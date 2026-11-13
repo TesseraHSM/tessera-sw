@@ -346,15 +346,12 @@ fn expected_outcome(
     Ok(len)
 }
 
-/// Accept only the predicted typed FW status or its numeric backend equivalent;
-/// transport failures, malformed responses, and codec failures always panic.
+/// Accept the predicted FW status, its numeric backend equivalent, or the
+/// socket ownership gate's session rejection. Other errors always panic.
 fn assert_rejection(err: &DdiError, expected: TborStatus) {
     match err {
         DdiError::DdiError(code) => assert_eq!(*code, expected.0, "wrong backend status"),
-        DdiError::TborStatus(status) => {
-            assert_eq!(*status, expected, "FW rejected with wrong TborStatus")
-        }
-        _ => panic!("unexpected error type"),
+        _ => assertions::assert_session_rejects(err, expected),
     }
 }
 

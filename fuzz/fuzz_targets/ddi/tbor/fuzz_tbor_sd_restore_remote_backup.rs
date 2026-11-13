@@ -462,12 +462,13 @@ fn mutate_request(
 ///
 /// An unchanged Local-scope request must succeed. Changed arbitrary OOB evidence
 /// may succeed or receive a firmware-status error; all other changed requests
-/// and all non-Local scopes require firmware rejection. Every successful response
-/// must contain correctly sized, nonzero backups.
+/// and all non-Local scopes require rejection. A mismatched session may be
+/// rejected by socket ownership checks before reaching firmware. Every successful
+/// response must contain correctly sized, nonzero backups.
 ///
 /// # Panics
 ///
-/// Panics on an unexpected result, a non-firmware error, or an invalid successful
+/// Panics on an unexpected result, an unexpected error, or an invalid successful
 /// response.
 fn validate_response(
     input: &FuzzInput,
@@ -488,6 +489,9 @@ fn validate_response(
     let must_succeed = input.key_scope == common::KeyScope::Local && !changed;
 
     match result {
+        Err(err) if matches!(input.target, MutationTarget::SessionId) => {
+            assertions::assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+        }
         Err(DdiError::TborStatus(_)) if !must_succeed => {}
         Err(err) => panic!("SdRestoreRemoteBackup unexpected error: {err:?}"),
         Ok(response) => {

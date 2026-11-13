@@ -17,9 +17,10 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use crate::utils::partition_ex_helpers::PARTITION_LOCK;
 use crate::utils::sd_provision::CaKey;
 use crate::utils::sd_provision::RAW_PUB_LEN;
+use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::build_receiver_evidence;
-use crate::utils::sd_provision::finalized_backing_session;
 use crate::utils::sd_provision::masked_key_and_report;
+use crate::utils::sd_provision::provision_backing;
 
 /// Create a real source backup: a fresh BKS3 sealed to the receiver's
 /// attested public key (`receiver_report`) by the `masked_sender_key`.
@@ -50,7 +51,8 @@ fn sd_reseal_remote_backup_roundtrip() {
     }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
-    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let pota_key = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
     // Receiver (unseals the source), sender (sealed the source), and
     // destination (the reseal target) SD sealing keys, each attested.
@@ -70,8 +72,8 @@ fn sd_reseal_remote_backup_roundtrip() {
 
     // Reseal: open with the receiver key (auth = sender), reseal to the
     // destination receiver.
-    let src_ev = build_receiver_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &report_sndr);
-    let dst_ev = build_receiver_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &report_dst);
+    let src_ev = build_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &pota_key, &report_sndr);
+    let dst_ev = build_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &pota_key, &report_dst);
     let dst_backup = src_ev
         .with_hsm_evidence(|src| {
             dst_ev.with_hsm_evidence(|dest| {
@@ -102,7 +104,8 @@ fn sd_reseal_remote_backup_rerandomizes() {
     }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
-    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let pota_key = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
     let (masked_rcvr, rcvr_pub_rcvr, report_rcvr) = masked_key_and_report(&session);
     let (masked_sndr, rcvr_pub_sndr, report_sndr) = masked_key_and_report(&session);
@@ -118,8 +121,8 @@ fn sd_reseal_remote_backup_rerandomizes() {
         &policy,
     );
 
-    let src_ev = build_receiver_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &report_sndr);
-    let dst_ev = build_receiver_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &report_dst);
+    let src_ev = build_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &pota_key, &report_sndr);
+    let dst_ev = build_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &pota_key, &report_dst);
     let reseal = || {
         src_ev
             .with_hsm_evidence(|src| {

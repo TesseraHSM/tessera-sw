@@ -17,14 +17,25 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_tbor_codec::EncodeError;
+use tsra_ddi_tbor_codec::RequestView;
+use tsra_ddi_tbor_codec::TocType;
+use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
+use tsra_ddi_tbor_codec::TOC_ENTRY_LEN;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
+use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborEcdhDeriveReq;
+use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyResp;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
@@ -85,16 +96,15 @@ pub(crate) fn with_generated_ecc_key(
 }
 
 /// RSA-AES-wrap `data` against the HSM-format unwrapping public key
-/// (`n_le ‖ e_le`): RSA-OAEP an ephemeral 32-byte KEK with `oaep_hash`, then
-/// AES-KWP the data under it, and concatenate.
+/// (`n ‖ e`, device byte order): RSA-OAEP an ephemeral 32-byte KEK with
+/// `oaep_hash`, then AES-KWP the data under it, and concatenate.
 pub(crate) fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> Vec<u8> {
-    // `GetUnwrappingKey` returns the modulus / exponent little-endian
-    // (`n_le(256) ‖ e_le(4)`), but `RsaPublicKey::from_hsm_bytes` parses
-    // each component big-endian — reverse them per-component.
+    // `GetUnwrappingKey` returns the modulus / exponent in device byte
+    // order (`n(256) ‖ e(4)`), but `RsaPublicKey::from_hsm_bytes` parses
+    // each component big-endian — convert them per-component.
     assert_eq!(hsm_pub.len(), 260, "RSA-2048 HSM pubkey is 260 bytes");
-    let mut be = Vec::with_capacity(260);
-    be.extend(hsm_pub[..256].iter().rev());
-    be.extend(hsm_pub[256..260].iter().rev());
+    let mut be = rev(&hsm_pub[..256]);
+    be.extend(rev(&hsm_pub[256..260]));
 
     let ephemeral_kek = [0xA7u8; 32];
     let pub_key = RsaPublicKey::from_hsm_bytes(&be).expect("from_hsm_bytes");
@@ -104,10 +114,9 @@ pub(crate) fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> 
         &ephemeral_kek,
     )
     .expect("RSA-OAEP wrap KEK");
-    // The device expects the OAEP ciphertext in wire-LE (it flips it to
-    // big-endian internally for OpenSSL); OpenSSL emits big-endian, so
-    // reverse the modulus-sized RSA ciphertext.
-    enc_kek.reverse();
+    // The device expects the OAEP ciphertext in device byte order; OpenSSL
+    // emits big-endian.
+    dev_rev_in_place(&mut enc_kek);
 
     let kek = AesKey::from_bytes(&ephemeral_kek).expect("AES KEK");
     let mut enc_data = Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, data)
@@ -152,9 +161,11 @@ pub(crate) fn import_ok(
         .expect("UnwrapKey")
 }
 
-/// Reverse `bytes` into a fresh vec (wire-LE ↔ OpenSSL-BE conversion).
+/// Convert `bytes` between device byte order and OpenSSL big-endian (see
+/// [`dev_rev`]). Operand names suffixed `_le` in these tests hold device
+/// byte order, which is big-endian on Duo.
 pub(crate) fn rev(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().rev().copied().collect()
+    dev_rev(bytes)
 }
 
 /// A non-palindrome big-endian integer of `modulus_len` bytes that stays
@@ -258,12 +269,11 @@ pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) 
     let (wire_coord, raw_coord) = coord_sizes(pub_le.len());
     assert_eq!(sig_le.len(), wire_coord * 2, "signature length mismatch");
 
-    // Public key: reverse each full padded wire coordinate → big-endian
-    // `hsm_point_size` coordinates. Trailing LE pad becomes leading BE
-    // zeros, which `from_hsm_bytes` tolerates.
+    // Public key: convert each wire coordinate → big-endian
+    // `hsm_point_size` coordinates (P-521 is left-padded to 68 bytes).
     let (x_le, y_le) = pub_le.split_at(wire_coord);
-    let mut pub_be = rev(x_le);
-    pub_be.extend(rev(y_le));
+    let mut pub_be = dev_coord_to_host_be(x_le);
+    pub_be.extend(dev_coord_to_host_be(y_le));
     let pubkey = EccPublicKey::from_hsm_bytes(&pub_be).expect("import public key");
 
     // Signature: reverse the meaningful `raw_coord` bytes of each component
@@ -324,4 +334,215 @@ pub(crate) fn derive(
     })
     .expect("EcdhDerive")
     .masked_secret
+}
+
+/// Wraps a request so its encoding carries a 4-byte zero gap at the start of
+/// the payload data area, with every offset/length TOC entry rebased past it.
+///
+/// The result still parses as a structurally valid TBOR request, but its
+/// payload layout is non-canonical, which firmware must reject.
+pub(crate) struct PayloadGapReq<R>(pub(crate) R);
+
+/// Size of the zero gap [`PayloadGapReq`] inserts.  A multiple of 4 so
+/// masked keys stay aligned and firmware rejects the layout, not alignment.
+const PAYLOAD_GAP: usize = 4;
+
+impl<R: TborOpReq> TborOpReq for PayloadGapReq<R> {
+    const OPCODE: u8 = R::OPCODE;
+    type OpResp = R::OpResp;
+
+    fn get_session_id(&self) -> Option<u16> {
+        self.0.get_session_id()
+    }
+
+    fn session_ctrl(&self) -> SessionControlKind {
+        self.0.session_ctrl()
+    }
+
+    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
+        let len = self.0.encode_request(buf)?.len();
+        let toc_count = RequestView::parse(&buf[..len])
+            .expect("parse canonical request")
+            .toc_count();
+        let data_start = REQ_HEADER_LEN + toc_count * TOC_ENTRY_LEN;
+        if buf.len() < len + PAYLOAD_GAP {
+            return Err(EncodeError::BufferTooSmall);
+        }
+        buf.copy_within(data_start..len, data_start + PAYLOAD_GAP);
+        buf[data_start..data_start + PAYLOAD_GAP].fill(0);
+        for index in 0..toc_count {
+            let at = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
+            let word = u32::from_be_bytes(
+                buf[at..at + TOC_ENTRY_LEN]
+                    .try_into()
+                    .expect("TOC entry is 4 bytes"),
+            );
+            let entry_type = TocType::from_raw((word >> 26) as u8);
+            if matches!(
+                entry_type,
+                Some(
+                    TocType::SealedKey
+                        | TocType::Uint32
+                        | TocType::Uint64
+                        | TocType::Buffer
+                        | TocType::Padding
+                )
+            ) {
+                // The offset occupies the low 13 bits of the TOC word.
+                assert!((word & 0x1FFF) as usize + PAYLOAD_GAP <= 0x1FFF);
+                let word = word + PAYLOAD_GAP as u32;
+                buf[at..at + TOC_ENTRY_LEN].copy_from_slice(&word.to_be_bytes());
+            }
+        }
+        let shifted = &buf[..len + PAYLOAD_GAP];
+        RequestView::parse(shifted).expect("gapped request stays structurally valid");
+        Ok(shifted)
+    }
+}
+
+/// How [`MaskedKeyLayoutReq`] breaks an aligned masked key.
+#[derive(Clone, Copy, Debug)]
+enum MaskedKeyFault {
+    /// Two more bytes of padding, so the key starts 2 bytes past a
+    /// 4-byte boundary.
+    Misaligned,
+    /// The padding entry is removed; a trailing `none` keeps the TOC count.
+    NoPadding,
+}
+
+/// Wraps a request and breaks the masked key that follows the padding TOC
+/// entry at `padding_idx`.
+struct MaskedKeyLayoutReq<'r, R> {
+    req: &'r R,
+    padding_idx: usize,
+    fault: MaskedKeyFault,
+}
+
+/// Bytes [`MaskedKeyFault::Misaligned`] adds to the padding.
+const MISALIGN: usize = 2;
+
+/// Reads the TOC word at `index`.
+fn toc_word(buf: &[u8], index: usize) -> u32 {
+    let at = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
+    u32::from_be_bytes(
+        buf[at..at + TOC_ENTRY_LEN]
+            .try_into()
+            .expect("TOC entry is 4 bytes"),
+    )
+}
+
+/// Writes the TOC word at `index`.
+fn set_toc_word(buf: &mut [u8], index: usize, word: u32) {
+    let at = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
+    buf[at..at + TOC_ENTRY_LEN].copy_from_slice(&word.to_be_bytes());
+}
+
+/// Returns whether a TOC word references bytes in the data section.
+fn has_data(word: u32) -> bool {
+    matches!(
+        TocType::from_raw((word >> 26) as u8),
+        Some(
+            TocType::SealedKey
+                | TocType::Uint32
+                | TocType::Uint64
+                | TocType::Buffer
+                | TocType::Padding
+        )
+    )
+}
+
+impl<R: TborOpReq> TborOpReq for MaskedKeyLayoutReq<'_, R> {
+    const OPCODE: u8 = R::OPCODE;
+    type OpResp = R::OpResp;
+
+    fn get_session_id(&self) -> Option<u16> {
+        self.req.get_session_id()
+    }
+
+    fn session_ctrl(&self) -> SessionControlKind {
+        self.req.session_ctrl()
+    }
+
+    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
+        let len = self.req.encode_request(buf)?.len();
+        let toc_count = RequestView::parse(&buf[..len])
+            .expect("parse canonical request")
+            .toc_count();
+        let data_start = REQ_HEADER_LEN + toc_count * TOC_ENTRY_LEN;
+        let padding = toc_word(buf, self.padding_idx);
+        assert_eq!(
+            TocType::from_raw((padding >> 26) as u8),
+            Some(TocType::Padding)
+        );
+        let len = match self.fault {
+            MaskedKeyFault::Misaligned => {
+                // The offset is the low 13 bits and the length the next 13.
+                let pad_end =
+                    data_start + (padding & 0x1FFF) as usize + ((padding >> 13) & 0x1FFF) as usize;
+                if buf.len() < len + MISALIGN {
+                    return Err(EncodeError::BufferTooSmall);
+                }
+                buf.copy_within(pad_end..len, pad_end + MISALIGN);
+                buf[pad_end..pad_end + MISALIGN].fill(0);
+                set_toc_word(buf, self.padding_idx, padding + ((MISALIGN as u32) << 13));
+                for index in self.padding_idx + 1..toc_count {
+                    let word = toc_word(buf, index);
+                    if has_data(word) {
+                        set_toc_word(buf, index, word + MISALIGN as u32);
+                    }
+                }
+                len + MISALIGN
+            }
+            MaskedKeyFault::NoPadding => {
+                let toc = REQ_HEADER_LEN + self.padding_idx * TOC_ENTRY_LEN;
+                buf.copy_within(toc + TOC_ENTRY_LEN..data_start, toc);
+                set_toc_word(buf, toc_count - 1, (TocType::None as u32) << 26);
+                len
+            }
+        };
+        RequestView::parse(&buf[..len]).expect("faulted request stays structurally valid");
+        Ok(&buf[..len])
+    }
+}
+
+/// Asserts that firmware rejects `req` when any of its masked keys is
+/// moved off its 4-byte boundary (`TborMisalignedField`) or loses the
+/// padding entry before it (`TborUnexpectedTocType`).
+///
+/// Every masked key in `req` must be present.
+pub(crate) fn assert_masked_key_layout_rejected<R: TborOpReq>(ctx: &TestCtx, req: &R)
+where
+    R::OpResp: core::fmt::Debug,
+{
+    let mut buf = vec![0u8; 0x2000];
+    let encoded = req.encode_request(&mut buf).expect("encode request");
+    let toc_count = RequestView::parse(encoded)
+        .expect("parse canonical request")
+        .toc_count();
+    let paddings: Vec<usize> = (0..toc_count)
+        .filter(|&index| {
+            TocType::from_raw((toc_word(encoded, index) >> 26) as u8) == Some(TocType::Padding)
+        })
+        .collect();
+    assert!(!paddings.is_empty(), "request has no aligned masked key");
+    for padding_idx in paddings {
+        assert!(
+            has_data(toc_word(encoded, padding_idx + 1)),
+            "masked key after padding entry {padding_idx} must be present"
+        );
+        for (fault, status) in [
+            (MaskedKeyFault::Misaligned, TborStatus::TborMisalignedField),
+            (MaskedKeyFault::NoPadding, TborStatus::TborUnexpectedTocType),
+        ] {
+            println!("padding entry {padding_idx}: {fault:?}");
+            ctx.expect_fw_reject(
+                &MaskedKeyLayoutReq {
+                    req,
+                    padding_idx,
+                    fault,
+                },
+                status,
+            );
+        }
+    }
 }

@@ -89,11 +89,15 @@ jobs:
       id: test-api-ex
       run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_1 --profile ci-api-ex
       continue-on-error: true
+    - name: Run tsra_api_tests against Duo (API revision 2.0) over sock
+      id: test-api-duo
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 2_0 --profile ci-api-duo
+      continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-api.outcome == 'failure' || steps.test-api-ex.outcome == 'failure' }}
+      if: ${{ steps.test-api.outcome == 'failure' || steps.test-api-ex.outcome == 'failure' || steps.test-api-duo.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -200,11 +204,15 @@ jobs:
       id: test-api-ex
       run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_1 --profile ci-api-ex
       continue-on-error: true
+    - name: Run tsra_api_tests against Duo (API revision 2.0) over sock
+      id: test-api-duo
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 2_0 --profile ci-api-duo
+      continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-api.outcome == 'failure' || steps.test-api-ex.outcome == 'failure' }}
+      if: ${{ steps.test-api.outcome == 'failure' || steps.test-api-ex.outcome == 'failure' || steps.test-api-duo.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1

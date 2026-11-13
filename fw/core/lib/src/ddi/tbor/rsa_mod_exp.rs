@@ -70,7 +70,7 @@ pub(crate) async fn handle<P: HsmPal>(
         }
         let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborRsaModExpReq::TOC_COUNT * 4;
         if (req.y.as_ptr() as usize).checked_sub(base) != Some(data_start) {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
         pal.mod_exp_priv_in_place(io, key_type, view.target_key, req.y)
             .await?;

@@ -81,7 +81,7 @@ fn require_evidence(evidence: &Evidence) -> Result<()> {
 
 /// Open a source backup and reseal it inside the authority's HSM.
 ///
-/// Both source and destination evidence must be SATA-anchored and attest the
+/// Both source and destination evidence must be POTA-anchored and attest the
 /// requested domain policy. That policy need not be the authority's policy.
 /// The authority's original receiver becomes the authenticated sender.
 pub fn reseal_remote_backup(

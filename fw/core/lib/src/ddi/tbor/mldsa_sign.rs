@@ -69,10 +69,15 @@ pub(crate) async fn handle<P: HsmPal>(
             validate_active_session(pal, io, sess_id)?;
 
             let hedge = mldsa_hedge(MlDsaHedge(req.hedge))?;
+            // The decoder has already checked that the masked key is
+            // 4-aligned. This checks its position: the response `signature`
+            // is written in place at the first 4-aligned offset of the data
+            // section, so the masked key must be the first data field,
+            // preceded only by the minimal alignment padding.
             let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
             let masked_at = req.masked_key.as_ptr() as usize;
-            if masked_at.checked_sub(base) != Some(data_start) {
-                return Err(HsmError::InvalidArg);
+            if masked_at.checked_sub(base) != Some(data_start.next_multiple_of(4)) {
+                return Err(HsmError::TborNonCanonicalLayout);
             }
 
             // Resolve the envelope's tag-bound scope before unmasking.

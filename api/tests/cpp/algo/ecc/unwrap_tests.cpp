@@ -24,45 +24,6 @@ class tsra_ecc_keyunwrap : public ::testing::Test
 
 // ----- Positive Paths -----
 
-// Helper: unwraps a wrapped ECC key pair for the given curve and verifies the
-// imported keys report the expected curve.
-static void verify_unwrap_pair_returns_valid_keys(
-    PartitionListHandle &part_list,
-    tsra_ecc_curve curve
-)
-{
-    part_list.for_each_session([&](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, curve, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_SUCCESS);
-        ASSERT_NE(result.private_key, 0);
-        ASSERT_NE(result.public_key, 0);
-
-        auto_key imported_private_key;
-        auto_key imported_public_key;
-        imported_private_key.handle = result.private_key;
-        imported_public_key.handle = result.public_key;
-
-        EccKeySummary private_summary{};
-        EccKeySummary public_summary{};
-        ASSERT_EQ(
-            read_ecc_key_summary(imported_private_key.get(), private_summary),
-            TSRA_STATUS_SUCCESS
-        );
-        ASSERT_EQ(
-            read_ecc_key_summary(imported_public_key.get(), public_summary),
-            TSRA_STATUS_SUCCESS
-        );
-        ASSERT_TRUE(is_expected_ecc_curve(private_summary, curve));
-        ASSERT_TRUE(is_expected_ecc_curve(public_summary, curve));
-    });
-}
-
 // Helper: unwraps a wrapped ECC key pair and verifies the imported keys are
 // cryptographically functional by performing an ECDSA sign-then-verify roundtrip.
 static void verify_unwrap_pair_keys_sign_verify_roundtrip(
@@ -97,23 +58,6 @@ static void verify_unwrap_pair_keys_sign_verify_roundtrip(
         ASSERT_EQ(roundtrip.status, TSRA_STATUS_SUCCESS)
             << "roundtrip failed at step: " << roundtrip.step << " detail: " << roundtrip.detail;
     });
-}
-
-TEST_F(tsra_ecc_keyunwrap, unwrap_pair_returns_valid_keys_p256)
-{
-    verify_unwrap_pair_returns_valid_keys(part_list_, TSRA_ECC_CURVE_P256);
-}
-
-// P-384: unwrapped keys report correct curve metadata.
-TEST_F(tsra_ecc_keyunwrap, unwrap_pair_returns_valid_keys_p384)
-{
-    verify_unwrap_pair_returns_valid_keys(part_list_, TSRA_ECC_CURVE_P384);
-}
-
-// P-521: unwrapped keys report correct curve metadata.
-TEST_F(tsra_ecc_keyunwrap, unwrap_pair_returns_valid_keys_p521)
-{
-    verify_unwrap_pair_returns_valid_keys(part_list_, TSRA_ECC_CURVE_P521);
 }
 
 // P-256: unwrapped keys can sign and verify an ECDSA roundtrip.

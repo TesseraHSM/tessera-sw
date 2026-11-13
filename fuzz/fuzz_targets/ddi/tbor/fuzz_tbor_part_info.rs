@@ -7,7 +7,8 @@
 //! to fuzz. Instead, structured mutations cover its header/TOC/data while
 //! valid lifecycle operations vary the state observed by the handler.
 //! The dispatcher only performs structural decoding for this opcode; it
-//! does not require the typed schema's single `None` placeholder.
+//! does not require the typed schema's `None` placeholders, including
+//! the padding emitted to reserve response TOC slots.
 
 #![no_main]
 
@@ -66,7 +67,7 @@ enum FrameCase {
     UnsupportedVersion,
     /// Remove part of the header or mandatory TOC, retaining at least one byte.
     Truncated,
-    /// Claim more TOC entries than the frame contains.
+    /// Vary the claimed TOC count, rejecting only counts beyond the frame.
     MissingToc,
     /// Set at least one of the `None` entry's reserved payload bits.
     NonePayload,
@@ -143,6 +144,7 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
         }
         FrameCase::AdditionalToc => {
             let count = 2 + usize::from(input.selector) % (MAX_TOC_ENTRIES - 1);
+            bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
             bytes[2] = (count - 1) as u8;
             for i in 1..count {
                 let word = ((TocType::Uint16 as u32) << 26)
@@ -154,6 +156,8 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
             }
         }
         FrameCase::AlternativeToc => {
+            bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
+            bytes[2] = 0;
             let kinds = [
                 TocType::SessionId,
                 TocType::KeyId,
@@ -204,7 +208,10 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
         }
         FrameCase::MissingToc => {
             bytes[2] = 1 + input.selector % (MAX_TOC_ENTRIES as u8 - 1);
-            expected = Expected::CqeReject;
+            let count = usize::from(bytes[2]) + 1;
+            if REQ_HEADER_LEN + count * TOC_ENTRY_LEN > bytes.len() {
+                expected = Expected::CqeReject;
+            }
         }
         FrameCase::NonePayload => {
             set_entry(
@@ -215,6 +222,8 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
             expected = Expected::CqeReject;
         }
         FrameCase::OutOfBounds => {
+            bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
+            bytes[2] = 0;
             bytes.extend_from_slice(&input.data);
             let offset = input.value % (input.data.len() as u32 + 1);
             let length = input.data.len() as u32 - offset + 1 + u32::from(input.selector);
@@ -222,6 +231,8 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
             expected = Expected::CqeReject;
         }
         FrameCase::InvalidFixedLength => {
+            bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
+            bytes[2] = 0;
             bytes.extend_from_slice(&input.data);
             let (kind, required) = if input.selector & 1 == 0 {
                 (TocType::Uint32, 4)
@@ -274,6 +285,11 @@ fn assert_identity(before: &TborPartInfoResp, after: &TborPartInfoResp) {
 /// driver faults, encode/decode failures, and command errors remain failures.
 fn exercise(ctx: &TestCtx, input: &FuzzInput, baseline: &TborPartInfoResp) {
     let (request, expected) = build_request(input);
+    assert_eq!(
+        RequestView::parse(&request.0).is_ok(),
+        matches!(expected, Expected::Success),
+        "construction-based framing oracle must agree with structural decoding: {input:?}"
+    );
     for _ in 0..1 + input.repeats % MAX_REPEAT_CALLS {
         let result = ctx.tbor(&request);
         match expected {
@@ -284,7 +300,8 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput, baseline: &TborPartInfoResp) {
             ),
             Expected::CqeReject => assert!(
                 matches!(result, Err(DdiError::DdiError(status)) if status == REQUEST_DECODE_STATUS),
-                "unexpected CQE request-decode status"
+                "unexpected CQE request-decode status: {result:?}, input: {input:?}, frame: {:02x?}",
+                request.0
             ),
         }
         assert_eq!(

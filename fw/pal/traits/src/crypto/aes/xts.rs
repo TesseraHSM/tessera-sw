@@ -45,12 +45,12 @@ pub trait HsmAesXts: HsmIoTypes {
     /// - `Err(HsmError)` — propagated from the CSPRNG.
     async fn aes_xts_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
 
-    /// AES-256-XTS encrypt or decrypt host-to-host over raw SGL
-    /// descriptors.
+    /// AES-256-XTS encrypt or decrypt host-to-host over out-of-band
+    /// items.
     ///
     /// The AES engine reads `len` bytes (`len / dul` data units) from the
-    /// host buffer described by `src` and writes the result (same length)
-    /// to the host buffer described by `dst`; nothing is staged in HSM
+    /// out-of-band item `src` of `io` and writes the result (same length)
+    /// to item `dst`; nothing is staged in HSM
     /// memory.  The tweak of the first data unit is `tweak`; it increments
     /// by one per subsequent data unit.
     ///
@@ -65,20 +65,20 @@ pub trait HsmAesXts: HsmIoTypes {
     ///   little-endian number of the first data unit.
     /// - `len` — total length: a non-zero multiple of `dul`.
     /// - `dul` — data-unit length: at least 16 and a multiple of 16.
-    /// - `src` — raw 16-byte NVMe SGL descriptor of the host input.
-    /// - `dst` — raw 16-byte NVMe SGL descriptor of the host output.
+    /// - `src` — index of the input out-of-band item.
+    /// - `dst` — index of the output out-of-band item.
     ///
     /// # Returns
     ///
     /// - `Ok(())` — result written to `dst`.
     /// - `Err(HsmError::InvalidArg)` — key or tweak length violation,
-    ///   `K1 == K2`, or a descriptor does not describe `len` bytes.
+    ///   `K1 == K2`, `io` has no such item, or an item is not `len` bytes.
     /// - `Err(HsmError::AesXtsInvalidBufferSize)` — `len` / `dul`
     ///   violation, or `tweak + len / dul` (the tweak after the last data
     ///   unit) would overflow 64 bits.
     /// - `Err(HsmError)` — AES / DMA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn aes_xts_enc_dec_sgl(
+    async fn aes_xts_enc_dec_oob(
         &self,
         io: &Self::Io,
         op: HsmAesOp,
@@ -86,7 +86,7 @@ pub trait HsmAesXts: HsmIoTypes {
         tweak: &HsmDmaBuf,
         len: usize,
         dul: usize,
-        src: &[u8; 16],
-        dst: &[u8; 16],
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()>;
 }

@@ -22,6 +22,7 @@ use tsra_fw_hsm_pal_traits::HsmCertBank;
 use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
 use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCertStore;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
@@ -247,10 +248,11 @@ impl UnoHsmPal {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
             let outd = scope.dma_alloc(SKI_LEN)?;
-            // `big_endian = true`: the SKI is the standard NIST byte-order SHA-1
-            // of the key (RFC 5280). `big_endian = false` would fully byte-reverse
-            // the digest and encode an incorrect Subject Key Identifier.
-            self.hash(io, HsmHashAlgo::Sha1, inp, outd, true).await?;
+            // `Standard`: the SKI is the standard SHA-1 of the key (RFC 5280).
+            // `Operand` would byte-reverse the digest and encode an incorrect
+            // Subject Key Identifier.
+            self.hash(io, HsmHashAlgo::Sha1, inp, outd, HsmDigestForm::Standard)
+                .await?;
             let mut out = [0u8; SKI_LEN];
             out.copy_from_slice(&outd[..SKI_LEN]);
             Ok(out)
@@ -264,11 +266,12 @@ impl UnoHsmPal {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
             let outd = scope.dma_alloc(SHA256_LEN)?;
-            // `big_endian = true`: emit the standard (natural byte order) SHA-256
-            // digest. The host and SP compute cert thumbprints over natural
-            // SHA-256; `false` here would fully byte-reverse the digest (the PKA
-            // operand order) and the chain thumbprint would never match.
-            self.hash(io, HsmHashAlgo::Sha256, inp, outd, true).await?;
+            // `Standard`: emit the standard SHA-256 digest. The host and SP
+            // compute cert thumbprints over natural SHA-256; `Operand` here
+            // would byte-reverse the digest (the PKA operand order) and the
+            // chain thumbprint would never match.
+            self.hash(io, HsmHashAlgo::Sha256, inp, outd, HsmDigestForm::Standard)
+                .await?;
             let mut out = [0u8; SHA256_LEN];
             out.copy_from_slice(&outd[..SHA256_LEN]);
             Ok(out)

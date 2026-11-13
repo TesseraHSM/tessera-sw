@@ -108,7 +108,7 @@ pub struct TborDarcTmkImportReq<'a> {
     /// The receiver's masked DARC key-exchange key (from
     /// `DarcKexKeyGen`), exactly [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked
     /// on-device to recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280)]
     pub masked_kex_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] whose `POTAPubKey` anchors
@@ -143,7 +143,7 @@ pub struct TborDarcTmkImportReq<'a> {
 pub struct TborDarcTmkImportResp<'a> {
     /// The imported TMK, masked (AEAD-GCM-256) under the partition SDMK.
     /// Always exactly [`MASKED_TMK_LEN`] (264 B).
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 }
 

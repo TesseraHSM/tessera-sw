@@ -78,8 +78,9 @@
 //! Remote recovery uses the root's stored original backup, not the leaf's
 //! local SD backups or upload copy. The leaf restores its partition-local MK
 //! and mints a fresh receiver. Root verifies both original and recovering
-//! leaf evidence against the bound policy and their respective pinned PTAs, then SATA-endorses
-//! their PID chains for the HSM reseal operation. BKS3 never leaves the HSM.
+//! leaf evidence against the bound policy and their respective pinned PTAs;
+//! firmware anchors both POTA/PTA/PID chains to the policy POTA during the
+//! HSM reseal operation. BKS3 never leaves the HSM.
 //! The root-held receiver becomes the resealed backup's authenticated sender.
 //! Its v2 report attests the root policy, which the leaf verifies against its
 //! saved root policy. Firmware authenticates that key using leaf SATA and

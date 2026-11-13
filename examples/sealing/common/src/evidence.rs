@@ -3,7 +3,7 @@
 
 //! Consistency checks for the loopback demo. Emulator manufacturer roots are
 //! generated per process: supplied roots are NOT trusted hardware identities.
-//! Any local caller can request admission. SATA endorses a PID only after its
+//! Any local caller can request admission. POTA signs a PTA only after its
 //! report signature, policy and CSR binding have been checked.
 
 use anyhow::Context;
@@ -59,8 +59,10 @@ pub fn verify_report(
     Ok((pid, [public.x, public.y].concat()))
 }
 
+/// Check peer evidence whose partition-owner chain is anchored to the policy
+/// POTA key, matching the firmware peer-clone check.
 pub fn verify_peer(evidence: &Evidence, policy: &PartPolicy) -> Result<()> {
-    verify_attested_key(evidence, policy, &policy.sata_pub_key.data)?;
+    verify_attested_key(evidence, policy, &policy.pota_pub_key.data)?;
     Ok(())
 }
 

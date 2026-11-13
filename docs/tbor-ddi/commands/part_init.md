@@ -66,7 +66,7 @@ usual way: the caller's CO PSK must already have been rotated by
 
 ## Request
 
-Wire layout: 4-byte header, six TOC entries, then the variable-length
+Wire layout: 8-byte header, six TOC entries, then the variable-length
 data section.
 
 ### TOC entries
@@ -76,12 +76,12 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
-| 8  | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
-| 12 | `part_policy` | `buffer` (fixed 584 B) | Unified `PartPolicy` blob bound into the partition's attested state. Length pinned to `PART_POLICY_LEN` (584 B); a wrong length is rejected at decode. |
-| 16 | `pota_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the POTA certificate the partition is being provisioned under. |
-| 20 | `sata_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the SATA certificate bound to the security domain. |
-| 24 | `sapota_thumbprint` | `buffer` (offset/len) | Optional SHA-384 thumbprint of the SAPOTA certificate. An **empty** field means absent; when present it is exactly 48 B. |
+| 8 | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
+| 12 | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
+| 16 | `part_policy` | `buffer` (fixed 584 B) | Unified `PartPolicy` blob bound into the partition's attested state. Length pinned to `PART_POLICY_LEN` (584 B); a wrong length is rejected at decode. |
+| 20 | `pota_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the POTA certificate the partition is being provisioned under. |
+| 24 | `sata_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the SATA certificate bound to the security domain. |
+| 28 | `sapota_thumbprint` | `buffer` (offset/len) | Optional SHA-384 thumbprint of the SAPOTA certificate. An **empty** field means absent; when present it is exactly 48 B. |
 
 ### `mach_seed_envelope` contents
 
@@ -118,15 +118,15 @@ Built by the host with [`aead_envelope::seal`](
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `pta_csr` | `varlen` (≤ 512 B) | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
+| 8 | `pta_csr` | `varlen` (≤ 512 B) | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
 | 12 | `pta_report` | `varlen` (≤ 1024 B) | COSE_Sign1 PTA key-attestation report signed by the partition identity key (PID). |
 
 ### Data section
 
 | Offset | Field | Description |
 |---|---|---|
-| 16 | `pta_csr` bytes | DER PKCS#10; length stored in the TOC entry above. |
-| 16 + `len(pta_csr)` | `pta_report` bytes | COSE_Sign1; length stored in the TOC entry above. |
+| 32 | `pta_csr` bytes | DER PKCS#10; length stored in the TOC entry above. |
+| 32 + `len(pta_csr)` | `pta_report` bytes | COSE_Sign1; length stored in the TOC entry above. |
 
 The host is expected to forward both blobs to the partition owner
 for POTA validation; the resulting PTA certificate is then handed

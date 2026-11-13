@@ -97,7 +97,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // The host emits a fixed-length peer public key for the curve; the
         // PAL requires exactly `wire_pub_key_len` bytes — reject any
         // non-exact length so trailing junk is not silently accepted.
-        if req.peer_pub_key.len() != curve.wire_pub_key_len() {
+        if req.peer_pub_key.len() != curve.wire_pub_key_len(P::BYTE_ORDER) {
             return Err(HsmError::InvalidArg);
         }
 

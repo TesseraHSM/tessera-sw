@@ -7,6 +7,8 @@
 //! two-phase HPKE session handshake: VM ephemeral generation, HPKE
 //! `auth_psk receive_export`, the Phase-1/Phase-2 confirm MACs,
 //! `param_key` derivation, and the `seed_envelope` AEAD seal.
+//! [`SessionTransport`] carries the API revision 2.x (Duo) per-message
+//! transport encryption of an open session.
 //!
 //! The handshake conforms to the **wire protocol** (shared constants
 //! and labels live in [`tsra_ddi_tbor_types`]); it does not share
@@ -338,4 +340,160 @@ pub fn derive_mac_tx_key(exported: &[u8]) -> SessionExCryptoResult<Vec<u8>> {
 /// `SESSION_MAC_RX_LABEL`.
 pub fn derive_mac_rx_key(exported: &[u8]) -> SessionExCryptoResult<Vec<u8>> {
     hkdf_expand_labeled(exported, SESSION_MAC_RX_LABEL, SESSION_MAC_DIR_KEY_LEN)
+}
+
+/// AES-GCM IV and tag of one session transport message, carried in the
+/// Duo SQE (request) or CQE (response) rather than in the payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionTransportSeal {
+    /// Random per-message IV.
+    pub iv: [u8; SESSION_TRANSPORT_IV_LEN],
+
+    /// Authentication tag.
+    pub tag: [u8; SESSION_TRANSPORT_TAG_LEN],
+}
+
+/// Per-session transport encryption for API revision 2.x (Duo).
+///
+/// Holds the VM→HSM and HSM→VM AES-256-GCM keys the firmware derives at
+/// `SessionOpenInit`; every `TborSecure` request (open_finish, in-session
+/// commands and close) is sealed with one, and its response opened with
+/// the other. Messages use a random 96-bit IV and no AAD. The keys are
+/// zeroized when this value is dropped, so drop it on session close or
+/// flush.
+pub struct SessionTransport {
+    h2m: AesKey,
+    m2h: AesKey,
+}
+
+impl SessionTransport {
+    /// Derive both directional keys from the HPKE exported secret of a
+    /// `SessionOpenInit` exchange (see [`receive_exported`]).
+    pub fn derive(exported: &[u8]) -> SessionExCryptoResult<Self> {
+        let key = |label| -> SessionExCryptoResult<AesKey> {
+            let bytes = Zeroizing::new(hkdf_expand_labeled(
+                exported,
+                label,
+                SESSION_TRANSPORT_KEY_LEN,
+            )?);
+            AesKey::from_bytes(&bytes).map_err(|_| SessionExCryptoError::Crypto)
+        };
+        Ok(Self {
+            h2m: key(SESSION_TRANSPORT_H2M_LABEL)?,
+            m2h: key(SESSION_TRANSPORT_M2H_LABEL)?,
+        })
+    }
+
+    /// Encrypt a request payload in place with the VM→HSM key under a
+    /// fresh random IV.
+    pub fn seal_request(&self, buf: &mut [u8]) -> SessionExCryptoResult<SessionTransportSeal> {
+        let mut sealed = SessionTransportSeal::default();
+        Rng::rand_bytes(&mut sealed.iv).map_err(|_| SessionExCryptoError::Crypto)?;
+        let mut algo =
+            AesGcmAlgo::for_encrypt(&sealed.iv, None).map_err(|_| SessionExCryptoError::Crypto)?;
+        let plaintext = Zeroizing::new(buf.to_vec());
+        algo.encrypt(&self.h2m, &plaintext, Some(buf))
+            .map_err(|_| SessionExCryptoError::Crypto)?;
+        sealed.tag = algo
+            .tag()
+            .try_into()
+            .map_err(|_| SessionExCryptoError::Crypto)?;
+        Ok(sealed)
+    }
+
+    /// Decrypt a response payload in place with the HSM→VM key.
+    ///
+    /// On a tag mismatch `buf` is zeroed and
+    /// [`SessionExCryptoError::MacMismatch`] is returned.
+    pub fn open_response(
+        &self,
+        sealed: &SessionTransportSeal,
+        buf: &mut [u8],
+    ) -> SessionExCryptoResult<()> {
+        let mut algo = AesGcmAlgo::for_decrypt(&sealed.iv, &sealed.tag, None)
+            .map_err(|_| SessionExCryptoError::Crypto)?;
+        let ciphertext = buf.to_vec();
+        if algo.decrypt(&self.m2h, &ciphertext, Some(buf)).is_err() {
+            buf.fill(0);
+            return Err(SessionExCryptoError::MacMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXPORTED: [u8; 48] = [0x5a; 48];
+
+    /// The device's key for one direction.
+    fn device_key(label: &[u8]) -> AesKey {
+        let bytes =
+            hkdf_expand_labeled(&EXPORTED, label, SESSION_TRANSPORT_KEY_LEN).expect("test crypto");
+        AesKey::from_bytes(&bytes).expect("test crypto")
+    }
+
+    #[test]
+    fn transport_interoperates_with_device_keys() {
+        let transport = SessionTransport::derive(&EXPORTED).expect("test crypto");
+
+        let mut request = *b"tbor secure request";
+        let sealed = transport.seal_request(&mut request).expect("test crypto");
+        assert_ne!(&request, b"tbor secure request");
+        let mut algo = AesGcmAlgo::for_decrypt(&sealed.iv, &sealed.tag, None).expect("test crypto");
+        let mut plain = [0u8; 19];
+        algo.decrypt(
+            &device_key(SESSION_TRANSPORT_H2M_LABEL),
+            &request,
+            Some(&mut plain),
+        )
+        .expect("test crypto");
+        assert_eq!(&plain, b"tbor secure request");
+
+        let mut response = [0u8; 13];
+        let mut sealed = SessionTransportSeal {
+            iv: [7; SESSION_TRANSPORT_IV_LEN],
+            ..Default::default()
+        };
+        let mut algo = AesGcmAlgo::for_encrypt(&sealed.iv, None).expect("test crypto");
+        algo.encrypt(
+            &device_key(SESSION_TRANSPORT_M2H_LABEL),
+            b"tbor response",
+            Some(&mut response),
+        )
+        .expect("test crypto");
+        sealed.tag = algo.tag().try_into().expect("test crypto");
+        transport
+            .open_response(&sealed, &mut response)
+            .expect("test crypto");
+        assert_eq!(&response, b"tbor response");
+    }
+
+    #[test]
+    fn open_response_rejects_reflection_and_tampering() {
+        let transport = SessionTransport::derive(&EXPORTED).expect("test crypto");
+        let mut buf = *b"payload";
+        let sealed = transport.seal_request(&mut buf).expect("test crypto");
+
+        // A reflected request is under the VM→HSM key.
+        let mut reflected = buf;
+        assert!(matches!(
+            transport.open_response(&sealed, &mut reflected),
+            Err(SessionExCryptoError::MacMismatch)
+        ));
+        assert_eq!(reflected, [0; 7]);
+
+        let mut tampered = SessionTransportSeal { ..sealed };
+        tampered.tag[0] ^= 1;
+        assert!(transport.open_response(&tampered, &mut buf).is_err());
+    }
+
+    #[test]
+    fn requests_use_fresh_ivs() {
+        let transport = SessionTransport::derive(&EXPORTED).expect("test crypto");
+        let first = transport.seal_request(&mut [0u8; 4]).expect("test crypto");
+        let second = transport.seal_request(&mut [0u8; 4]).expect("test crypto");
+        assert_ne!(first.iv, second.iv);
+    }
 }

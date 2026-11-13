@@ -54,100 +54,117 @@ struct KeyIdForwardCompatResp {
     value: u8,
 }
 
-const TRAILING_COUNT: usize = MAX_TOC_ENTRIES - 2;
+/// Number of known TOC entries in `TborApiRevResp`.
+const API_REV_FIELDS: usize = 4;
 
-/// Decode a normal two-field `TborApiRevResp`.
-fn decode_api_rev(min_ver: u8, max_ver: u8) -> TborApiRevResp {
+const TRAILING_COUNT: usize = MAX_TOC_ENTRIES - API_REV_FIELDS;
+
+/// `TborApiRevResp` field values in wire order:
+/// `[min_major, min_minor, max_major, max_minor]`.
+type Rev = [u16; API_REV_FIELDS];
+
+/// Returns the decoded `TborApiRevResp` fields in wire order.
+fn fields(resp: &TborApiRevResp) -> Rev {
+    [
+        resp.min_major.get(),
+        resp.min_minor.get(),
+        resp.max_major.get(),
+        resp.max_minor.get(),
+    ]
+}
+
+/// Encode the leading `known` API revision fields followed by the
+/// supplied future fields.
+fn encode_api_rev_fields<'a>(buf: &'a mut [u8], known: &[u16], trailing: &[u8]) -> &'a [u8] {
+    let mut encoder = ResponseEncoder::new(buf, PROTOCOL_VERSION, 0, false);
+    for (index, value) in known.iter().copied().enumerate() {
+        encoder = encoder
+            .uint16(value)
+            .unwrap_or_else(|err| panic!("encode known field {index}: {err:?}"));
+    }
+    for value in trailing.iter().copied() {
+        encoder = encoder.uint8(value).unwrap_or_else(|err| {
+            panic!("encode trailing future field with value {value:#04x}: {err:?}")
+        });
+    }
+    encoder.finish().expect("finish response")
+}
+
+/// Encode all four API revision fields followed by the supplied future
+/// fields.
+fn encode_api_rev_with_trailing<'a>(buf: &'a mut [u8], rev: Rev, trailing: &[u8]) -> &'a [u8] {
+    encode_api_rev_fields(buf, &rev, trailing)
+}
+
+/// Decode a normal four-field `TborApiRevResp`.
+fn decode_api_rev(rev: Rev) -> TborApiRevResp {
     let mut buf = [0u8; 64];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(min_ver)
-        .expect("encode min_ver")
-        .uint8(max_ver)
-        .expect("encode max_ver")
-        .finish()
-        .expect("finish response");
-
+    let bytes = encode_api_rev_with_trailing(&mut buf, rev, &[]);
     TborApiRevResp::decode_response(bytes).expect("decode API revision response")
 }
 
-/// Encode the two known API revision fields followed by the supplied
-/// future fields.
-fn encode_api_rev_with_trailing<'a>(
-    buf: &'a mut [u8],
-    min_ver: u8,
-    max_ver: u8,
-    trailing: &[u8],
-) -> &'a [u8] {
-    let mut encoder = ResponseEncoder::new(buf, PROTOCOL_VERSION, 0, false)
-        .uint8(min_ver)
-        .expect("encode min_ver")
-        .uint8(max_ver)
-        .expect("encode max_ver");
-
-    for value in trailing.iter().copied() {
-        encoder = encoder.uint8(value).unwrap_or_else(|err| {
-            panic!(
-                "encode trailing future field \
-                     with value {value:#04x}: {err:?}"
-            )
-        });
-    }
-
-    encoder.finish().expect("finish response")
+/// Decode `rev` followed by `trailing` future fields, asserting the known
+/// fields survive.
+fn assert_known_fields_survive(rev: Rev, trailing: &[u8]) {
+    let mut buf = [0u8; 512];
+    let bytes = encode_api_rev_with_trailing(&mut buf, rev, trailing);
+    let resp = TborApiRevResp::decode_response(bytes).unwrap_or_else(|err| {
+        panic!(
+            "{rev:?} with {} trailing entries must decode: {err:?}",
+            trailing.len()
+        )
+    });
+    assert_eq!(
+        fields(&resp),
+        rev,
+        "known fields changed with {} trailing entries",
+        trailing.len()
+    );
 }
 
 /// Verifies that a response with exactly the expected TOC count decodes successfully.
 #[test]
 fn exact_toc_count_decodes_successfully() {
-    let resp = decode_api_rev(0x05, 0x07);
-
-    assert_eq!(resp.min_ver, 0x05);
-    assert_eq!(resp.max_ver, 0x07);
+    assert_eq!(fields(&decode_api_rev([1, 0, 1, 1])), [1, 0, 1, 1]);
 }
 
 /// Verifies that exact-count decoding preserves zero-valued known fields.
 #[test]
 fn exact_toc_count_preserves_zero_values() {
-    let resp = decode_api_rev(0x00, 0x00);
-
-    assert_eq!(resp.min_ver, 0x00);
-    assert_eq!(resp.max_ver, 0x00);
+    assert_eq!(fields(&decode_api_rev([0; 4])), [0; 4]);
 }
 
-/// Verifies that exact-count decoding preserves the full `u8` boundary range.
+/// Verifies that exact-count decoding preserves the full `u16` boundary range.
 #[test]
-fn exact_toc_count_preserves_uint8_boundary_values() {
-    let resp = decode_api_rev(u8::MIN, u8::MAX);
-
-    assert_eq!(resp.min_ver, u8::MIN);
-    assert_eq!(resp.max_ver, u8::MAX);
+fn exact_toc_count_preserves_uint16_boundary_values() {
+    for rev in [
+        [u16::MIN, u16::MAX, u16::MIN, u16::MAX],
+        [u16::MAX, u16::MIN, u16::MAX, u16::MIN],
+        [u16::MAX; 4],
+    ] {
+        assert_eq!(fields(&decode_api_rev(rev)), rev);
+    }
 }
 
-/// Verifies that exact-count decoding preserves representative known-field pairs.
+/// Verifies that exact-count decoding preserves representative known-field sets.
 #[test]
-fn exact_toc_count_preserves_representative_value_pairs() {
-    let cases = [
-        (0x00, 0x00),
-        (0x00, 0xFF),
-        (0xFF, 0x00),
-        (0xFF, 0xFF),
-        (0x01, 0x02),
-        (0x7F, 0x80),
-        (0x55, 0xAA),
-        (0xAA, 0x55),
+fn exact_toc_count_preserves_representative_value_sets() {
+    let cases: [Rev; 8] = [
+        [0, 0, 0, 0],
+        [1, 0, 1, 1],
+        [2, 0, 2, 0],
+        [1, 0, 2, 0],
+        [0x00FF, 0xFF00, 0x0100, 0x00FE],
+        [0x7FFF, 0x8000, 0x8001, 0x7FFE],
+        [0x5555, 0xAAAA, 0xAAAA, 0x5555],
+        [0x1234, 0x5678, 0x9ABC, 0xDEF0],
     ];
 
-    for (min_ver, max_ver) in cases {
-        let resp = decode_api_rev(min_ver, max_ver);
-
+    for rev in cases {
         assert_eq!(
-            resp.min_ver, min_ver,
-            "min_ver changed for pair ({min_ver:#04x}, {max_ver:#04x})",
-        );
-        assert_eq!(
-            resp.max_ver, max_ver,
-            "max_ver changed for pair ({min_ver:#04x}, {max_ver:#04x})",
+            fields(&decode_api_rev(rev)),
+            rev,
+            "fields changed for {rev:?}"
         );
     }
 }
@@ -155,25 +172,9 @@ fn exact_toc_count_preserves_representative_value_pairs() {
 /// Verifies that one appended future TOC entry is ignored.
 #[test]
 fn one_extra_trailing_toc_entry_is_ignored() {
-    // TborApiRevResp expects two Uint8 TOC entries. Encode three:
-    // the two known fields plus one future-field placeholder.
-    let mut buf = [0u8; 64];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(0x05)
-        .expect("encode min_ver")
-        .uint8(0x07)
-        .expect("encode max_ver")
-        .uint8(0xFF)
-        .expect("encode trailing future field")
-        .finish()
-        .expect("finish response");
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("forward compatibility: trailing entry must be ignored");
-
-    assert_eq!(resp.min_ver, 0x05);
-    assert_eq!(resp.max_ver, 0x07);
+    // TborApiRevResp expects four Uint16 TOC entries. Encode five:
+    // the four known fields plus one future-field placeholder.
+    assert_known_fields_survive([1, 0, 1, 1], &[0xFF]);
 }
 
 /// Verifies that every possible `u8` value is ignored when appended as a future field.
@@ -182,33 +183,7 @@ fn every_uint8_value_is_ignored_as_one_trailing_entry() {
     // The compatibility behavior must not depend on the encoded value
     // of the appended field.
     for trailing_value in u8::MIN..=u8::MAX {
-        let mut buf = [0u8; 64];
-
-        let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-            .uint8(0x12)
-            .expect("encode min_ver")
-            .uint8(0x34)
-            .expect("encode max_ver")
-            .uint8(trailing_value)
-            .expect("encode trailing future field")
-            .finish()
-            .expect("finish response");
-
-        let resp = TborApiRevResp::decode_response(bytes).unwrap_or_else(|err| {
-            panic!(
-                "trailing value {trailing_value:#04x} \
-                     must be ignored: {err:?}"
-            )
-        });
-
-        assert_eq!(
-            resp.min_ver, 0x12,
-            "min_ver changed for trailing value {trailing_value:#04x}",
-        );
-        assert_eq!(
-            resp.max_ver, 0x34,
-            "max_ver changed for trailing value {trailing_value:#04x}",
-        );
+        assert_known_fields_survive([0x12, 0x34, 0x56, 0x78], &[trailing_value]);
     }
 }
 
@@ -217,27 +192,7 @@ fn every_uint8_value_is_ignored_as_one_trailing_entry() {
 fn multiple_extra_trailing_toc_entries_are_ignored() {
     // Verify that compatibility is not limited to exactly one appended
     // field. A newer firmware may append several fields over time.
-    let mut buf = [0u8; 64];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(0x11)
-        .expect("encode min_ver")
-        .uint8(0x22)
-        .expect("encode max_ver")
-        .uint8(0x33)
-        .expect("encode future field 1")
-        .uint8(0x44)
-        .expect("encode future field 2")
-        .uint8(0x55)
-        .expect("encode future field 3")
-        .finish()
-        .expect("finish response");
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("forward compatibility: all trailing entries must be ignored");
-
-    assert_eq!(resp.min_ver, 0x11);
-    assert_eq!(resp.max_ver, 0x22);
+    assert_known_fields_survive([0x11, 0x22, 0x33, 0x44], &[0x55, 0x66, 0x77]);
 }
 
 /// Verifies that trailing future entries cannot overwrite known decoded fields.
@@ -247,26 +202,15 @@ fn trailing_entries_do_not_overwrite_known_fields() {
     // decoder reads the known prefix rather than accidentally reading
     // the final entries.
     let mut buf = [0u8; 64];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(0x01)
-        .expect("encode min_ver")
-        .uint8(0x02)
-        .expect("encode max_ver")
-        .uint8(0xA1)
-        .expect("encode future field 1")
-        .uint8(0xA2)
-        .expect("encode future field 2")
-        .finish()
-        .expect("finish response");
+    let bytes = encode_api_rev_with_trailing(&mut buf, [0x01, 0x02, 0x03, 0x04], &[0xA1, 0xA2]);
 
     let resp = TborApiRevResp::decode_response(bytes)
         .expect("trailing fields must not change known decoded fields");
 
-    assert_eq!(resp.min_ver, 0x01);
-    assert_eq!(resp.max_ver, 0x02);
-    assert_ne!(resp.min_ver, 0xA1);
-    assert_ne!(resp.max_ver, 0xA2);
+    assert_eq!(fields(&resp), [0x01, 0x02, 0x03, 0x04]);
+    assert!(fields(&resp)
+        .iter()
+        .all(|&field| field != 0xA1 && field != 0xA2));
 }
 
 /// Verifies that repeatedly decoding the same extended response produces identical results.
@@ -275,35 +219,33 @@ fn repeated_decode_of_forward_compatible_message_is_deterministic() {
     let trailing = [0x10, 0x20, 0x30, 0x40, 0x50];
     let mut buf = [0u8; 128];
 
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0x09, 0x0B, &trailing);
+    let bytes = encode_api_rev_with_trailing(&mut buf, [0x09, 0x0A, 0x0B, 0x0C], &trailing);
 
     let first = TborApiRevResp::decode_response(bytes).expect("first decode with trailing entries");
-
     let second =
         TborApiRevResp::decode_response(bytes).expect("second decode with trailing entries");
 
-    assert_eq!(first.min_ver, 0x09);
-    assert_eq!(first.max_ver, 0x0B);
-    assert_eq!(second.min_ver, first.min_ver);
-    assert_eq!(second.max_ver, first.max_ver);
+    assert_eq!(fields(&first), [0x09, 0x0A, 0x0B, 0x0C]);
+    assert_eq!(second, first);
 }
 
-/// Verifies that a response missing the second required TOC entry is truncated.
+/// Verifies that a response missing any required TOC entry is truncated.
 #[test]
-fn one_toc_entry_is_message_truncated() {
-    // The first field exists, but max_ver is missing.
-    let mut buf = [0u8; 64];
+fn missing_known_toc_entries_are_message_truncated() {
+    let rev: Rev = [1, 0, 1, 1];
+    for present in 1..API_REV_FIELDS {
+        let mut buf = [0u8; 64];
+        let bytes = encode_api_rev_fields(&mut buf, &rev[..present], &[]);
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(0x05)
-        .expect("encode min_ver")
-        .finish()
-        .expect("finish response");
+        let err = TborApiRevResp::decode_response(bytes)
+            .expect_err("a response missing a known field must produce MessageTruncated");
 
-    let err = TborApiRevResp::decode_response(bytes)
-        .expect_err("missing max_ver must produce MessageTruncated");
-
-    assert_eq!(err, DecodeError::MessageTruncated);
+        assert_eq!(
+            err,
+            DecodeError::MessageTruncated,
+            "unexpected result with {present} of {API_REV_FIELDS} fields",
+        );
+    }
 }
 
 /// Verifies that the response encoder rejects an empty TOC.
@@ -320,54 +262,44 @@ fn zero_toc_entries_cannot_be_encoded() {
     assert_eq!(err, EncodeError::MissingTocEntries);
 }
 
-/// Verifies that truncation depends on TOC count rather than the present field value.
+/// Verifies that truncation depends on TOC count rather than the present field values.
 #[test]
-fn truncated_result_is_independent_of_present_field_value() {
-    // The TOC count, rather than the value of the existing entry,
+fn truncated_result_is_independent_of_present_field_values() {
+    // The TOC count, rather than the values of the existing entries,
     // determines whether the message is truncated.
-    for min_ver in [u8::MIN, 0x01, 0x7F, u8::MAX] {
+    for value in [u16::MIN, 0x0001, 0x7FFF, u16::MAX] {
         let mut buf = [0u8; 64];
-
-        let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-            .uint8(min_ver)
-            .expect("encode min_ver")
-            .finish()
-            .expect("finish response");
+        let bytes = encode_api_rev_fields(&mut buf, &[value; API_REV_FIELDS - 1], &[]);
 
         let err = TborApiRevResp::decode_response(bytes).expect_err(
-            "a one-entry response must be truncated regardless \
-                 of field value",
+            "a three-entry response must be truncated regardless \
+                 of field values",
         );
 
         assert_eq!(
             err,
             DecodeError::MessageTruncated,
-            "unexpected result for min_ver={min_ver:#04x}",
+            "unexpected result for value={value:#06x}",
         );
     }
 }
 
-/// Verifies for every `u8` value that omitting the second required field is truncated.
+/// Verifies for every `u16` value that a lone first field is truncated.
 #[test]
-fn every_uint8_first_field_value_is_truncated_when_second_is_missing() {
+fn every_uint16_first_field_value_is_truncated_when_others_are_missing() {
     // Exhaustively verify that no possible first-field value can alter
     // the schema-length check.
-    for min_ver in u8::MIN..=u8::MAX {
+    for min_major in u16::MIN..=u16::MAX {
         let mut buf = [0u8; 64];
-
-        let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-            .uint8(min_ver)
-            .expect("encode min_ver")
-            .finish()
-            .expect("finish response");
+        let bytes = encode_api_rev_fields(&mut buf, &[min_major], &[]);
 
         let err = TborApiRevResp::decode_response(bytes)
-            .expect_err("missing second field must produce MessageTruncated");
+            .expect_err("missing fields must produce MessageTruncated");
 
         assert_eq!(
             err,
             DecodeError::MessageTruncated,
-            "unexpected result for min_ver={min_ver:#04x}",
+            "unexpected result for min_major={min_major:#06x}",
         );
     }
 }
@@ -377,88 +309,48 @@ fn every_uint8_first_field_value_is_truncated_when_second_is_missing() {
 fn forward_compatibility_preserves_boundary_values() {
     // Exercise the compatibility behavior while the known fields
     // contain their minimum and maximum representable values.
-    let mut buf = [0u8; 64];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(u8::MIN)
-        .expect("encode minimum min_ver")
-        .uint8(u8::MAX)
-        .expect("encode maximum max_ver")
-        .uint8(0x55)
-        .expect("encode future field")
-        .finish()
-        .expect("finish response");
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("boundary values with a trailing entry must decode");
-
-    assert_eq!(resp.min_ver, u8::MIN);
-    assert_eq!(resp.max_ver, u8::MAX);
+    assert_known_fields_survive([u16::MIN, u16::MAX, u16::MIN, u16::MAX], &[0x55]);
 }
 
 /// Verifies that forward-compatible decoding preserves representative known-field values.
 #[test]
 fn forward_compatibility_preserves_representative_known_values() {
-    let cases = [
-        (0x00, 0x00),
-        (0x00, 0xFF),
-        (0xFF, 0x00),
-        (0xFF, 0xFF),
-        (0x01, 0xFE),
-        (0x7F, 0x80),
-        (0x55, 0xAA),
+    let cases: [Rev; 7] = [
+        [0, 0, 0, 0],
+        [1, 0, 1, 1],
+        [2, 0, 2, 0],
+        [u16::MAX; 4],
+        [0x0001, 0xFFFE, 0xFFFE, 0x0001],
+        [0x7FFF, 0x8000, 0x8000, 0x7FFF],
+        [0x5555, 0xAAAA, 0x5555, 0xAAAA],
     ];
 
-    let trailing = [0xDE, 0xAD, 0xBE, 0xEF];
-
-    for (min_ver, max_ver) in cases {
-        let mut buf = [0u8; 128];
-
-        let bytes = encode_api_rev_with_trailing(&mut buf, min_ver, max_ver, &trailing);
-
-        let resp = TborApiRevResp::decode_response(bytes).unwrap_or_else(|err| {
-            panic!(
-                "known pair ({min_ver:#04x}, {max_ver:#04x}) \
-                     with trailing entries must decode: {err:?}"
-            )
-        });
-
-        assert_eq!(resp.min_ver, min_ver);
-        assert_eq!(resp.max_ver, max_ver);
+    for rev in cases {
+        assert_known_fields_survive(rev, &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 }
 
 /// Verifies that the maximum supported TOC count still decodes the known prefix.
 #[test]
 fn maximum_supported_toc_count_decodes_known_prefix() {
-    // TborApiRevResp uses two known TOC entries; fill the remaining
+    // TborApiRevResp uses four known TOC entries; fill the remaining
     // encoder capacity with trailing future entries.
-
     let trailing: [u8; TRAILING_COUNT] = core::array::from_fn(|index| index as u8);
-
-    let mut buf = [0u8; 512];
-    let bytes = encode_api_rev_with_trailing(&mut buf, u8::MIN, u8::MAX, &trailing);
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("maximum-entry response must preserve the known prefix");
-
-    assert_eq!(resp.min_ver, u8::MIN);
-    assert_eq!(resp.max_ver, u8::MAX);
+    assert_known_fields_survive([u16::MIN, u16::MAX, u16::MIN, u16::MAX], &trailing);
 }
 
 /// Verifies that the encoder rejects a TOC entry beyond its supported limit.
 #[test]
 fn toc_entry_beyond_encoder_limit_is_rejected() {
-    // Fill the remaining TOC capacity after the two known fields.
+    // Fill the remaining TOC capacity after the four known fields.
     // One additional entry beyond MAX_TOC_ENTRIES must fail with
     // TooManyTocEntries.
     let mut buf = [0u8; 512];
 
-    let mut encoder = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .uint8(0x12)
-        .expect("encode min_ver")
-        .uint8(0x34)
-        .expect("encode max_ver");
+    let mut encoder = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false);
+    for value in [1, 0, 1, 1] {
+        encoder = encoder.uint16(value).expect("encode known field");
+    }
 
     for index in 0..TRAILING_COUNT {
         encoder = encoder.uint8(index as u8).unwrap_or_else(|err| {
@@ -480,18 +372,9 @@ fn toc_entry_beyond_encoder_limit_is_rejected() {
 #[test]
 fn many_extra_trailing_toc_entries_are_ignored() {
     // Exercise the maximum number of future fields supported by the
-    // encoder after the two known fields.
-
+    // encoder after the four known fields.
     let trailing: [u8; TRAILING_COUNT] = core::array::from_fn(|index| index as u8);
-
-    let mut buf = [0u8; 512];
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0x21, 0x43, &trailing);
-
-    let resp =
-        TborApiRevResp::decode_response(bytes).expect("maximum trailing entries must be ignored");
-
-    assert_eq!(resp.min_ver, 0x21);
-    assert_eq!(resp.max_ver, 0x43);
+    assert_known_fields_survive([0x21, 0x43, 0x65, 0x87], &trailing);
 }
 
 /// Verifies that varying supported trailing-entry counts preserve the same known fields.
@@ -501,102 +384,49 @@ fn different_trailing_counts_preserve_the_same_known_fields() {
     // supported trailing-entry count.
     for trailing_count in [0usize, 1, 2, 3, 8, 16, TRAILING_COUNT - 1, TRAILING_COUNT] {
         let trailing: Vec<u8> = (0..trailing_count).map(|index| index as u8).collect();
-
-        let mut buf = [0u8; 512];
-        let bytes = encode_api_rev_with_trailing(&mut buf, 0x6A, 0xB5, &trailing);
-
-        let resp = TborApiRevResp::decode_response(bytes).unwrap_or_else(|err| {
-            panic!(
-                "response with {trailing_count} trailing entries \
-                     must decode: {err:?}"
-            )
-        });
-
-        assert_eq!(
-            resp.min_ver, 0x6A,
-            "min_ver changed with {trailing_count} trailing entries",
-        );
-
-        assert_eq!(
-            resp.max_ver, 0xB5,
-            "max_ver changed with {trailing_count} trailing entries",
-        );
+        assert_known_fields_survive([0x6A, 0xB5, 0x6B, 0xB6], &trailing);
     }
 }
 
-/// Verifies exact-count decoding across representative `u8` values.
+/// Verifies exact-count decoding across representative `u16` values.
 #[test]
-fn exact_toc_count_preserves_representative_uint8_pairs() {
-    let values = [u8::MIN, 0x01, 0x7F, 0x80, 0xFE, u8::MAX];
+fn exact_toc_count_preserves_representative_uint16_sets() {
+    let values = [u16::MIN, 0x0001, 0x7FFF, 0x8000, 0xFFFE, u16::MAX];
 
-    for min_ver in values {
-        for max_ver in values {
-            let resp = decode_api_rev(min_ver, max_ver);
-
+    for major in values {
+        for minor in values {
+            let rev = [major, minor, minor, major];
             assert_eq!(
-                resp.min_ver, min_ver,
-                "min_ver changed for pair ({min_ver:#04x}, {max_ver:#04x})",
-            );
-            assert_eq!(
-                resp.max_ver, max_ver,
-                "max_ver changed for pair ({min_ver:#04x}, {max_ver:#04x})",
+                fields(&decode_api_rev(rev)),
+                rev,
+                "fields changed for {rev:?}"
             );
         }
     }
 }
 
-/// Verifies that decoding preserves field values without imposing semantic version ordering.
+/// Verifies that decoding preserves field values without imposing semantic revision ordering.
 #[test]
-fn exact_toc_count_does_not_require_min_ver_to_be_less_than_max_ver() {
-    let resp = decode_api_rev(0xFE, 0x01);
-
-    assert_eq!(resp.min_ver, 0xFE);
-    assert_eq!(resp.max_ver, 0x01);
+fn exact_toc_count_does_not_require_min_rev_to_be_at_most_max_rev() {
+    assert_eq!(fields(&decode_api_rev([2, 5, 1, 0])), [2, 5, 1, 0]);
 }
 
 /// Verifies that equal known-field values are preserved with appended future fields.
 #[test]
 fn forward_compatibility_preserves_equal_known_values() {
-    let trailing = [0x10, 0x20, 0x30, 0x40];
-    let mut buf = [0u8; 128];
-
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0x7F, 0x7F, &trailing);
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("equal known fields with trailing entries must decode");
-
-    assert_eq!(resp.min_ver, 0x7F);
-    assert_eq!(resp.max_ver, 0x7F);
+    assert_known_fields_survive([2, 0, 2, 0], &[0x10, 0x20, 0x30, 0x40]);
 }
 
 /// Verifies that maximum-count trailing entries filled with zero are ignored.
 #[test]
 fn maximum_supported_trailing_zero_values_are_ignored() {
-    let trailing = [u8::MIN; TRAILING_COUNT];
-    let mut buf = [0u8; 512];
-
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0x12, 0x34, &trailing);
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("maximum-count zero-valued trailing entries must be ignored");
-
-    assert_eq!(resp.min_ver, 0x12);
-    assert_eq!(resp.max_ver, 0x34);
+    assert_known_fields_survive([0x12, 0x34, 0x56, 0x78], &[u8::MIN; TRAILING_COUNT]);
 }
 
 /// Verifies that maximum-count trailing entries filled with `u8::MAX` are ignored.
 #[test]
 fn maximum_supported_trailing_max_values_are_ignored() {
-    let trailing = [u8::MAX; TRAILING_COUNT];
-    let mut buf = [0u8; 512];
-
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0x56, 0x78, &trailing);
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("maximum-count max-valued trailing entries must be ignored");
-
-    assert_eq!(resp.min_ver, 0x56);
-    assert_eq!(resp.max_ver, 0x78);
+    assert_known_fields_survive([0x56, 0x78, 0x9A, 0xBC], &[u8::MAX; TRAILING_COUNT]);
 }
 
 /// Verifies that alternating boundary-valued future fields are ignored at the TOC limit.
@@ -604,15 +434,7 @@ fn maximum_supported_trailing_max_values_are_ignored() {
 fn maximum_supported_alternating_trailing_values_are_ignored() {
     let trailing: [u8; TRAILING_COUNT] =
         core::array::from_fn(|index| if index % 2 == 0 { u8::MIN } else { u8::MAX });
-
-    let mut buf = [0u8; 512];
-    let bytes = encode_api_rev_with_trailing(&mut buf, 0xA5, 0x5A, &trailing);
-
-    let resp = TborApiRevResp::decode_response(bytes)
-        .expect("alternating boundary-valued trailing entries must be ignored");
-
-    assert_eq!(resp.min_ver, 0xA5);
-    assert_eq!(resp.max_ver, 0x5A);
+    assert_known_fields_survive([0xA5, 0x5A, 0xA5, 0x5A], &trailing);
 }
 
 /// Verifies forward compatibility immediately below and at the maximum TOC count.
@@ -622,19 +444,7 @@ fn forward_compatibility_preserves_known_fields_at_toc_limit_boundary() {
         let trailing: Vec<u8> = (0..trailing_count)
             .map(|index| 0xF0u8.wrapping_add(index as u8))
             .collect();
-
-        let mut buf = [0u8; 512];
-        let bytes = encode_api_rev_with_trailing(&mut buf, 0x2A, 0xD5, &trailing);
-
-        let resp = TborApiRevResp::decode_response(bytes).unwrap_or_else(|err| {
-            panic!(
-                "response with {trailing_count} trailing entries at the TOC boundary \
-                 must decode: {err:?}"
-            )
-        });
-
-        assert_eq!(resp.min_ver, 0x2A);
-        assert_eq!(resp.max_ver, 0xD5);
+        assert_known_fields_survive([0x2A, 0xD5, 0x2B, 0xD6], &trailing);
     }
 }
 
@@ -804,6 +614,29 @@ fn aes_encrypt_decrypt_extra_trailing_toc_entry_is_ignored() {
     assert_eq!(resp.iv, iv);
 }
 
+/// Rejects a response whose masked key is off its alignment boundary.
+#[test]
+fn ecc_generate_key_misaligned_masked_key_is_rejected() {
+    let mut buf = [0u8; 1024];
+
+    // The data section starts at 8 + 3 * 4 = 20, so 2 bytes of padding put
+    // the masked key at offset 22.
+    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        .padding(2)
+        .expect("encode misaligning padding")
+        .buffer(&[0x11; 180])
+        .expect("encode masked key")
+        .buffer(&[0x22; 96])
+        .expect("encode public key")
+        .finish()
+        .expect("finish response");
+
+    assert_eq!(
+        TborEccGenerateKeyResp::decode_response(bytes).err(),
+        Some(DecodeError::MisalignedField)
+    );
+}
+
 /// Verifies that an appended field is ignored for a response containing
 /// two variable-length buffers.
 #[test]
@@ -816,6 +649,8 @@ fn ecc_generate_key_extra_trailing_toc_entry_is_ignored() {
     let mut buf = [0u8; 1024];
 
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -849,6 +684,8 @@ fn unwrap_key_extra_trailing_toc_entry_is_ignored() {
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -879,6 +716,8 @@ fn unwrap_key_multiple_trailing_toc_entries_are_ignored() {
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -909,11 +748,13 @@ fn unwrap_key_missing_required_field_is_message_truncated() {
     let mut buf = [0u8; 1024];
 
     // TborUnwrapKeyResp expects:
-    //   key_kind, masked_key, pub_key.
-    // Encode only the first two.
+    //   key_kind, masked_key alignment padding, masked_key, pub_key.
+    // Encode all but pub_key.
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .finish()

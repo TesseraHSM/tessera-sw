@@ -16,9 +16,6 @@
 //! (PSK, ephemeral keypair).
 
 use tsra_crypto::EccPrivateKey;
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionOpenInitReq;
@@ -31,10 +28,12 @@ use tsra_session_ex_crypto::ec_pub_from_sec1;
 use tsra_session_ex_crypto::generate_vm_ephemeral;
 use tsra_session_ex_crypto::receive_exported;
 use tsra_session_ex_crypto::verify_phase1_mac;
+use tsra_session_ex_crypto::SessionTransport;
 use tsra_session_ex_crypto::VmEphemeralKey;
 use zeroize::Zeroizing;
 
 use super::crypto;
+use crate::fixture::TestDev;
 
 /// State carried between Phase 1 and Phase 2 of the handshake.
 /// The caller may construct this directly to drive negative-path
@@ -137,7 +136,7 @@ impl<'a> SessionOpenInitOptions<'a> {
 /// Equivalent to
 /// `session_open_init_with_options(dev, SessionOpenInitOptions::new(psk_id, session_type))`.
 pub fn session_open_init(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     psk_id: u8,
     session_type: SessionType,
 ) -> Result<PendingHandshake, DdiError> {
@@ -147,7 +146,7 @@ pub fn session_open_init(
 /// Full-control entry point. Honours every override in `opts`;
 /// fills in happy-path defaults for the rest.
 pub fn session_open_init_with_options(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     opts: SessionOpenInitOptions<'_>,
 ) -> Result<PendingHandshake, DdiError> {
     let (sk_init, pk_init_sec1, pk_init_key) = match opts.ephemeral {
@@ -198,6 +197,14 @@ pub fn session_open_init_with_options(
         &resp.mac_resp,
     )
     .map_err(|_| DdiError::TborDecodeError)?;
+
+    if dev.uses_session_transport() {
+        // Duo seals the finish, every later in-session command and the
+        // close of this slot under the transport keys bound at Phase 1.
+        let transport =
+            SessionTransport::derive(&exported).map_err(|_| DdiError::TborDecodeError)?;
+        dev.set_session_transport(resp.session_id, transport);
+    }
 
     Ok(PendingHandshake {
         session_id: resp.session_id,

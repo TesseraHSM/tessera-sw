@@ -212,7 +212,7 @@ pub fn gen_field_group(schema: &Schema) -> TokenStream {
 
             let pad_write = if has_padding {
                 quote! {
-                    let pad_len = (#align - (self.data_offset % #align)) % #align;
+                    let pad_len = (#align - ((data_start + self.data_offset) % #align)) % #align;
                     let pad_end = data_start + self.data_offset + pad_len;
                     if pad_end > self.buf.len() {
                         return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);

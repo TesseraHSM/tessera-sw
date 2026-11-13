@@ -44,6 +44,7 @@ pub struct TborSdResealRemoteBackupReq {
     /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
     /// the receiver's private HPKE key; a fixed-length `[u8; N]` field
     /// (mirrors the firmware `len = 280`), never a vault handle.
+    #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Unified [`PartPolicy`] the source and destination must share.

@@ -22,7 +22,7 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 
 use crate::utils::partition_ex_helpers::PARTITION_LOCK;
 use crate::utils::sd_provision::CaKey;
-use crate::utils::sd_provision::build_receiver_evidence;
+use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 use crate::utils::sd_provision::provision_backing_ex;
@@ -44,7 +44,7 @@ fn sd_restore_peer_backup_roundtrip() {
     // needs to restore.
     let (session1, policy, pid_pub, local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session1);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session1.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
@@ -102,7 +102,7 @@ fn sd_restore_peer_backup_is_one_shot() {
 
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
@@ -146,7 +146,7 @@ fn sd_restore_peer_backup_rejects_without_peer_cloning() {
     let (session, policy, pid_pub, _local_mk) =
         provision_backing_ex(&sata, &pota, None, None, false);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
 
     let pok_peer_backup = [0u8; POK_REMOTE_BACKUP_LEN];
     let prev_sd_mk_backup = [0u8; SD_MK_BACKUP_LEN];

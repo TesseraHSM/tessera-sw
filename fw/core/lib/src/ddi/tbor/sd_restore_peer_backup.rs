@@ -27,7 +27,7 @@
 //!    `policy_hash`, require its `allow_peer_cloning` flag
 //!    ([`SdPeerCloningNotAllowed`](HsmError::SdPeerCloningNotAllowed)), then
 //!    verify the **sender** peer evidence against it: its cert chains are
-//!    validated and anchored to the policy SATA key, its report's v2
+//!    validated and anchored to the policy POTA key, its report's v2
 //!    `policy_hash` must equal `SHA-384(policy)`, and its attested COSE_Key
 //!    is recovered as `SndrPub`.
 //! 3. Unmask `masked_sealing_key` → `RcvrPriv` (must be an
@@ -62,8 +62,9 @@ use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -110,7 +111,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
@@ -143,7 +143,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
     // The sender attestation evidence is mandatory side-band data carried
     // in the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the two fixed-size response backups in the IO scope so they
     // survive the crypto scratch allocator's reset.
@@ -172,15 +171,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 return Err(HsmError::SdPeerCloningNotAllowed);
             }
 
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
+            let pota = &part_policy.pota_pub_key;
+            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
                 return Err(HsmError::InvalidArg);
             }
 
             // The sender peer's report must attest to the same policy.
             let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            pal.hash(io, HsmHashAlgo::Sha384, policy, expected, true)
-                .await?;
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                policy,
+                expected,
+                HsmDigestForm::Standard,
+            )
+            .await?;
 
             let src_hash = alloc.dma_alloc(POLICY_HASH_LEN)?;
             {
@@ -188,7 +193,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 verify_evidence(
                     pal,
                     io,
-                    &oob,
                     &EvidenceRefs {
                         mfgr_chain: ev.mfgr_cert_chain(),
                         owner_chain: ev.owner_cert_chain(),
@@ -196,7 +200,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_sndr,
@@ -247,8 +251,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            pk_r[1..1 + coord].reverse();
-            pk_r[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3

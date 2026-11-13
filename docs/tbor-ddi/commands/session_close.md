@@ -17,14 +17,14 @@ Officer slot) may be closed and later reopened via a fresh
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entry, then the
+Wire layout: 8-byte header, followed by the TOC entry, then the
 (empty) data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Slot to destroy. |
+| 8 | `session_id` | `session_id` (inline) | Slot to destroy. |
 
 ### Data section
 

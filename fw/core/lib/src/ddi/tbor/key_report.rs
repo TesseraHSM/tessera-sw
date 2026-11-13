@@ -48,7 +48,9 @@ use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::TborKeyReportResp;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_AUTH_ENVELOPE_LEN;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -96,13 +98,6 @@ fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs, kind: HsmVaultKeyKind) -> KeyFl
         .with_is_sd_sealing(kind == HsmVaultKeyKind::SdSealing && attrs.local())
 }
 
-/// Reverse-copy `src` into `dst[..src.len()]` (LE↔BE per coordinate).
-fn reverse_copy(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
-        *d = *s;
-    }
-}
-
 /// Allocate the report's AppId captured by the authenticated handshake.
 /// It is the only non-key report field that needs owned
 /// storage; `report_data` and `vm_launch_id` are borrowed in place.
@@ -129,20 +124,15 @@ async fn attested_pub_key<'a, P: HsmPal>(
         if pal.rsa_priv_pub_key(io, priv_key, None)? != wire_len {
             return Err(HsmError::InternalError);
         }
-        let pub_le = alloc.dma_alloc(wire_len)?;
-        if pal.rsa_priv_pub_key(io, priv_key, Some(&mut *pub_le))? != wire_len {
+        let pub_key = alloc.dma_alloc(wire_len)?;
+        if pal.rsa_priv_pub_key(io, priv_key, Some(&mut *pub_key))? != wire_len {
             return Err(HsmError::InternalError);
         }
-        let modulus = alloc.dma_alloc(modulus_len)?;
-        let exponent = alloc.dma_alloc(RSA_PUB_EXP_LEN)?;
-        reverse_copy(
-            modulus,
-            pub_le.get(..modulus_len).ok_or(HsmError::InternalError)?,
-        );
-        reverse_copy(
-            exponent,
-            pub_le.get(modulus_len..).ok_or(HsmError::InternalError)?,
-        );
+        // The COSE_Key encodes big-endian `n` and `e`; convert each
+        // operand-order field in place.
+        let (modulus, exponent) = pub_key.split_at_mut(modulus_len);
+        byte_order::int_to_be(P::BYTE_ORDER, modulus);
+        byte_order::int_to_be(P::BYTE_ORDER, exponent);
         return Ok(AttestedPubKey::Rsa {
             n: modulus,
             e: exponent,
@@ -156,23 +146,17 @@ async fn attested_pub_key<'a, P: HsmPal>(
     };
 
     let coord_raw = curve.priv_key_len();
-    let coord_wire = curve.wire_coord_len();
 
-    let pub_le = alloc.dma_alloc(curve.wire_pub_key_len())?;
-    pal.ecc_pub_from_priv(io, curve, priv_key, pub_le).await?;
+    let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
+    pal.ecc_pub_from_priv(io, curve, priv_key, pub_key).await?;
 
-    // The COSE_Key encodes big-endian coordinates; the PAL emits the
-    // wire-LE `x ‖ y`, so reverse each coordinate.
-    let x_be = alloc.dma_alloc(coord_raw)?;
-    let y_be = alloc.dma_alloc(coord_raw)?;
-    reverse_copy(x_be, &pub_le[..coord_raw]);
-    reverse_copy(y_be, &pub_le[coord_wire..coord_wire + coord_raw]);
+    // The COSE_Key encodes big-endian coordinates; convert the PAL's
+    // operand-order `x ‖ y` in place to the exact-width BE pair.
+    byte_order::pair_to_be(P::BYTE_ORDER, curve, pub_key)?;
+    let pub_key: &'a HsmDmaBuf = pub_key;
+    let (x, y) = pub_key[..2 * coord_raw].split_at(coord_raw);
 
-    Ok(AttestedPubKey::Ecc {
-        curve,
-        x: x_be,
-        y: y_be,
-    })
+    Ok(AttestedPubKey::Ecc { curve, x, y })
 }
 
 /// Handle a TBOR `KeyReport` request.
@@ -263,8 +247,14 @@ async fn authenticate_request<P: HsmPal>(
     data[..masked_key.len()].copy_from_slice(masked_key);
     data[masked_key.len()..].copy_from_slice(report_data);
     let digest = alloc.dma_alloc(48)?;
-    pal.hash(io, HsmHashAlgo::Sha384, data, digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        data,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
     let view = aead_open(pal, io, param_key, envelope)
         .await
         .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;

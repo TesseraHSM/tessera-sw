@@ -72,7 +72,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     }
 
     /// Export the live SD to an attested receiver. Firmware verifies receiver
-    /// evidence against SATA and the bound policy. `attest` must return the
+    /// evidence against POTA and the bound policy. `attest` must return the
     /// complete sender evidence for the freshly generated sealing key.
     pub fn create_peer_backup<Attest>(
         &self,

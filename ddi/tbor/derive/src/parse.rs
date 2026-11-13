@@ -19,7 +19,7 @@ use syn::Type;
 const STRUCT_OPTS: &str = "`response`, `resp = T`, `opcode = N`, `session_ctrl = variant`";
 
 /// Allowed field-level option names, for error messages.
-const FIELD_OPTS: &str = "`session_id`, `key_id`, `min_len = N`, `max_len = N`";
+const FIELD_OPTS: &str = "`session_id`, `key_id`, `min_len = N`, `max_len = N`, `align = N`";
 
 /// Whether the annotated struct is a request or a response.
 pub enum StructKind {
@@ -211,6 +211,9 @@ pub struct ParsedField {
     pub name: Ident,
     pub ty: Type,
     pub shape: FieldShape,
+    /// `#[tbor(align = N)]`: the field's data starts at a multiple of `N`
+    /// bytes from the message start, preceded by a padding TOC entry.
+    pub align: Option<usize>,
 }
 
 impl ParsedField {
@@ -221,11 +224,27 @@ impl ParsedField {
             .ok_or_else(|| syn::Error::new(f.span(), "expected a named field"))?;
         let flags = FieldFlags::collect(&f.attrs)?;
         let shape = resolve_shape(f, &flags)?;
+        if flags.align.is_some()
+            && matches!(
+                shape,
+                FieldShape::U8
+                    | FieldShape::U16
+                    | FieldShape::LeU16
+                    | FieldShape::SessionId
+                    | FieldShape::KeyId
+            )
+        {
+            return Err(syn::Error::new(
+                f.span(),
+                "#[tbor(align = N)] is only valid on fields stored in the data section",
+            ));
+        }
 
         Ok(Self {
             name,
             ty: f.ty.clone(),
             shape,
+            align: flags.align,
         })
     }
 }
@@ -297,6 +316,7 @@ struct FieldFlags {
     key_id: bool,
     has_max_len: bool,
     has_min_len: bool,
+    align: Option<usize>,
 }
 
 impl FieldFlags {
@@ -319,6 +339,17 @@ impl FieldFlags {
                 } else if m.path.is_ident("min_len") {
                     out.has_min_len = true;
                     m.value()?.parse::<syn::LitInt>().map(|_| ())
+                } else if m.path.is_ident("align") {
+                    let lit = m.value()?.parse::<syn::LitInt>()?;
+                    let n = lit.base10_parse::<usize>()?;
+                    if !n.is_power_of_two() || n < 2 {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "#[tbor(align = N)] requires a power of two >= 2",
+                        ));
+                    }
+                    out.align = Some(n);
+                    Ok(())
                 } else if m.path.is_ident("len") {
                     Err(m.error(
                         "#[tbor(len = N)] is redundant on host — \

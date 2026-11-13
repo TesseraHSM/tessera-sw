@@ -13,6 +13,7 @@ use libfuzzer_sys::fuzz_target;
 use tsra_crypto::*;
 use tsra_ddi_interface::*;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_types::*;
 use tsra_session_ex_crypto::*;
 use x509::X509CertificateOp;
@@ -173,16 +174,11 @@ fuzz_target!(|input: FuzzInput| {
                     "SessionClose on a session opened this iteration must succeed"
                 );
             } else {
-                // Any SessionOpenFinish failure eagerly destroys the Pending slot in FW,
-                // so a follow-up SessionClose on the same id must be rejected with
-                // SessionNotFound (0x08700004)
-                assert!(
-                    matches!(
-                        close_result.as_ref(),
-                        Err(DdiError::TborStatus(status)) if *status == TborStatus::SessionNotFound
-                    ),
-                    "SessionClose on a session that failed to open must fail with SessionNotFound"
-                );
+                // The socket transport may reject the released allocation's ownership
+                // before firmware can return SessionNotFound.
+                let err = close_result
+                    .expect_err("SessionClose on a session that failed to open must fail");
+                assert_session_rejects(&err, TborStatus::SessionNotFound);
             }
         }
     });

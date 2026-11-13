@@ -57,10 +57,11 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
-| — | `mu` | `buffer` (64 B) | The message representative `μ` to sign. |
-| — | `hedge` | `u8` | `0` = hedge preferred; `1` = hedge required; `2` = deterministic required. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
+| 20 | `mu` | `buffer` (64 B) | The message representative `μ` to sign. |
+| 24 | `hedge` | `u8` | `0` = hedge preferred; `1` = hedge required; `2` = deterministic required. |
 
 ### Data section
 
@@ -77,7 +78,8 @@ costs the data section nothing.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes (maximum for ML-DSA-87). |
+| 8 | (padding) | `padding` (0..=3 B) | Places `signature` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes (maximum for ML-DSA-87). |
 
 ### Data section
 
@@ -92,6 +94,7 @@ Carries the signature.
 | `InvalidKeyType` | The masked blob is not an ML-DSA key |
 | `InvalidPermissions` | The key may not sign |
 | `TborInvalidFixedLength` | `mu` is not 64 bytes |
+| `TborNonCanonicalLayout` | `masked_key` is not the first data field after the minimal alignment padding |
 | `DdiDecodeFailed` | Malformed request body |
 
 The parameter set is recovered from the masked key's authenticated key

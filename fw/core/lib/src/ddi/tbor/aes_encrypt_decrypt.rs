@@ -110,7 +110,7 @@ pub(crate) async fn handle<P: HsmPal>(
             || offset(req.msg().as_ptr()) != Some(data_start + iv_len)
             || key_off < region_end
         {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
 
         // In bounds: decode bounded every field within the request, and

@@ -418,6 +418,17 @@ pub fn parse_struct_schema(
     // empty-schema branches in `codegen_enc::gen_new_fn` and
     // `codegen_view::gen_validation`.
 
+    // Alignment is measured from the message start, which a field group's
+    // standalone validator cannot see.
+    if matches!(kind, MessageKind::Fields) {
+        if let Some(f) = fields.iter().find(|f| f.align > 0) {
+            return Err(syn::Error::new(
+                f.name.span(),
+                "#[tbor(align = N)] is not supported in field groups",
+            ));
+        }
+    }
+
     // Validate total TOC count doesn't exceed protocol limit.
     let layout = TocLayout::compute(&fields);
     if layout.total_toc_count > MAX_TOC_ENTRIES {

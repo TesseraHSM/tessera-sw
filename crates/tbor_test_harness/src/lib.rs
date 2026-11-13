@@ -29,6 +29,7 @@
 
 pub mod api_rev;
 pub mod assertions;
+pub mod byte_order;
 pub mod ctx;
 pub mod fixture;
 pub mod pqc;
@@ -44,6 +45,11 @@ pub mod x509_fixture;
 // instead of `crate::ctx::TestCtx`. Only items actually used
 // from test files are re-exported here; helpers only reached through
 // `TestCtx` methods stay behind their submodule.
+pub use byte_order::dev_coord_to_host_be;
+pub use byte_order::dev_rev;
+pub use byte_order::dev_rev_in_place;
+pub use byte_order::device_is_little_endian;
+pub use byte_order::wire_coord_len;
 pub use ctx::TestCtx;
 pub use fixture::bootstrap_rotated_co;
 pub use fixture::bootstrap_rotated_cu;

@@ -7,17 +7,6 @@ use super::*;
 // Helper functions
 // ================================
 
-/// Computes hash of input data using the specified hash algorithm
-fn hash_data(session: &HsmSession, mut hash_algo: HsmHashAlgo, data: &[u8]) -> Vec<u8> {
-    HsmHasher::hash_vec(session, &mut hash_algo, data).expect("Failed to hash data")
-}
-
-/// Signs a precomputed hash using the given ECC private key
-fn sign_hash(priv_key: &HsmEccPrivateKey, hash: &[u8]) -> Vec<u8> {
-    let mut sign_algo = HsmEccSignAlgo::default();
-    HsmSigner::sign_vec(&mut sign_algo, priv_key, hash).expect("Signature generation failed")
-}
-
 /// Verifies a signature against a hash using the given ECC public key
 fn verify_hash_signature(
     pub_key: &HsmEccPublicKey,

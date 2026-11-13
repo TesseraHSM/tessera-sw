@@ -145,12 +145,10 @@ impl HsmHashAlgo {
 ///   [`hash_finish`](Self::hash_finish)) — message arrives in
 ///   fragments; intermediate state lives in a PAL-allocated context.
 ///
-/// All output digests can be requested in either NIST big-endian or
-/// little-endian order via the `big_endian` flag, to match what the
-/// next consumer (DDI response framing, KDF input, etc.) expects. The
-/// little-endian form is the full byte reversal of the big-endian
-/// digest.
-pub trait HsmHash: HsmIoTypes {
+/// Every digest is produced in the [`HsmDigestForm`] the caller asks
+/// for: the standard digest (DDI responses, KDF input, certificates) or
+/// an ECC sign/verify operand in the platform's operand byte order.
+pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
     /// Platform-specific multi-step hash context.
     ///
     /// Created by [`hash_begin`](Self::hash_begin) and consumed by
@@ -174,9 +172,8 @@ pub trait HsmHash: HsmIoTypes {
     /// - `digest` — output buffer; must be at least
     ///   [`HsmHashAlgo::digest_len`] bytes.  Only the leading
     ///   `digest_len` bytes are written.
-    /// - `big_endian` — `true` for NIST big-endian output, `false`
-    ///   for little-endian (the full byte reversal of the big-endian
-    ///   digest, i.e. the PKA `ecc_sign` operand order).
+    /// - `form` — [`HsmDigestForm::Standard`] for the standard digest,
+    ///   [`HsmDigestForm::Operand`] for an ECC sign/verify operand.
     ///
     /// # Returns
     ///
@@ -191,7 +188,7 @@ pub trait HsmHash: HsmIoTypes {
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()>;
 
     /// Begins a multi-step hash.
@@ -265,9 +262,8 @@ pub trait HsmHash: HsmIoTypes {
     /// - `ctx` — context to finalise (consumed).
     /// - `digest` — output buffer; must be at least
     ///   [`HsmHashAlgo::digest_len`] bytes.
-    /// - `big_endian` — `true` for NIST big-endian output, `false`
-    ///   for little-endian (the full byte reversal of the big-endian
-    ///   digest, i.e. the PKA `ecc_sign` operand order).
+    /// - `form` — [`HsmDigestForm::Standard`] for the standard digest,
+    ///   [`HsmDigestForm::Operand`] for an ECC sign/verify operand.
     ///
     /// # Returns
     ///
@@ -280,6 +276,6 @@ pub trait HsmHash: HsmIoTypes {
         io: &Self::Io,
         ctx: Self::HashCtx<'_>,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()>;
 }

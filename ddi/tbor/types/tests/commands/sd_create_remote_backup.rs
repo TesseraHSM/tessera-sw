@@ -45,6 +45,7 @@
 //! `clear_enabled_state`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -73,6 +74,7 @@ use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_ENABLED;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
@@ -150,6 +152,16 @@ pub(crate) fn finalized_backing_session(
     ctx: &TestCtx,
     sata_key: &CaKey,
 ) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+    finalized_backing_session_with_pota(ctx, sata_key, &CaKey::generate())
+}
+
+/// [`finalized_backing_session`] with a caller-held POTA key, for commands
+/// whose evidence must chain to the partition's POTA.
+pub(crate) fn finalized_backing_session_with_pota(
+    ctx: &TestCtx,
+    sata_key: &CaKey,
+    pota: &CaKey,
+) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
 
     // PID / PID public key are materialized before PartInit.
@@ -158,7 +170,6 @@ pub(crate) fn finalized_backing_session(
     pid_pub.copy_from_slice(&info.pid_pub_key);
 
     // POTA anchor for the PTA certificate chain `PartFinal` validates.
-    let pota = CaKey::generate();
     let policy = backing_part_policy(
         &info.pid,
         &info.pid_pub_key,
@@ -169,7 +180,7 @@ pub(crate) fn finalized_backing_session(
     let init = ctx
         .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
         .expect("PartInit");
-    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
@@ -265,18 +276,9 @@ pub(crate) fn masked_key_report_and_pub(
 
     const COORD_LEN: usize = RAW_PUB_LEN / 2;
     let mut rcvr_pub = [0u8; RAW_PUB_LEN];
-    for (dst, src) in rcvr_pub[..COORD_LEN]
-        .iter_mut()
-        .zip(seal.pub_key[..COORD_LEN].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in rcvr_pub[COORD_LEN..]
-        .iter_mut()
-        .zip(seal.pub_key[COORD_LEN..].iter().rev())
-    {
-        *dst = *src;
-    }
+    rcvr_pub.copy_from_slice(&seal.pub_key);
+    dev_rev_in_place(&mut rcvr_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
         .tbor(&TborKeyReportReq {
@@ -312,6 +314,24 @@ impl ReceiverEvidence {
     /// Borrow the OOB items as the `&[&[u8]]` slice `tbor_oob` expects.
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
+    }
+
+    /// Copy this evidence, replacing only the partition-owner chain with
+    /// `part_owner` (appended as new OOB items).
+    pub(crate) fn with_part_owner_chain(&self, part_owner: &GeneratedChain) -> Self {
+        let mut oob_items = self.oob_items.clone();
+        let part_owner_desc = vec![
+            push_item(&mut oob_items, &part_owner.root_der),
+            push_item(&mut oob_items, &part_owner.leaf_der),
+        ];
+        Self {
+            oob_items,
+            receiver: self.receiver.clone(),
+            mfgr: self.mfgr.clone(),
+            owner: self.owner.clone(),
+            part_owner: part_owner_desc,
+            report: self.report,
+        }
     }
 }
 
@@ -381,10 +401,23 @@ pub(crate) fn build_receiver_evidence(
     sata_key: &CaKey,
     report: &[u8],
 ) -> ReceiverEvidence {
+    build_evidence(pid_pub, rcvr_pub, sata_key, sata_key, report)
+}
+
+/// Like [`build_receiver_evidence`], but roots the partition-owner chain at
+/// `part_owner_anchor` (the policy POTA key for peer and reseal evidence)
+/// while the receiver chain stays rooted at `sata_key`.
+pub(crate) fn build_evidence(
+    pid_pub: &[u8; RAW_PUB_LEN],
+    rcvr_pub: &[u8; RAW_PUB_LEN],
+    sata_key: &CaKey,
+    part_owner_anchor: &CaKey,
+    report: &[u8],
+) -> ReceiverEvidence {
     let receiver = make_chain(sata_key, rcvr_pub);
     let mfgr = make_chain(&CaKey::generate(), pid_pub);
     let owner = make_chain(&CaKey::generate(), pid_pub);
-    let part_owner = make_chain(sata_key, pid_pub);
+    let part_owner = make_chain(part_owner_anchor, pid_pub);
     evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, report)
 }
 
@@ -1027,4 +1060,17 @@ fn sd_create_remote_backup_accepts_duplicate_receiver_cert_descriptor() {
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN,);
 
     assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN,);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_create_remote_backup_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sata_key = CaKey::generate();
+    let (session, policy, pid_pub) = finalized_backing_session(&ctx, &sata_key);
+    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    assert_masked_key_layout_rejected(&ctx, &req);
 }

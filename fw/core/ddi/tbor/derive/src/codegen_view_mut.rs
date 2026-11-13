@@ -32,9 +32,9 @@
 //! layout; any wire message that violates the invariant is rejected
 //! with [`tsra_fw_hsm_pal_traits::HsmError::TborNonMonotonicTocOffsets`].
 //!
-//! Schemas using `#[tbor(align = N)]` (which inject Padding TOC
-//! entries between fields) are currently unsupported in combination
-//! with `#[tbor(mutable)]`. None of the current targets need both.
+//! `#[tbor(align = N)]` fields compose with `#[tbor(mutable)]`: the
+//! padding bytes before an aligned field are an inter-field gap that the
+//! split chain discards.
 
 use proc_macro2::TokenStream;
 use quote::format_ident;

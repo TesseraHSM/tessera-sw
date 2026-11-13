@@ -8,8 +8,10 @@
 //! Routes: `GET /v1/policy` returns only the complete bound policy as hex;
 //! `GET /v1/authorities` returns the public POTA/SATA certificates needed to
 //! derive DER thumbprints, not private signers. `POST /v1/pta-cert` validates
-//! the CSR, PID-signed report and policy before issuing POTA/PTA and SATA/PID
-//! chains. `POST /v1/sd/clone` exchanges receiver evidence for a peer backup.
+//! the CSR, PID-signed report and policy before issuing the POTA/PTA chain.
+//! Peer evidence is anchored to POTA through each partition's own
+//! POTA/PTA/PID chain. `POST /v1/sd/clone` exchanges receiver evidence for a
+//! peer backup.
 //! `GET /v1/health` becomes available only after successful provisioning.
 //!
 //! The destination saves `peer.json` (public authority certificates, issuer URL,
@@ -65,8 +67,16 @@ pub fn serve(
         .ex_pub_key()?
         .try_into()
         .map_err(|_| anyhow::anyhow!("invalid partition PID public key"))?;
-    let endorsement = env.receiver_chain(&pid)?;
-    let pid_chain = vec![endorsement.root_der, endorsement.leaf_der];
+    let (partition, _) = load_local_recovery(env.store())?;
+    let pid_chain = env.part_owner_cert_chain(&session.partition, &partition.pta_cert_chain)?;
+    anyhow::ensure!(
+        pid_chain
+            .last()
+            .map(|leaf| evidence::cert_public(leaf))
+            .transpose()?
+            == Some(pid.to_vec()),
+        "partition-owner chain does not certify this partition's PID"
+    );
 
     http::serve(server, |method, path, request| {
         if path == "/v1/leaves" || path.starts_with("/v1/leaves/") {
@@ -92,17 +102,13 @@ pub fn serve(
                 let csr = wire::blob(request, "csr")?;
                 let report = wire::blob(request, "report")?;
                 let mfgr = wire::chain(request, "manufacturer")?;
-                let (pid, attested) = evidence::verify_report(&mfgr, &report, env.policy())?;
+                let (_, attested) = evidence::verify_report(&mfgr, &report, env.policy())?;
                 anyhow::ensure!(
                     pki::pta_pub_from_csr(&csr)?[1..] == attested,
                     "CSR does not match attested PTA key"
                 );
                 let pta = env.sign_pta(&csr, &report)?;
-                let endorsed = env.receiver_chain(&pid)?;
-                Ok(jzon::object! {
-                    pta: wire::encode_chain(&pta),
-                    pid: wire::encode_chain(&[endorsed.root_der, endorsed.leaf_der]),
-                })
+                Ok(jzon::object! { pta: wire::encode_chain(&pta) })
             }
             ("POST", "/v1/sd/clone") => {
                 let receiver = wire::evidence(request)?;
@@ -143,7 +149,6 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
     env.store.save_peer(&env.record())?;
     let domain = SecurityDomain::new(env);
     let env = domain.env();
-    let mut pid_chain = Vec::new();
     let prepared = domain.prepare_peer(&session, &seed, |csr, report| {
         display::write_peer_enrollment(
             &mut std::io::stdout().lock(),
@@ -151,28 +156,15 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
             csr,
             report,
         )?;
-        let response = env.certify(csr, report)?;
-        pid_chain = wire::chain(&response, "pid")?;
-        let pta_chain = wire::chain(&response, "pta")?;
-        evidence::verify_peer(
-            &Evidence {
-                mfgr_cert_chain: env.manufacturer.clone(),
-                owner_cert_chain: Vec::new(),
-                part_owner_cert_chain: pid_chain.clone(),
-                report: report.to_vec(),
-            },
-            env.policy(),
-        )?;
-        display::write_peer_enrollment_response(
-            &mut std::io::stdout().lock(),
-            &pta_chain,
-            &pid_chain,
-        )?;
+        let pta_chain = wire::chain(&env.certify(csr, report)?, "pta")?;
+        display::write_peer_enrollment_response(&mut std::io::stdout().lock(), &pta_chain)?;
         Ok(pta_chain)
     })?;
     env.store
         .save_prepared_peer(&prepared)
         .context("destination finalized; failed to persist prepared peer recovery material")?;
+    let pid_chain =
+        env.part_owner_cert_chain(&session.partition, &prepared.partition.pta_cert_chain)?;
     let receiver = Evidence {
         mfgr_cert_chain: env.manufacturer.clone(),
         owner_cert_chain: Vec::new(),

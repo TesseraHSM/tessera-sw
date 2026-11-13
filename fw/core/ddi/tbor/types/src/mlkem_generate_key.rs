@@ -130,7 +130,7 @@ pub struct TborMlKemGenerateKeyResp<'a> {
     /// under the scope's masking key.  Always 196 B: the wire is
     /// seed-only, so the plaintext is the 64-byte `(d ‖ z)` seed
     /// material.  See [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 3464, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
 
     /// The ML-KEM public / encapsulation key.  Up to 1568 B for ML-KEM-1024.

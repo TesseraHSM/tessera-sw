@@ -159,6 +159,12 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     hdr: &DdiReqHdr,
     undo: &mut UndoLog<'_>,
 ) -> HsmResult<DispatchResult<'p>> {
+    const {
+        assert!(
+            !P::BYTE_ORDER.is_be(),
+            "the released MBOR wire is little-endian; big-endian PALs must not dispatch MBOR"
+        )
+    };
     check_api_rev(hdr)?;
 
     // `OpenSession` is the only command that surfaces a session id (for the

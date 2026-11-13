@@ -66,6 +66,8 @@ const TSRA_MAX_DATA_XFER_BUFFERS: usize = 64;
 ///
 /// Requests exceeding this limit are rejected before issuing the IOCTL.
 const TSRA_MAX_DATA_XFER_PER_BUFFER: u32 = 64 * 1024;
+/// Marks an OOB buffer that the device writes rather than reads.
+const TSRA_DATA_XFER_BUF_DEV_WRITE: u32 = 0x1;
 
 #[derive(Default)]
 #[repr(C)]
@@ -267,12 +269,13 @@ pub struct TsraCpGenericIoctlOutData {
 
 /// Describes one caller-supplied OOB buffer for the driver.
 ///
-/// Its layout matches one anonymous `{ XferLen, BufferAddr }` entry in
-/// `TSRA_HSM_DATA_XFER_BUFFERS`.
+/// Its layout matches `{ XferLen, Flags, BufferAddr }` in the 64-bit driver ABI.
+/// Flags must be explicit: Rust padding is not guaranteed to remain zero.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct DataXferBuffer {
     xfer_length: u32,
+    flags: u32,
     buffer_addr: *mut u8,
 }
 
@@ -328,6 +331,8 @@ struct TsraCpDataXferIoctlIndata {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(mem::size_of::<DataXferBuffer>() == 16);
+    assert!(mem::offset_of!(DataXferBuffer, flags) == 4);
+    assert!(mem::offset_of!(DataXferBuffer, buffer_addr) == 8);
     assert!(mem::size_of::<DataXferBuffers>() == 1544);
     assert!(mem::size_of::<TsraCpGenericIoctlIndata>() == 344);
     assert!(mem::size_of::<TsraCpDataXferIoctlIndata>() == 4440);
@@ -1116,6 +1121,11 @@ impl DdiDev for DdiWinDev {
             for (i, item) in oob_items.iter_mut().enumerate() {
                 data_xfer.buffers[i] = DataXferBuffer {
                     xfer_length: item.len() as u32,
+                    flags: if item.is_out() {
+                        TSRA_DATA_XFER_BUF_DEV_WRITE
+                    } else {
+                        0
+                    },
                     buffer_addr: item.dma_ptr(),
                 };
             }

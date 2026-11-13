@@ -79,7 +79,7 @@ pub struct TborMlDsaSignReq<'a> {
 
     /// The masked ML-DSA secret key, an AEAD-GCM-256 envelope of 164 B:
     /// the wire ships seed-only keys.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 5160, mutable)]
+    #[tbor(align = 4, buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
     /// The message representative `μ` to sign, exactly [`MLDSA_MU_LEN`]
@@ -96,8 +96,9 @@ pub struct TborMlDsaSignReq<'a> {
 /// `MlDsaSign` response schema.
 #[tbor(response, pair = TborMlDsaSignReq)]
 pub struct TborMlDsaSignResp<'a> {
-    /// ML-DSA signature bytes.  Up to 4627 B for ML-DSA-87.
-    #[tbor(buffer, max_len = 4627, mutable)]
+    /// ML-DSA signature bytes.  Up to 4627 B for ML-DSA-87.  Aligned like
+    /// the request's `masked_key`, which the signature overwrites in place.
+    #[tbor(align = 4, buffer, max_len = 4627, mutable)]
     pub signature: &'a [u8],
 }
 
@@ -139,9 +140,9 @@ mod tests {
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.mu(), &mu[..]);
         assert_eq!(frame.hedge(), MlDsaHedge::Deterministic);
-        // header(8) + 4 TOC entries * 4 + data(5160 + 64).
-        assert_eq!(frame.len(), 5248);
-        assert_eq!(frame.len(), TborMlDsaSignReq::MAX_ENCODED_SIZE);
+        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5252);
+        assert!(frame.len() <= TborMlDsaSignReq::MAX_ENCODED_SIZE);
     }
 
     #[test]

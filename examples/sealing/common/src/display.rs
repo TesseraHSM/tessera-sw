@@ -76,20 +76,15 @@ pub fn write_peer_enrollment(
     write_evidence(output, &evidence, "Joining PTA")
 }
 
-pub fn write_peer_enrollment_response(
-    output: &mut impl Write,
-    pta: &[Vec<u8>],
-    pid: &[Vec<u8>],
-) -> Result<()> {
+pub fn write_peer_enrollment_response(output: &mut impl Write, pta: &[Vec<u8>]) -> Result<()> {
     writeln!(
         output,
-        "\nPeer cloning: issued certificate chains received from primary"
+        "\nPeer cloning: issued certificate chain received from primary"
     )?;
-    write_certificate_chain(output, pta, "Joining peer", "POTA/PTA")?;
-    write_certificate_chain(output, pid, "Joining peer", "SATA/PID")
+    write_certificate_chain(output, pta, "Joining peer", "POTA/PTA")
 }
 
-/// The caller validates policy and SATA binding before displaying peer evidence.
+/// The caller validates policy and POTA binding before displaying peer evidence.
 pub fn write_peer_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> Result<()> {
     writeln!(output, "\nPeer cloning: {role} sealing-key evidence")?;
     write_evidence(output, evidence, role)

@@ -1,0 +1,69 @@
+name: Smoke-Test Fuzz Targets
+
+on:
+  push:
+    branches: [ main, dev, fw-main ]
+  pull_request:
+    branches: [ main, dev, fw-main ]
+  merge_group:
+    branches: [ main, dev, fw-main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at midnight PST (8 AM UTC)
+env:
+  CARGO_TERM_COLOR: always
+  CACHE_KEY_ID: 9709feeb3d4e548df12fa714f6280701bd98c486
+
+jobs:
+  fuzz_smoke:
+    runs-on: ubuntu-24.04
+
+    env:
+      # The number of seconds to run the fuzz target.
+      FUZZ_TIME: 10
+
+      # Run every fuzz target against the simulated HSM over the sock transport.
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
+
+    defaults:
+      run:
+        working-directory: fuzz
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+      id: ubuntu-setup
+    - run: rustup toolchain install nightly
+    - name: Install nightly rustfmt
+      if: steps.ubuntu-setup.outputs.cache-hit == 'true'
+      run: rustup component add --toolchain nightly rustfmt
+    - name: Install clippy
+      if: steps.ubuntu-setup.outputs.cache-hit == 'true'
+      run: rustup component add clippy
+
+    - run: cargo +nightly fmt -- --check
+    - run: cargo clippy -- -D warnings
+    - run: cargo +nightly fuzz build
+    - name: Run fuzz smoke tests (10s each)
+      run: |
+        TARGETS=$(cargo fuzz list)
+
+        echo "Found fuzz targets:"
+        echo "$TARGETS"
+        echo ""
+
+        seed=1
+        for target in $TARGETS; do
+          echo "[$seed] Fuzzing $target for ${{ env.FUZZ_TIME }} seconds..."
+          cargo +nightly fuzz run "$target" -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
+          seed=$((seed + 1))
+          echo ""
+        done
+
+    - name: Upload fuzzing artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fuzzing-artifacts-${{ github.sha }}
+        path: fuzz/artifacts

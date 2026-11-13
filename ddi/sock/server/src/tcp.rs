@@ -180,7 +180,9 @@ mod tests {
     use tsra_ddi_interface::Ddi;
     use tsra_ddi_interface::DdiAesGcmParams;
     use tsra_ddi_interface::DdiDev;
+    use tsra_ddi_interface::DdiDeviceModel;
     use tsra_ddi_interface::DdiError;
+    use tsra_ddi_interface::DdiTransportSeal;
     use tsra_ddi_mbor_types::*;
     use tsra_ddi_sock::DdiSock;
     use tsra_ddi_sock::DdiSockDev;
@@ -188,10 +190,12 @@ mod tests {
     use tsra_ddi_sock_proto::Request;
     use tsra_ddi_sock_proto::RequestFrame;
     use tsra_ddi_tbor_types::SESSION_SEED_LEN;
+    use tsra_ddi_tbor_types::TborApiRevReq;
     use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
     use tsra_ddi_tbor_types::TborGetCertReq;
     use tsra_ddi_tbor_types::TborOpReq;
     use tsra_ddi_tbor_types::TborPskChangeReq;
+    use tsra_ddi_tbor_types::TborResp;
     use tsra_ddi_tbor_types::TborSessionCloseReq;
     use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
     use tsra_ddi_tbor_types::TborSessionOpenInitReq;
@@ -272,7 +276,13 @@ mod tests {
 
     fn with_session_clients(test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static) {
         let _guard = crate::test_partition_lock();
-        let hsm = crate::test_hsm();
+        with_clients(crate::test_hsm(), test);
+    }
+
+    fn with_clients(
+        hsm: Arc<SocketHsm>,
+        test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static,
+    ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1088,6 +1098,161 @@ mod tests {
 
             drop(idle_device);
             serving.abort();
+        });
+    }
+
+    /// Encode, seal, execute, open and decode one Duo secure command.
+    fn secure<R: TborOpReq>(
+        device: &DdiSockDev,
+        transport: &SessionTransport,
+        session_id: u16,
+        request: &R,
+    ) -> Result<R::OpResp, DdiError> {
+        let mut buf = vec![0u8; 4096];
+        let len = request.encode_request(&mut buf).expect("encode").len();
+        buf.truncate(len);
+        let sealed = transport.seal_request(&mut buf).expect("seal request");
+        let (mut payload, seal) = device.exec_op_tbor_secure(
+            session_id,
+            &buf,
+            DdiTransportSeal {
+                iv: sealed.iv,
+                tag: sealed.tag,
+            },
+            &mut [],
+        )?;
+        transport
+            .open_response(
+                &SessionTransportSeal {
+                    iv: seal.iv,
+                    tag: seal.tag,
+                },
+                &mut payload,
+            )
+            .expect("open response");
+        Ok(R::OpResp::decode_response(&payload)?)
+    }
+
+    #[test]
+    fn duo_client_runs_secure_session() {
+        with_clients(crate::test_duo_hsm(), |endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            assert_eq!(
+                device.discover().expect("discover").model,
+                DdiDeviceModel::Duo
+            );
+            let rev = tbor(&device, &TborApiRevReq);
+            assert_eq!(rev.max_major.get(), 2);
+            assert!(matches!(
+                bulk_error(&device, 0),
+                DdiError::UnsupportedEncoding
+            ));
+
+            let (finish, exported) = open_init_with_exported(&device, 0);
+            let id = finish.session_id;
+            let transport = SessionTransport::derive(&exported).expect("transport keys");
+            secure(&device, &transport, id, &finish).expect("open_finish");
+
+            // A tampered request fails transport authentication.
+            let close = TborSessionCloseReq { session_id: id };
+            let mut buf = vec![0u8; 64];
+            let len = close.encode_request(&mut buf).expect("encode").len();
+            buf.truncate(len);
+            let sealed = transport.seal_request(&mut buf).expect("seal");
+            let mut tag = sealed.tag;
+            tag[0] ^= 1;
+            assert!(matches!(
+                device.exec_op_tbor_secure(
+                    id,
+                    &buf,
+                    DdiTransportSeal { iv: sealed.iv, tag },
+                    &mut []
+                ),
+                Err(DdiError::DdiError(0xCC))
+            ));
+
+            secure(&device, &transport, id, &close).expect("close");
+
+            let pending = open_init(&device, 0);
+            device
+                .flush_session(pending.session_id)
+                .expect("flush session");
+        });
+    }
+
+    /// Open an active Duo session; returns its id and transport keys.
+    fn open_secure(device: &DdiSockDev, psk_id: u8) -> (u16, SessionTransport) {
+        let (finish, exported) = open_init_with_exported(device, psk_id);
+        let transport = SessionTransport::derive(&exported).expect("transport keys");
+        secure(device, &transport, finish.session_id, &finish).expect("open_finish");
+        (finish.session_id, transport)
+    }
+
+    #[test]
+    fn duo_secure_session_rejects_misuse() {
+        with_clients(crate::test_duo_hsm(), |endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            let (co, co_keys) = open_secure(&device, 0);
+            let (cu, cu_keys) = open_secure(&device, 1);
+            let close = |session_id| TborSessionCloseReq { session_id };
+
+            // A command must name the session whose keys sealed it.
+            assert!(matches!(
+                secure(&device, &co_keys, co, &close(cu)),
+                Err(DdiError::TborStatus(TborStatus::InvalidArg))
+            ));
+
+            // A closed session's keys are gone.
+            secure(&device, &co_keys, co, &close(co)).expect("close");
+            assert!(matches!(
+                secure(&device, &co_keys, co, &close(co)),
+                Err(DdiError::DdiError(0xCC))
+            ));
+
+            // A flushed session is gone, together with its ownership.
+            device.flush_session(cu).expect("flush");
+            assert!(matches!(
+                secure(&device, &cu_keys, cu, &close(cu)),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+
+            // CU owns 7 of the 8 slots; with all 7 active, an 8th handshake
+            // has no slot to take.
+            let active: Vec<_> = (0..7).map(|_| open_secure(&device, 1)).collect();
+            let init = TborSessionOpenInitReq {
+                psk_id: 1,
+                session_type: 0,
+                pk_init: generate_vm_ephemeral().expect("VM ephemeral").pk_sec1,
+                ..Default::default()
+            };
+            assert!(matches!(
+                device.exec_op_tbor(&init, None, &mut None),
+                Err(DdiError::TborStatus(TborStatus::VaultSessionLimitReached))
+            ));
+            for (id, keys) in &active {
+                secure(&device, keys, *id, &close(*id)).expect("close");
+            }
+        });
+    }
+
+    #[test]
+    fn uno_client_rejects_duo_commands() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            assert_eq!(
+                device.discover().expect("discover").model,
+                DdiDeviceModel::Uno
+            );
+            assert!(matches!(
+                device.flush_session(1),
+                Err(DdiError::UnsupportedEncoding)
+            ));
+            assert!(matches!(
+                device.exec_op_tbor_secure(1, &[0; 16], DdiTransportSeal::default(), &mut []),
+                Err(DdiError::UnsupportedEncoding)
+            ));
         });
     }
 }

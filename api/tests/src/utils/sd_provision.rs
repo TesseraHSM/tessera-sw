@@ -759,10 +759,23 @@ pub(crate) fn build_receiver_evidence(
     sata_key: &CaKey,
     report: &[u8],
 ) -> SdEvidence {
+    build_evidence(pid_pub, rcvr_pub, sata_key, sata_key, report)
+}
+
+/// Like [`build_receiver_evidence`], but roots the partition-owner chain at
+/// `part_owner_anchor` (the policy POTA key for peer-clone and reseal
+/// evidence) while the receiver chain stays rooted at `sata_key`.
+pub(crate) fn build_evidence(
+    pid_pub: &[u8; RAW_PUB_LEN],
+    rcvr_pub: &[u8; RAW_PUB_LEN],
+    sata_key: &CaKey,
+    part_owner_anchor: &CaKey,
+    report: &[u8],
+) -> SdEvidence {
     SdEvidence {
         mfgr: make_chain(&CaKey::generate(), pid_pub),
         owner: make_chain(&CaKey::generate(), pid_pub),
-        part_owner: make_chain(sata_key, pid_pub),
+        part_owner: make_chain(part_owner_anchor, pid_pub),
         receiver: make_chain(sata_key, rcvr_pub),
         report: report.to_vec(),
     }

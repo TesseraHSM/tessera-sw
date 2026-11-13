@@ -6,8 +6,8 @@
 //! `EccSign` is an **in-session** command (Crypto-Officer or Crypto-User)
 //! that produces a raw ECDSA `r ‖ s` signature over a host-supplied
 //! **pre-computed digest** using a caller-held **masked** ECC private key.
-//! Firmware does no hashing — the caller supplies the digest in wire
-//! little-endian order.
+//! Firmware does no hashing — the caller supplies the digest in device
+//! byte order.
 
 use alloc::vec::Vec;
 
@@ -18,7 +18,7 @@ pub const TBOR_OP_ECC_SIGN: u8 = 0x18;
 
 /// Maximum digest length (bytes): the SHA-512 digest.
 pub const ECC_DIGEST_MAX_LEN: usize = 64;
-/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 padded).
+/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 little-endian word-padded).
 pub const ECC_SIG_MAX_LEN: usize = 136;
 
 /// Host-facing TBOR `EccSign` request.
@@ -30,10 +30,10 @@ pub struct TborEccSignReq {
     pub session_id: u16,
 
     /// The masked ECC private key (from `EccGenerateKey` / `UnwrapKey`).
-    #[tbor(min_len = 264, max_len = 312)]
+    #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The pre-computed message digest in wire little-endian order. Its
+    /// The pre-computed message digest in device byte order. Its
     /// length must be one of the supported SHA-2 digest lengths
     /// (32 / 48 / 64 B); the hash algorithm is inferred from that length,
     /// so no separate algorithm selector is carried on the wire.
@@ -45,8 +45,8 @@ pub struct TborEccSignReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborEccSignResp {
-    /// Raw ECDSA `r ‖ s`, each component little-endian and padded to the
-    /// curve wire coordinate length (64 / 96 / 136 B).
+    /// Raw ECDSA `r ‖ s`, each component in device byte order and sized to
+    /// the curve wire coordinate length (64 / 96 / 132-or-136 B).
     #[tbor(max_len = 136)]
     pub signature: Vec<u8>,
 }

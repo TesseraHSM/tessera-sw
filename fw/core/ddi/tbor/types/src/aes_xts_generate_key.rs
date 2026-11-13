@@ -61,7 +61,7 @@ pub struct TborAesXtsGenerateKeyReq<'a> {
 pub struct TborAesXtsGenerateKeyResp<'a> {
     /// The freshly generated XTS key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key; 296 B.
-    #[tbor(buffer, len = 296, mutable)]
+    #[tbor(align = 4, buffer, len = 296, mutable)]
     pub masked_key: &'a [u8],
 }
 

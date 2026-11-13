@@ -13,6 +13,7 @@ test = false
 
 [dependencies]
 bitfield-struct.workspace = true
+tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 
 [lints]

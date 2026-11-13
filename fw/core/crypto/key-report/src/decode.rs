@@ -11,6 +11,7 @@
 
 use minicbor::Decoder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -21,7 +22,7 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use crate::codec::SigStructure;
 use crate::codec::SIG_STRUCTURE_CONTEXT;
 use crate::consts::*;
-use crate::sig::reverse_signature_halves;
+use crate::sig::sig_halves_swap;
 
 /// Zero-copy view over a decoded COSE_Sign1 key-attestation report.
 ///
@@ -204,7 +205,7 @@ pub fn parse_key_report(report: &HsmDmaBuf) -> HsmResult<KeyReportView<'_>> {
 ///
 /// # Parameters
 /// * `signer_pub` — signer's P-384 public key, `x || y` with each
-///   coordinate little-endian (the `ecc_verify` wire form).
+///   coordinate in the PAL's operand order (the `ecc_verify` wire form).
 ///
 /// # Returns
 /// * `Ok(true)` — signature is valid.
@@ -249,22 +250,33 @@ where
     minicbor::encode(&sig_struct_val, crate::codec::as_mut_slice(sig_struct))
         .map_err(|_| HsmError::InternalError)?;
 
-    // SHA-384. `ecc_verify` is PKA little-endian native, so hash
-    // big-endian and then fully byte-reverse the digest into PKA-LE,
-    // matching the other verify callers (establish_credential /
-    // x509-chain).
+    // SHA-384 in the operand order `ecc_verify` consumes.
     let digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, sig_struct, digest, true)
-        .await?;
-    digest[..SHA384_LEN].reverse();
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        sig_struct,
+        digest,
+        HsmDigestForm::Operand,
+    )
+    .await?;
 
-    // The COSE signature stores `r || s` big-endian per half; convert
-    // to the little-endian `ecc_verify` wire form.
-    let sig_le = alloc.dma_alloc(SIGNATURE_LEN)?;
-    reverse_signature_halves(sig_le, view.signature)?;
+    // The COSE signature stores `r || s` big-endian per half; a
+    // big-endian PAL verifies it in place, otherwise convert a copy.
+    if view.signature.len() != SIGNATURE_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let sig: &HsmDmaBuf = if P::BYTE_ORDER.is_be() {
+        view.signature
+    } else {
+        let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
+        sig.copy_from_slice(view.signature);
+        sig_halves_swap(P::BYTE_ORDER, sig)?;
+        sig
+    };
 
     let result = alloc.dma_alloc(4)?;
-    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig_le, result)
+    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig, result)
         .await?;
 
     // Per the trait contract, bit 0 clear indicates a valid signature.

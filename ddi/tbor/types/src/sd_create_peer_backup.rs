@@ -48,6 +48,7 @@ pub struct TborSdCreatePeerBackupReq {
     /// the sender's private HPKE key (`SndrPriv`) that authenticates the
     /// seal.  A fixed-length `[u8; N]` field; the firmware schema is the
     /// length authority.
+    #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Unified [`PartPolicy`] describing the security domain being backed
