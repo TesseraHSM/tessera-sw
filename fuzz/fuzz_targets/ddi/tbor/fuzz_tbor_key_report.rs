@@ -421,7 +421,7 @@ fn key_outcome(masked: &[u8], original: &[u8]) -> Expected {
     }
 }
 
-/// Assert both directions of the oracle; transport and unexpected errors are fatal.
+/// Assert both directions of the oracle, including socket session-ownership rejections.
 fn check_result(
     result: Result<TborKeyReportResp, DdiError>,
     expected: Expected,
@@ -430,8 +430,8 @@ fn check_result(
         (Ok(response), Expected::Success) => Some(response),
         (Ok(_), _) => panic!("invalid KeyReport unexpectedly succeeded: {expected:?}"),
         (Err(error), Expected::Success) => panic!("valid KeyReport failed: {error:?}"),
-        (Err(DdiError::TborStatus(status)), Expected::Status(wanted)) => {
-            assert_eq!(status, wanted, "KeyReport rejection");
+        (Err(error), Expected::Status(wanted)) => {
+            assertions::assert_session_rejects(&error, wanted);
             None
         }
         (Err(DdiError::TborStatus(status)), Expected::MalformedKey) => {

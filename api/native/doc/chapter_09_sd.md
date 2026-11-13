@@ -540,7 +540,8 @@ session.
 HPKE-opens the source remote backup with the receiver's masked SD-sealing
 key (authenticated by the source sender in `src_evidence`) and reseals the
 recovered backup to the destination receiver (`dest_evidence`), returning the
-resealed remote backup (161 bytes).
+resealed remote backup (161 bytes). Both evidences' partition-owner chains
+must anchor to the POTA key of the client policy in `params`.
 
 The inputs are grouped into an
 [`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
@@ -685,6 +686,7 @@ Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
 destination peer named by `dst_evidence` (authenticated by the sender's
 masked SD-sealing key), returning the peer backup (161 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+The `dst_evidence` partition-owner chain must anchor to the policy POTA key.
 
 The inputs are grouped into an
 [`tsra_sd_create_peer_backup_params`](#tsra_sd_create_peer_backup_params)
@@ -744,6 +746,7 @@ security-domain masking key from `prev_sd_mk_backup`, and returns the
 refreshed device-local backups: the local partition-owner-key backup
 (276 bytes) and the security-domain masking-key backup (260 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+The `src_evidence` partition-owner chain must anchor to the policy POTA key.
 
 The inputs are grouped into an
 [`tsra_sd_restore_peer_backup_params`](#tsra_sd_restore_peer_backup_params)

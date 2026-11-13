@@ -43,7 +43,7 @@ use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
-use crate::commands::sd_create_remote_backup::build_receiver_evidence;
+use crate::commands::sd_create_remote_backup::build_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 use crate::commands::sd_create_remote_backup::ReceiverEvidence;
 
@@ -144,7 +144,7 @@ fn sd_create_peer_backup_roundtrip() {
     // Mint + attest a sealing key, then create the security domain to
     // obtain the device-local backup this command re-seals.
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
             &backup_request(session_id, masked.clone(), &evidence, &part.policy),
@@ -170,6 +170,36 @@ fn sd_create_peer_backup_roundtrip() {
     );
 }
 
+/// Destination evidence must chain to the policy POTA key; a partition-owner
+/// chain rooted at the policy SATA key is rejected.
+#[test]
+fn sd_create_peer_backup_rejects_sata_anchored_evidence() {
+    let ctx = TestCtx::new();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
+    let session_id = part.session.session_id;
+
+    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
+    let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
+    let created = ctx
+        .tbor_oob(
+            &backup_request(session_id, masked.clone(), &genuine, &part.policy),
+            &genuine.oob(),
+        )
+        .expect("SdCreateRemoteBackup");
+
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &sata, &report);
+    let req = create_peer_req(
+        session_id,
+        &masked,
+        &evidence,
+        &part.policy,
+        &created.pok_local_backup,
+    );
+    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+}
+
 #[test]
 fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     use tsra_crypto::EccCurve;
@@ -190,7 +220,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
     let sid = part.session.session_id;
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let genuine = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
             &backup_request(sid, masked.clone(), &genuine, &part.policy),
@@ -230,7 +260,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     imported_pub.copy_from_slice(&imported.pub_key);
     imported_pub[..48].reverse();
     imported_pub[48..].reverse();
-    let evidence = build_receiver_evidence(&part.pid_pub, &imported_pub, &sata, &report.report);
+    let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
     let req = create_peer_req(
         sid,
         &masked,
@@ -257,7 +287,7 @@ fn sd_create_peer_backup_rejects_without_peer_cloning() {
     // the peer-cloning check fires before any local backup is unmasked, so
     // a zero `pok_local_backup` is sufficient.
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let req = create_peer_req(
         session_id,
         &masked,
@@ -298,7 +328,7 @@ fn valid_peer_backup_fixture() -> (TestCtx, TborSdCreatePeerBackupReq, ReceiverE
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
 
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
 
     let created = ctx
         .tbor_oob(

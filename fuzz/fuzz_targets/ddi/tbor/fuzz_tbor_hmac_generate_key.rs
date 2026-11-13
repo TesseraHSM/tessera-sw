@@ -308,7 +308,12 @@ fn run(input: &FuzzInput<'_>) {
         match expected {
             Ok(()) => assert_success(ctx, &req, input.msg),
             Err(status) => {
-                ctx.expect_fw_reject(&req, status);
+                if input.scenario == Scenario::ClosedSession || req.session_id != active_session_id
+                {
+                    ctx.expect_session_reject(&req, status);
+                } else {
+                    ctx.expect_fw_reject(&req, status);
+                }
                 if session.is_some() && input.scenario != Scenario::DefaultPsk {
                     let follow_up = TborHmacGenerateKeyReq {
                         session_id: active_session_id,
