@@ -33,6 +33,7 @@ use tsra_ddi_mbor_test_hooks::TestActionRequest;
 use tsra_ddi_mbor_types::*;
 
 const REV: DdiApiRev = DdiApiRev { major: 1, minor: 0 };
+const MAX_NEGATIVE_TEST_ID: u32 = 76;
 
 /// Seconds to wait for the queued self-test to run and, on validation
 /// firmware, for the firmware and driver to recover from the failure.
@@ -41,8 +42,8 @@ const RECOVERY_WAIT_SECS: u64 = 20;
 #[test]
 fn trigger_negative_periodic_cast() {
     // Validate before the harness so a skipped run never erases the device.
-    if let Err(err) = read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID") {
-        println!("TSRA_NEGATIVE_TEST_ID not set or invalid ({err}); skipping.");
+    if read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID").is_err() {
+        println!("TSRA_NEGATIVE_TEST_ID not set or invalid; skipping.");
         return;
     }
 
@@ -63,8 +64,24 @@ fn trigger_negative_periodic_cast() {
 
 fn read_neg_self_test_env_variable(var_name: &str) -> Result<u32, Box<dyn Error>> {
     let env_var = env::var(var_name)?;
-    let value: u32 = env_var.parse()?;
+    parse_negative_self_test_id(&env_var)
+}
+
+fn parse_negative_self_test_id(input: &str) -> Result<u32, Box<dyn Error>> {
+    let value: u32 = input.parse()?;
+    if value > MAX_NEGATIVE_TEST_ID {
+        return Err("invalid self-test ID".into());
+    }
     Ok(value)
+}
+
+#[test]
+fn validate_negative_self_test_id() {
+    assert_eq!(parse_negative_self_test_id("0").unwrap(), 0);
+    assert_eq!(parse_negative_self_test_id("76").unwrap(), 76);
+    assert!(parse_negative_self_test_id("77").is_err());
+    assert!(parse_negative_self_test_id("4294967295").is_err());
+    assert!(parse_negative_self_test_id("invalid").is_err());
 }
 
 fn send_negative_self_test(device_path: String, test_id: u32) {
