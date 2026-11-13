@@ -589,8 +589,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 common::FuzzRole::Cu => &ROTATED_CU_PSK,
             };
             let options =
-                SessionOpenInitOptions::new(input.role.psk_id(), input.role.session_type())
-                    .with_psk(psk);
+                SessionOpenInitOptions::new(input.role.psk_id(), input.role.suite()).with_psk(psk);
             let pending = ctx
                 .session_open_init_with_options(options)
                 .expect("open independent session under rotated PSK");

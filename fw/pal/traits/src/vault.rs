@@ -166,11 +166,8 @@ pub enum HsmVaultKeyKind {
     /// Session-establishment-protocol blob for TBOR sessions (both CO
     /// and CU).
     ///
-    /// Length-discriminated by session type:
-    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)
-    ///   ‖ auth_binding(68)]` = 140 B.
-    /// * **Authenticated (CO):** the above ‖ `mac_tx(48) ‖ mac_rx(48)`
-    ///   = 236 B.
+    /// `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)
+    /// ‖ h2m(32) ‖ m2h(32)]` = 204 B, identical for CO and CU.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used

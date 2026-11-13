@@ -213,7 +213,8 @@ mod tests {
     use tsra_ddi_tbor_types::TborApiRevResp;
     use tsra_ddi_tbor_types::TborOpReq;
     use tsra_ddi_tbor_types::TborSessionOpenInitReq;
-    use tsra_session_ex_crypto::generate_vm_ephemeral;
+    use tsra_session_ex_crypto::SessionInitiator;
+    use tsra_session_ex_crypto::SessionSuite;
 
     use super::*;
     use crate::test_duo_hsm as duo_hsm;
@@ -268,8 +269,10 @@ mod tests {
     async fn open_init(connection: &Connection) -> u16 {
         let request = TborSessionOpenInitReq {
             psk_id: 0,
-            session_type: 1,
-            pk_init: generate_vm_ephemeral().expect("VM ephemeral").pk_sec1,
+            pk_init: SessionInitiator::generate(SessionSuite::EcdhP384)
+                .expect("ephemeral")
+                .pk_init()
+                .to_vec(),
             ..Default::default()
         };
         let response = submit(connection, tbor(DuoOp::Tbor, 0, &request)).await;

@@ -18,8 +18,8 @@ use tsra_api::HsmPartition;
 use tsra_api::HsmPartitionManager;
 use tsra_api::HsmPskId;
 use tsra_api::HsmSession;
-use tsra_api::HsmSessionExType;
 use tsra_api::HsmSessionPsk;
+use tsra_api::HsmSessionSuite;
 use tsra_api::PSK_LEN;
 
 /// A fixed non-default Crypto-Officer PSK, rotated in during bring-up to
@@ -55,7 +55,7 @@ impl SealingSession {
             .open_session_ex(
                 rev,
                 HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .context("open rotated CO session")
     }
@@ -114,7 +114,7 @@ fn open_rotated_co_session(part: &HsmPartition, rev: HsmApiRev) -> Result<HsmSes
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .context("open bootstrap CO session")?;
         bootstrap

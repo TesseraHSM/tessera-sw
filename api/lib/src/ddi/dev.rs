@@ -20,8 +20,11 @@ use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_session_ex_crypto::SealedFrameReq;
+use tsra_session_ex_crypto::SealedFrameResp;
 use tsra_session_ex_crypto::SessionTransport;
 use tsra_session_ex_crypto::SessionTransportSeal;
+use zeroize::Zeroizing;
 
 use super::*;
 use crate::resiliency::HsmDdi;
@@ -223,6 +226,11 @@ impl HsmDev {
 
     /// Encode `req`, seal it with `transport`, execute it, and open and
     /// decode the response.
+    ///
+    /// On Duo the IV and tag ride in the SQE and CQE; on Uno the request
+    /// and response travel as in-band sealed frames (see
+    /// [`SessionTransport::seal_frame`]).
+    #[allow(unsafe_code)]
     pub(crate) fn exec_op_tbor_sealed<T: tsra_ddi_tbor_types::TborOpReq>(
         &self,
         session_id: u16,
@@ -230,26 +238,50 @@ impl HsmDev {
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
     ) -> DdiResult<T::OpResp> {
-        let mut buf = vec![0u8; SECURE_REQ_CAP];
+        let mut buf = Zeroizing::new(vec![0u8; SECURE_REQ_CAP]);
         let len = req.encode_request(&mut buf)?.len();
         buf.truncate(len);
-        let seal = transport
-            .seal_request(&mut buf)
-            .map_err(|_| DdiError::TborEncodeError)?;
-        let seal = DdiTransportSeal {
-            iv: seal.iv,
-            tag: seal.tag,
+        let resp = if self.0.discover()?.model == DdiDeviceModel::Duo {
+            let seal = transport
+                .seal_request(&mut buf)
+                .map_err(|_| DdiError::TborEncodeError)?;
+            let seal = DdiTransportSeal {
+                iv: seal.iv,
+                tag: seal.tag,
+            };
+            let (mut resp, seal) = self
+                .0
+                .exec_op_tbor_secure(session_id, &buf, seal, oob_items)?;
+            let seal = SessionTransportSeal {
+                iv: seal.iv,
+                tag: seal.tag,
+            };
+            transport
+                .open_response(&seal, &mut resp)
+                .map_err(|_| DdiError::TborDecodeError)?;
+            Zeroizing::new(resp)
+        } else {
+            let frame = transport
+                .seal_frame(&buf)
+                .map_err(|_| DdiError::TborEncodeError)?;
+            let req = SealedFrameReq {
+                session_ctrl: req.session_ctrl(),
+                session_id,
+                frame,
+            };
+            let SealedFrameResp(mut resp) = match ACTIVE_SESSION_COOKIE.with(Cell::get) {
+                Some(mut active_cookie) => {
+                    // SAFETY: see `with_session_cookie`.
+                    let cookie = unsafe { active_cookie.as_mut() };
+                    self.0.exec_op_tbor_oob(&req, oob_items, cookie)?
+                }
+                None => self.0.exec_op_tbor_oob(&req, oob_items, &mut None)?,
+            };
+            transport
+                .open_frame(&mut resp)
+                .map_err(|_| DdiError::TborDecodeError)?;
+            Zeroizing::new(resp)
         };
-        let (mut resp, seal) = self
-            .0
-            .exec_op_tbor_secure(session_id, &buf, seal, oob_items)?;
-        let seal = SessionTransportSeal {
-            iv: seal.iv,
-            tag: seal.tag,
-        };
-        transport
-            .open_response(&seal, &mut resp)
-            .map_err(|_| DdiError::TborDecodeError)?;
         Ok(T::OpResp::decode_response(&resp)?)
     }
 

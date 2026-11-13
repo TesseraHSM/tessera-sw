@@ -592,14 +592,14 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
         | Scenario::WrongMaskingSession => true,
         _ => input.cu,
     };
-    let (psk_id, session_type, psk) = if cu {
-        (CU_PSK_ID, SessionType::PlainText, &ROTATED_CU_PSK)
+    let (psk_id, suite, psk) = if cu {
+        (CU_PSK_ID, SessionSuite::MlKem1024, &ROTATED_CU_PSK)
     } else {
-        (CO_PSK_ID, SessionType::Authenticated, &ROTATED_CO_PSK)
+        (CO_PSK_ID, SessionSuite::EcdhP384, &ROTATED_CO_PSK)
     };
     if scenario == Scenario::DefaultPsk {
         let session = ctx
-            .open_session(psk_id, session_type)
+            .open_session(psk_id, suite)
             .expect("default-PSK session");
         let req = TborKeyReportReq {
             session_id: session.session_id(),
@@ -703,7 +703,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
             let other = TestCtx::new_with_path(path);
             let pending = other
                 .session_open_init_with_options(
-                    SessionOpenInitOptions::new(psk_id, session_type).with_psk(psk),
+                    SessionOpenInitOptions::new(psk_id, suite).with_psk(psk),
                 )
                 .expect("credential-rotation session init");
             let current = other
@@ -719,7 +719,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
                 .expect("close rotation session");
             let pending = other
                 .session_open_init_with_options(
-                    SessionOpenInitOptions::new(psk_id, session_type).with_psk(&next_psk),
+                    SessionOpenInitOptions::new(psk_id, suite).with_psk(&next_psk),
                 )
                 .expect("fresh credential session init");
             let fresh = other
@@ -867,7 +867,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
             let other = TestCtx::new_with_path(path);
             let pending = other
                 .session_open_init_with_options(
-                    SessionOpenInitOptions::new(psk_id, session_type).with_psk(psk),
+                    SessionOpenInitOptions::new(psk_id, suite).with_psk(psk),
                 )
                 .expect("second session init");
             let other_session = other

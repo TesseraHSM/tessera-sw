@@ -936,7 +936,7 @@ mod tests {
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open EX session");
         session.change_psk(&[0xA5; PSK_LEN]).expect("rotate CO PSK");

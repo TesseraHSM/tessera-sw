@@ -25,11 +25,12 @@
 //! compiling without modification — deref coercion supplies the
 //! `&<Dev>` automatically.
 //!
-//! On a Duo device (API revision 2.x) in-session and close commands must
-//! travel encrypted under the session transport keys. [`TestDev`]
-//! shadows the TBOR exec methods to route those commands over
-//! [`DdiDev::exec_op_tbor_secure`] for every session whose handshake it
-//! finished, so tests run unchanged on both Uno and Duo.
+//! In-session and close commands must travel encrypted under the session
+//! transport keys. [`TestDev`] shadows the TBOR exec methods to route
+//! those commands over the session transport for every session whose
+//! handshake it ran: on Duo via [`DdiDev::exec_op_tbor_secure`] (IV and
+//! tag in the SQE/CQE), on Uno as in-band sealed frames. Tests therefore
+//! run unchanged on both models.
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -48,13 +49,15 @@ use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::DdiTransportSeal;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::SessionControlKind;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
 pub use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 pub use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
 pub use tsra_ddi_tbor_types::PSK_LEN;
 pub use tsra_ddi_tbor_types::SESSION_SEED_LEN;
+use tsra_session_ex_crypto::SealedFrameReq;
+use tsra_session_ex_crypto::SealedFrameResp;
+use tsra_session_ex_crypto::SessionSuite;
 use tsra_session_ex_crypto::SessionTransport;
 use tsra_session_ex_crypto::SessionTransportSeal;
 
@@ -80,17 +83,16 @@ pub const ROTATED_CU_PSK: [u8; PSK_LEN] = [
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
 ];
 
-/// Rotate the default CO PSK and return a fresh authenticated CO session.
+/// Rotate the default CO PSK and return a fresh CO session.
 pub fn bootstrap_rotated_co(ctx: &TestCtx, target_psk: &[u8; PSK_LEN]) -> SessionHandshake {
     let bootstrap = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
+        .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     ctx.psk_change(bootstrap.handshake(), target_psk)
         .expect("rotate CO PSK");
     bootstrap.close().expect("close bootstrap CO session");
 
-    let opts =
-        SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated).with_psk(target_psk);
+    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(target_psk);
     let pending = ctx
         .session_open_init_with_options(opts)
         .expect("CO session_open_init under rotated PSK");
@@ -98,16 +100,16 @@ pub fn bootstrap_rotated_co(ctx: &TestCtx, target_psk: &[u8; PSK_LEN]) -> Sessio
         .expect("CO session_open_finish under rotated PSK")
 }
 
-/// Rotate the default CU PSK and return a fresh plaintext CU session.
+/// Rotate the default CU PSK and return a fresh CU session.
 pub fn bootstrap_rotated_cu(ctx: &TestCtx, target_psk: &[u8; PSK_LEN]) -> SessionHandshake {
     let bootstrap = ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     ctx.psk_change(bootstrap.handshake(), target_psk)
         .expect("rotate CU PSK");
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText).with_psk(target_psk);
+    let opts = SessionOpenInitOptions::new(CU_PSK_ID, SessionSuite::EcdhP384).with_psk(target_psk);
     let pending = ctx
         .session_open_init_with_options(opts)
         .expect("CU session_open_init under rotated PSK");
@@ -143,8 +145,8 @@ pub struct TestDev {
     path: String,
     /// Device model, discovered on first use.
     model: OnceLock<DdiDeviceModel>,
-    /// Session transports of the encrypted (Duo) sessions this handle
-    /// opened, keyed by session id.
+    /// Session transports of the sessions this handle opened, keyed by
+    /// session id.
     transports: Mutex<HashMap<u16, Arc<SessionTransport>>>,
 }
 
@@ -186,9 +188,8 @@ impl TestDev {
         })
     }
 
-    /// Whether in-session commands travel under the session transport
-    /// (Duo, API revision 2.x).
-    pub fn uses_session_transport(&self) -> bool {
+    /// Whether the device is a Duo (API revision 2.x).
+    pub fn is_duo(&self) -> bool {
         self.model() == DdiDeviceModel::Duo
     }
 
@@ -205,18 +206,16 @@ impl TestDev {
         self.transports.lock().remove(&session_id);
     }
 
-    /// Whether `req` is an in-session or close command that a Duo device
+    /// Whether `req` is an in-session or close command that the device
     /// receives without transport protection, because this handle holds
     /// no transport keys for its session (an unknown or closed session,
-    /// or one opened on another connection). Duo's channel policy then
-    /// rejects it before any session lookup.
+    /// or one opened on another connection). The device then rejects it
+    /// before any session lookup.
     pub fn sends_unsealed_session_cmd<T: TborOpReq>(&self, req: &T) -> bool {
-        self.uses_session_transport()
-            && matches!(
-                req.session_ctrl(),
-                SessionControlKind::InSession | SessionControlKind::Close
-            )
-            && self.session_transport(req).is_none()
+        matches!(
+            req.session_ctrl(),
+            SessionControlKind::InSession | SessionControlKind::Close
+        ) && self.session_transport(req).is_none()
     }
 
     /// The session transport for `req`, if it is an in-session or close
@@ -233,8 +232,9 @@ impl TestDev {
         Some((id, transport))
     }
 
-    /// Encode `req`, seal it with `transport`, execute it as a
-    /// `TborSecure` command, and open and decode the response.
+    /// Encode `req`, seal it with `transport`, execute it, and open and
+    /// decode the response: on Duo as a `TborSecure` command, on Uno as
+    /// an in-band sealed frame.
     fn exec_op_tbor_sealed<T: TborOpReq>(
         &self,
         session_id: u16,
@@ -245,6 +245,22 @@ impl TestDev {
         let mut buf = vec![0u8; SECURE_REQ_CAP];
         let len = req.encode_request(&mut buf)?.len();
         buf.truncate(len);
+        if !self.is_duo() {
+            let frame = transport
+                .seal_frame(&buf)
+                .map_err(|_| DdiError::TborEncodeError)?;
+            let req = SealedFrameReq {
+                session_ctrl: req.session_ctrl(),
+                session_id,
+                frame,
+            };
+            let SealedFrameResp(mut resp) =
+                self.dev.exec_op_tbor_oob(&req, oob_items, &mut None)?;
+            transport
+                .open_frame(&mut resp)
+                .map_err(|_| DdiError::TborDecodeError)?;
+            return Ok(T::OpResp::decode_response(&resp)?);
+        }
         let seal = transport
             .seal_request(&mut buf)
             .map_err(|_| DdiError::TborEncodeError)?;
@@ -266,7 +282,7 @@ impl TestDev {
     }
 
     /// [`DdiDev::exec_op_tbor`], routed over the session transport for
-    /// the in-session and close commands of an encrypted session.
+    /// the in-session and close commands of a session this handle opened.
     pub fn exec_op_tbor<T: TborOpReq>(
         &self,
         req: &T,

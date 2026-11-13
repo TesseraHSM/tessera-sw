@@ -41,12 +41,12 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
@@ -408,7 +408,7 @@ fn key_report_cu_rejects_before_finalize() {
 
     // Rotate the CU PSK out of the default so the dispatcher's default-PSK
     // gate does not fire first; then reopen a CU session under it.  CU
-    // sessions are pinned to `SessionType::PlainText`.
+    // sessions are pinned to `SessionSuite::EcdhP384`.
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
     let req = TborKeyReportReq {
@@ -424,8 +424,8 @@ fn key_report_cu_rejects_before_finalize() {
 #[test]
 fn key_report_rejected_on_default_psk() {
     for (psk_id, session_type) in [
-        (CO_PSK_ID, SessionType::Authenticated),
-        (CU_PSK_ID, SessionType::PlainText),
+        (CO_PSK_ID, SessionSuite::EcdhP384),
+        (CU_PSK_ID, SessionSuite::EcdhP384),
     ] {
         let ctx = TestCtx::new();
         let session = ctx
@@ -779,7 +779,7 @@ fn key_report_cu_authentication_binds_key_data_and_session() {
     let other_ctx = TestCtx::new_with_path(ctx.path());
     let pending = other_ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&ROTATED_CU_PSK),
         )
         .expect("second CU init");
@@ -836,11 +836,11 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
     let old_ctx = TestCtx::new_with_path(ctx.path());
     let old = old_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("default CU session");
     let pending_ctx = TestCtx::new_with_path(ctx.path());
     let pending = pending_ctx
-        .session_open_init(CU_PSK_ID, SessionType::PlainText)
+        .session_open_init(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("pending CU under the old credential");
     let cu_ctx = TestCtx::new_with_path(ctx.path());
     let cu = bootstrap_rotated_cu(&cu_ctx, &ROTATED_CU_PSK);
@@ -883,11 +883,11 @@ fn key_report_concurrent_cu_rotations_have_one_winner() {
     let co = finalized_co_session(&ctx);
     let first_ctx = TestCtx::new_with_path(ctx.path());
     let first = first_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("first default CU");
     let second_ctx = TestCtx::new_with_path(ctx.path());
     let second = second_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("second default CU");
     let candidates = [[0xB1; 32], [0xB2; 32]];
     let barrier = Barrier::new(2);
@@ -915,7 +915,7 @@ fn key_report_concurrent_cu_rotations_have_one_winner() {
     second.close().expect("close second CU");
     let pending = first_ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&candidates[winner]),
         )
         .expect("winning credential init");

@@ -569,7 +569,7 @@ impl HsmPartition {
 
     /// Opens a session over the TBOR transport (security-domain).
     ///
-    /// Runs the two-phase `open_session_ex` HPKE handshake and wraps
+    /// Runs the two-phase `open_session_ex` handshake and wraps
     /// the result in an [`HsmSession`] (`SessionKind::Ver2`).
     ///
     /// # Arguments
@@ -577,15 +577,15 @@ impl HsmPartition {
     /// * `api_rev` - The negotiated API revision.
     /// * `psk` - PSK credential: the role slot plus an optional
     ///   caller-supplied PSK (`None` selects the partition default PSK).
-    /// * `session_type` - Channel integrity profile to pin.
+    /// * `suite` - Key-establishment suite of the handshake.
     #[instrument(skip_all, err, fields(path = self.path().as_str()))]
     pub fn open_session_ex(
         &self,
         api_rev: HsmApiRev,
         psk: HsmSessionPsk<'_>,
-        session_type: HsmSessionExType,
+        suite: HsmSessionSuite,
     ) -> HsmResult<HsmSession> {
-        let result = ddi::open_session_ex(self, api_rev, psk.psk_id as u8, psk.psk, session_type)?;
+        let result = ddi::open_session_ex(self, api_rev, psk.psk_id as u8, psk.psk, suite)?;
         Ok(HsmSession::new_ex(api_rev, self.clone(), result))
     }
 

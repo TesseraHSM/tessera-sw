@@ -21,9 +21,9 @@ use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEcdhDeriveReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -419,7 +419,7 @@ fn ecdh_derive_unknown_session_rejected() {
 fn ecdh_derive_rejects_default_co_psk() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO session under default PSK");
 
     ctx.expect_fw_reject(
@@ -439,7 +439,7 @@ fn ecdh_derive_rejects_default_co_psk() {
 fn ecdh_derive_rejects_default_cu_psk() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session under default PSK");
 
     ctx.expect_fw_reject(
@@ -471,13 +471,13 @@ fn ecdh_derive_session_scope_before_finalize() {
 fn ecdh_derive_allowed_on_crypto_user_session() {
     let ctx = TestCtx::new();
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
         .expect("rotate CU PSK");
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
     let pending = ctx
         .session_open_init_with_options(opts)
         .expect("open CU session under rotated PSK");
@@ -682,8 +682,7 @@ fn ecdh_derive_session_key_from_other_session_rejected() {
     ctx.session_close(session_a.session_id)
         .expect("close originating CO session");
 
-    let opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+    let opts = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -720,8 +719,7 @@ fn ecdh_derive_local_key_across_sessions() {
     ctx.session_close(session_a.session_id)
         .expect("close originating CO session");
 
-    let opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+    let opts = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
