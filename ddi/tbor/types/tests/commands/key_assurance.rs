@@ -9,8 +9,8 @@
 //!
 //! * Imports through `UnwrapKey` for every ECC curve and usage, and every RSA
 //!   size, layout (plain and CRT), and usage, then uses each imported key.
-//!   On Uno these imports pass the embedded-public-key check and the
-//!   usage-matched pairwise consistency test (PCT) before the key is stored.
+//!   These imports pass the embedded-public-key check and the usage-matched
+//!   pairwise consistency test (PCT) before the key is stored.
 //! * Malformed imports that the firmware must reject. ECC keys whose
 //!   embedded public key is wrong, missing, compressed, or hybrid, or that
 //!   carry `[0]` curve parameters, fail the structure check: a missing key or
@@ -18,17 +18,13 @@
 //!   `KeyStructuralValidationFailed`. RSA keys with an inconsistent private
 //!   component, or whose operations return their input unchanged, fail the
 //!   pairwise consistency test. An RSA key with a zero public exponent is
-//!   rejected with `InvalidArg`, which the test's private operation returns.
-//!   Only hardware firmware runs either check.
+//!   rejected with `InvalidArg`. Uno and the std platform behind the socket
+//!   transport run both checks.
 //! * Imports of ECC keys whose private value is 0 or the curve order, which
 //!   every firmware rejects with `InvalidArg`.
 //! * On-device ECC key generation for every curve and usage, then use of the
 //!   returned blob.
 //! * The partition unwrapping key: availability and stability.
-//!
-//! The std platform behind the socket transport doesn't run the structure
-//! check or pairwise consistency tests yet (#120), so the tests that need
-//! one return early when the socket transport is selected.
 //!
 //! The SP publishes the unwrapping key asynchronously, so tests wait up to
 //! `UNWRAP_KEY_WAIT_SECS` seconds (default 900) for `GetUnwrappingKey`.
@@ -49,6 +45,8 @@ use tsra_ddi_mbor_test_helpers::RsaParts;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P256;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P384;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P521;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
@@ -98,7 +96,7 @@ fn unwrap_wait() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Returns the unwrapping public key (`n_le ‖ e_le`), waiting while the
+/// Returns the unwrapping public key (`n ‖ e`, device byte order), waiting while the
 /// device reports `PendingKeyGeneration`.
 fn unwrapping_pub(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
     let deadline = Instant::now() + unwrap_wait();
@@ -129,6 +127,24 @@ fn import_rejected(
 }
 
 // ───────────────────────── host keys ─────────────────────────
+
+/// The device's public key for `key`: each coordinate in device byte
+/// order, zero-padded to the wire coordinate length.
+fn ecc_wire_pub(key: &HostEcc) -> Vec<u8> {
+    let coord = wire_coord_len(key.curve.raw);
+    let mut out = Vec::with_capacity(2 * coord);
+    for c in [&key.x, &key.y] {
+        let mut dev = dev_rev(c);
+        dev.resize(coord, 0);
+        out.extend(dev);
+    }
+    out
+}
+
+/// The device's public key for `parts`: `n ‖ e`, each in device byte order.
+fn rsa_wire_pub(parts: &RsaParts) -> Vec<u8> {
+    [dev_rev(&parts.n), dev_rev(&parts.e)].concat()
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Curve {
@@ -164,7 +180,13 @@ fn host_rsa(k: usize) -> (RsaPrivateKey, RsaParts) {
 /// Runs ECDH with `masked_key` against a fresh host peer key.
 fn assert_derives(ctx: &TestCtx, session_id: u16, curve: Curve, masked_key: Vec<u8>) {
     let peer = HostEcc::generate(curve.ecc);
-    let secret = derive(ctx, session_id, SCOPE_LOCAL, masked_key, peer.wire_pub());
+    let secret = derive(
+        ctx,
+        session_id,
+        SCOPE_LOCAL,
+        masked_key,
+        ecc_wire_pub(&peer),
+    );
     assert_eq!(
         secret.len(),
         232 + curve.ecc.raw.next_multiple_of(16),
@@ -223,7 +245,7 @@ fn import_ecc_roundtrip(curve: Curve, usage: u64) {
     );
     assert_eq!(
         resp.pub_key,
-        key.wire_pub(),
+        ecc_wire_pub(&key),
         "re-derived public key must match the host key"
     );
     assert_ecc_works(
@@ -267,10 +289,17 @@ fn import_ecc_p521_derive() {
 }
 
 fn import_rsa_roundtrip(k: usize, crt: bool, usage: u64) {
+    import_rsa_altered(k, crt, usage, |_| {});
+}
+
+/// Imports an RSA key after `alter` changes components the selected layout
+/// doesn't use, and expects it to import and work like the host key.
+fn import_rsa_altered(k: usize, crt: bool, usage: u64, alter: impl Fn(&mut RsaParts)) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
-    let (key, parts) = host_rsa(k);
+    let (key, mut parts) = host_rsa(k);
+    alter(&mut parts);
     let class = if crt {
         KEY_CLASS_RSA_CRT
     } else {
@@ -287,7 +316,7 @@ fn import_rsa_roundtrip(k: usize, crt: bool, usage: u64) {
     );
     assert_eq!(
         resp.pub_key,
-        parts.wire_pub(),
+        rsa_wire_pub(&parts),
         "re-derived n ‖ e must match the host key"
     );
     assert_rsa_works(&ctx, session.session_id, &key, resp.masked_key, usage);
@@ -384,6 +413,13 @@ fn mismatched_q(key: &HostEcc) -> Vec<u8> {
     ecc_pkcs8(key.curve.oid, &key.d, false, Some(&other.point(0x04)))
 }
 
+/// A correctly sized uncompressed point that is not on the curve.
+fn off_curve_q(key: &HostEcc) -> Vec<u8> {
+    let mut point = vec![0; 1 + 2 * key.curve.raw];
+    point[0] = 0x04;
+    ecc_pkcs8(key.curve.oid, &key.d, false, Some(&point))
+}
+
 fn missing_q(key: &HostEcc) -> Vec<u8> {
     ecc_pkcs8(key.curve.oid, &key.d, false, None)
 }
@@ -410,65 +446,47 @@ fn order_d(key: &HostEcc) -> Vec<u8> {
 }
 
 #[test]
+fn reject_ecc_off_curve_q_p256_sign() {
+    reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, off_curve_q);
+}
+
+#[test]
+fn reject_ecc_off_curve_q_p521_derive() {
+    reject_ecc(P521, KEY_USAGE_DERIVE, BAD_STRUCTURE, off_curve_q);
+}
+
+#[test]
 fn reject_ecc_mismatched_q_p256_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
 fn reject_ecc_mismatched_q_p384_derive() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P384, KEY_USAGE_DERIVE, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
 fn reject_ecc_mismatched_q_p521_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P521, SIGN_VERIFY, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
 fn reject_ecc_missing_q_p256_derive() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P256, KEY_USAGE_DERIVE, BAD_DECODE, missing_q);
 }
 
 #[test]
 fn reject_ecc_missing_q_p384_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P384, SIGN_VERIFY, BAD_DECODE, missing_q);
 }
 
 #[test]
 fn reject_ecc_missing_q_p521_derive() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P521, KEY_USAGE_DERIVE, BAD_DECODE, missing_q);
 }
 
 #[test]
 fn reject_ecc_compressed_q_02_p256() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.compressed(0x02)))
     });
@@ -476,10 +494,6 @@ fn reject_ecc_compressed_q_02_p256() {
 
 #[test]
 fn reject_ecc_compressed_q_03_p384() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P384, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.compressed(0x03)))
     });
@@ -487,10 +501,6 @@ fn reject_ecc_compressed_q_03_p384() {
 
 #[test]
 fn reject_ecc_hybrid_q_06_p256() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.point(0x06)))
     });
@@ -498,10 +508,6 @@ fn reject_ecc_hybrid_q_06_p256() {
 
 #[test]
 fn reject_ecc_hybrid_q_07_p521() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P521, KEY_USAGE_DERIVE, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.point(0x07)))
     });
@@ -509,28 +515,16 @@ fn reject_ecc_hybrid_q_07_p521() {
 
 #[test]
 fn reject_ecc_params_p256_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P256, SIGN_VERIFY, BAD_DECODE, params_then_q);
 }
 
 #[test]
 fn reject_ecc_params_p384_derive() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P384, KEY_USAGE_DERIVE, BAD_DECODE, params_then_q);
 }
 
 #[test]
 fn reject_ecc_params_p521_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_ecc(P521, SIGN_VERIFY, BAD_DECODE, params_then_q);
 }
 
@@ -598,64 +592,89 @@ fn reject_rsa_with(
 
 #[test]
 fn reject_rsa_2k_plain_d_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, false, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
 }
 
 #[test]
 fn reject_rsa_2k_plain_d_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, false, RSA_DECRYPT, |p| p.d = plus_two(&p.d));
 }
 
 #[test]
 fn reject_rsa_4k_plain_d_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(512, false, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
+}
+
+/// Sets `d = 2^(8k)`, one byte wider than the modulus.
+fn oversized_d(p: &mut RsaParts) {
+    let mut d = vec![0; p.n.len() + 1];
+    d[0] = 1;
+    p.d = d;
+}
+
+#[test]
+fn reject_rsa_2k_plain_oversized_d_sign() {
+    reject_rsa_with(256, false, SIGN_VERIFY, oversized_d, TborStatus::InvalidArg);
+}
+
+// Like Uno, a CRT key ignores `d` and a non-CRT key ignores `dp`, `dq` and
+// `qInv`.
+#[test]
+fn import_rsa_2k_crt_ignores_d_sign() {
+    import_rsa_altered(256, true, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
+}
+
+#[test]
+fn import_rsa_2k_crt_ignores_d_decrypt() {
+    import_rsa_altered(256, true, RSA_DECRYPT, |p| p.d = plus_two(&p.d));
+}
+
+// A short ignored `d` makes the DER smaller than the CRT vault layout.
+#[test]
+fn import_rsa_2k_crt_ignores_zero_d_sign() {
+    import_rsa_altered(256, true, SIGN_VERIFY, |p| p.d = vec![0]);
+}
+
+#[test]
+fn import_rsa_4k_crt_ignores_zero_d_decrypt() {
+    import_rsa_altered(512, true, RSA_DECRYPT, |p| p.d = vec![0]);
+}
+
+#[test]
+fn import_rsa_2k_plain_ignores_crt_exponents_sign() {
+    import_rsa_altered(256, false, SIGN_VERIFY, |p| {
+        p.dp = plus_two(&p.dp);
+        p.dq = plus_two(&p.dq);
+        p.qinv = plus_two(&p.qinv);
+    });
+}
+
+#[test]
+fn import_rsa_2k_plain_ignores_crt_exponents_decrypt() {
+    import_rsa_altered(256, false, RSA_DECRYPT, |p| {
+        p.dp = plus_two(&p.dp);
+        p.dq = plus_two(&p.dq);
+        p.qinv = plus_two(&p.qinv);
+    });
 }
 
 #[test]
 fn reject_rsa_2k_crt_dp_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, true, SIGN_VERIFY, |p| p.dp = plus_two(&p.dp));
 }
 
 #[test]
 fn reject_rsa_2k_crt_dq_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, true, RSA_DECRYPT, |p| p.dq = plus_two(&p.dq));
 }
 
 #[test]
 fn reject_rsa_3k_crt_dp_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(384, true, RSA_DECRYPT, |p| p.dp = plus_two(&p.dp));
 }
 
 #[test]
 fn reject_rsa_4k_crt_dq_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(512, true, SIGN_VERIFY, |p| p.dq = plus_two(&p.dq));
 }
 
@@ -674,19 +693,11 @@ fn swap_prime(k: usize, crt_p: bool) -> impl Fn(&mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_crt_p_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, true, SIGN_VERIFY, swap_prime(256, true));
 }
 
 #[test]
 fn reject_rsa_2k_crt_q_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, true, RSA_DECRYPT, swap_prime(256, false));
 }
 
@@ -700,19 +711,11 @@ fn identity_exponents(p: &mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_plain_identity_sign() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, false, SIGN_VERIFY, identity_exponents);
 }
 
 #[test]
 fn reject_rsa_2k_crt_identity_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa(256, true, RSA_DECRYPT, identity_exponents);
 }
 
@@ -724,10 +727,6 @@ fn zero_public_exponent(p: &mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_plain_zero_e_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa_with(
         256,
         false,
@@ -739,10 +738,6 @@ fn reject_rsa_2k_plain_zero_e_decrypt() {
 
 #[test]
 fn reject_rsa_2k_crt_zero_e_decrypt() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     reject_rsa_with(
         256,
         true,
@@ -810,10 +805,6 @@ fn reject_rsa_4k_repeatedly(
 /// the vault would have run out of space first.
 #[test]
 fn reject_repeated_then_valid() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
@@ -835,10 +826,6 @@ fn reject_repeated_then_valid() {
 /// imports, whose masked blobs are a whole number of AES blocks.
 #[test]
 fn reject_repeated_then_ecc_valid() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
@@ -853,7 +840,7 @@ fn reject_repeated_then_ecc_valid() {
             SIGN_VERIFY,
             &key.pkcs8(),
         );
-        assert_eq!(resp.pub_key, key.wire_pub(), "re-derived public key");
+        assert_eq!(resp.pub_key, ecc_wire_pub(&key), "re-derived public key");
         assert_ecc_signs(
             &ctx,
             session.session_id,
@@ -870,10 +857,6 @@ fn reject_repeated_then_ecc_valid() {
 /// Valid P-256 imports must still work afterwards.
 #[test]
 fn reject_matrix() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let sid = session.session_id;
@@ -1015,7 +998,7 @@ fn generate_roundtrip(curve: Curve, usage: u64) {
         .expect("EccGenerateKey");
     assert_eq!(
         resp.pub_key.len(),
-        2 * curve.ecc.wire_coord,
+        2 * wire_coord_len(curve.ecc.raw),
         "wire public key length"
     );
     assert_ecc_works(
@@ -1067,7 +1050,7 @@ fn unwrapping_key_available_and_stable() {
     let session = finalized_co_session(&ctx);
     let first = unwrapping_pub(&ctx, session.session_id);
     let second = unwrapping_pub(&ctx, session.session_id);
-    assert_eq!(first.len(), 260, "RSA-2048 n_le ‖ e_le");
+    assert_eq!(first.len(), 260, "RSA-2048 n ‖ e");
     assert_eq!(first, second, "the unwrapping key must be stable");
     assert!(first.iter().any(|&b| b != 0), "a published key is non-zero");
 }

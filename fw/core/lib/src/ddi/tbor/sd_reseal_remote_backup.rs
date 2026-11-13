@@ -20,7 +20,8 @@
 //!    (not the local one): each of the source-sender and destination-
 //!    receiver evidence requires manufacturer and partition-owner chains,
 //!    with device-owner evidence optional. Supplied chains are validated;
-//!    the partition-owner chain is anchored to the request policy's SATA key, and each report's v2
+//!    the partition-owner chain is anchored to the request policy's POTA key (the
+//!    client partitions' owner), and each report's v2
 //!    `policy_hash` must equal `SHA-384(policy)`.  This binds both sides to
 //!    the same policy (whose digest covers the POTA key).  The attested
 //!    COSE_Keys are recovered as `SndrPub` (source sender) and `DstRcvrPub`
@@ -57,8 +58,9 @@ use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -102,7 +104,6 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  `mk_key_id` is `Copy`, so it outlives the view.
@@ -127,7 +128,6 @@ pub(crate) async fn handle<P: HsmPal>(
 
     // Both attestation evidences are mandatory side-band data carried in
     // the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the fixed-size resealed backup in the IO scope so it
     // survives the crypto scratch allocator's reset.
@@ -151,12 +151,18 @@ pub(crate) async fn handle<P: HsmPal>(
             // The source and destination must share this policy: each v2
             // report's `policy_hash` must equal its SHA-384 digest.
             let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            pal.hash(io, HsmHashAlgo::Sha384, policy, expected, true)
-                .await?;
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                policy,
+                expected,
+                HsmDigestForm::Standard,
+            )
+            .await?;
 
             let part_policy = super::policy::from_bytes(policy)?;
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
+            let pota = &part_policy.pota_pub_key;
+            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
                 return Err(HsmError::InvalidArg);
             }
 
@@ -168,7 +174,6 @@ pub(crate) async fn handle<P: HsmPal>(
                 verify_evidence(
                     pal,
                     io,
-                    &oob,
                     &EvidenceRefs {
                         mfgr_chain: ev.mfgr_cert_chain(),
                         owner_chain: ev.owner_cert_chain(),
@@ -176,7 +181,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_sndr,
@@ -198,7 +203,6 @@ pub(crate) async fn handle<P: HsmPal>(
                 verify_evidence(
                     pal,
                     io,
-                    &oob,
                     &EvidenceRefs {
                         mfgr_chain: ev.mfgr_cert_chain(),
                         owner_chain: ev.owner_cert_chain(),
@@ -206,7 +210,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_dst,
@@ -253,15 +257,14 @@ pub(crate) async fn handle<P: HsmPal>(
             }
 
             // Receiver public key (`RcvrPub`) in SEC1 BE, derived on-device
-            // from the recovered private key.  The PAL emits wire-LE
-            // `X ‖ Y` into the coordinate region; reversing each coordinate
+            // from the recovered private key.  The PAL emits
+            // operand-order `X ‖ Y` into the coordinate region; converting
             // in place yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
             let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
             pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            pk_r[1..1 + coord].reverse();
-            pk_r[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` requires a plaintext buffer at least the
             // ciphertext length (`ct` = BKS3 + GCM tag = 64 B); the recovered

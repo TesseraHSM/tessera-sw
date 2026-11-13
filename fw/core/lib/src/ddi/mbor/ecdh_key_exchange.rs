@@ -60,7 +60,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
     // and the PAL trait requires exactly `wire_pub_key_len` bytes
     // — reject any non-exact length so trailing junk isn't silently
     // accepted.
-    let wire_pub_key_len = curve.wire_pub_key_len();
+    let wire_pub_key_len = curve.wire_pub_key_len(P::BYTE_ORDER);
     if body.pub_key_der.len() != wire_pub_key_len {
         return Err(HsmError::InvalidArg);
     }
@@ -69,7 +69,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
     //
     // Allocate the secret zeroed to wire (word-padded) coordinate length
     // to match vault storage format and ensure P-521 pad bytes are zero.
-    let secret = pal.dma_alloc_zeroed(io, curve.wire_coord_len())?;
+    let secret = pal.dma_alloc_zeroed(io, curve.wire_coord_len(P::BYTE_ORDER))?;
     let priv_key = pal.vault_key(io, priv_key_id)?;
 
     let res = async {
@@ -91,6 +91,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
                 super::from_pal::ecdh_secret(curve),
                 target_attrs.session().then_some(HsmSessId::from(sess_id)),
                 target_attrs,
+                HsmVaultPct::None,
             )
             .await?
             .into();

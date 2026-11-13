@@ -76,7 +76,7 @@ pub struct TborSdResealRemoteBackupReq<'a> {
     /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
     /// the receiver's private HPKE key (used to both unseal the source and
     /// authenticate the reseal to the destination); never a vault handle.
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] the source and destination

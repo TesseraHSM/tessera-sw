@@ -43,14 +43,14 @@ pub struct TborRsaModExpReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The input integer `y` in wire little-endian order, exactly the key's
+    /// The input integer `y` in device byte order, exactly the key's
     /// modulus length (256 / 384 / 512 B). Firmware overwrites it with `x`.
     #[tbor(max_len = 512)]
     pub y: Vec<u8>,
 
     /// The masked RSA private key (from `UnwrapKey`); its kind recovers the
     /// modulus size and CRT form.
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// The private-key operation, 1-byte `RsaOp` (see `RSA_OP_*`): gates on
@@ -62,7 +62,7 @@ pub struct TborRsaModExpReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborRsaModExpResp {
-    /// The result `x = y^d mod n` in wire little-endian order, exactly the
+    /// The result `x = y^d mod n` in device byte order, exactly the
     /// key's modulus length (256 / 384 / 512 B).
     #[tbor(max_len = 512)]
     pub x: Vec<u8>,

@@ -85,7 +85,8 @@ pub(crate) fn darc_unwrap_key_pair(
         return Err(HsmError::InvalidKeyProps);
     }
 
-    let pub_key_der = ecc_wire_pub_key_to_der(recovered_curve, &resp.pub_key)?;
+    let pub_key_der =
+        ecc_wire_pub_key_to_der(WireOrder::of(session), recovered_curve, &resp.pub_key)?;
     let (priv_key_props, pub_key_props) =
         HsmMaskedKey::to_key_pair_props(&resp.masked_key, &pub_key_der)?;
 

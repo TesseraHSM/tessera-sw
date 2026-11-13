@@ -10,6 +10,7 @@ use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
@@ -123,10 +124,7 @@ fuzz_target!(|input: FuzzInput| {
                 Expected::Success => {
                     panic!("valid SdSealingKeyGen request failed: {err:?}");
                 }
-                Expected::Reject(expected_status) => assert!(
-                    matches!(err, DdiError::TborStatus(status) if status == expected_status),
-                    "expected {expected_status:?}, got {err:?}"
-                ),
+                Expected::Reject(expected_status) => assert_session_rejects(&err, expected_status),
             },
         }
 

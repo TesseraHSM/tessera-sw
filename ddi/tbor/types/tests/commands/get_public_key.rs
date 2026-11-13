@@ -17,6 +17,7 @@ use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::*;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::CO;
 use crate::commands::common::SCOPE_SESSION;
 use crate::commands::ecc_sign::ECC_CURVES;
@@ -177,5 +178,20 @@ fn get_public_key_rejects_default_co_psk() {
             masked_key: vec![0u8; 64],
         },
         TborStatus::DefaultPskMustRotate,
+    );
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn get_public_key_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _) = generate_ecc(&ctx, session.session_id, ECC_CURVE_P384);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborGetPublicKeyReq {
+            session_id: session.session_id,
+            masked_key,
+        },
     );
 }

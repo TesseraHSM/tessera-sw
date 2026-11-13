@@ -33,7 +33,6 @@
 //! `get_certificate`). This forces every test path through the
 //! shared assertion funnel.
 
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
@@ -128,6 +127,24 @@ impl TestCtx {
         self.dev.path()
     }
 
+    /// The device model this ctx talks to.
+    pub fn model(&self) -> tsra_ddi_interface::DdiDeviceModel {
+        self.dev.model()
+    }
+
+    /// Whether the device is a Duo (API revision 2.x): in-session
+    /// commands travel under the session transport, crypto operands are
+    /// big-endian, and MBOR is unavailable.
+    pub fn is_duo(&self) -> bool {
+        self.dev.uses_session_transport()
+    }
+
+    /// DER partition-ID (leaf) certificate of cert slot 0, read over
+    /// MBOR on Uno and TBOR on Duo.
+    pub fn leaf_certificate(&self) -> DdiResult<Vec<u8>> {
+        crate::session::fetch_leaf_cert_der(&self.dev)
+    }
+
     /// Factory-reset the partition. Used by the
     /// `commands::part_init` determinism test for cold-restart
     /// iterations. Available on every backend the harness compiles
@@ -174,6 +191,47 @@ impl TestCtx {
         self.dev.exec_op_tbor_oob(req, oob_items, &mut cookie)
     }
 
+    /// The status the device reports for `req` when firmware would
+    /// reject it with `expected`.
+    ///
+    /// A session lookup failure becomes `InvalidSessionControlOpcode` on
+    /// Duo when the harness holds no transport keys for the session: the
+    /// command then travels unsealed, and Duo's channel policy rejects it
+    /// before any session lookup.
+    pub fn device_status<R: TborOpReq>(&self, req: &R, expected: TborStatus) -> TborStatus {
+        if matches!(
+            expected,
+            TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+        ) && self.dev.sends_unsealed_session_cmd(req)
+        {
+            TborStatus::InvalidSessionControlOpcode
+        } else {
+            expected
+        }
+    }
+
+    /// The status the device reports for an in-session or close command
+    /// addressed to a session this handle holds no transport keys for
+    /// (unknown, closed, erased, or opened elsewhere), when firmware would
+    /// reject it with `expected`. Duo receives such a command unsealed and
+    /// rejects it as `InvalidSessionControlOpcode` before any session
+    /// lookup; Uno reports `expected`.
+    pub fn unknown_session_status(&self, expected: TborStatus) -> TborStatus {
+        if self.is_duo() {
+            TborStatus::InvalidSessionControlOpcode
+        } else {
+            expected
+        }
+    }
+
+    /// [`assert_session_rejects`] for a command addressed to a session this
+    /// handle holds no transport keys for (see
+    /// [`Self::unknown_session_status`]).
+    #[track_caller]
+    pub fn assert_unknown_session_rejects(&self, err: &DdiError, expected: TborStatus) {
+        assert_session_rejects(err, self.unknown_session_status(expected));
+    }
+
     /// [`Self::expect_fw_reject`] for a request carrying in / out
     /// out-of-band SGL items (see [`Self::tbor_oob_io`]).
     #[track_caller]
@@ -189,7 +247,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }
@@ -214,7 +272,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }
@@ -229,7 +287,7 @@ impl TestCtx {
         let err = self
             .tbor(req)
             .expect_err("session command must be rejected");
-        assert_session_rejects(&err, expected);
+        assert_session_rejects(&err, self.device_status(req, expected));
         err
     }
 
@@ -251,7 +309,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }

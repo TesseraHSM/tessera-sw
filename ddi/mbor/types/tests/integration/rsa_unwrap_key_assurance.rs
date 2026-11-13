@@ -8,10 +8,10 @@
 //! private value is 0 or the curve order, whose embedded public key is
 //! mismatched, missing, compressed, or hybrid, or that carry `[0]` curve
 //! parameters, and RSA keys with one inconsistent private component. Every
-//! firmware rejects the out-of-range private values with `InvalidArg`. Only
-//! hardware firmware runs the structure check that rejects the other ECC keys
-//! and the pairwise consistency test that rejects the RSA keys, so every test
-//! here is ignored under `emu`.
+//! firmware rejects the out-of-range private values with `InvalidArg`. The
+//! structure check rejects the other ECC keys and the pairwise consistency
+//! test rejects the RSA keys; Uno and the std platform behind the socket
+//! transport run both.
 
 #![cfg(test)]
 
@@ -129,14 +129,9 @@ fn run_import_matrix(
 }
 
 /// ECC structure and private-value checks through MBOR `RsaUnwrap`: 6 valid
-/// ECC keys with 54 malformed variants. Only hardware firmware checks an
-/// imported ECC key's structure.
+/// ECC keys with 54 malformed variants.
 #[test]
 fn rsa_unwrap_ecc_structure_matrix() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -201,10 +196,6 @@ fn rsa_unwrap_ecc_structure_matrix() {
 /// with 36 malformed variants.
 #[test]
 fn rsa_unwrap_rsa_pct_matrix() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -253,10 +244,6 @@ fn rsa_unwrap_rsa_pct_matrix() {
 /// vault would have run out of space first.
 #[test]
 fn rsa_unwrap_rejected_imports_store_nothing() {
-    // The std platform doesn't implement FIPS key assurance yet (#120).
-    if tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

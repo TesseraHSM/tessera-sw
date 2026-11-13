@@ -137,6 +137,36 @@ TEST_P(rsa_enc_dec_kind, encrypt_decrypt_oaep)
         << "Decrypted data does not match original plaintext";
 }
 
+/// PKCS#1 v1.5 decryption fails for valid and invalid padding alike and writes
+/// no output; encryption with PKCS#1 v1.5 still works.
+TEST_F(rsa_enc_dec, pkcs1_decrypt_is_rejected)
+{
+    auto key = generate_rsa_session_key(prov_.libctx(), 2048, "keyEncipherment");
+    ASSERT_NE(key, nullptr);
+    const size_t key_bytes = static_cast<size_t>(EVP_PKEY_get_size(key.get()));
+    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_pkey(prov_.libctx(), key.get(), "provider=tsra"));
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_EQ(EVP_PKEY_encrypt_init(ctx.get()), 1);
+    char padding[] = "pkcs1";
+    OSSL_PARAM params[] = { OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_PAD_MODE, padding, 0),
+                            OSSL_PARAM_END };
+    ASSERT_EQ(EVP_PKEY_CTX_set_params(ctx.get(), params), 1);
+    const unsigned char message[] = "reject valid padding too";
+    std::vector<unsigned char> ciphertext(key_bytes);
+    size_t len = ciphertext.size();
+    ASSERT_EQ(EVP_PKEY_encrypt(ctx.get(), ciphertext.data(), &len, message, sizeof(message)), 1);
+    ASSERT_EQ(EVP_PKEY_decrypt_init(ctx.get()), 1);
+    ASSERT_EQ(EVP_PKEY_CTX_set_params(ctx.get(), params), 1);
+    size_t query_len = 0;
+    EXPECT_LE(EVP_PKEY_decrypt(ctx.get(), nullptr, &query_len, ciphertext.data(), len), 0);
+    std::vector<unsigned char> output(key_bytes, 0xa5);
+    size_t out_len = output.size();
+    EXPECT_LE(EVP_PKEY_decrypt(ctx.get(), output.data(), &out_len, ciphertext.data(), len), 0);
+    EXPECT_EQ(output, std::vector<unsigned char>(key_bytes, 0xa5));
+    ciphertext[0] ^= 1;
+    EXPECT_LE(EVP_PKEY_decrypt(ctx.get(), output.data(), &out_len, ciphertext.data(), len), 0);
+}
+
 /// Encrypting with key_a and decrypting with key_b must fail.  Runs on the
 /// default key form (RSA-CRT); the stored form is not what is under test here.
 TEST_F(rsa_enc_dec, decrypt_fails_with_wrong_key)

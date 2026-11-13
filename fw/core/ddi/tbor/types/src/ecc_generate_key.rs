@@ -26,7 +26,7 @@
 //!
 //! * `masked_key` — the private key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
-//! * `pub_key` — the wire public key `x ‖ y` (little-endian, P-521 padded).
+//! * `pub_key` — the wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -46,7 +46,7 @@ pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 /// on [`TborEccGenerateKeyResp::masked_key`].
 pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
-/// Maximum wire public-key length (`x ‖ y`, P-521 padded coordinates).
+/// Maximum wire public-key length (`x ‖ y`, P-521 little-endian word-padded coordinates).
 /// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
 /// [`TborEccGenerateKeyResp::pub_key`].
 pub const ECC_PUB_KEY_MAX_LEN: usize = 136;
@@ -109,11 +109,11 @@ pub struct TborEccGenerateKeyReq<'a> {
 pub struct TborEccGenerateKeyResp<'a> {
     /// The generated private key, masked (AEAD-GCM-256) under the scope's
     /// masking key.  264 / 280 / 312 B for P-256 / P-384 / P-521.
-    #[tbor(buffer, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The wire public key `x ‖ y` (little-endian, P-521 padded):
-    /// 64 / 96 / 136 B for P-256 / P-384 / P-521.
+    /// The wire public key `x ‖ y` in device byte order: 64 / 96 B for
+    /// P-256 / P-384; 132 B (big-endian) or 136 B (little-endian) for P-521.
     #[tbor(buffer, max_len = 136)]
     pub pub_key: &'a [u8],
 }

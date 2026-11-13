@@ -8,7 +8,6 @@
 // Starts a private in-process DDI sock server before the fuzzer's `main`;
 // libFuzzer `-jobs`/`-fork` workers each get their own.
 use ddi_sock_server as _;
-
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::AesKey;

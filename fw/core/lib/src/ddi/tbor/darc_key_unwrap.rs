@@ -49,6 +49,7 @@ use tsra_fw_ddi_tbor_types::TborDarcKeyUnwrapResp;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_PUB_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -124,42 +125,48 @@ fn attrs_for_ecc(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
     })
 }
 
-/// Verify that the wire-LE public key `wire_pub` (`x_le ‖ y_le`, each
-/// `curve.wire_coord_len()` bytes) re-derived from the recovered scalar
-/// equals the big-endian COSE coordinates `x` / `y` — the COSE
+/// Verify that the operand-order public key `wire_pub` (`x ‖ y`, each
+/// `curve.wire_coord_len(order)` bytes) re-derived from the recovered
+/// scalar equals the big-endian COSE coordinates `x` / `y` — the COSE
 /// private/public consistency requirement (spec §4.1, §10.9).
 ///
 /// Public-key material, so an ordinary (non-constant-time) comparison is
 /// appropriate.
-fn pub_key_matches(curve: HsmEccCurve, x: &HsmDmaBuf, y: &HsmDmaBuf, wire_pub: &HsmDmaBuf) -> bool {
+fn pub_key_matches(
+    order: HsmByteOrder,
+    curve: HsmEccCurve,
+    x: &HsmDmaBuf,
+    y: &HsmDmaBuf,
+    wire_pub: &HsmDmaBuf,
+) -> bool {
     let coord_raw = curve.priv_key_len();
-    let wc = curve.wire_coord_len();
+    let wc = curve.wire_coord_len(order);
     if wire_pub.len() != 2 * wc {
         return false;
     }
-    coord_matches(&wire_pub[0..wc], x, coord_raw)
-        && coord_matches(&wire_pub[wc..2 * wc], y, coord_raw)
+    coord_matches(order, &wire_pub[0..wc], x, coord_raw)
+        && coord_matches(order, &wire_pub[wc..2 * wc], y, coord_raw)
 }
 
-/// Whether the wire-LE coordinate `wire_le` (field-width, low bytes are
-/// the reversed field element, any high bytes are zero pad) equals the
-/// big-endian coordinate `be` (`coord_raw` bytes).
-fn coord_matches(wire_le: &HsmDmaBuf, be: &HsmDmaBuf, coord_raw: usize) -> bool {
-    if be.len() != coord_raw {
+/// Whether the operand-order coordinate `operand` (value in the first
+/// `coord_raw` bytes, any padding zero) equals the big-endian coordinate
+/// `be` (`coord_raw` bytes).
+fn coord_matches(
+    order: HsmByteOrder,
+    operand: &HsmDmaBuf,
+    be: &HsmDmaBuf,
+    coord_raw: usize,
+) -> bool {
+    if be.len() != coord_raw || operand.len() < coord_raw {
         return false;
     }
-    for i in 0..coord_raw {
-        if wire_le[i] != be[coord_raw - 1 - i] {
-            return false;
-        }
-    }
-    // Any padding above the raw field width must be zero.
-    for i in coord_raw..wire_le.len() {
-        if wire_le[i] != 0 {
-            return false;
-        }
-    }
-    true
+    let (value, pad) = operand.split_at(coord_raw);
+    let value_matches = if order.is_be() {
+        value == be
+    } else {
+        value.iter().eq(be.iter().rev())
+    };
+    value_matches && pad.iter().all(|&b| b == 0)
 }
 
 /// Handle a TBOR `DarcKeyUnwrap` request.
@@ -268,16 +275,22 @@ pub(crate) async fn handle<P: HsmPal>(
                     let attrs = attrs_for_ecc(out_scope, effective)?;
                     let key_kind = ecc_vault_kind(curve);
 
-                    let vault = alloc.dma_alloc(curve.wire_coord_len())?;
+                    let vault = alloc.dma_alloc(curve.wire_coord_len(P::BYTE_ORDER))?;
                     let vault_res = async {
                         pal.ecc_priv_to_vault(io, curve, parsed.d, Some(vault))?;
 
                         // Re-derive the wire public key and enforce COSE
                         // private/public consistency against `x` / `y`.
-                        let wire_pub_len = curve.wire_pub_key_len();
+                        let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
                         pal.ecc_pub_from_priv(io, curve, vault, &mut pub_out[..wire_pub_len])
                             .await?;
-                        if !pub_key_matches(curve, parsed.x, parsed.y, &pub_out[..wire_pub_len]) {
+                        if !pub_key_matches(
+                            P::BYTE_ORDER,
+                            curve,
+                            parsed.x,
+                            parsed.y,
+                            &pub_out[..wire_pub_len],
+                        ) {
                             return Err(HsmError::InvalidArg);
                         }
 

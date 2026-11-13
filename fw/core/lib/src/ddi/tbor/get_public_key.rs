@@ -5,8 +5,8 @@
 //!
 //! Takes a **masked private key** (RSA / RSA-CRT / ECC), unmasks it, and
 //! returns its wire public key — the same format [`super::unwrap_key`]
-//! returns (`n_le ‖ e_le` / `x ‖ y`). This lets a host that holds only the
-//! masked blob rebuild the public half of a key pair.
+//! returns (`n ‖ e` / `x ‖ y`, device byte order). This lets a host that
+//! holds only the masked blob rebuild the public half of a key pair.
 //!
 //! Flow:
 //!

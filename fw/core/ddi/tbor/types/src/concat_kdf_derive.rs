@@ -119,7 +119,7 @@ pub struct TborConcatKdfDeriveReq<'a> {
 
     /// The masked ECDH shared secret IKM (from `EcdhDerive`), an
     /// AEAD-GCM-256 envelope of 264..=312 B; unmasked in place.
-    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_secret: &'a [u8],
 
     /// Optional `SharedInfo` (X9.63) / `OtherInfo` (SP 800-56A), ≤ 256 B;
@@ -136,7 +136,7 @@ pub struct TborConcatKdfDeriveReq<'a> {
 pub struct TborConcatKdfDeriveResp<'a> {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.  248..=360 B depending on the derived key length.
-    #[tbor(buffer, max_len = 360, mutable)]
+    #[tbor(align = 4, buffer, max_len = 360, mutable)]
     pub masked_key: &'a [u8],
 }
 

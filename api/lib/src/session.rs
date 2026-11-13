@@ -309,7 +309,7 @@ impl HsmSession {
     ///
     /// Generates a new DARC key-exchange key (ECC-P384) and returns the
     /// masked private key plus its raw P-384 public key (`x ‖ y`, 96
-    /// bytes). Run on the target it yields the HPKE receiver identity; run
+    /// bytes, big-endian per coordinate). Run on the target it yields the HPKE receiver identity; run
     /// on the source it yields the HPKE sender-auth identity. Only valid on
     /// a V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn darc_kex_key_gen(

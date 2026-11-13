@@ -91,7 +91,7 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`),
     /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security

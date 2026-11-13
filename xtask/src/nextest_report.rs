@@ -32,6 +32,7 @@ fn profile_to_command(profile_name: &str) -> String {
         }
         "ci-api" => "TSRA_TEST_ARGS=\"transport=sock;api_rev=1_0\" cargo nextest run --no-fail-fast -p tsra_api_tests --profile ci-api".to_string(),
         "ci-api-ex" => "TSRA_TEST_ARGS=\"transport=sock;api_rev=1_1\" cargo nextest run --no-fail-fast -p tsra_api_tests --profile ci-api-ex".to_string(),
+        "ci-api-duo" => "TSRA_TEST_ARGS=\"transport=sock;api_rev=2_0\" cargo nextest run --no-fail-fast -p tsra_api_tests --profile ci-api-duo".to_string(),
         // For unknown profiles, construct a generic command showing the profile
         _ => format!("cargo nextest run --profile {}", profile_name),
     }

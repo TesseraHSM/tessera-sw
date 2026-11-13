@@ -162,7 +162,14 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
 
                     let session_binding = attrs.session().then_some(HsmSessId::from(sess_id));
                     let created = pal
-                        .vault_key_create(io, key_buf, kind, session_binding, attrs)
+                        .vault_key_create(
+                            io,
+                            key_buf,
+                            kind,
+                            session_binding,
+                            attrs,
+                            HsmVaultPct::None,
+                        )
                         .await;
                     created
                 })

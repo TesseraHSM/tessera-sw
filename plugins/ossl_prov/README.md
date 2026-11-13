@@ -440,6 +440,8 @@ openssl dgst -sha256 ${PROV} \
 
 ### RSA Encryption and Decryption
 
+RSA PKCS#1 v1.5 decryption is disabled because the native decoder does not provide implicit rejection. Use RSA-OAEP for encryption and decryption. PKCS#1 v1.5 signatures are unaffected.
+
 **Requires:** An RSA key imported with `keyEncipherment` usage. A `digitalSignature` key cannot encrypt/decrypt.
 
 **RSA-OAEP:**

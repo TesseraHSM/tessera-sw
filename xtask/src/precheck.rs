@@ -488,6 +488,24 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
         });
     }
 
+    // Run tsra_api_tests at API revision 2.0, which the sock server hosts
+    // on Duo
+    // CI job: test_*_api
+    if !exclude.iter().any(|e| e == "tsra_api_tests") {
+        tests.push(Nextest {
+            features: None,
+            package: Some("tsra_api_tests".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-api-duo".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+            transport: Some("sock".to_string()),
+            api_rev: Some("2_0".to_string()),
+        });
+    }
+
     tests
 }
 

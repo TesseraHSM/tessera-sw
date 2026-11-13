@@ -6,10 +6,15 @@
 #include <tsra_api.h>
 #include <vector>
 
+#include "algo/ecc/helpers.hpp"
+#include "handle/part_handle.hpp"
 #include "handle/part_list_handle.hpp"
+#include "handle/session_handle.hpp"
 #include "helpers.hpp"
 #include "utils/auto_key.hpp"
+#include "utils/rsa_keygen.hpp"
 #include "utils/shared_secret.hpp"
+#include "utils/utils.hpp"
 
 class tsra_hmac_keygen : public ::testing::Test
 {
@@ -250,6 +255,39 @@ static tsra_algo_id hmac_algo_id_for_key_kind(tsra_key_kind key_kind)
     }
 }
 
+static constexpr tsra_key_kind hmac_unwrap_key_kinds[] = {
+    TSRA_KEY_KIND_HMAC_SHA256,
+    TSRA_KEY_KIND_HMAC_SHA384,
+    TSRA_KEY_KIND_HMAC_SHA512,
+};
+
+struct HmacUnwrapProperties
+{
+    tsra_key_class key_class = TSRA_KEY_CLASS_SECRET;
+    tsra_key_kind key_kind;
+    uint32_t bits;
+    bool session = true;
+    bool sign = true;
+    bool verify = true;
+    std::vector<tsra_key_prop> props;
+
+    explicit HmacUnwrapProperties(tsra_key_kind kind)
+        : key_kind(kind), bits(get_hmac_key_bits(kind))
+    {
+        props = { { TSRA_KEY_PROP_ID_CLASS, &key_class, sizeof(key_class) },
+                  { TSRA_KEY_PROP_ID_KIND, &key_kind, sizeof(key_kind) },
+                  { TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) },
+                  { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+                  { TSRA_KEY_PROP_ID_SIGN, &sign, sizeof(sign) },
+                  { TSRA_KEY_PROP_ID_VERIFY, &verify, sizeof(verify) } };
+    }
+
+    tsra_key_prop_list prop_list()
+    {
+        return { props.data(), static_cast<uint32_t>(props.size()) };
+    }
+};
+
 // Helper to map an HMAC key kind to the ECDH curve used by the existing HMAC tests
 static tsra_ecc_curve ecc_curve_for_hmac_key_kind(tsra_key_kind key_kind)
 {
@@ -369,6 +407,390 @@ static std::vector<tsra_key_prop> build_hmac_derive_props(
 }
 
 // Test HMAC key derivation and property verification for all algorithms
+TEST_F(tsra_hmac_keygen, unwrap_all_algorithms)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto_key rsa_private;
+        auto_key rsa_public;
+        ASSERT_EQ(
+            generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+            TSRA_STATUS_SUCCESS
+        );
+
+        for (auto kind : hmac_unwrap_key_kinds)
+        {
+            auto bits = get_hmac_key_bits(kind);
+            auto raw_key = make_deterministic_payload(0x91, 1, bits / 8);
+            for (const auto &config : {
+                     RsaAesWrapConfig{},
+                     RsaAesWrapConfig{ .hash_algo = TSRA_ALGO_ID_SHA384,
+                                       .mgf1_hash_algo = TSRA_MGF1_ID_SHA384 },
+                     RsaAesWrapConfig{ .hash_algo = TSRA_ALGO_ID_SHA512,
+                                       .mgf1_hash_algo = TSRA_MGF1_ID_SHA512 },
+                 })
+            {
+                SCOPED_TRACE(::testing::Message() << kind << ":" << config.hash_algo);
+                std::vector<uint8_t> wrapped;
+                ASSERT_EQ(
+                    wrap_plaintext_with_rsa_aes(rsa_public.get(), raw_key, config, wrapped),
+                    TSRA_STATUS_SUCCESS
+                );
+                tsra_buffer wrapped_buf{ wrapped.data(), static_cast<uint32_t>(wrapped.size()) };
+                RsaAesUnwrapAlgo unwrap_algo(config);
+                HmacUnwrapProperties properties(kind);
+                auto props = properties.prop_list();
+                auto_key imported;
+                ASSERT_EQ(
+                    tsra_key_unwrap(
+                        &unwrap_algo.algo,
+                        rsa_private.get(),
+                        &wrapped_buf,
+                        &props,
+                        imported.get_ptr()
+                    ),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_NE(imported.get(), 0u);
+                verify_hmac_key_properties(imported.get(), kind, bits);
+
+                uint8_t data[] = "native imported HMAC";
+                tsra_buffer data_buf{ data, sizeof(data) - 1 };
+                std::vector<uint8_t> tag(bits / 8);
+                tsra_buffer tag_buf{ tag.data(), static_cast<uint32_t>(tag.size()) };
+                tsra_algo hmac_algo{ .id = hmac_algo_id_for_key_kind(kind),
+                                     .params = nullptr,
+                                     .len = 0 };
+                ASSERT_EQ(
+                    tsra_crypt_sign(&hmac_algo, imported.get(), &data_buf, &tag_buf),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_EQ(tag_buf.len, tag.size());
+                ASSERT_EQ(
+                    tsra_crypt_verify(&hmac_algo, imported.get(), &data_buf, &tag_buf),
+                    TSRA_STATUS_SUCCESS
+                );
+
+                std::vector<uint8_t> masked;
+                ASSERT_EQ(get_masked_key_blob(imported.get(), masked), TSRA_STATUS_SUCCESS);
+                ASSERT_EQ(tsra_key_delete(imported.get()), TSRA_STATUS_SUCCESS);
+                imported.handle = 0;
+                tsra_buffer masked_buf{ masked.data(), static_cast<uint32_t>(masked.size()) };
+                auto_key restored;
+                ASSERT_EQ(
+                    tsra_key_unmask(session, kind, &masked_buf, restored.get_ptr()),
+                    TSRA_STATUS_SUCCESS
+                );
+                verify_hmac_key_properties(restored.get(), kind, bits);
+                std::vector<uint8_t> restored_tag(tag.size());
+                tsra_buffer restored_tag_buf{ restored_tag.data(),
+                                              static_cast<uint32_t>(restored_tag.size()) };
+                ASSERT_EQ(
+                    tsra_crypt_sign(&hmac_algo, restored.get(), &data_buf, &restored_tag_buf),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_EQ(restored_tag_buf.len, restored_tag.size());
+                ASSERT_EQ(restored_tag, tag);
+            }
+        }
+    });
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_invalid_props)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto_key rsa_private;
+        auto_key rsa_public;
+        ASSERT_EQ(
+            generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+            TSRA_STATUS_SUCCESS
+        );
+        RsaAesUnwrapAlgo unwrap_algo;
+        uint8_t dummy = 0;
+        tsra_buffer wrapped{ &dummy, sizeof(dummy) };
+
+        for (auto kind : hmac_unwrap_key_kinds)
+        {
+            const auto expect_invalid = [&](HmacUnwrapProperties &properties) {
+                auto props = properties.prop_list();
+                auto_key output;
+                EXPECT_EQ(
+                    tsra_key_unwrap(
+                        &unwrap_algo.algo,
+                        rsa_private.get(),
+                        &wrapped,
+                        &props,
+                        output.get_ptr()
+                    ),
+                    TSRA_STATUS_INVALID_KEY_PROPS
+                );
+                EXPECT_EQ(output.get(), 0u);
+            };
+
+            for (auto key_class : { TSRA_KEY_CLASS_PUBLIC, TSRA_KEY_CLASS_PRIVATE })
+            {
+                HmacUnwrapProperties properties(kind);
+                properties.key_class = key_class;
+                expect_invalid(properties);
+            }
+            for (uint32_t bits : { 0u, get_hmac_key_bits(kind) - 8, get_hmac_key_bits(kind) + 8 })
+            {
+                HmacUnwrapProperties properties(kind);
+                properties.bits = bits;
+                expect_invalid(properties);
+            }
+            for (const auto &usage : {
+                     std::pair{ false, true },
+                     std::pair{ true, false },
+                     std::pair{ false, false },
+                 })
+            {
+                HmacUnwrapProperties properties(kind);
+                properties.sign = usage.first;
+                properties.verify = usage.second;
+                expect_invalid(properties);
+            }
+            for (auto prop_id : { TSRA_KEY_PROP_ID_ENCRYPT,
+                                  TSRA_KEY_PROP_ID_DECRYPT,
+                                  TSRA_KEY_PROP_ID_DERIVE,
+                                  TSRA_KEY_PROP_ID_WRAP,
+                                  TSRA_KEY_PROP_ID_UNWRAP })
+            {
+                HmacUnwrapProperties properties(kind);
+                bool enabled = true;
+                properties.props.push_back({ prop_id, &enabled, sizeof(enabled) });
+                expect_invalid(properties);
+            }
+        }
+    });
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_invalid_blob)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto_key rsa_private;
+        auto_key rsa_public;
+        ASSERT_EQ(
+            generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+            TSRA_STATUS_SUCCESS
+        );
+
+        for (auto kind : hmac_unwrap_key_kinds)
+        {
+            auto raw_key = make_deterministic_payload(0x71, 1, get_hmac_key_bits(kind) / 8);
+            std::vector<uint8_t> wrapped;
+            ASSERT_EQ(
+                wrap_plaintext_with_rsa_aes(rsa_public.get(), raw_key, RsaAesWrapConfig{}, wrapped),
+                TSRA_STATUS_SUCCESS
+            );
+            ASSERT_GT(wrapped.size(), 1u);
+            auto corrupted = wrapped;
+            corrupted.back() ^= 1;
+            auto truncated = wrapped;
+            truncated.pop_back();
+            HmacUnwrapProperties properties(kind);
+            auto props = properties.prop_list();
+            RsaAesUnwrapAlgo unwrap_algo;
+
+            for (auto invalid_blob : { corrupted, truncated })
+            {
+                tsra_buffer blob{ invalid_blob.data(), static_cast<uint32_t>(invalid_blob.size()) };
+                auto_key output;
+                ASSERT_NE(
+                    tsra_key_unwrap(
+                        &unwrap_algo.algo,
+                        rsa_private.get(),
+                        &blob,
+                        &props,
+                        output.get_ptr()
+                    ),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_EQ(output.get(), 0u);
+            }
+
+            RsaAesWrapConfig wrong_hash{ .hash_algo = TSRA_ALGO_ID_SHA384,
+                                         .mgf1_hash_algo = TSRA_MGF1_ID_SHA384 };
+            RsaAesUnwrapAlgo wrong_algo(wrong_hash);
+            tsra_buffer blob{ wrapped.data(), static_cast<uint32_t>(wrapped.size()) };
+            auto_key output;
+            ASSERT_NE(
+                tsra_key_unwrap(
+                    &wrong_algo.algo,
+                    rsa_private.get(),
+                    &blob,
+                    &props,
+                    output.get_ptr()
+                ),
+                TSRA_STATUS_SUCCESS
+            );
+            ASSERT_EQ(output.get(), 0u);
+            ASSERT_EQ(
+                tsra_key_unwrap(
+                    &unwrap_algo.algo,
+                    rsa_private.get(),
+                    &blob,
+                    &props,
+                    output.get_ptr()
+                ),
+                TSRA_STATUS_SUCCESS
+            );
+            ASSERT_NE(output.get(), 0u);
+        }
+    });
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_invalid_args)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto_key rsa_private;
+        auto_key rsa_public;
+        ASSERT_EQ(
+            generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+            TSRA_STATUS_SUCCESS
+        );
+        HmacUnwrapProperties properties(TSRA_KEY_KIND_HMAC_SHA256);
+        auto props = properties.prop_list();
+        RsaAesUnwrapAlgo unwrap_algo;
+        uint8_t dummy = 0;
+        tsra_buffer wrapped{ &dummy, sizeof(dummy) };
+        auto_key output;
+
+        ASSERT_EQ(
+            tsra_key_unwrap(nullptr, rsa_private.get(), &wrapped, &props, output.get_ptr()),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(
+            tsra_key_unwrap(
+                &unwrap_algo.algo,
+                rsa_private.get(),
+                nullptr,
+                &props,
+                output.get_ptr()
+            ),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(
+            tsra_key_unwrap(
+                &unwrap_algo.algo,
+                rsa_private.get(),
+                &wrapped,
+                nullptr,
+                output.get_ptr()
+            ),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(
+            tsra_key_unwrap(&unwrap_algo.algo, rsa_private.get(), &wrapped, &props, nullptr),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(
+            tsra_key_unwrap(&unwrap_algo.algo, 0, &wrapped, &props, output.get_ptr()),
+            TSRA_STATUS_INVALID_HANDLE
+        );
+        ASSERT_EQ(output.get(), 0u);
+    });
+}
+
+static void verify_hmac_unwrap_legacy_rejected(tsra_handle session)
+{
+    auto_key rsa_private;
+    auto_key rsa_public;
+    ASSERT_EQ(
+        generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+        TSRA_STATUS_SUCCESS
+    );
+    for (auto kind : hmac_unwrap_key_kinds)
+    {
+        auto raw_key = make_deterministic_payload(0x51, 1, get_hmac_key_bits(kind) / 8);
+        std::vector<uint8_t> wrapped;
+        ASSERT_EQ(
+            wrap_plaintext_with_rsa_aes(rsa_public.get(), raw_key, RsaAesWrapConfig{}, wrapped),
+            TSRA_STATUS_SUCCESS
+        );
+        RsaAesUnwrapAlgo unwrap_algo;
+        HmacUnwrapProperties properties(kind);
+        auto props = properties.prop_list();
+        for (auto length : { static_cast<uint32_t>(wrapped.size()), uint32_t{ 1 } })
+        {
+            tsra_buffer blob{ wrapped.data(), length };
+            auto_key output;
+            ASSERT_EQ(
+                tsra_key_unwrap(
+                    &unwrap_algo.algo,
+                    rsa_private.get(),
+                    &blob,
+                    &props,
+                    output.get_ptr()
+                ),
+                TSRA_STATUS_UNSUPPORTED_KEY_OPERATION
+            );
+            ASSERT_EQ(output.get(), 0u);
+        }
+    }
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_legacy_rejected)
+{
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_session([&](tsra_handle session) {
+        verify_hmac_unwrap_legacy_rejected(session);
+    });
+}
+
+// Negotiating API 1.1 or newer does not add HMAC unwrap support to a legacy
+// session. From API 2.0 a legacy session cannot be opened at all.
+TEST_F(tsra_hmac_keygen, unwrap_legacy_rev_1_1)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    const bool legacy_supported = api_rev_at_most(1, 1);
+    part_list_.for_each_part([&](std::vector<tsra_char> &path) {
+        if (!legacy_supported)
+        {
+            tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
+            tsra_handle raw_partition = 0;
+            ASSERT_EQ(
+                tsra_part_open(&path_str, &raw_partition, session_ex_test_api_rev()),
+                TSRA_STATUS_SUCCESS
+            );
+            auto partition = PartitionHandle::from_raw(raw_partition);
+            tsra_credentials creds{};
+            std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+            std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+            tsra_handle session = 0;
+            EXPECT_EQ(
+                tsra_sess_open(partition.get(), &creds, nullptr, &session),
+                TSRA_STATUS_DDI_CMD_FAILURE
+            );
+            EXPECT_EQ(session, 0u);
+            return;
+        }
+        auto initialized_partition = PartitionHandle(path);
+        tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
+        tsra_handle raw_partition = 0;
+        ASSERT_EQ(
+            tsra_part_open(&path_str, &raw_partition, session_ex_test_api_rev()),
+            TSRA_STATUS_SUCCESS
+        );
+        auto partition = PartitionHandle::from_raw(raw_partition);
+        auto session = SessionHandle(partition.get());
+        verify_hmac_unwrap_legacy_rejected(session.get());
+    });
+}
+
 TEST_F(tsra_hmac_keygen, derive_and_get_properties_all_algorithms)
 {
     std::vector<HmacKeyTestParams> test_cases = {

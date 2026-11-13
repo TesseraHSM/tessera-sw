@@ -271,7 +271,8 @@ fn gen_validation(schema: &Schema) -> TokenStream {
     };
 
     let type_checks = gen_type_checks(schema, &layout);
-    let padding_checks = gen_padding_checks(&layout);
+    let padding_checks = gen_padding_checks(schema, &layout);
+    let align_checks = gen_align_checks(schema, &layout);
     let len_checks = gen_len_checks(schema, &layout);
 
     // Included field groups expand the TOC dynamically, so fold their
@@ -309,6 +310,10 @@ fn gen_validation(schema: &Schema) -> TokenStream {
 
         // Validate padding entries.
         #(#padding_checks)*
+
+        // Aligned fields must start on their boundary, measured from the
+        // start of the message.
+        #(#align_checks)*
 
         // Validate each field TOC entry type at expected position.
         #(#type_checks)*
@@ -364,15 +369,41 @@ fn gen_type_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
 }
 
 /// Generate validation checks for padding TOC entries.
-fn gen_padding_checks(layout: &TocLayout) -> Vec<TokenStream> {
+fn gen_padding_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
     let padding_type_id = 9u8;
     layout
         .padding_positions
         .iter()
-        .map(|&(toc_idx, _)| {
+        .map(|&(_, field_idx)| {
+            let field_toc_idx =
+                crate::codegen_enc::effective_toc_idx(field_idx, layout, &schema.fields);
             quote! {
-                if raw.toc_entry_type(#toc_idx) != #padding_type_id {
+                if raw.toc_entry_type(#field_toc_idx - 1) != #padding_type_id {
                     return Err(tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType);
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate checks that each present `#[tbor(align = N)]` field starts at
+/// a multiple of `N` bytes from the start of the message.
+fn gen_align_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
+    schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.align > 0)
+        .map(|(i, f)| {
+            let toc_idx = crate::codegen_enc::effective_toc_idx(i, layout, &schema.fields);
+            let toc_type_id = f.toc_type_id;
+            let align = f.align;
+            quote! {
+                if raw.toc_entry_type(#toc_idx) == #toc_type_id {
+                    let off = tsra_fw_ddi_tbor::toc::raw_toc_offset(raw.toc_word(#toc_idx));
+                    if (raw.data_start() + off) % #align != 0 {
+                        return Err(tsra_fw_hsm_pal_traits::HsmError::TborMisalignedField);
+                    }
                 }
             }
         })

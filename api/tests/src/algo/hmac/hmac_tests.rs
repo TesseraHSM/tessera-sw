@@ -3,8 +3,11 @@
 
 use tsra_api::*;
 use tsra_api_tests_macro::*;
+use tsra_crypto as crypto;
+use tsra_crypto::ImportableKey;
 
 use crate::algo::ecc::*;
+use crate::algo::rsa::get_rsa_unwrapping_key_pair;
 
 // Maps an HMAC key kind to the hash algorithm used for HKDF.
 pub(crate) fn hkdf_hash_for_hmac_key_kind(key_kind: HsmKeyKind) -> HsmHashAlgo {
@@ -1158,6 +1161,425 @@ fn test_hmac_sign_buffer_too_small_then_success(session: HsmSession) {
         is_valid,
         "Tag produced after BufferTooSmall path should verify"
     );
+}
+
+fn hmac_unwrap_props(key_kind: HsmKeyKind) -> HsmKeyPropsBuilder {
+    HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(key_kind)
+        .bits(hmac_key_kind_to_bits(key_kind))
+        .is_session(true)
+        .can_sign(true)
+        .can_verify(true)
+}
+
+fn wrap_hmac_key(
+    wrapping_key: &HsmRsaPublicKey,
+    hash_algo: HsmHashAlgo,
+    raw_key: &[u8],
+) -> Vec<u8> {
+    let kek_bytes = 256 / 8;
+    HsmEncrypter::encrypt_vec(
+        &mut HsmRsaAesWrapAlgo::new(hash_algo, kek_bytes),
+        wrapping_key,
+        raw_key,
+    )
+    .expect("Failed to RSA-AES wrap HMAC key")
+}
+
+fn software_hmac(key_kind: HsmKeyKind, raw_key: &[u8], data: &[u8]) -> Vec<u8> {
+    let hash_algo = match key_kind {
+        HsmKeyKind::HmacSha256 => crypto::HashAlgo::sha256(),
+        HsmKeyKind::HmacSha384 => crypto::HashAlgo::sha384(),
+        HsmKeyKind::HmacSha512 => crypto::HashAlgo::sha512(),
+        _ => panic!("Expected an HMAC key kind, got {key_kind:?}"),
+    };
+    let key = crypto::HmacKey::from_bytes(raw_key).expect("Failed to import software HMAC key");
+    let mut tag = vec![0; hmac_key_kind_to_bits(key_kind) as usize / 8];
+    let tag_len = crypto::Signer::sign(
+        &mut crypto::HmacAlgo::new(hash_algo),
+        &key,
+        data,
+        Some(&mut tag),
+    )
+    .expect("Software HMAC failed");
+    assert_eq!(tag_len, tag.len());
+    tag
+}
+
+/// Imports every supported HMAC kind with each OAEP hash and checks
+/// the imported material against a software HMAC oracle.
+#[session_test]
+fn test_hmac_unwrap_roundtrip(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+    let data = test_message_bytes(0x47, 127);
+    let label = b"imported-hmac";
+
+    for key_kind in hmac_test_key_kinds() {
+        let bits = hmac_key_kind_to_bits(key_kind);
+        let raw_key = test_message_bytes(0x91, bits as usize / 8);
+        let expected_tag = software_hmac(key_kind, &raw_key, &data);
+
+        for hash_algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ] {
+            let wrapped_key = wrap_hmac_key(&wrapping_key, hash_algo, &raw_key);
+            let props = hmac_unwrap_props(key_kind)
+                .label(label)
+                .build()
+                .expect("Failed to build HMAC unwrap props");
+            let key = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(hash_algo),
+                &unwrapping_key,
+                &wrapped_key,
+                props,
+            )
+            .expect("Failed to unwrap HMAC key");
+
+            assert_eq!(key.kind(), key_kind);
+            assert_eq!(key.class(), HsmKeyClass::Secret);
+            assert_eq!(key.bits(), bits);
+            assert_eq!(key.label(), label);
+            assert!(key.is_session());
+            assert!(key.can_sign());
+            assert!(key.can_verify());
+            assert!(!key.can_encrypt());
+            assert!(!key.can_decrypt());
+            assert!(!key.can_wrap());
+            assert!(!key.can_unwrap());
+            assert!(!key.can_derive());
+            assert!(key.is_extractable());
+            assert_eq!(key.ecc_curve(), None);
+            let tag = HsmSigner::sign_vec(&mut HsmHmacAlgo::new(), &key, &data)
+                .expect("Imported HMAC key must sign");
+            assert_eq!(tag, expected_tag, "Incorrect imported key for {key_kind:?}");
+            assert!(
+                HsmVerifier::verify(&mut HsmHmacAlgo::new(), &key, &data, &expected_tag)
+                    .expect("Imported HMAC key must verify")
+            );
+            let empty_tag = HsmSigner::sign_vec(&mut HsmHmacAlgo::new(), &key, b"")
+                .expect("Imported HMAC key must sign an empty message");
+            assert_eq!(empty_tag, software_hmac(key_kind, &raw_key, b""));
+        }
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_invalid_props(session: HsmSession) {
+    let (unwrapping_key, _) = get_rsa_unwrapping_key_pair(&session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let bits = hmac_key_kind_to_bits(key_kind);
+        for builder in [
+            hmac_unwrap_props(key_kind).class(HsmKeyClass::Public),
+            hmac_unwrap_props(key_kind).class(HsmKeyClass::Private),
+            hmac_unwrap_props(key_kind).key_kind(HsmKeyKind::Aes),
+            hmac_unwrap_props(key_kind).key_kind(HsmKeyKind::Rsa),
+            hmac_unwrap_props(key_kind).bits(0),
+            hmac_unwrap_props(key_kind).bits(1),
+            hmac_unwrap_props(key_kind).bits(bits - 8),
+            hmac_unwrap_props(key_kind).bits(bits + 8),
+            hmac_unwrap_props(key_kind).ecc_curve(HsmEccCurve::P256),
+            hmac_unwrap_props(key_kind).can_encrypt(true),
+            hmac_unwrap_props(key_kind).can_decrypt(true),
+            hmac_unwrap_props(key_kind).can_wrap(true),
+            hmac_unwrap_props(key_kind).can_unwrap(true),
+            hmac_unwrap_props(key_kind).can_derive(true),
+        ] {
+            let result = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                &[],
+                builder.build().expect("Failed to build invalid HMAC props"),
+            );
+            assert!(
+                matches!(result, Err(HsmError::InvalidKeyProps)),
+                "Invalid HMAC properties must fail before processing the wrapped blob"
+            );
+        }
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_invalid_permissions(session: HsmSession) {
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x67, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+
+        for (can_sign, can_verify) in [(true, false), (false, true), (false, false)] {
+            let props = hmac_unwrap_props(key_kind)
+                .can_sign(can_sign)
+                .can_verify(can_verify)
+                .build()
+                .expect("Failed to build HMAC permission props");
+            let result = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                &wrapped_key,
+                props,
+            );
+            assert!(
+                matches!(result, Err(HsmError::InvalidKeyProps)),
+                "HMAC unwrap requires paired SIGN and VERIFY permissions"
+            );
+        }
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_invalid_blob(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x39, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+        let mut bad_rsa = wrapped_key.clone();
+        bad_rsa[0] ^= 1;
+        let mut bad_kwp = wrapped_key.clone();
+        *bad_kwp.last_mut().expect("Wrapped key must not be empty") ^= 1;
+        let mut extended = wrapped_key.clone();
+        extended.push(0);
+        let mut algo = HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256);
+
+        for invalid_blob in [
+            &[][..],
+            &wrapped_key[..1],
+            &wrapped_key[..unwrapping_key.size() - 1],
+            &wrapped_key[..unwrapping_key.size()],
+            &wrapped_key[..wrapped_key.len() - 1],
+            bad_rsa.as_slice(),
+            bad_kwp.as_slice(),
+            extended.as_slice(),
+        ] {
+            let result = HsmKeyManager::unwrap_key(
+                &mut algo,
+                &unwrapping_key,
+                invalid_blob,
+                hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+            );
+            assert!(
+                result.is_err(),
+                "Malformed wrapped HMAC key must be rejected"
+            );
+        }
+
+        let key = HsmKeyManager::unwrap_key(
+            &mut algo,
+            &unwrapping_key,
+            &wrapped_key,
+            hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+        )
+        .expect("Failed unwrap attempts must not poison the session or algorithm");
+        let tag = HsmSigner::sign_vec(&mut HsmHmacAlgo::new(), &key, b"after invalid unwrap")
+            .expect("Imported HMAC key must sign after failed unwraps");
+        assert_eq!(
+            tag,
+            software_hmac(key_kind, &raw_key, b"after invalid unwrap")
+        );
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_wrong_hash(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x75, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+        let result = HsmKeyManager::unwrap_key(
+            &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha384),
+            &unwrapping_key,
+            &wrapped_key,
+            hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+        );
+        assert!(result.is_err(), "A mismatched OAEP hash must be rejected");
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_wrong_key_length(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let key_bytes = hmac_key_kind_to_bits(key_kind) as usize / 8;
+        for wrong_length in [1, key_bytes - 1, key_bytes + 1] {
+            let raw_key = test_message_bytes(0x29, wrong_length);
+            let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+            let result = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                &wrapped_key,
+                hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+            );
+            assert!(
+                result.is_err(),
+                "HMAC material must match the requested size"
+            );
+        }
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_unmask_roundtrip(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+    let data = test_message_bytes(0x23, 1024);
+    let label = vec![b'h'; 128];
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x17, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let expected_tag = software_hmac(key_kind, &raw_key, &data);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+
+        for scope in [
+            HsmKeyScope::Session,
+            HsmKeyScope::Ephemeral,
+            HsmKeyScope::Local,
+        ] {
+            let props = hmac_unwrap_props(key_kind)
+                .scope(scope)
+                .label(&label)
+                .build()
+                .expect("Failed to build scoped HMAC props");
+            let key = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                &wrapped_key,
+                props,
+            )
+            .expect("Failed to unwrap scoped HMAC key");
+            let masked_key = key
+                .masked_key_vec()
+                .expect("Imported key must have masked material");
+            key.delete_key()
+                .expect("Failed to delete imported HMAC key");
+            let restored = HsmHmacKeyUnmaskAlgo::default()
+                .unmask_key(&session, &masked_key)
+                .expect("Failed to unmask imported HMAC key");
+
+            assert_eq!(restored.kind(), key_kind);
+            assert_eq!(restored.bits(), hmac_key_kind_to_bits(key_kind));
+            assert_eq!(restored.label(), label);
+            assert_eq!(restored.is_session(), scope == HsmKeyScope::Session);
+            assert_eq!(
+                streaming_sign(restored.clone(), &data, &[1, 31, 128]),
+                expected_tag
+            );
+            assert!(streaming_verify(restored, &data, &[7, 64], &expected_tag));
+        }
+    }
+}
+
+#[session_test]
+fn test_hmac_unwrap_label_too_long(session: HsmSession) {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+    let label = vec![b'h'; 129];
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x81, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+        let props = hmac_unwrap_props(key_kind)
+            .label(&label)
+            .build()
+            .expect("Failed to build HMAC label props");
+        let result = HsmKeyManager::unwrap_key(
+            &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+            &unwrapping_key,
+            &wrapped_key,
+            props,
+        );
+        assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
+    }
+}
+
+fn assert_hmac_unwrap_legacy_rejected(session: &HsmSession) {
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x91, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+        for blob in [&[][..], wrapped_key.as_slice()] {
+            let result = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                blob,
+                hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+            );
+            assert!(matches!(result, Err(HsmError::UnsupportedKeyOperation)));
+        }
+    }
+}
+
+/// Legacy sessions reject HMAC unwrap before processing the wrapped material.
+#[session_test]
+fn test_hmac_unwrap_legacy_rejected(session: HsmSession) {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    assert_hmac_unwrap_legacy_rejected(&session);
+}
+
+/// Negotiating API 1.1 or newer does not add HMAC unwrap support to a legacy
+/// session. From API 2.0 a legacy session cannot be opened at all.
+#[test]
+fn test_hmac_unwrap_legacy_rev_1_1() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let legacy_supported = crate::utils::session::api_rev_at_most(1, 1);
+    let rev = if legacy_supported {
+        HsmApiRev { major: 1, minor: 1 }
+    } else {
+        HsmApiRev { major: 2, minor: 0 }
+    };
+    let _guard = crate::utils::partition::PARTITION_LOCK.lock();
+    let partitions = HsmPartitionManager::partition_info_list();
+    assert!(!partitions.is_empty(), "No partitions found");
+
+    for info in partitions {
+        if legacy_supported {
+            drop(crate::utils::session::open_session_test_session(&info.path));
+        }
+        let partition =
+            HsmPartitionManager::open_partition(&info.path, rev).expect("Failed to open partition");
+        let creds = HsmCredentials::new(
+            &crate::utils::partition::APP_ID,
+            &crate::utils::partition::APP_PIN,
+        );
+        let result = partition.open_session(rev, &creds, None);
+        if !legacy_supported {
+            assert!(
+                matches!(result, Err(HsmError::DdiCmdFailure)),
+                "legacy session must be rejected from API 2.0"
+            );
+            continue;
+        }
+        let session = result.expect("Failed to open legacy session with API 1.1");
+        assert_eq!(session.api_rev(), rev);
+        assert_hmac_unwrap_legacy_rejected(&session);
+    }
 }
 
 /// TBOR HMAC sign path: a generated (masked, non-resident) HMAC key signs

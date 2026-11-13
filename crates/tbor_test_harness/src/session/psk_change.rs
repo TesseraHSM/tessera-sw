@@ -14,9 +14,6 @@
 use tsra_crypto::aead_envelope;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::Rng;
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::build_psk_change_aad;
 use tsra_ddi_tbor_types::TborPskChangeReq;
@@ -24,6 +21,7 @@ use tsra_ddi_tbor_types::TborPskChangeResp;
 use tsra_ddi_tbor_types::PSK_LEN;
 
 use super::finish::SessionHandshake;
+use crate::fixture::TestDev;
 
 /// Encrypt `new_psk` under `session.param_key` with the canonical
 /// `psk-change-v1 ‖ session_id_le ‖ rsv0` AAD and issue `PskChange`
@@ -33,7 +31,7 @@ use super::finish::SessionHandshake;
 /// is an immediate [`DdiError::InvalidParameter`] without touching
 /// the device.
 pub fn psk_change(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     session: &SessionHandshake,
     new_psk: &[u8],
 ) -> Result<(), DdiError> {

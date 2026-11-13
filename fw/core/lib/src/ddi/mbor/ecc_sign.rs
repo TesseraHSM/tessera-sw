@@ -50,8 +50,8 @@ pub(crate) async fn ecc_sign<'p, P: HsmPal>(
 
     // Sign directly into the wire-format signature slot.  The PAL
     // emits `r || s` in LE with P-521 trailing pad bytes, so we just
-    // reserve `curve.wire_sig_len()` bytes and hand the slot through.
-    let wire_len = curve.wire_sig_len();
+    // reserve `curve.wire_sig_len(P::BYTE_ORDER)` bytes and hand the slot through.
+    let wire_len = curve.wire_sig_len(P::BYTE_ORDER);
     let (resp, layout) = pal.dma_alloc_var_with(io, |buf| {
         let mut encoder =
             super::encode_resp_hdr(&super::success_hdr_sess(hdr, DdiOp::EccSign, sess_id), buf)?;
@@ -65,7 +65,7 @@ pub(crate) async fn ecc_sign<'p, P: HsmPal>(
     //     the meaningful digest bytes that are signed (also what the std PAL's
     //     OpenSSL and the UPKA driver's `hash.len() >= hash_size` check bound);
     //     and
-    //   * the PKA DMA OPERAND width, `curve.wire_coord_len()` (32 / 48 / 68) —
+    //   * the PKA DMA OPERAND width, `curve.wire_coord_len(P::BYTE_ORDER)` (32 / 48 / 68) —
     //     the word-aligned field the engine actually DMA-reads for the digest.
     // They coincide for P-256/P-384 but differ for P-521 (64 vs 68): the 66-byte
     // P-521 field is zero-padded to a 32-bit word boundary. The engine reads the
@@ -90,7 +90,7 @@ pub(crate) async fn ecc_sign<'p, P: HsmPal>(
     // P-521+SHA-512) that region is 0-4 bytes (only the P-521 `[64..68]` wire
     // pad), so the common path is effectively free; the worst case is a short
     // digest on P-521 (~36 bytes), trivial next to the PKA sign.
-    let operand_len = curve.wire_coord_len();
+    let operand_len = curve.wire_coord_len(P::BYTE_ORDER);
     if body.digest.len() < operand_len {
         return Err(HsmError::InvalidArg);
     }

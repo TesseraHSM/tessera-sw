@@ -47,11 +47,13 @@ pub struct TborDarcTmkExportReq {
     /// The source's masked DARC key-exchange key (from `DarcKexKeyGen`),
     /// exactly [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the HPKE sender private key (`SndrPriv`).
+    #[tbor(align = 4)]
     pub masked_sender_key: [u8; MASKED_KEX_KEY_LEN],
 
     /// The locally-masked TMK envelope (from `DarcTmkGen` /
     /// `DarcTmkImport`), exactly [`MASKED_TMK_LEN`] (264 B).  Unmasked
     /// on-device to recover the 32-byte TMK plaintext.
+    #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// Unified [`PartPolicy`] whose `DATAPubKey` anchors

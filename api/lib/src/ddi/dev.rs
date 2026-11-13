@@ -8,14 +8,20 @@
 //! and device access operations.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
+use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
+use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_session_ex_crypto::SessionTransport;
+use tsra_session_ex_crypto::SessionTransportSeal;
 
 use super::*;
 use crate::resiliency::HsmDdi;
@@ -49,6 +55,26 @@ static DDI: LazyLock<HsmDdi> = LazyLock::new(HsmDdi::default);
 /// - The DDI operation returns an error
 /// - The device is not responding
 pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
+    // TBOR first; MBOR-only firmware rejects it.
+    match dev.exec_op_tbor(&TborApiRevReq, None, &mut None) {
+        Ok(resp) => {
+            let rev = |major: u16, minor: u16| HsmApiRev {
+                major: major.into(),
+                minor: minor.into(),
+            };
+            return Ok((
+                rev(resp.min_major.get(), resp.min_minor.get()),
+                rev(resp.max_major.get(), resp.max_minor.get()),
+            ));
+        }
+        Err(
+            DdiError::UnsupportedEncoding
+            | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
+            | DdiError::TborStatus(TborStatus::UnsupportedCmd),
+        ) => {}
+        Err(err) => return Err(HsmError::from(err)),
+    }
+
     let req = DdiGetApiRevCmdReq {
         hdr: build_ddi_req_hdr(DdiOp::GetApiRev, None, None),
         data: DdiGetApiRevReq {},
@@ -109,7 +135,21 @@ impl From<HsmApiRev> for DdiApiRev {
 /// for HSM device operations while maintaining deref access to the
 /// underlying device.
 #[derive(Debug)]
-pub(crate) struct HsmDev(TsraDev);
+pub(crate) struct HsmDev(TsraDev, SessionTransports);
+
+/// Transport keys of the device's encrypted (API revision 2.0) sessions,
+/// by session id.
+#[derive(Default)]
+struct SessionTransports(Mutex<HashMap<u16, Arc<SessionTransport>>>);
+
+impl std::fmt::Debug for SessionTransports {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionTransports")
+    }
+}
+
+/// Upper bound on an encoded TBOR request sent over the session transport.
+const SECURE_REQ_CAP: usize = 8192;
 
 // Session-bound API operations traditionally pass `&mut None` through the
 // DDI layer. Scope the handle's backend cookie around those calls without
@@ -151,6 +191,68 @@ pub(crate) fn with_session_cookie<R>(
 }
 
 impl HsmDev {
+    /// Route later in-session and close commands for `session_id` over the
+    /// session transport.
+    pub(crate) fn set_session_transport(&self, session_id: u16, transport: SessionTransport) {
+        self.1.0.lock().insert(session_id, Arc::new(transport));
+    }
+
+    /// Stop routing `session_id` over the session transport. Returns
+    /// whether it was.
+    pub(crate) fn remove_session_transport(&self, session_id: u16) -> bool {
+        self.1.0.lock().remove(&session_id).is_some()
+    }
+
+    /// The session transport for `req`, if it is an in-session or close
+    /// command of an encrypted session.
+    fn session_transport<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        req: &T,
+    ) -> Option<(u16, Arc<SessionTransport>)> {
+        if !matches!(
+            req.session_ctrl(),
+            tsra_ddi_tbor_types::SessionControlKind::InSession
+                | tsra_ddi_tbor_types::SessionControlKind::Close
+        ) {
+            return None;
+        }
+        let id = req.get_session_id()?;
+        let transport = self.1.0.lock().get(&id).cloned()?;
+        Some((id, transport))
+    }
+
+    /// Encode `req`, seal it with `transport`, execute it, and open and
+    /// decode the response.
+    pub(crate) fn exec_op_tbor_sealed<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        session_id: u16,
+        transport: &SessionTransport,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<T::OpResp> {
+        let mut buf = vec![0u8; SECURE_REQ_CAP];
+        let len = req.encode_request(&mut buf)?.len();
+        buf.truncate(len);
+        let seal = transport
+            .seal_request(&mut buf)
+            .map_err(|_| DdiError::TborEncodeError)?;
+        let seal = DdiTransportSeal {
+            iv: seal.iv,
+            tag: seal.tag,
+        };
+        let (mut resp, seal) = self
+            .0
+            .exec_op_tbor_secure(session_id, &buf, seal, oob_items)?;
+        let seal = SessionTransportSeal {
+            iv: seal.iv,
+            tag: seal.tag,
+        };
+        transport
+            .open_response(&seal, &mut resp)
+            .map_err(|_| DdiError::TborDecodeError)?;
+        Ok(T::OpResp::decode_response(&resp)?)
+    }
+
     #[allow(unsafe_code)]
     pub(crate) fn exec_op_mbor<T: DdiOpReq>(
         &self,
@@ -176,6 +278,14 @@ impl HsmDev {
         oob_items: Option<&[&[u8]]>,
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            let mut items: Vec<_> = oob_items
+                .unwrap_or_default()
+                .iter()
+                .map(|item| TborOobItem::In(item))
+                .collect();
+            return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
+        }
         let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
             return self.0.exec_op_tbor(req, oob_items, cookie);
         };
@@ -198,6 +308,9 @@ impl HsmDev {
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
+        }
         let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
             return self.0.exec_op_tbor_oob(req, oob_items, cookie);
         };
@@ -307,7 +420,10 @@ pub(crate) fn dev_info_by_path(path: &str) -> HsmResult<DevInfo> {
 /// - The underlying DDI operation fails
 #[tracing::instrument(skip_all, fields(path = path))]
 pub(crate) fn open_dev(path: &str) -> HsmResult<HsmDev> {
-    let dev = DDI.open_dev(path).map(HsmDev).map_err(HsmError::from)?;
+    let dev = DDI
+        .open_dev(path)
+        .map(|dev| HsmDev(dev, SessionTransports::default()))
+        .map_err(HsmError::from)?;
 
     // Probe the device with GetApiRev + GetDeviceInfo at open time so
     // that transient IO faults surface here (where the resiliency
@@ -325,6 +441,10 @@ pub(crate) fn open_dev(path: &str) -> HsmResult<HsmDev> {
 /// surface transient errors during retry-eligible operations.
 fn probe_device(dev: &HsmDev) -> HsmResult<()> {
     let (_, max_rev) = get_api_rev(dev)?;
+    // Revision 2.0 devices have no MBOR transport.
+    if max_rev >= SESSION_TRANSPORT_API_REV {
+        return Ok(());
+    }
 
     let req = DdiGetDeviceInfoCmdReq {
         hdr: build_ddi_req_hdr(DdiOp::GetDeviceInfo, Some(max_rev), None),

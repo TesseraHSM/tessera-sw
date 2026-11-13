@@ -52,8 +52,7 @@ use tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
-use tsra_fw_hsm_oob::copy_oob;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -91,7 +90,6 @@ async fn recover_target_pub<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    oob: &OobPtr,
     req_buf: &HsmDmaBuf,
     rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
@@ -123,7 +121,7 @@ async fn recover_target_pub<P: HsmPal>(
         cert_descriptors,
         Some(anchor),
         &mut rcvr_pub[1..1 + POLICY_MAX_KEY_LEN],
-        async |index, buf| copy_oob(pal, io, oob, index, buf).await,
+        async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
     rcvr_pub[0] = SEC1_UNCOMPRESSED;
@@ -140,7 +138,6 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Both ids are `Copy`, so they outlive the view.
@@ -171,7 +168,6 @@ pub(crate) async fn handle<P: HsmPal>(
 
     // The target certificate chain is mandatory side-band data carried in
     // the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the fixed-size output seal in the IO scope so it survives
     // the crypto scratch allocator's reset.
@@ -182,7 +178,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // ── Phase 1: policy binding + DATA-anchored target chain ──
         let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-        recover_target_pub(pal, io, alloc, &oob, cmd_buf.request(), pk_r).await?;
+        recover_target_pub(pal, io, alloc, cmd_buf.request(), pk_r).await?;
 
         // ── Phase 2: recover SndrPriv + TMK, then HPKE-Auth seal the TMK
         // to RcvrPub.  The masked inputs are copied into crypto scratch so
@@ -232,14 +228,13 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 // Sender public key (`SndrPub`) in SEC1 BE, derived
                 // on-device from the recovered private key.  The PAL emits
-                // wire-LE `X ‖ Y`; reversing each coordinate in place yields
-                // SEC1 `0x04 ‖ X_be ‖ Y_be`.
+                // operand-order `X ‖ Y`; converting each coordinate in place
+                // yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
                 let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
                 pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
                     .await?;
                 pk_s[0] = SEC1_UNCOMPRESSED;
-                pk_s[1..1 + coord].reverse();
-                pk_s[1 + coord..1 + 2 * coord].reverse();
+                byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_s[1..])?;
 
                 // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
                 let cfg = HpkeSealConfig::auth(

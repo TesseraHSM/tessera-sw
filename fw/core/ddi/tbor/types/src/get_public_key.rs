@@ -19,7 +19,7 @@
 //!
 //! * `pub_key` — the wire public key, in the same format as
 //!   [`TborUnwrapKeyResp::pub_key`](crate::unwrap_key::TborUnwrapKeyResp):
-//!   `n_le ‖ e_le` for RSA, `x ‖ y` for ECC.
+//!   `n ‖ e` for RSA, `x ‖ y` for ECC (device byte order).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -50,14 +50,15 @@ pub struct TborGetPublicKeyReq<'a> {
 
     /// The masked private-key envelope. `mutable` so the handler can
     /// unmask it in place.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 }
 
 /// `GetPublicKey` response schema.
 #[tbor(response, pair = TborGetPublicKeyReq)]
 pub struct TborGetPublicKeyResp<'a> {
-    /// The wire public key (`n_le ‖ e_le` for RSA, `x ‖ y` for ECC).
+    /// The wire public key (`n ‖ e` for RSA, `x ‖ y` for ECC), in device
+    /// byte order.
     #[tbor(buffer, max_len = 520, mutable)]
     pub pub_key: &'a [u8],
 }

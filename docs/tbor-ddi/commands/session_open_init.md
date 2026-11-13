@@ -70,23 +70,23 @@ command.  Every `SessionOpenInit` here is therefore a fresh open.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 8-byte header, followed by the TOC entries, then the
 data section.  Buffer payloads pack contiguously in TOC order.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `psk_id` | `uint8` (inline) | PSK identifier asserting the caller role.  `0` = Crypto Officer, `1` = Crypto User.  Any other value → `InvalidPskId`. |
-| 8  | `session_type` | `uint8` (inline) | Channel-level integrity profile.  `0` = PlainText, `1` = Authenticated.  Any other value → `InvalidSessionType`.  Pairing with `psk_id` is enforced (see table above). |
-| 12 | `suite_id` | `uint8` (inline) | Cryptographic suite identifier (see [Suite registry](#suite-registry)).  Today only `0x01` is accepted; any other value → `UnsupportedSessionSuite`. |
-| 16 | `pk_init` | `buffer` (ref) | References the `pk_init` payload below.  TOC word carries `(data_offset = 20, length = Npk)`.  For `suite_id = 0x01` `Npk = 97`. |
+| 8 | `psk_id` | `uint8` (inline) | PSK identifier asserting the caller role.  `0` = Crypto Officer, `1` = Crypto User.  Any other value → `InvalidPskId`. |
+| 12 | `session_type` | `uint8` (inline) | Channel-level integrity profile.  `0` = PlainText, `1` = Authenticated.  Any other value → `InvalidSessionType`.  Pairing with `psk_id` is enforced (see table above). |
+| 16 | `suite_id` | `uint8` (inline) | Cryptographic suite identifier (see [Suite registry](#suite-registry)).  Today only `0x01` is accepted; any other value → `UnsupportedSessionSuite`. |
+| 20 | `pk_init` | `buffer` (ref) | References the `pk_init` payload below.  TOC word carries `(data_offset = 20, length = Npk)`.  For `suite_id = 0x01` `Npk = 97`. |
 
 ### Data section
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 20  | `Npk` (97 B for `0x01`) | `pk_init` | VM's per-handshake ephemeral key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed public key (`0x04 ‖ x(48) ‖ y(48)`).  Used as the HPKE recipient key in `auth_psk` send/receive export. |
+| 24 | `Npk` (97 B for `0x01`) | `pk_init` | VM's per-handshake ephemeral key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed public key (`0x04 ‖ x(48) ‖ y(48)`).  Used as the HPKE recipient key in `auth_psk` send/receive export. |
 
 ## Response
 
@@ -97,7 +97,7 @@ data section.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `session_id` | `session_id` (inline) | Reserved Pending slot index (`0` for CO, `1..=7` for CU). |
+| 8 | `session_id` | `session_id` (inline) | Reserved Pending slot index (`0` for CO, `1..=7` for CU). |
 | 12 | `pk_resp` | `buffer` (ref) | References the `pk_resp` payload below.  TOC word carries `(data_offset = 20, length = Npk)`. |
 | 16 | `mac_resp` | `buffer` (ref) | References the `mac_resp` payload below.  TOC word carries `(data_offset = 20 + Npk, length = Nh)`. |
 
@@ -105,8 +105,8 @@ data section.
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 20 | `Npk` (97 B for `0x01`) | `pk_resp` | HSM's HPKE response ephemeral public key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed point (distinct from the long-term `pk_hsm` — this is the per-handshake `enc` value from `auth_encap`). |
-| 20 + `Npk` | `Nh` (48 B for `0x01`) | `mac_resp` | Phase-1 confirmation MAC, HMAC over the suite's KDF hash keyed on the HPKE `exported` value.  See [Phase-1 confirmation MAC](#phase-1-confirmation-mac-mac_resp) below. |
+| 24 | `Npk` (97 B for `0x01`) | `pk_resp` | HSM's HPKE response ephemeral public key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed point (distinct from the long-term `pk_hsm` — this is the per-handshake `enc` value from `auth_encap`). |
+| 24 + `Npk` | `Nh` (48 B for `0x01`) | `mac_resp` | Phase-1 confirmation MAC, HMAC over the suite's KDF hash keyed on the HPKE `exported` value.  See [Phase-1 confirmation MAC](#phase-1-confirmation-mac-mac_resp) below. |
 
 ## Phase-1 confirmation MAC (`mac_resp`)
 

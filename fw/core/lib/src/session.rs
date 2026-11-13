@@ -8,6 +8,7 @@
 //! to a given session.  See [`tsra_fw_hsm_pal_traits::PSK_LEN`]
 //! for the `app_id ‖ app_pin` PSK layout.
 
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -55,7 +56,7 @@ pub(crate) async fn capture_auth_binding<'a, P: HsmPal>(
         HsmHashAlgo::Sha384,
         psk,
         &mut binding[4 + APP_ID_LEN..],
-        true,
+        HsmDigestForm::Standard,
     )
     .await?;
     Ok(binding)
@@ -78,7 +79,14 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
     let psk = alloc.dma_alloc(PSK_LEN)?;
     psk.copy_from_slice(crate::part_state::part_psk(pal, io, psk_id)?);
     let digest = alloc.dma_alloc(48)?;
-    pal.hash(io, HsmHashAlgo::Sha384, psk, digest, true).await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        psk,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
     if binding[4 + APP_ID_LEN..] != digest[..] {
         return Err(HsmError::SessionAuthFailure);
     }

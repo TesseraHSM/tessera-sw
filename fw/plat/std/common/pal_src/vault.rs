@@ -1,0 +1,266 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! [`HsmVault`] implementation for the standard PAL.
+//!
+//! Delegates to the per-partition [`KeyVault`] stored inside each
+//! [`PartitionEntry`].  Uses [`active_part`](StdHsmPal::active_part) /
+//! [`active_part_mut`](StdHsmPal::active_part_mut) helpers for partition
+//! access.  All methods are synchronous on the single-threaded Embassy
+//! executor.
+//!
+//! `vault_key_create` commits the key immediately and returns its
+//! [`HsmKeyId`]; rollback of a half-completed operation is left to a
+//! future undo log.
+//!
+//! [`KeyVault`]: crate::drivers::vault::KeyVault
+//! [`PartitionEntry`]: crate::part::PartitionEntry
+
+use tsra_crypto::PrivateKey;
+use tsra_crypto::RsaPrivateKey;
+
+use super::*;
+use crate::drivers::vault::KeyVault;
+use crate::StdHsmPal;
+
+impl StdHsmPal {
+    /// Enforce session-scoped key isolation.
+    ///
+    /// A key bound to a session (created with `Session` availability) may
+    /// only be accessed from that same session; from any other session it
+    /// is reported as [`HsmError::KeyNotFound`], mirroring the reference
+    /// behaviour. Partition-scoped (`App`/persistent) keys carry no
+    /// binding and stay accessible from any context, including internal
+    /// firmware IOs whose SQE has no session.
+    fn assert_key_session_access(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+        let entry = self.active_part(io.pid())?;
+        let Some(bound) = entry.vault.key_session_binding(key_id)? else {
+            return Ok(());
+        };
+        // Session-bound key: the current session (from the SQE) must map to
+        // the same physical vault key id (the session key id) that the key
+        // is bound to, else the key is not visible here.
+        let current = io
+            .sqe()
+            .session_id()
+            .and_then(|id| entry.session_table.physical_id(HsmSessId::from(id)).ok());
+        if current == Some(bound) {
+            Ok(())
+        } else {
+            Err(HsmError::KeyNotFound)
+        }
+    }
+}
+
+impl StdHsmPal {
+    /// Store `key` in the partition's vault, mapping a logical session ID
+    /// to its physical vault key ID first.  Shared by the ordinary and the
+    /// bulk create paths.
+    pub(crate) fn vault_store(
+        &self,
+        io: &StdHsmIo,
+        key: &[u8],
+        kind: HsmVaultKeyKind,
+        session_id: Option<HsmSessId>,
+        attrs: HsmVaultKeyAttrs,
+    ) -> HsmResult<HsmKeyId> {
+        let entry = self.active_part_mut(io.pid())?;
+        let session_key_id = session_id
+            .map(|sid| entry.session_table.physical_id(sid))
+            .transpose()?;
+        entry.vault.create(key, kind, session_key_id, attrs)
+    }
+}
+
+impl HsmVault for StdHsmPal {
+    /// Store a new key in the partition's vault.
+    ///
+    /// If `session_id` is `Some`, maps the logical session ID to the
+    /// physical vault key ID via the session table before storing.
+    /// The key is committed immediately.
+    async fn vault_key_create(
+        &self,
+        io: &StdHsmIo,
+        key: &HsmDmaBuf,
+        kind: HsmVaultKeyKind,
+        session_id: Option<HsmSessId>,
+        attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
+    ) -> HsmResult<HsmKeyId> {
+        // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
+        if crate::bulk::is_bulk_kind(kind) {
+            return Err(HsmError::InvalidKeyType);
+        }
+
+        let unwrapping =
+            kind == HsmVaultKeyKind::Rsa2kPrivate && attrs.internal() && attrs.unwrap();
+        if unwrapping != (pct == HsmVaultPct::UnwrappingKey) || (unwrapping && session_id.is_some())
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        if pct == HsmVaultPct::UnwrappingKey {
+            let private = RsaPrivateKey::from_hsm_bytes(key).map_err(|_| HsmError::InvalidArg)?;
+            let public = private
+                .public_key()
+                .map_err(|_| HsmError::RsaGenerateError)?;
+            if !self
+                .rsa_pair_pct(&private, &public, HsmRsaPct::EncryptDecrypt)
+                .await?
+            {
+                return Err(HsmError::PctValidationUnwrappingKeyFailed);
+            }
+        }
+        self.vault_store(io, key, kind, session_id, attrs)
+    }
+
+    /// Delete a key from the partition's vault.
+    async fn vault_key_delete(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.vault.delete(key_id)
+    }
+
+    /// Disable (soft-delete) a key — the undo log's reversible-delete
+    /// staging step.  Hidden from lookups; `enable` rolls back, `delete`
+    /// commits.
+    fn vault_key_disable(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.vault.disable(key_id)
+    }
+
+    /// Re-enable a disabled key — the undo side of a reversible delete.
+    fn vault_key_enable(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.vault.enable(key_id)
+    }
+
+    /// Delete all session-scoped keys for the given logical session.
+    ///
+    /// Maps the logical session ID to the physical vault key ID, then
+    /// removes all vault entries bound to that physical ID.
+    async fn vault_key_delete_by_session(
+        &self,
+        io: &StdHsmIo,
+        session_id: HsmSessId,
+    ) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        let physical_id = entry.session_table.physical_id(session_id)?;
+        entry.vault.delete_by_session_key(physical_id)
+    }
+
+    /// Clear all keys from the partition's vault.
+    async fn vault_clear(&self, io: &StdHsmIo) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.vault.clear();
+        Ok(())
+    }
+
+    /// Retrieve key material by ID.
+    fn vault_key(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
+        self.assert_key_session_access(io, key_id)?;
+        let entry = self.active_part(io.pid())?;
+        let bytes = entry.vault.key(key_id)?;
+        // SAFETY: on the host, "DMA" is a fiction — every heap-allocated
+        // byte is reachable by every code path. Branding the slice as
+        // `HsmDmaBuf` only satisfies the type system; no DMA hardware is
+        // involved.
+        Ok(unsafe { HsmDmaBuf::from_raw(bytes) })
+    }
+
+    /// Return the firmware raw key size for a given kind.
+    fn vault_key_len(&self, _io: &StdHsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
+        KeyVault::key_len(kind)
+    }
+
+    /// Query key kind.
+    fn vault_key_kind(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
+        self.assert_key_session_access(io, key_id)?;
+        let entry = self.active_part(io.pid())?;
+        entry.vault.key_kind(key_id)
+    }
+
+    /// Query key attributes.
+    fn vault_key_attrs(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
+        self.assert_key_session_access(io, key_id)?;
+        let entry = self.active_part(io.pid())?;
+        entry.vault.key_attrs(key_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tsra_crypto::ExportableHsmKey;
+    use tsra_crypto::KeyGenerationOp;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn unwrapping_pct_is_explicit_and_failure_does_not_store_key() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let pid = HsmPartId::from(1u8);
+        pal.part_alloc_internal(1, 1)
+            .await
+            .expect("allocate partition");
+        let io = StdHsmIo::admin(pid, 0, reply_tx);
+        let pk = RsaPrivateKey::generate(256).expect("generate RSA key");
+        let attrs = HsmVaultKeyAttrs::new()
+            .with_internal(true)
+            .with_unwrap(true);
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let key = alloc.dma_alloc(pk.hsm_bytes_len()).expect("key buffer");
+            pk.to_hsm_bytes(key).expect("export key");
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::None
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    HsmVaultKeyAttrs::new(),
+                    HsmVaultPct::UnwrappingKey
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            pal.rsa_pct_fail.set(true);
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::UnwrappingKey
+                )
+                .await,
+                Err(HsmError::PctValidationUnwrappingKeyFailed)
+            );
+            pal.rsa_pct_fail.set(false);
+            let id = pal
+                .vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::UnwrappingKey,
+                )
+                .await
+                .expect("store tested key");
+            assert!(pal.vault_key(&io, id).expect("stored key") == key);
+        })
+        .await;
+    }
+}

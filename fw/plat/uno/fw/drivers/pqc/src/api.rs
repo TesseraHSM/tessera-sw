@@ -123,10 +123,10 @@ impl PqcDriver {
         &self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mldsa_gen_key(kind, seed, pub_key, sec_key).await)
+        self.with_engine(async |engine| engine.mldsa_gen_key(kind, seed, pk, sk).await)
             .await
     }
 
@@ -162,7 +162,7 @@ impl PqcDriver {
     pub async fn mldsa_sign(
         &self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
+        sk: &[u8],
         rnd: &[u8; crate::MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
@@ -171,7 +171,7 @@ impl PqcDriver {
     ) -> HsmResult<()> {
         self.with_engine(async |engine| {
             engine
-                .mldsa_sign(kind, sec_key, rnd, msg_type, msg, ctx, sig)
+                .mldsa_sign(kind, sk, rnd, msg_type, msg, ctx, sig)
                 .await
         })
         .await
@@ -182,10 +182,10 @@ impl PqcDriver {
         &self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mlkem_gen_key(kind, seed, pub_key, sec_key).await)
+        self.with_engine(async |engine| engine.mlkem_gen_key(kind, seed, pk, sk).await)
             .await
     }
 
@@ -193,33 +193,25 @@ impl PqcDriver {
     pub async fn mlkem_encaps(
         &self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         m: &[u8; crate::MLDSA_SEED_LEN],
-        ciphertext: &mut [u8],
-        shared_secret: &mut [u8],
+        ct: &mut [u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_encaps(kind, pub_key, m, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        self.with_engine(async |engine| engine.mlkem_encaps(kind, pk, m, ct, ss).await)
+            .await
     }
 
     /// Decapsulate a ciphertext on whichever FP core is free.
     pub async fn mlkem_decaps(
         &self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
-        ciphertext: &[u8],
-        shared_secret: &mut [u8],
+        sk: &[u8],
+        ct: &[u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_decaps(kind, sec_key, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        self.with_engine(async |engine| engine.mlkem_decaps(kind, sk, ct, ss).await)
+            .await
     }
 
     /// Verify a signature over a message, or an external `μ`, on whichever
@@ -227,16 +219,14 @@ impl PqcDriver {
     pub async fn mldsa_verify(
         &self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
         self.with_engine(async |engine| {
-            engine
-                .mldsa_verify(kind, pub_key, msg_type, msg, ctx, sig)
-                .await
+            engine.mldsa_verify(kind, pk, msg_type, msg, ctx, sig).await
         })
         .await
     }

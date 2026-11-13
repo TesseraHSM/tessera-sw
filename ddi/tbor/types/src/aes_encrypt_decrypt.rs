@@ -71,7 +71,7 @@ pub struct TborAesEncryptDecryptReq {
 
     /// The masked AES key, placed after the IV and message so firmware can
     /// return those fields in place without moving their payload bytes.
-    #[tbor(min_len = 248, max_len = 264)]
+    #[tbor(align = 4, min_len = 248, max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 

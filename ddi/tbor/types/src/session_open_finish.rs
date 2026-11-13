@@ -60,6 +60,33 @@ pub const SESSION_MAC_RX_LABEL: &[u8] = b"tsra-session-mac-rx-v1";
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN`.
 pub const SESSION_MAC_DIR_KEY_LEN: usize = 48;
 
+/// HKDF-Expand label producing the **VM→HSM** session transport key
+/// (API revision 2.x).
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_H2M_LABEL`.
+pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
+
+/// HKDF-Expand label producing the **HSM→VM** session transport key
+/// (API revision 2.x).
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_M2H_LABEL`.
+pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
+
+/// Length in bytes of each directional AES-256-GCM session transport key.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN`.
+pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
+
+/// AES-GCM IV length of a session transport message.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN`.
+pub const SESSION_TRANSPORT_IV_LEN: usize = 12;
+
+/// AES-GCM tag length of a session transport message.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_TAG_LEN`.
+pub const SESSION_TRANSPORT_TAG_LEN: usize = 16;
+
 /// Length of the AEAD `seed_envelope` on the wire.
 ///
 /// `"AEAD"(4) ‖ alg=AesGcm256(1) ‖ rsv=0(1) ‖ aad_len_be=0(2) ‖

@@ -46,6 +46,50 @@ single `none` TOC placeholder and no typed body fields.
 | 3 | 1 B | `reserved` | Reserved, MUST be `0x00`. |
 | 4 | 4 B | `status` | Little-endian `HsmError` value.  `0x00000000` = success. |
 
+## Crypto operand byte order
+
+Header and framing integers (`U16`/`U32`/`U64` fields, descriptors) are
+always little-endian. Crypto operands — ECC coordinates and signature
+components, digests passed to `EccSign`, RSA moduli, exponents and
+`RsaModExp` / OAEP integers — are carried in the **device byte order**, the
+native order of the device's crypto engine, so firmware never copies an
+operand just to convert it:
+
+| API revision | Device | Order | P-521 coordinate |
+| --- | --- | --- | --- |
+| 1.x | Uno (and std Uno) | little-endian | 68 B (66 B value + 2 zero pad bytes above it) |
+| 2.0 | Duo (and std Duo) | big-endian | 66 B (exact) |
+
+P-256 / P-384 coordinates are 32 / 48 B in both orders. The host derives
+the order from the negotiated API revision and converts at the DDI
+boundary. `PartInfo.pid_pub_key` is the exception: it is big-endian on
+every device.
+
+## Pairwise consistency tests
+
+The std Uno, std Duo, and physical Uno PALs honor selected key-generation
+PCTs: sign/verify for ECC and ML-DSA, two-way agreement for ECDH, RSA
+sign/verify or encrypt/decrypt, and ML-KEM encapsulate/decapsulate. RSA
+generation is supported only by the std PALs. Query
+mode performs no generation, entropy draw, or PCT; `None` explicitly skips
+the test. TBOR ML key generation requests its PCT before masking or returning
+the generated key.
+
+An inconsistent generated key enters physical Uno's FIPS error state.
+The simulator returns the matching PCT error without publishing the key.
+ML-DSA and ML-KEM failures use `PctValidationMlDsaGenKeyFailed`
+(`0x087000E8`) and `PctValidationMlKemGenKeyFailed` (`0x087000E9`).
+Partition identity, establish-credential, and session-encryption failures
+retain their distinct statuses. An operation that cannot complete a PCT
+returns its operation error rather than treating it as a consistency failure.
+
+Restoring the partition unwrapping key explicitly requests
+`HsmVaultPct::UnwrappingKey`, an RSA-2048 encrypt/decrypt PCT before vault
+storage. The simulator also tests its lazily generated unwrapping key.
+Imported ECC/RSA keys retain their component-validation checks and selected
+PCTs, with import-specific errors rather than generated-key error-state
+handling. PCT secret scratch is zeroized or owned by scrubbed IO storage.
+
 ## Paired TOC footprint
 
 Each command reserves the larger of its request and response schema TOC
@@ -58,6 +102,30 @@ Host and firmware must be updated together. Equal metadata footprints are
 the framing prerequisite for shared-buffer execution; handlers still need
 to preserve live inputs and validate output capacity before reusing data.
 Error responses retain the single `None` placeholder described above.
+
+## Alignment padding
+
+Every masked key (and the `MlDsaSign` signature, written in place over its
+masked key) is preceded by a `padding` TOC entry (type 9). The padding
+places the field on a 4-byte boundary measured from the start of the
+message, so its length is 0..=3 bytes and is usually 0. The entry is
+always present, even when its length is 0.
+
+Firmware guarantees only 4-byte alignment for its exchange buffers, so
+4-byte message-relative alignment is also 4-byte memory alignment. Both
+sides reject:
+
+| Error | Cause |
+|---|---|
+| `TborMisalignedField` | An aligned field does not start on its 4-byte boundary |
+| `TborUnexpectedTocType` | The `padding` entry before an aligned field is missing |
+
+The host decoder reports the same cases on responses as
+`DecodeError::MisalignedField` and `DecodeError::UnexpectedTocType`.
+Handlers that transform fields in place additionally return
+`TborNonCanonicalLayout` when the request fields are not in the layout
+the in-place operation requires. See the
+[TBOR specification](../../fw/core/ddi/tbor/docs/spec.md) for the framing rules.
 
 ## Firmware exchange storage
 
@@ -266,3 +334,67 @@ acknowledges and zeroizes the slot), and the HSM unilaterally
 zeroizes any session whose slot it needs to reclaim (`bmk_session`
 may still be re-presented later via the resume path on a fresh
 `SessionOpenInit`).
+
+## Duo session transport (API revision 2.0)
+
+Duo devices support API revision 2.0 only and carry TBOR only (no MBOR,
+no bulk queue). Every Duo submission is a 128-byte SQE answered by a
+64-byte CQE; the SQE opcode (DW0 bits 7-0) selects one of three channels:
+
+| SQE opcode | Name | Carries |
+|---|---|---|
+| `0` | `Tbor` | Plaintext TBOR: `NoSession` commands and `SessionOpenInit`. |
+| `1` | `TborSecure` | TBOR encrypted under the session transport keys: `SessionOpenFinish`, every `InSession` command, and `SessionClose`. |
+| `2` | `FlushSession` | No payload. Tears down the session named by the SQE `session_id` (including a Pending one). |
+
+A command sent on the wrong channel is rejected without being executed.
+On `TborSecure`, the TBOR body's `session_id` must equal the SQE
+`session_id` (DW1).
+
+### Transport keys
+
+`SessionOpenInit` derives two AES-256-GCM keys from the HPKE `exported`
+secret and stores them with the Pending session, so `SessionOpenFinish`
+already travels encrypted:
+
+```text
+key_h2m = HKDF-Expand-SHA-384(exported, "tsra-session-xport-h2m-v1" ‖ be16(32), 32)
+key_m2h = HKDF-Expand-SHA-384(exported, "tsra-session-xport-m2h-v1" ‖ be16(32), 32)
+```
+
+`key_h2m` protects requests (host → HSM) and `key_m2h` protects responses
+(HSM → host); separate keys stop reflection of one direction into the
+other. Both CO and CU sessions use them, and at revision 2.0 they replace
+the CO outer HMAC envelope. The keys never leave the session's key-vault
+entry; the host zeroizes its copies on close or flush.
+
+### Encrypted exchange
+
+1. The host encrypts the entire TBOR request (header, TOC and data)
+   in place with `key_h2m` under a fresh random 96-bit IV, and places the
+   IV (DW23–25) and 16-byte tag (DW19–22) in the SQE. `aad_len` (DW26)
+   must be `0`; there is no AAD.
+2. The HSM decrypts the request and checks the tag before parsing. A tag
+   failure, or a session without transport keys, completes with CQE
+   status `SESSION_TRANSPORT_ERR` (`0xCC`); session state is unchanged.
+3. The TBOR response, success or error, is encrypted with `key_m2h`
+   under a fresh IV; the IV (CQE DW5–7) and tag (CQE DW1–4) are returned
+   in the CQE.
+
+Because the SQE `session_id` selects the key, tampering with it fails the
+tag check. `SessionClose` defers destroying the session until the CQE has
+posted, so its response is still encrypted.
+
+### Out-of-band data
+
+Out-of-band (OOB) items are not encrypted by the transport. On
+`TborSecure` they are passed through as on `Tbor`: the SQE OOB fields
+(DW2–4) describe the SGL descriptor array, and `oob_len` must equal the
+number of items × 16 bytes. Parameters that need confidentiality are
+protected at the command level (for example, AEAD-sealed key material).
+
+### Limitations
+
+Replay of a captured request or response is not detected: the firmware
+processes requests concurrently on several cores and keeps no
+per-session sequence state.

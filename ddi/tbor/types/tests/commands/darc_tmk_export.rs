@@ -38,6 +38,7 @@
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -67,6 +68,7 @@ use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
 use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -197,8 +199,8 @@ pub(crate) fn mint_kex(ready: &ExportReady) -> KexKey {
         .expect("masked kex key length");
     let mut pub_raw = [0u8; RAW_PUB_LEN];
     pub_raw.copy_from_slice(&kex.pub_key);
-    pub_raw[..COORD_LEN].reverse();
-    pub_raw[COORD_LEN..].reverse();
+    dev_rev_in_place(&mut pub_raw[..COORD_LEN]);
+    dev_rev_in_place(&mut pub_raw[COORD_LEN..]);
     KexKey { masked, pub_raw }
 }
 
@@ -505,4 +507,22 @@ fn darc_tmk_export_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked sender key or TMK and one without its
+/// padding entry; the decoder rejects before the OOB chain is read.
+#[test]
+fn darc_tmk_export_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session_with_data();
+    let masked_tmk = gen_masked_tmk(&ready);
+    let source_kex = mint_kex(&ready);
+    let target_kex = mint_kex(&ready);
+    let (req, _chain) = build_valid_export(
+        &ready,
+        &ready.data,
+        &target_kex.pub_raw,
+        source_kex.masked,
+        masked_tmk,
+    );
+    assert_masked_key_layout_rejected(&ready.ctx, &req);
 }
