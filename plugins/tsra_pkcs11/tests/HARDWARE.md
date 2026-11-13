@@ -53,13 +53,15 @@ and the result of the last hardware run.
 ### H-a Firmware, platform and key survival
 
 - Run: generate AES keys, encrypt with CBC, GCM and XTS, `C_Logout`,
-  `C_Login`, encrypt again.
-- Expect: the same ciphertexts after the login. Round trips only, until keys
+  `C_Login`, encrypt again. The same with an EC key pair, signing.
+- Expect: the same ciphertexts after the login, and EC signatures that
+  verify under the public point read before it. Round trips only, until keys
   can be imported for known-answer tests. Firmware older than the key
   generation enablement fails at key generation.
 - Cases: `key_survival.*`, `key_survival_persist.after_finalize_initialize`,
   `logout.public_session_object_survives_logout`,
-  `aes_cbc.logout_tears_down_the_active_operation`.
+  `aes_cbc.logout_tears_down_the_active_operation`, `ec_survival.*`,
+  `ec_survival_persist.*`.
 - Result: not run yet.
 
 ### H-b Provisioning through C_Login on a fresh partition
@@ -155,6 +157,8 @@ and the result of the last hardware run.
   unwrapped over MBOR, a 16-byte XTS tweak against an 8-byte little-endian
   sector number.
 - Expect: the same results as on the emulator and the host references.
+- Cases: `ec_sign.every_curve_and_hash_signs_what_the_host_verifies` (a
+  64-byte hash on P-256 and P-384 is the over-long digest).
 - Result: not run yet.
 
 ### H-l RSA decryption timing

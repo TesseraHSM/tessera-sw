@@ -220,14 +220,17 @@ class ModuleEnvironment : public ::testing::Environment
 };
 
 /// Terminate whatever operation `s` has active. A data call with bad
-/// arguments terminates a cipher or digest operation (spec rule, see
-/// tsra_pkcs11_crypt.c), and C_FindObjectsFinal ends a search; each call is
-/// a harmless CKR_OPERATION_NOT_INITIALIZED when nothing is active.
+/// arguments terminates a cipher, digest, sign or verify operation (spec
+/// rule, see tsra_pkcs11_crypt.c), and C_FindObjectsFinal ends a search;
+/// each call is a harmless CKR_OPERATION_NOT_INITIALIZED when nothing is
+/// active.
 inline void abandon_operations(CK_SESSION_HANDLE s)
 {
     (void)p11()->C_Encrypt(s, nullptr, 0, nullptr, nullptr);
     (void)p11()->C_Decrypt(s, nullptr, 0, nullptr, nullptr);
     (void)p11()->C_Digest(s, nullptr, 0, nullptr, nullptr);
+    (void)p11()->C_Sign(s, nullptr, 0, nullptr, nullptr);
+    (void)p11()->C_Verify(s, nullptr, 1, nullptr, 0);
     (void)p11()->C_FindObjectsFinal(s);
 }
 

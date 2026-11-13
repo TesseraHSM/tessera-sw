@@ -83,9 +83,11 @@ typedef struct
 
     tsra_pkcs11_op_type_t op;
     tsra_pkcs11_op_mode_t op_mode; /* reset together with op */
-    void *op_ctx;                  /* digest state (P11_OP_DIGEST) or cipher operation state
+    void *op_ctx;                  /* digest state (P11_OP_DIGEST), cipher operation state
                                     * (P11_OP_ENCRYPT / P11_OP_DECRYPT, owned by
-                                    * tsra_pkcs11_crypt.c) */
+                                    * tsra_pkcs11_crypt.c) or sign operation state
+                                    * (P11_OP_SIGN / P11_OP_VERIFY, owned by
+                                    * tsra_pkcs11_sign.c) */
     void *find_cursor;             /* object-store cursor while op == P11_OP_FIND */
 
     /*
@@ -164,7 +166,7 @@ void tsra_pkcs11_unlock(void);
 tsra_pkcs11_session_t *tsra_pkcs11_session_lookup(CK_SESSION_HANDLE h);
 
 /* Abandon the session's active operation, releasing its digest state, cipher
- * state (including the unmasked device key), or find cursor. */
+ * or sign state (including the unmasked device keys), or find cursor. */
 CK_RV tsra_pkcs11_session_reset_op(tsra_pkcs11_session_t *s);
 
 /* Abandon the session's active operation if it is of kind `op` (the v3.0
@@ -188,6 +190,11 @@ void tsra_pkcs11_session_destroy_owned(tsra_pkcs11_session_t *s);
  * key first). NULL-safe no-op. Defined in tsra_pkcs11_crypt.c, which owns the
  * type. */
 void tsra_pkcs11_cipher_op_free(void *op_ctx);
+
+/* Free a sign or verify operation context (releases its SDK stream and
+ * unmasked device keys first). NULL-safe no-op. Defined in
+ * tsra_pkcs11_sign.c, which owns the type. */
+void tsra_pkcs11_sign_op_free(void *op_ctx);
 
 /* Fill a fixed-width, space-padded CK_UTF8CHAR string field. */
 void tsra_pkcs11_pad_str(CK_UTF8CHAR *dst, size_t dstlen, const char *src);

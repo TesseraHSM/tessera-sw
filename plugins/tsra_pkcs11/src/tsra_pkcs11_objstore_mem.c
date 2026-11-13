@@ -153,7 +153,7 @@ static CK_RV mem_create(
     }
 
     memset(o, 0, sizeof(*o));
-    o->attrs = (mem_attr *)calloc(count ? count : 1, sizeof(mem_attr));
+    o->attrs = (mem_attr *)calloc(count + 1, sizeof(mem_attr)); /* + a defaulted CKA_TOKEN */
     if (o->attrs == NULL)
     {
         return CKR_HOST_MEMORY;
@@ -186,6 +186,20 @@ static CK_RV mem_create(
         }
     }
     o->attr_count = count;
+    if (find_attr(o, CKA_TOKEN) == NULL)
+    {
+        /* Every object answers CKA_TOKEN, and a search for FALSE finds it. */
+        mem_attr *a = &o->attrs[count];
+        a->value = (CK_BYTE *)calloc(1, sizeof(CK_BBOOL)); /* CK_FALSE */
+        if (a->value == NULL)
+        {
+            free_object(o);
+            return CKR_HOST_MEMORY;
+        }
+        a->type = CKA_TOKEN;
+        a->len = sizeof(CK_BBOOL);
+        o->attr_count++;
+    }
     o->in_use = CK_TRUE;
     o->handle = ++st->next_handle; /* handle 0 is CK_INVALID_HANDLE */
     o->slot = slot;

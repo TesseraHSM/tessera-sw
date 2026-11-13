@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 /*
- * Key-backed operations: C_GenerateKey (CKM_AES_KEY_GEN, CKM_AES_XTS_KEY_GEN)
- * and AES-CBC / AES-CBC-PAD / AES-GCM / AES-XTS encrypt/decrypt, one-shot and
- * multi-part.
+ * Key-backed operations: C_GenerateKey (CKM_AES_KEY_GEN, CKM_AES_XTS_KEY_GEN),
+ * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN) and AES-CBC / AES-CBC-PAD / AES-GCM /
+ * AES-XTS encrypt/decrypt, one-shot and multi-part. Sign and verify are in
+ * tsra_pkcs11_sign.c.
  *
  * The TSRA device holds keys only as session-scoped handles; the durable form
  * is the opaque masked blob. So C_GenerateKey stores that blob as the object's
@@ -16,6 +17,7 @@
  * logic (validation, defaults) in tsra_pkcs11_template.c.
  */
 
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_key.h"
 #include "tsra_pkcs11_template.h"
@@ -86,6 +88,46 @@ void tsra_pkcs11_cipher_op_free(void *op_ctx)
     }
     tsra_pkcs11_wipe(op, sizeof(*op));
     free(op);
+}
+
+/*
+ * Store one generated key object: the object from `full`, its masked body, and
+ * for a session object its place on the session's owned list. On failure
+ * nothing remains: a key object without its masked body, or one the session
+ * cannot track, is not handed out.
+ */
+static CK_RV store_key(
+    tsra_pkcs11_session_t *s,
+    const CK_ATTRIBUTE *full,
+    CK_ULONG n,
+    CK_BBOOL token,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    CK_OBJECT_HANDLE *out
+)
+{
+    CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+    CK_RV rv =
+        g_tsra_pkcs11.store.ops->create(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, full, n, &h);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    rv = g_tsra_pkcs11.store.ops
+             ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
+    if ((rv == CKR_OK) && !token)
+    {
+        /* A session object dies with this session (the C_CloseSession rule). */
+        rv = tsra_pkcs11_session_own_object(s, h);
+    }
+    if (rv != CKR_OK)
+    {
+        (void
+        )g_tsra_pkcs11.store.ops->destroy(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, NULL, NULL);
+        return rv;
+    }
+    *out = h;
+    return CKR_OK;
 }
 
 /* ========================================================================= */
@@ -201,24 +243,9 @@ CK_RV C_GenerateKey(
     }
 
     CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
-    rv = g_tsra_pkcs11.store.ops->create(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, full, n, &h);
+    rv = store_key(s, full, n, token, blob, blob_len, &h);
     if (rv != CKR_OK)
     {
-        goto cleanup;
-    }
-    rv = g_tsra_pkcs11.store.ops
-             ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
-    if ((rv == CKR_OK) && !token)
-    {
-        /* A session object dies with this session (the C_CloseSession rule). */
-        rv = tsra_pkcs11_session_own_object(s, h);
-    }
-    if (rv != CKR_OK)
-    {
-        /* No half-object: a key object without its masked body, or one the
-         * session cannot track, is not handed out. */
-        (void
-        )g_tsra_pkcs11.store.ops->destroy(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, NULL, NULL);
         goto cleanup;
     }
     *phKey = h;
@@ -237,6 +264,251 @@ cleanup:
         free(blob);
     }
     free(full);
+    tsra_pkcs11_unlock();
+    return rv;
+}
+
+/* ========================================================================= */
+/* C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN)                                   */
+/* ========================================================================= */
+
+/* Destroy a key object this call created (one half of a pair whose other half
+ * failed), and take it off the session's owned list. */
+static void discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h)
+{
+    tsra_pkcs11_session_disown_object(s->slot, h);
+    (void
+    )g_tsra_pkcs11.store.ops->destroy(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, NULL, NULL);
+}
+
+/*
+ * Generate one key pair of a key-pair mechanism, in the logged-in session `s`
+ * whose device session is `hsm_session`: judge the templates, make the pair on
+ * the device and store both objects (neither on failure).
+ */
+typedef CK_RV (*keypair_fn)(
+    tsra_pkcs11_session_t *s,
+    uint32_t hsm_session,
+    const CK_ATTRIBUTE *pub,
+    CK_ULONG pub_count,
+    const CK_ATTRIBUTE *priv,
+    CK_ULONG priv_count,
+    CK_OBJECT_HANDLE *h_pub,
+    CK_OBJECT_HANDLE *h_priv
+);
+
+static CK_RV ec_generate_pair(
+    tsra_pkcs11_session_t *s,
+    uint32_t hsm_session,
+    const CK_ATTRIBUTE *pub,
+    CK_ULONG pub_count,
+    const CK_ATTRIBUTE *priv,
+    CK_ULONG priv_count,
+    CK_OBJECT_HANDLE *h_pub,
+    CK_OBJECT_HANDLE *h_priv
+)
+{
+    tsra_pkcs11_ec_keygen kg;
+    const char *why = NULL;
+    CK_RV rv = tsra_pkcs11_ec_keygen_check(
+        CKM_EC_KEY_PAIR_GEN,
+        pub,
+        pub_count,
+        priv,
+        priv_count,
+        &kg,
+        &why
+    );
+    if (why != NULL)
+    {
+        TSRA_PKCS11_LOG("C_GenerateKeyPair: template refused: %s", why);
+    }
+    if ((rv == CKR_OK) && (kg.pub_token || kg.priv_token) && ((s->flags & CKF_RW_SESSION) == 0))
+    {
+        rv = CKR_SESSION_READ_ONLY;
+    }
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+
+    /* The private key is private unless its template says otherwise; the
+     * scope does not depend on it. */
+    CK_BBOOL priv_private = CK_TRUE;
+    (void
+    )tsra_pkcs11_tmpl_bool(tsra_pkcs11_tmpl_find(priv, priv_count, CKA_PRIVATE), &priv_private);
+
+    CK_BYTE *blob = NULL;
+    CK_ULONG blob_len = 0;
+    CK_BYTE *spki = NULL;
+    CK_ULONG spki_len = 0;
+    CK_ATTRIBUTE *pub_full = NULL;
+    CK_ATTRIBUTE *priv_full = NULL;
+    CK_OBJECT_HANDLE pub_handle = CK_INVALID_HANDLE;
+    rv = tsra_pkcs11_key_ec_generate(
+        hsm_session,
+        kg.curve,
+        kg.sign,
+        tsra_pkcs11_key_scope_props(kg.priv_token, priv_private),
+        &blob,
+        &blob_len,
+        &spki,
+        &spki_len
+    );
+    if (rv != CKR_OK)
+    {
+        goto cleanup;
+    }
+    CK_BYTE point[EC_POINT_DER_MAX];
+    CK_ULONG point_len = sizeof(point);
+    rv = tsra_pkcs11_ec_point_from_spki(spki, spki_len, kg.curve, point, &point_len);
+    if (rv != CKR_OK)
+    {
+        TSRA_PKCS11_LOG(
+            "C_GenerateKeyPair: the device's public key info is not the EC key asked for"
+        );
+        goto cleanup;
+    }
+
+    pub_full = (CK_ATTRIBUTE *)malloc((pub_count + EC_PUB_APPENDED_ATTRS) * sizeof(CK_ATTRIBUTE));
+    priv_full =
+        (CK_ATTRIBUTE *)malloc((priv_count + EC_PRIV_APPENDED_ATTRS) * sizeof(CK_ATTRIBUTE));
+    if ((pub_full == NULL) || (priv_full == NULL))
+    {
+        rv = CKR_HOST_MEMORY;
+        goto cleanup;
+    }
+    /* `fill` backs the appended values and must live until the store has
+     * copied them. */
+    tsra_pkcs11_ec_keygen_fill fill;
+    CK_ULONG pub_n = 0;
+    CK_ULONG priv_n = 0;
+    rv = tsra_pkcs11_ec_keygen_build(
+        &kg,
+        pub,
+        pub_count,
+        priv,
+        priv_count,
+        point,
+        point_len,
+        &fill,
+        pub_full,
+        &pub_n,
+        priv_full,
+        &priv_n
+    );
+    if (rv != CKR_OK)
+    {
+        goto cleanup;
+    }
+
+    /* Both objects carry the pair's masked blob: the SDK verifies only with
+     * a device handle, which only unmasking the pair gives. */
+    rv = store_key(s, pub_full, pub_n, kg.pub_token, blob, blob_len, &pub_handle);
+    if (rv != CKR_OK)
+    {
+        goto cleanup;
+    }
+    rv = store_key(s, priv_full, priv_n, kg.priv_token, blob, blob_len, h_priv);
+    if (rv != CKR_OK)
+    {
+        discard_key(s, pub_handle);
+        goto cleanup;
+    }
+    *h_pub = pub_handle;
+    TSRA_PKCS11_LOG(
+        "C_GenerateKeyPair: EC curve %d, %s, pub=%lu priv=%lu (blob %lu bytes)",
+        (int)kg.curve,
+        kg.sign ? "sign" : "derive",
+        (unsigned long)*h_pub,
+        (unsigned long)*h_priv,
+        (unsigned long)blob_len
+    );
+
+cleanup:
+    if (blob != NULL)
+    {
+        tsra_pkcs11_wipe(blob, blob_len);
+        free(blob);
+    }
+    free(spki);
+    free(pub_full);
+    free(priv_full);
+    return rv;
+}
+
+/* The generator of each key-pair mechanism; NULL for any other. */
+static keypair_fn keypair_generator(CK_MECHANISM_TYPE mech)
+{
+    switch (mech)
+    {
+    case CKM_EC_KEY_PAIR_GEN:
+        return ec_generate_pair;
+    default:
+        return NULL;
+    }
+}
+
+CK_RV C_GenerateKeyPair(
+    CK_SESSION_HANDLE hSession,
+    CK_MECHANISM_PTR pMechanism,
+    CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+    CK_ULONG ulPublicKeyAttributeCount,
+    CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+    CK_ULONG ulPrivateKeyAttributeCount,
+    CK_OBJECT_HANDLE_PTR phPublicKey,
+    CK_OBJECT_HANDLE_PTR phPrivateKey
+)
+{
+    if (!g_tsra_pkcs11.initialized)
+    {
+        return CKR_CRYPTOKI_NOT_INITIALIZED;
+    }
+    tsra_pkcs11_lock();
+    tsra_pkcs11_session_t *s = tsra_pkcs11_session_lookup(hSession);
+    if (s == NULL)
+    {
+        tsra_pkcs11_unlock();
+        return CKR_SESSION_HANDLE_INVALID;
+    }
+    /* Precedence as in C_GenerateKey. */
+    CK_RV rv = CKR_OK;
+    keypair_fn generate = NULL;
+    if ((pMechanism == NULL_PTR) || (phPublicKey == NULL_PTR) || (phPrivateKey == NULL_PTR) ||
+        ((pPublicKeyTemplate == NULL_PTR) && (ulPublicKeyAttributeCount > 0)) ||
+        ((pPrivateKeyTemplate == NULL_PTR) && (ulPrivateKeyAttributeCount > 0)))
+    {
+        rv = CKR_ARGUMENTS_BAD;
+    }
+    else if ((generate = keypair_generator(pMechanism->mechanism)) == NULL)
+    {
+        rv = CKR_MECHANISM_INVALID;
+    }
+    else if ((pMechanism->pParameter != NULL_PTR) || (pMechanism->ulParameterLen != 0))
+    {
+        rv = CKR_MECHANISM_PARAM_INVALID;
+    }
+    if (rv != CKR_OK)
+    {
+        tsra_pkcs11_unlock();
+        return rv;
+    }
+    tsra_pkcs11_slot_t *slot = &g_tsra_pkcs11.slots[s->slot];
+    if (!slot->user_logged_in || (slot->hsm_session == 0))
+    {
+        tsra_pkcs11_unlock();
+        return CKR_USER_NOT_LOGGED_IN; /* generation runs in the device session */
+    }
+    rv = generate(
+        s,
+        slot->hsm_session,
+        pPublicKeyTemplate,
+        ulPublicKeyAttributeCount,
+        pPrivateKeyTemplate,
+        ulPrivateKeyAttributeCount,
+        phPublicKey,
+        phPrivateKey
+    );
     tsra_pkcs11_unlock();
     return rv;
 }
