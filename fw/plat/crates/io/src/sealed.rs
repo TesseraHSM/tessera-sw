@@ -227,21 +227,39 @@ where
     Ok(&frame[TRANSPORT_AAD_LEN..])
 }
 
-/// Message length of the padded plaintext `pt`, or `None` if its padding
-/// is invalid.
-fn unpad(pt: &[u8]) -> Option<usize> {
-    let (&pad, body) = pt.split_last()?;
+/// Message length of the padded plaintext `pt`, whole blocks, or `None` if
+/// its padding is invalid.
+///
+/// The padding lies within the last block, which is read out of DMA memory
+/// (uncached on Uno) with one burst rather than a load per byte.
+fn unpad(pt: &HsmDmaBuf) -> Option<usize> {
+    let start = pt.len().checked_sub(SEALED_BLOCK_LEN)?;
+    let (words, _) = pt.split_at(start).1.read_head_words();
+    let mut last = [0u8; SEALED_BLOCK_LEN];
+    for (bytes, word) in last.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *bytes = word.to_ne_bytes();
+    }
+    let (&pad, body) = last.split_last()?;
     let pad = pad as usize;
     if pad >= SEALED_BLOCK_LEN {
         return None;
     }
-    let msg_len = body.len().checked_sub(pad)?;
-    body[msg_len..].iter().all(|&b| b == 0).then_some(msg_len)
+    let tail = body.len() - pad;
+    body[tail..].iter().all(|&b| b == 0).then_some(start + tail)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Views host bytes as a `&HsmDmaBuf`.
+    #[allow(unsafe_code)]
+    fn unpad_bytes(pt: &[u8]) -> Option<usize> {
+        // SAFETY: `from_raw` requires DMA-addressable memory, which is vacuous
+        // on the host: `unpad` only reads the bytes with the CPU, and
+        // `HsmDmaBuf` is a `[u8]` newtype borrowed no longer than `pt`.
+        unpad(unsafe { HsmDmaBuf::from_raw(pt) })
+    }
 
     #[test]
     fn frame_and_capacity_agree() {
@@ -259,13 +277,30 @@ mod tests {
         let mut pt = [0u8; 16];
         pt[..5].copy_from_slice(b"hello");
         pt[15] = 10;
-        assert_eq!(unpad(&pt), Some(5));
+        assert_eq!(unpad_bytes(&pt), Some(5));
         pt[15] = 11;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
         pt[15] = 16;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
         pt[15] = 10;
         pt[14] = 1;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
+    }
+
+    #[test]
+    fn unpad_reads_the_last_block() {
+        let mut pt = [0u8; 48];
+        pt[..20].copy_from_slice(b"hello, sealed world!");
+        pt[47] = 27;
+        assert_eq!(unpad_bytes(&pt), None);
+        pt[47] = 15;
+        assert_eq!(unpad_bytes(&pt), Some(32));
+        pt[32] = 1;
+        assert_eq!(unpad_bytes(&pt), None);
+        pt[47] = 14;
+        assert_eq!(unpad_bytes(&pt), Some(33));
+        pt[47] = 0;
+        assert_eq!(unpad_bytes(&pt), Some(47));
+        assert_eq!(unpad_bytes(&pt[..15]), None);
     }
 }
