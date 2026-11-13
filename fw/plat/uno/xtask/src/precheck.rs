@@ -35,7 +35,9 @@ struct Stage {
     /// Run cargo audit (firmware).
     #[clap(long)]
     audit: bool,
-    /// Run release build (firmware).
+    /// Run release builds (the five message-map firmware images, locked to
+    /// the map, and the fastpath PQC image), check the decoder header, and
+    /// run the log fixture.
     #[clap(long)]
     build: bool,
     /// Run unit tests (firmware and platform workspace, host target).

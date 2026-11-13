@@ -45,7 +45,7 @@ impl Xtask for Fmt {
             cmd!(sh, "cargo {toolchain} fmt -- {fmt_check...}").run()?;
         }
 
-        // Top platform workspace (xtask + reggen + systemrdl).
+        // Top platform workspace (xtask + log_map + reggen + systemrdl).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running fmt on platform workspace...");

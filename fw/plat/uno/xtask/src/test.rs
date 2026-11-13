@@ -47,7 +47,7 @@ impl Xtask for Test {
             cmd!(sh, "cargo nextest run -p {krate} --target {host}").run()?;
         }
 
-        // Top platform workspace (xtask + reggen + systemrdl, host target).
+        // Top platform workspace (xtask + log_map + reggen + systemrdl, host target).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running platform workspace unit tests...");

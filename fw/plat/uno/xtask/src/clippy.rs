@@ -58,7 +58,7 @@ impl Xtask for Clippy {
             cmd!(sh, "cargo {toolchain} clippy -- -D warnings").run()?;
         }
 
-        // Top platform workspace (xtask + reggen + systemrdl, host target).
+        // Top platform workspace (xtask + log_map + reggen + systemrdl, host target).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running clippy on platform workspace...");
