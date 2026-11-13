@@ -6,8 +6,10 @@
 //! the crypto paths; malformed blobs additionally exercise unmasking.
 //! Generated XTS keys permit both directions, so authenticated restricted-
 //! permission keys are not constructed by this target.
+//! Shared-descriptor rejection is socket-only; other transports keep distinct
+//! source/destination descriptors and retain the crypto oracle.
 
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 
 #[path = "../../common.rs"]
 mod common;
@@ -128,12 +130,14 @@ fn expected(
     wrong_kind: bool,
     tag_only: bool,
     buffers: &[Vec<u8>],
+    socket_direction_negative: bool,
 ) -> Expected {
     let reject = Expected::Status;
     if req.session_id != sid {
         return reject(TborStatus::FileHandleSessionIdDoesNotMatch);
     }
-    if req.data_len != 0
+    if socket_direction_negative
+        && req.data_len != 0
         && req.in_index == req.out_index
         && usize::from(req.in_index) < buffers.len()
     {
@@ -264,6 +268,7 @@ fn check_output(ctx: &TestCtx, req: &TborAesXtsEncryptDecryptReq, input: &[u8], 
 /// Construct one scenario, predict its outcome, and check the actual command.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario % 32;
+    let socket_direction_negative = scenario == 29 && tsra_ddi::sock_selected();
     let persisted_scope = matches!(scenario, 25 | 26);
     let session = session(ctx, input, persisted_scope);
     let sid = session.session_id();
@@ -382,7 +387,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
-        29 => req.out_index = req.in_index,
+        29 => {
+            if socket_direction_negative {
+                req.out_index = req.in_index;
+            } else {
+                std::mem::swap(&mut req.in_index, &mut req.out_index);
+            }
+        }
         30 => req.tweak = input.tweak.to_le_bytes().to_vec(),
         31 => {
             let lengths = [
@@ -409,6 +420,9 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         }
         _ => unreachable!("scenario reduced modulo 32"),
     }
+    if req.data_len != 0 && req.in_index == req.out_index && !socket_direction_negative {
+        req.out_index = req.out_index.wrapping_add(1);
+    }
     let expected = expected(
         &req,
         sid,
@@ -416,6 +430,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         scenario == 27,
         scenario == 20,
         &buffers,
+        socket_direction_negative,
     );
     let before = buffers
         .get(usize::from(req.in_index))
@@ -461,3 +476,65 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
 fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_scenarios() {
+        let seed = vec![0; FuzzInput::size_hint(0).0];
+        for scenario in [0, 29] {
+            for op in [0, 1] {
+                let mut input =
+                    FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("regression seed");
+                input.scenario = scenario;
+                input.op = op;
+                input.pattern = [0xA5; BLOCK_LEN];
+                common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
+            }
+        }
+    }
+
+    #[test]
+    fn direction_rejection_requires_socket() {
+        let pristine = vec![0; MASKED_AES_XTS_KEY_LEN];
+        let buffers = vec![vec![0xA5; BLOCK_LEN]; 2];
+        let request = TborAesXtsEncryptDecryptReq {
+            session_id: 1,
+            op: AES_OP_ENCRYPT,
+            data_len: BLOCK_LEN as u16,
+            dul: BLOCK_LEN as u16,
+            in_index: 0,
+            out_index: 0,
+            tweak: vec![0; XTS_TWEAK_LEN],
+            masked_key: pristine.clone(),
+        };
+        assert!(matches!(
+            expected(&request, 1, &pristine, false, false, &buffers, true),
+            Expected::DirectionMismatch
+        ));
+        assert!(matches!(
+            expected(&request, 1, &pristine, false, false, &buffers, false),
+            Expected::Success
+        ));
+        let separate = TborAesXtsEncryptDecryptReq {
+            out_index: 1,
+            ..request
+        };
+        for socket_direction_negative in [false, true] {
+            assert!(matches!(
+                expected(
+                    &separate,
+                    1,
+                    &pristine,
+                    false,
+                    false,
+                    &buffers,
+                    socket_direction_negative
+                ),
+                Expected::Success
+            ));
+        }
+    }
+}
