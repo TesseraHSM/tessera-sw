@@ -7,6 +7,12 @@
 //! Debug-log output: builds that add message-map rows (fix mode) or fail on a
 //! message without one (locked mode), the checks on each linked image, the
 //! decoder header, and the check of the map against the base branch's map.
+//!
+//! Which log calls survive optimization decides which messages need rows,
+//! and which ones the decoder header marks as deprecated. So a compiler
+//! update can fail a locked build or the header check with no source change.
+//! Running `cargo xtask log-map` in fw/plat/uno and committing the map and
+//! the header fixes both.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -111,7 +117,9 @@ impl fmt::Display for MissingRows {
             f,
             "To add their rows, run `{}` in fw/plat/uno, then `cargo xtask log-map` to update \
              the decoder header, and commit fw/plat/uno/{MAP} and fw/plat/uno/{HEADER} with \
-             the change.",
+             the change. A compiler update can cause this with no source change, because it \
+             can change which log calls survive optimization; then `cargo xtask log-map` \
+             alone adds the rows and updates the header, and committing both fixes it.",
             self.fix
         )
     }
@@ -682,7 +690,9 @@ pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result
         }
         Mode::Locked => anyhow::bail!(
             "fw/plat/uno/{HEADER} doesn't match the message map and the images. Run \
-             `cargo xtask log-map` in fw/plat/uno, then commit the header."
+             `cargo xtask log-map` in fw/plat/uno, then commit the header. A compiler update \
+             can cause this with no source change, because it can change which log calls \
+             survive optimization, and so which messages the header marks as deprecated."
         ),
     }
 }
