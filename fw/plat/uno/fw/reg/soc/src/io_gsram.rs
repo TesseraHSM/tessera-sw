@@ -20,12 +20,12 @@ pub const IPC_HSM_ADMIN_RX_PI_OFFSET: u32 = 0x7F30;
 pub const ICQ_TAIL_SHADOW_OFFSET: u32 = 0xEF40;
 pub const OCQ_TAIL_SHADOW_OFFSET: u32 = 0x11E40;
 pub const GDMA_CQ_TAIL_SHADOW_OFFSET: u32 = 0x15040;
-pub const BCP_SQ_CI_SHADOW_OFFSET: u32 = 0x16300;
-pub const BCP_CQ_PI_SHADOW_OFFSET: u32 = 0x16304;
 pub const BULK_ICQ_TAIL_SHADOW_OFFSET: u32 = 0x17700;
 pub const BULK_OCQ_TAIL_SHADOW_OFFSET: u32 = 0x18B20;
 pub const BULK_FP2_ICQ_TAIL_SHADOW_OFFSET: u32 = 0x1A760;
 pub const BULK_FP2_OCQ_TAIL_SHADOW_OFFSET: u32 = 0x1AB80;
+pub const BCP_SQ_CI_SHADOW_OFFSET: u32 = 0xAB600;
+pub const BCP_CQ_PI_SHADOW_OFFSET: u32 = 0xAB604;
 pub const IPC_ADMIN_HSM_RX_RING_OFFSET: u32 = 0x7014;
 pub const IPC_ADMIN_HSM_RX_RING_COUNT: u32 = 2;
 pub const IPC_ADMIN_HSM_RX_RING_STRIDE: u32 = 0x40;
@@ -62,15 +62,6 @@ pub const GDMA_SQ_STRIDE: u32 = 0x40;
 pub const GDMA_CQ_OFFSET: u32 = 0x14840;
 pub const GDMA_CQ_COUNT: u32 = 128;
 pub const GDMA_CQ_STRIDE: u32 = 0x10;
-pub const BCP_SQ_OFFSET: u32 = 0x16000;
-pub const BCP_SQ_COUNT: u32 = 32;
-pub const BCP_SQ_STRIDE: u32 = 0x10;
-pub const BCP_CQ_OFFSET: u32 = 0x16200;
-pub const BCP_CQ_COUNT: u32 = 32;
-pub const BCP_CQ_STRIDE: u32 = 0x08;
-pub const BCP_DFL_OFFSET: u32 = 0x16400;
-pub const BCP_DFL_COUNT: u32 = 32;
-pub const BCP_DFL_STRIDE: u32 = 0x80;
 pub const BULK_ISQ_OFFSET: u32 = 0x17400;
 pub const BULK_ISQ_COUNT: u32 = 32;
 pub const BULK_ISQ_STRIDE: u32 = 0x08;
@@ -116,6 +107,15 @@ pub const UPKA_ENGINE_CMD_STRIDE: u32 = 0x14;
 pub const SHA_CMD_OFFSET: u32 = 0xA9D40;
 pub const SHA_CMD_COUNT: u32 = 128;
 pub const SHA_CMD_STRIDE: u32 = 0x20;
+pub const BCP_SQ_OFFSET: u32 = 0xAB000;
+pub const BCP_SQ_COUNT: u32 = 64;
+pub const BCP_SQ_STRIDE: u32 = 0x10;
+pub const BCP_CQ_OFFSET: u32 = 0xAB400;
+pub const BCP_CQ_COUNT: u32 = 64;
+pub const BCP_CQ_STRIDE: u32 = 0x08;
+pub const BCP_DFL_OFFSET: u32 = 0xAB800;
+pub const BCP_DFL_COUNT: u32 = 64;
+pub const BCP_DFL_STRIDE: u32 = 0x80;
 pub const BKS_TABLE_OFFSET: u32 = 0x1110;
 pub const BKS_TABLE_COUNT: u32 = 12;
 pub const BKS_TABLE_STRIDE: u32 = 0x29;
@@ -208,14 +208,6 @@ tock_registers::register_bitfields! [u32,
         VAL OFFSET(0) NUMBITS(32) [],
     ],
     /// 'DMA shadow of a queue producer/consumer index.'
-    pub BCP_SQ_CI_SHADOW [
-        VAL OFFSET(0) NUMBITS(32) [],
-    ],
-    /// 'DMA shadow of a queue producer/consumer index.'
-    pub BCP_CQ_PI_SHADOW [
-        VAL OFFSET(0) NUMBITS(32) [],
-    ],
-    /// 'DMA shadow of a queue producer/consumer index.'
     pub BULK_ICQ_TAIL_SHADOW [
         VAL OFFSET(0) NUMBITS(32) [],
     ],
@@ -229,6 +221,14 @@ tock_registers::register_bitfields! [u32,
     ],
     /// 'DMA shadow of a queue producer/consumer index.'
     pub BULK_FP2_OCQ_TAIL_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BCP_SQ_CI_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BCP_CQ_PI_SHADOW [
         VAL OFFSET(0) NUMBITS(32) [],
     ],
     /// 'Inbound Completion Queue info: status and interface select.'
@@ -399,59 +399,6 @@ pub struct GdmaCqEntry {
     pub rsvd2: crate::RW<u32>,
 }
 
-/// Regfile entry struct for `bcp_sqe`.
-#[repr(C)]
-pub struct BcpSqe {
-    pub dw0: crate::RW<u32>,
-    pub dw1: crate::RW<u32>,
-    pub dw2: crate::RW<u32>,
-    pub dw3: crate::RW<u32>,
-}
-
-/// Regfile entry struct for `bcp_cqe`.
-#[repr(C)]
-pub struct BcpCqe {
-    pub dw0: crate::RW<u32>,
-    pub dw1: crate::RW<u32>,
-}
-
-/// Regfile entry struct for `bcp_dfl_entry`.
-#[repr(C)]
-pub struct BcpDflEntry {
-    pub dw0: crate::RW<u32>,
-    pub dw1: crate::RW<u32>,
-    pub dw2: crate::RW<u32>,
-    pub dw3: crate::RW<u32>,
-    pub dw4: crate::RW<u32>,
-    pub dw5: crate::RW<u32>,
-    pub dw6: crate::RW<u32>,
-    pub dw7: crate::RW<u32>,
-    pub dw8: crate::RW<u32>,
-    pub dw9: crate::RW<u32>,
-    pub dw10: crate::RW<u32>,
-    pub dw11: crate::RW<u32>,
-    pub dw12: crate::RW<u32>,
-    pub dw13: crate::RW<u32>,
-    pub dw14: crate::RW<u32>,
-    pub dw15: crate::RW<u32>,
-    pub dw16: crate::RW<u32>,
-    pub dw17: crate::RW<u32>,
-    pub dw18: crate::RW<u32>,
-    pub dw19: crate::RW<u32>,
-    pub dw20: crate::RW<u32>,
-    pub dw21: crate::RW<u32>,
-    pub dw22: crate::RW<u32>,
-    pub dw23: crate::RW<u32>,
-    pub dw24: crate::RW<u32>,
-    pub dw25: crate::RW<u32>,
-    pub dw26: crate::RW<u32>,
-    pub dw27: crate::RW<u32>,
-    pub dw28: crate::RW<u32>,
-    pub dw29: crate::RW<u32>,
-    pub dw30: crate::RW<u32>,
-    pub dw31: crate::RW<u32>,
-}
-
 /// Regfile entry struct for `bulk_io_sq_entry`.
 #[repr(C)]
 pub struct BulkIoSqEntry {
@@ -551,6 +498,59 @@ pub struct ShaCmdEntry {
     pub sha_key_len: crate::RW<u32>,
 }
 
+/// Regfile entry struct for `bcp_sqe`.
+#[repr(C)]
+pub struct BcpSqe {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+    pub dw2: crate::RW<u32>,
+    pub dw3: crate::RW<u32>,
+}
+
+/// Regfile entry struct for `bcp_cqe`.
+#[repr(C)]
+pub struct BcpCqe {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+}
+
+/// Regfile entry struct for `bcp_dfl_entry`.
+#[repr(C)]
+pub struct BcpDflEntry {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+    pub dw2: crate::RW<u32>,
+    pub dw3: crate::RW<u32>,
+    pub dw4: crate::RW<u32>,
+    pub dw5: crate::RW<u32>,
+    pub dw6: crate::RW<u32>,
+    pub dw7: crate::RW<u32>,
+    pub dw8: crate::RW<u32>,
+    pub dw9: crate::RW<u32>,
+    pub dw10: crate::RW<u32>,
+    pub dw11: crate::RW<u32>,
+    pub dw12: crate::RW<u32>,
+    pub dw13: crate::RW<u32>,
+    pub dw14: crate::RW<u32>,
+    pub dw15: crate::RW<u32>,
+    pub dw16: crate::RW<u32>,
+    pub dw17: crate::RW<u32>,
+    pub dw18: crate::RW<u32>,
+    pub dw19: crate::RW<u32>,
+    pub dw20: crate::RW<u32>,
+    pub dw21: crate::RW<u32>,
+    pub dw22: crate::RW<u32>,
+    pub dw23: crate::RW<u32>,
+    pub dw24: crate::RW<u32>,
+    pub dw25: crate::RW<u32>,
+    pub dw26: crate::RW<u32>,
+    pub dw27: crate::RW<u32>,
+    pub dw28: crate::RW<u32>,
+    pub dw29: crate::RW<u32>,
+    pub dw30: crate::RW<u32>,
+    pub dw31: crate::RW<u32>,
+}
+
 pub mod regs {
     //! MMIO register struct for firmware use.
     tock_registers::register_structs! {
@@ -591,41 +591,42 @@ pub mod regs {
             (0x14840 => pub gdma_cq: [super::GdmaCqEntry; 128]),
             (0x15040 => pub gdma_cq_tail_shadow: crate::RW<u32, super::GDMA_CQ_TAIL_SHADOW::Register>),
             (0x15044 => _reserved6),
-            (0x16000 => pub bcp_sq: [super::BcpSqe; 32]),
-            (0x16200 => pub bcp_cq: [super::BcpCqe; 32]),
-            (0x16300 => pub bcp_sq_ci_shadow: crate::RW<u32, super::BCP_SQ_CI_SHADOW::Register>),
-            (0x16304 => pub bcp_cq_pi_shadow: crate::RW<u32, super::BCP_CQ_PI_SHADOW::Register>),
-            (0x16308 => _reserved7),
-            (0x16400 => pub bcp_dfl: [super::BcpDflEntry; 32]),
             (0x17400 => pub bulk_isq: [super::IsqEntry; 32]),
             (0x17500 => pub bulk_icq: [super::IcqEntry; 32]),
             (0x17700 => pub bulk_icq_tail_shadow: crate::RW<u32, super::BULK_ICQ_TAIL_SHADOW::Register>),
-            (0x17704 => _reserved8),
+            (0x17704 => _reserved7),
             (0x17720 => pub bulk_io_sq: [super::BulkIoSqEntry; 32]),
             (0x18720 => pub bulk_osq: [super::OsqEntry; 32]),
             (0x18920 => pub bulk_ocq: [super::OcqEntry; 32]),
             (0x18b20 => pub bulk_ocq_tail_shadow: crate::RW<u32, super::BULK_OCQ_TAIL_SHADOW::Register>),
-            (0x18b24 => _reserved9),
+            (0x18b24 => _reserved8),
             (0x18b60 => pub bulk_io_cq: [super::BulkIoCqEntry; 32]),
             (0x19360 => pub bulk_io_meta: [super::IoMetaEntry; 32]),
             (0x19460 => pub bulk_scratch: [u8; 4096]),
             (0x1a460 => pub bulk_fp2_isq: [super::IsqEntry; 32]),
             (0x1a560 => pub bulk_fp2_icq: [super::IcqEntry; 32]),
             (0x1a760 => pub bulk_fp2_icq_tail_shadow: crate::RW<u32, super::BULK_FP2_ICQ_TAIL_SHADOW::Register>),
-            (0x1a764 => _reserved10),
+            (0x1a764 => _reserved9),
             (0x1a780 => pub bulk_fp2_osq: [super::OsqEntry; 32]),
             (0x1a980 => pub bulk_fp2_ocq: [super::OcqEntry; 32]),
             (0x1ab80 => pub bulk_fp2_ocq_tail_shadow: crate::RW<u32, super::BULK_FP2_OCQ_TAIL_SHADOW::Register>),
-            (0x1ab84 => _reserved11),
+            (0x1ab84 => _reserved10),
             (0x20c58 => pub io_meta: [super::IoMetaEntry; 33]),
             (0x20d60 => pub sram_io_buf: [u8; 557056]),
-            (0xa8d60 => _reserved12),
+            (0xa8d60 => _reserved11),
             (0xa9000 => pub aes_cmd: [super::AesCmdEntry; 128]),
             (0xa9c00 => pub upka_engine_cmd: [super::UpkaCmdEntry; 16]),
             (0xa9d40 => pub sha_cmd: [super::ShaCmdEntry; 128]),
-            (0xaad40 => _reserved13),
+            (0xaad40 => _reserved12),
+            (0xab000 => pub bcp_sq: [super::BcpSqe; 64]),
+            (0xab400 => pub bcp_cq: [super::BcpCqe; 64]),
+            (0xab600 => pub bcp_sq_ci_shadow: crate::RW<u32, super::BCP_SQ_CI_SHADOW::Register>),
+            (0xab604 => pub bcp_cq_pi_shadow: crate::RW<u32, super::BCP_CQ_PI_SHADOW::Register>),
+            (0xab608 => _reserved13),
+            (0xab800 => pub bcp_dfl: [super::BcpDflEntry; 64]),
+            (0xad800 => _reserved14),
             (0xb8000 => pub fp_slot_map: [u8; 65]),
-            (0xb8041 => _reserved14),
+            (0xb8041 => _reserved15),
             (0x16e000 => pub hsm_code: [u8; 401408]),
             (0x1d0000 => pub fp_dsa_cache: [u8; 196608]),
             (0x200000 => @END),

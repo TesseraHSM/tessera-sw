@@ -18,13 +18,13 @@
 //   0x0F000 - 0x11824  Reserved: Admin (CP0) GDMA rings — do not place HSM data here
 //   0x11840 - 0x11E44  OIC queues (OSQ, OCQ, IO_CQ, OCQ tail shadow)
 //   0x12840 - 0x15048  GDMA queues (128 entries)
-//   0x16000 - 0x17400  BCP (CDMA) rings
 //   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
 //   0x19460 - 0x1A460  Bulk crypto per-IO scratch
 //   0x1A460 - 0x1AB84  Bulk IIC/OIC rings (controller 1, channel 1)
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
 //   0xA9000 - 0xAAD40  Crypto command buffers (AES, UPKA, SHA)
-//   0xAAD40 - 0xB8000  Unused (former HSM code window)
+//   0xAB000 - 0xAD800  BCP (CDMA) rings
+//   0xAD800 - 0xB8000  Unused (former HSM code window)
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
 //   0xBB000 - 0xEBC00  Partition store
 //   0xEBC00 - 0x16DC00 Key vault (65 × 8 KB tables)
@@ -818,13 +818,7 @@ addrmap io_gsram {
     gdma_cq_entry_t  GDMA_CQ[128]       @ 0x14840 += 0x10;
     queue_shadow_t   GDMA_CQ_TAIL_SHADOW @ 0x15040;
 
-    // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
-    // may master (0x0F000 - 0xB8000) ───
-    bcp_sqe_t        BCP_SQ[32]          @ 0x16000 += 0x10;   // 0x16000 - 0x16200
-    bcp_cqe_t        BCP_CQ[32]          @ 0x16200 += 0x08;   // 0x16200 - 0x16300
-    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16300;
-    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16304;
-    bcp_dfl_entry_t  BCP_DFL[32]         @ 0x16400 += 0x80;   // 0x16400 - 0x17400
+    // 0x15048 - 0x17400 is unused; the 64-entry BCP rings did not fit.
 
     // ─── Bulk IIC/OIC (controller 1, channel 0) — 0x20-aligned; inside
     // the CDMA window ───
@@ -864,10 +858,18 @@ addrmap io_gsram {
     sram_io_buf_t    SRAM_IO_BUF[34]     @ 0x20D60 += 0x4000;
 
     // ─── Crypto command buffers, in the former HSM code window (HSM_CODE
-    // moved above the key vault); 0xAAD40 - 0xB8000 is unused. ───
+    // moved above the key vault); 0xAD800 - 0xB8000 is unused. ───
     aes_cmd_entry_t  AES_CMD[128]        @ 0xA9000 += 0x18;   // 0xA9000 - 0xA9C00
     upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0xA9C00 += 0x14;   // 0xA9C00 - 0xA9D40
     sha_cmd_entry_t  SHA_CMD[128]        @ 0xA9D40 += 0x20;   // 0xA9D40 - 0xAAD40
+
+    // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
+    // may master (0x0F000 - 0xB8000) ───
+    bcp_sqe_t        BCP_SQ[64]          @ 0xAB000 += 0x10;   // 0xAB000 - 0xAB400
+    bcp_cqe_t        BCP_CQ[64]          @ 0xAB400 += 0x08;   // 0xAB400 - 0xAB600
+    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0xAB600;
+    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0xAB604;
+    bcp_dfl_entry_t  BCP_DFL[64]         @ 0xAB800 += 0x80;   // 0xAB800 - 0xAD800
 
     // ─── FP bulk-key slot map: 65 × 1-byte table bitmaps ───
     fp_slot_map_t    FP_SLOT_MAP         @ 0xB8000;   // 0xB8000 - 0xB8041

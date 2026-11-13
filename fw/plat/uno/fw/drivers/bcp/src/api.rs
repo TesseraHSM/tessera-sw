@@ -83,7 +83,7 @@ const IDS: usize = SQE_BUDGET;
 const ID_WAITERS: usize = 32;
 
 /// `free` bitmap with every command ID free.
-const ALL_FREE: u32 = ((1u64 << IDS) - 1) as u32;
+const ALL_FREE: u64 = (1 << IDS) - 1;
 
 /// Command deadline. One chunk takes microseconds; past this the engine is
 /// presumed stuck, reset, and the commands in flight fail. Well inside the
@@ -99,7 +99,7 @@ const DEADLINE_CHECK_PASSES: u16 = 64;
 /// Driver-internal status for a command abandoned by a reset.
 const STATUS_STALLED: u8 = 0xFF;
 
-const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 32);
+const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 64);
 const _: () = assert!(BCP_CQ_COUNT as usize == DEPTH && BCP_DFL_COUNT as usize == DEPTH);
 
 /// AES-256 key length; the engine has no other key size.
@@ -461,7 +461,7 @@ struct BcpState {
     /// Next completion ring index.
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
-    free: u32,
+    free: u64,
     /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
     reserved: usize,
     /// [`BcpDriver::wake`] passes with commands in flight, counted to space
