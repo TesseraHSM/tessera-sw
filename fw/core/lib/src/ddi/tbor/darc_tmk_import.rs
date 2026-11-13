@@ -22,7 +22,7 @@
 //!    SDMK the output is masked under is provisioned by SD setup).
 //! 2. Bind the caller-supplied [`PartPolicy`] to the partition's fixed
 //!    `policy_hash`, then validate `remote_cert_chain` anchored to the
-//!    policy `POTAPubKey`, recovering the terminal certificate's public
+//!    policy `pota_spki_thumbprint`, recovering the terminal certificate's public
 //!    key as `SndrPub`.
 //! 3. Unmask `masked_kex_key` → `RcvrPriv` (must be a
 //!    [`DarcKex`](HsmVaultKeyKind::DarcKex) key) and derive `RcvrPub`.
@@ -43,9 +43,8 @@ use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_crypto_x509_chain::validate_chain;
+use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborDarcTmkImportReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkImportResp;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
@@ -90,7 +89,7 @@ const _: () = assert!(DARC_ENC_LEN + (TMK_LEN + 16) == tsra_fw_ddi_tbor_types::S
 ///
 /// The chain travels out of band; it must carry `1..=MAX_CERTS`
 /// certificates and be cryptographically anchored to the policy
-/// `POTAPubKey`.  On success `sndr_pub` is the SEC1-uncompressed
+/// `pota_spki_thumbprint`.  On success `sndr_pub` is the SEC1-uncompressed
 /// (`0x04 ‖ X ‖ Y`) sender public key.
 async fn recover_sender_pub<P: HsmPal>(
     pal: &P,
@@ -100,17 +99,13 @@ async fn recover_sender_pub<P: HsmPal>(
     sndr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // The re-supplied policy must match the one bound at `PartInit`; only
-    // then is its `POTAPubKey` a trustworthy anchor.
+    // then is its `pota_spki_thumbprint` a trustworthy anchor.
     let req = TborDarcTmkImportReq::decode(req_buf)?;
     let policy = req.policy();
     verify_policy_hash(pal, io, alloc, policy).await?;
 
     let part_policy = super::policy::from_bytes(policy)?;
-    let pota = &part_policy.pota_pub_key;
-    if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let anchor = &pota.data[..POLICY_MAX_KEY_LEN];
+    let anchor = part_policy.pota_spki_thumbprint;
 
     let cert_descriptors = req.remote_cert_chain();
     if cert_descriptors.is_empty() || cert_descriptors.len() > MAX_CERTS {
@@ -126,7 +121,7 @@ async fn recover_sender_pub<P: HsmPal>(
         alloc,
         cert_descriptors,
         Some(anchor),
-        &mut sndr_pub[1..1 + POLICY_MAX_KEY_LEN],
+        &mut sndr_pub[1..1 + P384_POINT_LEN],
         async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;

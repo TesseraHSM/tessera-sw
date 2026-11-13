@@ -15,7 +15,6 @@ use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
 use tsra_ddi_tbor_types::SessionType;
-use zerocopy::IntoBytes;
 use zeroize::Zeroize;
 
 use super::*;
@@ -217,16 +216,13 @@ impl HsmSession {
     /// Issues TBOR `PartInit` (opcode `0x07`) on this CO session.
     ///
     /// Seals `mach_seed` under the session `param_key` and ships it
-    /// alongside the unified `part_policy` and the POTA / SATA /
-    /// optional SAPOTA thumbprints. Only valid on a V2 session; a V1
-    /// session returns [`HsmError::InvalidSession`].
+    /// alongside `part_policy` (the partition policy CBOR document).
+    /// Only valid on a V2 session; a V1 session returns
+    /// [`HsmError::InvalidSession`].
     pub fn part_init_ex(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         mach_seed: &[u8],
-        pota_thumbprint: &[u8],
-        sata_thumbprint: &[u8],
-        sapota_thumbprint: Option<&[u8]>,
     ) -> HsmResult<HsmPartInitExResult> {
         let inner = self.inner.read();
         match &inner.kind {
@@ -236,9 +232,6 @@ impl HsmSession {
                 param_key,
                 mach_seed,
                 part_policy,
-                pota_thumbprint,
-                sata_thumbprint,
-                sapota_thumbprint,
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
@@ -247,13 +240,13 @@ impl HsmSession {
 
     /// Issues TBOR `PartFinal` (opcode `0x08`) on this CO session.
     ///
-    /// Re-supplies the unified `part_policy` (for `POTAPubKey` recovery)
+    /// Re-supplies `part_policy` (for the POTA trust anchor)
     /// and the PTA certificate chain (as a list of [`HsmCert`]s),
     /// optionally restoring a prior `local_mk` backup. Only valid on a V2
     /// session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn part_final_ex(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         pta_cert_chain: &[HsmCert<'_>],
         prev_local_mk_backup: Option<&[u8]>,
     ) -> HsmResult<HsmPartFinalExResult> {
@@ -274,18 +267,18 @@ impl HsmSession {
     /// Issues TBOR `SdCreateRemoteBackup` (opcode `0x0A`) on this CO
     /// session.
     ///
-    /// Creates a new security domain from the caller-supplied unified
+    /// Creates a new security domain from the caller-supplied
     /// `part_policy`, using the sender's `masked_sealing_key` (from
     /// `SdSealingKeyGen`). The receiver public key is always recovered from
     /// the authoritative `receiver_cert_chain` (anchored to the policy SATA
-    /// key); `receiver_evidence` is optional and verified only when the
+    /// key thumbprint); `receiver_evidence` is optional and verified only when the
     /// policy sets `require_trusted_sa_key` (pass an empty evidence
     /// otherwise). Returns the remote backup together with the device-local
     /// backups. Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_create_remote_backup(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         masked_sealing_key: &[u8],
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &HsmSdEvidence<'_>,
@@ -298,7 +291,7 @@ impl HsmSession {
                 masked_sealing_key,
                 receiver_cert_chain,
                 receiver_evidence,
-                part_policy.as_bytes(),
+                part_policy,
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
@@ -331,7 +324,7 @@ impl HsmSession {
     /// Issues TBOR `DarcTmkExport` (opcode `0x24`) on this CO session.
     ///
     /// Seals the TMK to an authenticated target: validates
-    /// `target_cert_chain` against the policy `DATAPubKey`, then HPKE-Auth
+    /// `target_cert_chain` against the policy DATA key thumbprint, then HPKE-Auth
     /// seals the TMK to the target's KEX key. Returns the sealed TMK. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
@@ -354,7 +347,7 @@ impl HsmSession {
     /// Issues TBOR `DarcTmkImport` (opcode `0x21`) on this CO session.
     ///
     /// Opens a `sealed_tmk` on the target: validates `remote_cert_chain`
-    /// against the policy `POTAPubKey`, HPKE-Auth opens the sealed TMK, and
+    /// against the policy POTA key thumbprint, HPKE-Auth opens the sealed TMK, and
     /// re-masks it under the partition SDMK. Returns the masked TMK. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
@@ -379,7 +372,7 @@ impl HsmSession {
     /// [`HsmError::InvalidSession`].
     pub fn sd_reseal_remote_backup(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         masked_sealing_key: &[u8],
         src_evidence: &HsmSdEvidence<'_>,
         dest_evidence: &HsmSdEvidence<'_>,
@@ -393,7 +386,7 @@ impl HsmSession {
                 masked_sealing_key,
                 src_evidence,
                 dest_evidence,
-                part_policy.as_bytes(),
+                part_policy,
                 src_remote_backup,
                 &inner.ddi_cookie,
             ),
@@ -412,7 +405,7 @@ impl HsmSession {
     /// [`HsmError::InvalidSession`].
     pub fn sd_restore_remote_backup(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         masked_sealing_key: &[u8],
         sender_cert_chain: &[HsmCert<'_>],
         sender_evidence: &HsmSdEvidence<'_>,
@@ -427,7 +420,7 @@ impl HsmSession {
                 masked_sealing_key,
                 sender_cert_chain,
                 sender_evidence,
-                part_policy.as_bytes(),
+                part_policy,
                 src_remote_backup,
                 prev_sd_mk_backup,
                 &inner.ddi_cookie,
@@ -445,7 +438,7 @@ impl HsmSession {
     /// V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn sd_create_peer_backup(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         masked_sealing_key: &[u8],
         dst_evidence: &HsmSdEvidence<'_>,
         pok_local_backup: &[u8],
@@ -457,7 +450,7 @@ impl HsmSession {
                 inner.id,
                 masked_sealing_key,
                 dst_evidence,
-                part_policy.as_bytes(),
+                part_policy,
                 pok_local_backup,
                 &inner.ddi_cookie,
             ),
@@ -476,7 +469,7 @@ impl HsmSession {
     /// session returns [`HsmError::InvalidSession`].
     pub fn sd_restore_peer_backup(
         &self,
-        part_policy: &PartPolicy,
+        part_policy: &[u8],
         masked_sealing_key: &[u8],
         src_evidence: &HsmSdEvidence<'_>,
         pok_peer_backup: &[u8],
@@ -489,7 +482,7 @@ impl HsmSession {
                 inner.id,
                 masked_sealing_key,
                 src_evidence,
-                part_policy.as_bytes(),
+                part_policy,
                 pok_peer_backup,
                 prev_sd_mk_backup,
                 &inner.ddi_cookie,

@@ -15,8 +15,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum MutationTarget {
@@ -70,7 +68,7 @@ impl SenderEvidence {
 struct RestoreFixture {
     session_id: u16,
     masked_sealing_key: [u8; tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN],
-    policy: PartPolicy,
+    policy: Vec<u8>,
     evidence: SenderEvidence,
     src_remote_backup: [u8; tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN],
     prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
@@ -120,31 +118,19 @@ fn build_sender_evidence(
     }
 }
 
-/// Set the SATA, SAPOTA, and backup-partition trust anchors, require a trusted
-/// sender key, and copy the updated policy into its wire-format buffer.
+/// Bind SATA, SAPOTA, and the backup partition, and require a trusted sender
+/// key.
 fn build_policy(
-    policy_bytes: &mut [u8; tsra_ddi_tbor_types::PART_POLICY_LEN],
-    policy: &mut PartPolicy,
+    pota: &CaKey,
     pid: &[u8],
     pid_pub: &[u8; RAW_PUB_LEN],
     sata: &CaKey,
     sapota: &CaKey,
-) {
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata.raw_pub(),
-    );
-    policy.sapota_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sapota.raw_pub(),
-    );
-    policy.backup_part_id.copy_from_slice(pid);
-    policy.backup_part_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, *pid_pub);
-    policy.flags = policy.flags.with_require_trusted_sa_key(true);
-    policy_bytes.copy_from_slice(policy.as_bytes());
+) -> Vec<u8> {
+    common::backup_test_policy(pota, sata, pid, pid_pub)
+        .with_sapota(sapota.spki_thumbprint())
+        .with_flags(PolicyFlags::REQUIRE_TRUSTED_SA_KEY)
+        .encode()
 }
 
 /// Create a remote backup, then reset and reinitialize the partition with
@@ -168,29 +154,14 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
     let sata = CaKey::generate();
     let sapota = CaKey::generate();
 
-    let mut policy_bytes = common::known_good_part_policy(pota.raw_pub());
-    let mut policy = PartPolicy::try_read_from_bytes(&policy_bytes)
-        .expect("common known-good policy should decode");
-    build_policy(
-        &mut policy_bytes,
-        &mut policy,
-        &part_info.pid,
-        &pid_pub,
-        &sata,
-        &sapota,
-    );
+    let policy = build_policy(&pota, &part_info.pid, &pid_pub, &sata, &sapota);
 
     let init = ctx
-        .part_init(
-            &source_session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&source_session, &common::mach_seed(), &policy)
         .expect("PartInit should succeed");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
-        .part_final(&source_session, &policy_bytes, &[], &pta_chain.der_items())
+        .part_final(&source_session, &policy, &[], &pta_chain.der_items())
         .expect("PartFinal should succeed")
         .local_mk_backup;
 
@@ -293,17 +264,12 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
 
     let restore_session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(
-            &restore_session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&restore_session, &common::mach_seed(), &policy)
         .expect("PartInit after reset should succeed");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
         &restore_session,
-        &policy_bytes,
+        &policy,
         &local_mk_backup,
         &pta_chain.der_items(),
     )
@@ -390,7 +356,7 @@ fn mutate_request(
         MutationTarget::MaskedSealingKey => {
             flip(&mut req.masked_sealing_key, input.offset, input.mask)
         }
-        MutationTarget::Policy => flip(&mut req.policy.info, input.offset, input.mask),
+        MutationTarget::Policy => flip(&mut req.policy, input.offset, input.mask),
         MutationTarget::SenderCertChain => invalidate_descriptor(&mut req.sender_cert_chain, input),
         MutationTarget::SenderMfgrCertChain => {
             invalidate_descriptor(&mut req.sender_mfgr_cert_chain, input)

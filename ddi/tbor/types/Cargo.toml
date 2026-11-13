@@ -8,6 +8,7 @@ version = "0.1.0"
 
 [dependencies]
 bitfield-struct.workspace = true
+minicbor = { features = ["alloc"], workspace = true }
 open-enum.workspace = true
 tsra_ddi_tbor_codec.workspace = true
 tsra_ddi_tbor_derive.workspace = true

@@ -5,7 +5,6 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_api::PartPolicy;
 use tsra_crypto as hpke;
 use tsra_crypto::aead_envelope;
 use tsra_crypto::EccCurve;
@@ -19,7 +18,9 @@ use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
 use tsra_crypto::ImportableKey;
 use tsra_sealing_api::mint_sealing_key;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
 use tsra_sealing_api::SealingSession;
@@ -34,7 +35,6 @@ use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::Curve;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
-use zerocopy::IntoBytes;
 use zeroize::Zeroizing;
 
 use crate::env::SelfContainedEnv;
@@ -181,7 +181,7 @@ fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
     verify_certificate_chain(chain)?;
     let mut anchored = false;
     for cert in chain.iter().take(chain.len().saturating_sub(1)) {
-        anchored |= public_key(cert)? == policy.sata_pub_key.data;
+        anchored |= spki_thumbprint(&public_key(cert)?)? == policy.sata_spki_thumbprint;
     }
     anyhow::ensure!(anchored, "HPKE chain is not endorsed by policy SATA");
     let leaf = chain.last().context("HPKE certificate chain is empty")?;
@@ -202,6 +202,9 @@ fn public_key(certificate: &[u8]) -> Result<Vec<u8>> {
 fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> Result<()> {
     let mut digest = [0u8; 48];
     HashAlgo::sha384().hash(policy.as_bytes(), Some(&mut digest))?;
+    let (_, backup_thumbprint) = policy
+        .backup_part
+        .context("policy has no backing partition")?;
     for (name, chain) in [
         ("manufacturer", &evidence.mfgr_cert_chain),
         ("owner", &evidence.owner_cert_chain),
@@ -214,7 +217,7 @@ fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> 
             .with_context(|| format!("verify remote sender {name} chain"))?;
         let leaf = chain.last().context("remote sender chain is empty")?;
         anyhow::ensure!(
-            public_key(leaf)? == policy.backup_part_pub_key.data,
+            spki_thumbprint(&public_key(leaf)?)? == backup_thumbprint,
             "remote sender {name} leaf does not match the backing partition PID"
         );
         let report = verify_key_report_bytes(&evidence.report, leaf)
@@ -233,13 +236,13 @@ fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> 
     }
     let chain = &evidence.part_owner_cert_chain;
     let anchor = if legacy {
-        &policy.sata_pub_key
+        policy.sata_spki_thumbprint
     } else {
-        &policy.pota_pub_key
+        policy.pota_spki_thumbprint
     };
     let mut anchored = false;
     for certificate in chain.iter().take(chain.len().saturating_sub(1)) {
-        if public_key(certificate)? == anchor.data {
+        if spki_thumbprint(&public_key(certificate)?)? == anchor {
             anchored = true;
         }
     }

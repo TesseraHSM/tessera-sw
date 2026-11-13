@@ -21,92 +21,77 @@
 //!   AAD-binding rejects.
 //!
 //! PartInit-specific helpers (`open_co_with`, the wire-correct
-//! `known_good_part_policy`/`mach_seed`/`pota_thumbprint` fixtures)
+//! `known_good_part_policy`/`part_policy_with_pota`/`mach_seed` fixtures)
 //! live in this module. Shared role-session bootstrap helpers and
 //! rotated PSKs live in [`tsra_ddi_tbor_test_harness::fixture`].
 
+use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
-use tsra_ddi_tbor_types::PolicyKeyKind;
+use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
-use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 
 mod crypto_rejects;
 mod fw_rejects;
 mod sd_config;
 mod success_path;
 
-/// Build a 484-byte unified `PartPolicy` blob that passes
-/// `tsra_fw_hsm_core::ddi::tbor::policy::from_bytes`.  Layout mirrors
-/// the canonical wire format defined in
-/// `fw/core/ddi/tbor/types/src/policy.rs`: POTA + SATA trust anchors are
-/// populated Ecc384 keys; SAPOTA + backing-partition keys are left
-/// absent (zero `len`); flags are clear; `info` is filled.
-pub(crate) fn known_good_part_policy() -> [u8; PART_POLICY_LEN] {
-    const OFF_POTA: usize = 2;
-    const OFF_SATA: usize = 102;
-    const OFF_FLAGS: usize = 418;
-    const OFF_INFO: usize = 419;
+/// Filler POTA thumbprint for tests that never walk a PTA chain.
+pub(crate) const FILLER_POTA_THUMBPRINT: [u8; POLICY_THUMBPRINT_LEN] =
+    [0x10; POLICY_THUMBPRINT_LEN];
 
-    // Write an Ecc384 (kind 0) raw X‖Y pubkey at `off` (no SEC1 prefix).
-    fn write_pubkey(bytes: &mut [u8], off: usize, fill: u8) {
-        bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-        bytes[off + 2..off + 4].copy_from_slice(&96u16.to_le_bytes());
-        for (i, b) in bytes[off + 4..off + 4 + 96].iter_mut().enumerate() {
-            *b = (fill.wrapping_add(i as u8)) | 0x80;
-        }
-    }
+/// Filler SATA thumbprint for tests that never verify a sealing key.
+pub(crate) const FILLER_SATA_THUMBPRINT: [u8; POLICY_THUMBPRINT_LEN] =
+    [0x20; POLICY_THUMBPRINT_LEN];
 
-    let mut bytes = [0u8; PART_POLICY_LEN];
-    bytes[0] = 1; // version major
-    bytes[1] = 0; // version minor
-    write_pubkey(&mut bytes, OFF_POTA, 0x10);
-    write_pubkey(&mut bytes, OFF_SATA, 0x20);
-    // SAPOTA + backup-part pubkeys left absent (len 0).
-    bytes[OFF_FLAGS] = 0;
-    for b in bytes[OFF_INFO..OFF_INFO + 64].iter_mut() {
-        *b = 0xAB;
-    }
-    bytes
+/// Build a canonical CBOR `PartPolicy` document that passes
+/// `tsra_fw_hsm_core::ddi::tbor::policy::from_bytes`: filler POTA and
+/// SATA thumbprints, no SAPOTA / backing partition, flags clear and a
+/// 64-byte `info`.
+pub(crate) fn known_good_part_policy() -> Vec<u8> {
+    known_good_test_policy().encode()
 }
 
-/// Like [`known_good_part_policy`] but with a caller-supplied **real**
-/// `POTAPubKey` (raw P-384 `X ‖ Y`, 96 bytes), so `PartFinal` can validate
-/// a PTA certificate chain anchored to it.
-pub(crate) fn part_policy_with_pota(pota_raw: &[u8; 96]) -> [u8; PART_POLICY_LEN] {
-    const OFF_POTA: usize = 2;
-    let mut bytes = known_good_part_policy();
-    // POTA slot layout: kind(2) ‖ len(2) ‖ data(96); overwrite the data.
-    bytes[OFF_POTA + 4..OFF_POTA + 4 + 96].copy_from_slice(pota_raw);
-    bytes
+/// The [`TestPolicy`] behind [`known_good_part_policy`], for tests that
+/// tweak individual fields before encoding.
+pub(crate) fn known_good_test_policy() -> TestPolicy {
+    TestPolicy::new(FILLER_POTA_THUMBPRINT, FILLER_SATA_THUMBPRINT).with_info(&[0xAB; 64])
+}
+
+/// Like [`known_good_part_policy`] but anchored to a caller-supplied
+/// **real** `POTAPubKey` (raw P-384 `X ‖ Y`, 96 bytes) via its SPKI
+/// thumbprint, so `PartFinal` can validate a PTA certificate chain
+/// rooted in it.
+pub(crate) fn part_policy_with_pota(pota_raw: &[u8; 96]) -> Vec<u8> {
+    let mut p = known_good_test_policy();
+    p.pota_spki_thumbprint = spki_thumbprint(pota_raw);
+    p.encode()
+}
+
+/// Return `policy` with the first byte of its `info` value flipped: still
+/// a canonical policy with the same anchors, but a different hash.
+/// `policy` must carry the 64-byte `info` of [`known_good_test_policy`].
+pub(crate) fn perturb_policy_info(policy: &[u8]) -> Vec<u8> {
+    const INFO_ENTRY_HEAD: [u8; 3] = [PolicyKey::Info as u8, 0x58, 64];
+    let pos = policy
+        .windows(INFO_ENTRY_HEAD.len())
+        .position(|w| w == INFO_ENTRY_HEAD)
+        .expect("policy carries the 64-byte fixture info");
+    let mut out = policy.to_vec();
+    out[pos + INFO_ENTRY_HEAD.len()] ^= 0xFF;
+    out
 }
 
 pub(crate) fn mach_seed() -> [u8; MACH_SEED_LEN] {
     let mut v = [0u8; MACH_SEED_LEN];
     for (i, b) in v.iter_mut().enumerate() {
         *b = 0x40 + i as u8;
-    }
-    v
-}
-
-pub(crate) fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
-    let mut v = [0u8; POTA_THUMBPRINT_LEN];
-    for (i, b) in v.iter_mut().enumerate() {
-        *b = 0x80 ^ i as u8;
-    }
-    v
-}
-
-pub(super) fn sata_thumbprint() -> [u8; SATA_THUMBPRINT_LEN] {
-    let mut v = [0u8; SATA_THUMBPRINT_LEN];
-    for (i, b) in v.iter_mut().enumerate() {
-        *b = 0x40 ^ i as u8;
     }
     v
 }

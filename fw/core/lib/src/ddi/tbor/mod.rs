@@ -327,8 +327,8 @@ pub(crate) mod opcode {
     /// (TMK, see [`DARC_TMK_GEN`] / [`DARC_TMK_IMPORT`]) to a remote
     /// **target**, producing a 145-byte `sealed_tmk` byte-compatible with
     /// what [`DARC_TMK_IMPORT`] consumes.  The target is authenticated by
-    /// a certificate chain anchored to the policy `DATAPubKey` (the
-    /// export-side mirror of the `POTAPubKey`-anchored sender chain
+    /// a certificate chain anchored to the policy `data_spki_thumbprint` (the
+    /// export-side mirror of the `pota_spki_thumbprint`-anchored sender chain
     /// [`DARC_TMK_IMPORT`] verifies).  Nothing is persisted on-device.
     /// See [`super::darc_tmk_export`].
     pub(crate) const DARC_TMK_EXPORT: u8 = 0x24;

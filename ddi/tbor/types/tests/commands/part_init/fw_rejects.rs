@@ -9,74 +9,52 @@
 //! [`tsra_ddi_tbor_test_harness::bootstrap_rotated_cu`] (where needed) to clear the
 //! default-PSK arm before reaching the path under test.
 
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
+use tsra_ddi_tbor_test_harness::policy::CborWriter;
 use tsra_ddi_tbor_test_harness::session_guard::SessionGuard;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
+use tsra_ddi_tbor_types::PolicyFlags;
+use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborPartInitReq;
 use tsra_ddi_tbor_types::TborStatus;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
+use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
+use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_VERSION;
 
 use super::known_good_part_policy;
+use super::known_good_test_policy;
 use super::mach_seed;
-use super::pota_thumbprint;
+use super::FILLER_POTA_THUMBPRINT;
+use super::FILLER_SATA_THUMBPRINT;
 
-// Replace these with the canonical offsets/constants from the PartPolicy
-// encoder or firmware policy structure.
-const POLICY_PUB_KEY_KIND_OFFSET: usize = 2;
-const POLICY_PUB_KEY_LEN_OFFSET: usize = 4;
-
-const PART_POLICY_FLAGS_OFFSET: usize = 418;
-
-const RESERVED_POLICY_FLAG_BITS: [u8; 5] = [1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7];
-
-const BACKUP_PART_PUB_KEY_KIND_OFFSET: usize = 318;
-const BACKUP_PART_PUB_KEY_LEN_OFFSET: usize = 320;
-const BACKUP_PART_PUB_KEY_DATA_OFFSET: usize = 322;
-
-const EXPECTED_BACKUP_PUB_KEY_LEN: u16 = 96;
-const ECC384_POLICY_KEY_KIND: u16 = 0;
-
-const SATA_PUB_KEY_KIND_OFFSET: usize = 102;
-const SATA_PUB_KEY_LEN_OFFSET: usize = 104;
-
-fn set_u16_le(buf: &mut [u8], offset: usize, value: u16) {
-    buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+/// A structurally malformed policy (all zero bytes: a CBOR uint where
+/// the top-level map is expected).
+fn malformed_policy() -> Vec<u8> {
+    vec![0u8; 64]
 }
 
-fn set_backup_part_pub_key_present(policy: &mut [u8; PART_POLICY_LEN]) {
-    set_u16_le(
-        policy,
-        BACKUP_PART_PUB_KEY_KIND_OFFSET,
-        ECC384_POLICY_KEY_KIND,
-    );
-    set_u16_le(
-        policy,
-        BACKUP_PART_PUB_KEY_LEN_OFFSET,
-        EXPECTED_BACKUP_PUB_KEY_LEN,
-    );
-
-    // Supply deterministic nonzero P-384-sized key bytes.
-    policy[BACKUP_PART_PUB_KEY_DATA_OFFSET
-        ..BACKUP_PART_PUB_KEY_DATA_OFFSET + EXPECTED_BACKUP_PUB_KEY_LEN as usize]
-        .fill(0xA5);
+/// A policy of `0xFF` bytes (CBOR "break" where the map is expected).
+fn all_ff_policy() -> Vec<u8> {
+    vec![0xFFu8; 64]
 }
 
-fn set_backup_part_pub_key_kind(policy: &mut [u8; PART_POLICY_LEN], kind: u16) {
-    set_u16_le(policy, BACKUP_PART_PUB_KEY_KIND_OFFSET, kind);
-}
-
-fn set_backup_part_pub_key_len(policy: &mut [u8; PART_POLICY_LEN], len: u16) {
-    set_u16_le(policy, BACKUP_PART_PUB_KEY_LEN_OFFSET, len);
-}
-
-fn set_valid_backup_part_pub_key(policy: &mut [u8; PART_POLICY_LEN]) {
-    set_backup_part_pub_key_present(policy);
+/// The known-good policy with `version` set to zero.
+fn zero_version_policy() -> Vec<u8> {
+    let mut p = known_good_test_policy();
+    p.version = 0;
+    p.encode()
 }
 
 /// Default-PSK CO session: the TBOR dispatcher must reject `PartInit`
@@ -92,10 +70,9 @@ fn part_init_reject_default_psk_co() {
         .expect("open_session must succeed");
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(session.handshake(), &seed, &policy, &thumb)
+        .part_init(session.handshake(), &seed, &policy)
         .expect_err("PartInit under default CO PSK must be rejected");
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
 }
@@ -112,10 +89,9 @@ fn part_init_reject_cu_session() {
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&session, &seed, &policy, &thumb)
+        .part_init(&session, &seed, &policy)
         .expect_err("PartInit on CU session must be rejected");
     assert_fw_rejects(&err, TborStatus::InvalidPermissions);
 }
@@ -133,11 +109,10 @@ fn part_init_reject_bad_policy() {
     let session = SessionGuard::new(&ctx, bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK));
 
     let seed = mach_seed();
-    let bad_policy = [0u8; PART_POLICY_LEN];
-    let thumb = pota_thumbprint();
+    let bad_policy = malformed_policy();
 
     let err = ctx
-        .part_init(session.handshake(), &seed, &bad_policy, &thumb)
+        .part_init(session.handshake(), &seed, &bad_policy)
         .expect_err("PartInit with malformed PartPolicy must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
@@ -154,12 +129,11 @@ fn part_init_default_psk_gate_precedes_policy_decode() {
     let session = ctx
         .open_session(CO, SessionType::Authenticated)
         .expect("open default-PSK CO session");
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(session.handshake(), &seed, &bad_policy, &thumb)
+        .part_init(session.handshake(), &seed, &bad_policy)
         .expect_err("default-PSK gate must reject before policy decoding");
 
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
@@ -181,10 +155,9 @@ fn part_init_default_psk_gate_precedes_cu_role_gate() {
         .expect("open default-PSK CU session");
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(session.handshake(), &seed, &policy, &thumb)
+        .part_init(session.handshake(), &seed, &policy)
         .expect_err("default-PSK CU session must be rejected");
 
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
@@ -199,12 +172,11 @@ fn part_init_cu_role_gate_precedes_policy_decode() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
+        .part_init(&session, &seed, &bad_policy)
         .expect_err("CU role gate must reject before policy decoding");
 
     assert_fw_rejects(&err, TborStatus::InvalidPermissions);
@@ -220,39 +192,30 @@ fn part_init_reject_all_ff_policy() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let bad_policy = [0xFFu8; PART_POLICY_LEN];
+    let bad_policy = all_ff_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
+        .part_init(&session, &seed, &bad_policy)
         .expect_err("PartInit with all-0xFF PartPolicy must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
 }
 
-/// Corrupt only the policy major-version byte while preserving the rest
-/// of an otherwise valid policy.
-///
-/// This provides a more targeted version of the all-zero-policy test and
-/// verifies that `version.major == 0` is independently rejected.
+/// A canonically encoded policy whose only defect is `version == 0`
+/// must be rejected.
 #[test]
-fn part_init_reject_zero_policy_major_version() {
+fn part_init_reject_zero_policy_version() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
-
-    // PartPolicy begins with its encoded version. The canonical decoder
-    // rejects a policy whose major version is zero.
-    bad_policy[0] = 0;
+    let bad_policy = zero_version_policy();
 
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("PartInit with zero policy major version must be rejected");
+        .part_init(&session, &seed, &bad_policy)
+        .expect_err("PartInit with zero policy version must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
 }
@@ -267,12 +230,11 @@ fn part_init_bad_policy_rejection_is_repeatable() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     for attempt in 1..=2 {
-        let result = ctx.part_init(&session, &seed, &bad_policy, &thumb);
+        let result = ctx.part_init(&session, &seed, &bad_policy);
 
         let err = match result {
             Ok(_) => panic!(
@@ -297,18 +259,17 @@ fn part_init_bad_policy_does_not_mutate_partition_state() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let good_policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
+        .part_init(&session, &seed, &bad_policy)
         .expect_err("malformed PartPolicy must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
 
-    ctx.part_init(&session, &seed, &good_policy, &thumb)
+    ctx.part_init(&session, &seed, &good_policy)
         .expect("valid PartInit must succeed after malformed-policy rejection");
 }
 
@@ -324,9 +285,8 @@ fn part_init_valid_rotated_co_request_succeeds() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
-    ctx.part_init(&session, &seed, &policy, &thumb)
+    ctx.part_init(&session, &seed, &policy)
         .expect("valid PartInit from rotated authenticated CO must succeed");
 }
 
@@ -341,10 +301,9 @@ fn part_init_cu_rejection_does_not_mutate_partition_state() {
     let cu_session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(&cu_session, &seed, &policy, &thumb)
+        .part_init(&cu_session, &seed, &policy)
         .expect_err("PartInit from a CU session must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidPermissions);
@@ -353,7 +312,7 @@ fn part_init_cu_rejection_does_not_mutate_partition_state() {
     let co_session = bootstrap_rotated_co(&co_ctx, &ROTATED_CO_PSK);
 
     co_ctx
-        .part_init(&co_session, &seed, &policy, &thumb)
+        .part_init(&co_session, &seed, &policy)
         .expect("valid CO PartInit must succeed after CU rejection");
 }
 
@@ -371,13 +330,12 @@ fn part_init_rejects_second_initialization() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
-    ctx.part_init(&session, &seed, &policy, &thumb)
+    ctx.part_init(&session, &seed, &policy)
         .expect("first valid PartInit must succeed");
 
     let err = ctx
-        .part_init(&session, &seed, &policy, &thumb)
+        .part_init(&session, &seed, &policy)
         .expect_err("second PartInit on an initialized partition must be rejected");
 
     assert_fw_rejects(&err, TborStatus::PtaKeyAlreadySet);
@@ -393,38 +351,33 @@ fn part_init_policy_rejection_matrix_does_not_mutate_state() {
     enum BadPolicyCase {
         AllZero,
         AllOnes,
-        ZeroMajorVersion,
+        ZeroVersion,
     }
 
     for case in [
         BadPolicyCase::AllZero,
         BadPolicyCase::AllOnes,
-        BadPolicyCase::ZeroMajorVersion,
+        BadPolicyCase::ZeroVersion,
     ] {
         let ctx = TestCtx::new();
         let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
         let bad_policy = match case {
-            BadPolicyCase::AllZero => [0u8; PART_POLICY_LEN],
-            BadPolicyCase::AllOnes => [0xFFu8; PART_POLICY_LEN],
-            BadPolicyCase::ZeroMajorVersion => {
-                let mut policy = known_good_part_policy();
-                policy[0] = 0;
-                policy
-            }
+            BadPolicyCase::AllZero => malformed_policy(),
+            BadPolicyCase::AllOnes => all_ff_policy(),
+            BadPolicyCase::ZeroVersion => zero_version_policy(),
         };
 
         let good_policy = known_good_part_policy();
         let seed = mach_seed();
-        let thumb = pota_thumbprint();
 
         let err = ctx
-            .part_init(&session, &seed, &bad_policy, &thumb)
+            .part_init(&session, &seed, &bad_policy)
             .expect_err("malformed PartPolicy must be rejected");
 
         assert_fw_rejects(&err, TborStatus::InvalidArg);
 
-        ctx.part_init(&session, &seed, &good_policy, &thumb)
+        ctx.part_init(&session, &seed, &good_policy)
             .expect("valid PartInit must succeed after policy rejection");
     }
 }
@@ -439,19 +392,11 @@ fn part_init_session_remains_usable_after_policy_rejections() {
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
-    let mut zero_major_policy = known_good_part_policy();
-    zero_major_policy[0] = 0;
-
-    let bad_policies = [
-        [0u8; PART_POLICY_LEN],
-        [0xFFu8; PART_POLICY_LEN],
-        zero_major_policy,
-    ];
+    let bad_policies = [malformed_policy(), all_ff_policy(), zero_version_policy()];
 
     for (index, bad_policy) in bad_policies.iter().enumerate() {
-        let result = ctx.part_init(&session, &seed, bad_policy, &thumb);
+        let result = ctx.part_init(&session, &seed, bad_policy);
 
         let err = match result {
             Ok(_) => panic!(
@@ -466,7 +411,7 @@ fn part_init_session_remains_usable_after_policy_rejections() {
 
     let good_policy = known_good_part_policy();
 
-    ctx.part_init(&session, &seed, &good_policy, &thumb)
+    ctx.part_init(&session, &seed, &good_policy)
         .expect("session must remain usable after policy rejections");
 }
 
@@ -487,10 +432,9 @@ fn part_init_default_psk_rejection_does_not_mutate_partition_state() {
 
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let err = ctx
-        .part_init(default_session.handshake(), &seed, &policy, &thumb)
+        .part_init(default_session.handshake(), &seed, &policy)
         .expect_err("PartInit under default CO PSK must be rejected");
 
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
@@ -501,7 +445,7 @@ fn part_init_default_psk_rejection_does_not_mutate_partition_state() {
 
     let rotated_session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    ctx.part_init(&rotated_session, &seed, &policy, &thumb)
+    ctx.part_init(&rotated_session, &seed, &policy)
         .expect("valid PartInit must succeed after default-PSK rejection");
 }
 
@@ -520,16 +464,15 @@ fn part_init_multiple_rejections_do_not_mutate_partition_state() {
     let ctx = TestCtx::new();
 
     let policy = known_good_part_policy();
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     // First rejection: default CO PSK.
     let default_co = ctx
         .open_session(CO, SessionType::Authenticated)
         .expect("open default-PSK CO session");
     let err = ctx
-        .part_init(default_co.handshake(), &seed, &policy, &thumb)
+        .part_init(default_co.handshake(), &seed, &policy)
         .expect_err("PartInit under default CO PSK must be rejected");
 
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
@@ -540,7 +483,7 @@ fn part_init_multiple_rejections_do_not_mutate_partition_state() {
     let cu_session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
     let err = ctx
-        .part_init(&cu_session, &seed, &policy, &thumb)
+        .part_init(&cu_session, &seed, &policy)
         .expect_err("PartInit from CU must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidPermissions);
@@ -552,7 +495,7 @@ fn part_init_multiple_rejections_do_not_mutate_partition_state() {
 
     // Third rejection: malformed policy.
     let err = co_ctx
-        .part_init(&co_session, &seed, &bad_policy, &thumb)
+        .part_init(&co_session, &seed, &bad_policy)
         .expect_err("malformed PartPolicy must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
@@ -560,14 +503,14 @@ fn part_init_multiple_rejections_do_not_mutate_partition_state() {
     // None of the preceding rejections may have initialized or otherwise
     // mutated the partition.
     co_ctx
-        .part_init(&co_session, &seed, &policy, &thumb)
+        .part_init(&co_session, &seed, &policy)
         .expect("valid PartInit must succeed after multiple rejected requests");
 }
 
 /// A malformed-policy rejection must not modify any caller-owned input
 /// buffer.
 ///
-/// `PartInit` receives the seed, policy, and thumbprint by shared
+/// `PartInit` receives the seed and policy by shared
 /// reference. This test confirms the harness and serialization path do
 /// not unexpectedly alter those buffers when firmware rejects the
 /// request.
@@ -577,16 +520,14 @@ fn part_init_rejection_does_not_modify_input_buffers() {
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
-    let expected_policy = bad_policy;
+    let expected_policy = bad_policy.clone();
     let expected_seed = seed;
-    let expected_thumb = thumb;
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
+        .part_init(&session, &seed, &bad_policy)
         .expect_err("malformed PartPolicy must be rejected");
 
     assert_fw_rejects(&err, TborStatus::InvalidArg);
@@ -599,11 +540,6 @@ fn part_init_rejection_does_not_modify_input_buffers() {
     assert_eq!(
         seed, expected_seed,
         "PartInit rejection modified the caller-owned seed buffer",
-    );
-
-    assert_eq!(
-        thumb, expected_thumb,
-        "PartInit rejection modified the caller-owned thumbprint buffer",
     );
 }
 
@@ -620,13 +556,12 @@ fn part_init_repeated_policy_rejections_preserve_session_and_state() {
     let ctx = TestCtx::new();
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let bad_policy = [0u8; PART_POLICY_LEN];
+    let bad_policy = malformed_policy();
     let good_policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     for attempt in 1..=ATTEMPTS {
-        let result = ctx.part_init(&session, &seed, &bad_policy, &thumb);
+        let result = ctx.part_init(&session, &seed, &bad_policy);
 
         let err = match result {
             Ok(_) => panic!(
@@ -639,7 +574,7 @@ fn part_init_repeated_policy_rejections_preserve_session_and_state() {
         assert_fw_rejects(&err, TborStatus::InvalidArg);
     }
 
-    ctx.part_init(&session, &seed, &good_policy, &thumb)
+    ctx.part_init(&session, &seed, &good_policy)
         .expect("valid PartInit must succeed after repeated policy rejections");
 }
 
@@ -659,206 +594,324 @@ fn part_init_co_plaintext_session_rejected() {
     assert_fw_rejects(&err, TborStatus::InvalidSessionType);
 }
 
-/// A valid-version policy must reject an unsupported POTA public-key kind.
-#[test]
-fn part_init_rejects_invalid_pub_key_kind_with_valid_version() {
-    let ctx = TestCtx::new();
-
-    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
-
-    bad_policy[POLICY_PUB_KEY_KIND_OFFSET..POLICY_PUB_KEY_KIND_OFFSET + 2]
-        .copy_from_slice(&u16::MAX.to_le_bytes());
-
-    let seed = mach_seed();
-    let thumb = pota_thumbprint();
-
-    let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("unsupported public-key kind must be rejected");
-
-    assert_fw_rejects(&err, TborStatus::InvalidArg);
+/// A value in a hand-built policy map entry.
+#[derive(Clone, Copy)]
+enum Val<'a> {
+    U(u64),
+    B(&'a [u8]),
 }
 
-/// A valid-version policy must reject an invalid POTA public-key length.
-#[test]
-fn part_init_rejects_invalid_pub_key_len_with_valid_version() {
-    let ctx = TestCtx::new();
+const POTA_TP: [u8; POLICY_THUMBPRINT_LEN] = FILLER_POTA_THUMBPRINT;
+const SATA_TP: [u8; POLICY_THUMBPRINT_LEN] = FILLER_SATA_THUMBPRINT;
+const OTHER_TP: [u8; POLICY_THUMBPRINT_LEN] = [0x33; POLICY_THUMBPRINT_LEN];
+const BACKUP_ID: [u8; POLICY_BACKUP_PART_ID_LEN] = [0xCD; POLICY_BACKUP_PART_ID_LEN];
 
-    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
-
-    bad_policy[POLICY_PUB_KEY_LEN_OFFSET..POLICY_PUB_KEY_LEN_OFFSET + 2]
-        .copy_from_slice(&95u16.to_le_bytes());
-
-    let seed = mach_seed();
-    let thumb = pota_thumbprint();
-
-    let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("invalid public-key length must be rejected");
-
-    assert_fw_rejects(&err, TborStatus::InvalidArg);
-}
-
-/// A correctly encoded optional backup partition public key must be
-/// accepted as part of an otherwise valid policy.
-#[test]
-fn part_init_accepts_valid_backup_pub_key() {
-    let ctx = TestCtx::new();
-
-    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut policy = known_good_part_policy();
-
-    set_valid_backup_part_pub_key(&mut policy);
-
-    let seed = mach_seed();
-    let thumb = pota_thumbprint();
-
-    ctx.part_init(&session, &seed, &policy, &thumb)
-        .expect("valid optional backup public key must be accepted");
-}
-
-/// Every reserved policy-flag bit must be rejected independently.
-#[test]
-fn part_init_rejects_each_reserved_policy_flag_bit() {
-    for reserved_bit in RESERVED_POLICY_FLAG_BITS {
-        let ctx = TestCtx::new();
-        let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-        let mut bad_policy = known_good_part_policy();
-
-        bad_policy[PART_POLICY_FLAGS_OFFSET] |= reserved_bit;
-
-        let seed = mach_seed();
-        let thumb = pota_thumbprint();
-
-        let err = ctx
-            .part_init(&session, &seed, &bad_policy, &thumb)
-            .expect_err("reserved policy flag bit must be rejected");
-
-        assert_fw_rejects(&err, TborStatus::InvalidArg);
+/// Encode `entries` verbatim (in the given order) as a CBOR map with
+/// shortest-form heads, so tests control key order, duplicates, and
+/// value types independently of [`TestPolicy`]'s canonical encoder.
+fn encode_map(entries: &[(u64, Val<'_>)]) -> Vec<u8> {
+    let mut w = CborWriter::new();
+    w.map(entries.len() as u64);
+    for (k, v) in entries {
+        w.uint(*k);
+        match v {
+            Val::U(u) => w.uint(*u),
+            Val::B(b) => w.bstr(b),
+        };
     }
+    w.finish()
 }
 
-/// A present backup partition public key with an unsupported key kind
-/// must be rejected.
+/// The minimal valid policy entries: version, POTA, SATA, flags.
+fn minimal_entries() -> Vec<(u64, Val<'static>)> {
+    vec![
+        (PolicyKey::Version as u64, Val::U(POLICY_VERSION.into())),
+        (PolicyKey::PotaSpkiThumbprint as u64, Val::B(&POTA_TP)),
+        (PolicyKey::SataSpkiThumbprint as u64, Val::B(&SATA_TP)),
+        (PolicyKey::Flags as u64, Val::U(0)),
+    ]
+}
+
+/// [`minimal_entries`] with the entry for `key` replaced by `val`
+/// (inserted in key order if absent).
+fn with_entry(key: PolicyKey, val: Val<'static>) -> Vec<u8> {
+    let mut e = minimal_entries();
+    let k = key as u64;
+    match e.iter().position(|(ek, _)| *ek >= k) {
+        Some(i) if e[i].0 == k => e[i].1 = val,
+        Some(i) => e.insert(i, (k, val)),
+        None => e.push((k, val)),
+    }
+    encode_map(&e)
+}
+
+/// [`minimal_entries`] without the entry for `key`.
+fn without_entry(key: PolicyKey) -> Vec<u8> {
+    let mut e = minimal_entries();
+    e.retain(|(k, _)| *k != key as u64);
+    encode_map(&e)
+}
+
+/// Every non-canonical or schema-violating policy document must be
+/// rejected by the firmware's strict CBOR decoder with
+/// [`TborStatus::InvalidArg`] — the single status every `PolicyError`
+/// maps to.  All cases share one rotated CO session; rejections never
+/// mutate partition state, which the trailing valid `PartInit` confirms.
 #[test]
-fn part_init_rejects_backup_pub_key_with_invalid_kind() {
+fn part_init_rejects_malformed_cbor_policies() {
+    let minimal = encode_map(&minimal_entries());
+
+    let mut cases: Vec<(String, Vec<u8>)> = vec![
+        ("empty document".into(), Vec::new()),
+        ("all-zero bytes".into(), malformed_policy()),
+        ("all-0xFF bytes".into(), all_ff_policy()),
+        // Version.
+        (
+            "version 0".into(),
+            with_entry(PolicyKey::Version, Val::U(0)),
+        ),
+        (
+            "version 2".into(),
+            with_entry(PolicyKey::Version, Val::U(2)),
+        ),
+        (
+            "version as bstr".into(),
+            with_entry(PolicyKey::Version, Val::B(&[1])),
+        ),
+        // Flags beyond the 8-bit field.
+        (
+            "flags 0x100".into(),
+            with_entry(PolicyKey::Flags, Val::U(0x100)),
+        ),
+        // Missing required keys.
+        ("missing version".into(), without_entry(PolicyKey::Version)),
+        (
+            "missing pota thumbprint".into(),
+            without_entry(PolicyKey::PotaSpkiThumbprint),
+        ),
+        (
+            "missing sata thumbprint".into(),
+            without_entry(PolicyKey::SataSpkiThumbprint),
+        ),
+        ("missing flags".into(), without_entry(PolicyKey::Flags)),
+        // Unknown keys.
+        ("unknown key 10".into(), {
+            let mut e = minimal_entries();
+            e.push((10, Val::U(0)));
+            encode_map(&e)
+        }),
+        ("unknown key 0".into(), {
+            let mut e = minimal_entries();
+            e.insert(0, (0, Val::U(0)));
+            encode_map(&e)
+        }),
+        // Key ordering.
+        ("keys out of order".into(), {
+            let mut e = minimal_entries();
+            e.swap(1, 2);
+            encode_map(&e)
+        }),
+        ("duplicate key".into(), {
+            let mut e = minimal_entries();
+            e.insert(2, (PolicyKey::PotaSpkiThumbprint as u64, Val::B(&POTA_TP)));
+            encode_map(&e)
+        }),
+        // Non-shortest / indefinite-length heads.
+        ("non-shortest flags value".into(), {
+            let mut b = minimal.clone();
+            let last = b.len() - 1;
+            b[last] = 0x18;
+            b.push(0x00);
+            b
+        }),
+        ("non-shortest map header".into(), {
+            let mut b = vec![0xB8, 0x04];
+            b.extend_from_slice(&minimal[1..]);
+            b
+        }),
+        ("non-shortest bstr length".into(), {
+            let mut w = CborWriter::new();
+            w.map(4).uint(1).uint(1).uint(2);
+            w.raw(&[0x59, 0x00, POLICY_THUMBPRINT_LEN as u8])
+                .raw(&POTA_TP);
+            w.uint(3).bstr(&SATA_TP).uint(7).uint(0);
+            w.finish()
+        }),
+        ("indefinite-length map".into(), {
+            let mut b = minimal.clone();
+            b[0] = 0xBF;
+            b.push(0xFF);
+            b
+        }),
+        // Framing.
+        ("trailing byte".into(), {
+            let mut b = minimal.clone();
+            b.push(0x00);
+            b
+        }),
+        (
+            "truncated document".into(),
+            minimal[..minimal.len() - 1].to_vec(),
+        ),
+        ("map count exceeds entries".into(), {
+            let mut b = minimal.clone();
+            b[0] += 1;
+            b
+        }),
+        // Backup-partition pairing.
+        (
+            "backup id without thumbprint".into(),
+            with_entry(PolicyKey::BackupPartId, Val::B(&BACKUP_ID)),
+        ),
+        (
+            "backup thumbprint without id".into(),
+            with_entry(PolicyKey::BackupPartSpkiThumbprint, Val::B(&OTHER_TP)),
+        ),
+        // Info bounds.
+        (
+            "empty info".into(),
+            with_entry(PolicyKey::Info, Val::B(&[])),
+        ),
+        (
+            "info too long".into(),
+            with_entry(PolicyKey::Info, Val::B(&[0xAB; POLICY_INFO_MAX_LEN + 1])),
+        ),
+    ];
+
+    // Each reserved flag bit independently.
+    for bit in 3..8 {
+        cases.push((
+            format!("reserved flag bit {bit}"),
+            with_entry(PolicyKey::Flags, Val::U(1 << bit)),
+        ));
+    }
+
+    // Wrong-length and wrong-type thumbprint / id fields.
+    const TP_SHORT: [u8; POLICY_THUMBPRINT_LEN - 1] = [0x5A; POLICY_THUMBPRINT_LEN - 1];
+    const TP_LONG: [u8; POLICY_THUMBPRINT_LEN + 1] = [0x5A; POLICY_THUMBPRINT_LEN + 1];
+    for key in [
+        PolicyKey::PotaSpkiThumbprint,
+        PolicyKey::SataSpkiThumbprint,
+        PolicyKey::SapotaSpkiThumbprint,
+        PolicyKey::DataSpkiThumbprint,
+    ] {
+        cases.push((format!("{key:?} short"), with_entry(key, Val::B(&TP_SHORT))));
+        cases.push((format!("{key:?} long"), with_entry(key, Val::B(&TP_LONG))));
+        cases.push((format!("{key:?} as uint"), with_entry(key, Val::U(0))));
+    }
+    const ID_SHORT: [u8; POLICY_BACKUP_PART_ID_LEN - 1] = [0xCD; POLICY_BACKUP_PART_ID_LEN - 1];
+    const ID_LONG: [u8; POLICY_BACKUP_PART_ID_LEN + 1] = [0xCD; POLICY_BACKUP_PART_ID_LEN + 1];
+    for (name, id) in [("short", &ID_SHORT[..]), ("long", &ID_LONG[..])] {
+        let mut e = minimal_entries();
+        e.insert(3, (PolicyKey::BackupPartId as u64, Val::B(id)));
+        e.insert(
+            4,
+            (
+                PolicyKey::BackupPartSpkiThumbprint as u64,
+                Val::B(&OTHER_TP),
+            ),
+        );
+        cases.push((format!("backup id {name}"), encode_map(&e)));
+    }
+    {
+        let mut e = minimal_entries();
+        e.insert(3, (PolicyKey::BackupPartId as u64, Val::B(&BACKUP_ID)));
+        e.insert(
+            4,
+            (
+                PolicyKey::BackupPartSpkiThumbprint as u64,
+                Val::B(&TP_SHORT),
+            ),
+        );
+        cases.push(("backup thumbprint short".into(), encode_map(&e)));
+    }
+
     let ctx = TestCtx::new();
-
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
-
-    set_backup_part_pub_key_present(&mut bad_policy);
-    set_backup_part_pub_key_kind(&mut bad_policy, u16::MAX);
-
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
-    let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("backup public key with invalid kind must be rejected");
+    for (name, bad_policy) in &cases {
+        let err = ctx
+            .part_init(&session, &seed, bad_policy)
+            .expect_err(&format!("malformed policy ({name}) must be rejected"));
+        match err {
+            DdiError::TborStatus(status) => assert_eq!(
+                status,
+                TborStatus::InvalidArg,
+                "malformed policy ({name}) rejected with wrong status",
+            ),
+            other => panic!("malformed policy ({name}): expected FW reject, got {other:?}"),
+        }
+    }
 
-    assert_fw_rejects(&err, TborStatus::InvalidArg);
+    ctx.part_init(&session, &seed, &minimal)
+        .expect("minimal valid policy must be accepted after the rejections");
 }
 
-/// A present backup partition public key with a nonzero length other
-/// than the required P-384 length must be rejected.
-///
-/// A zero length is intentionally not tested here because `len == 0`
-/// represents an absent optional backup key and is valid.
+/// A policy populating every optional field (SAPOTA, backing partition,
+/// all known flags, maximum-length info, DATA) must be accepted.
 #[test]
-fn part_init_rejects_backup_pub_key_with_wrong_length() {
+fn part_init_accepts_policy_with_all_optional_fields() {
     let ctx = TestCtx::new();
-
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
 
-    set_backup_part_pub_key_present(&mut bad_policy);
-    set_backup_part_pub_key_len(&mut bad_policy, EXPECTED_BACKUP_PUB_KEY_LEN - 1);
+    let policy = TestPolicy::new(POTA_TP, SATA_TP)
+        .with_sapota(OTHER_TP)
+        .with_backup_part(BACKUP_ID, [0x44; POLICY_THUMBPRINT_LEN])
+        .with_flags(PolicyFlags::KNOWN_MASK)
+        .with_info(&[0xAB; POLICY_INFO_MAX_LEN])
+        .with_data([0x55; POLICY_THUMBPRINT_LEN])
+        .encode();
+    assert!(policy.len() <= PART_POLICY_MAX_LEN);
 
-    let seed = mach_seed();
-    let thumb = pota_thumbprint();
-
-    let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("backup public key with invalid nonzero length must be rejected");
-
-    assert_fw_rejects(&err, TborStatus::InvalidArg);
+    ctx.part_init(&session, &mach_seed(), &policy)
+        .expect("policy with every optional field must be accepted");
 }
 
-/// Backup partition public-key lengths immediately below and above the
-/// required P-384 length must be rejected.
+/// The minimal policy (only the required keys, no `info`) and a
+/// one-byte `info` must each be accepted.
 #[test]
-fn part_init_rejects_backup_pub_key_boundary_lengths() {
-    for bad_len in [
-        EXPECTED_BACKUP_PUB_KEY_LEN - 1,
-        EXPECTED_BACKUP_PUB_KEY_LEN + 1,
+fn part_init_accepts_minimal_policy_boundaries() {
+    for policy in [
+        TestPolicy::new(POTA_TP, SATA_TP).encode(),
+        TestPolicy::new(POTA_TP, SATA_TP)
+            .with_info(&[0x01])
+            .encode(),
     ] {
         let ctx = TestCtx::new();
         let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-        let mut bad_policy = known_good_part_policy();
-
-        set_backup_part_pub_key_present(&mut bad_policy);
-        set_backup_part_pub_key_len(&mut bad_policy, bad_len);
-
-        let seed = mach_seed();
-        let thumb = pota_thumbprint();
-
-        let err = ctx
-            .part_init(&session, &seed, &bad_policy, &thumb)
-            .expect_err("backup public key with invalid length must be rejected");
-
-        assert_fw_rejects(&err, TborStatus::InvalidArg);
+        ctx.part_init(&session, &mach_seed(), &policy)
+            .expect("minimal-boundary policy must be accepted");
     }
 }
 
-/// An otherwise valid policy with an unsupported SATA public-key kind
-/// must be rejected.
-///
-/// Starting from the known-good policy keeps the version, POTA key,
-/// SATA length, and all unrelated fields valid, so the rejection
-/// directly exercises SATA key-kind validation.
+/// A policy larger than [`PART_POLICY_MAX_LEN`] is refused: the harness
+/// rejects it up front, and a raw request carrying it is rejected by the
+/// firmware TBOR codec (schema `max_len`) with `TborInvalidFixedLength`.
 #[test]
-fn part_init_rejects_invalid_sata_pub_key_kind() {
+fn part_init_rejects_oversized_policy() {
     let ctx = TestCtx::new();
-
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let mut bad_policy = known_good_part_policy();
-
-    bad_policy[SATA_PUB_KEY_KIND_OFFSET..SATA_PUB_KEY_KIND_OFFSET + 2]
-        .copy_from_slice(&u16::MAX.to_le_bytes());
-
-    let seed = mach_seed();
-    let thumb = pota_thumbprint();
+    let oversized = vec![0u8; PART_POLICY_MAX_LEN + 1];
 
     let err = ctx
-        .part_init(&session, &seed, &bad_policy, &thumb)
-        .expect_err("unsupported SATA public-key kind must be rejected");
+        .part_init(&session, &mach_seed(), &oversized)
+        .expect_err("oversized policy must be refused by the harness");
+    assert!(
+        matches!(err, DdiError::InvalidParameter),
+        "expected InvalidParameter, got {err:?}",
+    );
 
-    assert_fw_rejects(&err, TborStatus::InvalidArg);
-}
+    let req = TborPartInitReq {
+        session_id: session.session_id,
+        mach_seed_envelope: encrypt_mach_seed_envelope(&session, &mach_seed())
+            .expect("seal mach_seed envelope"),
+        part_policy: oversized,
+    };
+    // The host encoder does not enforce `max_len`; the firmware codec
+    // rejects the over-long field before the handler runs.
+    ctx.expect_fw_reject(&req, TborStatus::TborInvalidFixedLength);
 
-/// SATA public-key lengths immediately below and above the required
-/// P-384 length must both be rejected.
-#[test]
-fn part_init_rejects_invalid_sata_pub_key_boundary_lengths() {
-    for bad_len in [95u16, 97u16] {
-        let ctx = TestCtx::new();
-
-        let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-        let mut bad_policy = known_good_part_policy();
-
-        bad_policy[SATA_PUB_KEY_LEN_OFFSET..SATA_PUB_KEY_LEN_OFFSET + 2]
-            .copy_from_slice(&bad_len.to_le_bytes());
-
-        let seed = mach_seed();
-        let thumb = pota_thumbprint();
-
-        let err = ctx
-            .part_init(&session, &seed, &bad_policy, &thumb)
-            .expect_err("invalid SATA public-key length must be rejected");
-
-        assert_fw_rejects(&err, TborStatus::InvalidArg);
-    }
+    ctx.part_init(&session, &mach_seed(), &known_good_part_policy())
+        .expect("valid PartInit must succeed after host-side rejects");
 }

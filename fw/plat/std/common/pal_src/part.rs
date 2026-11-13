@@ -110,9 +110,6 @@ const SEALED_BK3_SIZE: usize = 512;
 /// Length of a partition's random identity blob in bytes.
 const PART_ID_LEN: usize = 16;
 
-/// Length of a POTA SHA-384 thumbprint in bytes.
-const POTA_THUMBPRINT_LEN: usize = 48;
-
 /// Size of a single P-384 coordinate (x or y) in bytes.
 const P384_COORD_SIZE: usize = 48;
 
@@ -318,17 +315,6 @@ pub(crate) struct PartitionEntry {
 
     /// Raw partition policy bytes bound by PartInit.
     policy_hash: Option<[u8; POLICY_HASH_LEN]>,
-
-    /// POTA SHA-384 thumbprint bound by PartInit.
-    pota_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
-
-    /// SATA SHA-384 thumbprint bound by PartInit (security-domain
-    /// configuration).
-    sata_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
-
-    /// SAPOTA SHA-384 thumbprint bound by PartInit.  Optional — `None`
-    /// when the request carried no SAPOTA thumbprint.
-    sapota_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
 }
 
 impl Default for PartitionEntry {
@@ -369,9 +355,6 @@ impl Default for PartitionEntry {
             ephemeral_mk_key_id: None,
             sd_mk_key_id: None,
             policy_hash: None,
-            pota_thumbprint: None,
-            sata_thumbprint: None,
-            sapota_thumbprint: None,
         }
     }
 }
@@ -1145,9 +1128,6 @@ impl StdHsmPal {
 
         // Provisioning material (write-once fields bound by PartInit).
         drop_secret(&mut entry.policy_hash);
-        drop_secret(&mut entry.pota_thumbprint);
-        drop_secret(&mut entry.sata_thumbprint);
-        drop_secret(&mut entry.sapota_thumbprint);
 
         // Rotated PSK material.
         drop_secret(&mut entry.psk_co);
@@ -1410,21 +1390,6 @@ impl PartitionEntry {
                 .as_ref()
                 .map(|a| a.as_slice())
                 .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::POTA_THUMBPRINT => self
-                .pota_thumbprint
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::SATA_THUMBPRINT => self
-                .sata_thumbprint
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::SAPOTA_THUMBPRINT => self
-                .sapota_thumbprint
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -1497,33 +1462,6 @@ impl PartitionEntry {
                 let mut buf = [0u8; POLICY_HASH_LEN];
                 buf.copy_from_slice(data);
                 self.policy_hash = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::POTA_THUMBPRINT => {
-                if self.pota_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.pota_thumbprint = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::SATA_THUMBPRINT => {
-                if self.sata_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.sata_thumbprint = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::SAPOTA_THUMBPRINT => {
-                if self.sapota_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.sapota_thumbprint = Some(buf);
                 Ok(())
             }
             HsmPartPropId::BK3_SESSION => {
@@ -1611,18 +1549,6 @@ impl PartitionEntry {
             }
             HsmPartPropId::POLICY_HASH => {
                 self.policy_hash = None;
-                Ok(())
-            }
-            HsmPartPropId::POTA_THUMBPRINT => {
-                self.pota_thumbprint = None;
-                Ok(())
-            }
-            HsmPartPropId::SATA_THUMBPRINT => {
-                self.sata_thumbprint = None;
-                Ok(())
-            }
-            HsmPartPropId::SAPOTA_THUMBPRINT => {
-                self.sapota_thumbprint = None;
                 Ok(())
             }
             HsmPartPropId::BK3_SESSION => {
