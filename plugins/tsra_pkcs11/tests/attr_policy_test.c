@@ -520,6 +520,56 @@ static void test_other_classes(void)
     );
 }
 
+static void test_ec_usage(void)
+{
+    printf("== EC keys: the usage the device fixed ==\n");
+    static CK_KEY_TYPE ec = CKK_EC;
+    static CK_KEY_TYPE rsa = CKK_RSA;
+    const CK_ATTRIBUTE ec_priv[] = { ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, ec) };
+    const CK_ATTRIBUTE ec_pub[] = { ATTR(CKA_CLASS, g_public), ATTR(CKA_KEY_TYPE, ec) };
+    const CK_ATTRIBUTE rsa_priv[] = { ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, rsa) };
+    /* A key type one byte wide, as an edited file store could hold. */
+    const CK_ATTRIBUTE odd_priv[] = { ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, g_true) };
+    CHECK(
+        check_on(ec_priv, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_SIGN, g_true)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "EC private key: CKA_SIGN -> READ_ONLY"
+    );
+    CHECK(
+        check_on(ec_priv, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_SIGN, g_false)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "EC private key: turning CKA_SIGN off -> READ_ONLY too"
+    );
+    CHECK(
+        check_on(ec_priv, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_DERIVE, g_true)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "EC private key: CKA_DERIVE -> READ_ONLY"
+    );
+    CHECK(
+        check_on(ec_pub, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_VERIFY, g_true)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "EC public key: CKA_VERIFY -> READ_ONLY"
+    );
+    CHECK(
+        check_on(ec_pub, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_DERIVE, g_true)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "EC public key: CKA_DERIVE -> READ_ONLY"
+    );
+    CHECK(
+        check_on(ec_priv, 2, CK_TRUE, (CK_ATTRIBUTE)ATTR(CKA_LABEL, g_label)) == CKR_OK,
+        "EC private key: CKA_LABEL still changes"
+    );
+    CHECK(
+        check_on(rsa_priv, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_SIGN, g_true)) == CKR_OK,
+        "RSA private key: CKA_SIGN keeps the PKCS#11 rule"
+    );
+    CHECK(
+        check_on(odd_priv, 2, CK_TRUE, (CK_ATTRIBUTE)BOOL_ATTR(CKA_SIGN, g_true)) ==
+            CKR_ATTRIBUTE_READ_ONLY,
+        "a key type that is not a CK_KEY_TYPE -> READ_ONLY (restrictive)"
+    );
+}
+
 static void test_shapes_and_order(void)
 {
     printf("== value shapes, duplicates, ordering ==\n");
@@ -854,6 +904,7 @@ int main(void)
     test_secret_key();
     test_latches();
     test_other_classes();
+    test_ec_usage();
     test_shapes_and_order();
     test_create();
     printf(

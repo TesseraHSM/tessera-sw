@@ -238,11 +238,28 @@ static void test_check_arguments(void)
     len = 99;
     token = CK_TRUE;
     CK_ATTRIBUTE only_label[] = { ATTR(CKA_LABEL, g_label) };
+    CK_OBJECT_CLASS data = CKO_DATA;
+    CK_ATTRIBUTE wrong_class[] = { ATTR(CKA_CLASS, data) };
+    CHECK(
+        (tsra_pkcs11_keygen_check_template(CKM_AES_KEY_GEN, wrong_class, 1, &pol, &len, &token) ==
+         CKR_TEMPLATE_INCONSISTENT) &&
+            (len == 0) && (token == CK_FALSE) && (pol == NULL),
+        "outputs are reset even when the template is rejected"
+    );
+    len = 99;
     CHECK(
         (tsra_pkcs11_keygen_check_template(CKM_AES_KEY_GEN, only_label, 1, &pol, &len, &token) ==
          CKR_TEMPLATE_INCOMPLETE) &&
-            (len == 0) && (token == CK_FALSE) && (pol == NULL),
-        "outputs are reset even when the template is rejected"
+            (len == 0) && (pol != NULL) && (pol->kind == TSRA_PKCS11_KIND_AES),
+        "lacking only CKA_VALUE_LEN -> CKR_TEMPLATE_INCOMPLETE with the family (for unwrap)"
+    );
+    CK_ULONG len64 = AES_XTS_KEY_BYTES;
+    CK_ATTRIBUTE bad_len[] = { ATTR(CKA_VALUE_LEN, len64) };
+    CHECK(
+        (tsra_pkcs11_keygen_check_template(CKM_AES_KEY_GEN, bad_len, 1, &pol, &len, &token) ==
+         CKR_ATTRIBUTE_VALUE_INVALID) &&
+            (pol == NULL),
+        "a length the family lacks -> no family"
     );
 }
 
@@ -663,34 +680,38 @@ static void test_build(void)
     CK_ULONG n = 0;
 
     CHECK(
-        tsra_pkcs11_keygen_build_template(pol, NULL, 0, NULL, full, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(pol, NULL, 0, true, NULL, full, &n) == CKR_ARGUMENTS_BAD,
         "NULL fill -> CKR_ARGUMENTS_BAD"
     );
     CHECK(
-        tsra_pkcs11_keygen_build_template(pol, NULL, 0, &fill, NULL, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(pol, NULL, 0, true, &fill, NULL, &n) == CKR_ARGUMENTS_BAD,
         "NULL output array -> CKR_ARGUMENTS_BAD"
     );
     CHECK(
-        tsra_pkcs11_keygen_build_template(pol, NULL, 0, &fill, full, NULL) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(pol, NULL, 0, true, &fill, full, NULL) ==
+            CKR_ARGUMENTS_BAD,
         "NULL count output -> CKR_ARGUMENTS_BAD"
     );
     CHECK(
-        tsra_pkcs11_keygen_build_template(pol, NULL, 1, &fill, full, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(pol, NULL, 1, true, &fill, full, &n) == CKR_ARGUMENTS_BAD,
         "NULL template with count 1 -> CKR_ARGUMENTS_BAD"
     );
     CHECK(
-        tsra_pkcs11_keygen_build_template(NULL, NULL, 0, &fill, full, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(NULL, NULL, 0, true, &fill, full, &n) ==
+            CKR_ARGUMENTS_BAD,
         "NULL policy -> CKR_ARGUMENTS_BAD"
     );
     tsra_pkcs11_keygen_policy bad = *pol;
     bad.mech_count = 0;
     CHECK(
-        tsra_pkcs11_keygen_build_template(&bad, NULL, 0, &fill, full, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(&bad, NULL, 0, true, &fill, full, &n) ==
+            CKR_ARGUMENTS_BAD,
         "policy with no mechanisms -> CKR_ARGUMENTS_BAD"
     );
     bad.mech_count = KEYGEN_MAX_KEY_MECHS + 1;
     CHECK(
-        tsra_pkcs11_keygen_build_template(&bad, NULL, 0, &fill, full, &n) == CKR_ARGUMENTS_BAD,
+        tsra_pkcs11_keygen_build_template(&bad, NULL, 0, true, &fill, full, &n) ==
+            CKR_ARGUMENTS_BAD,
         "policy above KEYGEN_MAX_KEY_MECHS -> CKR_ARGUMENTS_BAD"
     );
 
@@ -699,7 +720,7 @@ static void test_build(void)
     CK_KEY_TYPE aes = CKK_AES;
     CK_BBOOL t = CK_TRUE, f = CK_FALSE;
     CHECK(
-        (tsra_pkcs11_keygen_build_template(pol, NULL, 0, &fill, full, &n) == CKR_OK) &&
+        (tsra_pkcs11_keygen_build_template(pol, NULL, 0, true, &fill, full, &n) == CKR_OK) &&
             (n == KEYGEN_APPENDED_ATTRS),
         "empty template -> exactly KEYGEN_APPENDED_ATTRS attributes"
     );
@@ -739,7 +760,8 @@ static void test_build(void)
                              BOOL_ATTR(CKA_DECRYPT, g_false),
                              ATTR(CKA_LABEL, g_label) };
     CHECK(
-        (tsra_pkcs11_keygen_build_template(pol, usage, COUNT(usage), &fill, full, &n) == CKR_OK) &&
+        (tsra_pkcs11_keygen_build_template(pol, usage, COUNT(usage), true, &fill, full, &n) ==
+         CKR_OK) &&
             (n == COUNT(usage) + KEYGEN_APPENDED_ATTRS - 2),
         "given ENCRYPT/DECRYPT are not appended again"
     );
@@ -770,8 +792,8 @@ static void test_build(void)
                             BOOL_ATTR(CKA_DECRYPT, g_true),
                             VALUE_LEN32 };
     CHECK(
-        (tsra_pkcs11_keygen_build_template(pol, all8, COUNT(all8), &fill, full, &n) == CKR_OK) &&
-            (n == COUNT(all8) + 4),
+        (tsra_pkcs11_keygen_build_template(pol, all8, COUNT(all8), true, &fill, full, &n) == CKR_OK
+        ) && (n == COUNT(all8) + 4),
         "all defaults given -> only LOCAL/ALWAYS_SENSITIVE/NEVER_EXTRACTABLE/KEY_GEN_MECHANISM "
         "appended"
     );
@@ -792,6 +814,20 @@ static void test_build(void)
     CHECK(
         (local != NULL) && (local->pValue == &fill.btrue),
         "appended values point into the fill struct"
+    );
+
+    /* An unwrapped key came from outside the token. */
+    CK_MECHANISM_TYPE unavailable = CK_UNAVAILABLE_INFORMATION;
+    CHECK(
+        (tsra_pkcs11_keygen_build_template(pol, plain, 1, false, &fill, full, &n) == CKR_OK) &&
+            (n == 1 + KEYGEN_APPENDED_ATTRS) && built_has(full, n, CKA_LOCAL, &f, sizeof(f)) &&
+            built_has(full, n, CKA_ALWAYS_SENSITIVE, &f, sizeof(f)) &&
+            built_has(full, n, CKA_NEVER_EXTRACTABLE, &f, sizeof(f)) &&
+            built_has(full, n, CKA_KEY_GEN_MECHANISM, &unavailable, sizeof(unavailable)) &&
+            built_has(full, n, CKA_SENSITIVE, &t, sizeof(t)) &&
+            built_has(full, n, CKA_EXTRACTABLE, &f, sizeof(f)),
+        "not local -> LOCAL, ALWAYS_SENSITIVE, NEVER_EXTRACTABLE FALSE, no generation mechanism, "
+        "still sensitive and unextractable"
     );
 }
 
@@ -1073,7 +1109,8 @@ static void test_families(void)
     const tsra_pkcs11_keygen_policy *gcm_pol = policy_for(CKM_AES_KEY_GEN, t_gcm, 2);
     CHECK(
         (gcm_pol != NULL) &&
-            (tsra_pkcs11_keygen_build_template(gcm_pol, t_gcm, 2, &fill, full, &n) == CKR_OK) &&
+            (tsra_pkcs11_keygen_build_template(gcm_pol, t_gcm, 2, true, &fill, full, &n) == CKR_OK
+            ) &&
             built_has(full, n, CKA_ALLOWED_MECHANISMS, gcm, sizeof(gcm)) &&
             built_has(full, n, CKA_KEY_TYPE, &g_aes, sizeof(g_aes)),
         "a GCM key stores {CKM_AES_GCM} and CKK_AES"
@@ -1081,7 +1118,8 @@ static void test_families(void)
     const tsra_pkcs11_keygen_policy *xts_pol = policy_for(CKM_AES_XTS_KEY_GEN, t_64, 1);
     CHECK(
         (xts_pol != NULL) &&
-            (tsra_pkcs11_keygen_build_template(xts_pol, t_64, 1, &fill, full, &n) == CKR_OK) &&
+            (tsra_pkcs11_keygen_build_template(xts_pol, t_64, 1, true, &fill, full, &n) == CKR_OK
+            ) &&
             built_has(full, n, CKA_ALLOWED_MECHANISMS, xts, sizeof(xts)) &&
             built_has(full, n, CKA_KEY_TYPE, &xts_type, sizeof(xts_type)),
         "an XTS key stores {CKM_AES_XTS} and CKK_AES_XTS"

@@ -6,12 +6,13 @@
 /// The host oracle (utils/host_crypto.hpp) against published vectors, so a
 /// module test that relies on it relies on OpenSSL and the vectors, not on new
 /// code: RFC 4231 (HMAC), RFC 5869 (HKDF), NIST CAVP (AES-CBC, ECDH, RSA
-/// PKCS#1 v1.5 and PSS signatures), RFC 5649 (AES key wrap with padding), RFC
-/// 6979 (ECDSA) and BoringSSL (RSA-OAEP). Hand-built cases check that bad
-/// padding, a bad key wrap, a point off the curve and a tampered OAEP
-/// ciphertext are refused. Each case runs in a process that has the module
-/// loaded; the coexistence case also uses a token key between host operations,
-/// after the login has started the SDK's own libcrypto use.
+/// PKCS#1 v1.5 and PSS signatures), RFC 5649 and Wycheproof (AES key wrap with
+/// padding, every KEK size), RFC 6979 (ECDSA) and BoringSSL (RSA-OAEP).
+/// Hand-built cases check that bad padding, a bad key wrap, a point off the
+/// curve and a tampered OAEP ciphertext are refused. Each case runs in a
+/// process that has the module loaded; the coexistence case also uses a token
+/// key between host operations, after the login has started the SDK's own
+/// libcrypto use.
 
 #include <cstring>
 #include <gtest/gtest.h>
@@ -27,6 +28,7 @@
 #include "vectors/rsa_oaep.inc"
 #include "vectors/rsa_pkcs1_nist.inc"
 #include "vectors/rsa_pss_nist.inc"
+#include "wycheproof/aes_kwp.inc"
 
 using host::Bytes;
 using vectors::hex;
@@ -266,6 +268,28 @@ TEST(host_crypto, aes_kwp_unwrap_refuses_bad_input)
         << "a length of 9 in one block";
     EXPECT_FALSE(unwrap(block("a65959a600000007466f725061736901")).has_value())
         << "a nonzero pad byte";
+}
+
+TEST(host_crypto, aes_kwp_matches_wycheproof)
+{
+    // Every KEK size, AES-256 included: the KEK of a CKM_RSA_AES_KEY_WRAP blob.
+    for (const auto &v : vectors::kWycheproofAesKwp)
+    {
+        SCOPED_TRACE("tcId " + std::to_string(v.tc_id));
+        Bytes kek = hex(v.key);
+        std::string name = "AES-" + std::to_string(kek.size() * 8) + "-WRAP-PAD";
+        std::optional<Bytes> msg = host::cipher(name, false, kek, Bytes(), hex(v.ct), false);
+        if (v.valid)
+        {
+            ASSERT_TRUE(msg.has_value());
+            EXPECT_EQ(hex(v.msg), *msg);
+            EXPECT_EQ(hex(v.ct), host::aes_kwp_wrap(kek, hex(v.msg)));
+        }
+        else
+        {
+            EXPECT_FALSE(msg.has_value());
+        }
+    }
 }
 
 TEST(host_crypto, ecdsa_verify_matches_rfc6979)
