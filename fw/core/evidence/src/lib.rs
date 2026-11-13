@@ -41,9 +41,9 @@
 //! [`verify_receiver_cert_chain`]); the attestation evidence is optional
 //! and, when present, SAPOTA-anchored.
 //!
-//! The bulk DER/COSE items travel out of band as NVMe SGL Data Blocks; the
-//! caller passes the [`OobPtr`] locating them plus the per-item
-//! descriptors (see [`EvidenceRefs`]). Each certificate is copied into a
+//! The bulk DER/COSE items travel out of band; the caller passes the
+//! per-item descriptors (see [`EvidenceRefs`]) and each item is fetched
+//! with [`HsmIoController::recv_oob`]. Each certificate is copied into a
 //! nested, per-chain allocator scope that frees on return, so peak DMA use
 //! stays bounded regardless of chain depth.
 //!
@@ -61,14 +61,13 @@ use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain as validate_cert_chain;
 use tsra_fw_ddi_tbor_types::CertDescriptor;
 use tsra_fw_ddi_tbor_types::ReportDescriptor;
-use tsra_fw_hsm_oob::copy_oob;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmGdmaController;
+use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -87,13 +86,6 @@ pub const ATTESTED_KEY_LEN: usize = 1 + POINT_LEN;
 
 /// SEC1 uncompressed point tag (`0x04 ‖ X ‖ Y`).
 const SEC1_UNCOMPRESSED: u8 = 0x04;
-
-/// Reverse-copy `src` into `dst[..src.len()]` (LE↔BE per coordinate).
-fn reverse_copy(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
-        *d = *s;
-    }
-}
 
 /// Out-of-band locations of one attestation context's items: the three
 /// certificate-chain descriptor lists plus the attestation-report
@@ -153,13 +145,12 @@ pub struct TrustAnchors<'a> {
 pub async fn verify_receiver_cert_chain<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     chain: &[CertDescriptor],
     sata_anchor: &[u8],
     rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
     if sata_anchor.len() != POINT_LEN || rcvr_pub.len() < ATTESTED_KEY_LEN {
         return Err(HsmError::InvalidArg);
@@ -168,7 +159,7 @@ where
     // The validated leaf point (`X ‖ Y`, big-endian) is the receiver key;
     // prefix the SEC1 uncompressed tag so it is ready for the HPKE seal.
     let mut leaf = [0u8; POINT_LEN];
-    validate_chain(pal, io, oob, chain, Some(sata_anchor), &mut leaf).await?;
+    validate_chain(pal, io, chain, Some(sata_anchor), &mut leaf).await?;
     rcvr_pub[0] = SEC1_UNCOMPRESSED;
     rcvr_pub[1..ATTESTED_KEY_LEN].copy_from_slice(&leaf);
     Ok(())
@@ -203,14 +194,13 @@ where
 pub async fn verify_evidence<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     refs: &EvidenceRefs<'_>,
     anchors: &TrustAnchors<'_>,
     attested_key: &mut HsmDmaBuf,
     policy_hash_out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
     if anchors.part_owner_anchor.len() != POINT_LEN || attested_key.len() < ATTESTED_KEY_LEN {
         return Err(HsmError::InvalidArg);
@@ -220,11 +210,11 @@ where
     // Reqs 1–2: the manufacturer chain (no anchor) fixes the canonical leaf
     // key; an optional owner chain (no anchor) must share it (req 4).
     let mut canonical = [0u8; POINT_LEN];
-    validate_chain(pal, io, oob, refs.mfgr_chain, None, &mut canonical).await?;
+    validate_chain(pal, io, refs.mfgr_chain, None, &mut canonical).await?;
 
     let mut leaf = [0u8; POINT_LEN];
     if !refs.owner_chain.is_empty() {
-        validate_chain(pal, io, oob, refs.owner_chain, None, &mut leaf).await?;
+        validate_chain(pal, io, refs.owner_chain, None, &mut leaf).await?;
         if leaf != canonical {
             return Err(HsmError::InvalidArg);
         }
@@ -237,7 +227,6 @@ where
     validate_chain(
         pal,
         io,
-        oob,
         refs.part_owner_chain,
         Some(anchors.part_owner_anchor),
         &mut leaf,
@@ -260,16 +249,17 @@ where
 
     pal.alloc_scoped_async(io, async |ra| -> HsmResult<()> {
         let report = ra.dma_alloc(report_len)?;
-        copy_oob(pal, io, oob, report_index, report).await?;
+        pal.recv_oob(io, report_index, report).await?;
 
         // The leaf point is big-endian (X.509); `verify_key_report`'s
-        // `signer_pub` is the `ecc_verify` wire form (little-endian per
+        // `signer_pub` is the `ecc_verify` wire form (operand order per
         // coordinate).
-        let leaf_le = ra.dma_alloc(POINT_LEN)?;
-        reverse_copy(&mut leaf_le[..coord], &canonical[..coord]);
-        reverse_copy(&mut leaf_le[coord..2 * coord], &canonical[coord..2 * coord]);
+        let leaf = ra.dma_alloc(POINT_LEN)?;
+        let (leaf_x, leaf_y) = leaf.split_at_mut(coord);
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_x, &canonical[..coord])?;
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_y, &canonical[coord..2 * coord])?;
 
-        if !verify_key_report(pal, io, ra, report, leaf_le).await? {
+        if !verify_key_report(pal, io, ra, report, leaf).await? {
             return Err(HsmError::InvalidArg);
         }
 
@@ -323,13 +313,12 @@ where
 async fn validate_chain<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     chain: &[CertDescriptor],
     anchor: Option<&[u8]>,
     leaf_out: &mut [u8],
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
     pal.alloc_scoped_async(io, async |ca| -> HsmResult<()> {
         validate_cert_chain(
@@ -339,7 +328,7 @@ where
             chain,
             anchor,
             leaf_out,
-            async |index: usize, buf: &mut HsmDmaBuf| copy_oob(pal, io, oob, index, buf).await,
+            async |index: usize, buf: &mut HsmDmaBuf| pal.recv_oob(io, index, buf).await,
         )
         .await
     })

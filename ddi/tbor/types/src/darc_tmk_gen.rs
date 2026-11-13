@@ -48,7 +48,7 @@ pub struct TborDarcTmkGenReq {
 pub struct TborDarcTmkGenResp {
     /// The minted TMK, masked under the partition SDMK (exactly 264 B on
     /// the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub masked_tmk: Vec<u8>,
 }
 

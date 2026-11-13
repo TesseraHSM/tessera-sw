@@ -77,7 +77,7 @@ pub struct TborAesGenerateKeyResp {
     /// The freshly generated AES key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  248 / 264 / 264 B for
     /// AES-128 / 192 / 256; not stored on-device.
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 

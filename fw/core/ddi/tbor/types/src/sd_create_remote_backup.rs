@@ -121,7 +121,7 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
     /// omitted from the generated `ViewMut` (its accessors remain on the
     /// shared [`decode`](TborSdCreateRemoteBackupReq::decode) view), so the
     /// handler reads evidence via `decode` and unmasks via `decode_mut`.
-    #[tbor(buffer, len = 280, mutable)]
+    #[tbor(align = 4, buffer, len = 280, mutable)]
     pub masked_sealing_key: &'a [u8],
 
     /// Receiver key certificate-chain descriptors (root→leaf), carried

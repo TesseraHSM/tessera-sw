@@ -47,6 +47,7 @@ mod hash;
 mod hmac;
 mod kdf;
 mod ml;
+mod order;
 mod rng;
 mod rsa;
 
@@ -57,6 +58,7 @@ pub use hash::*;
 pub use hmac::*;
 pub use kdf::*;
 pub use ml::*;
+pub use order::*;
 pub use rng::*;
 pub use rsa::*;
 

@@ -23,9 +23,6 @@ use crate::utils::sd_provision::RAW_PUB_LEN;
 use crate::utils::sd_provision::darc_sd_initialized_session;
 use crate::utils::sd_provision::make_chain;
 
-/// P-384 coordinate width; the DARC key-exchange keys are always P-384.
-const COORD_LEN: usize = 48;
-
 /// A minted DARC key-exchange key: its masked blob (the HPKE identity the
 /// device unmasks on export/import) and its public key as raw big-endian
 /// `X ‖ Y` — the certificate-leaf format the cert chains carry.
@@ -34,18 +31,13 @@ struct KexKey {
     pub_raw: [u8; RAW_PUB_LEN],
 }
 
-/// Mint a `DarcKexKeyGen` key and convert its device little-endian
-/// `x ‖ y` public key into the raw big-endian `X ‖ Y` a certificate leaf
-/// carries (reversing each P-384 coordinate).
+/// Mint a `DarcKexKeyGen` key; its public key is already the raw
+/// big-endian `X ‖ Y` a certificate leaf carries.
 fn mint_kex(ready: &DarcReady) -> KexKey {
-    let (masked, pub_le) = ready
+    let (masked, pub_raw) = ready
         .session
         .darc_kex_key_gen(KEY_SCOPE_LOCAL)
         .expect("darc_kex_key_gen");
-    let mut pub_raw = [0u8; RAW_PUB_LEN];
-    pub_raw.copy_from_slice(&pub_le);
-    pub_raw[..COORD_LEN].reverse();
-    pub_raw[COORD_LEN..].reverse();
     KexKey { masked, pub_raw }
 }
 

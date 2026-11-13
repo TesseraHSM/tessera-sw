@@ -78,15 +78,13 @@ fn validate_masked_sealing_key(masked_key: &[u8; MASKED_SEALING_KEY_LEN]) -> Hsm
 
 /// Encodes the response's raw P-384 public key as a DER SPKI blob.
 ///
-/// The wire form is `x ‖ y` affine coordinates, little-endian per
-/// coordinate; DER SPKI expects big-endian, so each 48-byte half is
-/// reversed before encoding.
-fn sealing_pub_key_to_der(pub_key: &[u8; SD_SEALING_PUB_KEY_LEN]) -> HsmResult<Vec<u8>> {
-    let coord = SD_SEALING_PUB_KEY_LEN / 2;
-    let mut x = pub_key[..coord].to_vec();
-    let mut y = pub_key[coord..].to_vec();
-    x.reverse();
-    y.reverse();
+/// The wire form is `x ‖ y` affine coordinates in `order`; DER SPKI
+/// expects big-endian coordinates.
+fn sealing_pub_key_to_der(
+    order: WireOrder,
+    pub_key: &[u8; SD_SEALING_PUB_KEY_LEN],
+) -> HsmResult<Vec<u8>> {
+    let (x, y) = order.pair_to_be(pub_key, SD_SEALING_PUB_KEY_LEN / 2)?;
 
     let der = DerEccPublicKey::new(EccCurve::P384, &x, &y).map_err(|_| HsmError::InternalError)?;
     let der_len = der.to_der(None).map_err(|_| HsmError::InternalError)?;
@@ -136,7 +134,7 @@ pub(crate) fn sd_sealing_key_gen(
     // unmasked on-use by the backup commands. The array is returned by
     // value so the caller copies it once into the key's props.
     validate_masked_sealing_key(&resp.masked_key)?;
-    let pub_key_der = sealing_pub_key_to_der(&resp.pub_key)?;
+    let pub_key_der = sealing_pub_key_to_der(WireOrder::of(session), &resp.pub_key)?;
     Ok((resp.masked_key, pub_key_der))
 }
 
@@ -300,26 +298,28 @@ mod tests {
         );
     }
 
-    /// The wire public key is `x ‖ y`, little-endian per coordinate;
-    /// the DER SPKI must carry the big-endian (reversed) coordinates.
+    /// The wire public key is `x ‖ y` in the session's wire order; the
+    /// DER SPKI must carry big-endian coordinates.
     #[test]
-    fn pub_key_to_der_reverses_coordinates() {
+    fn pub_key_to_der_converts_coordinates() {
         let coord = SD_SEALING_PUB_KEY_LEN / 2;
         let mut raw = [0u8; SD_SEALING_PUB_KEY_LEN];
         for (i, b) in raw.iter_mut().enumerate() {
             *b = (i + 1) as u8;
         }
 
-        let der = sealing_pub_key_to_der(&raw).expect("encode der");
-        let parsed = DerEccPublicKey::from_der(&der).expect("parse der");
+        for order in [WireOrder::Le, WireOrder::Be] {
+            let der = sealing_pub_key_to_der(order, &raw).expect("encode der");
+            let parsed = DerEccPublicKey::from_der(&der).expect("parse der");
 
-        let mut x_be = raw[..coord].to_vec();
-        let mut y_be = raw[coord..].to_vec();
-        x_be.reverse();
-        y_be.reverse();
+            let mut x_be = raw[..coord].to_vec();
+            let mut y_be = raw[coord..].to_vec();
+            order.convert_in_place(&mut x_be);
+            order.convert_in_place(&mut y_be);
 
-        assert_eq!(parsed.curve(), EccCurve::P384);
-        assert_eq!(parsed.x(), x_be.as_slice());
-        assert_eq!(parsed.y(), y_be.as_slice());
+            assert_eq!(parsed.curve(), EccCurve::P384);
+            assert_eq!(parsed.x(), x_be.as_slice());
+            assert_eq!(parsed.y(), y_be.as_slice());
+        }
     }
 }

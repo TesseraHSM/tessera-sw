@@ -46,7 +46,7 @@ members = [
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
   "fuzz",
-  "fw/core/bulk",
+  "fw/core/byte-order",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
   "fw/core/crypto/cose-key",
@@ -67,16 +67,19 @@ members = [
   "fw/core/ddi/tbor/derive",
   "fw/core/ddi/tbor/types",
   "fw/core/evidence",
-  "fw/core/io",
   "fw/core/key-decode",
   "fw/core/key-unwrap",
   "fw/core/lib",
-  "fw/core/oob",
   "fw/core/tracing",
   "fw/core/undo",
   "fw/pal/traits",
-  "fw/plat/std/lib",
-  "fw/plat/std/pal",
+  "fw/plat/crates/bulk",
+  "fw/plat/crates/io",
+  "fw/plat/std/common",
+  "fw/plat/std/duo/lib",
+  "fw/plat/std/duo/pal",
+  "fw/plat/std/uno/lib",
+  "fw/plat/std/uno/pal",
   "plugins/ossl_engine/integration-tests/masked-keygen",
   "plugins/ossl_engine/integration-tests/openssl-capi",
   "plugins/ossl_engine/integration-tests/openssl-cli",
@@ -176,16 +179,19 @@ tsra_fw_core_evidence = { path = "fw/core/evidence" }
 
 # Firmware crates — common
 tsra_crypto_x509_builder_gen = { path = "crates/crypto/x509_builder/gen" }
-tsra_fw_hsm_bulk = { path = "fw/core/bulk" }
+tsra_fw_hsm_bulk = { path = "fw/plat/crates/bulk" }
+tsra_fw_hsm_byte_order = { path = "fw/core/byte-order" }
 tsra_fw_hsm_core = { path = "fw/core/lib" }
 tsra_fw_hsm_core_tracing = { path = "fw/core/tracing" }
-tsra_fw_hsm_io = { path = "fw/core/io" }
+tsra_fw_hsm_io = { path = "fw/plat/crates/io" }
 tsra_fw_hsm_key_decode = { path = "fw/core/key-decode" }
 tsra_fw_hsm_key_unwrap = { path = "fw/core/key-unwrap" }
-tsra_fw_hsm_oob = { path = "fw/core/oob" }
-tsra_fw_hsm_pal_std = { path = "fw/plat/std/pal" }
+tsra_fw_hsm_pal_std_duo = { path = "fw/plat/std/duo/pal" }
+tsra_fw_hsm_pal_std_uno = { path = "fw/plat/std/uno/pal" }
 tsra_fw_hsm_pal_traits = { path = "fw/pal/traits" }
-tsra_fw_hsm_std = { path = "fw/plat/std/lib" }
+tsra_fw_hsm_std_common = { path = "fw/plat/std/common" }
+tsra_fw_hsm_std_duo = { path = "fw/plat/std/duo/lib" }
+tsra_fw_hsm_std_uno = { path = "fw/plat/std/uno/lib" }
 tsra_fw_hsm_undo = { path = "fw/core/undo" }
 
 # Embassy crates

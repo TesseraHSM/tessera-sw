@@ -31,8 +31,8 @@
 //!
 //! The attested key's public coordinates / modulus are baked into the
 //! opaque signed `report` byte array, which the MBOR wire layer does not
-//! convert. The PAL emits public keys in wire-LE, so this handler reverses
-//! each component to **big-endian** before building the COSE_Key (RFC 9052
+//! convert. The PAL emits public keys in operand order, so this handler
+//! converts each component to **big-endian** before building the COSE_Key (RFC 9052
 //! uses big-endian). Typed MBOR fields would instead rely on the wire
 //! layer's `pre_encode`/`post_decode`; the report is the exception because
 //! it is a signed opaque blob.
@@ -44,6 +44,7 @@ use tsra_fw_core_crypto_key_report::KeyReportParams;
 use tsra_fw_core_crypto_key_report::APP_UUID_LEN;
 use tsra_fw_ddi_mbor_types::attest_key::DdiAttestKeyReq;
 use tsra_fw_ddi_mbor_types::attest_key::DdiAttestKeyResp;
+use tsra_fw_hsm_byte_order as byte_order;
 
 use super::*;
 
@@ -60,13 +61,6 @@ fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs) -> KeyFlags {
         .with_can_wrap(attrs.wrap())
         .with_can_unwrap(attrs.unwrap())
         .with_can_derive(attrs.derive())
-}
-
-/// Reverse-copy `src` into `dst[..src.len()]` (wire-LE → big-endian).
-fn reverse_copy(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
-        *d = *s;
-    }
 }
 
 /// Handle `DdiAttestKeyCmd`.
@@ -106,33 +100,28 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
     let key = if let Ok(curve) = super::from_pal::ecc_curve(kind) {
         let priv_key = pal.vault_key(io, key_id)?;
         let coord_raw = curve.priv_key_len();
-        let coord_wire = curve.wire_coord_len();
-        let wire_len = curve.wire_pub_key_len();
-        let pub_le = pal.dma_alloc(io, wire_len)?;
+        let wire_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+        let pub_key = pal.dma_alloc(io, wire_len)?;
         // The serialize pass must write the full wire key; a short write
-        // would leave stale DMA bytes in the tail of `pub_le` that must not
+        // would leave stale DMA bytes in the tail of `pub_key` that must not
         // be baked into the report — treat any mismatch as a PAL fault.
         if pal
-            .ecc_priv_pub_key(io, priv_key, Some(&mut *pub_le))
+            .ecc_priv_pub_key(io, priv_key, Some(&mut *pub_key))
             .await?
             != wire_len
         {
             return Err(HsmError::InternalError);
         }
-        let x_be = pal.dma_alloc(io, coord_raw)?;
-        let y_be = pal.dma_alloc(io, coord_raw)?;
-        reverse_copy(x_be, &pub_le[..coord_raw]);
-        reverse_copy(y_be, &pub_le[coord_wire..coord_wire + coord_raw]);
-        AttestedPubKey::Ecc {
-            curve,
-            x: x_be,
-            y: y_be,
-        }
+        // Convert in place to the exact-width big-endian `x ‖ y`.
+        byte_order::pair_to_be(P::BYTE_ORDER, curve, pub_key)?;
+        let pub_key: &'p HsmDmaBuf = pub_key;
+        let (x, y) = pub_key[..2 * coord_raw].split_at(coord_raw);
+        AttestedPubKey::Ecc { curve, x, y }
     } else if let Ok(rsa) = super::from_pal::rsa_key(kind) {
         let priv_key = pal.vault_key(io, key_id)?;
         let mod_len = rsa.modulus_len();
-        // The PAL emits the RSA public key as wire-LE `n_le || e_le`, where
-        // `e_le` is a fixed 4-byte little-endian exponent, so the wire is
+        // The PAL emits the RSA public key as operand-order `n || e`, where
+        // `e` is a fixed 4-byte exponent, so the wire is
         // exactly `mod_len + RSA_PUB_EXP_LEN`. Any other length means the
         // PAL and our modulus-kind mapping disagree — a PAL/internal fault,
         // not a caller error.
@@ -141,17 +130,17 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
         if pal.rsa_priv_pub_key(io, priv_key, None)? != wire {
             return Err(HsmError::InternalError);
         }
-        let pub_le = pal.dma_alloc(io, wire)?;
+        let pub_key = pal.dma_alloc(io, wire)?;
         // The serialize pass must write exactly the queried length; a
-        // shorter write would leave stale bytes in the tail of `pub_le`.
-        if pal.rsa_priv_pub_key(io, priv_key, Some(&mut *pub_le))? != wire {
+        // shorter write would leave stale bytes in the tail of `pub_key`.
+        if pal.rsa_priv_pub_key(io, priv_key, Some(&mut *pub_key))? != wire {
             return Err(HsmError::InternalError);
         }
-        let n_be = pal.dma_alloc(io, mod_len)?;
-        let e_be = pal.dma_alloc(io, RSA_PUB_EXP_LEN)?;
-        reverse_copy(n_be, &pub_le[..mod_len]);
-        reverse_copy(e_be, &pub_le[mod_len..wire]);
-        AttestedPubKey::Rsa { n: n_be, e: e_be }
+        // Convert `n` and `e` in place to big-endian.
+        let (n, e) = pub_key.split_at_mut(mod_len);
+        byte_order::int_to_be(P::BYTE_ORDER, n);
+        byte_order::int_to_be(P::BYTE_ORDER, e);
+        AttestedPubKey::Rsa { n, e }
     } else {
         // Any other kind (symmetric / bulk / HMAC / secret) is attestable
         // but has no public component: emit an empty COSE_Key, matching the

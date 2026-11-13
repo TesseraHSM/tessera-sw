@@ -29,6 +29,8 @@ use tsra_crypto::EccPublicKey;
 use tsra_crypto::Verifier;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -49,6 +51,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::darc_tmk_export::build_valid_export;
 use crate::commands::darc_tmk_export::gen_masked_tmk;
 use crate::commands::darc_tmk_export::mint_kex;
@@ -68,14 +71,16 @@ fn coord_sizes(pub_len: usize) -> (usize, usize) {
     match pub_len {
         64 => (32, 32),
         96 => (48, 48),
+        132 => (66, 66),
         136 => (68, 66),
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }
 
-/// Reverse the low `len` bytes of `src` into a fresh big-endian vec.
+/// Convert the low `len` bytes of `src` from device byte order into a
+/// fresh big-endian vec.
 fn rev(src: &[u8], len: usize) -> Vec<u8> {
-    src[..len].iter().rev().copied().collect()
+    dev_rev(&src[..len])
 }
 
 /// Verify a wire-LE ECDSA signature on the host against a wire-LE public
@@ -85,8 +90,8 @@ fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) -> bool {
     assert_eq!(sig_le.len(), wire_coord * 2, "signature length mismatch");
 
     let (x_le, y_le) = pub_le.split_at(wire_coord);
-    let mut pub_be = rev(x_le, wire_coord);
-    pub_be.extend(rev(y_le, wire_coord));
+    let mut pub_be = dev_coord_to_host_be(x_le);
+    pub_be.extend(dev_coord_to_host_be(y_le));
     let pubkey = EccPublicKey::from_hsm_bytes(&pub_be).expect("import public key");
 
     let (r_le, s_le) = sig_le.split_at(wire_coord);
@@ -110,7 +115,7 @@ fn digest_len_for(pub_len: usize) -> usize {
     match pub_len {
         64 => 32,
         96 => 48,
-        136 => 64,
+        132 | 136 => 64,
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }
@@ -425,4 +430,34 @@ fn darc_key_wrap_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked TMK or key and one without its padding entry.
+#[test]
+fn darc_key_wrap_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let tmk = ready
+        .ctx
+        .tbor(&TborDarcTmkGenReq {
+            session_id: ready.session.session_id,
+        })
+        .expect("DarcTmkGen");
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: ready.session.session_id,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("EccGenerateKey");
+    assert_masked_key_layout_rejected(
+        &ready.ctx,
+        &TborDarcKeyWrapReq {
+            session_id: ready.session.session_id,
+            masked_tmk: tmk_array(&tmk.masked_tmk),
+            masked_key: ec.masked_key,
+        },
+    );
 }

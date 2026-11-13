@@ -13,6 +13,7 @@
 use core::cmp::Ordering;
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
@@ -274,8 +275,13 @@ impl UnoHsmPal {
         if !salt.is_empty() {
             self.hash_continue(io, &mut ctx, salt).await?;
         }
-        self.hash_finish(io, ctx, &mut digest[..algo.digest_len()], true)
-            .await
+        self.hash_finish(
+            io,
+            ctx,
+            &mut digest[..algo.digest_len()],
+            HsmDigestForm::Standard,
+        )
+        .await
     }
     /// Compute the derived RSA-CRT PKA operands from the recovered primes.
     ///
@@ -863,8 +869,14 @@ impl HsmRsa for UnoHsmPal {
 
         // Build DB in em[1+hLen..k]: lHash || PS || 0x01 || M
         // Hash label directly into DB[0..hLen]
-        self.hash(io, algo, label, &mut em[1 + h_len..1 + 2 * h_len], true)
-            .await?;
+        self.hash(
+            io,
+            algo,
+            label,
+            &mut em[1 + h_len..1 + 2 * h_len],
+            HsmDigestForm::Standard,
+        )
+        .await?;
         // PS is already zeros
         em[1 + 2 * h_len + ps_len] = 0x01;
         em[1 + 2 * h_len + ps_len + 1..k].copy_from_slice(message);
@@ -943,7 +955,8 @@ impl HsmRsa for UnoHsmPal {
 
         // Verify lHash using reusable scratch allocated from the alloc.
         let db = &em[1 + h_len..k];
-        self.hash(io, algo, label, label_hash, true).await?;
+        self.hash(io, algo, label, label_hash, HsmDigestForm::Standard)
+            .await?;
         let db_hash: &[u8] = &db[..h_len];
         let label_hash_slice: &[u8] = &label_hash[..h_len];
         if db_hash != label_hash_slice {

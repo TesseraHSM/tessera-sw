@@ -40,6 +40,7 @@
 //! | `#[tbor(key_id)]` | field is a `u16` carried as `KeyId` on the wire |
 //! | `#[tbor(min_len = N)]` | accepted for parity with FW; not host-side enforced — the FW codec validates |
 //! | `#[tbor(max_len = N)]` | accepted for parity with FW; not host-side enforced — the FW encoder validates |
+//! | `#[tbor(align = N)]` | data starts at a multiple of `N` bytes from the message start; a `padding` TOC entry precedes the field |
 //!
 //! ## Field-type inference rules
 //!
@@ -142,7 +143,7 @@ fn gen_request(
     fields: &[ParsedField],
 ) -> syn::Result<TokenStream2> {
     let name = &item.ident;
-    let field_toc_count = fields.len().max(1);
+    let field_toc_count = toc_count(fields);
     let opcode = attrs.opcode.as_ref().ok_or_else(|| {
         syn::Error::new(
             name.span(),
@@ -163,7 +164,16 @@ fn gen_request(
         // placeholder so empty-body requests can still encode.
         quote! { let __enc = __enc.none()?; }
     } else {
-        fields.iter().map(gen_encode_step).collect()
+        fields
+            .iter()
+            .map(|f| {
+                let step = gen_encode_step(f);
+                match f.align {
+                    Some(n) => quote! { let __enc = __enc.align_to(#n)?; #step },
+                    None => step,
+                }
+            })
+            .collect()
     };
 
     let session_id_field = fields
@@ -227,20 +237,42 @@ fn gen_request(
 fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
     let name = &item.ident;
 
-    // Compute the TOC layout. Typed-slice elements are `Unaligned`, so no
-    // alignment padding entry precedes them — every field maps to a single
-    // sequential TOC slot, matching the firmware derive's layout.
+    // Compute the TOC layout, matching the firmware derive: each field
+    // takes one TOC slot, preceded by a padding slot when it is aligned.
     let mut toc_idx = 0usize;
     let mut decode_steps_vec: Vec<TokenStream2> = Vec::with_capacity(fields.len());
     for f in fields {
+        if let Some(align) = f.align {
+            let field_idx = toc_idx + 1;
+            decode_steps_vec.push(quote! {
+                if !::core::matches!(
+                    __raw.toc_entry(#toc_idx),
+                    ::tsra_ddi_tbor_codec::TocEntry::Padding(_)
+                ) {
+                    return ::core::result::Result::Err(
+                        ::tsra_ddi_tbor_codec::DecodeError::UnexpectedTocType,
+                    );
+                }
+                // Alignment is measured from the start of the message.
+                if let ::tsra_ddi_tbor_codec::TocEntry::Buffer(__data)
+                | ::tsra_ddi_tbor_codec::TocEntry::SealedKey(__data) = __raw.toc_entry(#field_idx)
+                {
+                    let __at = (__data.as_ptr() as usize).wrapping_sub(__buf.as_ptr() as usize);
+                    if __at % #align != 0 {
+                        return ::core::result::Result::Err(
+                            ::tsra_ddi_tbor_codec::DecodeError::MisalignedField,
+                        );
+                    }
+                }
+            });
+            toc_idx += 1;
+        }
         decode_steps_vec.push(gen_decode_step(toc_idx, f));
         toc_idx += 1;
     }
     let decode_steps: TokenStream2 = decode_steps_vec.into_iter().collect();
 
-    // Empty bodies still carry one synthetic `None` TOC entry (see
-    // `gen_request` encode chain), so toc_count is always `>= 1`.
-    let expected_toc = toc_idx.max(1);
+    let expected_toc = toc_count(fields);
 
     let construct = if fields.is_empty() {
         quote! { Self }
@@ -295,6 +327,14 @@ fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
             }
         }
     }
+}
+
+/// TOC entries a schema occupies: one per field plus one padding entry
+/// per aligned field. Empty bodies still carry one synthetic `None` entry,
+/// so the count is always `>= 1`.
+fn toc_count(fields: &[ParsedField]) -> usize {
+    let padding = fields.iter().filter(|f| f.align.is_some()).count();
+    (fields.len() + padding).max(1)
 }
 
 /// Emit one statement that rebinds `__enc` by applying a single codec

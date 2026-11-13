@@ -103,7 +103,7 @@ pub struct TborMlDsaGenerateKeyResp {
     /// The generated ML-DSA private key, masked under the scope's masking
     /// key.  Always 164 B: the wire is seed-only, so the plaintext is the
     /// 32-byte `xi` seed.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(max_len = 5160)]
+    #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// The ML-DSA public key bytes.

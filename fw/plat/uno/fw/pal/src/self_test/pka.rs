@@ -16,6 +16,7 @@
 //! via the bump allocator (see [`crate::self_test`]).
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -129,8 +130,14 @@ pub(super) async fn run_rsa_mod_exp_on_engine(
         // Verify lHash' == SHA-256(empty label).
         let label_hash = scope.dma_alloc(H_LEN)?;
         let empty = &input[..0];
-        pal.hash(io, HsmHashAlgo::Sha256, empty, label_hash, true)
-            .await?;
+        pal.hash(
+            io,
+            HsmHashAlgo::Sha256,
+            empty,
+            label_hash,
+            HsmDigestForm::Standard,
+        )
+        .await?;
         let db = &em[1 + H_LEN..RSA_2K_LEN];
         let db_hash: &[u8] = &db[..H_LEN];
         let label_hash_slice: &[u8] = &label_hash[..H_LEN];

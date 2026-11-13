@@ -41,6 +41,7 @@ use super::*;
 /// | Trait | Purpose |
 /// |-------|---------|
 /// | [`HsmAlloc`] | Per-IO bump-allocator scopes (DTCM and DMA SRAM) |
+/// | [`HsmPalFeatures`] | Compile-time platform capabilities (API revision, IO protocol) |
 /// | [`HsmIoController`] | I/O submission and completion |
 /// | [`HsmGdmaController`] | Host↔device memory copies (GDMA) |
 /// | [`HsmPartitionManager`] | Partition lifecycle and identity queries |
@@ -58,9 +59,9 @@ use super::*;
 /// hardware access, no allocations, no panics); real bring-up belongs
 /// in [`init`](Self::init).
 pub trait HsmPal:
-    HsmAlloc
+    HsmPalFeatures
+    + HsmAlloc
     + HsmIoController
-    + HsmGdmaController
     + HsmCustomDispatch
     + HsmPartitionManager
     + HsmPartitionLock

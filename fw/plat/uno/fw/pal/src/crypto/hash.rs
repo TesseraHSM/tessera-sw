@@ -52,6 +52,8 @@
 //! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
 //! ML-DSA and ML-KEM are.
 
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
@@ -214,9 +216,8 @@ impl HsmHash for UnoHsmPal {
     /// - `data` — complete input message.
     /// - `digest` — output buffer (must be at least
     ///   [`HsmHashAlgo::digest_len`] bytes).
-    /// - `big_endian` — if `true`, the digest is written in big-endian (NIST
-    ///   standard) byte order.  If `false`, the whole digest is reversed to
-    ///   little-endian byte order.
+    /// - `form` — [`HsmDigestForm::Standard`] writes the standard digest;
+    ///   [`HsmDigestForm::Operand`] writes its byte reversal (PKA operand).
     ///
     /// # Returns
     ///
@@ -230,7 +231,7 @@ impl HsmHash for UnoHsmPal {
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()> {
         let _ = io;
         let digest_len = algo.digest_len();
@@ -247,7 +248,7 @@ impl HsmHash for UnoHsmPal {
         } else {
             self.sha_oneshot(algo, data, digest).await?;
         }
-        if !big_endian {
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
         Ok(())
@@ -336,9 +337,8 @@ impl HsmHash for UnoHsmPal {
     /// - `ctx` — the [`HsmHashContext`] to finalize (consumed).
     /// - `digest` — output buffer for the final digest. Must be at least
     ///   [`HsmHashAlgo::digest_len`] bytes.
-    /// - `big_endian` — if `true`, the digest is written in big-endian (NIST
-    ///   standard) byte order. If `false`, the whole digest is reversed to
-    ///   little-endian byte order.
+    /// - `form` — [`HsmDigestForm::Standard`] writes the standard digest;
+    ///   [`HsmDigestForm::Operand`] writes its byte reversal (PKA operand).
     ///
     /// # Returns
     ///
@@ -349,7 +349,7 @@ impl HsmHash for UnoHsmPal {
         io: &UnoHsmIo,
         mut ctx: Self::HashCtx<'_>,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()> {
         let _ = io;
         let algo = ctx.algo;
@@ -366,7 +366,7 @@ impl HsmHash for UnoHsmPal {
             self.sha_digest_block(&mut ctx, None, len, true).await?;
             digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
         }
-        if !big_endian {
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
         Ok(())

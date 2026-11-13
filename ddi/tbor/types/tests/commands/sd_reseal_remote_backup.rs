@@ -41,6 +41,7 @@ use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
 use crate::commands::sd_create_remote_backup::finalized_backing_session_with_pota;
@@ -732,4 +733,12 @@ fn sd_reseal_remote_backup_malformed_dest_owner_chain_rejected() {
 
     ctx.tbor_oob(&req, &evidence.oob())
         .expect_err("malformed destination owner certificate must be rejected");
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_reseal_remote_backup_rejects_bad_masked_key_layout() {
+    let (ctx, req, _evidence) = valid_reseal_fixture();
+    assert_masked_key_layout_rejected(&ctx, &req);
 }

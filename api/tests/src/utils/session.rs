@@ -34,6 +34,25 @@ pub(crate) fn api_rev_at_least(major: u32, minor: u32) -> bool {
     } >= HsmApiRev { major, minor }
 }
 
+/// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
+/// most `major.minor`. An unset `api_rev` selects revision 1.1.
+///
+/// Legacy `open_session` and partition `init` tests run only up to 1.1;
+/// 2.0 devices accept only `open_session_ex`.
+///
+/// # Panics
+///
+/// Panics if `TSRA_TEST_ARGS` is invalid.
+pub(crate) fn api_rev_at_most(major: u32, minor: u32) -> bool {
+    let (sel_major, sel_minor) = ddi_sock_server::TestArgs::from_env()
+        .api_rev_parts()
+        .unwrap_or((1, 1));
+    HsmApiRev {
+        major: sel_major,
+        minor: sel_minor,
+    } <= HsmApiRev { major, minor }
+}
+
 /// Runs `test`, which must panic with `expected` from API revision 1.1 and
 /// must succeed below it.
 pub(crate) fn panics_from_api_rev_1_1(expected: &str, test: impl FnOnce()) {

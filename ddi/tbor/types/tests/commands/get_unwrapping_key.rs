@@ -13,6 +13,7 @@
 //! * Stability — a second call returns the same (stable) key.
 //! * Role access — Crypto-User sessions can also fetch the key.
 
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
@@ -97,7 +98,9 @@ fn get_unwrapping_key_available_to_cu() {
         "unwrapping pub key must be the pinned length",
     );
 
-    let (modulus, exponent) = pub_key.split_at(RSA_2048_MODULUS_LEN);
+    // Components arrive in device byte order; check them big-endian.
+    let modulus = dev_rev(&pub_key[..RSA_2048_MODULUS_LEN]);
+    let exponent = dev_rev(&pub_key[RSA_2048_MODULUS_LEN..]);
 
     assert!(
         modulus.iter().any(|&byte| byte != 0),
@@ -105,13 +108,21 @@ fn get_unwrapping_key_available_to_cu() {
     );
 
     assert!(
-        modulus[RSA_2048_MODULUS_LEN - 1] & 0x80 != 0,
+        modulus[0] & 0x80 != 0,
         "RSA modulus must have exactly 2048 significant bits",
     );
 
-    assert!(modulus[0] & 1 != 0, "RSA modulus must be odd");
+    assert!(
+        modulus[RSA_2048_MODULUS_LEN - 1] & 1 != 0,
+        "RSA modulus must be odd"
+    );
 
-    let exponent = u32::from_le_bytes(exponent.try_into().expect("four-byte RSA exponent"));
+    let exponent = u32::from_be_bytes(
+        exponent
+            .as_slice()
+            .try_into()
+            .expect("four-byte RSA exponent"),
+    );
 
     assert_eq!(
         exponent, RSA_PUBLIC_EXPONENT,
@@ -429,19 +440,29 @@ fn assert_valid_unwrapping_pub_key(pub_key: &[u8]) {
         "unwrapping pub key must be the pinned length",
     );
 
-    let (modulus, exponent) = pub_key.split_at(RSA_2048_MODULUS_LEN);
+    // Components arrive in device byte order; check them big-endian.
+    let modulus = dev_rev(&pub_key[..RSA_2048_MODULUS_LEN]);
+    let exponent = dev_rev(&pub_key[RSA_2048_MODULUS_LEN..]);
 
     assert!(
         modulus.iter().any(|&byte| byte != 0),
         "RSA modulus must not be all zero",
     );
-    assert!(modulus[0] & 1 != 0, "RSA modulus must be odd");
     assert!(
-        modulus[RSA_2048_MODULUS_LEN - 1] & 0x80 != 0,
+        modulus[RSA_2048_MODULUS_LEN - 1] & 1 != 0,
+        "RSA modulus must be odd"
+    );
+    assert!(
+        modulus[0] & 0x80 != 0,
         "RSA modulus must have exactly 2048 significant bits",
     );
 
-    let exponent = u32::from_le_bytes(exponent.try_into().expect("four-byte RSA exponent"));
+    let exponent = u32::from_be_bytes(
+        exponent
+            .as_slice()
+            .try_into()
+            .expect("four-byte RSA exponent"),
+    );
 
     assert_eq!(
         exponent, RSA_PUBLIC_EXPONENT,

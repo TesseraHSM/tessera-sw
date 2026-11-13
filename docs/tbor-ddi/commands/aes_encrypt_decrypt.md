@@ -54,7 +54,8 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | 16 | `mode` | `uint8` (inline) | Mode (`AesMode` discriminant): `0` = CBC, `1` = ECB, `2` = CFB-128, `3` = OFB, `4` = CTR. |
 | 20 | `iv` | `buffer` (0 or 16 B) | The input IV: empty for ECB, otherwise 16 bytes (the initial counter block for CTR). |
 | 24 | `msg` | `buffer` (1–1024 B) | The message to transform; a multiple of the 16-byte AES block for CBC / ECB. |
-| 28 | `masked_key` | `buffer` (248–264 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
+| 28 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 32 | `masked_key` | `buffer` (248–264 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
 
 ### Data section
 
@@ -83,12 +84,13 @@ same payload base (byte 32) as the request.
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | Unknown `op` or `mode`, noncanonical IV/message offsets, IV length not matching the mode, or `msg` empty / over 1024 bytes / not a multiple of 16 for CBC / ECB |
+| `InvalidArg` | Unknown `op` or `mode`, IV length not matching the mode, or `msg` empty / over 1024 bytes / not a multiple of 16 for CBC / ECB |
 | `AesGcmDecryptTagDoesNotMatch` | The masked key's AEAD tag failed to verify (tampered or wrong-scope blob) |
 | `InvalidKeyType` | The recovered key is not a non-bulk AES key |
 | `InvalidPermissions` | The key lacks the permission for the direction (`encrypt` / `decrypt`) |
 | `UnsupportedKeyScope` | The masked key's scope has no masking key on this partition |
 | `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |
+| `TborNonCanonicalLayout` | `iv` and `msg` are not contiguous at the start of the data section, or `masked_key` overlaps them |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also

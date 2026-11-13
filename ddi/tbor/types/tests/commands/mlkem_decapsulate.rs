@@ -33,6 +33,7 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLKEM_DECAPSULATE;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant.
@@ -56,7 +57,8 @@ fn mlkem_decapsulate_request_wire_shape() {
     let bytes = req.encode_request(&mut buf).expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLKEM_DECAPSULATE);
-    assert_eq!(view.toc_count(), 4);
+    // Four fields plus the masked key's alignment padding entry.
+    assert_eq!(view.toc_count(), 5);
 }
 
 /// Happy path: generate, encapsulate to the public key, then
@@ -251,5 +253,35 @@ fn mlkem_decapsulate_wrong_key_class_rejected() {
             ciphertext: vec![0u8; ML_KEM_512.ciphertext_len],
         },
         TborStatus::InvalidKeyType,
+    );
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn mlkem_decapsulate_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlKemGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_KEM_512.key_kind,
+        })
+        .expect("MlKemGenerateKey");
+    let encap = ctx
+        .tbor(&TborMlKemEncapsulateReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            pub_key: key.pub_key,
+        })
+        .expect("MlKemEncapsulate");
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborMlKemDecapsulateReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            masked_key: key.masked_key,
+            ciphertext: encap.ciphertext,
+        },
     );
 }

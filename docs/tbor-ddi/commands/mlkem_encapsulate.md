@@ -27,9 +27,9 @@ implementation is registered.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the returned shared secret. |
-| — | `pub_key` | `buffer` (up to 1568 B) | ML-KEM public / encapsulation key bytes. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the returned shared secret. |
+| 16 | `pub_key` | `buffer` (up to 1568 B) | ML-KEM public / encapsulation key bytes. |
 
 ### Data section
 
@@ -42,7 +42,8 @@ Carries the public key.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | `ciphertext` | `buffer` (up to 1568 B) | ML-KEM ciphertext bytes. |
-| — | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_shared_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
 
 ### Data section
 

@@ -35,6 +35,9 @@ pub struct Encoder<'a, H: Header> {
     /// Bytes written so far to the staged data region (relative to
     /// [`stage_base`](Self::stage_base)).
     data_offset: usize,
+    /// Set by [`align_to`](Self::align_to); alignment holds only when every
+    /// reserved TOC slot is used.
+    aligned: bool,
     _phantom: PhantomData<fn() -> H>,
 }
 
@@ -82,6 +85,7 @@ impl<'a, H: Header> Encoder<'a, H> {
             toc_count: 0,
             toc_slots: MAX_TOC_ENTRIES,
             data_offset: 0,
+            aligned: false,
             _phantom: PhantomData,
         }
     }
@@ -192,6 +196,22 @@ impl<'a, H: Header> Encoder<'a, H> {
         Ok(self)
     }
 
+    /// Add a `padding` TOC entry so the next data entry starts at a
+    /// multiple of `align` bytes from the start of the message.
+    ///
+    /// Requires [`with_toc_slots`](Self::with_toc_slots) and every reserved
+    /// slot to be filled; [`finish`](Self::finish) fails with
+    /// [`EncodeError::MissingTocEntries`] otherwise.
+    pub fn align_to(mut self, align: usize) -> Result<Self, EncodeError> {
+        if align == 0 {
+            return Err(EncodeError::InvalidAlignment);
+        }
+        let pos = self.stage_base() + self.data_offset;
+        let pad = (align - pos % align) % align;
+        self.aligned = true;
+        self.padding(pad)
+    }
+
     // ── Finalize ───────────────────────────────────────────────────
 
     /// Finalize the message.
@@ -201,6 +221,9 @@ impl<'a, H: Header> Encoder<'a, H> {
     pub fn finish(self) -> Result<&'a [u8], EncodeError> {
         if self.toc_count == 0 {
             // At least one TOC entry is required by spec.
+            return Err(EncodeError::MissingTocEntries);
+        }
+        if self.aligned && self.toc_count != self.toc_slots {
             return Err(EncodeError::MissingTocEntries);
         }
 

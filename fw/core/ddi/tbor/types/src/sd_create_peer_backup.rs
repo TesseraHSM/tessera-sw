@@ -84,7 +84,7 @@ pub struct TborSdCreatePeerBackupReq<'a> {
     /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
     /// the sender's private HPKE key (`SndrPriv`) that authenticates the
     /// seal.
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security

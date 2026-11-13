@@ -35,6 +35,8 @@ use tsra_crypto::Encrypter;
 use tsra_crypto::ImportableKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -51,6 +53,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::darc_tmk_import::build_valid_import;
 use crate::commands::darc_tmk_import::sd_initialized_session;
 use crate::commands::darc_tmk_import::SdReady;
@@ -73,7 +76,7 @@ fn curve_params(curve: EccCurve) -> (i32, i32, usize, usize) {
     match curve {
         EccCurve::P256 => (1, -9, 32, 32),
         EccCurve::P384 => (2, -51, 48, 48),
-        EccCurve::P521 => (3, -52, 66, 68),
+        EccCurve::P521 => (3, -52, 66, wire_coord_len(66)),
     }
 }
 
@@ -181,16 +184,15 @@ fn build_valid_unwrap(
     (req, key)
 }
 
-/// The expected wire-LE public key (`x_le ‖ y_le`, each zero-padded to the
-/// curve's wire coordinate width) the device returns.
+/// The expected wire public key (`x ‖ y` in device byte order, each
+/// zero-padded to the curve's wire coordinate width) the device returns.
 fn expected_wire_pub(key: &HostEcKey) -> Vec<u8> {
     let (_, _, _, wire) = curve_params(key.curve);
     let mut out = Vec::with_capacity(2 * wire);
     for coord in [&key.x, &key.y] {
-        let mut le = coord.clone();
-        le.reverse();
-        le.resize(wire, 0);
-        out.extend_from_slice(&le);
+        let mut dev = dev_rev(coord);
+        dev.resize(wire, 0);
+        out.extend_from_slice(&dev);
     }
     out
 }
@@ -438,4 +440,18 @@ fn darc_key_unwrap_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked TMK and one without its padding entry.
+#[test]
+fn darc_key_unwrap_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let (req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    assert_masked_key_layout_rejected(&ready.ctx, &req);
 }

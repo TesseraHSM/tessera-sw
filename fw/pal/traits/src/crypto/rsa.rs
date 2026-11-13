@@ -172,7 +172,7 @@ pub enum HsmRsaPct {
 /// PAL implementations provide this to the core for RSA key generation
 /// and modular exponentiation. The async signatures allow hardware-backed
 /// implementations to yield while the PKA engine processes operations.
-pub trait HsmRsa: HsmIoTypes {
+pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// Generate an RSA key pair.
     ///
     /// # Parameters
@@ -214,13 +214,11 @@ pub trait HsmRsa: HsmIoTypes {
     /// - `key` — RSA private key in PAL-defined serialization
     ///   matching `key_size.is_crt()`.
     /// - `y` — input integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, in wire **little-endian** byte
-    ///   order, and must satisfy `1 < y < n - 1`, where `n` is the
-    ///   private key's modulus.  The PAL flips to its primitive's native
-    ///   order (e.g. the std/OpenSSL PAL reverses to big-endian).
+    ///   `key_size.modulus_len()` bytes, in operand order
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]), and must satisfy
+    ///   `1 < y < n - 1`, where `n` is the private key's modulus.
     /// - `x` — output integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, written in wire **little-endian**
-    ///   byte order.
+    ///   `key_size.modulus_len()` bytes, written in operand order.
     ///
     /// # Returns
     ///
@@ -261,12 +259,10 @@ pub trait HsmRsa: HsmIoTypes {
     /// - `key_size` — modulus size selector.
     /// - `key` — RSA public key.
     /// - `x` — input integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, in wire **little-endian** byte
-    ///   order.  The PAL flips to its primitive's native order (e.g. the
-    ///   std/OpenSSL PAL reverses to big-endian).
+    ///   `key_size.modulus_len()` bytes, in operand order
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]).
     /// - `y` — output integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, written in wire **little-endian**
-    ///   byte order.
+    ///   `key_size.modulus_len()` bytes, written in operand order.
     ///
     /// # Returns
     ///
@@ -282,7 +278,7 @@ pub trait HsmRsa: HsmIoTypes {
         y: &mut HsmDmaBuf,
     ) -> Result<(), HsmError>;
 
-    /// Derive the raw wire-format public key (`n_le || e_le`) from a
+    /// Derive the raw operand-order public key (`n || e`) from a
     /// vault-stored RSA private key.
     ///
     /// Used to recover the public key of a vault-stored private key
@@ -291,13 +287,10 @@ pub trait HsmRsa: HsmIoTypes {
     ///
     /// `priv_key` is in the PAL's own vault representation — raw key
     /// material on real PKA hardware, the crypto crate's HSM byte layout
-    /// in the std/OpenSSL PAL — and this method converts it into the wire
-    /// form: the little-endian modulus followed by a fixed 4-byte
-    /// little-endian exponent (the raw layout the host's `DdiDerPublicKey`
-    /// post-decode turns into DER).  The PAL owns the whole vault-format →
-    /// wire-format conversion, including any big-endian↔little-endian flip
-    /// (real PKA is little-endian native; an OpenSSL backend holds
-    /// big-endian components and reverses them).
+    /// in the std/OpenSSL PAL — and this method converts it into the
+    /// modulus followed by a fixed 4-byte exponent, both in operand order
+    /// ([`HsmCryptoOrder::BYTE_ORDER`]).  The PAL owns the whole
+    /// vault-format → operand-format conversion.
     ///
     /// Follows the query/alloc/use convention: pass `pub_out = None` to
     /// query the wire length the caller must allocate, then

@@ -45,16 +45,16 @@ is `PartInit` → `PartFinal(prev_local_mk_backup)` (which restores
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 8-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8  | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup to restore (a masked BKS3 wrapped under the device-local key) = `MASKED_SD_LEN` (276 B). |
-| 12 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup envelope = `LOCAL_MK_BACKUP_LEN` (260 B). |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup to restore (a masked BKS3 wrapped under the device-local key) = `MASKED_SD_LEN` (276 B). |
+| 16 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup envelope = `LOCAL_MK_BACKUP_LEN` (260 B). |
 
 ### Data section
 
@@ -70,7 +70,7 @@ section.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `pok_local_backup` | `buffer` (fixed 276 B) | Refreshed local partition-owner-key backup, sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
+| 8 | `pok_local_backup` | `buffer` (fixed 276 B) | Refreshed local partition-owner-key backup, sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
 | 12 | `sd_mk_backup` | `buffer` (fixed 260 B) | Refreshed security-domain masking-key backup envelope = `LOCAL_MK_BACKUP_LEN` (260 B). |
 
 ### Data section

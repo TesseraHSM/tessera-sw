@@ -73,6 +73,13 @@ integrity profile pinned for the session (see
 [tsra_session_ex_type](#tsra_session_ex_type)), and a handle to the new
 session is returned.
 
+At API revision 2.0 (Duo), the handshake also derives per-direction
+AES-256-GCM transport keys. The SDK encrypts the handshake's second
+message, every in-session command and the session close with them, and
+the device encrypts each response; this applies to both session types.
+Out-of-band data is not covered by this encryption. The transport is
+transparent to callers: no API or parameter changes.
+
 ```cpp
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
@@ -259,7 +266,7 @@ not match a subsequent certificate read. Neither a certificate chain nor
 issuer metadata is stored in firmware. The caller retains its POTA/PTA chain
 and prepends it to this PID certificate to construct root-first evidence.
 Slot 0's provisioning behavior is unchanged, though on the std PAL its leaf
-certificate is not byte-for-byte identical: `fw/plat/std/pal/src/cert.rs`
+certificate is not byte-for-byte identical: `fw/plat/std/common/pal_src/cert.rs`
 now derives the slot-0 leaf serial from the PID key's SHA-1 identifier (the
 same derivation as the slot-2 PID serial). Slot 1 remains unsupported.
 The owner chain can be omitted; manufacturer and partition-owner chains plus

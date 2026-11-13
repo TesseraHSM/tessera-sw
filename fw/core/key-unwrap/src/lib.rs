@@ -128,7 +128,7 @@ pub async fn unwrap_key<'p, P: HsmPal>(
     let (oaep_ct, kwp_payload) = params.wrapped_blob.split_at(modulus_len);
 
     // 1. OAEP-decrypt the KEK with the unwrapping private key.  The std
-    //    PAL driver flips the wire-LE ciphertext to big-endian for
+    //    PAL driver converts the operand-order ciphertext for
     //    OpenSSL and decrypts through modulus-sized internal scratch,
     //    returning the recovered length.  The output buffer only needs to
     //    hold the recovered plaintext, so size it to the largest KEK we
