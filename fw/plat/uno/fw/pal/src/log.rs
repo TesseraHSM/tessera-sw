@@ -46,6 +46,9 @@ impl RingMemory for GsramRing {
     }
 
     fn barrier(&mut self) {
+        // Orders the record before `tail`, but cleans no data cache: the SP
+        // sees the record only while CP1's D-cache is off. See "Visible to
+        // the SP only while CP1's D-cache is off" on `RingMemory`.
         cortex_m::asm::dmb();
     }
 }

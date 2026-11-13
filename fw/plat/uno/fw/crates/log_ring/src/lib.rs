@@ -170,6 +170,19 @@ impl Word {
 /// On target, each `read` and `write` is one volatile access to GSRAM
 /// through a raw pointer, at [`Word::offset`], and nothing takes a reference
 /// into the ring. `barrier` is `dmb`.
+///
+/// ## Visible to the SP only while CP1's D-cache is off
+///
+/// `dmb` orders CP1's accesses, but doesn't clean a data cache, and GSRAM,
+/// at `0x6100_0000`, is in the Cortex-M7's default write-back cacheable
+/// region. The SP sees each record, and then the `tail` that publishes it,
+/// only because CP1 runs with the D-cache **off**: nothing in the tree
+/// enables it, and the Cortex-M7 comes out of reset with it disabled, so
+/// every write lands in GSRAM.
+///
+/// **If the D-cache is ever enabled**, give the ring a non-cacheable MPU
+/// region, or clean the record's cache lines and then `tail`'s, with a
+/// barrier between, before the SP reads them.
 pub trait RingMemory {
     /// Number of record slots: [`SLOTS`] for the ring in GSRAM.
     const SLOTS: u32;
@@ -180,7 +193,8 @@ pub trait RingMemory {
     /// Writes one word.
     fn write(&mut self, word: Word, value: u32);
 
-    /// Makes every earlier write visible to the SP before any later write.
+    /// Makes every earlier write visible to the SP before any later write,
+    /// while CP1's D-cache is off.
     fn barrier(&mut self);
 }
 
