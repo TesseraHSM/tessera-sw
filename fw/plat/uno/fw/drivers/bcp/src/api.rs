@@ -1155,13 +1155,86 @@ fn dfl_ptr(id: usize) -> *mut u32 {
     (IO_GSRAM_BASE + BCP_DFL_OFFSET + id as u32 * BCP_DFL_STRIDE) as *mut u32
 }
 
+/// Read `N` (2 to 4) words at `src` with one LDM burst: out of memory the
+/// CPU reads uncached (DMA memory, the GSRAM rings), a burst costs about as
+/// much as a single load.
+///
+/// # Safety
+///
+/// `src` must be word-aligned and valid for reads of `N` words.
+#[inline(always)]
+unsafe fn burst_read<const N: usize>(src: *const u32) -> [u32; N] {
+    const { assert!(N >= 2 && N <= 4) };
+    let (a, b, c, d): (u32, u32, u32, u32);
+    #[cfg(target_arch = "arm")]
+    // SAFETY: per the function contract, for the words loaded.
+    unsafe {
+        match N {
+            2 => {
+                core::arch::asm!(
+                    "ldm {s}, {{r2, r3}}",
+                    s = in(reg) src,
+                    out("r2") a,
+                    out("r3") b,
+                    options(nostack, preserves_flags, readonly),
+                );
+                (c, d) = (0, 0);
+            }
+            3 => {
+                core::arch::asm!(
+                    "ldm {s}, {{r2, r3, r4}}",
+                    s = in(reg) src,
+                    out("r2") a,
+                    out("r3") b,
+                    out("r4") c,
+                    options(nostack, preserves_flags, readonly),
+                );
+                d = 0;
+            }
+            _ => core::arch::asm!(
+                "ldm {s}, {{r2, r3, r4, r5}}",
+                s = in(reg) src,
+                out("r2") a,
+                out("r3") b,
+                out("r4") c,
+                out("r5") d,
+                options(nostack, preserves_flags, readonly),
+            ),
+        }
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract, for the words loaded.
+    unsafe {
+        let word = |i: usize| if i < N { src.add(i).read_volatile() } else { 0 };
+        (a, b, c, d) = (word(0), word(1), word(2), word(3));
+    }
+    let words = [a, b, c, d];
+    core::array::from_fn(|i| words[i])
+}
+
 /// Pack bytes into little-endian words at `dw[start..]`.
 ///
-/// Word-aligned bytes are read a word at a time: they may sit in DMA memory
-/// (an IV in a masked blob), which the CPU reads uncached, a load per word
-/// rather than per byte.
+/// Word-aligned bytes are read a word at a time, and a 12-byte IV or a
+/// 16-byte tag with one burst: they may sit in DMA memory (a frame's
+/// trailer, a masked blob), which the CPU reads uncached.
 fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
     if bytes.as_ptr().align_offset(4) == 0 {
+        let src = bytes.as_ptr().cast::<u32>();
+        match bytes.len() {
+            12 => {
+                // SAFETY: `bytes` is 12 readable bytes at a 4-aligned address.
+                let words: [u32; 3] = unsafe { burst_read(src) };
+                dw[start..start + 3].copy_from_slice(&words);
+                return;
+            }
+            16 => {
+                // SAFETY: `bytes` is 16 readable bytes at a 4-aligned address.
+                let words: [u32; 4] = unsafe { burst_read(src) };
+                dw[start..start + 4].copy_from_slice(&words);
+                return;
+            }
+            _ => {}
+        }
         let (words, rest) = bytes.as_chunks::<4>();
         for (i, word) in words.iter().enumerate() {
             // SAFETY: `word` is four readable bytes at a 4-aligned address.
@@ -1227,19 +1300,23 @@ fn write_dfl(id: usize, cmd: &Cmd<'_>) {
     tsra_fw_bulk_copy::copy_slice(dst, &dw);
 }
 
-/// Read the completion-ring entry at `ci`.
+/// Read the completion-ring entry at `ci`, with one burst.
 fn read_cqe(ci: usize) -> (CqeDw0, CqeDw1) {
-    let entry = &GSRAM.bcp_cq[ci];
-    (CqeDw0::from(entry.dw0.get()), CqeDw1::from(entry.dw1.get()))
+    let entry = core::ptr::from_ref(&GSRAM.bcp_cq[ci]).cast::<u32>();
+    // SAFETY: the entry is two words of the GSRAM ring, 8-byte aligned.
+    let [dw0, dw1] = unsafe { burst_read::<2>(entry) };
+    (CqeDw0::from(dw0), CqeDw1::from(dw1))
 }
 
-/// Read the tag the engine wrote back into the DFL element of command `id`.
+/// Read the tag the engine wrote back into the DFL element of command `id`,
+/// with one burst.
 fn read_tag(id: usize) -> [u8; BCP_TAG_LEN] {
+    // SAFETY: see `write_dfl`; DW1-4 lie within the element, and the
+    // engine finished writing them before the CQE that got us here.
+    let words = unsafe { burst_read::<4>(dfl_ptr(id).add(DFL_CRYPTO_OUT_DW)) };
     let mut tag = [0u8; BCP_TAG_LEN];
-    for (i, word) in tag.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        // SAFETY: see `write_dfl`; DW1-4 lie within the element, and the
-        // engine finished writing them before the CQE that got us here.
-        *word = unsafe { dfl_ptr(id).add(DFL_CRYPTO_OUT_DW + i).read_volatile() }.to_le_bytes();
+    for (bytes, word) in tag.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *bytes = word.to_le_bytes();
     }
     tag
 }
