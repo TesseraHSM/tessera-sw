@@ -1020,6 +1020,7 @@ fn run_once(scn: &Scenario, cfg: &Config, prefix: Vec<usize>) -> (Run, Vec<Decis
     };
     (run, world.sched.decisions)
 }
+
 /// Checks one schedule against the properties.
 fn check(scn: &Scenario, run: &Run, properties: Properties) -> Result<(), String> {
     if let Some(error) = &run.error {

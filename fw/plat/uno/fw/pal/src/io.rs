@@ -577,7 +577,7 @@ impl UnoHsmPal {
             if !ok {
                 error!(
                     "io",
-                    tsra_fw_hsm_pal_traits::HsmError::CompleteIoFailure,
+                    HsmError::CompleteIoFailure,
                     "detached CQE post failed for slot {}",
                     index
                 );

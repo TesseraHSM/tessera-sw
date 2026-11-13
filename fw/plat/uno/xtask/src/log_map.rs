@@ -328,6 +328,7 @@ pub fn build_with_map(
         }
     }
 }
+
 /// What one image's link left for debug-log output.
 pub struct ImageLog {
     /// The image's name, such as `default`.
@@ -699,6 +700,7 @@ pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result
         ),
     }
 }
+
 /// Paths, relative to the repository root, where earlier revisions kept the
 /// message map. A change that moves or renames the map adds the old path
 /// here, so that [`check_against_base`] still finds the base's map.

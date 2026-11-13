@@ -1,4 +1,5 @@
-/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
+/* Copyright (c) Microsoft Corporation. */
+/* Licensed under the MIT License. */
 
 /* The fixture image's memory. Any Cortex-M layout works. */
 MEMORY
