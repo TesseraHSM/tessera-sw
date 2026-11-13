@@ -824,6 +824,14 @@ static int tsra_ossl_cipher_final(void *vctx, unsigned char *out, size_t *outl, 
 
     *outl = 0;
 
+    /* Run the GCM operation if no update did, so the tag is produced or checked. */
+    if (ctx->mode == TSRA_CIPHER_MODE_GCM && !ctx->oneshot_done)
+    {
+        unsigned char empty_in = 0;
+        unsigned char empty_out = 0;
+        return tsra_ossl_cipher_update(ctx, &empty_out, outl, 0, &empty_in, 0);
+    }
+
     /* GCM/XTS emit everything during update(); nothing remains at final. */
     if (ctx->mode != TSRA_CIPHER_MODE_CBC)
     {
@@ -928,6 +936,12 @@ static int tsra_ossl_cipher_cipher(
     {
         ERR_raise(ERR_LIB_PROV, ERR_R_PASSED_NULL_PARAMETER);
         return OSSL_FAILURE;
+    }
+
+    /* EVP_Cipher() finalises AES-GCM with a NULL input. */
+    if (ctx->mode == TSRA_CIPHER_MODE_GCM && in == NULL)
+    {
+        return tsra_ossl_cipher_final(ctx, out, outl, outsize);
     }
 
     /* One-shot path used by EVP_Cipher(): delegate to update() + final(). */
