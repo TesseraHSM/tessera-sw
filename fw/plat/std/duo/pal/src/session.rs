@@ -36,32 +36,23 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 /// MBOR masking-key flow: `[api_rev(8) || masking_key(80)]` = 88 B.
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
-/// `SessionEx`-kind blob size for **PlainText (CU)** sessions:
-/// `api_rev(8) || param_key(32) || masking_key(32) || auth_binding(68)` = 140 B.  The
-/// SessionEx masking key is the 32 B AES-256-GCM `key_masking::aead`
-/// key ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-pub(crate) const SESSION_CU_BLOB_SIZE: usize = SESSION_API_REV_SIZE
+/// `SessionEx`-kind blob size (TBOR handshake sessions):
+/// `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖
+/// h2m(32) ‖ m2h(32)` = 204 B.  The SessionEx masking key is the 32 B
+/// AES-256-GCM `key_masking::aead` key ([`SESSION_MASKING_KEY_LEN`]), not
+/// the legacy 80 B cbc key.
+pub(crate) const SESSION_EX_BLOB_SIZE: usize = SESSION_API_REV_SIZE
     + SESSION_PARAM_KEY_LEN
     + SESSION_MASKING_KEY_LEN
-    + SESSION_AUTH_BINDING_LEN;
+    + SESSION_AUTH_BINDING_LEN
+    + 2 * SESSION_TRANSPORT_KEY_LEN;
 
-/// `SessionEx`-kind blob size for **Authenticated (CO)** sessions:
-/// PlainText blob ‖ `mac_tx(48) ‖ mac_rx(48)` = 236 B.
-pub(crate) const SESSION_CU_AUTH_BLOB_SIZE: usize =
-    SESSION_CU_BLOB_SIZE + 2 * SESSION_MAC_DIR_KEY_LEN;
-
-/// `SessionEx`-kind blob size for **secure-transport** sessions:
-/// PlainText blob ‖ `h2m(32) ‖ m2h(32)` AES-256-GCM transport keys = 204 B.
-pub(crate) const SESSION_SECURE_BLOB_SIZE: usize =
-    SESSION_CU_BLOB_SIZE + 2 * SESSION_TRANSPORT_KEY_LEN;
-
-/// Whether `len` is a `SessionEx` (TBOR handshake) blob length.
-pub(crate) fn is_session_ex_len(len: usize) -> bool {
-    if len == SESSION_SECURE_BLOB_SIZE {
-        return true;
-    }
-    matches!(len, SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE)
-}
+/// Offset of `masking_key` in a `SessionEx` blob.
+const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
+/// Offset of `auth_binding` in a `SessionEx` blob.
+const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
+/// Offset of the `h2m ‖ m2h` transport keys in a `SessionEx` blob.
+const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
 
 impl HsmSessionManager for StdHsmPal {
     /// Check whether the partition's session table is full.
@@ -233,29 +224,18 @@ impl HsmSessionManager for StdHsmPal {
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
-        mac_tx_key: Option<&HsmDmaBuf>,
-        mac_rx_key: Option<&HsmDmaBuf>,
+        h2m_key: &HsmDmaBuf,
+        m2h_key: &HsmDmaBuf,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
             || masking_key.len() != SESSION_MASKING_KEY_LEN
             || auth_binding.len() != SESSION_AUTH_BINDING_LEN
+            || h2m_key.len() != SESSION_TRANSPORT_KEY_LEN
+            || m2h_key.len() != SESSION_TRANSPORT_KEY_LEN
         {
             return Err(HsmError::InvalidArg);
         }
-
-        // Both MAC keys must be present together (Authenticated) or both
-        // absent (PlainText) — mixed presence is a caller bug.
-        let mac_pair = match (mac_tx_key, mac_rx_key) {
-            (None, None) => None,
-            (Some(tx), Some(rx)) => {
-                if tx.len() != rx.len() || !is_dir_key_len(tx.len()) {
-                    return Err(HsmError::InvalidArg);
-                }
-                Some((tx, rx))
-            }
-            _ => return Err(HsmError::InvalidArg),
-        };
 
         let pid = io.pid();
         let entry = self.active_part_mut(pid)?;
@@ -267,35 +247,18 @@ impl HsmSessionManager for StdHsmPal {
 
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
 
-        // Length-discriminated blob:
-        // - PlainText: api_rev(8) + param_key(32) + masking_key(32) + auth_binding(68) = 140 B
-        // - Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                       = 236 B
-        // - Secure transport: above PlainText ‖ h2m(32) ‖ m2h(32)              = 204 B
-        let mut blob = Zeroizing::new([0u8; SESSION_CU_AUTH_BLOB_SIZE]);
+        let mut blob = Zeroizing::new([0u8; SESSION_EX_BLOB_SIZE]);
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
-        blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN]
-            .copy_from_slice(param_key);
-        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN
-            ..SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN]
-            .copy_from_slice(masking_key);
-        blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE]
-            .copy_from_slice(auth_binding);
+        blob[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
+        blob[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
+        blob[SESSION_EX_AUTH_OFF..SESSION_EX_KEYS_OFF].copy_from_slice(auth_binding);
+        blob[SESSION_EX_KEYS_OFF..SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_KEY_LEN]
+            .copy_from_slice(h2m_key);
+        blob[SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_KEY_LEN..].copy_from_slice(m2h_key);
 
-        let blob_len = match mac_pair {
-            None => SESSION_CU_BLOB_SIZE,
-            Some((tx, rx)) => {
-                let key_len = tx.len();
-                blob[SESSION_CU_BLOB_SIZE..SESSION_CU_BLOB_SIZE + key_len].copy_from_slice(tx);
-                blob[SESSION_CU_BLOB_SIZE + key_len..SESSION_CU_BLOB_SIZE + 2 * key_len]
-                    .copy_from_slice(rx);
-                SESSION_CU_BLOB_SIZE + 2 * key_len
-            }
-        };
-
-        let physical_id =
-            entry
-                .vault
-                .create(&blob[..blob_len], HsmVaultKeyKind::SessionEx, None, attrs)?;
+        let physical_id = entry
+            .vault
+            .create(&blob[..], HsmVaultKeyKind::SessionEx, None, attrs)?;
 
         // Promote the slot to Active and bind to the new vault entry.
         if let Err(e) = entry.session_table.promote(id, physical_id) {
@@ -309,7 +272,7 @@ impl HsmSessionManager for StdHsmPal {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
-        if !is_session_ex_len(blob.len()) {
+        if blob.len() != SESSION_EX_BLOB_SIZE {
             return Err(HsmError::InvalidPermissions);
         }
         let key_bytes = &blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN];
@@ -330,10 +293,7 @@ impl HsmSessionManager for StdHsmPal {
         // work.
         let (offset, size) = match blob.len() {
             SESSION_BLOB_SIZE => (SESSION_API_REV_SIZE, SESSION_MASKING_KEY_SIZE),
-            len if is_session_ex_len(len) => (
-                SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN,
-                SESSION_MASKING_KEY_LEN,
-            ),
+            SESSION_EX_BLOB_SIZE => (SESSION_EX_MASKING_OFF, SESSION_MASKING_KEY_LEN),
             _ => return Err(HsmError::InternalError),
         };
         let key_bytes = &blob[offset..offset + size];
@@ -347,46 +307,22 @@ impl HsmSessionManager for StdHsmPal {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
-        if !is_session_ex_len(blob.len()) {
+        if blob.len() != SESSION_EX_BLOB_SIZE {
             return Err(HsmError::InvalidPermissions);
         }
-        let binding = &blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE];
+        let binding = &blob[SESSION_EX_AUTH_OFF..SESSION_EX_KEYS_OFF];
         // SAFETY: this is a sub-view of the vault's DMA-reachable key storage.
         Ok(unsafe { HsmDmaBuf::from_raw(binding) })
     }
 
-    fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
-        let entry = self.active_part_mut(io.pid())?;
-        entry.session_table.try_consume_psk_change(id)
-    }
-}
-
-/// Whether `len` is a valid directional key length for `session_promote`.
-fn is_dir_key_len(len: usize) -> bool {
-    if len == SESSION_TRANSPORT_KEY_LEN {
-        return true;
-    }
-    len == SESSION_MAC_DIR_KEY_LEN
-}
-
-/// Direction of a session transport key.
-#[derive(Clone, Copy)]
-pub(crate) enum TransportDir {
-    /// VM→HSM (requests).
-    H2m,
-    /// HSM→VM (responses).
-    M2h,
-}
-
-impl StdHsmPal {
     /// Borrows a directional transport key: from a Pending slot's
-    /// handshake blob tail, or an Active session's secure-transport blob.
-    pub(crate) fn session_transport_key(
+    /// handshake blob tail, or an Active session's `SessionEx` blob.
+    fn session_transport_key(
         &self,
         io: &StdHsmIo,
         id: HsmSessId,
-        dir: TransportDir,
-    ) -> HsmResult<&[u8; SESSION_TRANSPORT_KEY_LEN]> {
+        dir: HsmSessionTransportDir,
+    ) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let (blob, keys_off) = match entry.session_table.state(id) {
             HsmSessionState::Pending => {
@@ -400,20 +336,26 @@ impl StdHsmPal {
             HsmSessionState::Active => {
                 let kid = entry.session_table.physical_id(id)?;
                 let blob = entry.vault.key(kid)?;
-                if blob.len() != SESSION_SECURE_BLOB_SIZE {
+                if blob.len() != SESSION_EX_BLOB_SIZE {
                     return Err(HsmError::InvalidPermissions);
                 }
-                (blob, SESSION_CU_BLOB_SIZE)
+                (blob, SESSION_EX_KEYS_OFF)
             }
             _ => return Err(HsmError::SessionNotFound),
         };
         let offset = match dir {
-            TransportDir::H2m => keys_off,
-            TransportDir::M2h => keys_off + SESSION_TRANSPORT_KEY_LEN,
+            HsmSessionTransportDir::H2m => keys_off,
+            HsmSessionTransportDir::M2h => keys_off + SESSION_TRANSPORT_KEY_LEN,
         };
-        blob[offset..offset + SESSION_TRANSPORT_KEY_LEN]
-            .try_into()
-            .map_err(|_| HsmError::InternalError)
+        let key = &blob[offset..offset + SESSION_TRANSPORT_KEY_LEN];
+        // SAFETY: this is a sub-view of the session table's / vault's
+        // DMA-reachable host storage.
+        Ok(unsafe { HsmDmaBuf::from_raw(key) })
+    }
+
+    fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.session_table.try_consume_psk_change(id)
     }
 }
 
@@ -627,26 +569,12 @@ mod session_type_tests {
     }
 
     #[test]
-    fn to_u8_matches_discriminant() {
-        assert_eq!(HsmSessionType::PlainText.to_u8(), 0);
-        assert_eq!(HsmSessionType::Authenticated.to_u8(), 1);
-    }
-
-    #[test]
-    fn from_u8_round_trip() {
+    fn from_u8_accepts_only_encrypted() {
         assert_eq!(
-            HsmSessionType::from_u8(0).unwrap(),
-            HsmSessionType::PlainText
+            HsmSessionType::from_u8(0).expect("0 is Encrypted"),
+            HsmSessionType::Encrypted
         );
-        assert_eq!(
-            HsmSessionType::from_u8(1).unwrap(),
-            HsmSessionType::Authenticated
-        );
-    }
-
-    #[test]
-    fn from_u8_rejects_unknown_values() {
-        for v in [2u8, 3, 0x7f, 0x80, 0xff] {
+        for v in [1u8, 2, 0x7f, 0x80, 0xff] {
             assert!(
                 matches!(
                     HsmSessionType::from_u8(v),
@@ -656,39 +584,11 @@ mod session_type_tests {
             );
         }
     }
-
-    #[test]
-    fn validate_for_role_co_requires_authenticated() {
-        assert!(HsmSessionType::Authenticated
-            .validate_for_role(HsmSessionRole::CryptoOfficer)
-            .is_ok());
-        assert!(matches!(
-            HsmSessionType::PlainText.validate_for_role(HsmSessionRole::CryptoOfficer),
-            Err(HsmError::InvalidSessionType)
-        ));
-    }
-
-    #[test]
-    fn validate_for_role_cu_requires_plaintext() {
-        assert!(HsmSessionType::PlainText
-            .validate_for_role(HsmSessionRole::CryptoUser)
-            .is_ok());
-        assert!(matches!(
-            HsmSessionType::Authenticated.validate_for_role(HsmSessionRole::CryptoUser),
-            Err(HsmError::InvalidSessionType)
-        ));
-    }
-
-    #[test]
-    fn is_authenticated_flag() {
-        assert!(HsmSessionType::Authenticated.is_authenticated());
-        assert!(!HsmSessionType::PlainText.is_authenticated());
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod secure_session_tests {
+mod session_transport_tests {
     use tsra_fw_hsm_io::duo::DuoCmdDword;
     use tsra_fw_hsm_io::duo::DuoOp;
     use tsra_fw_hsm_io::duo::DuoSqeBuilder;
@@ -831,8 +731,8 @@ mod secure_session_tests {
             dma(&[2u8; SESSION_PARAM_KEY_LEN]),
             dma(&[3u8; SESSION_MASKING_KEY_LEN]),
             dma(&[4u8; SESSION_AUTH_BINDING_LEN]),
-            Some(dma(&H2M)),
-            Some(dma(&M2H)),
+            dma(&H2M),
+            dma(&M2H),
         )
         .await
         .unwrap();
@@ -897,7 +797,7 @@ mod secure_session_tests {
         assert_eq!(dst, vec![0u8; MSG.len()], "nothing reaches the host");
     }
 
-    /// Duo defers `SessionClose` to the commit walk so the response can
+    /// `SessionClose` is deferred to the commit walk so the response can
     /// still be sealed under the session's transport key.
     #[tokio::test]
     async fn session_close_destroys_only_on_commit() {
@@ -913,8 +813,8 @@ mod secure_session_tests {
             dma(&[2u8; SESSION_PARAM_KEY_LEN]),
             dma(&[3u8; SESSION_MASKING_KEY_LEN]),
             dma(&[4u8; SESSION_AUTH_BINDING_LEN]),
-            Some(dma(&H2M)),
-            Some(dma(&M2H)),
+            dma(&H2M),
+            dma(&M2H),
         )
         .await
         .unwrap();

@@ -39,7 +39,7 @@ pub(crate) fn new_co_session() -> HsmSession {
     part.open_session_ex(
         rev,
         HsmSessionPsk::new(HsmPskId::CO),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     )
     .expect("open CO session")
 }

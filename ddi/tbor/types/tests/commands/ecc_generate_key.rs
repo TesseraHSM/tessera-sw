@@ -16,10 +16,10 @@
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
@@ -141,7 +141,7 @@ fn ecc_generate_key_allowed_on_crypto_user_session() {
     // gate does not obscure the command's role authorization.
     let ctx = TestCtx::new();
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -149,7 +149,7 @@ fn ecc_generate_key_allowed_on_crypto_user_session() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -357,7 +357,7 @@ fn ecc_generate_key_max_label_length_all_curves() {
 fn ecc_generate_key_rejects_default_co_psk() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO session under default PSK");
 
     ctx.expect_fw_reject(
@@ -460,8 +460,7 @@ fn ecc_generate_key_session_scope_after_reopen() {
     ctx.session_close(session_a.session_id)
         .expect("close first CO session");
 
-    let opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+    let opts = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)

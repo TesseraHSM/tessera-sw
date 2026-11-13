@@ -15,12 +15,12 @@
 
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::PSK_LEN;
@@ -75,7 +75,7 @@ fn get_unwrapping_key_available_to_cu() {
     // Rotate the CU PSK so GetUnwrappingKey reaches its handler instead of
     // being rejected by the dispatcher's default-PSK gate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -83,7 +83,7 @@ fn get_unwrapping_key_available_to_cu() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -160,8 +160,8 @@ fn get_unwrapping_key_stable_across_co_sessions() {
         .expect("close first CO session");
 
     // Reopen CO under the PSK already rotated by finalized_co_session().
-    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
-        .with_psk(&ROTATED_CO_PSK);
+    let opts =
+        SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -196,7 +196,7 @@ fn get_unwrapping_key_same_for_co_and_cu() {
     // Rotate the CU PSK so GetUnwrappingKey reaches its handler instead
     // of being rejected by the dispatcher's default-PSK gate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -205,7 +205,7 @@ fn get_unwrapping_key_same_for_co_and_cu() {
     bootstrap.close().expect("close bootstrap CU session");
 
     // Reopen CU under the rotated PSK.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -227,7 +227,7 @@ fn get_unwrapping_key_default_cu_psk_rejected() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session under default PSK");
 
     ctx.expect_fw_reject(
@@ -246,7 +246,7 @@ fn get_unwrapping_key_unknown_session_rejected() {
     // Rotate the CU PSK so the dispatcher reaches session lookup instead of
     // rejecting the request first with DefaultPskMustRotate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -274,7 +274,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
 
     // Rotate the CU PSK.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -283,7 +283,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
     bootstrap.close().expect("close bootstrap CU session");
 
     // First CU session.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -299,7 +299,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
         .expect("close first CU session");
 
     // Second CU session.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -349,7 +349,7 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
 
     // Rotate away from the default CU PSK first.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -357,7 +357,7 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -393,7 +393,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     // Rotate CU PSK.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -401,7 +401,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -415,8 +415,8 @@ fn get_unwrapping_key_stable_across_role_transitions() {
         .expect("close CU session");
 
     // Reopen CO.
-    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
-        .with_psk(&ROTATED_CO_PSK);
+    let opts =
+        SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)

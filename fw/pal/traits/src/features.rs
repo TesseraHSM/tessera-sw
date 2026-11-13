@@ -34,14 +34,6 @@ pub enum HsmIoProtocol {
     Duo,
 }
 
-impl HsmIoProtocol {
-    /// Whether sessions carry AES-256-GCM transport keys and secure-channel
-    /// commands are encrypted with them.
-    pub const fn secure_session(self) -> bool {
-        matches!(self, Self::Duo)
-    }
-}
-
 /// Type-level IO protocol marker, selected by
 /// [`HsmPalFeatures::IoProtocol`].
 ///

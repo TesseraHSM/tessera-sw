@@ -19,6 +19,7 @@
 //! tests, which share the same `pal.hkdf_extract` / `pal.hkdf_expand`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::*;
@@ -689,7 +690,7 @@ fn hkdf_derive_allowed_on_cu_session() {
 fn hkdf_derive_default_cu_psk_rejected() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session");
 
     ctx.expect_fw_reject(

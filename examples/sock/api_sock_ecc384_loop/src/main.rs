@@ -60,7 +60,7 @@ fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>
     let default_session = partition.open_session_ex(
         rev,
         HsmSessionPsk::new(HsmPskId::CO),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     );
 
     match default_session {
@@ -74,7 +74,7 @@ fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>
             .open_session_ex(
                 rev,
                 HsmSessionPsk::with_psk(HsmPskId::CO, &TOOL_CO_PSK),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .map_err(|rotated_error| {
                 format!(

@@ -5,7 +5,8 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
-/// Length of the Phase-2 confirmation MAC (HMAC-SHA-384).
+/// Length of the host's handshake confirmation `fin` (HMAC-SHA-384 over
+/// the transcript hash under the derived `fin_key`).
 pub const MAC_FIN_LEN: usize = 48;
 
 /// Length of the host-supplied `seed`, encrypted inside
@@ -17,7 +18,7 @@ pub const SEED_LEN: usize = 32;
 /// Layout (see [`tsra_fw_core_crypto_aead_envelope`]):
 /// `"AEAD"(4) ‖ alg=AesGcm256(1) ‖ rsv=0(1) ‖ aad_len_be=0(2) ‖
 ///  IV(16) ‖ seed(32) ‖ TAG(16)` = 72 B.  No AAD: `param_key` is
-/// HPKE-derived per session, so the envelope is structurally bound
+/// derived per session, so the envelope is structurally bound
 /// to the active session by key uniqueness.
 pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
@@ -30,6 +31,9 @@ pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 pub const BMK_SESSION_MAX_LEN: usize = 512;
 
 /// `SessionOpenFinish` request schema.
+///
+/// Travels on the session's encrypted channel (served from the Pending
+/// slot's transport keys).
 #[tbor(opcode = 0x04, pair = TborSessionOpenFinishResp)]
 pub struct TborSessionOpenFinishReq<'a> {
     /// Pending session identifier the handshake reserved in Phase 1.
@@ -39,7 +43,7 @@ pub struct TborSessionOpenFinishReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// Phase-2 confirmation MAC.
+    /// Host handshake confirmation (`fin`).
     #[tbor(buffer, len = 48)]
     pub mac_fin: &'a [u8],
 

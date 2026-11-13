@@ -3,97 +3,91 @@
 
 //! TBOR `SessionOpenInit` handler — Phase 1 of session establishment.
 //!
-//! Validates the request, looks up the partition's PSK and identity
-//! key, runs HPKE `mode_auth_psk` `send_export` to derive the shared
-//! `exported` secret and the HSM's response ephemeral, reserves a
-//! `Pending` session slot, computes the Phase-1 confirm MAC, and
-//! returns `(slot, pk_resp, mac_resp)` to the caller.
+//! Validates the request, encapsulates to the VM's ephemeral KEM key
+//! (ECDH P-384 or ML-KEM-1024), hashes the handshake transcript `T1`,
+//! signs it with the partition identity key, derives the handshake
+//! secret `hs` from the KEM secret and the role's PSK, reserves a
+//! `Pending` session slot holding `hs`, `T1` and the transport keys, and
+//! returns `(slot, enc, sig)` to the caller.
 //!
-//! Resume is no longer multiplexed onto this opcode; the host
-//! recovers a prior session's `masking_key` via the MBOR
-//! `ReopenSession` command instead.
+//! ```text
+//! T1   = SHA-384("TSRA-SESSION-v2" ‖ suite_id ‖ psk_id ‖ session_type
+//!                ‖ pk_hsm(97) ‖ len16 ‖ pk_init ‖ len16 ‖ enc)
+//! sig  = ECDSA-P384(PID, T1)
+//! prk  = HKDF-Extract(salt = "TSRA-SESSION-v2", Z ‖ PSK)
+//! hs   = HKDF-Expand(prk, "tsra-session-hs-v2" ‖ T1, 48)
+//! h2m, m2h = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v2", 32)
+//! ```
 //!
-//! On any error the partial session state is rolled back via the
-//! caller-visible TBOR error response; no Pending slot is leaked.
+//! The signature authenticates the HSM to the host; knowledge of the PSK
+//! (proven by the host's `fin` in `SessionOpenFinish`) authenticates the
+//! host to the HSM.
+//!
+//! Resume is not multiplexed onto this opcode; the host recovers a prior
+//! session's `masking_key` via the MBOR `ReopenSession` command instead.
+//!
+//! On any error after the Pending slot is reserved, the dispatcher's undo
+//! walk destroys it; no Pending slot is leaked.
 //!
 //! All variable-length and crypto-sized buffers are allocated from the
 //! per-IO scoped allocator — handler frames never put DMA-targeted
 //! arrays on the async stack.
 
-use tsra_fw_core_crypto_hpke::*;
 use tsra_fw_ddi_tbor_types::*;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
 use tsra_fw_hsm_undo::UndoLog;
 
+use super::session_open_finish::hkdf_expand_labeled_into;
+
 /// Validated `SessionOpenInit` request fields.
 struct ParsedRequest<'a> {
-    /// Roles
+    /// Role asserted by `psk_id`.
     role: HsmSessionRole,
 
     /// PSK identifier (0 or 1).
     psk_id: u8,
 
-    /// Channel-level integrity profile selected by the caller.
+    /// Channel profile selected by the caller.
     session_type: HsmSessionType,
 
     /// Cryptographic suite negotiated by the caller.
     suite: HsmSessionSuite,
 
     /// Sub-view of the inbound request buffer (DMA-branded by the
-    /// codec), so it can flow straight into HPKE / HMAC inputs
-    /// without an intermediate copy.
+    /// codec), so it can flow straight into the KEM and the transcript
+    /// hash without an intermediate copy.
     pk_init: &'a HsmDmaBuf,
 }
 
-/// Map a [`HsmSessionSuite`] to the concrete [`HpkeSuite`] used by the
-/// session-establishment handshake.  Today every implemented suite is
-/// HPKE-based, so this is a total function; future ML-KEM variants
-/// will require a different code path (and a different return type).
-const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
-    match suite {
-        HsmSessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
-    }
-}
+/// Curve of the ECDH suite and of the transcript signature.
+const CURVE: HsmEccCurve = HsmEccCurve::P384;
 
-/// HPKE suite used by the only currently registered `HsmSessionSuite`
-/// (`P384HkdfSha384AesGcm256`).  Used at compile time to size the
-/// Pending blob; the runtime handler always uses
-/// [`hpke_suite_for`] for the actually-negotiated suite.
-const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSha384AesGcm256);
+/// Offset of `T1` in the Pending blob.
+pub(super) const PENDING_T1_OFF: usize = SESSION_HS_LEN;
+
+/// Offset of `auth_binding` in the Pending blob.
+pub(super) const PENDING_AUTH_OFF: usize = PENDING_T1_OFF + SESSION_HS_LEN;
+
+/// Offset of the `session_type` byte in the Pending blob.
+pub(super) const PENDING_TYPE_OFF: usize = PENDING_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
+
+/// Offset of the `suite_id` byte in the Pending blob.
+pub(super) const PENDING_SUITE_OFF: usize = PENDING_TYPE_OFF + 1;
+
+/// Offset of the transport keys `h2m ‖ m2h` in the Pending blob.
+pub(super) const PENDING_KEYS_OFF: usize = PENDING_SUITE_OFF + 1;
 
 /// Length of the Pending handshake-state blob:
-/// `exported (Nh) ‖ pk_init (Npk) ‖ pk_resp (Npk)
-/// ‖ auth_binding (68 B) ‖ session_type (1 B) ‖ suite_id (1 B)`.
+/// `hs(48) ‖ T1(48) ‖ auth_binding(68) ‖ session_type(1) ‖ suite_id(1)
+/// ‖ h2m(32) ‖ m2h(32)`.
 ///
-/// The trailing `session_type` byte tells [`session_open_finish`]
-/// which derived-key schedule to run (PlainText: param+masking only;
-/// Authenticated: param+masking+mac_tx+mac_rx).  The `suite_id` byte
-/// lets `session_open_finish` recover the negotiated cryptographic
-/// suite without trusting any client-side state.
-pub(super) const PENDING_BASE_LEN: usize = DEFAULT_HPKE_SUITE.nh()
-    + DEFAULT_HPKE_SUITE.npk()
-    + DEFAULT_HPKE_SUITE.npk()
-    + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN
-    + 1
-    + 1;
+/// The transport keys must end the blob (see
+/// [`HsmSessionManager::session_create_pending`]), so `SessionOpenFinish`
+/// already travels on the encrypted channel.
+pub(super) const PENDING_BLOB_LEN: usize = PENDING_KEYS_OFF + 2 * SESSION_TRANSPORT_KEY_LEN;
 
-/// Length of the Pending blob as stored on platform `P`.
-///
-/// With secure sessions (Duo) it ends with the transport keys `h2m ‖ m2h`
-/// (see [`HsmSessionManager::session_create_pending`]), so
-/// `SessionOpenFinish` can already travel on the secure channel.
-pub(super) const fn pending_blob_len<P: HsmPalFeatures>() -> usize {
-    if P::IO_PROTOCOL.secure_session() {
-        PENDING_BASE_LEN + 2 * SESSION_TRANSPORT_KEY_LEN
-    } else {
-        PENDING_BASE_LEN
-    }
-}
-
-/// Compile-time guard: the largest Pending blob must fit inside the PAL
-/// budget.  If the HPKE suite sizes grow past the budget, this
-/// assertion fires at build time rather than at runtime.
-const _: () = assert!(PENDING_BASE_LEN + 2 * SESSION_TRANSPORT_KEY_LEN <= SESSION_PENDING_BLOB_MAX);
+const _: () = assert!(PENDING_BLOB_LEN <= SESSION_PENDING_BLOB_MAX);
 
 /// Handle a TBOR `SessionOpenInit` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
@@ -112,39 +106,27 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_init,
         } = parse_request(cmd_buf.request())?;
 
-        let hpke_suite = hpke_suite_for(suite);
-
         // ── Identity + PSK material (all on the scoped allocator) ──
         let psk = load_psk(pal, io, alloc, psk_id)?;
         let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
-        let key_id = crate::part_state::part_id_key_id(pal, io)?;
-        let sk_hsm = pal.vault_key(io, key_id)?;
         let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
 
-        // ── HPKE info = SESSION_HPKE_INFO ‖ psk_id ‖ session_type
-        //                                   ‖ suite_id
-        // The trailing role+type+suite bytes bind the handshake
-        // transcript so a downgrade to a different role, session type
-        // or cryptographic suite produces a different `exported`
-        // secret on the HSM side, MAC-failing any spoofed Phase-1
-        // confirm.
-        let info = build_hpke_info(alloc, psk_id, session_type, suite)?;
+        // ── KEM encapsulation to the VM's ephemeral key ────────────
+        let (enc, z) = encapsulate(pal, io, alloc, suite, pk_init).await?;
 
-        // ── HPKE auth_psk send_export ──────────────────────────────
-        let psk_id_bytes = &[psk_id];
-        let (pk_resp, exported) = hpke_auth_psk_export(
+        // ── Transcript, signature and handshake secret ─────────────
+        let t1 = transcript_hash(
             pal,
             io,
             alloc,
-            hpke_suite,
-            pk_init,
-            sk_hsm,
+            [suite.to_u8(), psk_id, session_type.to_u8()],
             pk_hsm,
-            psk,
-            psk_id_bytes,
-            info,
+            pk_init,
+            enc,
         )
         .await?;
+        let sig = sign_transcript(pal, io, alloc, t1).await?;
+        let hs = handshake_secret(pal, io, alloc, z, psk, t1).await?;
 
         // ── Pending slot allocation ────────────────────────────────
         let slot = create_pending_slot(
@@ -154,16 +136,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             role,
             session_type,
             suite,
-            hpke_suite,
-            exported,
-            pk_init,
-            pk_resp,
+            hs,
+            t1,
             auth_binding,
         )
         .await?;
         // Record the just-created Pending session's teardown inverse, so a
-        // failure below (MAC, response encode, or the CQE post) reverts it
-        // via the dispatcher's undo walk rather than leaking the slot.
+        // failure below (response encode, or the CQE post) reverts it via
+        // the dispatcher's undo walk rather than leaking the slot.
         undo.push_session_destroy(slot)?;
         let session_id = u16::from(slot);
         // Hand the freshly allocated slot to the IO layer so it lands in
@@ -174,14 +154,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ever reaches the firmware.
         *cqe_sess_id = Some(session_id);
 
-        // ── Phase-1 confirm MAC ────────────────────────────────────
-        let mac_resp = compute_phase1_mac(
-            pal, io, alloc, hpke_suite, exported, session_id, pk_init, pk_hsm, pk_resp,
-        )
-        .await?;
-
-        // ── Encode response from the scoped buffers ────────────────
-        encode_response(cmd_buf, session_id, pk_resp, mac_resp)
+        encode_response(cmd_buf, session_id, enc, sig)
     })
     .await
 }
@@ -196,15 +169,11 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
         _ => return Err(HsmError::InvalidPskId),
     };
     let psk_id = req.psk_id().0;
-
     let session_type = HsmSessionType::from_u8(req.session_type().0)?;
-    session_type.validate_for_role(role)?;
-
     let suite = HsmSessionSuite::from_u8(req.suite_id().0)?;
-    let hpke_suite = hpke_suite_for(suite);
 
     let pk_init: &HsmDmaBuf = req.pk_init();
-    if pk_init.len() != hpke_suite.npk() {
+    if pk_init.len() != suite.pk_init_len() {
         return Err(HsmError::InvalidArg);
     }
 
@@ -234,21 +203,17 @@ fn load_psk<'a, P: HsmPal>(
 /// identity public key, in a freshly-allocated scoped buffer.
 ///
 /// The PAL stores the partition identity public key as raw
-/// `X_be ‖ Y_be` (matching OpenSSL's natural EC point representation
-/// and the form used for cert generation); concatenating with the
-/// SEC1 `0x04` prefix yields the RFC 9180 §7.1.1 wire encoding
-/// directly.
-///
-/// Using the PAL's queried coordinate length (rather than a hard-coded
-/// suite-derived constant) future-proofs against PAL impls that return
-/// a different size; an HPKE-suite mismatch would surface at
-/// `send_export` time, not here.
-fn load_pk_hsm_sec1<'a, P: HsmPal>(
+/// `X_be ‖ Y_be` (the form used for cert generation); prefixing `0x04`
+/// yields the SEC1 encoding the host recovers from the PID certificate.
+pub(super) fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
+    if xy_len + 1 != SESSION_P384_SEC1_LEN {
+        return Err(HsmError::InvalidArg);
+    }
     let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
     pk_hsm[0] = 0x04;
     {
@@ -258,78 +223,171 @@ fn load_pk_hsm_sec1<'a, P: HsmPal>(
     Ok(pk_hsm)
 }
 
-/// Build the HPKE `info` field as
-/// `SESSION_HPKE_INFO ‖ psk_id ‖ session_type ‖ suite_id` in a scoped
-/// DMA buffer.  Returns a borrow with `'a` so the caller can pass it
-/// into [`HpkeSendExportConfig::auth_psk`] without copying.
+/// Encapsulate to `pk_init`, returning `(enc, Z)`.
 ///
-/// Binding `psk_id`, `session_type` and `suite_id` into the HPKE
-/// `info` makes the handshake transcript non-malleable: a downgrade
-/// to a different role, session type or cryptographic suite would
-/// produce a different `exported` secret on the HSM side, causing
-/// the Phase-1 confirm MAC to fail.
-fn build_hpke_info(
-    alloc: &impl HsmScopedAlloc,
-    psk_id: u8,
-    session_type: HsmSessionType,
-    suite: HsmSessionSuite,
-) -> HsmResult<&[u8]> {
-    let info = alloc.dma_alloc(SESSION_HPKE_INFO.len() + 3)?;
-    let mut off = 0;
-    info[off..off + SESSION_HPKE_INFO.len()].copy_from_slice(SESSION_HPKE_INFO);
-    off += SESSION_HPKE_INFO.len();
-    info[off] = psk_id;
-    info[off + 1] = session_type.to_u8();
-    info[off + 2] = suite.to_u8();
-    Ok(&info[..])
-}
-
-/// Run HPKE `auth_psk send_export`. Returns `(pk_resp, exported)` in
-/// scoped buffers.
-#[allow(clippy::too_many_arguments)]
-async fn hpke_auth_psk_export<'a, P: HsmPal>(
-    pal: &'a P,
+/// * ECDH P-384: a fresh ephemeral keypair; `enc` is its SEC1 public
+///   point and `Z` the 48 B big-endian x-coordinate of the shared point.
+/// * ML-KEM-1024: `enc` is the 1568 B ciphertext and `Z` the 32 B shared
+///   secret.
+async fn encapsulate<'a, P: HsmPal>(
+    pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    suite: HpkeSuite,
+    suite: HsmSessionSuite,
     pk_init: &HsmDmaBuf,
-    sk_hsm: &HsmDmaBuf,
-    pk_hsm: &HsmDmaBuf,
-    psk: &HsmDmaBuf,
-    psk_id_bytes: &[u8],
-    info: &[u8],
 ) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
-    let pk_resp = alloc.dma_alloc(suite.npk())?;
-    let exported = alloc.dma_alloc(suite.nh())?;
-    let cfg = HpkeSendExportConfig::auth_psk(
-        suite,
-        pk_init,
-        info,
-        SESSION_HPKE_EXPORTER_CONTEXT,
-        AuthParams {
-            sk_s: sk_hsm,
-            pk_s: pk_hsm,
-        },
-        PskParams {
-            psk,
-            psk_id: psk_id_bytes,
-        },
-    );
-    send_export(
-        pal,
-        io,
-        &cfg,
-        Some(&mut pk_resp[..]),
-        Some(&mut exported[..]),
-        alloc,
-    )
-    .await?;
-    Ok((pk_resp, exported))
+    match suite {
+        HsmSessionSuite::EcdhP384EcdsaP384 => ecdh_encapsulate(pal, io, alloc, pk_init).await,
+        HsmSessionSuite::MlKem1024EcdsaP384 => {
+            let param = HsmMlKemParam::MlKem1024;
+            let (ct_len, ss_len) = pal.mlkem_encaps(io, param, pk_init, None).await?;
+            let enc = alloc.dma_alloc(ct_len)?;
+            let z = alloc.dma_alloc(ss_len)?;
+            pal.mlkem_encaps(io, param, pk_init, Some((&mut *enc, &mut *z)))
+                .await?;
+            Ok((enc, z))
+        }
+    }
 }
 
-/// Pack `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`
-/// (plus `h2m ‖ m2h` with secure sessions) into a Pending blob and hand it
-/// to `session_create_pending`.
+/// Ephemeral ECDH P-384 against the SEC1 point `pk_init`.
+async fn ecdh_encapsulate<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    pk_init: &HsmDmaBuf,
+) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
+    let order = P::BYTE_ORDER;
+    let coord = CURVE.wire_coord_len(order);
+    if pk_init[0] != 0x04 {
+        return Err(HsmError::InvalidArg);
+    }
+    let peer = alloc.dma_alloc(2 * coord)?;
+    peer[..SESSION_P384_SEC1_LEN - 1].copy_from_slice(&pk_init[1..]);
+    byte_order::pair_from_be(order, CURVE, peer)?;
+
+    // The ephemeral key is used for ECDH, so its generation runs a
+    // key-agreement PCT.
+    let (priv_len, pub_len) = pal
+        .ecc_gen_keypair(io, alloc, CURVE, None, HsmEccPct::KeyAgreement)
+        .await?;
+    let sk = alloc.dma_alloc(priv_len)?;
+    let pk = alloc.dma_alloc(pub_len)?;
+    pal.ecc_gen_keypair(
+        io,
+        alloc,
+        CURVE,
+        Some((&mut *sk, &mut *pk)),
+        HsmEccPct::KeyAgreement,
+    )
+    .await?;
+
+    let z = alloc.dma_alloc(coord)?;
+    pal.ecdh_derive(io, CURVE, sk, peer, z).await?;
+    let z_len = byte_order::coord_to_be(order, CURVE, z)?.len();
+
+    let enc = alloc.dma_alloc(SESSION_P384_SEC1_LEN)?;
+    enc[0] = 0x04;
+    let xy = byte_order::pair_to_be(order, CURVE, pk)?;
+    if xy.len() != SESSION_P384_SEC1_LEN - 1 {
+        return Err(HsmError::InvalidArg);
+    }
+    enc[1..].copy_from_slice(xy);
+    Ok((enc, &mut z[..z_len]))
+}
+
+/// `T1 = SHA-384(label ‖ suite_id ‖ psk_id ‖ session_type ‖ pk_hsm
+/// ‖ len16 ‖ pk_init ‖ len16 ‖ enc)`, as a standard digest.
+async fn transcript_hash<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    params: [u8; 3],
+    pk_hsm: &HsmDmaBuf,
+    pk_init: &HsmDmaBuf,
+    enc: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let label = SESSION_TRANSCRIPT_LABEL;
+    let head = alloc.dma_alloc(label.len() + params.len() + pk_hsm.len() + 2)?;
+    let (l, rest) = head.split_at_mut(label.len());
+    l.copy_from_slice(label);
+    let (p, rest) = rest.split_at_mut(params.len());
+    p.copy_from_slice(&params);
+    let (k, n) = rest.split_at_mut(pk_hsm.len());
+    k.copy_from_slice(pk_hsm);
+    n.copy_from_slice(&len16(pk_init.len())?);
+    let enc_len = alloc.dma_alloc(2)?;
+    enc_len.copy_from_slice(&len16(enc.len())?);
+
+    let mut ctx = pal.hash_begin(io, HsmHashAlgo::Sha384, alloc)?;
+    for chunk in [head as &HsmDmaBuf, pk_init, enc_len, enc] {
+        pal.hash_continue(io, &mut ctx, chunk).await?;
+    }
+    let t1 = alloc.dma_alloc(SESSION_HS_LEN)?;
+    pal.hash_finish(io, ctx, t1, HsmDigestForm::Standard)
+        .await?;
+    Ok(t1)
+}
+
+/// Big-endian 16-bit length prefix.
+fn len16(len: usize) -> HsmResult<[u8; 2]> {
+    u16::try_from(len)
+        .map(u16::to_be_bytes)
+        .map_err(|_| HsmError::InvalidArg)
+}
+
+/// Sign `T1` with the partition identity key, returning the raw
+/// big-endian `r ‖ s` signature.
+async fn sign_transcript<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    t1: &HsmDmaBuf,
+) -> HsmResult<&'a mut [u8]> {
+    let order = P::BYTE_ORDER;
+    let digest = alloc.dma_alloc(t1.len())?;
+    byte_order::int_copy_from_be(order, digest, t1)?;
+    let sig = alloc.dma_alloc(CURVE.wire_sig_len(order))?;
+    let key_id = crate::part_state::part_id_key_id(pal, io)?;
+    let sk_hsm = pal.vault_key(io, key_id)?;
+    pal.ecc_sign(io, CURVE, sk_hsm, digest, sig).await?;
+    let sig = byte_order::pair_to_be(order, CURVE, sig)?;
+    if sig.len() != SIG_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(sig)
+}
+
+/// `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v2", Z ‖ PSK),
+/// "tsra-session-hs-v2" ‖ T1, 48)`.
+async fn handshake_secret<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    z: &HsmDmaBuf,
+    psk: &HsmDmaBuf,
+    t1: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let ikm = alloc.dma_alloc(z.len() + psk.len())?;
+    ikm[..z.len()].copy_from_slice(z);
+    ikm[z.len()..].copy_from_slice(psk);
+    let salt = alloc.dma_alloc(SESSION_TRANSCRIPT_LABEL.len())?;
+    salt.copy_from_slice(SESSION_TRANSCRIPT_LABEL);
+    let prk = alloc.dma_alloc(SESSION_HS_LEN)?;
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, Some(salt), ikm, prk)
+        .await?;
+
+    let info = alloc.dma_alloc(SESSION_HS_LABEL.len() + t1.len())?;
+    info[..SESSION_HS_LABEL.len()].copy_from_slice(SESSION_HS_LABEL);
+    info[SESSION_HS_LABEL.len()..].copy_from_slice(t1);
+    let hs = alloc.dma_alloc(SESSION_HS_LEN)?;
+    pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(info), hs)
+        .await?;
+    Ok(hs)
+}
+
+/// Pack `hs ‖ T1 ‖ auth_binding ‖ session_type ‖ suite_id ‖ h2m ‖ m2h`
+/// into a Pending blob and hand it to `session_create_pending`.
 #[allow(clippy::too_many_arguments)]
 async fn create_pending_slot<P: HsmPal>(
     pal: &P,
@@ -338,103 +396,35 @@ async fn create_pending_slot<P: HsmPal>(
     role: HsmSessionRole,
     session_type: HsmSessionType,
     suite: HsmSessionSuite,
-    hpke_suite: HpkeSuite,
-    exported: &HsmDmaBuf,
-    pk_init: &HsmDmaBuf,
-    pk_resp: &HsmDmaBuf,
+    hs: &HsmDmaBuf,
+    t1: &HsmDmaBuf,
     auth_binding: &HsmDmaBuf,
 ) -> HsmResult<HsmSessId> {
-    let nh = hpke_suite.nh();
-    let npk = hpke_suite.npk();
-    let pending_blob = alloc.dma_alloc(pending_blob_len::<P>())?;
-    let mut off = 0;
-    pending_blob[off..off + nh].copy_from_slice(exported);
-    off += nh;
-    pending_blob[off..off + npk].copy_from_slice(pk_init);
-    off += npk;
-    pending_blob[off..off + npk].copy_from_slice(pk_resp);
-    off += npk;
-    pending_blob[off..off + auth_binding.len()].copy_from_slice(auth_binding);
-    off += auth_binding.len();
-    pending_blob[off] = session_type.to_u8();
-    pending_blob[off + 1] = suite.to_u8();
-    if P::IO_PROTOCOL.secure_session() {
-        let keys = &mut pending_blob[PENDING_BASE_LEN..];
-        let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
-        super::session_open_finish::hkdf_expand_labeled_into(
-            pal,
-            io,
-            alloc,
-            exported,
-            SESSION_TRANSPORT_H2M_LABEL,
-            h2m,
-        )
-        .await?;
-        super::session_open_finish::hkdf_expand_labeled_into(
-            pal,
-            io,
-            alloc,
-            exported,
-            SESSION_TRANSPORT_M2H_LABEL,
-            m2h,
-        )
-        .await?;
-    }
-    pal.session_create_pending(io, role, pending_blob).await
+    let blob = alloc.dma_alloc(PENDING_BLOB_LEN)?;
+    blob[..PENDING_T1_OFF].copy_from_slice(hs);
+    blob[PENDING_T1_OFF..PENDING_AUTH_OFF].copy_from_slice(t1);
+    blob[PENDING_AUTH_OFF..PENDING_TYPE_OFF].copy_from_slice(auth_binding);
+    blob[PENDING_TYPE_OFF] = session_type.to_u8();
+    blob[PENDING_SUITE_OFF] = suite.to_u8();
+    let (h2m, m2h) = blob[PENDING_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_KEY_LEN);
+    hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_H2M_LABEL, h2m).await?;
+    hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_M2H_LABEL, m2h).await?;
+    pal.session_create_pending(io, role, blob).await
 }
 
-/// Compute the Phase-1 confirm MAC:
-/// `HMAC-SHA384(exported, (label ‖ session_id_be) ‖ pk_init ‖
-/// pk_hsm ‖ pk_resp)`.
-///
-/// The label and the 2-byte big-endian `session_id` share one DMA
-/// buffer so we don't pay for a separate small allocation just to
-/// satisfy the PAL `hmac_continue(&HsmDmaBuf)` contract.  `pk_init` is
-/// passed through as the codec-supplied `&HsmDmaBuf` sub-view of the
-/// inbound request buffer.
-#[allow(clippy::too_many_arguments)]
-async fn compute_phase1_mac<'a, P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
-    suite: HpkeSuite,
-    exported: &HsmDmaBuf,
-    session_id: u16,
-    pk_init: &HsmDmaBuf,
-    pk_hsm: &HsmDmaBuf,
-    pk_resp: &HsmDmaBuf,
-) -> HsmResult<&'a mut HsmDmaBuf> {
-    debug_assert_eq!(SESSION_PHASE1_LABEL.len(), 14);
-    let label_sid = alloc.dma_alloc(SESSION_PHASE1_LABEL.len() + 2)?;
-    label_sid[..SESSION_PHASE1_LABEL.len()].copy_from_slice(SESSION_PHASE1_LABEL);
-    label_sid[SESSION_PHASE1_LABEL.len()..].copy_from_slice(&session_id.to_be_bytes());
-
-    let mac_resp = alloc.dma_alloc(suite.nh())?;
-    let mut hmac_ctx = pal
-        .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
-        .await?;
-
-    for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
-        pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;
-    }
-    pal.hmac_finish_into(io, hmac_ctx, mac_resp).await?;
-    Ok(mac_resp)
-}
-
-/// Encode the `SessionOpenInit` response into a fresh IO-scoped HsmDmaBuf.
+/// Encode the `SessionOpenInit` response.
 fn encode_response(
     cmd_buf: &mut HsmCmdBuf<'_>,
     session_id: u16,
-    pk_resp: &HsmDmaBuf,
-    mac_resp: &HsmDmaBuf,
+    enc: &HsmDmaBuf,
+    sig: &[u8],
 ) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
+    cmd_buf.encode_response(|buf| {
         let frame = TborSessionOpenInitResp::encode(buf, 0, false)?
             .session_id(SessionId(session_id))?
-            .pk_resp(pk_resp)?
-            .mac_resp(mac_resp)?
+            .enc(enc)?
+            .sig(sig)?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }

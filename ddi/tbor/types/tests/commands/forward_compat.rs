@@ -830,18 +830,23 @@ fn part_info_extra_trailing_toc_entry_is_ignored() {
 #[test]
 fn session_open_init_extra_trailing_toc_entry_is_ignored() {
     let session_id = 0x1234;
-    let pk_resp = [0x11u8; 97];
-    let mac_resp = [0x22u8; 48];
+    let enc = [0x11u8; 97];
+    let sig = [0x22u8; 96];
 
     let mut buf = [0u8; 512];
 
+    // session_id, enc's alignment padding, enc, sig, trailing field.
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        .with_toc_slots(5)
+        .expect("reserve TOC")
         .session_id(session_id)
         .expect("encode session id")
-        .buffer(&pk_resp)
-        .expect("encode response public key")
-        .buffer(&mac_resp)
-        .expect("encode response MAC")
+        .align_to(4)
+        .expect("align response encapsulation")
+        .buffer(&enc)
+        .expect("encode response encapsulation")
+        .buffer(&sig)
+        .expect("encode response signature")
         .uint8(0xFF)
         .expect("encode trailing future field")
         .finish()
@@ -851,8 +856,8 @@ fn session_open_init_extra_trailing_toc_entry_is_ignored() {
         .expect("trailing entry must not disturb session-open response");
 
     assert_eq!(resp.session_id, session_id);
-    assert_eq!(resp.pk_resp, pk_resp);
-    assert_eq!(resp.mac_resp, mac_resp);
+    assert_eq!(resp.enc, enc);
+    assert_eq!(resp.sig, sig);
 }
 
 /// Verifies forward compatibility for the typed `KeyId` TOC entry.

@@ -196,7 +196,7 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput, lifecycle: Lifecycle) -
     };
     if lifecycle == Lifecycle::DefaultPsk {
         return ctx
-            .open_session(role.psk_id(), role.session_type())
+            .open_session(role.psk_id(), role.suite())
             .expect("open default-PSK session");
     }
 

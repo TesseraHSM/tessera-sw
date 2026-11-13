@@ -484,7 +484,7 @@ pub(crate) fn finalized_co_partition() -> (HsmPartition, HsmApiRev, HsmSession) 
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open bootstrap CO session");
         bootstrap
@@ -496,7 +496,7 @@ pub(crate) fn finalized_co_partition() -> (HsmPartition, HsmApiRev, HsmSession) 
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
 
@@ -827,7 +827,7 @@ fn provision_backing_core(
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open bootstrap CO session");
         bootstrap
@@ -839,7 +839,7 @@ fn provision_backing_core(
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
 
@@ -1038,7 +1038,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open bootstrap CO session");
         bootstrap
@@ -1050,7 +1050,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
 

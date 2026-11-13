@@ -179,15 +179,15 @@ typedef uint32_t tsra_sess_type;
 
 Possible values are defined by [TSRA_SESS_TYPE_XXX](#tsra_sess_type_xxx)
 
-### tsra_session_ex_type
+### tsra_session_suite
 
-Security-domain session channel integrity profile
+Security-domain session key-establishment suite
 
 ```cpp
-typedef uint32_t tsra_session_ex_type;
+typedef uint32_t tsra_session_suite;
 ```
 
-Possible values are defined by [TSRA_SESSION_EX_TYPE_XXX](#tsra_session_ex_type_xxx)
+Possible values are defined by [TSRA_SESSION_SUITE_XXX](#tsra_session_suite_xxx)
 
 
 <!--
@@ -372,13 +372,14 @@ Algorithm ID type values
 #define TSRA_SESS_TYPE_ENCRYPTED 3
 ```
 
-### TSRA_SESSION_EX_TYPE_XXX
+### TSRA_SESSION_SUITE_XXX
 
-Security-domain session channel integrity profile values
+Security-domain session key-establishment suite values. Both suites sign
+the handshake transcript with the partition identity key (ECDSA P-384).
 
 ```cpp
-#define TSRA_SESSION_EX_TYPE_PLAIN_TEXT 0
-#define TSRA_SESSION_EX_TYPE_AUTHENTICATED 1
+#define TSRA_SESSION_SUITE_ECDH_P384 1   // ephemeral ECDH P-384
+#define TSRA_SESSION_SUITE_ML_KEM1024 2  // ML-KEM-1024 (post-quantum)
 ```
 
 <!-- 

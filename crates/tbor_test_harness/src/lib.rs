@@ -67,3 +67,4 @@ pub use session::SessionOpenInitOptions;
 pub use session_guard::SessionGuard;
 pub use tsra_ddi_tbor_types::build_psk_change_aad;
 pub use tsra_ddi_tbor_types::TborPskChangeReq;
+pub use tsra_session_ex_crypto::SessionSuite;

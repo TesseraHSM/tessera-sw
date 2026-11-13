@@ -277,8 +277,7 @@ pub const APP_ID_LEN: usize = 16;
 /// Length in bytes of a partition pre-shared key (PSK).
 ///
 /// Both the CO and CU PSKs are exactly this length.  Mixed into the
-/// HPKE `mode_auth_psk` key schedule by the session-establishment
-/// handshake.
+/// HKDF-Extract input of the session-establishment key schedule.
 pub const PSK_LEN: usize = 32;
 
 /// Well-known default Crypto Officer (CO) PSK.
@@ -303,82 +302,73 @@ pub const DEFAULT_PSK_CU: [u8; PSK_LEN] = [
     0x50, 0x53, 0x4b, 0x2d, 0x76, 0x31, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d,
 ];
 
-/// Length in bytes of the per-handshake `seed` value supplied by the
-/// VM in `OpenSessionInit`.
+/// Length in bytes of the per-session `seed` value supplied by the VM,
+/// encrypted under `param_key`, in `OpenSessionFinish`.
 ///
-/// Mixed into the HPKE `info` field so the derived `exported` value
-/// also depends on host-supplied entropy, and re-used at
-/// `OpenSessionFinish` time to derive `BK_SESSION` for wrapping the
-/// resumable `bmk_session` blob.
+/// Used to derive `BK_SESSION` for wrapping the resumable `bmk_session`
+/// blob.
 pub const SESSION_SEED_LEN: usize = 32;
 
 /// Maximum size of the opaque Pending handshake-state blob stored in a
 /// session slot between `OpenSessionInit` and `OpenSessionFinish`.
 ///
-/// Holds: HPKE `exported` (48 B) ‖ `pk_init` (97 B, SEC1
-/// uncompressed P-384) ‖ `pk_resp` (97 B, same) ‖ `session_type`
-/// (1 B), suite (1 B), and credential binding (68 B). The host-supplied
-/// `seed` is no longer part of the Pending
-/// blob (it arrives encrypted in `OpenSessionFinish` instead).
-/// On [`HsmIoProtocol::Duo`] the blob additionally ends with the session
-/// transport keys `h2m ‖ m2h` (2 × [`SESSION_TRANSPORT_KEY_LEN`]), so
-/// `SessionOpenFinish` can already travel on the secure channel.
-/// Rounded up to give a small implementation margin.
-pub const SESSION_PENDING_BLOB_MAX: usize = 384;
+/// Holds: handshake secret `hs` (48 B) ‖ transcript hash `T1` (48 B) ‖
+/// credential binding (68 B) ‖ `session_type` (1 B) ‖ suite (1 B) ‖ the
+/// session transport keys `h2m ‖ m2h` (2 × [`SESSION_TRANSPORT_KEY_LEN`]),
+/// 230 B in total, so `OpenSessionFinish` already travels on the encrypted
+/// channel. Rounded up to give a small implementation margin.
+pub const SESSION_PENDING_BLOB_MAX: usize = 256;
 
 /// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
 pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
 
-/// HPKE `info` string for the session-establishment handshake.
-///
-/// Mixed into the HPKE key schedule on both sides; ensures the derived
-/// `exported` value is domain-separated from any other HPKE usage.
-///
-/// `v2` introduces the `suite_id` byte appended after `psk_id` and
-/// `session_type` so that any attempt to downgrade the negotiated
-/// cryptographic suite would produce a different `exported` and fail
-/// the Phase-1 confirm MAC.  The bump from `v1` → `v2` also
-/// domain-separates against any pre-suite-id firmware/host pairings.
-pub const SESSION_HPKE_INFO: &[u8] = b"tsra-session-v2";
+/// Domain-separation prefix of the session handshake transcript `T1`,
+/// and the HKDF-Extract salt of the handshake key schedule.
+pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v2";
 
-/// HPKE exporter context for the session-establishment handshake.
-pub const SESSION_HPKE_EXPORTER_CONTEXT: &[u8] = b"session-exporter";
+/// HKDF-Expand label (followed by `T1`) deriving the handshake secret
+/// `hs` from the extracted `Z ‖ PSK` key.
+pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v2";
 
-/// HMAC label binding the Phase-1 (server-auth) confirm signature.
-pub const SESSION_PHASE1_LABEL: &[u8] = b"phase1-confirm";
+/// HKDF-Expand label deriving the host-finished key from `hs`; the host
+/// proves PSK possession with `HMAC-SHA-384(fin_key, T1)`.
+pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v2";
 
-/// HMAC label binding the Phase-2 (client-auth) confirm signature.
-pub const SESSION_PHASE2_LABEL: &[u8] = b"phase2-confirm";
+/// Length in bytes of the handshake secret `hs`, the transcript hash
+/// `T1`, the host-finished key and the `fin` MAC (SHA-384 sized).
+pub const SESSION_HS_LEN: usize = 48;
+
+/// Length in bytes of a P-384 SEC1 uncompressed point.
+pub const SESSION_P384_SEC1_LEN: usize = 97;
+
+/// Length in bytes of an ML-KEM-1024 encapsulation key.
+pub const SESSION_MLKEM1024_PK_LEN: usize = 1568;
+
+/// Length in bytes of an ML-KEM-1024 ciphertext.
+pub const SESSION_MLKEM1024_CT_LEN: usize = 1568;
+
+/// Length in bytes of the raw big-endian `r ‖ s` ECDSA-P384 transcript
+/// signature.
+pub const SESSION_SIG_LEN: usize = 96;
 
 /// HKDF-Expand label producing the per-session **param key** — a raw
 /// 32-byte AES-256 key consumed by
 /// [`tsra_fw_core_crypto_aead_envelope`] to AEAD-seal/open the
 /// `seed_envelope` (in `OpenSessionFinish`) and per-parameter
 /// envelopes carried by in-session commands such as `ChangePsk`.
-///
-/// Derived for every promoted TBOR session regardless of session
-/// type.
-pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v1";
-
-/// HKDF-Expand label producing the **VM→HSM** message-MAC key.
-/// Derived only for Authenticated sessions.
-pub const SESSION_MAC_TX_LABEL: &[u8] = b"tsra-session-mac-tx-v1";
-
-/// HKDF-Expand label producing the **HSM→VM** message-MAC key.
-/// Derived only for Authenticated sessions.
-pub const SESSION_MAC_RX_LABEL: &[u8] = b"tsra-session-mac-rx-v1";
+pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v2";
 
 /// HKDF-Expand label producing the **VM→HSM** session transport key.
-pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
+pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v2";
 
 /// HKDF-Expand label producing the **HSM→VM** session transport key.
-pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
+pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
 
 /// Length in bytes of each directional AES-256-GCM session transport key.
 ///
-/// On [`HsmIoProtocol::Duo`], every session carries one key per direction,
-/// installed through [`HsmSessionManager::session_promote`]'s
-/// `mac_tx_key` (VM→HSM) and `mac_rx_key` (HSM→VM) arguments.
+/// Every session carries one key per direction, installed through
+/// [`HsmSessionManager::session_promote`] and served by
+/// [`HsmSessionManager::session_transport_key`].
 pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
 
 /// AES-GCM IV length of a session transport message.
@@ -419,9 +409,3 @@ pub const SESSION_PARAM_KEY_LEN: usize = 32;
 /// sized by the std-PAL-local `SESSION_MASKING_KEY_SIZE`), which the
 /// `key_masking::cbc`-based MBOR masked-key system continues to use.
 pub const SESSION_MASKING_KEY_LEN: usize = 32;
-
-/// Length in bytes of each directional message-MAC key (HMAC-SHA-384).
-///
-/// Derived only for **Authenticated** sessions; one key per direction
-/// (VM→HSM, HSM→VM).
-pub const SESSION_MAC_DIR_KEY_LEN: usize = 48;

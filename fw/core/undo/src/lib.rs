@@ -573,8 +573,6 @@ where
 {
     type Io = P::Io;
 
-    const DEFERRED_SESSION_CLOSE: bool = P::IO_PROTOCOL.secure_session();
-
     async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_delete(self, io, id).await
     }

@@ -13,6 +13,9 @@
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::TborStatus;
 
+/// CQE status for a session-transport failure (firmware `HostStatus::SESSION_TRANSPORT_ERR`).
+pub const CQE_SESSION_TRANSPORT_ERR: u32 = 0xCC;
+
 /// Assert that `err` is a backend-side "this wire encoding is not
 /// implemented" rejection, as returned by a backend that has not opted
 /// into TBOR.
@@ -47,8 +50,18 @@ pub fn assert_tbor_decode_error(err: &DdiError) {
 /// `tsra_ddi_interface::error` maps that to
 /// [`DdiError::TborStatus`]. If the contract ever changes, this is the
 /// single site that needs updating.
+///
+/// [`TborStatus::SessionTransportError`] is the exception: firmware
+/// rejects a sealed frame that fails to open before dispatch, so it
+/// surfaces as the CQE status [`CQE_SESSION_TRANSPORT_ERR`] rather than
+/// in a TBOR response body.
 #[track_caller]
 pub fn assert_fw_rejects(err: &DdiError, expected: TborStatus) {
+    if expected == TborStatus::SessionTransportError
+        && matches!(err, DdiError::DdiError(CQE_SESSION_TRANSPORT_ERR))
+    {
+        return;
+    }
     match err {
         DdiError::TborStatus(status) => assert_eq!(
             *status, expected,
@@ -67,7 +80,9 @@ pub fn assert_session_rejects(err: &DdiError, expected: TborStatus) {
     if tsra_ddi::sock_selected()
         && matches!(
             expected,
-            TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+            TborStatus::SessionNotFound
+                | TborStatus::FileHandleSessionIdDoesNotMatch
+                | TborStatus::SessionTransportError
         )
         && matches!(
             err,

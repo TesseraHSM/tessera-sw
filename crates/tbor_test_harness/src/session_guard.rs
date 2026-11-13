@@ -25,7 +25,7 @@
 use core::fmt;
 
 use tsra_ddi_interface::DdiResult;
-use tsra_ddi_tbor_types::SessionType;
+use tsra_session_ex_crypto::SessionSuite;
 
 use crate::session::SessionHandshake;
 use crate::TestCtx;
@@ -110,12 +110,8 @@ impl TestCtx {
     /// underlying `open_session_raw`. Happy-path callers
     /// typically `.expect(...)` the returned `Result`; negative-path
     /// tests inspect the `Err` directly.
-    pub fn open_session(
-        &self,
-        psk_id: u8,
-        session_type: SessionType,
-    ) -> DdiResult<SessionGuard<'_>> {
-        let handshake = self.open_session_raw(psk_id, session_type)?;
+    pub fn open_session(&self, psk_id: u8, suite: SessionSuite) -> DdiResult<SessionGuard<'_>> {
+        let handshake = self.open_session_raw(psk_id, suite)?;
         Ok(SessionGuard::new(self, handshake))
     }
 }

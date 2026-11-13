@@ -27,10 +27,10 @@ use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_types::PolicyKeyKind;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
@@ -399,11 +399,11 @@ fn finalized_co_session(ctx: &TestCtx) -> Result<u16, String> {
 }
 
 /// Rotate the Crypto Officer PSK from its factory default to `psk` and open
-/// an authenticated CO session under it: the TBOR tests'
+/// an encrypted CO session under it: the TBOR tests'
 /// `bootstrap_rotated_co`, returning errors instead of panicking.
 fn rotate_co_psk(ctx: &TestCtx, psk: &[u8; PSK_LEN]) -> Result<SessionHandshake, String> {
     let bootstrap = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
+        .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
         .map_err(|e| format!("CO session under the default PSK: {e:?}"))?;
     ctx.psk_change(bootstrap.handshake(), psk)
         .map_err(|e| format!("PskChange: {e:?}"))?;
@@ -412,7 +412,7 @@ fn rotate_co_psk(ctx: &TestCtx, psk: &[u8; PSK_LEN]) -> Result<SessionHandshake,
         .map_err(|e| format!("closing the default-PSK CO session: {e:?}"))?;
     let pending = ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated).with_psk(psk),
+            SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(psk),
         )
         .map_err(|e| format!("CO session under the new PSK: {e:?}"))?;
     ctx.session_open_finish(pending)

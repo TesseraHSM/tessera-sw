@@ -16,10 +16,10 @@
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 
 use crate::commands::part_init::known_good_part_policy;
@@ -122,7 +122,7 @@ fn part_info_independent_of_session_state() {
 
     // CO Pending: init only, do not finish yet.
     let pending = ctx
-        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+        .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("SessionOpenInit (CO/Authenticated) for pending-state probe");
     let during_pending = ctx
         .tbor(&TborPartInfoReq::new())
@@ -286,7 +286,7 @@ fn part_info_does_not_disturb_pending_session() {
     assert_default_part_info(&baseline);
 
     let pending = ctx
-        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+        .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("SessionOpenInit (CO/Authenticated)");
 
     for i in 0..16 {
@@ -336,7 +336,7 @@ fn part_info_stable_across_repeated_session_cycles() {
 
     for i in 0..8 {
         let pending = ctx
-            .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+            .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
             .expect("SessionOpenInit during repeated session cycle");
 
         let during_pending = ctx
@@ -455,7 +455,7 @@ fn part_info_does_not_disturb_active_session() {
     assert_default_part_info(&baseline);
 
     let pending = ctx
-        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+        .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("SessionOpenInit (CO/Authenticated)");
 
     let session = ctx.session_open_finish(pending).expect("SessionOpenFinish");
@@ -521,8 +521,8 @@ fn part_info_initializing_independent_of_session_state() {
         "partition must be Initializing after PartInit",
     );
 
-    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
-        .with_psk(&ROTATED_CO_PSK);
+    let opts =
+        SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     // SessionOpenInit remains available while the partition is Initializing.
     // Opening a new session must not change the partition state.

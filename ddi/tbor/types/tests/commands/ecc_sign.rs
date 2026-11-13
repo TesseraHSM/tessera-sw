@@ -26,10 +26,10 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::device_is_little_endian;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -499,7 +499,7 @@ fn ecc_sign_session_scoped_key_rejected_in_different_session() {
         ctx.session_close(session_a.session_id)
             .expect("close originating CO session");
         let opts =
-            SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+            SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
         let pending = ctx
             .session_open_init_with_options(opts)
             .expect("open replacement CO session");

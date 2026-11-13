@@ -7,7 +7,7 @@
 //! [`session_close`] lifecycle helpers. Lower-level [`session_open_init`]
 //! and [`session_open_finish`] primitives live in [`init`] and [`finish`]
 //! so negative-path tests can intercept the handshake — e.g., tamper with
-//! `mac_fin` to drive the Phase-2 MAC mismatch arm in the FW.
+//! `mac_fin` to drive the host-confirmation mismatch arm in the FW.
 
 mod crypto;
 pub mod finish;
@@ -19,6 +19,7 @@ pub mod psk_change;
 
 pub use crypto::coord_sizes;
 pub use crypto::fetch_leaf_cert_der;
+pub use crypto::fetch_pk_hsm;
 pub use finish::build_mac_fin;
 pub use finish::session_open_finish;
 pub use finish::session_open_finish_with_mac;

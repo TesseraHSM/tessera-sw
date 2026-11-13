@@ -50,6 +50,7 @@
 //! | DW3   | [`CqeDw3`] — cmd id, phase, status                 |
 
 pub mod duo;
+pub mod sealed;
 mod status;
 mod validate;
 

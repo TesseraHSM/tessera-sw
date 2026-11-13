@@ -7,7 +7,7 @@
 //! (`SessionOpenInit` + `SessionOpenFinish`) against a [`DdiDev`] and
 //! returns a [`SessionHandshake`] carrier whose fields are everything
 //! a per-command test needs to drive subsequent in-session commands
-//! (param_key for the AEAD-GCM envelope, session_id, session_type,
+//! (param_key for the AEAD-GCM envelope, session_id, suite,
 //! bmk_session for later resume tests).
 //!
 //! [`session_close`] is the matching teardown: a thin wrapper around
@@ -21,9 +21,9 @@
 //! `mac_fin` to drive the Phase-2 MAC mismatch arm in the FW.
 
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionCloseReq;
 use tsra_ddi_tbor_types::TborSessionCloseResp;
+use tsra_session_ex_crypto::SessionSuite;
 
 use super::finish::session_open_finish;
 use super::finish::SessionHandshake;
@@ -35,9 +35,9 @@ use crate::fixture::TestDev;
 pub fn session_open(
     dev: &TestDev,
     psk_id: u8,
-    session_type: SessionType,
+    suite: SessionSuite,
 ) -> Result<SessionHandshake, DdiError> {
-    let pending = session_open_init(dev, psk_id, session_type)?;
+    let pending = session_open_init(dev, psk_id, suite)?;
     session_open_finish(dev, pending)
 }
 

@@ -14,7 +14,6 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
-use tsra_ddi_tbor_types::SessionType;
 use zerocopy::IntoBytes;
 use zeroize::Zeroize;
 
@@ -544,15 +543,13 @@ enum SessionKind {
         bmk_session: Vec<u8>,
     },
     /// Version 2 session, established over the two-phase
-    /// `OpenSessionEx` HPKE handshake.
+    /// `OpenSessionEx` handshake.
     Ver2 {
         /// PSK id selecting the role (0 = CO, 1 = CU).
         psk_id: u8,
-        /// Channel integrity profile pinned at handshake time.
-        session_type: SessionType,
-        /// HPKE exported secret (`Nh = 48`).
-        exported: Vec<u8>,
-        /// Per-session AES-256 wrap key derived from the HPKE export.
+        /// Key-establishment suite of the handshake.
+        suite: HsmSessionSuite,
+        /// Per-session AES-256 wrap key derived from the handshake secret.
         /// Sensitive — never logged (redacted in the manual `Debug`
         /// impl, since `AesKey` is not `Debug`).
         param_key: AesKey,
@@ -579,18 +576,13 @@ impl fmt::Debug for SessionKind {
                 .finish(),
             SessionKind::Ver2 {
                 psk_id,
-                session_type,
-                exported,
+                suite,
                 bmk_session,
                 ..
             } => f
                 .debug_struct("Ver2")
                 .field("psk_id", psk_id)
-                .field("session_type", session_type)
-                .field(
-                    "exported",
-                    &format_args!("<redacted; {} bytes>", exported.len()),
-                )
+                .field("suite", suite)
                 .field("param_key", &"<redacted>")
                 .field(
                     "bmk_session",
@@ -654,8 +646,8 @@ impl Drop for HsmSessionInner {
         };
 
         // Wipe sensitive session material from process memory once the
-        // session is closed: `seed` for V1, the HPKE `exported` secret
-        // for V2, and the device-wrapped `bmk_session` blob for both.
+        // session is closed: `seed` for V1 and the device-wrapped
+        // `bmk_session` blob for both.
         match &mut self.kind {
             SessionKind::Ver1 {
                 seed, bmk_session, ..
@@ -663,12 +655,7 @@ impl Drop for HsmSessionInner {
                 seed.zeroize();
                 bmk_session.zeroize();
             }
-            SessionKind::Ver2 {
-                exported,
-                bmk_session,
-                ..
-            } => {
-                exported.zeroize();
+            SessionKind::Ver2 { bmk_session, .. } => {
                 bmk_session.zeroize();
             }
         }
@@ -730,8 +717,7 @@ impl HsmSessionInner {
             last_restore_epoch: epoch,
             kind: SessionKind::Ver2 {
                 psk_id: result.psk_id,
-                session_type: result.session_type,
-                exported: result.exported.to_vec(),
+                suite: result.suite,
                 param_key: result.param_key,
                 bmk_session: result.bmk_session.to_vec(),
             },

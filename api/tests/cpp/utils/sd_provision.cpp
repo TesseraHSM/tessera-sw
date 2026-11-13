@@ -947,7 +947,7 @@ tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
 {
     tsra_handle sess = 0;
     tsra_session_psk psk{ 0 /* CO */, psk_buf };
-    auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess);
+    auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess);
     if (err != TSRA_STATUS_SUCCESS || sess == 0)
     {
         ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;

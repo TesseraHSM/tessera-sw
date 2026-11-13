@@ -153,8 +153,7 @@ const _: () = assert!(crate::PSK_LEN == tsra_ddi_tbor_types::PSK_LEN);
 /// Minimum negotiated API revision required by TBOR operations.
 pub(crate) const TBOR_MIN_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
 
-/// API revision whose sessions encrypt in-session commands with the
-/// session transport keys.
+/// API revision 2.0 (Duo): big-endian wire and no MBOR transport.
 pub(crate) const SESSION_TRANSPORT_API_REV: HsmApiRev = HsmApiRev { major: 2, minor: 0 };
 
 /// Returns `true` when `rev` supports TBOR operations.

@@ -194,7 +194,7 @@ fuzz_target!(|input: FuzzInput| {
         // A deterministic sweep keeps all core scenarios reachable even with
         // an empty corpus, while generating only one RSA key per iteration.
         let bootstrap = ctx
-            .open_session(input.role.psk_id(), input.role.session_type())
+            .open_session(input.role.psk_id(), input.role.suite())
             .expect("open selected role under default PSK");
         let session_id = bootstrap.session_id();
         let bound = Some(session_id);

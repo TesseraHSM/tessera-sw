@@ -11,10 +11,10 @@
 //! Backend is selected at compile time by
 //! [`tsra_ddi::TsraDdi::default`].
 
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_types::tbor_int::U16;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborStatus;
 
@@ -77,7 +77,7 @@ fn api_rev_independent_of_session_state() {
 
     // CO Pending: init only, do not finish yet.
     let pending = ctx
-        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+        .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("SessionOpenInit (CO/Authenticated) for pending-state probe");
     let during_pending = ctx
         .tbor(&TborApiRevReq::new())
@@ -161,7 +161,7 @@ fn api_rev_stable_across_repeated_session_lifecycles() {
 
     for iteration in 0..8 {
         let pending = ctx
-            .session_open_init(0, SessionType::Authenticated)
+            .session_open_init(0, SessionSuite::EcdhP384)
             .unwrap_or_else(|err| {
                 panic!("SessionOpenInit failed during lifecycle iteration {iteration}: {err:?}")
             });

@@ -30,13 +30,13 @@ pub struct TsraSessionPsk {
 /// Opens a security-domain session using the API revision negotiated when
 /// the partition was opened, and returns a handle to the resulting
 /// session. `psk` selects the role slot and (optionally) the PSK, and
-/// `session_type` selects the channel integrity profile pinned for the
-/// session.
+/// `suite` selects the key-establishment suite. Every session encrypts
+/// its in-session traffic under keys agreed during the handshake.
 ///
 /// @param[in] dev_handle Handle to the HSM partition
 /// @param[in] psk PSK credential — slot plus optional PSK
 ///            (see `tsra_session_psk`)
-/// @param[in] session_type Channel integrity profile to pin for the session
+/// @param[in] suite Key-establishment suite (`tsra_session_suite`)
 /// @param[out] sess_handle Pointer to the session handle to be allocated
 ///
 /// @return `TsraStatus` indicating the result of the operation
@@ -54,7 +54,7 @@ pub struct TsraSessionPsk {
 pub unsafe extern "C" fn tsra_sess_ex_open(
     dev_handle: TsraHandle,
     psk: *const TsraSessionPsk,
-    session_type: TsraSessionExType,
+    suite: TsraSessionSuite,
     sess_handle: *mut TsraHandle,
 ) -> TsraStatus {
     abi_boundary(|| {
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
         let session = Box::new(partition.open_session_ex(
             partition.api_rev(),
             session_psk,
-            api::HsmSessionExType::from(session_type),
+            api::HsmSessionSuite::from(suite),
         )?);
 
         let handle = HANDLE_TABLE.alloc_handle(HandleType::Session, session);

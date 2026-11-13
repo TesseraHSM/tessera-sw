@@ -469,7 +469,7 @@ fn test_aes_unmask_rejects_key_from_another_session() {
         .open_session_ex(
             rev,
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionExType::PlainText,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open a different session");
     other

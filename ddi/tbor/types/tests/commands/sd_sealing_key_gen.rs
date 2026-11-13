@@ -34,11 +34,11 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
@@ -161,7 +161,7 @@ fn sd_sealing_key_gen_rejected_on_cu_session() {
 
     // Rotate the CU PSK out of the default so the dispatcher's default-PSK
     // gate does not fire first; then reopen a CU session under the rotated
-    // PSK.  CU sessions are pinned to `SessionType::PlainText` (CO-only is
+    // PSK.  CU sessions are pinned to `SessionSuite::EcdhP384` (CO-only is
     // `Authenticated`).
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
@@ -181,7 +181,7 @@ fn sd_sealing_key_gen_rejected_on_default_psk() {
     // default) — the dispatcher's default-PSK gate must reject the command
     // before the handler runs.
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
 
     let req = TborSdSealingKeyGenReq {

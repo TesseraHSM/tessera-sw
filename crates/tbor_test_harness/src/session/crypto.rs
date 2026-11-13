@@ -3,19 +3,18 @@
 
 //! Device-IO half of the TBOR session-establishment harness.
 //!
-//! The pure session crypto — ephemeral keygen, SEC1 ↔ `EccPublicKey`
-//! conversion, HPKE `auth_psk` receive-export, confirm MACs, and the
-//! `param_key` / `seed_envelope` derivations — lives in the reusable
-//! [`tsra_session_ex_crypto`] crate and is called directly from
-//! [`init`](super::init) and [`finish`](super::finish).
+//! The pure session crypto — the KEM ephemeral, transcript signature
+//! check, key schedule, host confirmation and `seed_envelope` — lives in
+//! the reusable [`tsra_session_ex_crypto`] crate and is called directly
+//! from [`init`](super::init) and [`finish`](super::finish).
 //!
 //! Only the step that must touch the device stays here:
 //!
 //! * `pk_hsm` retrieval via the cert-chain (`GetCertChainInfo` +
 //!   `GetCertificate`; MBOR on Uno, TBOR on Duo) — the production
 //!   attestation path that reads the partition-ID cert (its
-//!   SubjectPublicKeyInfo carries the P-384 key the FW uses as `pk_s`
-//!   in HPKE `auth_psk`).
+//!   SubjectPublicKeyInfo carries the P-384 key the FW signs the
+//!   handshake transcript with).
 
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
@@ -30,7 +29,7 @@ use crate::fixture::TestDev;
 /// commands; Duo, which has no MBOR, over their out-of-session TBOR
 /// counterparts.
 pub fn fetch_leaf_cert_der(dev: &TestDev) -> Result<Vec<u8>, DdiError> {
-    if dev.uses_session_transport() {
+    if dev.is_duo() {
         let mut cookie = None;
         let info: TborGetCertChainInfoResp =
             dev.exec_op_tbor(&TborGetCertChainInfoReq::new(0), None, &mut cookie)?;
@@ -54,17 +53,14 @@ pub fn fetch_leaf_cert_der(dev: &TestDev) -> Result<Vec<u8>, DdiError> {
 /// Look up the partition identity public key (`pk_hsm`) from the leaf
 /// of the device cert chain (see [`fetch_leaf_cert_der`]). The leaf cert
 /// is the partition-ID cert; its SubjectPublicKeyInfo carries the P-384
-/// key the FW uses as `pk_s` in HPKE `auth_psk`.
+/// key the FW signs the handshake transcript with.
 ///
 /// Device IO is intentionally kept here (out of the pure
 /// [`tsra_session_ex_crypto`] crate).
-pub(super) fn fetch_pk_hsm(dev: &TestDev) -> Result<(EccPublicKey, [u8; PK_RESP_LEN]), DdiError> {
+pub fn fetch_pk_hsm(dev: &TestDev) -> Result<EccPublicKey, DdiError> {
     let der = fetch_leaf_cert_der(dev)?;
     let pk_der = extract_subject_public_key_der(&der)?;
-    let pk = EccPublicKey::from_bytes(&pk_der).map_err(|_| DdiError::InvalidParameter)?;
-    let sec1 =
-        tsra_session_ex_crypto::ec_pub_to_sec1(&pk).map_err(|_| DdiError::InvalidParameter)?;
-    Ok((pk, sec1))
+    EccPublicKey::from_bytes(&pk_der).map_err(|_| DdiError::InvalidParameter)
 }
 
 /// Pull the DER-encoded SubjectPublicKeyInfo out of an X.509

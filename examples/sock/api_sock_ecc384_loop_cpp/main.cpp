@@ -194,7 +194,7 @@ Session open_session(tsra_handle partition)
     const auto default_status = tsra_sess_ex_open(
         partition,
         &credential,
-        TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+        TSRA_SESSION_SUITE_ECDH_P384,
         session.out()
     );
     if (default_status == TSRA_STATUS_SUCCESS)
@@ -207,7 +207,7 @@ Session open_session(tsra_handle partition)
         const auto rotated_status = tsra_sess_ex_open(
             partition,
             &credential,
-            TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+            TSRA_SESSION_SUITE_ECDH_P384,
             session.out()
         );
         if (rotated_status != TSRA_STATUS_SUCCESS)

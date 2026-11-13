@@ -55,11 +55,6 @@ use tsra_ddi_sock_proto::ResponseFrame;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::SessionControlKind;
-use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
-use tsra_ddi_tbor_types::TborResp;
-use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
-use tsra_ddi_tbor_types::TborStatus;
-use tsra_ddi_tbor_types::codec::RequestView;
 use tsra_fw_hsm_bulk::BLOCK_LEN;
 use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
 use tsra_fw_hsm_bulk::BulkCqe;
@@ -341,9 +336,11 @@ impl Connection {
                     TRANSPORT_INVALID_REQUEST,
                 )));
             }
-            let finish = op == OP_TBOR
-                && RequestView::parse(&submission.payload)
-                    .is_ok_and(|view| view.opcode() == TBOR_OP_SESSION_OPEN_FINISH);
+            // In-session TBOR requests are sealed, so a `SessionOpenFinish`
+            // is recognised by its target: any in-session TBOR command on a
+            // Pending slot. Firmware promotes the slot only for a finish.
+            let tbor_in_session =
+                op == OP_TBOR && session_ctrl == u8::from(SessionControlKind::InSession);
             let reopen = op == OP_MBOR
                 && DdiDecoder::new(&submission.payload, false)
                     .decode_hdr::<DdiReqHdr>()
@@ -351,7 +348,6 @@ impl Connection {
             let lifecycle = session_ctrl == u8::from(SessionControlKind::Open)
                 || session_ctrl == u8::from(SessionControlKind::Close)
                 || op == OP_FLUSH
-                || finish
                 || reopen;
             if !lifecycle {
                 if !scoped {
@@ -363,11 +359,14 @@ impl Connection {
                         TRANSPORT_SESSION_NOT_OWNED,
                     )));
                 }
-                // Keep this allocation pinned until firmware completes without
-                // serializing ordinary commands on other connections.
-                let response = execute_frame(Arc::clone(&server), request).await;
-                drop(sessions);
-                return Ok(response);
+                if !(tbor_in_session && is_pending(&sessions, session_id)) {
+                    // Keep this allocation pinned until firmware completes
+                    // without serializing ordinary commands on other
+                    // connections.
+                    let response = execute_frame(Arc::clone(&server), request).await;
+                    drop(sessions);
+                    return Ok(response);
+                }
             }
             // Serialize slot mutations through firmware completion and ownership
             // publication; ordinary in-session commands can still run concurrently.
@@ -377,12 +376,17 @@ impl Connection {
                     TRANSPORT_SESSION_NOT_OWNED,
                 )));
             }
+            let finish = tbor_in_session && is_pending(&sessions, session_id);
             let response = execute_frame(Arc::clone(&server), request).await;
             if let ResponseFrame::Submit(response) = &response {
                 let mut raw = cqe_dwords(&response.cqe);
                 let cqe = Cqe::from(&mut raw);
                 let flags = CqeDw0::from(response.cqe[0]);
-                if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() && !reopen
+                if response.status == 0
+                    && cqe.status() == 0
+                    && flags.session_id_valid()
+                    && !reopen
+                    && !finish
                 {
                     let id = CqeDw1::from(response.cqe[1]).session_id();
                     if flags.session_closed() {
@@ -422,26 +426,17 @@ impl Connection {
                         owner.state = SessionState::Active;
                     }
                 }
+                // Firmware reports the id only when the finish succeeded. A
+                // failed finish destroys the slot; it stays Pending here (so
+                // bulk keys remain refused) until disconnect or reset.
                 if response.status == 0
                     && cqe.status() == 0
                     && finish
-                    && TborSessionOpenFinishResp::decode_response(&response.payload).is_ok()
+                    && flags.session_id_valid()
+                    && CqeDw1::from(response.cqe[1]).session_id() == session_id
                     && let Some(owner) = sessions.get_mut(&session_id)
                 {
                     owner.state = SessionState::Active;
-                } else if response.status == 0
-                    && finish
-                    && matches!(
-                        TborSessionOpenFinishResp::decode_response(&response.payload),
-                        Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(status))
-                            if status == TborStatus::SessionAuthFailure.0
-                    )
-                    && sessions
-                        .get(&session_id)
-                        .is_some_and(|owner| owner.state == SessionState::Pending)
-                {
-                    sessions.remove(&session_id);
-                    state.sessions.retain(|session| session.id != session_id);
                 }
             }
             Ok(response)
@@ -449,6 +444,13 @@ impl Connection {
         .await
         .map_err(|error| format!("connection execution task failed: {error}"))?
     }
+}
+
+/// Whether `id` is a Pending (handshake-in-progress) slot.
+fn is_pending(sessions: &HashMap<u16, SessionOwner>, id: u16) -> bool {
+    sessions
+        .get(&id)
+        .is_some_and(|owner| owner.state == SessionState::Pending)
 }
 
 impl Drop for Connection {

@@ -36,11 +36,11 @@ use tsra_crypto::Signer;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborHmacGenerateKeyReq;
 use tsra_ddi_tbor_types::TborHmacReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -349,7 +349,7 @@ fn hmac_scope_behavior_after_session_reopen() {
         .expect("close first session");
     let pending = ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
+            SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&ROTATED_CO_PSK),
         )
         .expect("open second session");
@@ -748,7 +748,7 @@ fn hmac_labeled_session_key_rejected_after_session_reopen() {
 
     let pending = ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
+            SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&ROTATED_CO_PSK),
         )
         .expect("open second session");

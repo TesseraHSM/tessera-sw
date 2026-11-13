@@ -68,8 +68,7 @@ class tsra_sess_ex : public ::testing::Test
     {
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
         if (err != TSRA_STATUS_SUCCESS || sess_handle == 0)
         {
             ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;
@@ -98,8 +97,7 @@ TEST_F(tsra_sess_ex, open_and_close)
 
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
         ASSERT_NE(sess_handle, 0);
@@ -126,8 +124,7 @@ TEST_F(tsra_sess_ex, open_null_sess_handle)
             scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
 
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, nullptr);
+        auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, nullptr);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -145,8 +142,7 @@ TEST_F(tsra_sess_ex, open_invalid_partition_handle)
         tsra_handle sess_handle = 0;
 
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(bad_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(bad_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
     });
@@ -169,12 +165,8 @@ TEST_F(tsra_sess_ex, open_null_psk)
             scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
 
         tsra_handle sess_handle = 0;
-        auto err = tsra_sess_ex_open(
-            part_handle,
-            nullptr,
-            TSRA_SESSION_EX_TYPE_AUTHENTICATED,
-            &sess_handle
-        );
+        auto err =
+            tsra_sess_ex_open(part_handle, nullptr, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -198,8 +190,7 @@ TEST_F(tsra_sess_ex, open_invalid_psk_id)
 
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 2, nullptr }; // 2 is neither CO nor CU
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -226,8 +217,7 @@ TEST_F(tsra_sess_ex, open_wrong_length_psk)
         std::vector<uint8_t> short_psk(16, 0);
         tsra_buffer psk_buf{ short_psk.data(), static_cast<uint32_t>(short_psk.size()) };
         tsra_session_psk psk{ 0, &psk_buf };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -581,12 +571,8 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
         {
             tsra_handle sess_handle = 0;
             tsra_session_psk psk{ 0, &new_psk_buf };
-            auto err = tsra_sess_ex_open(
-                part_handle,
-                &psk,
-                TSRA_SESSION_EX_TYPE_AUTHENTICATED,
-                &sess_handle
-            );
+            auto err =
+                tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
             ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
             ASSERT_NE(sess_handle, 0);
             tsra_sess_close(sess_handle);
@@ -596,12 +582,8 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
         {
             tsra_handle sess_handle = 0;
             tsra_session_psk psk{ 0, nullptr };
-            auto err = tsra_sess_ex_open(
-                part_handle,
-                &psk,
-                TSRA_SESSION_EX_TYPE_AUTHENTICATED,
-                &sess_handle
-            );
+            auto err =
+                tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
             ASSERT_NE(err, TSRA_STATUS_SUCCESS);
             // Defensive: if the stale default PSK unexpectedly opened a
             // session, don't leak the handle.

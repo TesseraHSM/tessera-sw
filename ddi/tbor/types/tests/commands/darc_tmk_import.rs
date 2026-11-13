@@ -47,13 +47,13 @@ use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::GeneratedChain;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::CertDescriptor;
 use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborDarcTmkImportReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
@@ -376,7 +376,7 @@ fn darc_tmk_import_rejected_on_default_psk() {
     // dispatcher's default-PSK gate before the handler runs.
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();

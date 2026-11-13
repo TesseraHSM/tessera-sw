@@ -326,6 +326,11 @@ pub enum TborStatus {
     /// `HsmError::SdPeerCloningNotAllowed`).
     SdPeerCloningNotAllowed = 0x0870010A,
 
+    /// An in-session or close command's transport frame failed to open:
+    /// it is malformed, its session has no transport keys, or its tag or
+    /// padding does not verify (mirror of `HsmError::SessionTransportError`).
+    SessionTransportError = 0x08700113,
+
     // -- CPT (CryptoController) errors --------------------------------
     // Mirror of `HsmError`'s CPT range, which itself mirrors tiger-collab's
     // `DeviceErrorCodes::CryptoController` range

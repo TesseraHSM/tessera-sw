@@ -13,12 +13,12 @@ use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::session_guard::SessionGuard;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::PART_POLICY_LEN;
 
@@ -88,7 +88,7 @@ fn part_init_reject_default_psk_co() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let policy = known_good_part_policy();
     let seed = mach_seed();
@@ -152,7 +152,7 @@ fn part_init_default_psk_gate_precedes_policy_decode() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
     let bad_policy = [0u8; PART_POLICY_LEN];
     let seed = mach_seed();
@@ -177,7 +177,7 @@ fn part_init_default_psk_gate_precedes_cu_role_gate() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open default-PSK CU session");
     let policy = known_good_part_policy();
     let seed = mach_seed();
@@ -482,7 +482,7 @@ fn part_init_default_psk_rejection_does_not_mutate_partition_state() {
     let ctx = TestCtx::new();
 
     let default_session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
 
     let policy = known_good_part_policy();
@@ -526,7 +526,7 @@ fn part_init_multiple_rejections_do_not_mutate_partition_state() {
 
     // First rejection: default CO PSK.
     let default_co = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
     let err = ctx
         .part_init(default_co.handshake(), &seed, &policy, &thumb)
@@ -642,23 +642,6 @@ fn part_init_repeated_policy_rejections_preserve_session_and_state() {
     ctx.part_init(&session, &seed, &good_policy, &thumb)
         .expect("valid PartInit must succeed after repeated policy rejections");
 }
-
-/// A CO session cannot be opened with [`SessionType::PlainText`].
-///
-/// CO commands require an authenticated session, so the session-open
-/// request must fail with [`TborStatus::InvalidSessionType`] before a
-/// `PartInit` request can be submitted.
-#[test]
-fn part_init_co_plaintext_session_rejected() {
-    let ctx = TestCtx::new();
-
-    let err = ctx
-        .session_open_init(0, SessionType::PlainText)
-        .expect_err("CO PlainText session must be rejected");
-
-    assert_fw_rejects(&err, TborStatus::InvalidSessionType);
-}
-
 /// A valid-version policy must reject an unsupported POTA public-key kind.
 #[test]
 fn part_init_rejects_invalid_pub_key_kind_with_valid_version() {

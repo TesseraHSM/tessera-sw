@@ -73,7 +73,7 @@ struct Tamper {
 fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx: &TestCtx, _path: &str| {
         let session = ctx
-            .open_session(input.role.psk_id(), input.role.session_type())
+            .open_session(input.role.psk_id(), input.role.suite())
             .expect("session open should succeed");
         let handshake = session.handshake();
 

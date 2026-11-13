@@ -124,12 +124,12 @@ fn prepare_fixture<'ctx>(
     let mut security_domain_provisioned = false;
 
     let session = if default_psk {
-        let (psk_id, session_type) = if crypto_officer {
-            (CO_PSK_ID, SessionType::Authenticated)
+        let (psk_id, suite) = if crypto_officer {
+            (CO_PSK_ID, SessionSuite::EcdhP384)
         } else {
-            (CU_PSK_ID, SessionType::PlainText)
+            (CU_PSK_ID, SessionSuite::MlKem1024)
         };
-        ctx.open_session(psk_id, session_type)
+        ctx.open_session(psk_id, suite)
             .expect("default-PSK session should open")
     } else {
         let setup_as_co = crypto_officer || matches!(input.scenario, Scenario::FinalizedCryptoUser);

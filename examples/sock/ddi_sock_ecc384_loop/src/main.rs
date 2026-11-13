@@ -53,7 +53,7 @@ mod unix {
         let default_session = partition.open_session_ex(
             rev,
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         );
 
         match default_session {
@@ -67,7 +67,7 @@ mod unix {
                 .open_session_ex(
                     rev,
                     HsmSessionPsk::with_psk(HsmPskId::CO, &TOOL_CO_PSK),
-                    HsmSessionExType::Authenticated,
+                    HsmSessionSuite::EcdhP384,
                 )
                 .map_err(|rotated_error| {
                     format!(

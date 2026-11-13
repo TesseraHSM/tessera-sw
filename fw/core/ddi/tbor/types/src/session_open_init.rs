@@ -3,13 +3,13 @@
 
 //! TBOR `SessionOpenInit` wire schema (session-establishment Phase 1).
 //!
-//! Carries the VM's per-handshake ephemeral public key plus the
+//! Carries the VM's per-handshake ephemeral KEM public key plus the
 //! `psk_id` identifying the caller role (`0` = Crypto Officer,
 //! `1` = Crypto User).  The response advertises the slot the HSM
-//! reserved for the in-flight handshake, the HSM's HPKE-encap
-//! response ephemeral, and the Phase-1 confirmation MAC.
+//! reserved for the in-flight handshake, the KEM encapsulation, and the
+//! HSM's partition-identity signature over the handshake transcript.
 //!
-//! All byte fields are declared as `&[u8]` slices with `max_len`
+//! All byte fields are declared as `&[u8]` slices with length
 //! constraints rather than fixed-size arrays so that handler code
 //! can pass and receive slices end-to-end without materializing
 //! stack-allocated arrays at any layer.
@@ -31,10 +31,10 @@ use tsra_fw_ddi_tbor_api::tbor;
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PskId {
-    /// Crypto Officer role (authenticated sessions).
+    /// Crypto Officer role.
     CryptoOfficer = 0,
 
-    /// Crypto User role (plaintext sessions).
+    /// Crypto User role.
     CryptoUser = 1,
 }
 
@@ -48,9 +48,8 @@ pub enum PskId {
 /// **open** keeps it forward-compatible: an unrecognized byte surfaces as
 /// `SessionKind(x)` rather than failing to decode. The value is **not**
 /// validated at decode (any byte round-trips); the handler maps it to a
-/// [`HsmSessionType`] via `HsmSessionType::from_u8(kind.0)` and cross-checks it
-/// against the caller role, which is where an invalid value or role
-/// pairing is rejected with [`InvalidSessionType`].
+/// [`HsmSessionType`] via `HsmSessionType::from_u8(kind.0)`, which is where
+/// an invalid value is rejected with [`InvalidSessionType`].
 ///
 /// [`HsmSessionType`]: tsra_fw_hsm_pal_traits::HsmSessionType
 /// [`InvalidSessionType`]: tsra_fw_hsm_pal_traits::HsmError::InvalidSessionType
@@ -58,13 +57,9 @@ pub enum PskId {
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
-    /// Channel transports bodies without a per-message MAC. Required for
-    /// CU (`psk_id = 1`).
-    PlainText = 0,
-
-    /// Channel transports bodies under a per-message MAC envelope.
-    /// Required for CO (`psk_id = 0`).
-    Authenticated = 1,
+    /// Every in-session request and response is AES-256-GCM protected.
+    /// The only session type, for both CO and CU.
+    Encrypted = 0,
 }
 
 /// Typed wire wrapper for the `SessionOpenInit` `suite_id` byte.
@@ -86,37 +81,35 @@ pub enum SessionKind {
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuiteId {
-    /// HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
-    /// The only registered suite today.
-    P384HkdfSha384AesGcm256 = 0x01,
+    /// Ephemeral ECDH P-384, transcript signed with ECDSA P-384.
+    EcdhP384EcdsaP384 = 0x01,
+
+    /// ML-KEM-1024, transcript signed with ECDSA P-384.
+    MlKem1024EcdsaP384 = 0x02,
 }
 
-/// Length of the VM's per-handshake ephemeral public key
-/// (HPKE `Npk` for the P-384 KEM: SEC1 uncompressed
-/// `0x04 ‖ X ‖ Y` per RFC 9180 §7.1.1, big-endian coordinates).
-pub const PK_INIT_LEN: usize = 97;
+/// Largest `pk_init`: the ML-KEM-1024 encapsulation key.  An ECDH P-384
+/// `pk_init` is a 97 B SEC1 uncompressed point.
+pub const PK_INIT_MAX_LEN: usize = 1568;
 
-/// Length of the HSM's HPKE response ephemeral (same `Npk` layout).
-pub const PK_RESP_LEN: usize = 97;
+/// Largest `enc`: the ML-KEM-1024 ciphertext.  An ECDH P-384 `enc` is the
+/// HSM's 97 B SEC1 uncompressed ephemeral point.
+pub const ENC_MAX_LEN: usize = 1568;
 
-/// Length of the Phase-1 confirmation MAC (HMAC-SHA-384).
-pub const MAC_RESP_LEN: usize = 48;
+/// Length of the transcript signature: raw big-endian ECDSA P-384 `r ‖ s`.
+pub const SIG_LEN: usize = 96;
 
 /// `SessionOpenInit` request schema.
 ///
-/// Always starts a fresh HPKE handshake bound to the partition
-/// identity key and the caller-asserted PSK.  Resume (recovery of
-/// a prior session's `masking_key`) is handled separately by the
-/// MBOR `ReopenSession` command and is no longer multiplexed onto
-/// this opcode.
+/// Always starts a fresh handshake bound to the partition identity key
+/// and the caller-asserted PSK.  Resume (recovery of a prior session's
+/// `masking_key`) is handled separately by the MBOR `ReopenSession`
+/// command.
 ///
-/// The `suite_id` field selects the cryptographic suite used for
-/// every subsequent step of the handshake (KEM, KDF, AEAD, MAC).  It
-/// is also mixed into the HPKE `info` for transcript binding, so any
-/// suite-downgrade attempt by an attacker would produce a different
-/// `exported` secret on the HSM and fail the Phase-1 confirm MAC.
-/// See [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the wire
-/// registry.
+/// `psk_id`, `session_type`, `suite_id` and `pk_init` are all bound into
+/// the transcript the HSM signs, so a downgrade or substitution fails
+/// the host's signature check.  See
+/// [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the suite registry.
 #[tbor(opcode = 0x03, pair = TborSessionOpenInitResp)]
 pub struct TborSessionOpenInitReq<'a> {
     /// PSK identifier asserting the caller role (`CryptoOfficer` = `0`,
@@ -125,31 +118,20 @@ pub struct TborSessionOpenInitReq<'a> {
     #[tbor(U8)]
     pub psk_id: PskId,
 
-    /// Channel-level integrity profile selected by the caller.
-    ///
-    /// * `PlainText` (`0`) — required for CU (`psk_id = 1`).
-    /// * `Authenticated` (`1`) — required for CO (`psk_id = 0`).
-    ///
-    /// Any other value, or a role/type pair other than the two above,
-    /// is rejected with `InvalidSessionType` by the handler.  See
-    /// [`tsra_fw_hsm_pal_traits::HsmSessionType`] for the full
-    /// validation matrix.
+    /// Channel profile; only `Encrypted` (`0`) is defined.  Any other
+    /// value is rejected with `InvalidSessionType` by the handler.
     #[tbor(U8)]
     pub session_type: SessionKind,
 
-    /// Cryptographic suite identifier.  See
-    /// [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the registered
-    /// values.  Today only `0x01`
-    /// (`P384HkdfSha384AesGcm256`) is implemented; any other value is
+    /// Cryptographic suite identifier.  Any unregistered value is
     /// rejected with `UnsupportedSessionSuite` by the handler.
     #[tbor(U8)]
     pub suite_id: SuiteId,
 
-    /// Per-handshake ephemeral public key supplied by the requesting
-    /// VM.  The encoding and length are dictated by the negotiated
-    /// suite — for `suite_id = 0x01` this is the HPKE `Npk` SEC1
-    /// uncompressed `0x04 ‖ X ‖ Y` for the P-384 KEM (97 B).
-    #[tbor(buffer, len = 97)]
+    /// The VM's per-handshake ephemeral KEM public key; its length must
+    /// match the suite (97 B SEC1 point for ECDH P-384, 1568 B
+    /// encapsulation key for ML-KEM-1024).
+    #[tbor(align = 4, buffer, max_len = 1568)]
     pub pk_init: &'a [u8],
 }
 
@@ -165,13 +147,13 @@ pub struct TborSessionOpenInitResp<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// HSM's HPKE response ephemeral public key (HPKE `Npk` SEC1
-    /// uncompressed `0x04 ‖ X ‖ Y` for the P-384 KEM, 97 B).
-    #[tbor(buffer, len = 97)]
-    pub pk_resp: &'a [u8],
+    /// KEM encapsulation for `pk_init`: the HSM's 97 B SEC1 ephemeral
+    /// point (ECDH P-384) or the 1568 B ciphertext (ML-KEM-1024).
+    #[tbor(align = 4, buffer, max_len = 1568)]
+    pub enc: &'a [u8],
 
-    /// Phase-1 confirmation MAC binding `(pk_init, pk_hsm, pk_resp,
-    /// session_id)` under the HPKE-exported handshake secret.
-    #[tbor(buffer, len = 48)]
-    pub mac_resp: &'a [u8],
+    /// Partition-identity ECDSA P-384 signature over the transcript hash
+    /// `T1`, raw big-endian `r ‖ s`.
+    #[tbor(buffer, len = 96)]
+    pub sig: &'a [u8],
 }

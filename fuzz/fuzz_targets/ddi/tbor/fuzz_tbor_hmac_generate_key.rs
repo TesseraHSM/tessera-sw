@@ -208,7 +208,7 @@ fn provision(ctx: &TestCtx, session: &SessionHandshake, partition: PartitionStat
 fn setup_session<'a>(ctx: &'a TestCtx, input: &FuzzInput<'_>) -> SessionGuard<'a> {
     if input.scenario == Scenario::DefaultPsk {
         return ctx
-            .open_session(input.role.psk_id(), input.role.session_type())
+            .open_session(input.role.psk_id(), input.role.suite())
             .expect("open default-PSK session");
     }
     if matches!(input.role, common::FuzzRole::Co) || input.partition != PartitionState::BeforeFinal

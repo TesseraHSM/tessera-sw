@@ -182,7 +182,9 @@ mod tests {
     use tsra_ddi_interface::DdiDev;
     use tsra_ddi_interface::DdiDeviceModel;
     use tsra_ddi_interface::DdiError;
+    use tsra_ddi_interface::DdiResult;
     use tsra_ddi_interface::DdiTransportSeal;
+    use tsra_ddi_interface::TborOobItem;
     use tsra_ddi_mbor_types::*;
     use tsra_ddi_sock::DdiSock;
     use tsra_ddi_sock::DdiSockDev;
@@ -198,6 +200,7 @@ mod tests {
     use tsra_ddi_tbor_types::TborResp;
     use tsra_ddi_tbor_types::TborSessionCloseReq;
     use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
+    use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
     use tsra_ddi_tbor_types::TborSessionOpenInitReq;
     use tsra_ddi_tbor_types::TborStatus;
     use tsra_session_ex_crypto::*;
@@ -212,66 +215,135 @@ mod tests {
             .expect("TBOR command")
     }
 
-    fn open_init(device: &DdiSockDev, psk_id: u8) -> TborSessionOpenFinishReq {
-        open_init_with_exported(device, psk_id).0
+    /// A handshake in progress (after `SessionOpenInit`) and, once
+    /// [`Session::finish`] succeeds, an open session.
+    struct Session {
+        session_id: u16,
+        psk_id: u8,
+        /// The `SessionOpenFinish` request; tests may tamper with it.
+        finish: TborSessionOpenFinishReq,
+        keys: SessionHandshake,
+        transport: Arc<SessionTransport>,
+        duo: bool,
     }
 
-    fn open_init_with_exported(
-        device: &DdiSockDev,
-        psk_id: u8,
-    ) -> (TborSessionOpenFinishReq, Vec<u8>) {
+    impl Session {
+        /// Seal `request` under the session transport, execute it, and
+        /// open and decode the response.
+        fn exec<R: TborOpReq>(&self, device: &DdiSockDev, request: &R) -> DdiResult<R::OpResp> {
+            self.exec_oob(device, request, &mut [])
+        }
+
+        fn exec_oob<R: TborOpReq>(
+            &self,
+            device: &DdiSockDev,
+            request: &R,
+            oob_items: &mut [TborOobItem<'_>],
+        ) -> DdiResult<R::OpResp> {
+            if self.duo {
+                return secure(device, &self.transport, self.session_id, request, oob_items);
+            }
+            let frame = self
+                .transport
+                .seal_frame(&encode(request))
+                .expect("seal frame");
+            let sealed = SealedFrameReq {
+                session_ctrl: request.session_ctrl(),
+                session_id: self.session_id,
+                frame,
+            };
+            let SealedFrameResp(mut response) =
+                device.exec_op_tbor_oob(&sealed, oob_items, &mut None)?;
+            self.open(&mut response);
+            Ok(R::OpResp::decode_response(&response)?)
+        }
+
+        /// Open a sealed Uno response frame in place.
+        fn open(&self, frame: &mut Vec<u8>) {
+            self.transport.open_frame(frame).expect("open frame");
+        }
+
+        /// The harness view of the open session, for its envelope helpers.
+        fn handshake(&self, bmk_session: Vec<u8>) -> tsra_ddi_tbor_test_harness::SessionHandshake {
+            tsra_ddi_tbor_test_harness::SessionHandshake {
+                session_id: self.session_id,
+                psk_id: self.psk_id,
+                suite: SessionSuite::EcdhP384,
+                param_key: self.keys.param_key().expect("parameter key"),
+                bmk_session,
+            }
+        }
+
+        fn try_finish(&self, device: &DdiSockDev) -> DdiResult<TborSessionOpenFinishResp> {
+            self.exec(device, &self.finish)
+        }
+
+        fn finish(&self, device: &DdiSockDev) -> TborSessionOpenFinishResp {
+            self.try_finish(device).expect("SessionOpenFinish")
+        }
+
+        fn close(&self, device: &DdiSockDev) {
+            self.exec(
+                device,
+                &TborSessionCloseReq {
+                    session_id: self.session_id,
+                },
+            )
+            .expect("SessionClose");
+        }
+    }
+
+    fn encode<R: TborOpReq>(request: &R) -> Vec<u8> {
+        let mut buf = vec![0u8; 4096];
+        let len = request.encode_request(&mut buf).expect("encode").len();
+        buf.truncate(len);
+        buf
+    }
+
+    /// Run `SessionOpenInit` with the role's default PSK and prepare the
+    /// matching `SessionOpenFinish`.
+    fn open_init(device: &DdiSockDev, psk_id: u8) -> Session {
+        let duo = device.discover().expect("discover").model == DdiDeviceModel::Duo;
         let chain = tbor(device, &TborGetCertChainInfoReq::new(0));
         let leaf = tbor(device, &TborGetCertReq::new(0, chain.num_certs - 1));
         let cert = X509Certificate::from_der(&leaf.certificate).expect("partition certificate");
         let pk_hsm =
             EccPublicKey::from_bytes(&cert.get_public_key_der().expect("partition public key"))
                 .expect("decode partition public key");
-        let pk_hsm_sec1 = ec_pub_to_sec1(&pk_hsm).expect("partition SEC1 key");
-        let ephemeral = generate_vm_ephemeral().expect("VM ephemeral");
+        let initiator = SessionInitiator::generate(SessionSuite::EcdhP384).expect("ephemeral");
         let request = TborSessionOpenInitReq {
             psk_id,
-            session_type: u8::from(psk_id == 0),
-            pk_init: ephemeral.pk_sec1,
+            pk_init: initiator.pk_init().to_vec(),
             ..Default::default()
         };
         let response = tbor(device, &request);
-        let info = build_hpke_info(request.psk_id, request.session_type, request.suite_id);
-        let exported = receive_exported(
-            &ephemeral.sk,
-            &ephemeral.pk,
-            &pk_hsm,
-            &response.pk_resp,
-            &info,
-            default_psk(request.psk_id).expect("default PSK"),
-            &[request.psk_id],
-        )
-        .expect("HPKE export");
-        verify_phase1_mac(
-            &exported,
-            response.session_id,
-            &ephemeral.pk_sec1,
-            &pk_hsm_sec1,
-            &response.pk_resp,
-            &response.mac_resp,
-        )
-        .expect("phase 1 MAC");
-        let param_key = derive_param_key(&exported).expect("parameter key");
+        let keys = initiator
+            .complete(
+                request.psk_id,
+                request.session_type,
+                &pk_hsm,
+                default_psk(request.psk_id).expect("default PSK"),
+                &response.enc,
+                &response.sig,
+            )
+            .expect("verify handshake");
+        let param_key = keys.param_key().expect("parameter key");
         let finish = TborSessionOpenFinishReq {
             session_id: response.session_id,
-            mac_fin: build_phase2_mac(
-                &exported,
-                response.session_id,
-                &ephemeral.pk_sec1,
-                &pk_hsm_sec1,
-                &response.pk_resp,
-            )
-            .expect("phase 2 MAC"),
+            mac_fin: keys.fin().expect("host confirmation"),
             seed_envelope: seal_seed_envelope(&param_key, &[0x5A; SESSION_SEED_LEN])
                 .expect("seed envelope")
                 .try_into()
                 .expect("seed envelope length"),
         };
-        (finish, exported)
+        Session {
+            session_id: response.session_id,
+            psk_id,
+            finish,
+            transport: Arc::new(keys.transport().expect("transport keys")),
+            keys,
+            duo,
+        }
     }
 
     fn with_session_clients(test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static) {
@@ -369,15 +441,18 @@ mod tests {
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
 
-            pending.mac_fin[0] ^= 1;
+            pending.finish.mac_fin[0] ^= 1;
             assert!(matches!(
-                owner.exec_op_tbor(&pending, None, &mut None),
+                pending.try_finish(&owner),
                 Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
             ));
+            // The sealed error hides the failure from the server, so the
+            // lease stays Pending (never promoted) until disconnect or reuse.
             assert!(
-                !hsm.sessions
+                hsm.sessions
                     .blocking_read()
-                    .contains_key(&pending.session_id)
+                    .get(&pending.session_id)
+                    .is_none_or(|owner| owner.state == crate::SessionState::Pending)
             );
             assert!(matches!(
                 bulk_error(&owner, pending.session_id),
@@ -385,7 +460,7 @@ mod tests {
             ));
 
             let replacement = open_init(&owner, 0);
-            tbor(&owner, &replacement);
+            replacement.finish(&owner);
             assert!(matches!(
                 bulk_error(&owner, replacement.session_id),
                 DdiError::FpError(status)
@@ -402,7 +477,7 @@ mod tests {
                 .expect("owner socket");
             owner.erase().expect("initial reset");
             let session = open_init(&owner, 0);
-            tbor(&owner, &session);
+            session.finish(&owner);
             let lease = generation(&hsm, session.session_id);
             assert!(matches!(
                 bulk_error(&owner, session.session_id),
@@ -422,7 +497,7 @@ mod tests {
                 .open_dev(&endpoint)
                 .expect("replacement socket");
             let replacement = open_init(&owner, 0);
-            tbor(&owner, &replacement);
+            replacement.finish(&owner);
             assert!(matches!(
                 bulk_error(&owner, replacement.session_id),
                 DdiError::FpError(status)
@@ -433,8 +508,6 @@ mod tests {
 
     #[test]
     fn cancelled_oob_submission_completes_before_disconnect_cleanup() {
-        use tsra_ddi_interface::TborOobItem;
-        use tsra_ddi_tbor_test_harness::SessionHandshake;
         use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
         use tsra_ddi_tbor_test_harness::encrypt_psk_envelope;
         use tsra_ddi_tbor_test_harness::x509_fixture::PotaFixture;
@@ -473,42 +546,38 @@ mod tests {
                     .open_dev(&endpoint)
                     .expect("client socket");
                 device.erase().expect("initial reset");
-                let (pending, exported) = open_init_with_exported(&device, 0);
-                let finished = tbor(&device, &pending);
-                let param_key = derive_param_key(&exported).expect("parameter key");
-                let session = SessionHandshake {
-                    session_id: pending.session_id,
-                    psk_id: 0,
-                    session_type: tsra_ddi_tbor_types::SessionType::Authenticated,
-                    exported: exported.into(),
-                    param_key,
-                    bmk_session: finished.bmk_session,
-                };
-                tbor(
-                    &device,
-                    &TborPskChangeReq {
-                        session_id: session.session_id,
-                        psk_envelope: encrypt_psk_envelope(&session, &[0xA5; 32])
-                            .expect("PSK envelope"),
-                    },
-                );
+                let pending = open_init(&device, 0);
+                let finished = pending.finish(&device);
+                let session = pending.handshake(finished.bmk_session);
+                pending
+                    .exec(
+                        &device,
+                        &TborPskChangeReq {
+                            session_id: session.session_id,
+                            psk_envelope: encrypt_psk_envelope(&session, &[0xA5; 32])
+                                .expect("PSK envelope"),
+                        },
+                    )
+                    .expect("PskChange");
                 let pota = PotaFixture::generate();
                 let mut policy = PartPolicy::zeroed();
                 policy.version.major = 1;
                 policy.pota_pub_key = PolicyPubKey::new(PolicyKeyKind::Ecc384, 96, pota.raw_pub());
                 policy.sata_pub_key = policy.pota_pub_key;
-                let init = tbor(
-                    &device,
-                    &TborPartInitReq {
-                        session_id: session.session_id,
-                        mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
-                            .expect("machine seed envelope"),
-                        part_policy: policy.clone(),
-                        pota_thumbprint: *pota.thumbprint(),
-                        sata_thumbprint: [0x5A; 48],
-                        ..Default::default()
-                    },
-                );
+                let init = pending
+                    .exec(
+                        &device,
+                        &TborPartInitReq {
+                            session_id: session.session_id,
+                            mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
+                                .expect("machine seed envelope"),
+                            part_policy: policy.clone(),
+                            pota_thumbprint: *pota.thumbprint(),
+                            sata_thumbprint: [0x5A; 48],
+                            ..Default::default()
+                        },
+                    )
+                    .expect("PartInit");
                 let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
                 let certs = chain.der_items();
                 let final_request = TborPartFinalReq {
@@ -526,20 +595,23 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 };
-                device
-                    .exec_op_tbor(&final_request, Some(&certs), &mut None)
+                let mut cert_items: Vec<_> = certs.iter().map(|c| TborOobItem::In(c)).collect();
+                pending
+                    .exec_oob(&device, &final_request, &mut cert_items)
                     .expect("finalize partition");
-                let key = tbor(
-                    &device,
-                    &TborAesGenerateKeyReq {
-                        session_id: session.session_id,
-                        scope: 3,
-                        key_size: tsra_ddi_tbor_types::AES_KEY_SIZE_256,
-                        key_usage: tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT
-                            | tsra_ddi_tbor_types::KEY_USAGE_DECRYPT,
-                        ..Default::default()
-                    },
-                );
+                let key = pending
+                    .exec(
+                        &device,
+                        &TborAesGenerateKeyReq {
+                            session_id: session.session_id,
+                            scope: 3,
+                            key_size: tsra_ddi_tbor_types::AES_KEY_SIZE_256,
+                            key_usage: tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT
+                                | tsra_ddi_tbor_types::KEY_USAGE_DECRYPT,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("AesGenerateKey");
                 let request = TborAesGcmEncryptDecryptReq {
                     session_id: session.session_id,
                     op: tsra_ddi_tbor_types::AES_OP_ENCRYPT,
@@ -554,11 +626,11 @@ mod tests {
                 };
                 let input = [0x42; 16];
                 let mut output = [0; 16];
-                let expected = device
-                    .exec_op_tbor_oob(
+                let expected = pending
+                    .exec_oob(
+                        &device,
                         &request,
                         &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
-                        &mut None,
                     )
                     .expect("reference OOB encryption");
                 assert_ne!(output, input);
@@ -567,22 +639,23 @@ mod tests {
                         expected,
                         output,
                         generation(&client_hsm, session.session_id),
+                        Arc::clone(&pending.transport),
                     ))
-                    .expect("submission preparation");
+                    .unwrap_or_else(|_| panic!("submission preparation"));
                 submit_rx.blocking_recv().expect("submit cancelled request");
                 assert!(
-                    device
-                        .exec_op_tbor_oob(
+                    pending
+                        .exec_oob(
+                            &device,
                             &request,
                             &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
-                            &mut None,
                         )
                         .is_err(),
                     "cancelled connection must not return the discarded response"
                 );
             });
 
-            let (expected, output, lease) =
+            let (expected, output, lease, transport) =
                 tokio::time::timeout(Duration::from_secs(30), prepared_rx)
                     .await
                     .expect("prepare OOB submission")
@@ -619,8 +692,12 @@ mod tests {
             assert_eq!(response.status, 0);
             let mut raw = crate::cqe_dwords(&response.cqe);
             assert_eq!(tsra_fw_hsm_io::Cqe::from(&mut raw).status(), 0);
+            let mut payload = response.payload.clone();
+            transport
+                .open_frame(&mut payload)
+                .expect("open sealed response");
             assert_eq!(
-                TborAesGcmEncryptDecryptResp::decode_response(&response.payload)
+                TborAesGcmEncryptDecryptResp::decode_response(&payload)
                     .expect("DMA destination response"),
                 expected
             );
@@ -647,8 +724,8 @@ mod tests {
             let foreign = DdiSock::default()
                 .open_dev(&endpoint)
                 .expect("foreign socket");
-            assert_not_owned(&foreign, &pending);
-            tbor(&owner, &pending);
+            assert_not_owned(&foreign, &pending.finish);
+            pending.finish(&owner);
             assert_not_owned(
                 &foreign,
                 &TborPskChangeReq {
@@ -692,12 +769,7 @@ mod tests {
                     DdiStatus::FileHandleSessionIdDoesNotMatch
                 ))
             ));
-            tbor(
-                &owner,
-                &TborSessionCloseReq {
-                    session_id: pending.session_id,
-                },
-            );
+            pending.close(&owner);
         });
     }
 
@@ -710,9 +782,9 @@ mod tests {
             owner.erase().expect("initial reset");
             let mut pending = open_init(&owner, 0);
             let lease = generation(&hsm, pending.session_id);
-            pending.mac_fin[0] ^= 1;
+            pending.finish.mac_fin[0] ^= 1;
             assert!(matches!(
-                owner.exec_op_tbor(&pending, None, &mut None),
+                pending.try_finish(&owner),
                 Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
             ));
             drop(owner);
@@ -728,12 +800,12 @@ mod tests {
                 .expect("owner socket");
             owner.erase().expect("initial reset");
             let co = open_init(&owner, 0);
-            tbor(&owner, &co);
+            co.finish(&owner);
             let cu = open_init(&owner, 1);
-            tbor(&owner, &cu);
+            cu.finish(&owner);
             assert_ne!(co.session_id, cu.session_id);
-            for session_id in [co.session_id, cu.session_id] {
-                tbor(&owner, &TborSessionCloseReq { session_id });
+            for session in [co, cu] {
+                session.close(&owner);
             }
         });
     }
@@ -756,8 +828,8 @@ mod tests {
                 }
                 let replacement = open_init(&second, 0);
                 assert_eq!(replacement.session_id, pending.session_id);
-                assert_not_owned(&first, &replacement);
-                tbor(&second, &replacement);
+                assert_not_owned(&first, &replacement.finish);
+                replacement.finish(&second);
                 assert_not_owned(
                     &first,
                     &TborSessionCloseReq {
@@ -767,12 +839,7 @@ mod tests {
 
                 drop(first);
                 wait_for_cleanup(first_generation);
-                tbor(
-                    &second,
-                    &TborSessionCloseReq {
-                        session_id: replacement.session_id,
-                    },
-                );
+                replacement.close(&second);
             }
         });
     }
@@ -785,7 +852,7 @@ mod tests {
                 .expect("first socket");
             first.erase().expect("initial reset");
             let session = open_init(&first, 0);
-            tbor(&first, &session);
+            session.finish(&first);
 
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
@@ -804,13 +871,8 @@ mod tests {
                     device.erase().expect("replacement reset");
                     reset_tx.send(()).expect("reset notification");
                     let session = open_init(&device, 0);
-                    tbor(&device, &session);
-                    tbor(
-                        &device,
-                        &TborSessionCloseReq {
-                            session_id: session.session_id,
-                        },
-                    );
+                    session.finish(&device);
+                    session.close(&device);
                 });
                 let early_reset = reset_rx.recv_timeout(Duration::from_millis(100));
                 resume_tx.send(()).expect("release disconnect cleanup");
@@ -831,7 +893,7 @@ mod tests {
                 .expect("first socket");
             first.erase().expect("initial reset");
             let pending = open_init(&first, 0);
-            tbor(&first, &pending);
+            pending.finish(&first);
             let first_generation = generation(&hsm, pending.session_id);
             let second = DdiSock::default()
                 .open_dev(&endpoint)
@@ -841,13 +903,8 @@ mod tests {
             drop(first);
             wait_for_cleanup(first_generation);
             let pending = open_init(&second, 0);
-            tbor(&second, &pending);
-            tbor(
-                &second,
-                &TborSessionCloseReq {
-                    session_id: pending.session_id,
-                },
-            );
+            pending.finish(&second);
+            pending.close(&second);
         });
     }
 
@@ -1009,7 +1066,7 @@ mod tests {
                     .expect("idle device");
                 device.erase().expect("initial reset");
                 let session = open_init(&device, 0);
-                tbor(&device, &session);
+                session.finish(&device);
                 (device, session.session_id)
             })
             .await
@@ -1023,7 +1080,7 @@ mod tests {
                 // A distinct PSK ID (CryptoUser, slots 1..=7) so this session
                 // doesn't contend with the idle connection's CO slot (0).
                 let session = open_init(&device, 1);
-                tbor(&device, &session);
+                session.finish(&device);
                 (device, session.session_id)
             })
             .await
@@ -1107,10 +1164,9 @@ mod tests {
         transport: &SessionTransport,
         session_id: u16,
         request: &R,
+        oob_items: &mut [TborOobItem<'_>],
     ) -> Result<R::OpResp, DdiError> {
-        let mut buf = vec![0u8; 4096];
-        let len = request.encode_request(&mut buf).expect("encode").len();
-        buf.truncate(len);
+        let mut buf = encode(request);
         let sealed = transport.seal_request(&mut buf).expect("seal request");
         let (mut payload, seal) = device.exec_op_tbor_secure(
             session_id,
@@ -1119,7 +1175,7 @@ mod tests {
                 iv: sealed.iv,
                 tag: sealed.tag,
             },
-            &mut [],
+            oob_items,
         )?;
         transport
             .open_response(
@@ -1148,16 +1204,14 @@ mod tests {
                 DdiError::UnsupportedEncoding
             ));
 
-            let (finish, exported) = open_init_with_exported(&device, 0);
-            let id = finish.session_id;
-            let transport = SessionTransport::derive(&exported).expect("transport keys");
-            secure(&device, &transport, id, &finish).expect("open_finish");
+            let session = open_init(&device, 0);
+            session.finish(&device);
+            let id = session.session_id;
+            let transport = &session.transport;
 
             // A tampered request fails transport authentication.
             let close = TborSessionCloseReq { session_id: id };
-            let mut buf = vec![0u8; 64];
-            let len = close.encode_request(&mut buf).expect("encode").len();
-            buf.truncate(len);
+            let mut buf = encode(&close);
             let sealed = transport.seal_request(&mut buf).expect("seal");
             let mut tag = sealed.tag;
             tag[0] ^= 1;
@@ -1171,7 +1225,7 @@ mod tests {
                 Err(DdiError::DdiError(0xCC))
             ));
 
-            secure(&device, &transport, id, &close).expect("close");
+            secure(&device, transport, id, &close, &mut []).expect("close");
 
             let pending = open_init(&device, 0);
             device
@@ -1181,11 +1235,10 @@ mod tests {
     }
 
     /// Open an active Duo session; returns its id and transport keys.
-    fn open_secure(device: &DdiSockDev, psk_id: u8) -> (u16, SessionTransport) {
-        let (finish, exported) = open_init_with_exported(device, psk_id);
-        let transport = SessionTransport::derive(&exported).expect("transport keys");
-        secure(device, &transport, finish.session_id, &finish).expect("open_finish");
-        (finish.session_id, transport)
+    fn open_secure(device: &DdiSockDev, psk_id: u8) -> (u16, Arc<SessionTransport>) {
+        let session = open_init(device, psk_id);
+        session.finish(device);
+        (session.session_id, session.transport)
     }
 
     #[test]
@@ -1198,21 +1251,21 @@ mod tests {
 
             // A command must name the session whose keys sealed it.
             assert!(matches!(
-                secure(&device, &co_keys, co, &close(cu)),
+                secure(&device, &co_keys, co, &close(cu), &mut []),
                 Err(DdiError::TborStatus(TborStatus::InvalidArg))
             ));
 
             // A closed session's keys are gone.
-            secure(&device, &co_keys, co, &close(co)).expect("close");
+            secure(&device, &co_keys, co, &close(co), &mut []).expect("close");
             assert!(matches!(
-                secure(&device, &co_keys, co, &close(co)),
+                secure(&device, &co_keys, co, &close(co), &mut []),
                 Err(DdiError::DdiError(0xCC))
             ));
 
             // A flushed session is gone, together with its ownership.
             device.flush_session(cu).expect("flush");
             assert!(matches!(
-                secure(&device, &cu_keys, cu, &close(cu)),
+                secure(&device, &cu_keys, cu, &close(cu), &mut []),
                 Err(DdiError::DdiStatus(
                     DdiStatus::FileHandleSessionIdDoesNotMatch
                 ))
@@ -1223,8 +1276,10 @@ mod tests {
             let active: Vec<_> = (0..7).map(|_| open_secure(&device, 1)).collect();
             let init = TborSessionOpenInitReq {
                 psk_id: 1,
-                session_type: 0,
-                pk_init: generate_vm_ephemeral().expect("VM ephemeral").pk_sec1,
+                pk_init: SessionInitiator::generate(SessionSuite::EcdhP384)
+                    .expect("ephemeral")
+                    .pk_init()
+                    .to_vec(),
                 ..Default::default()
             };
             assert!(matches!(
@@ -1232,7 +1287,7 @@ mod tests {
                 Err(DdiError::TborStatus(TborStatus::VaultSessionLimitReached))
             ));
             for (id, keys) in &active {
-                secure(&device, keys, *id, &close(*id)).expect("close");
+                secure(&device, keys, *id, &close(*id), &mut []).expect("close");
             }
         });
     }

@@ -16,7 +16,6 @@ use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_pal_traits::*;
 use zeroize::Zeroizing;
 
-use crate::session::TransportDir;
 use crate::StdHsmIo;
 use crate::StdHsmPal;
 
@@ -65,9 +64,11 @@ impl StdHsmPal {
         let key = if secure {
             let id = HsmSessId::from(sqe.session_id());
             let key = self
-                .session_transport_key(io, id, TransportDir::H2m)
+                .session_transport_key(io, id, HsmSessionTransportDir::H2m)
                 .map_err(|_| HsmError::SessionTransportError)?;
-            Some(Zeroizing::new(*key))
+            let mut copy = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
+            copy.copy_from_slice(key);
+            Some(copy)
         } else {
             None
         };
@@ -110,9 +111,9 @@ impl StdHsmPal {
         }
 
         let id = HsmSessId::from(sqe.session_id());
-        let key = Zeroizing::new(
-            *self
-                .session_transport_key(io, id, TransportDir::M2h)
+        let mut key = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
+        key.copy_from_slice(
+            self.session_transport_key(io, id, HsmSessionTransportDir::M2h)
                 .map_err(|_| HsmError::SessionTransportError)?,
         );
         let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];

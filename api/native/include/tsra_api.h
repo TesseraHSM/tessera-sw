@@ -604,30 +604,31 @@ typedef uint32_t tsra_part_prop_id;
 #endif // __cplusplus
 
 /*
- Channel-level integrity profile for a security-domain (TBOR) session,
- selected by the caller when opening a session via `open_session_ex`.
+ Key-establishment suite of a security-domain (TBOR) session, selected
+ by the caller when opening a session via `open_session_ex`.
 
- API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
- separate `#[open_enum]` so the public API surface does not leak the
- DDI-layer wire type.
+ Every such session encrypts its in-session traffic; the suite picks
+ how the session keys are agreed. Both suites authenticate the HSM with
+ its partition identity key (ECDSA P-384 over the handshake transcript)
+ and the caller with the role PSK. The discriminant is the wire
+ `suite_id`.
  */
-enum tsra_session_ex_type
+enum tsra_session_suite
 #ifdef __cplusplus
     : uint32_t
 #endif // __cplusplus
 {
     /*
-     Channel transports bodies without per-message MAC.
+     Ephemeral ECDH P-384 key agreement.
      */
-    TSRA_SESSION_EX_TYPE_PLAIN_TEXT = 0,
+    TSRA_SESSION_SUITE_ECDH_P384 = 1,
     /*
-     Channel transports bodies wrapped in an outer per-message HMAC
-     envelope.
+     ML-KEM-1024 key encapsulation (post-quantum).
      */
-    TSRA_SESSION_EX_TYPE_AUTHENTICATED = 1,
+    TSRA_SESSION_SUITE_ML_KEM1024 = 2,
 };
 #ifndef __cplusplus
-typedef uint32_t tsra_session_ex_type;
+typedef uint32_t tsra_session_suite;
 #endif // __cplusplus
 
 /*
@@ -1503,7 +1504,7 @@ struct tsra_session_psk
     const struct tsra_buffer *psk;
 };
 
-typedef tsra_session_ex_type tsra_session_ex_type;
+typedef tsra_session_suite tsra_session_suite;
 
 /*
  Input buffers for [`tsra_sess_ex_part_init`].
@@ -3316,13 +3317,13 @@ tsra_status tsra_sess_close(tsra_handle handle);
  Opens a security-domain session using the API revision negotiated when
  the partition was opened, and returns a handle to the resulting
  session. `psk` selects the role slot and (optionally) the PSK, and
- `session_type` selects the channel integrity profile pinned for the
- session.
+ `suite` selects the key-establishment suite. Every session encrypts
+ its in-session traffic under keys agreed during the handshake.
 
  @param[in] dev_handle Handle to the HSM partition
  @param[in] psk PSK credential — slot plus optional PSK
             (see `tsra_session_psk`)
- @param[in] session_type Channel integrity profile to pin for the session
+ @param[in] suite Key-establishment suite (`tsra_session_suite`)
  @param[out] sess_handle Pointer to the session handle to be allocated
 
  @return `TsraStatus` indicating the result of the operation
@@ -3339,7 +3340,7 @@ tsra_status tsra_sess_close(tsra_handle handle);
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
     const struct tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
 );
 

@@ -31,11 +31,11 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
 use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKeyUnwrapReq;
 use tsra_ddi_tbor_types::TborDarcKeyWrapReq;
 use tsra_ddi_tbor_types::TborDarcTmkGenReq;
@@ -425,7 +425,7 @@ fn darc_key_wrap_rejected_on_default_psk() {
     // default-PSK gate before the handler runs.
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();

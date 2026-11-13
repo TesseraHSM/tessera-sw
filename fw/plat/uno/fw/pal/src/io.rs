@@ -36,6 +36,7 @@ use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SqeEntry;
 use tsra_fw_hsm_io::oob_entry_addr;
+use tsra_fw_hsm_io::sealed;
 use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCqe;
@@ -321,6 +322,7 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
+        let sealed_id = sealed::sealed_session(io.sqe())?;
         let sqe = io.sqe().view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -344,14 +346,34 @@ impl HsmIoController for UnoHsmPal {
         )
         .await
         .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+        let resp_capacity = sqe.dst_len() as usize;
+        let Some(id) = sealed_id else {
+            return Ok(HsmRequest {
+                buf,
+                len,
+                resp_capacity,
+            });
+        };
+        let len = sealed::sealed_open(self, io, id, &mut buf.buffer_mut()[..len]).await?;
         Ok(HsmRequest {
             buf,
             len,
-            resp_capacity: sqe.dst_len() as usize,
+            resp_capacity: sealed::sealed_msg_capacity(resp_capacity),
         })
     }
 
+    /// Copies the response to the host, sealing an in-session TBOR one
+    /// (see [`sealed`]) and setting the CQE length to the frame's.
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
+        let resp = match sealed::sealed_session(io.sqe())? {
+            Some(id) => {
+                let frame = sealed::sealed_seal(self, io, id, resp).await?;
+                let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
+                io.cqe().view().set_dst_len(frame_len);
+                frame
+            }
+            None => resp,
+        };
         let sqe = io.sqe().view();
         if resp.len() > sqe.dst_len() as usize {
             return Err(HsmError::InvalidArg);
@@ -398,9 +420,15 @@ impl HsmIoController for UnoHsmPal {
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
     /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
-    /// IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
+    /// IOs, sealed IOs (whose reply [`send_response`] must seal), and IOs
+    /// whose dirty SRAM is too large to scrub with the CPU.
+    ///
+    /// [`send_response`]: HsmIoController::send_response
     fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io> {
         let index = io.index;
+        if sealed::sqe_is_sealed(io.sqe()) {
+            return Err(io);
+        }
         let sqe = io.sqe().view();
         let (dst, dst2) = (sqe.dst_prp1(), sqe.dst_prp2());
         if index as u32 >= IO_SQ_COUNT

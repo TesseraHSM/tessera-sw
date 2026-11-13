@@ -6,26 +6,13 @@
 //! Destroys the requested slot via
 //! [`HsmSessionManager::session_destroy`](tsra_fw_hsm_pal_traits::HsmSessionManager::session_destroy).
 //!
-//! # Trust boundary — outer-framing requirement
+//! # Trust boundary
 //!
-//! `SessionClose` is a destructive operation: a caller that can
-//! submit a TBOR request with a guessed `session_id` can tear down
-//! any Active or Pending slot owned by the same partition.  The
-//! request body therefore **must** be wrapped in the outer
-//! AEAD-authenticated framing layer (per the TBOR session-protocol
-//! spec) so that the dispatcher rejects unauthenticated `SessionClose`
-//! requests before they reach this handler.
-//!
-//! That outer framing is not yet enforced in the dispatcher (the
-//! framing layer is the next planned milestone for the TBOR session
-//! work).  Until then, callers of this handler are limited to the
-//! same-partition trust domain as established by the SQE
-//! `session_id` flag; cross-partition isolation is provided by the
-//! per-partition session table, but same-partition DoS via guessed
-//! slot ids is possible.  **Do not enable TBOR sessions in a
-//! security-sensitive deployment until the outer framing layer is
-//! in place** — track the gating issue in the PR description for
-//! #425.
+//! `SessionClose` is destructive, so it travels on the session's
+//! encrypted channel: the PAL opens the request under the session's
+//! VM→HSM transport key, and the dispatcher requires the SQE session id
+//! to match the body's.  A caller without the session's keys cannot
+//! close it.
 
 use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::TborSessionCloseResp;
@@ -40,9 +27,9 @@ use tsra_fw_hsm_undo::UndoLog;
 /// Handle a TBOR `SessionClose` request.
 ///
 /// Routes through `pal.session_destroy` to free the slot and any
-/// associated vault state.  With secure sessions (Duo) the destroy is deferred
-/// to the commit walk (after the completion posts), so the response can
-/// still be encrypted under the session's transport key.
+/// associated vault state.  The destroy is deferred to the commit walk
+/// (after the completion posts), so the response can still be sealed
+/// under the session's transport key.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
@@ -52,20 +39,10 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let req = TborSessionCloseReq::decode(cmd_buf.request())?;
     let session_id: u16 = req.session_id().into();
     let id = HsmSessId::from(session_id);
-    // SECURITY: This is a destructive operation gated only by
-    // possession of a valid `session_id` in the same partition.  See
-    // the module-level "Trust boundary" note: callers MUST wrap the
-    // request in the outer AEAD-authenticated framing layer once it
-    // lands; until then this is vulnerable to same-partition DoS by
-    // a caller who guesses an active slot id.
-    if P::IO_PROTOCOL.secure_session() {
-        if matches!(pal.session_state(io, id), HsmSessionState::Invalid) {
-            return Err(HsmError::SessionNotFound);
-        }
-        undo.push_session_close(id)?;
-    } else {
-        pal.session_destroy(io, id).await?;
+    if matches!(pal.session_state(io, id), HsmSessionState::Invalid) {
+        return Err(HsmError::SessionNotFound);
     }
+    undo.push_session_close(id)?;
     let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSessionCloseResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())

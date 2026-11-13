@@ -26,6 +26,7 @@ use tsra_ddi_tbor_codec::TocEntry;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
@@ -53,7 +54,6 @@ use tsra_ddi_tbor_types::PolicyKeyKind;
 use tsra_ddi_tbor_types::PolicyPubKey;
 use tsra_ddi_tbor_types::PolicyVer;
 use tsra_ddi_tbor_types::ReportDescriptor;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
@@ -128,9 +128,9 @@ pub enum EncoderTOCBuilders {
 /// Which role's session to open for this iteration.
 #[derive(Arbitrary, Debug)]
 pub enum FuzzRole {
-    /// `psk_id = 0`, `SessionType::Authenticated`
+    /// `psk_id = 0`, ECDH-P384 suite
     Co,
-    /// `psk_id = 1`, `SessionType::PlainText`
+    /// `psk_id = 1`, ML-KEM-1024 suite
     Cu,
 }
 
@@ -142,10 +142,10 @@ impl FuzzRole {
         }
     }
 
-    pub fn session_type(&self) -> SessionType {
+    pub fn suite(&self) -> SessionSuite {
         match self {
-            FuzzRole::Co => SessionType::Authenticated,
-            FuzzRole::Cu => SessionType::PlainText,
+            FuzzRole::Co => SessionSuite::EcdhP384,
+            FuzzRole::Cu => SessionSuite::MlKem1024,
         }
     }
 }

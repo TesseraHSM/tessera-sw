@@ -49,5 +49,8 @@
 |            | `TSRA_PART_PROP_ID_BACKUP_MASKING_KEY` and                       |
 |            | `TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` are not present on   |
 |            | partitions provisioned with `tsra_sess_ex_part_init`             |
+| 11/13/2026 | Replaced `tsra_session_ex_type` with `tsra_session_suite`        |
+|            | (`ECDH_P384`, `ML_KEM1024`); every security-domain session is    |
+|            | encrypted on every device model                                  |
 
 \pagebreak

@@ -3,63 +3,76 @@
 
 //! Host-side wrapper for the TBOR `SessionOpenInit` command.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::tbor;
 use crate::tbor_int::U8;
 
 /// TBOR opcode for `SessionOpenInit`.
 pub const TBOR_OP_SESSION_OPEN_INIT: u8 = 0x03;
 
-/// Length of the VM's per-handshake ephemeral public key
-/// (HPKE `Npk` for the P-384 KEM: SEC1 uncompressed `0x04 ‖ X ‖ Y`
-/// per RFC 9180 §7.1.1, big-endian coordinates).
-pub const PK_INIT_LEN: usize = 97;
-
-/// Length of the HSM's HPKE response ephemeral.
-pub const PK_RESP_LEN: usize = 97;
-
-/// Length of the Phase-1 confirmation MAC (HMAC-SHA-384).
-pub const MAC_RESP_LEN: usize = 48;
-
-/// Wire identifier for the only `HsmSessionSuite` currently implemented
-/// — HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
+/// Wire identifier of the ECDH P-384 suite: ephemeral ECDH P-384 key
+/// agreement, transcript signed with the partition identity key
+/// (ECDSA P-384).
 ///
-/// Mirrors the FW-side `HsmSessionSuite::P384HkdfSha384AesGcm256`
-/// discriminant.
-pub const SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256: u8 = 0x01;
+/// Mirrors the FW-side `HsmSessionSuite::EcdhP384EcdsaP384` discriminant.
+pub const SESSION_SUITE_ECDH_P384_ECDSA_P384: u8 = 0x01;
 
-/// HPKE `info` string for the session-establishment handshake.
+/// Wire identifier of the ML-KEM-1024 suite: ML-KEM-1024 key
+/// encapsulation, transcript signed with the partition identity key
+/// (ECDSA P-384).
 ///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HPKE_INFO`.  Mixed
-/// into the HPKE key schedule on both sides; ensures the derived
-/// `exported` value is domain-separated from any other HPKE usage.
-pub const SESSION_HPKE_INFO: &[u8] = b"tsra-session-v2";
+/// Mirrors the FW-side `HsmSessionSuite::MlKem1024EcdsaP384` discriminant.
+pub const SESSION_SUITE_MLKEM1024_ECDSA_P384: u8 = 0x02;
 
-/// HPKE exporter context for the session-establishment handshake.
+/// Length of a SEC1 uncompressed P-384 point (`0x04 ‖ X ‖ Y`): the ECDH
+/// suite's `pk_init`, `enc` and the partition identity key in the
+/// transcript.
 ///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HPKE_EXPORTER_CONTEXT`.
-pub const SESSION_HPKE_EXPORTER_CONTEXT: &[u8] = b"session-exporter";
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_P384_SEC1_LEN`.
+pub const SESSION_P384_SEC1_LEN: usize = 97;
 
-/// HMAC label binding the Phase-1 (server-auth) confirm signature.
+/// Length of an ML-KEM-1024 encapsulation key (the ML-KEM suite's
+/// `pk_init`).
 ///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_PHASE1_LABEL`.
-pub const SESSION_PHASE1_LABEL: &[u8] = b"phase1-confirm";
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MLKEM1024_PK_LEN`.
+pub const SESSION_MLKEM1024_PK_LEN: usize = 1568;
 
-/// Channel-level integrity profile for a TBOR session.
+/// Length of an ML-KEM-1024 ciphertext (the ML-KEM suite's `enc`).
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MLKEM1024_CT_LEN`.
+pub const SESSION_MLKEM1024_CT_LEN: usize = 1568;
+
+/// Largest `pk_init` on the wire.
+pub const PK_INIT_MAX_LEN: usize = SESSION_MLKEM1024_PK_LEN;
+
+/// Largest `enc` on the wire.
+pub const ENC_MAX_LEN: usize = SESSION_MLKEM1024_CT_LEN;
+
+/// Length of the transcript signature: raw big-endian ECDSA P-384 `r ‖ s`.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_SIG_LEN`.
+pub const SIG_LEN: usize = 96;
+
+/// Domain-separation label prefixed to the handshake transcript and used
+/// as the HKDF-Extract salt.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSCRIPT_LABEL`.
+pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v2";
+
+/// Channel profile of a TBOR session.
 ///
 /// Host-side mirror of `tsra_fw_hsm_pal_traits::HsmSessionType` —
 /// kept here as an independent definition so the host crate does not
 /// have to pull in the firmware PAL traits.  The on-wire `u8`
-/// encoding matches the FW enum so both sides populate the same SQE
-/// field with the same byte values.
+/// encoding matches the FW enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SessionType {
-    /// Channel transports MBOR bodies without per-message MAC.
-    PlainText = 0,
-
-    /// Channel transports MBOR bodies wrapped in an outer per-message
-    /// HMAC envelope.
-    Authenticated = 1,
+    /// Every in-session request and response is AES-256-GCM protected.
+    /// The only session type, for both CO and CU.
+    Encrypted = 0,
 }
 
 impl SessionType {
@@ -68,70 +81,59 @@ impl SessionType {
     pub const fn to_u8(self) -> u8 {
         self as u8
     }
-
-    /// `true` for [`Authenticated`](Self::Authenticated).
-    #[inline]
-    pub const fn is_authenticated(self) -> bool {
-        matches!(self, Self::Authenticated)
-    }
 }
 
 /// Host-facing TBOR `SessionOpenInit` request.
 ///
-/// Always starts a fresh HPKE handshake.  The 32-byte session seed
-/// is now generated client-side in
-/// [`TborSessionOpenFinishReq`](crate::TborSessionOpenFinishReq) and
-/// shipped AEAD-encrypted in Phase 2.  Resume is handled by the MBOR
-/// `ReopenSession` command, not by this opcode.
+/// Always starts a fresh handshake.  The 32-byte session seed is
+/// generated client-side and shipped AEAD-encrypted in
+/// [`TborSessionOpenFinishReq`](crate::TborSessionOpenFinishReq).
+/// Resume is handled by the MBOR `ReopenSession` command, not by this
+/// opcode.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_INIT, session_ctrl = open)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSessionOpenInitReq {
-    /// PSK identifier asserting the caller role.
+    /// PSK identifier asserting the caller role (`0` = CO, `1` = CU).
     pub psk_id: U8,
 
-    /// Channel-level integrity profile (0 = PlainText, 1 = Authenticated).
-    ///
-    /// CO (`psk_id = 0`) must use `Authenticated (1)`; CU (`psk_id = 1`)
-    /// must use `PlainText (0)`.  Any other pairing is rejected by
-    /// the HSM with `InvalidSessionType`.
+    /// Channel profile; only `Encrypted (0)` is defined.
     pub session_type: U8,
 
-    /// Cryptographic suite identifier.  See `HsmSessionSuite` in the PAL
-    /// traits crate for the registered values.  Today only `0x01`
-    /// (`P384HkdfSha384AesGcm256`) is accepted; any other value is
-    /// rejected by the HSM with `UnsupportedSessionSuite`.
+    /// Cryptographic suite identifier
+    /// ([`SESSION_SUITE_ECDH_P384_ECDSA_P384`] or
+    /// [`SESSION_SUITE_MLKEM1024_ECDSA_P384`]).
     pub suite_id: U8,
 
-    /// Per-handshake ephemeral public key supplied by the VM.  The
-    /// encoding and length are dictated by `suite_id`; for `0x01`
-    /// this is the HPKE `Npk` SEC1 uncompressed `0x04 ‖ X ‖ Y` for
-    /// the P-384 KEM (97 B).
-    pub pk_init: [u8; PK_INIT_LEN],
+    /// The VM's per-handshake ephemeral KEM public key: a 97 B SEC1
+    /// point (ECDH P-384) or a 1568 B encapsulation key (ML-KEM-1024).
+    #[tbor(align = 4, max_len = 1568)]
+    pub pk_init: Vec<u8>,
 }
 
 impl Default for TborSessionOpenInitReq {
     fn default() -> Self {
-        // Default to a valid CO/Authenticated pairing: CO sessions
-        // (psk_id=0) must use the Authenticated session type
-        // (session_type=1) per the role/type compatibility matrix.
         Self {
             psk_id: 0,
-            session_type: 1,
-            suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-            pk_init: [0u8; PK_INIT_LEN],
+            session_type: SessionType::Encrypted.to_u8(),
+            suite_id: SESSION_SUITE_ECDH_P384_ECDSA_P384,
+            pk_init: vec![0u8; SESSION_P384_SEC1_LEN],
         }
     }
 }
 
 /// Host-facing TBOR `SessionOpenInit` response.
 #[tbor(response)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborSessionOpenInitResp {
     /// Reserved session identifier.
     #[tbor(session_id)]
     pub session_id: u16,
-    /// HSM's HPKE response ephemeral.
-    pub pk_resp: [u8; PK_RESP_LEN],
-    /// Phase-1 confirmation MAC.
-    pub mac_resp: [u8; MAC_RESP_LEN],
+    /// KEM encapsulation for `pk_init`: the HSM's 97 B SEC1 ephemeral
+    /// point (ECDH P-384) or the 1568 B ciphertext (ML-KEM-1024).
+    #[tbor(align = 4, max_len = 1568)]
+    pub enc: Vec<u8>,
+    /// Partition-identity ECDSA P-384 signature over the transcript hash
+    /// `T1`, raw big-endian `r ‖ s`.
+    #[tbor(min_len = 96, max_len = 96)]
+    pub sig: Vec<u8>,
 }

@@ -68,23 +68,25 @@ opened with [`tsra_part_open`](#tsra_part_open). `psk` must be a non-NULL
 pointer to an [`tsra_session_psk`](#tsra_session_psk) selecting the role
 slot; only its inner `psk` buffer may be NULL, which selects the partition
 default PSK for the slot. A NULL `psk` pointer is rejected with
-`TSRA_STATUS_INVALID_ARGUMENT`. The `session_type` selects the channel
-integrity profile pinned for the session (see
-[tsra_session_ex_type](#tsra_session_ex_type)), and a handle to the new
-session is returned.
+`TSRA_STATUS_INVALID_ARGUMENT`. The `suite` selects the key-establishment
+suite (see [tsra_session_suite](#tsra_session_suite)); an unknown value is
+rejected with `TSRA_STATUS_INVALID_ARGUMENT`. A handle to the new session
+is returned.
 
-At API revision 2.0 (Duo), the handshake also derives per-direction
-AES-256-GCM transport keys. The SDK encrypts the handshake's second
-message, every in-session command and the session close with them, and
-the device encrypts each response; this applies to both session types.
+Every security-domain session is encrypted. The handshake authenticates
+the device with its partition identity key (an ECDSA P-384 signature over
+the handshake transcript) and the caller with the role PSK, and derives
+per-direction AES-256-GCM transport keys. The SDK encrypts the handshake's
+second message, every in-session command and the session close with them,
+and the device encrypts each response. This holds on every device model.
 Out-of-band data is not covered by this encryption. The transport is
-transparent to callers: no API or parameter changes.
+transparent to callers.
 
 ```cpp
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
     const tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
     );
 ```
@@ -95,7 +97,7 @@ tsra_status tsra_sess_ex_open(
  | ----------------- | --------------------------------------------------- | ---------------------------------------------- |
  | [in] dev_handle   | [tsra_handle](#tsra_handle)                     | partition handle                               |
  | [in] psk          | const tsra_session_psk *                          | PSK credential (non-NULL); inner `psk` buffer NULL = default |
- | [in] session_type | [tsra_session_ex_type](#tsra_session_ex_type)   | channel integrity profile to pin               |
+ | [in] suite        | [tsra_session_suite](#tsra_session_suite)       | key-establishment suite                        |
  | [out] sess_handle | [tsra_handle *](#tsra_handle)                   | new security-domain session handle      &nbsp; |
 
 **Returns**
