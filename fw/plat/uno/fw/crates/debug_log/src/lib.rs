@@ -438,6 +438,11 @@ macro_rules! __token {
 }
 
 /// Support for the macros.
+///
+/// The Uno platform's host tools check the message map against the same
+/// target, message, and placeholder rules (`Key::check` and the format
+/// conversion in `fw/plat/uno/crates/log_map`), so a rule that changes here
+/// must change there too.
 #[doc(hidden)]
 pub mod __bin {
     /// A value that a record can carry: it converts to `u32` without loss.

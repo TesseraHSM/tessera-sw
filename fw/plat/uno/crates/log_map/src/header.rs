@@ -20,7 +20,9 @@ pub(crate) fn format(message: &str) -> Result<String, Error> {
     convert(message).map(|(text, _)| text)
 }
 
-/// Converts a message as [`format`] does, and counts its placeholders.
+/// Converts a message as [`format`] does, and counts its placeholders. The
+/// placeholder forms are the Uno log crate's (`placeholders` in
+/// `fw/plat/uno/fw/crates/debug_log/src/lib.rs`); change both together.
 pub(crate) fn convert(message: &str) -> Result<(String, usize), Error> {
     let mut out = String::new();
     let mut count = 0;

@@ -204,7 +204,9 @@ impl Key {
     }
 
     /// Checks each field against the rules that the Uno log crate applies
-    /// for debug-log output.
+    /// for debug-log output. Its copies are `target_ok`, `message_ok`, and
+    /// `placeholders` in `fw/plat/uno/fw/crates/debug_log/src/lib.rs`; change
+    /// both together.
     pub fn check(&self) -> Result<(), Error> {
         let crate_ok = !self.crate_name.is_empty()
             && self
