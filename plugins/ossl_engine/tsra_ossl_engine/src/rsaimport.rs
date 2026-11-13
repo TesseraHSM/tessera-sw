@@ -13,16 +13,12 @@
 //! keyWrapping` instead exports the HSM's unwrapping public key for an
 //! external party to wrap against.
 
-use openssl::pkey::PKey;
-use tsra_api::HsmEncrypter;
-use tsra_api::HsmHashAlgo;
 use tsra_api::HsmKeyClass;
 use tsra_api::HsmKeyCommonProps;
 use tsra_api::HsmKeyKind;
 use tsra_api::HsmKeyManager;
 use tsra_api::HsmKeyProps;
 use tsra_api::HsmKeyPropsBuilder;
-use tsra_api::HsmRsaAesWrapAlgo;
 use tsra_api::HsmRsaKeyRsaAesKeyUnwrapAlgo;
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::error::EngineError;
@@ -37,12 +33,8 @@ use crate::context::EngineData;
 use crate::context::RSA_UNWRAPPING_KEY_BITS;
 use crate::context::delete_hsm_key;
 use crate::engine_impl::engine_data_slot;
-
-/// RSA-AES wrap parameters, matching the 3.x provider so a `wrapped_key` blob
-/// produced against the exported unwrapping key interoperates: SHA-256
-/// OAEP/MGF1 and a 256-bit (32-byte) AES KEK.
-pub(crate) const WRAP_HASH: HsmHashAlgo = HsmHashAlgo::Sha256;
-pub(crate) const WRAP_KEK_BYTES: usize = 32;
+use crate::import::ImportSource;
+use crate::import::WRAP_HASH;
 
 /// Marker type carrying the engine's RSA import logic (see
 /// [`RsaImportHandler`]).
@@ -128,41 +120,17 @@ fn import_private(
     params: &RsaImportParams,
     pkey: *mut ffi::EVP_PKEY,
 ) -> EngineResult<()> {
-    let source = match (&params.input_key, &params.wrapped_key) {
-        (Some(_), Some(_)) => {
-            return Err(EngineError::Other(
-                "tsra.input_key and tsra.wrapped_key are mutually exclusive".into(),
-            ));
-        }
-        (Some(p), None) => ImportSource::PlaintextDer(crate::keyload::read_masked_key(p)?),
-        (None, Some(p)) => ImportSource::WrappedBlob(crate::keyload::read_masked_key(p)?),
-        (None, None) => {
-            return Err(EngineError::Other(
-                "tsra RSA import requires tsra.input_key or tsra.wrapped_key".into(),
-            ));
-        }
-    };
+    let source = ImportSource::read(params.input_key.as_deref(), params.wrapped_key.as_deref())?
+        .ok_or_else(|| {
+            EngineError::Other("tsra RSA import requires tsra.input_key or tsra.wrapped_key".into())
+        })?;
     let (priv_props, pub_props) = import_props(params)?;
 
     // Unwrap the external key into the HSM, then export its public DER and
     // masked blob (all under one session + unwrapping-key borrow).
     let (imported, pub_der, masked) = data.with_session(|session| {
         data.with_unwrapping_key(session, |unwrap_priv, unwrap_pub| {
-            let wrapped = match &source {
-                // Wrap the plaintext DER against the HSM's unwrapping public
-                // key, exactly as an external party would for wrapped_key. The
-                // HSM unwrap parser expects unencrypted PKCS#8, so normalize
-                // PKCS#1/SEC1 (or already-PKCS#8) input first, as the provider does.
-                ImportSource::PlaintextDer(der) => {
-                    let pkcs8 = to_pkcs8_der(der)?;
-                    let mut wrap = HsmRsaAesWrapAlgo::new(WRAP_HASH, WRAP_KEK_BYTES);
-                    Zeroizing::new(
-                        HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, &pkcs8)
-                            .map_err(|e| EngineError::wrap("RSA-AES wrap input key", e))?,
-                    )
-                }
-                ImportSource::WrappedBlob(blob) => blob.clone(),
-            };
+            let wrapped = source.wrapped(unwrap_pub)?;
             let mut unwrap = HsmRsaKeyRsaAesKeyUnwrapAlgo::new(WRAP_HASH);
             let (imported, _imported_pub) = HsmKeyManager::unwrap_key_pair(
                 &mut unwrap,
@@ -233,26 +201,6 @@ fn export_unwrapping_key(
     })?;
     // SAFETY: pkey is the keygen out-key OpenSSL passed us.
     unsafe { crate::rsaload::set_pkey_to_public_rsa(pkey, &der) }
-}
-
-/// Normalize a plaintext private-key DER (traditional PKCS#1/SEC1 or already
-/// PKCS#8) to unencrypted PKCS#8 — the form the HSM unwrap parser expects and
-/// the provider produces before RSA-AES wrapping.
-fn to_pkcs8_der(der: &[u8]) -> EngineResult<Zeroizing<Vec<u8>>> {
-    let pkey =
-        PKey::private_key_from_der(der).map_err(|e| EngineError::wrap("parse input key DER", e))?;
-    pkey.private_key_to_pkcs8()
-        .map(Zeroizing::new)
-        .map_err(|e| EngineError::wrap("re-encode input key as PKCS#8", e))
-}
-
-/// The external key material to import.
-enum ImportSource {
-    /// A plaintext DER private key (`tsra.input_key`); the engine wraps it.
-    /// Held zeroizing — it is external private-key material.
-    PlaintextDer(Zeroizing<Vec<u8>>),
-    /// A pre-wrapped blob (`tsra.wrapped_key`); unwrapped directly.
-    WrappedBlob(Zeroizing<Vec<u8>>),
 }
 
 #[cfg(test)]

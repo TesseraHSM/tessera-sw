@@ -20,6 +20,11 @@
 //! when the HSM session closes; its blob only unmasks within that session, so
 //! `tsra.masked_key` is optional for session keys.
 //!
+//! `tsra.input_key` (a DER private key) or `tsra.wrapped_key` (a blob wrapped
+//! against the HSM's unwrapping key) imports an external key instead, as the
+//! provider does (see [`crate::import`]). The key must be on the requested
+//! curve.
+//!
 //! Unarmed keygen contexts never reach this module — the toolkit delegates
 //! them to OpenSSL's software keygen (see the pkey_method module docs).
 
@@ -28,8 +33,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use openssl::nid::Nid;
+use openssl::pkey::PKey;
 use tsra_api::HsmEccCurve;
 use tsra_api::HsmEccKeyGenAlgo;
+use tsra_api::HsmEccKeyRsaAesKeyUnwrapAlgo;
 use tsra_api::HsmKeyClass;
 use tsra_api::HsmKeyCommonProps;
 use tsra_api::HsmKeyKind;
@@ -47,6 +55,8 @@ use zeroize::Zeroizing;
 
 use crate::SECRET_FILE_MODE;
 use crate::engine_impl::engine_data_slot;
+use crate::import::ImportSource;
+use crate::import::WRAP_HASH;
 
 /// Marker type carrying the engine's EC keygen logic (see [`EcKeygenHandler`]).
 pub(crate) struct TsraEcKeygen;
@@ -63,6 +73,29 @@ fn curve_from_nid(nid: c_int) -> EngineResult<HsmEccCurve> {
             "unsupported curve for tsra keygen (NID {nid}); supported: P-256, P-384, P-521"
         ))),
     }
+}
+
+/// Refuse an `input_key` that is not an EC key on the curve `curve_nid`,
+/// before the HSM is touched.
+fn check_input_curve(der: &[u8], curve_nid: c_int) -> EngineResult<()> {
+    let key = PKey::private_key_from_der(der)
+        .map_err(|e| EngineError::wrap("parse tsra.input_key DER", e))?;
+    let nid = key
+        .ec_key()
+        .ok()
+        .and_then(|ec| ec.group().curve_name())
+        .ok_or_else(|| {
+            EngineError::Other("tsra.input_key is not an EC key on a named curve".into())
+        })?;
+    if nid.as_raw() != curve_nid {
+        let name = |n: Nid| n.short_name().unwrap_or("unknown").to_owned();
+        return Err(EngineError::Other(format!(
+            "tsra.input_key is on curve {}, but ec_paramgen_curve is {}",
+            name(nid),
+            name(Nid::from_raw(curve_nid))
+        )));
+    }
+    Ok(())
 }
 
 /// Write the masked blob with the engine's secret-file hardening, mirroring
@@ -130,6 +163,16 @@ impl EcKeygenHandler for TsraEcKeygen {
         pkey: *mut ffi::EVP_PKEY,
     ) -> EngineResult<()> {
         let curve = curve_from_nid(params.curve_nid)?;
+        let source =
+            ImportSource::read(params.input_key.as_deref(), params.wrapped_key.as_deref())?;
+        if let Some(ImportSource::PlaintextDer(der)) = &source {
+            check_input_curve(der, params.curve_nid)?;
+        }
+        let what = if source.is_some() {
+            "imported EC private key"
+        } else {
+            "generated EC private key"
+        };
 
         let slot = engine_data_slot()?;
         let data = slot
@@ -138,9 +181,9 @@ impl EcKeygenHandler for TsraEcKeygen {
         // First caller may be the keygen itself (idempotent open).
         data.open_hsm_from_env()?;
 
-        // Generate a key pair on the HSM (persistent, or a session key that
-        // dies with the HSM session) and export the public-key DER, plus the
-        // masked blob when a path will receive it. Usage is exclusive:
+        // Generate or import a key pair on the HSM (persistent, or a session
+        // key that dies with the HSM session) and export the public-key DER,
+        // plus the masked blob when a path will receive it. Usage is exclusive:
         // sign/verify for digitalSignature, derive on both halves for
         // keyAgreement.
         let agree = params.key_usage == EcKeyUsage::KeyAgreement;
@@ -163,12 +206,27 @@ impl EcKeygenHandler for TsraEcKeygen {
                 .can_derive(agree)
                 .build()
                 .map_err(|e| EngineError::wrap("build public key props", e))?;
-            let mut algo = HsmEccKeyGenAlgo::default();
             // The public half is a software wrapper without a device-side
             // handle (its delete_key is a documented no-op).
-            let (priv_key, _pub) =
-                HsmKeyManager::generate_key_pair(session, &mut algo, priv_props, pub_props)
-                    .map_err(|e| EngineError::wrap("generate EC key pair", e))?;
+            let (priv_key, _pub) = match &source {
+                None => {
+                    let mut algo = HsmEccKeyGenAlgo::default();
+                    HsmKeyManager::generate_key_pair(session, &mut algo, priv_props, pub_props)
+                        .map_err(|e| EngineError::wrap("generate EC key pair", e))?
+                }
+                Some(source) => data.with_unwrapping_key(session, |unwrap_priv, unwrap_pub| {
+                    let wrapped = source.wrapped(unwrap_pub)?;
+                    let mut algo = HsmEccKeyRsaAesKeyUnwrapAlgo::new(WRAP_HASH);
+                    HsmKeyManager::unwrap_key_pair(
+                        &mut algo,
+                        unwrap_priv,
+                        &wrapped,
+                        priv_props,
+                        pub_props,
+                    )
+                    .map_err(|e| EngineError::wrap("unwrap EC key into HSM", e))
+                })?,
+            };
             // Zeroizing: the masked blob is the private key in its persistent
             // form.
             let exported = params
@@ -190,7 +248,7 @@ impl EcKeygenHandler for TsraEcKeygen {
             match exported {
                 Ok((blob, pub_der)) => Ok((priv_key, blob, pub_der)),
                 Err(e) => {
-                    crate::context::delete_hsm_key(priv_key, "generated EC private key");
+                    crate::context::delete_hsm_key(priv_key, what);
                     Err(e)
                 }
             }
@@ -202,7 +260,7 @@ impl EcKeygenHandler for TsraEcKeygen {
         if let Some((path, masked)) = &blob
             && let Err(e) = write_masked_blob(path, masked)
         {
-            crate::context::delete_hsm_key(priv_key, "generated EC private key");
+            crate::context::delete_hsm_key(priv_key, what);
             return Err(e);
         }
 
