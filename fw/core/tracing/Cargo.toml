@@ -11,6 +11,9 @@ doctest = false
 test = false
 
 [features]
+## Debug-log output for Uno images: with no `level-*` feature and a bare-metal
+## target, `error!`, `warn!`, and `info!` go to the Uno log crate.
+debug-log = ["dep:tsra_fw_uno_debug_log"]
 default = []
 
 ## Log level threshold (compile-time). Only messages at or above the
@@ -21,6 +24,9 @@ level-error = [] # error only (default when tracing is on)
 level-info = []  # info + warn + error
 level-trace = [] # all levels
 level-warn = []  # warn + error
+
+[dependencies]
+tsra_fw_uno_debug_log = { optional = true, path = "../../plat/uno/fw/crates/debug_log" }
 
 [lints]
 workspace = true

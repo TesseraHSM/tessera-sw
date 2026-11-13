@@ -26,6 +26,7 @@ const HOST_TESTED: &[&str] = &[
     "tsra_fw_uno_drivers_iic",
     "tsra_fw_uno_drivers_oic",
     "tsra_fw_uno_drivers_session_store",
+    "tsra_fw_uno_debug_log",
     "tsra_fw_uno_log_ring",
     "tsra_fw_uno_pct",
 ];

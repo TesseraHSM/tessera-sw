@@ -25,6 +25,7 @@ tsra_fw_static_init = { workspace = true }
 tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_aes_sgl = { workspace = true }
 tsra_fw_uno_cert_blob = { workspace = true }
+tsra_fw_uno_debug_log = { workspace = true }
 tsra_fw_uno_drivers_aes = { workspace = true }
 tsra_fw_uno_drivers_bcp = { workspace = true }
 tsra_fw_uno_drivers_bks_store = { workspace = true }
