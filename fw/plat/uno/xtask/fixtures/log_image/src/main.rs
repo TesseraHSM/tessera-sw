@@ -97,6 +97,8 @@ fn main() -> ! {
     info!("fixture", "depth={} flag={}", depth, flag);
     warn!("fixture", "slot {:x} at {:#010x}", slot, wide);
     warn!("fixture_io", "queue at 50% of {{capacity}} {:08x}", size);
+    // `cargo xtask log-fixture` checks the values that these calls pass to
+    // their records (ERROR_CALLS in xtask/src/log_fixture.rs).
     error!("fixture", Code(0x5a), "failed");
     error!("fixture", Code(0x5b), "  MemManage: IACCVIOL {:#x}", depth);
     // With `--cfg fail_case="text_loaded"`, the image also keeps the text of

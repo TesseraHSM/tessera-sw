@@ -422,6 +422,45 @@ fn a_record_decodes_like_the_text_output_line() {
     );
 }
 
+/// The firmware's message map.
+const FIRMWARE_MAP: &str = include_str!("../../../fw/pal/log_map.tsv");
+
+#[test]
+fn every_error_format_in_the_firmware_map_ends_with_the_code() {
+    let m = Map::parse(FIRMWARE_MAP).expect("the firmware's map");
+    let header = m.decoder_header(&used(&m)).expect("a header");
+    // Each slot's format, by component and number.
+    let mut formats = std::collections::BTreeMap::new();
+    let mut table = None;
+    for line in header.lines() {
+        if let Some(rest) = line.strip_prefix("static const char *const tsra_log_") {
+            table = rest.split('_').next();
+        } else if let Some(rest) = line.strip_prefix("    [0x") {
+            let (number, rest) = rest.split_once("] = \"").expect("a slot");
+            let (format, _) = rest.rsplit_once("\",").expect("a format");
+            let number = u8::from_str_radix(number, 16).expect("a hex number");
+            formats.insert((table.expect("a table"), number), format);
+        }
+    }
+    let mut errors = 0;
+    for row in m.rows() {
+        let format = formats[&(row.component.name(), row.number)];
+        let (_, placeholders) = header::convert(&row.key.message).expect("a format");
+        // `%%` prints a percent sign; every other `%` starts a conversion.
+        let conversions = format.replace("%%", "").matches('%').count();
+        if row.key.kind.has_code() {
+            // The record carries the code last, after the message's values.
+            assert!(format.ends_with(" [err:%08x]"), "{}", row.to_line());
+            assert_eq!(conversions, placeholders + 1, "{}", row.to_line());
+            errors += 1;
+        } else {
+            assert!(!format.contains("[err:"), "{}", row.to_line());
+            assert_eq!(conversions, placeholders, "{}", row.to_line());
+        }
+    }
+    assert!(errors > 0, "the firmware's map has no error rows");
+}
+
 #[test]
 fn an_unused_message_is_marked_deprecated() {
     // Version 1 logs "booted" and "slow {}"; version 2 deletes "booted" and

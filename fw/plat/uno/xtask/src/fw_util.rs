@@ -49,6 +49,9 @@ pub struct FwPaths {
     /// Log fixture workspace directory (`cargo xtask log-fixture`).
     pub log_fixture_dir: PathBuf,
 
+    /// Host crate that `cargo xtask log-fixture` tests outside `fw/plat/uno/`.
+    pub log_above_pal_dir: PathBuf,
+
     /// Default release ELF path for the firmware app binary.
     pub elf: PathBuf,
 }
@@ -85,10 +88,12 @@ impl FwPaths {
             .join("release")
             .join(bin_name);
 
+        let fixtures = ctx.root.join("xtask").join("fixtures");
         Ok(Self {
             fw_dir,
             pqc_dir,
-            log_fixture_dir: ctx.root.join("xtask").join("fixtures").join("log_image"),
+            log_fixture_dir: fixtures.join("log_image"),
+            log_above_pal_dir: fixtures.join("log_above_pal"),
             elf,
         })
     }

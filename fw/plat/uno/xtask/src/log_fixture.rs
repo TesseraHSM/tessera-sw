@@ -8,8 +8,9 @@
 //! (`xtask/fixtures/log_image`), which links with debug-log output the way
 //! the firmware does: locked and fix modes, the generated linker script, the
 //! checks on each image, the cross-image source check, the decoder header's
-//! deprecation marks, text output and `error_text!`, the Uno log crate's
-//! compile-time checks, the drops outside `fw/plat/uno/`, and the build matrix.
+//! deprecation marks, the order of the values in an `error!` record, text
+//! output and `error_text!`, the Uno log crate's compile-time checks, the
+//! drops outside `fw/plat/uno/`, and the build matrix.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -70,6 +71,16 @@ const VALUE: &[&str] = &["can't be a log value with debug-log output"];
 const VALUE_REF: &[&str] = &[
     "can't be a log value with debug-log output",
     "__bin::LogValue",
+];
+
+/// Each `error!` call in the fixture's own crate, by message, with its error
+/// code and the record word that must carry the code. The decoder header
+/// appends ` [err:%08x]` to an error's format, so the error code must be the
+/// last value that the format uses: the first word for a message with no
+/// placeholder, and the second for a message with one.
+const ERROR_CALLS: &[(&str, &str, usize)] = &[
+    ("failed", "Code(0x5a)", 1),
+    ("  MemManage: IACCVIOL {:#x}", "Code(0x5b)", 2),
 ];
 
 /// Each `fail_case` in the fixture that a compile-time check rejects, with
@@ -143,6 +154,54 @@ fn in_loaded_section(elf: &Elf, text: &str) -> anyhow::Result<bool> {
 /// function that the optimizer kept.
 fn has_symbol(elf: &Elf, name: &str) -> bool {
     elf.symbols.iter().any(|symbol| symbol.name.contains(name))
+}
+
+/// The two values that the call whose token is `symbol` passes to its record,
+/// in macro-expanded source, without whitespace or the path of the Uno log
+/// crate's helpers: the last two fields of the tuple that the call's Uno
+/// branch (`if __IN`) gives before the record.
+fn record_values(expanded: &str, symbol: &str) -> anyhow::Result<[String; 2]> {
+    let token = format!("\"{symbol}\"");
+    let at = expanded
+        .find(&token)
+        .with_context(|| format!("the expanded fixture has no token {token}"))?;
+    let before = &expanded[..at];
+    let values = before
+        .rfind("let (__ok_values, __ok_code, __v1, __v2)")
+        .with_context(|| format!("no record values come before the token {token}"))?;
+    let branch = before[values..].find("if __IN {").with_context(|| {
+        format!("the record values before the token {token} have no Uno branch")
+    })?;
+    let open = before[values + branch..]
+        .find('(')
+        .with_context(|| format!("the Uno branch before the token {token} has no tuple"))?;
+    let mut fields = vec![String::new()];
+    let mut depth = 0;
+    for c in before[values + branch + open + 1..].chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => break,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                fields.push(String::new());
+                continue;
+            }
+            c if c.is_whitespace() => continue,
+            _ => {}
+        }
+        fields.last_mut().expect("a field").push(c);
+    }
+    if fields.last().is_some_and(String::is_empty) {
+        fields.pop();
+    }
+    let fields: Vec<String> = fields
+        .iter()
+        .map(|field| field.replace("::tsra_fw_uno_debug_log::__bin::", ""))
+        .collect();
+    match fields.as_slice() {
+        [_, _, value1, value2] => Ok([value1.clone(), value2.clone()]),
+        _ => anyhow::bail!("the Uno branch before the token {token} gives {fields:?}"),
+    }
 }
 
 /// Points each path dependency in the manifest at `path`, which reaches
@@ -389,6 +448,74 @@ impl Xtask for LogFixture {
         anyhow::ensure!(
             !header.contains("Deprecated"),
             "the header marks a message that an image uses:\n{header}"
+        );
+
+        log::info!("--- `error!` with debug-log output passes the error code last");
+        let output = Command::new("cargo")
+            .args([
+                toolchain.as_str(),
+                "rustc",
+                "--release",
+                "--bin",
+                "tsra_log_fixture",
+                "--",
+                "-Zunpretty=expanded",
+            ])
+            .current_dir(&fixture.dir)
+            .env("TSRA_LOG_MAP", &fixture.scratch)
+            .output()
+            .context("can't run cargo")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "can't expand the fixture's macros:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expanded = String::from_utf8(output.stdout).context("the expansion isn't UTF-8")?;
+        let errors: Vec<_> = golden
+            .rows()
+            .filter(|row| row.key.crate_name == "tsra_log_fixture" && row.key.kind.has_code())
+            .collect();
+        anyhow::ensure!(
+            errors.len() == ERROR_CALLS.len(),
+            "the fixture has {} error rows, but ERROR_CALLS lists {}",
+            errors.len(),
+            ERROR_CALLS.len()
+        );
+        for row in errors {
+            let (code, word) = ERROR_CALLS
+                .iter()
+                .find(|(message, _, _)| *message == row.key.message)
+                .map(|(_, code, word)| (*code, *word))
+                .with_context(|| format!("ERROR_CALLS lacks {:?}", row.key.message))?;
+            let values = record_values(&expanded, &row.key.symbol())?;
+            let converted = format!("Strict::<{{__IN}}>::code(&{code}.0)");
+            anyhow::ensure!(
+                values[word - 1] == converted && !values[2 - word].contains(code),
+                "error {:?} passes {values:?} to its record, not {converted} as word {word}",
+                row.key.message
+            );
+        }
+
+        log::info!("--- above the PAL, `error!` passes the error code last too");
+        let source = FwPaths::new(&ctx)?.log_above_pal_dir;
+        let above = fixture.repo.join("target").join("tsra_log_above_pal");
+        fs::create_dir_all(above.join("src"))?;
+        for file in ["Cargo.toml", "src/lib.rs"] {
+            fs::copy(source.join(file), above.join(file))
+                .with_context(|| format!("can't copy {}", source.join(file).display()))?;
+        }
+        absolute_paths(&above.join("Cargo.toml"), &source)?;
+        let output = Command::new("cargo")
+            .args([toolchain.as_str(), "test", "--quiet"])
+            .current_dir(&above)
+            .output()
+            .context("can't run cargo")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::ensure!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "the test of error records above the PAL failed in {}:\n{stdout}{}",
+            above.display(),
+            String::from_utf8_lossy(&output.stderr)
         );
 
         log::info!("--- the linker script keeps cortex-m-rt's boundary symbols");

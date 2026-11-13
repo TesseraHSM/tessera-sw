@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# A host crate whose test checks the records of `error!` calls in code above
+# the PAL. `cargo xtask log-fixture` copies it outside `fw/plat/uno/`, to the
+# repository's `target/`, and runs the test there. It's its own workspace.
+
+[workspace]
+
+[package]
+edition = "2024"
+name = "tsra_log_above_pal"
+publish = false
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+tsra_fw_uno_debug_log = { path = "../../../fw/crates/debug_log" }
