@@ -93,6 +93,9 @@ const CMD_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Bound on the wait for a soft reset to complete and the engine to stop.
 const RESET_SPIN: u32 = 100_000;
 
+/// [`BcpDriver::wake`] passes between checks of the command deadlines.
+const DEADLINE_CHECK_PASSES: u16 = 64;
+
 /// Driver-internal status for a command abandoned by a reset.
 const STATUS_STALLED: u8 = 0xFF;
 
@@ -461,6 +464,9 @@ struct BcpState {
     free: u32,
     /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
     reserved: usize,
+    /// [`BcpDriver::wake`] passes with commands in flight, counted to space
+    /// out the deadline checks.
+    passes: u16,
     /// Tasks waiting for a free command ID.
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
@@ -495,6 +501,7 @@ impl BcpDriver {
                 cq_ci: 0,
                 free: ALL_FREE,
                 reserved: 0,
+                passes: 0,
                 id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
@@ -582,7 +589,13 @@ impl BcpDriver {
             }
             // Checked after reaping as well, so that other commands
             // completing on every pass cannot hold off the reset of one
-            // that is stuck.
+            // that is stuck; but only every few passes, since deadlines
+            // are seconds away and the check reads the timer and every
+            // command's slot.
+            s.passes = s.passes.wrapping_add(1);
+            if !s.passes.is_multiple_of(DEADLINE_CHECK_PASSES) {
+                return;
+            }
             let now = Instant::now();
             let late = s
                 .slots
