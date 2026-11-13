@@ -78,8 +78,9 @@ impl UnoLog {
         SINK.boot_reset(&mut GsramRing);
     }
 
-    /// Writes one record into the ring, or drops and counts it.
-    pub fn record(desc: u32, value1: u32, value2: u32) {
+    /// Writes one record into the ring, or drops and counts it. Private, so
+    /// that records come only through the Uno log crate's hook.
+    fn record(desc: u32, value1: u32, value2: u32) {
         critical_section::with(|cs| {
             SINK.write(cs, &mut GsramRing, desc, value1, value2);
         });
