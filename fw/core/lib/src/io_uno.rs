@@ -15,6 +15,7 @@
 //!                │         session validate
 //!                │         DDI dispatch
 //!            set_ok_ex / set_err
+//!            seal_response (protects an in-session reply)
 //!            send_response (or finish_io)
 //!            complete_io
 //! ```
@@ -92,24 +93,36 @@ impl<P: HsmPal> Hsm<P> {
 
         // Record the success and send the reply. With nothing to walk once
         // the completion is posted, the platform can do that, post the CQE
-        // and drop the IO on its own, freeing this task at once.
+        // and drop the IO on its own, freeing this task at once. An
+        // in-session reply is sealed first, so that it can go that way too.
         let op_result = match op_result {
             Ok(reply) => {
                 let len = reply.resp.map_or(0, |r| r.len());
                 io.cqe().set_ok_ex(len as u32, reply.sess);
                 match reply.resp {
                     Some(resp) => {
-                        if credential_guard.is_none() && undo.as_ref().is_none_or(UndoLog::is_empty)
-                        {
-                            match self.pal().finish_io(io, resp) {
-                                Ok(()) => return,
-                                Err(back) => io = back,
+                        let sealed = if self.pal().reply_needs_seal(&io) {
+                            self.pal().seal_response(&mut io, resp).await
+                        } else {
+                            Ok(resp)
+                        };
+                        match sealed {
+                            Ok(resp) => {
+                                if credential_guard.is_none()
+                                    && undo.as_ref().is_none_or(UndoLog::is_empty)
+                                {
+                                    match self.pal().finish_io(io, resp) {
+                                        Ok(()) => return,
+                                        Err(back) => io = back,
+                                    }
+                                }
+                                self.pal()
+                                    .send_response(&mut io, resp)
+                                    .await
+                                    .map(|()| reply.ddi_failed)
                             }
+                            Err(e) => Err(e),
                         }
-                        self.pal()
-                            .send_response(&mut io, resp)
-                            .await
-                            .map(|()| reply.ddi_failed)
                     }
                     None => Ok(reply.ddi_failed),
                 }

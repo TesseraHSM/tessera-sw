@@ -268,6 +268,32 @@ pub trait HsmIoController: HsmIoTypes {
     /// the error in the CQE.
     async fn send_response(&self, io: &mut Self::Io, resp: &HsmDmaBuf) -> HsmResult<()>;
 
+    /// Whether [`seal_response`](Self::seal_response) has yet to protect
+    /// `io`'s response, so that unprotected IOs skip it.
+    fn reply_needs_seal(&self, io: &Self::Io) -> bool {
+        let _ = io;
+        false
+    }
+
+    /// Protects the response `resp` for `io` ahead of
+    /// [`finish_io`](Self::finish_io) or
+    /// [`send_response`](Self::send_response), returning what to send, if
+    /// the IO protocol protects it; the platform then updates the CQE length
+    /// to match. Platforms that send responses as they are return `resp`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`send_response`](Self::send_response): `NotEnoughSpace` or
+    /// `SessionTransportError`. The core then records the error in the CQE.
+    async fn seal_response<'a>(
+        &'a self,
+        io: &mut Self::Io,
+        resp: &'a HsmDmaBuf,
+    ) -> HsmResult<&'a HsmDmaBuf> {
+        let _ = io;
+        Ok(resp)
+    }
+
     /// Copies out-of-band item `index` of `io` from the host into `dst`;
     /// the item's length must equal `dst.len()`.
     ///

@@ -144,6 +144,9 @@ pub struct UnoHsmIo {
     pid: HsmPartId,
     /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
     queue_id: u16,
+    /// Whether [`seal_response`](HsmIoController::seal_response) sealed
+    /// this in-session IO's reply, which is then sent as it is.
+    reply_sealed: bool,
 }
 
 impl UnoHsmIo {
@@ -165,6 +168,7 @@ impl UnoHsmIo {
                 index,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
+                reply_sealed: false,
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
@@ -189,6 +193,7 @@ impl UnoHsmIo {
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
             queue_id,
+            reply_sealed: false,
         }
     }
 
@@ -363,16 +368,13 @@ impl HsmIoController for UnoHsmPal {
     }
 
     /// Copies the response to the host, sealing an in-session TBOR one
-    /// (see [`sealed`]) and setting the CQE length to the frame's.
+    /// (see [`sealed`]) that [`seal_response`](HsmIoController::seal_response)
+    /// has not, and setting the CQE length to the frame's.
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
-        let resp = match sealed::sealed_session(io.sqe())? {
-            Some(id) => {
-                let frame = sealed::sealed_seal(self, io, id, resp).await?;
-                let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
-                io.cqe().view().set_dst_len(frame_len);
-                frame
-            }
-            None => resp,
+        let resp = if self.reply_needs_seal(io) {
+            self.seal_response(io, resp).await?
+        } else {
+            resp
         };
         let sqe = io.sqe().view();
         if resp.len() > sqe.dst_len() as usize {
@@ -381,6 +383,32 @@ impl HsmIoController for UnoHsmPal {
         self.copy_mem_to_host(io, resp, sqe.dst_prp1(), sqe.dst_prp2(), true)
             .await
             .map_err(|_| HsmError::FailedToStartDmaTransaction)
+    }
+
+    /// An in-session TBOR IO whose reply is not sealed yet.
+    fn reply_needs_seal(&self, io: &UnoHsmIo) -> bool {
+        !io.reply_sealed && sealed::sqe_is_sealed(io.sqe())
+    }
+
+    /// Seals an in-session TBOR response (see [`sealed`]) into a new frame
+    /// and sets the CQE length to the frame's; returns any other response,
+    /// or one already sealed, as it is.
+    async fn seal_response<'a>(
+        &'a self,
+        io: &mut UnoHsmIo,
+        resp: &'a HsmDmaBuf,
+    ) -> HsmResult<&'a HsmDmaBuf> {
+        if io.reply_sealed {
+            return Ok(resp);
+        }
+        let Some(id) = sealed::sealed_session(io.sqe())? else {
+            return Ok(resp);
+        };
+        let frame = sealed::sealed_seal(self, io, id, resp).await?;
+        let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
+        io.cqe().view().set_dst_len(frame_len);
+        io.reply_sealed = true;
+        Ok(frame)
     }
 
     async fn recv_oob(&self, io: &UnoHsmIo, index: usize, dst: &mut HsmDmaBuf) -> HsmResult<()> {
@@ -420,13 +448,12 @@ impl HsmIoController for UnoHsmPal {
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
     /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
-    /// IOs, sealed IOs (whose reply [`send_response`] must seal), and IOs
-    /// whose dirty SRAM is too large to scrub with the CPU.
-    ///
-    /// [`send_response`]: HsmIoController::send_response
+    /// IOs, in-session IOs whose reply
+    /// [`seal_response`](HsmIoController::seal_response) has not sealed, and
+    /// IOs whose dirty SRAM is too large to scrub with the CPU.
     fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io> {
         let index = io.index;
-        if sealed::sqe_is_sealed(io.sqe()) {
+        if self.reply_needs_seal(&io) {
             return Err(io);
         }
         let sqe = io.sqe().view();
