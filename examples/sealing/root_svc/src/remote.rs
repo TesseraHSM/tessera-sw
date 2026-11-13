@@ -179,10 +179,7 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
 
 fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
     verify_certificate_chain(chain)?;
-    let mut anchored = false;
-    for cert in chain.iter().take(chain.len().saturating_sub(1)) {
-        anchored |= spki_thumbprint(&public_key(cert)?)? == policy.sata_spki_thumbprint;
-    }
+    let anchored = chain_has_anchor(chain, &policy.sata_spki_thumbprint)?;
     anyhow::ensure!(anchored, "HPKE chain is not endorsed by policy SATA");
     let leaf = chain.last().context("HPKE certificate chain is empty")?;
     anyhow::ensure!(
@@ -190,6 +187,17 @@ fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
         "HPKE key must be P-384"
     );
     Ok(())
+}
+
+fn chain_has_anchor(chain: &[Vec<u8>], anchor: &[u8; 48]) -> Result<bool> {
+    let mut anchored = false;
+    for certificate in chain.iter().take(chain.len().saturating_sub(1)) {
+        let public = public_key(certificate)?;
+        if public.len() == RAW_PUB_LEN {
+            anchored |= spki_thumbprint(&public)? == *anchor;
+        }
+    }
+    Ok(anchored)
 }
 
 fn public_key(certificate: &[u8]) -> Result<Vec<u8>> {
@@ -240,12 +248,7 @@ fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> 
     } else {
         policy.pota_spki_thumbprint
     };
-    let mut anchored = false;
-    for certificate in chain.iter().take(chain.len().saturating_sub(1)) {
-        if spki_thumbprint(&public_key(certificate)?)? == anchor {
-            anchored = true;
-        }
-    }
+    let anchored = chain_has_anchor(chain, &anchor)?;
     anyhow::ensure!(
         anchored,
         "creation sender partition-owner chain does not match its policy anchor"
