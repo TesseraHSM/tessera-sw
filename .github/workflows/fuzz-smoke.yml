@@ -36,7 +36,7 @@ jobs:
       id: ubuntu-setup
     - run: rustup toolchain install nightly
 
-    - run: cargo +nightly fuzz build
+    - run: cargo +nightly fuzz build --features autostart-isolated
     - name: Run fuzz smoke tests (10s each)
       run: |
         TARGETS=$(cargo fuzz list)
@@ -48,7 +48,7 @@ jobs:
         seed=1
         for target in $TARGETS; do
           echo "[$seed] Fuzzing $target for ${{ env.FUZZ_TIME }} seconds..."
-          cargo +nightly fuzz run "$target" -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
+          cargo +nightly fuzz run "$target" --features autostart-isolated -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
           seed=$((seed + 1))
           echo ""
         done
