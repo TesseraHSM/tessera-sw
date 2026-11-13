@@ -46,7 +46,6 @@ use tsra_ddi_tbor_types::SD_SEALING_PUB_KEY_LEN;
 
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::part_policy_with_pota;
-use crate::commands::part_init::pota_thumbprint;
 
 /// `KeyScope` discriminants (wire mirror of the firmware `HsmKeyScope`).
 const SCOPE_SESSION: u8 = 0b001;
@@ -69,7 +68,7 @@ pub(crate) fn finalized_co_session(ctx: &TestCtx) -> SessionHandshake {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())

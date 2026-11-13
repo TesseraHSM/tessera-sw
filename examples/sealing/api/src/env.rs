@@ -5,13 +5,13 @@
 
 use anyhow::Result;
 use tsra_api::HsmPartition;
-use tsra_api::PartPolicy;
 
 use crate::store::SecurityDomainStore;
+use crate::PartPolicy;
 
 /// Domain-lifetime configuration supplied by a sealing service.
 ///
-/// The policy and certificate thumbprints must remain unchanged for the
+/// The policy must remain unchanged for the
 /// security domain's lifetime. The application constructs the complete
 /// policy, including its backing-partition identity, before creating a
 /// security domain. Signing keys and per-operation receiver credentials are
@@ -22,15 +22,6 @@ pub trait SecurityDomainEnv {
 
     /// The complete unified partition policy.
     fn policy(&self) -> &PartPolicy;
-
-    /// SHA-384 thumbprint of the POTA DER certificate.
-    fn pota_thumbprint(&self) -> &[u8];
-
-    /// SHA-384 thumbprint of the SATA DER certificate.
-    fn sata_thumbprint(&self) -> &[u8];
-
-    /// Optional SHA-384 thumbprint of the SAPOTA DER certificate.
-    fn sapota_thumbprint(&self) -> Option<&[u8]>;
 
     /// Root-first DER manufacturer chain cached from the device at startup.
     fn mfgr_cert_chain(&self) -> &[Vec<u8>];

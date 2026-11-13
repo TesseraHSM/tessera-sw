@@ -49,7 +49,6 @@ use tsra_ddi_tbor_types::PSK_LEN;
 
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 
 /// First non-default CO PSK used by rotation tests.
 const GATE_ROTATED_PSK_A: [u8; PSK_LEN] = [
@@ -567,12 +566,7 @@ fn default_psk_gate_part_init_rejected() {
         .expect("open_session must succeed");
 
     let err = ctx
-        .part_init(
-            session.handshake(),
-            &mach_seed(),
-            &known_good_part_policy(),
-            &pota_thumbprint(),
-        )
+        .part_init(session.handshake(), &mach_seed(), &known_good_part_policy())
         .expect_err("PartInit under default PSK must be gated");
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
 }

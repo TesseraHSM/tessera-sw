@@ -15,8 +15,6 @@ use tsra_crypto::aead_envelope::HEADER_LEN as ENVELOPE_HEADER_LEN;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 const MASKED_KEY_METADATA_LEN: usize = 192;
 const ENVELOPE_CIPHERTEXT_OFFSET: usize =
@@ -39,7 +37,7 @@ struct FuzzInput {
 
 struct SourceBackups {
     session_id: u16,
-    policy: [u8; PART_POLICY_LEN],
+    policy: Vec<u8>,
     local_mk_backup: Vec<u8>,
     pok_local_backup: Vec<u8>,
     sd_mk_backup: Vec<u8>,
@@ -57,10 +55,10 @@ fn push_chain(items: &mut Vec<Vec<u8>>, chain: GeneratedChain) -> Vec<CertDescri
 
 /// Convert a wire-LE P-384 public key into big-endian `x || y` bytes for
 /// the receiver certificate fixture.
-fn raw_pub_from_wire(pub_key: &[u8]) -> [u8; POLICY_MAX_KEY_LEN] {
-    assert_eq!(pub_key.len(), POLICY_MAX_KEY_LEN);
+fn raw_pub_from_wire(pub_key: &[u8]) -> [u8; RAW_PUB_LEN] {
+    assert_eq!(pub_key.len(), RAW_PUB_LEN);
 
-    let mut raw = [0u8; POLICY_MAX_KEY_LEN];
+    let mut raw = [0u8; RAW_PUB_LEN];
     for (dst, src) in raw[..COORD_LEN]
         .iter_mut()
         .zip(pub_key[..COORD_LEN].iter().rev())
@@ -85,31 +83,15 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
 
     let pota = CaKey::generate();
     let sata = CaKey::generate();
-    let mut policy = common::known_good_part_policy(pota.raw_pub());
-    let mut policy_value =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&policy).expect("known policy");
-    policy_value.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata.raw_pub(),
-    );
-    policy_value.backup_part_id.copy_from_slice(&part_info.pid);
-    let pid_pub: [u8; POLICY_MAX_KEY_LEN] = part_info
+    let pid_pub: [u8; RAW_PUB_LEN] = part_info
         .pid_pub_key
         .as_slice()
         .try_into()
         .expect("PartInfo public key is P-384");
-    policy_value.backup_part_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, pid_pub);
-    policy.copy_from_slice(policy_value.as_bytes());
+    let policy = common::backup_test_policy(&pota, &sata, &part_info.pid, &pid_pub).encode();
 
     let init = ctx
-        .part_init(
-            &session,
-            &common::mach_seed(),
-            &policy,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&session, &common::mach_seed(), &policy)
         .expect("PartInit");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
@@ -128,8 +110,6 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
     let receiver_chain = make_chain(&sata, &receiver_pub);
     let mut oob_items = Vec::new();
     let receiver_cert_chain = push_chain(&mut oob_items, receiver_chain);
-    let policy_value =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&policy).expect("policy image");
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: sealing_key.masked_key,
@@ -138,7 +118,7 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
         receiver_owner_cert_chain: Vec::new(),
         receiver_part_owner_cert_chain: Vec::new(),
         receiver_report: Default::default(),
-        policy: policy_value,
+        policy: policy.clone(),
     };
     let oob: Vec<&[u8]> = oob_items.iter().map(Vec::as_slice).collect();
     let response = ctx
@@ -178,12 +158,7 @@ fn restore_after_reboot(ctx: &TestCtx, backups: &SourceBackups, mutation: Mutati
 
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(
-            &session,
-            &common::mach_seed(),
-            &backups.policy,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&session, &common::mach_seed(), &backups.policy)
         .expect("PartInit after reboot");
     let pta_chain = make_pta_chain(&backups.pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(

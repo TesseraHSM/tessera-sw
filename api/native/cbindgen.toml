@@ -140,6 +140,7 @@ item_types = [
 "TsraPartProp" = "tsra_part_prop"
 "TsraPartPropId" = "tsra_part_prop_id"
 "TsraPartType" = "tsra_part_type"
+"TsraPolicyKeyFormat" = "tsra_policy_key_format"
 "TsraPotaCallbackOps" = "tsra_pota_callback_ops"
 "TsraPotaEndorsement" = "tsra_pota_endorsement"
 "TsraPotaEndorsementData" = "tsra_pota_endorsement_data"

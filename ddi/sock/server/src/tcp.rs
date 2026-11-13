@@ -437,12 +437,10 @@ mod tests {
         use tsra_ddi_tbor_test_harness::SessionHandshake;
         use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
         use tsra_ddi_tbor_test_harness::encrypt_psk_envelope;
+        use tsra_ddi_tbor_test_harness::policy::TestPolicy;
         use tsra_ddi_tbor_test_harness::x509_fixture::PotaFixture;
         use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
         use tsra_ddi_tbor_types::CertDescriptor;
-        use tsra_ddi_tbor_types::PartPolicy;
-        use tsra_ddi_tbor_types::PolicyKeyKind;
-        use tsra_ddi_tbor_types::PolicyPubKey;
         use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
         use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
         use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
@@ -493,10 +491,8 @@ mod tests {
                     },
                 );
                 let pota = PotaFixture::generate();
-                let mut policy = PartPolicy::zeroed();
-                policy.version.major = 1;
-                policy.pota_pub_key = PolicyPubKey::new(PolicyKeyKind::Ecc384, 96, pota.raw_pub());
-                policy.sata_pub_key = policy.pota_pub_key;
+                let policy =
+                    TestPolicy::new(pota.spki_thumbprint(), pota.spki_thumbprint()).encode();
                 let init = tbor(
                     &device,
                     &TborPartInitReq {
@@ -504,9 +500,6 @@ mod tests {
                         mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
                             .expect("machine seed envelope"),
                         part_policy: policy.clone(),
-                        pota_thumbprint: *pota.thumbprint(),
-                        sata_thumbprint: [0x5A; 48],
-                        ..Default::default()
                     },
                 );
                 let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));

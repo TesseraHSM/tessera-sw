@@ -629,8 +629,7 @@ impl UnoHsmPal {
     /// tenant key survives, then clears only the per-tenant persistent state
     /// (credential, enable-time/provisioning key handles, nonce, session table,
     /// BK3 session key, PIN policy) while PRESERVING the provisioning material
-    /// (sealed BK3 + incarnation flag, PTA public key, policy hash,
-    /// POTA/SATA/SAPOTA thumbprints, PSKs, VM launch GUID, and
+    /// (sealed BK3 + incarnation flag, PTA public key, policy hash, PSKs, VM launch GUID, and
     /// `Masked_BK_BOOT`). Because the vault wipe also removes the identity
     /// private key, a fresh partition identity (keypair + id blob) is
     /// regenerated — matching the *std* reference firmware, whose NSSR/erase
@@ -964,18 +963,10 @@ impl HsmPartitionManager for UnoHsmPal {
 
             // AbsentUntilSet fields — `PartPropNotFound` until provisioned.
             HsmPartPropId::CREDENTIAL if p.credential_valid() => Ok(p.credential()),
-            HsmPartPropId::POTA_THUMBPRINT if p.pota_thumbprint_valid() => Ok(p.pota_thumbprint()),
-            HsmPartPropId::SATA_THUMBPRINT if p.sata_thumbprint_valid() => Ok(p.sata_thumbprint()),
-            HsmPartPropId::SAPOTA_THUMBPRINT if p.sapota_thumbprint_valid() => {
-                Ok(p.sapota_thumbprint())
-            }
             HsmPartPropId::BK3_SESSION if p.bk3_session_valid() => Ok(p.bk3_session()),
             HsmPartPropId::PTA_ECC_PUB_KEY if p.pta_pub_key_valid() => Ok(p.pta_pub_key()),
             HsmPartPropId::POLICY_HASH if p.policy_hash_valid() => Ok(p.policy_hash()),
             HsmPartPropId::CREDENTIAL
-            | HsmPartPropId::POTA_THUMBPRINT
-            | HsmPartPropId::SATA_THUMBPRINT
-            | HsmPartPropId::SAPOTA_THUMBPRINT
             | HsmPartPropId::BK3_SESSION
             | HsmPartPropId::PTA_ECC_PUB_KEY
             | HsmPartPropId::POLICY_HASH => Err(HsmError::PartPropNotFound),
@@ -1027,9 +1018,6 @@ impl HsmPartitionManager for UnoHsmPal {
             }
             HsmPartPropId::MASKED_BK_BOOT => p.set_masked_bk_boot(data),
             HsmPartPropId::BK3_SESSION => p.set_bk3_session(data),
-            HsmPartPropId::POTA_THUMBPRINT => p.set_pota_thumbprint(data),
-            HsmPartPropId::SATA_THUMBPRINT => p.set_sata_thumbprint(data),
-            HsmPartPropId::SAPOTA_THUMBPRINT => p.set_sapota_thumbprint(data),
             HsmPartPropId::PTA_ECC_PUB_KEY => p.set_pta_pub_key(data),
             HsmPartPropId::POLICY_HASH => p.set_policy_hash(data),
             _ => Err(HsmError::UnsupportedCmd),
@@ -1050,9 +1038,6 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::SD_MK_KEY_ID => p.set_sd_mk_key_id(None),
             // AbsentUntilSet byte fields zeroize and reset to absent.
             HsmPartPropId::CREDENTIAL => p.clear_credential(),
-            HsmPartPropId::POTA_THUMBPRINT => p.clear_pota_thumbprint(),
-            HsmPartPropId::SATA_THUMBPRINT => p.clear_sata_thumbprint(),
-            HsmPartPropId::SAPOTA_THUMBPRINT => p.clear_sapota_thumbprint(),
             HsmPartPropId::BK3_SESSION => p.clear_bk3_session(),
             HsmPartPropId::SEALED_BK3 => p.clear_sealed_bk3(),
             HsmPartPropId::MASKED_BK_BOOT => p.clear_masked_bk_boot(),

@@ -64,11 +64,6 @@ use crate::session::PendingHandshake;
 use crate::session::SessionHandshake;
 use crate::session::SessionOpenInitOptions;
 
-/// Fixed default 48-byte SATA thumbprint used by the convenience
-/// [`TestCtx::part_init`] wrapper, whose callers don't exercise the
-/// security-domain inputs.
-const DEFAULT_SATA_THUMBPRINT: [u8; 48] = [0x5A; 48];
-
 /// One-test fixture: an opened backend device handle (with the
 /// process-global test lock held for its lifetime) plus a thin layer
 /// of error-shape assertions. Constructed once per `#[test]`.
@@ -413,46 +408,14 @@ impl TestCtx {
     }
 
     /// Issue `PartInit` on the CO `session` with the canonical
-    /// envelope construction and a fixed default SATA thumbprint (no
-    /// SAPOTA). Returns the decoded [`TborPartInitResp`].
+    /// envelope construction. Returns the decoded [`TborPartInitResp`].
     pub fn part_init(
         &self,
         session: &SessionHandshake,
         mach_seed: &[u8],
         part_policy: &[u8],
-        pota_thumbprint: &[u8],
     ) -> DdiResult<TborPartInitResp> {
-        part_init_helper(
-            &self.dev,
-            session,
-            mach_seed,
-            part_policy,
-            pota_thumbprint,
-            &DEFAULT_SATA_THUMBPRINT,
-            None,
-        )
-    }
-
-    /// Issue `PartInit` with explicit security-domain thumbprint inputs
-    /// (SATA + optional SAPOTA).
-    pub fn part_init_sd(
-        &self,
-        session: &SessionHandshake,
-        mach_seed: &[u8],
-        part_policy: &[u8],
-        pota_thumbprint: &[u8],
-        sata_thumbprint: &[u8],
-        sapota_thumbprint: Option<&[u8]>,
-    ) -> DdiResult<TborPartInitResp> {
-        part_init_helper(
-            &self.dev,
-            session,
-            mach_seed,
-            part_policy,
-            pota_thumbprint,
-            sata_thumbprint,
-            sapota_thumbprint,
-        )
+        part_init_helper(&self.dev, session, mach_seed, part_policy)
     }
 
     /// Issue `PartFinal` re-supplying `part_policy` (must match the one

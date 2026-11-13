@@ -22,14 +22,15 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_tbor_test_harness::policy::TestPolicy;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
-use tsra_ddi_tbor_types::PolicyKeyKind;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
@@ -43,8 +44,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
 use zeroize::Zeroizing;
 
@@ -388,7 +388,7 @@ fn finalized_co_session(ctx: &TestCtx) -> Result<u16, String> {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .map_err(|e| format!("PartInit: {e:?}"))?;
     let chain = harness_call("PTA certificate for the device's CSR", || {
         make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr))
@@ -419,40 +419,17 @@ fn rotate_co_psk(ctx: &TestCtx, psk: &[u8; PSK_LEN]) -> Result<SessionHandshake,
         .map_err(|e| format!("CO session under the new PSK: {e:?}"))
 }
 
-/// A unified `PartPolicy` with the given POTA public key (raw P-384
-/// `X ‖ Y`), placeholder SATA key, no SAPOTA or backing partition.
-fn part_policy_with_pota(pota_raw: &[u8; 96]) -> [u8; PART_POLICY_LEN] {
-    const OFF_POTA: usize = 2;
-    const OFF_SATA: usize = 102;
-    const OFF_FLAGS: usize = 418;
-    const OFF_INFO: usize = 419;
-
-    fn write_pubkey(bytes: &mut [u8], off: usize, key: &[u8; 96]) {
-        bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-        bytes[off + 2..off + 4].copy_from_slice(&96u16.to_le_bytes());
-        bytes[off + 4..off + 4 + 96].copy_from_slice(key);
-    }
-
-    let mut sata = [0u8; 96];
-    for (i, b) in sata.iter_mut().enumerate() {
-        *b = 0x20u8.wrapping_add(i as u8) | 0x80;
-    }
-
-    let mut bytes = [0u8; PART_POLICY_LEN];
-    bytes[0] = 1; // version major
-    write_pubkey(&mut bytes, OFF_POTA, pota_raw);
-    write_pubkey(&mut bytes, OFF_SATA, &sata);
-    bytes[OFF_FLAGS] = 0;
-    bytes[OFF_INFO..OFF_INFO + 64].fill(0xAB);
-    bytes
+/// A CBOR partition policy binding the given POTA public key (raw P-384
+/// `X ‖ Y`), a placeholder SATA key, no SAPOTA or backing partition.
+fn part_policy_with_pota(pota_raw: &[u8; 96]) -> Vec<u8> {
+    let sata: [u8; 96] = core::array::from_fn(|i| 0x20u8.wrapping_add(i as u8) | 0x80);
+    TestPolicy::new(spki_thumbprint(pota_raw), spki_thumbprint(&sata))
+        .with_info(&[0xAB; POLICY_INFO_MAX_LEN])
+        .encode()
 }
 
 fn mach_seed() -> [u8; MACH_SEED_LEN] {
     core::array::from_fn(|i| 0x40 + i as u8)
-}
-
-fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
-    core::array::from_fn(|i| 0x80 ^ i as u8)
 }
 
 /// Import `key` (DER for RSA, raw bytes for AES) with `UnwrapKey` under the

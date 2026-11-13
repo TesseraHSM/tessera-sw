@@ -4,7 +4,10 @@
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <scope_guard.hpp>
+#include <string>
 #include <tsra_api.h>
+#include <utility>
+#include <vector>
 
 #include "handle/part_list_handle.hpp"
 #include "utils/sd_provision.hpp"
@@ -258,32 +261,24 @@ TEST_F(tsra_sess_ex, psk_change_invalid_session_handle)
 // provisioned, so they do not require valid provisioning inputs.
 namespace
 {
-// Well-formed (non-empty, non-null) provisioning inputs. The byte contents and
-// exact lengths are irrelevant for the pre-provisioning validation paths these
-// tests cover, since the FFI rejects them before reaching `part_init_ex`.
+// Non-null provisioning inputs. The policy is one byte over
+// `PART_POLICY_MAX_LEN` (384), so any path that clears the output-buffer
+// probe is rejected by the host-side policy-length guard before the
+// partition is provisioned.
 struct PartInitInputs
 {
     std::vector<uint8_t> mach_seed = std::vector<uint8_t>(32, 0);
-    std::vector<uint8_t> part_policy = std::vector<uint8_t>(32, 0);
-    std::vector<uint8_t> pota = std::vector<uint8_t>(48, 0);
-    std::vector<uint8_t> sata = std::vector<uint8_t>(48, 0);
+    std::vector<uint8_t> part_policy = std::vector<uint8_t>(385, 0);
     tsra_buffer mach_seed_buf{};
     tsra_buffer part_policy_buf{};
-    tsra_buffer pota_buf{};
-    tsra_buffer sata_buf{};
     tsra_sess_ex_part_init_params params{};
 
     PartInitInputs()
     {
         mach_seed_buf = { mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
         part_policy_buf = { part_policy.data(), static_cast<uint32_t>(part_policy.size()) };
-        pota_buf = { pota.data(), static_cast<uint32_t>(pota.size()) };
-        sata_buf = { sata.data(), static_cast<uint32_t>(sata.size()) };
         params.mach_seed = &mach_seed_buf;
         params.part_policy = &part_policy_buf;
-        params.pota_thumbprint = &pota_buf;
-        params.sata_thumbprint = &sata_buf;
-        params.sapota_thumbprint = nullptr;
     }
 };
 } // namespace
@@ -435,12 +430,10 @@ TEST_F(tsra_sess_ex, part_init_null_output_probe)
     });
 }
 
-// A wrong-length `part_policy` buffer is rejected with INVALID_ARGUMENT at
-// the native boundary, before the partition is provisioned. The output
-// buffers are sized to clear the buffer-capacity probe so the failure is
-// attributable to the policy-length guard (the typed Rust API accepts only
-// a `&PartPolicy`, so this length check now lives at the FFI boundary where
-// the opaque image is parsed back into a `PartPolicy`).
+// An oversized `part_policy` buffer is rejected with INVALID_ARGUMENT on the
+// host, before the partition is provisioned. The output buffers are sized to
+// clear the buffer-capacity probe so the failure is attributable to the
+// policy-length guard; the policy contents are validated by firmware.
 TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
 {
     if (!api_rev_at_least(1, 1))
@@ -464,8 +457,8 @@ TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
         auto sess_guard =
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
-        // `PartInitInputs` carries a deliberately wrong-length (32-byte)
-        // policy image; `PART_POLICY_LEN` is 484.
+        // `PartInitInputs` carries a deliberately oversized (385-byte)
+        // policy; `PART_POLICY_MAX_LEN` is 384.
         PartInitInputs in;
         std::vector<uint8_t> csr(512, 0);
         std::vector<uint8_t> report(1024, 0);
@@ -642,9 +635,8 @@ TEST_F(tsra_sess_ex, part_final_size_probe_precedes_policy_parse)
         auto sess_guard =
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
-        // Deliberately wrong-length (32-byte) policy image; `PART_POLICY_LEN`
-        // is 484.
-        std::vector<uint8_t> policy(32, 0);
+        // Deliberately oversized policy; `PART_POLICY_MAX_LEN` is 384.
+        std::vector<uint8_t> policy(385, 0);
         std::vector<uint8_t> cert(1, 0);
         tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
         tsra_buffer cert_buf{ cert.data(), static_cast<uint32_t>(cert.size()) };
@@ -687,7 +679,7 @@ TEST_F(tsra_sess_ex, part_final_rejects_bad_part_policy_len)
         auto sess_guard =
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
-        std::vector<uint8_t> policy(32, 0);
+        std::vector<uint8_t> policy(385, 0);
         std::vector<uint8_t> cert(1, 0);
         tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
         tsra_buffer cert_buf{ cert.data(), static_cast<uint32_t>(cert.size()) };
@@ -736,7 +728,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         auto sess_guard =
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
-        std::vector<uint8_t> policy(485, 0);
+        std::vector<uint8_t> policy(512, 0);
         std::vector<uint8_t> key(kMaskedSealingKeyLen, 0);
         std::vector<uint8_t> backup(kPokLocalBackupLen, 0);
         uint8_t cert = 0;
@@ -779,7 +771,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };
         tsra_buffer local_out{ local.data(), static_cast<uint32_t>(local.size()) };
         tsra_buffer mk_out{ mk.data(), static_cast<uint32_t>(mk.size()) };
-        for (uint32_t len : { 0u, 483u, 485u })
+        for (uint32_t len : { 0u, 385u, 512u })
         {
             SCOPED_TRACE(len);
             policy_buf.len = len;
@@ -852,26 +844,81 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
     });
 }
 
-// The typed partition-policy builder FFI is pure host-side serialization and
-// needs no device, so these run in every lane.
+// The partition-policy builder FFI is pure host-side serialization and needs
+// no device, so these run in every lane.
+namespace
+{
 
-// NULL builder handles are rejected by every entry point.
+std::vector<uint8_t> unhex(const char *hex)
+{
+    std::vector<uint8_t> out;
+    for (size_t i = 0; hex[i] != '\0' && hex[i + 1] != '\0'; i += 2)
+    {
+        out.push_back(static_cast<uint8_t>(std::stoul(std::string(hex + i, 2), nullptr, 16)));
+    }
+    return out;
+}
+
+// P-384 generator G (X || Y) and the SHA-384 of its DER SPKI.
+constexpr const char *kP384G =
+    "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e38"
+    "72760ab73617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d"
+    "7a431d7c90ea0e5f";
+constexpr const char *kP384GThumbprint =
+    "9b816e622b2e1a95723958091bfa35d774110a7475ec59c9425e007a8a84e0ebaabef67249e6a0fe621ae4f4"
+    "d30b0cc8";
+
+tsra_buffer as_buffer(std::vector<uint8_t> &bytes)
+{
+    return tsra_buffer{ bytes.data(), static_cast<uint32_t>(bytes.size()) };
+}
+
+// Allocates a builder with POTA = 0x11.., SATA = 0x22.. thumbprints.
+tsra_part_policy_builder *new_minimal_builder()
+{
+    tsra_part_policy_builder *b = nullptr;
+    EXPECT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
+    std::vector<uint8_t> pota(48, 0x11);
+    std::vector<uint8_t> sata(48, 0x22);
+    tsra_buffer pota_buf = as_buffer(pota);
+    tsra_buffer sata_buf = as_buffer(sata);
+    EXPECT_EQ(
+        tsra_part_policy_builder_set_pota_key(b, TSRA_POLICY_KEY_FORMAT_THUMBPRINT, &pota_buf),
+        TSRA_STATUS_SUCCESS
+    );
+    EXPECT_EQ(
+        tsra_part_policy_builder_set_sata_key(b, TSRA_POLICY_KEY_FORMAT_THUMBPRINT, &sata_buf),
+        TSRA_STATUS_SUCCESS
+    );
+    return b;
+}
+
+tsra_status probe_build(tsra_part_policy_builder *b)
+{
+    tsra_buffer probe{ nullptr, 0 };
+    return tsra_part_policy_build(b, &probe);
+}
+
+} // namespace
+
 TEST(tsra_part_policy_builder, null_handle_rejected)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
-    EXPECT_EQ(tsra_part_policy_builder_set_version(nullptr, 1, 0), TSRA_STATUS_INVALID_ARGUMENT);
+    std::vector<uint8_t> key(48, 0x11);
+    tsra_buffer key_buf = as_buffer(key);
+    EXPECT_EQ(
+        tsra_part_policy_builder_set_pota_key(nullptr, TSRA_POLICY_KEY_FORMAT_THUMBPRINT, &key_buf),
+        TSRA_STATUS_INVALID_ARGUMENT
+    );
     EXPECT_EQ(tsra_part_policy_builder_set_flags(nullptr, 0), TSRA_STATUS_INVALID_ARGUMENT);
-
     tsra_buffer out{ nullptr, 0 };
     EXPECT_EQ(tsra_part_policy_build(nullptr, &out), TSRA_STATUS_INVALID_ARGUMENT);
-
-    // A NULL out-handle pointer is rejected by the constructor.
     EXPECT_EQ(tsra_part_policy_builder_new(nullptr), TSRA_STATUS_INVALID_ARGUMENT);
 
-    // Freeing NULL is a documented no-op (must not crash).
+    // Freeing NULL is a documented no-op.
     tsra_part_policy_builder_free(nullptr);
 }
 
@@ -881,13 +928,11 @@ TEST(tsra_part_policy_builder, misaligned_handle_rejected)
     {
         return;
     }
-    tsra_part_policy_builder *builder = nullptr;
-    ASSERT_EQ(tsra_part_policy_builder_new(&builder), TSRA_STATUS_SUCCESS);
-    ASSERT_NE(builder, nullptr);
-    auto guard =
-        scope_guard::make_scope_exit([&builder] { tsra_part_policy_builder_free(builder); });
+    tsra_part_policy_builder *b = new_minimal_builder();
+    ASSERT_NE(b, nullptr);
+    auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
     auto *misaligned =
-        reinterpret_cast<tsra_part_policy_builder *>(reinterpret_cast<uint8_t *>(builder) + 1);
+        reinterpret_cast<tsra_part_policy_builder *>(reinterpret_cast<uint8_t *>(b) + 1);
 
     EXPECT_EQ(tsra_part_policy_builder_set_flags(misaligned, 0), TSRA_STATUS_INVALID_ARGUMENT);
     tsra_buffer out{ nullptr, 0 };
@@ -895,158 +940,154 @@ TEST(tsra_part_policy_builder, misaligned_handle_rejected)
     EXPECT_EQ(out.len, 0u);
 }
 
-// The two-call size-probe contract: a zero-capacity buffer reports the
-// required length, and a correctly-sized buffer then serializes the image.
+// Size probe, then serialize: the bytes match the minimal golden vector.
 TEST(tsra_part_policy_builder, build_round_trips_via_size_probe)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
-    tsra_part_policy_builder *b = nullptr;
-    ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
+    tsra_part_policy_builder *b = new_minimal_builder();
     ASSERT_NE(b, nullptr);
     auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
 
-    // `PolicyKeyKind::Ecc384` (kind 0) is `X || Y`, exactly
-    // `POLICY_MAX_KEY_LEN` (96) bytes; the firmware rejects any other
-    // length, so the builder requires it too.
-    std::vector<uint8_t> pota(96, 0x11);
-    tsra_buffer pota_buf{ pota.data(), static_cast<uint32_t>(pota.size()) };
-    ASSERT_EQ(tsra_part_policy_builder_set_version(b, 1, 0), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(b, 0, &pota_buf), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_sata_key(b, 0, &pota_buf), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_flags(b, 0), TSRA_STATUS_SUCCESS);
-
-    // Probe: zero-capacity buffer yields the required length.
     tsra_buffer probe{ nullptr, 0 };
     ASSERT_EQ(tsra_part_policy_build(b, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
-    ASSERT_GT(probe.len, 0u);
 
-    // Serialize into a correctly-sized buffer.
+    std::vector<uint8_t> expected{ 0xA4, 0x01, 0x01, 0x02, 0x58, 0x30 };
+    expected.insert(expected.end(), 48, 0x11);
+    expected.insert(expected.end(), { 0x03, 0x58, 0x30 });
+    expected.insert(expected.end(), 48, 0x22);
+    expected.insert(expected.end(), { 0x07, 0x00 });
+    ASSERT_EQ(probe.len, expected.size());
+
     std::vector<uint8_t> image(probe.len, 0);
-    tsra_buffer out{ image.data(), probe.len };
+    tsra_buffer out = as_buffer(image);
     ASSERT_EQ(tsra_part_policy_build(b, &out), TSRA_STATUS_SUCCESS);
-    EXPECT_EQ(out.len, probe.len);
-
-    // The version bytes land at the front of the canonical image.
-    EXPECT_EQ(image[0], 1u);
-    EXPECT_EQ(image[1], 0u);
+    EXPECT_EQ(out.len, expected.size());
+    EXPECT_EQ(image, expected);
 }
 
-TEST(tsra_part_policy_builder, invalid_versions_and_reserved_flags_rejected_at_build)
+TEST(tsra_part_policy_builder, invalid_fields_rejected_at_build)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
-    tsra_part_policy_builder *builder = nullptr;
-    ASSERT_EQ(tsra_part_policy_builder_new(&builder), TSRA_STATUS_SUCCESS);
-    ASSERT_NE(builder, nullptr);
-    auto guard =
-        scope_guard::make_scope_exit([&builder] { tsra_part_policy_builder_free(builder); });
-    std::vector<uint8_t> key(96, 0x11);
-    tsra_buffer key_buf{ key.data(), static_cast<uint32_t>(key.size()) };
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(builder, 0, &key_buf), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_sata_key(builder, 0, &key_buf), TSRA_STATUS_SUCCESS);
-
-    for (uint16_t major = 0; major <= 255; ++major)
+    // Missing SATA.
     {
+        tsra_part_policy_builder *b = nullptr;
+        ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
+        std::vector<uint8_t> pota(48, 0x11);
+        tsra_buffer pota_buf = as_buffer(pota);
         ASSERT_EQ(
-            tsra_part_policy_builder_set_version(builder, static_cast<uint8_t>(major), 255),
+            tsra_part_policy_builder_set_pota_key(b, TSRA_POLICY_KEY_FORMAT_THUMBPRINT, &pota_buf),
             TSRA_STATUS_SUCCESS
         );
-        tsra_buffer out{ nullptr, 0 };
-        EXPECT_EQ(
-            tsra_part_policy_build(builder, &out),
-            major == 1 ? TSRA_STATUS_BUFFER_TOO_SMALL : TSRA_STATUS_INVALID_ARGUMENT
-        ) << "major="
-          << major;
-        if (major != 1)
-        {
-            EXPECT_EQ(out.len, 0u);
-        }
+        EXPECT_EQ(probe_build(b), TSRA_STATUS_INVALID_ARGUMENT);
     }
-
-    ASSERT_EQ(tsra_part_policy_builder_set_version(builder, 1, 0), TSRA_STATUS_SUCCESS);
+    // Reserved flag bits.
     for (uint16_t flags = 0; flags <= 255; ++flags)
     {
+        tsra_part_policy_builder *b = new_minimal_builder();
+        auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
         ASSERT_EQ(
-            tsra_part_policy_builder_set_flags(builder, static_cast<uint8_t>(flags)),
+            tsra_part_policy_builder_set_flags(b, static_cast<uint8_t>(flags)),
             TSRA_STATUS_SUCCESS
         );
-        tsra_buffer out{ nullptr, 0 };
         EXPECT_EQ(
-            tsra_part_policy_build(builder, &out),
+            probe_build(b),
             flags <= 7 ? TSRA_STATUS_BUFFER_TOO_SMALL : TSRA_STATUS_INVALID_ARGUMENT
         ) << "flags="
           << flags;
-        if (flags > 7)
-        {
-            EXPECT_EQ(out.len, 0u);
-        }
+    }
+    // Wrong-length P-384 key: the setter defers validation to build.
+    {
+        tsra_part_policy_builder *b = new_minimal_builder();
+        auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
+        std::vector<uint8_t> short_key(95, 0x33);
+        tsra_buffer key_buf = as_buffer(short_key);
+        ASSERT_EQ(
+            tsra_part_policy_builder_set_pota_key(b, TSRA_POLICY_KEY_FORMAT_ECC_P384, &key_buf),
+            TSRA_STATUS_SUCCESS
+        );
+        EXPECT_EQ(probe_build(b), TSRA_STATUS_INVALID_ARGUMENT);
+    }
+    // Backup partition id without its key.
+    {
+        tsra_part_policy_builder *b = new_minimal_builder();
+        auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
+        std::vector<uint8_t> id(16, 0x44);
+        tsra_buffer id_buf = as_buffer(id);
+        ASSERT_EQ(tsra_part_policy_builder_set_backup_part_id(b, &id_buf), TSRA_STATUS_SUCCESS);
+        EXPECT_EQ(probe_build(b), TSRA_STATUS_INVALID_ARGUMENT);
     }
 }
 
-// Oversized key material is rejected at build time rather than truncated
-// (truncation would yield a *different* key while reporting success).
-TEST(tsra_part_policy_builder, oversized_key_rejected_at_build)
+// An unknown key format is rejected by the setter itself.
+TEST(tsra_part_policy_builder, unknown_key_format_rejected)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
-    tsra_part_policy_builder *b = nullptr;
-    ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
+    tsra_part_policy_builder *b = new_minimal_builder();
     ASSERT_NE(b, nullptr);
     auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
+    std::vector<uint8_t> key(48, 0x11);
+    tsra_buffer key_buf = as_buffer(key);
+    EXPECT_EQ(tsra_part_policy_builder_set_data_key(b, 3, &key_buf), TSRA_STATUS_INVALID_ARGUMENT);
 
-    std::vector<uint8_t> valid_key(96, 0x11);
-    tsra_buffer valid_key_buf{ valid_key.data(), static_cast<uint32_t>(valid_key.size()) };
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(b, 0, &valid_key_buf), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_sata_key(b, 0, &valid_key_buf), TSRA_STATUS_SUCCESS);
-    tsra_buffer probe{ nullptr, 0 };
-    ASSERT_EQ(tsra_part_policy_build(b, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
-
-    // `POLICY_MAX_KEY_LEN` is 96; one byte over must not fit.
-    std::vector<uint8_t> too_long(97, 0x22);
-    tsra_buffer key_buf{ too_long.data(), static_cast<uint32_t>(too_long.size()) };
-    // The setter defers validation; it still reports success.
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(b, 0, &key_buf), TSRA_STATUS_SUCCESS);
-
-    std::vector<uint8_t> image(512, 0);
-    tsra_buffer out{ image.data(), static_cast<uint32_t>(image.size()) };
-    EXPECT_EQ(tsra_part_policy_build(b, &out), TSRA_STATUS_INVALID_ARGUMENT);
+    std::vector<uint8_t> out(48);
+    tsra_buffer out_buf = as_buffer(out);
+    EXPECT_EQ(tsra_policy_key_thumbprint(3, &key_buf, &out_buf), TSRA_STATUS_INVALID_ARGUMENT);
 }
 
-// A known key kind must carry its exact firmware-required length. An
-// `Ecc384` (kind 0) key is `X || Y` = 96 bytes; a shorter key merely
-// "fits" the 96-byte slot but is rejected at build time, since firmware
-// rejects every non-96-byte Ecc384 key.
-TEST(tsra_part_policy_builder, wrong_length_ecc384_rejected_at_build)
+// Raw P-384, its DER SPKI and the thumbprint itself all yield the same value.
+TEST(tsra_part_policy_builder, key_thumbprint_matches_vector)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
-    tsra_part_policy_builder *b = nullptr;
-    ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
-    ASSERT_NE(b, nullptr);
-    auto guard = scope_guard::make_scope_exit([&b] { tsra_part_policy_builder_free(b); });
+    std::vector<uint8_t> raw = unhex(kP384G);
+    std::vector<uint8_t> spki = unhex("3076301006072a8648ce3d020106052b8104002203620004");
+    spki.insert(spki.end(), raw.begin(), raw.end());
+    std::vector<uint8_t> expected = unhex(kP384GThumbprint);
+    ASSERT_EQ(raw.size(), 96u);
+    ASSERT_EQ(expected.size(), 48u);
 
-    std::vector<uint8_t> valid_key(96, 0x11);
-    tsra_buffer valid_key_buf{ valid_key.data(), static_cast<uint32_t>(valid_key.size()) };
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(b, 0, &valid_key_buf), TSRA_STATUS_SUCCESS);
-    ASSERT_EQ(tsra_part_policy_builder_set_sata_key(b, 0, &valid_key_buf), TSRA_STATUS_SUCCESS);
     tsra_buffer probe{ nullptr, 0 };
-    ASSERT_EQ(tsra_part_policy_build(b, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
+    tsra_buffer raw_buf = as_buffer(raw);
+    ASSERT_EQ(
+        tsra_policy_key_thumbprint(TSRA_POLICY_KEY_FORMAT_ECC_P384, &raw_buf, &probe),
+        TSRA_STATUS_BUFFER_TOO_SMALL
+    );
+    EXPECT_EQ(probe.len, 48u);
 
-    // 48 bytes fits the slot but is not a well-formed Ecc384 key.
-    std::vector<uint8_t> too_short(48, 0x33);
-    tsra_buffer key_buf{ too_short.data(), static_cast<uint32_t>(too_short.size()) };
-    ASSERT_EQ(tsra_part_policy_builder_set_pota_key(b, 0, &key_buf), TSRA_STATUS_SUCCESS);
+    std::pair<tsra_policy_key_format, std::vector<uint8_t> *> cases[] = {
+        { TSRA_POLICY_KEY_FORMAT_ECC_P384, &raw },
+        { TSRA_POLICY_KEY_FORMAT_SPKI_DER, &spki },
+        { TSRA_POLICY_KEY_FORMAT_THUMBPRINT, &expected },
+    };
+    for (auto &[format, key] : cases)
+    {
+        std::vector<uint8_t> out(48, 0);
+        tsra_buffer key_buf = as_buffer(*key);
+        tsra_buffer out_buf = as_buffer(out);
+        ASSERT_EQ(tsra_policy_key_thumbprint(format, &key_buf, &out_buf), TSRA_STATUS_SUCCESS)
+            << "format=" << format;
+        EXPECT_EQ(out, expected) << "format=" << format;
+    }
 
-    std::vector<uint8_t> image(512, 0);
-    tsra_buffer out{ image.data(), static_cast<uint32_t>(image.size()) };
-    EXPECT_EQ(tsra_part_policy_build(b, &out), TSRA_STATUS_INVALID_ARGUMENT);
+    // A malformed key is rejected, not hashed.
+    raw.pop_back();
+    tsra_buffer short_buf = as_buffer(raw);
+    std::vector<uint8_t> out(48, 0);
+    tsra_buffer out_buf = as_buffer(out);
+    EXPECT_EQ(
+        tsra_policy_key_thumbprint(TSRA_POLICY_KEY_FORMAT_ECC_P384, &short_buf, &out_buf),
+        TSRA_STATUS_INVALID_ARGUMENT
+    );
 }

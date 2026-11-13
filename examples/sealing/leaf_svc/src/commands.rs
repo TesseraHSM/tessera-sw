@@ -25,13 +25,13 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_sealing_api::device_cert_chain;
 use tsra_sealing_api::load_local_recovery;
 use tsra_sealing_api::load_partition_recovery;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_common::http::Client;
 use tsra_sealing_common::runtime::finish_restore;
 use tsra_sealing_common::runtime::open_restore_session;
 use tsra_sealing_common::wire;
-use zerocopy::IntoBytes;
 
 use super::env::LeafEnv;
 use super::validate_name;
@@ -153,9 +153,11 @@ fn create(args: &CreateArgs) -> Result<()> {
     record["seed"] = hex::encode(seed).into();
     record["instance"] = "primary".into();
     let mut env = LeafEnv::from_record(store, &record)?;
+    let public = spki_thumbprint(&public)?;
     anyhow::ensure!(
-        env.policy.backup_part_id.as_slice() == pid
-            && env.policy.backup_part_pub_key.data.as_slice() == public,
+        env.policy
+            .backup_part
+            .is_some_and(|(id, thumbprint)| id.as_slice() == pid && thumbprint == public),
         "leaf policy is bound to another partition"
     );
     let (chain, evidence) = env.validate_receiver(&receiver)?;

@@ -20,7 +20,6 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::policy::PartPolicy;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
 use crate::CertDescriptor;
@@ -87,9 +86,10 @@ pub struct TborSdCreateRemoteBackupReq {
     /// Receiver attestation-report (COSE_Sign1) descriptor.
     pub receiver_report: ReportDescriptor,
 
-    /// Unified [`PartPolicy`] describing the security domain to create.
-    /// Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy describing the security domain to create.
+    /// Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 }
 
 /// Host-facing TBOR `SdCreateRemoteBackup` response.
@@ -131,13 +131,16 @@ mod tests {
             receiver_owner_cert_chain: Vec::new(),
             receiver_part_owner_cert_chain: Vec::new(),
             receiver_report: ReportDescriptor::default(),
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
         };
 
         let mut buf = [0u8; 1024];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy image must be carried in the data section.
-        assert!(frame.len() > 584, "encoded frame must carry the policy");
+        // The maximum-length policy image must be carried in the data section.
+        assert!(
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN,
+            "encoded frame must carry the policy"
+        );
     }
 }

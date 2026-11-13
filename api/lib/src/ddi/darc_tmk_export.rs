@@ -6,7 +6,7 @@
 //!
 //! `DarcTmkExport` seals the source's TMK to an authenticated target. The
 //! handler re-hashes the supplied `policy`, validates the **target**
-//! certificate chain against the policy `DATAPubKey` to recover the
+//! certificate chain against the policy DATA key thumbprint to recover the
 //! target's KEX public key (`RcvrPub`), unmasks the source's own KEX key
 //! (`SndrPriv`) and the TMK, and returns `sealed_tmk` as an HPKE-Auth seal
 //! of the TMK to `RcvrPub`.
@@ -35,8 +35,8 @@ pub(crate) const DARC_CERT_CHAIN_MAX_CERTS: usize = 2;
 /// * `masked_tmk` - The masked TMK (from
 ///   [`darc_tmk_gen`](super::darc_tmk_gen)), exactly [`MASKED_TMK_LEN`]
 ///   bytes.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes)
-///   whose `DATAPubKey` anchors `target_cert_chain`.
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes)
+///   whose DATA key thumbprint anchors `target_cert_chain`.
 /// * `target_cert_chain` - DATA-anchored target certificate chain
 ///   (1..=2 certs); DER carried out of band.
 ///
@@ -58,7 +58,7 @@ pub(crate) fn darc_tmk_export(
     let masked_tmk: [u8; MASKED_TMK_LEN] = masked_tmk
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     let mut oob: Vec<&[u8]> = Vec::new();
     let target_cert_chain =

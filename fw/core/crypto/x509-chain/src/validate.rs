@@ -27,6 +27,7 @@ use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -34,6 +35,9 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use crate::ecdsa;
 use crate::parse::parse_cert;
+use crate::spki::p384_spki_thumbprint;
+use crate::spki::P384_SPKI_LEN;
+use crate::spki::SPKI_THUMBPRINT_LEN;
 use crate::types::key_usage;
 use crate::types::CertInfo;
 use crate::types::EcPubKey;
@@ -423,9 +427,10 @@ pub const MAX_CERT_DER_LEN: usize = 2048;
 ///
 /// * `anchor == None` — the chain is trusted by its self-signed root
 ///   alone (no external anchor).
-/// * `anchor == Some(pubkey)` — some **non-leaf** (issuing) certificate's
-///   public key MUST equal `pubkey` (raw big-endian `X‖Y`), binding the
-///   chain to an external trust anchor (e.g. a policy POTA / SATA key).
+/// * `anchor == Some(thumbprint)` — some **non-leaf** (issuing)
+///   certificate's P-384 public-key thumbprint (see
+///   [`p384_spki_thumbprint`]) MUST equal `thumbprint`, binding the chain
+///   to an external trust anchor (e.g. a policy POTA / SATA key).
 ///
 /// On success `leaf_out` is filled with the leaf public key (raw
 /// big-endian `X‖Y`); its length must equal the leaf key length.
@@ -444,7 +449,7 @@ pub async fn validate_chain<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     fetch: F,
 ) -> HsmResult<()>
@@ -472,7 +477,7 @@ pub async fn validate_issuing_chain<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     fetch: F,
 ) -> HsmResult<()>
@@ -489,7 +494,7 @@ async fn validate_chain_inner<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     mut fetch: F,
     terminal_is_issuing_ca: bool,
@@ -524,6 +529,14 @@ where
     };
     // A chain with no anchor requirement is trivially "anchored".
     let mut anchored = anchor.is_none();
+    // Thumbprint scratch, allocated once only when an anchor is required.
+    let mut thumb_bufs = match anchor {
+        Some(_) => Some((
+            alloc.dma_alloc(P384_SPKI_LEN)?,
+            alloc.dma_alloc(SPKI_THUMBPRINT_LEN)?,
+        )),
+        None => None,
+    };
 
     // Double-buffering: [`ChainValidator`] only needs the *previous*
     // certificate alive while it checks the current one, so two
@@ -549,15 +562,15 @@ where
         {
             let curr_cert = parse_cert(&curr[..len])?;
 
-            // Trust-anchor binding: some non-leaf (issuing) certificate's
-            // public key must equal the anchor. Both the cert key and the
-            // anchor are big-endian, so this is a direct byte compare.
-            if let Some(anchor) = anchor {
-                if i + 1 < descriptors.len() {
-                    let point: &[u8] = curr_cert.pub_key.point;
-                    if point == anchor {
-                        anchored = true;
-                    }
+            // Trust-anchor binding: some non-leaf (issuing) P-384
+            // certificate's public-key thumbprint must equal the anchor.
+            if let (Some(anchor), Some((spki, thumb))) = (anchor, thumb_bufs.as_mut()) {
+                if !anchored
+                    && i + 1 < descriptors.len()
+                    && curr_cert.pub_key.curve == HsmEccCurve::P384
+                {
+                    p384_spki_thumbprint(pal, io, spki, curr_cert.pub_key.point, thumb).await?;
+                    anchored = &thumb[..] == anchor.as_slice();
                 }
             }
 

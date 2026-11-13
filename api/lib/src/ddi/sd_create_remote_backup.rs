@@ -4,8 +4,8 @@
 //! `SdCreateRemoteBackup` (opcode `0x0A`) over the TBOR transport at the
 //! DDI layer.
 //!
-//! Creates a new security domain from a caller-supplied unified
-//! `PartPolicy`, returning the remote partition-owner-key backup together
+//! Creates a new security domain from a caller-supplied
+//! partition policy, returning the remote partition-owner-key backup together
 //! with the device-local partition-owner-key and security-domain
 //! masking-key backups. Runs **inside an already-open session**; the
 //! request carries the active session id, which the firmware dispatcher
@@ -30,7 +30,7 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 
 /// Issue `SdCreateRemoteBackup` (opcode `0x0A`) on the active session.
 ///
-/// Creates a new security domain from the caller-supplied unified
+/// Creates a new security domain from the caller-supplied
 /// `policy`, using the sender's masked sealing key and the receiver's
 /// attestation evidence, and returns the remote backup together with the
 /// device-local backups.
@@ -48,7 +48,7 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 ///   report), transmitted out of band.  Verified only when the policy sets
 ///   `require_trusted_sa_key`; pass empty chains and an empty report
 ///   otherwise.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 ///
 /// # Errors
 ///
@@ -68,7 +68,7 @@ pub(crate) fn sd_create_remote_backup_ex(
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Flatten the receiver cert chain and evidence into descriptors +
     // shared OOB items.  The receiver chain is pushed first so its
@@ -76,16 +76,10 @@ pub(crate) fn sd_create_remote_backup_ex(
     let mut oob: Vec<&[u8]> = Vec::new();
     let receiver_chain = push_cert_chain(receiver_cert_chain, &mut oob, EVIDENCE_CHAIN_MAX_CERTS)?;
 
-    // The attestation evidence is verified by the firmware
-    // only when the policy sets `require_trusted_sa_key`; otherwise it is
-    // ignored.  Pack (and validate) it only in that case, and pack empty
-    // descriptors — shipping no DER bytes — when the flag is clear, so the
-    // documented flag-clear contract (empty evidence) is expressible.
-    let receiver = if policy.flags.require_trusted_sa_key() {
-        push_evidence(receiver_evidence, &mut oob)?
-    } else {
-        EvidenceDescriptors::empty()
-    };
+    // The attestation evidence is verified by the firmware only when the
+    // policy sets `require_trusted_sa_key`; empty evidence ships no DER
+    // bytes.
+    let receiver = push_evidence_if_present(receiver_evidence, &mut oob)?;
 
     let req = TborSdCreateRemoteBackupReq {
         session_id,

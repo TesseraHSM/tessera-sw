@@ -17,15 +17,15 @@ use tsra_ddi_tbor_types::*;
 
 use super::*;
 
-/// Decodes a caller-supplied unified `PartPolicy` image
-/// ([`PART_POLICY_LEN`] bytes), failing fast with
-/// [`HsmError::InvalidArgument`] on a wrong length or malformed image.
-pub(crate) fn decode_policy(policy: &[u8]) -> HsmResult<PartPolicy> {
-    if policy.len() != PART_POLICY_LEN {
+/// Validates the length of a caller-supplied partition policy document
+/// (`1..=`[`PART_POLICY_MAX_LEN`] bytes) and returns its wire copy.
+///
+/// The document's contents are validated by the device.
+pub(crate) fn policy_wire(policy: &[u8]) -> HsmResult<Vec<u8>> {
+    if policy.is_empty() || policy.len() > PART_POLICY_MAX_LEN {
         return Err(HsmError::InvalidArgument);
     }
-    <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(policy)
-        .map_err(|_| HsmError::InvalidArgument)
+    Ok(policy.to_vec())
 }
 
 /// Wire descriptors for one attestation party: the three cert-chain
@@ -54,6 +54,28 @@ impl EvidenceDescriptors {
                 length: tbor_int::U16::new(0),
             },
         }
+    }
+}
+
+/// Like [`push_evidence`], but packs [`EvidenceDescriptors::empty`]
+/// (shipping no DER bytes) when `evidence` carries nothing.
+///
+/// The firmware verifies the evidence only when the policy sets
+/// `require_trusted_sa_key` and ignores it otherwise. The host does not
+/// parse the policy, so callers express the flag-clear case by passing
+/// empty evidence.
+pub(crate) fn push_evidence_if_present<'a>(
+    evidence: &HsmSdEvidence<'a>,
+    oob: &mut Vec<&'a [u8]>,
+) -> HsmResult<EvidenceDescriptors> {
+    let is_empty = evidence.mfgr_cert_chain.is_empty()
+        && evidence.owner_cert_chain.is_empty()
+        && evidence.part_owner_cert_chain.is_empty()
+        && evidence.report.is_empty();
+    if is_empty {
+        Ok(EvidenceDescriptors::empty())
+    } else {
+        push_evidence(evidence, oob)
     }
 }
 

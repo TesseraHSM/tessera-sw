@@ -62,7 +62,6 @@ use tsra_ddi_tbor_types::TborPartInfoResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 
@@ -71,8 +70,6 @@ use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::open_co_with;
 use crate::commands::part_init::part_policy_with_pota;
-use crate::commands::part_init::pota_thumbprint;
-use crate::commands::part_init::sata_thumbprint;
 
 const PART_STATE_INITIALIZED: u8 = 5;
 
@@ -91,7 +88,7 @@ fn slot2_pid_cert_after_finalization() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
     let chain = make_pta_chain_csr_subject(&pota, &init.pta_csr);
 
@@ -160,7 +157,7 @@ fn slot2_pid_cert_serial_is_not_all_zeros() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
     let chain = make_pta_chain_csr_subject(&pota, &init.pta_csr);
     ctx.part_final(&session, &policy, &[], &chain.der_items())
@@ -209,7 +206,7 @@ fn slot2_pid_cert_basic_constraints_has_no_path_len() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
     let chain = make_pta_chain_csr_subject(&pota, &init.pta_csr);
     ctx.part_final(&session, &policy, &[], &chain.der_items())
@@ -300,16 +297,15 @@ fn issue_pta_chain(
     pota: &CaKey,
     seed: &[u8],
     policy: &[u8],
-    thumb: &[u8],
 ) -> PtaChain {
     let init = ctx
-        .part_init(session, seed, policy, thumb)
+        .part_init(session, seed, policy)
         .expect("PartInit roundtrip");
     make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr))
 }
 
 /// Build the `PartPolicy` bound to `fixture`'s POTA public key.
-fn pota_policy(fixture: &PotaFixture) -> [u8; PART_POLICY_LEN] {
+fn pota_policy(fixture: &PotaFixture) -> Vec<u8> {
     part_policy_with_pota(&fixture.raw_pub())
 }
 
@@ -369,14 +365,7 @@ fn run_part_init(
 ) -> [u8; SEC1_PUB_LEN] {
     let policy = pota_policy(fixture);
     let resp = ctx
-        .part_init_sd(
-            session,
-            seed,
-            &policy,
-            fixture.thumbprint(),
-            &sata_thumbprint(),
-            None,
-        )
+        .part_init(session, seed, &policy)
         .expect("PartInit roundtrip");
     pta_pub_from_csr(&resp.pta_csr)
 }
@@ -414,14 +403,7 @@ fn part_final_smoke_roundtrip() {
     // into the policy so the chain can be validated against it.
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
-    let chain = issue_pta_chain(
-        &ctx,
-        &session,
-        &pota,
-        &mach_seed(),
-        &policy,
-        &pota_thumbprint(),
-    );
+    let chain = issue_pta_chain(&ctx, &session, &pota, &mach_seed(), &policy);
 
     let resp = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -443,14 +425,13 @@ fn part_final_restore_prev_backup() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     // First device: mint a backup, then release the device (drops the
     // process-global test lock so a second device can be opened).
     let (backup, chain) = {
         let ctx1 = TestCtx::new();
         let session1 = bootstrap_rotated_co(&ctx1, &ROTATED_CO_PSK);
-        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy, &thumb);
+        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy);
         let backup = ctx1
             .part_final(&session1, &policy, &[], &chain.der_items())
             .expect("PartFinal roundtrip")
@@ -462,7 +443,7 @@ fn part_final_restore_prev_backup() {
     // Second device, same seed/owner: restore from the prior backup.
     let ctx2 = TestCtx::new();
     let session2 = bootstrap_rotated_co(&ctx2, &ROTATED_CO_PSK);
-    ctx2.part_init(&session2, &seed, &policy, &thumb)
+    ctx2.part_init(&session2, &seed, &policy)
         .expect("PartInit roundtrip");
     let resp = ctx2
         .part_final(&session2, &policy, &backup, &chain.der_items())
@@ -482,13 +463,12 @@ fn part_final_reject_tampered_backup() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     // First device: mint a backup, then release the test lock.
     let (mut backup, chain) = {
         let ctx1 = TestCtx::new();
         let session1 = bootstrap_rotated_co(&ctx1, &ROTATED_CO_PSK);
-        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy, &thumb);
+        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy);
         let backup = ctx1
             .part_final(&session1, &policy, &[], &chain.der_items())
             .expect("PartFinal roundtrip")
@@ -502,7 +482,7 @@ fn part_final_reject_tampered_backup() {
 
     let ctx2 = TestCtx::new();
     let session2 = bootstrap_rotated_co(&ctx2, &ROTATED_CO_PSK);
-    ctx2.part_init(&session2, &seed, &policy, &thumb)
+    ctx2.part_init(&session2, &seed, &policy)
         .expect("PartInit roundtrip");
     ctx2.part_final(&session2, &policy, &backup, &chain.der_items())
         .expect_err("PartFinal with a tampered backup must fail the AEAD tag check");
@@ -533,7 +513,7 @@ fn part_final_reject_policy_mismatch() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
 
-    ctx.part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+    ctx.part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Flip a byte in the `info` tail (still a structurally valid policy,
@@ -562,14 +542,7 @@ fn part_final_partition_serves_io_when_initialized() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
-    let chain = issue_pta_chain(
-        &ctx,
-        &session,
-        &pota,
-        &mach_seed(),
-        &policy,
-        &pota_thumbprint(),
-    );
+    let chain = issue_pta_chain(&ctx, &session, &pota, &mach_seed(), &policy);
 
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
@@ -888,13 +861,12 @@ fn part_final_tampered_backup_failure_allows_valid_backup_retry() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let (backup, chain) = {
         let ctx1 = TestCtx::new();
         let session1 = bootstrap_rotated_co(&ctx1, &ROTATED_CO_PSK);
 
-        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy, &thumb);
+        let chain = issue_pta_chain(&ctx1, &session1, &pota, &seed, &policy);
 
         let backup = ctx1
             .part_final(&session1, &policy, &[], &chain.der_items())
@@ -907,7 +879,7 @@ fn part_final_tampered_backup_failure_allows_valid_backup_retry() {
     let ctx2 = TestCtx::new();
     let session2 = bootstrap_rotated_co(&ctx2, &ROTATED_CO_PSK);
 
-    ctx2.part_init(&session2, &seed, &policy, &thumb)
+    ctx2.part_init(&session2, &seed, &policy)
         .expect("PartInit roundtrip");
 
     let before_reject = read_part_info(&ctx2);

@@ -7,18 +7,16 @@ use anyhow::Context;
 use anyhow::Result;
 use jzon::JsonValue;
 use tsra_api::HsmPartition;
-use tsra_api::PartPolicy;
-use tsra_api::PolicyKeyKind;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_sealing_api::device_cert_chain;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::SecurityDomainEnv;
-use tsra_sealing_api::RAW_PUB_LEN;
 use tsra_sealing_common::evidence;
 use tsra_sealing_common::http::Client;
 use tsra_sealing_common::wire;
 use tsra_sealing_report::verify_certificate_chain;
-use zerocopy::IntoBytes;
 
 use super::validate_name;
 use crate::pki;
@@ -36,7 +34,6 @@ pub(super) struct LeafEnv {
     pub sapota: Vec<u8>,
     pub manufacturer: Vec<Vec<u8>>,
     pub store: FileStore,
-    thumbprints: [[u8; 48]; 3],
 }
 
 impl LeafEnv {
@@ -57,13 +54,9 @@ impl LeafEnv {
             .to_owned();
         Client::new(&root)?;
         let policy_bytes = wire::blob(record, "policy")?;
-        let policy = PartPolicy::ref_from_wire(&policy_bytes)
-            .context("invalid leaf policy")?
-            .clone();
+        let policy = PartPolicy::from_bytes(&policy_bytes).context("invalid leaf policy")?;
         let root_bytes = wire::blob(record, "root_policy")?;
-        let root_policy = PartPolicy::ref_from_wire(&root_bytes)
-            .context("invalid root policy")?
-            .clone();
+        let root_policy = PartPolicy::from_bytes(&root_bytes).context("invalid root policy")?;
         anyhow::ensure!(
             policy.flags.require_trusted_sa_key() && !policy.flags.allow_peer_cloning(),
             "leaf policy must require trusted SA and disable peer cloning"
@@ -71,24 +64,21 @@ impl LeafEnv {
         let pota = wire::blob(record, "pota")?;
         let sata = wire::blob(record, "sata")?;
         let sapota = wire::blob(record, "sapota")?;
-        for (certificate, public) in [
-            (&pota, &policy.pota_pub_key),
-            (&sata, &policy.sata_pub_key),
-            (&sapota, &policy.sapota_pub_key),
-            (&sapota, &root_policy.pota_pub_key),
+        for (certificate, thumbprint) in [
+            (&pota, Some(policy.pota_spki_thumbprint)),
+            (&sata, Some(policy.sata_spki_thumbprint)),
+            (&sapota, policy.sapota_spki_thumbprint),
+            (&sapota, Some(root_policy.pota_spki_thumbprint)),
         ] {
             verify_certificate_chain(std::slice::from_ref(certificate))?;
             anyhow::ensure!(
-                public.kind() == PolicyKeyKind::Ecc384
-                    && public.len() == RAW_PUB_LEN
-                    && evidence::cert_public(certificate)? == public.data,
+                thumbprint == Some(spki_thumbprint(&evidence::cert_public(certificate)?)?),
                 "leaf authority certificate does not match policy"
             );
         }
         anyhow::ensure!(
-            policy.backup_part_pub_key.kind() == PolicyKeyKind::Ecc384
-                && policy.backup_part_pub_key.len() == RAW_PUB_LEN,
-            "invalid leaf backing partition key"
+            policy.backup_part.is_some(),
+            "leaf policy has no backing partition"
         );
         Ok(Self {
             policy,
@@ -99,11 +89,6 @@ impl LeafEnv {
             seed: wire::blob(record, "seed")?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid leaf seed"))?,
-            thumbprints: [
-                pki::thumbprint(&pota),
-                pki::thumbprint(&sata),
-                pki::thumbprint(&sapota),
-            ],
             pota,
             sata,
             sapota,
@@ -162,7 +147,10 @@ impl LeafEnv {
         let (_, public) = evidence::verify_attested_key(
             &attestation,
             &self.root_policy,
-            &self.policy.sapota_pub_key.data,
+            &self
+                .policy
+                .sapota_spki_thumbprint
+                .context("leaf policy has no SAPOTA thumbprint")?,
         )?;
         anyhow::ensure!(
             attestation.part_owner_cert_chain.first() == Some(&self.sapota),
@@ -180,15 +168,6 @@ impl SecurityDomainEnv for LeafEnv {
     type Store = FileStore;
     fn policy(&self) -> &PartPolicy {
         &self.policy
-    }
-    fn pota_thumbprint(&self) -> &[u8] {
-        &self.thumbprints[0]
-    }
-    fn sata_thumbprint(&self) -> &[u8] {
-        &self.thumbprints[1]
-    }
-    fn sapota_thumbprint(&self) -> Option<&[u8]> {
-        Some(&self.thumbprints[2])
     }
     fn mfgr_cert_chain(&self) -> &[Vec<u8>] {
         &self.manufacturer

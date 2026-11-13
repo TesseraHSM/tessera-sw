@@ -13,8 +13,6 @@ use libfuzzer_sys::fuzz_target;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 const CHAIN_LEAF_INDEX: usize = 1;
 const POLICY_MUTATION_MASK: u8 = 1;
@@ -47,7 +45,7 @@ struct FuzzInput {
 
 struct Fixture {
     session_id: u16,
-    policy: [u8; PART_POLICY_LEN],
+    policy: Vec<u8>,
     request: TborSdCreateRemoteBackupReq,
     oob_items: Vec<Vec<u8>>,
     receiver_leaf_index: usize,
@@ -57,35 +55,29 @@ struct Fixture {
 /// Build a remote-backup policy with optional trusted-SA enforcement and
 /// optional binding to the backing partition's PID and public key.
 fn build_policy(
-    pota_pub: [u8; POLICY_MAX_KEY_LEN],
-    sata_pub: [u8; POLICY_MAX_KEY_LEN],
-    sapota_pub: Option<[u8; POLICY_MAX_KEY_LEN]>,
+    pota: &CaKey,
+    sata: &CaKey,
+    sapota: Option<&CaKey>,
     pid: &[u8],
     pid_pub: &[u8],
     bind_backing_partition: bool,
-) -> [u8; PART_POLICY_LEN] {
-    let mut policy_bytes = common::known_good_part_policy(pota_pub);
-    let mut policy =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&policy_bytes).expect("known policy");
-
-    policy.sata_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, sata_pub);
-    if let Some(sapota_pub) = sapota_pub {
-        policy.sapota_pub_key =
-            PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, sapota_pub);
-        policy.flags = PolicyFlags::from_bits(PolicyFlags::REQUIRE_TRUSTED_SA_KEY);
+) -> Vec<u8> {
+    let mut policy = common::known_good_test_policy(pota.spki_thumbprint());
+    policy.sata_spki_thumbprint = sata.spki_thumbprint();
+    if let Some(sapota) = sapota {
+        policy = policy
+            .with_sapota(sapota.spki_thumbprint())
+            .with_flags(PolicyFlags::REQUIRE_TRUSTED_SA_KEY);
     }
 
     if bind_backing_partition {
-        policy.backup_part_id.copy_from_slice(pid);
-        let pid_pub: [u8; POLICY_MAX_KEY_LEN] =
-            pid_pub.try_into().expect("PartInfo public key is P-384");
-        policy.backup_part_pub_key =
-            PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, pid_pub);
+        let pid: [u8; POLICY_BACKUP_PART_ID_LEN] =
+            pid.try_into().expect("PartInfo PID has the policy length");
+        let pid_pub: [u8; RAW_PUB_LEN] = pid_pub.try_into().expect("PartInfo public key is P-384");
+        policy = policy.with_backup_part(pid, spki_thumbprint(&pid_pub));
     }
 
-    policy_bytes.copy_from_slice(policy.as_bytes());
-    policy_bytes
+    policy.encode()
 }
 
 /// Append the root and leaf certificates to the OOB items in chain order
@@ -99,10 +91,10 @@ fn push_chain(items: &mut Vec<Vec<u8>>, chain: GeneratedChain) -> Vec<CertDescri
 
 /// Convert a wire-LE P-384 public key into big-endian `x || y` bytes for
 /// the receiver certificate fixture.
-fn raw_pub_from_wire(pub_key: &[u8]) -> [u8; POLICY_MAX_KEY_LEN] {
-    assert_eq!(pub_key.len(), POLICY_MAX_KEY_LEN);
+fn raw_pub_from_wire(pub_key: &[u8]) -> [u8; RAW_PUB_LEN] {
+    assert_eq!(pub_key.len(), RAW_PUB_LEN);
 
-    let mut raw = [0u8; POLICY_MAX_KEY_LEN];
+    let mut raw = [0u8; RAW_PUB_LEN];
     for (dst, src) in raw[..COORD_LEN]
         .iter_mut()
         .zip(pub_key[..COORD_LEN].iter().rev())
@@ -135,21 +127,16 @@ fn build_fixture(
     let sata = CaKey::generate();
     let sapota = trusted_sa.then(CaKey::generate);
     let policy = build_policy(
-        pota.raw_pub(),
-        sata.raw_pub(),
-        sapota.as_ref().map(CaKey::raw_pub),
+        &pota,
+        &sata,
+        sapota.as_ref(),
         &part_info.pid,
         &part_info.pid_pub_key,
         bind_backing_partition,
     );
 
     let init = ctx
-        .part_init(
-            &session,
-            &common::mach_seed(),
-            &policy,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&session, &common::mach_seed(), &policy)
         .expect("PartInit");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &pta_chain.der_items())
@@ -196,7 +183,7 @@ fn build_fixture(
     let mut report_index = None;
 
     if trusted_sa {
-        let pid_pub: [u8; POLICY_MAX_KEY_LEN] = part_info
+        let pid_pub: [u8; RAW_PUB_LEN] = part_info
             .pid_pub_key
             .as_slice()
             .try_into()
@@ -227,8 +214,6 @@ fn build_fixture(
         };
     }
 
-    let policy_value =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&policy).expect("policy image");
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_sealing_key
@@ -240,7 +225,7 @@ fn build_fixture(
         receiver_owner_cert_chain: owner_desc,
         receiver_part_owner_cert_chain: part_owner_desc,
         receiver_report: report_desc,
-        policy: policy_value,
+        policy: policy.clone(),
     };
 
     Fixture {
@@ -336,11 +321,9 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             assert_rejected(ctx, &fixture, TborStatus::InvalidArg);
         }
         Mutation::PolicyHashMismatch => {
-            fixture.request.policy.info[0] ^= POLICY_MUTATION_MASK;
-            let bound_policy = <PartPolicy as TryFromBytes>::try_read_from_bytes(&fixture.policy)
-                .expect("bound policy image");
+            common::mutate_policy_tail(&mut fixture.request.policy, POLICY_MUTATION_MASK);
             assert_ne!(
-                fixture.request.policy.info, bound_policy.info,
+                fixture.request.policy, fixture.policy,
                 "policy mutation must differ from the bound policy",
             );
             assert_rejected(ctx, &fixture, TborStatus::InvalidArg);

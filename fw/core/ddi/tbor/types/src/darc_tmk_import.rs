@@ -26,7 +26,7 @@
 //!   never a vault handle.  Its masked-key kind must be
 //!   [`DarcKex`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind::DarcKex).
 //! * `policy` — the unified [`PartPolicy`] whose `POTAPubKey` anchors the
-//!   `remote_cert_chain`.  Length pinned to [`PART_POLICY_LEN`] (584 B);
+//!   `remote_cert_chain`.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B);
 //!   its SHA-384 digest must equal the partition's bound `policy_hash`.
 //! * `sealed_tmk` — the HPKE-Auth seal of the 32-byte TMK, exactly
 //!   [`SEALED_TMK_LEN`] (145 B): `enc(97) ‖ ct(TMK 32 + GCM tag 16)`.
@@ -45,7 +45,7 @@ use tsra_fw_ddi_tbor_api::tbor;
 
 pub use crate::darc_kex_key_gen::MASKED_KEX_KEY_LEN;
 use crate::evidence::CertDescriptor;
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 
 /// TBOR opcode for `DarcTmkImport`.
 pub const TBOR_OP_DARC_TMK_IMPORT: u8 = 0x21;
@@ -73,9 +73,9 @@ pub const MASKED_TMK_LEN: usize = 8 + 16 + 192 + TMK_LEN + 16;
 const _: () = assert!(MASKED_KEX_KEY_LEN == 280);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
-// literal on the field, so the length is spelled out as `484` and pinned
+// literal on the field, so the maximum length is spelled out as `384` and pinned
 // against the canonical value here.
-const _: () = assert!(PART_POLICY_LEN == 584);
+const _: () = assert!(PART_POLICY_MAX_LEN == 384);
 
 // `sealed_tmk` is an HPKE-Auth seal; the derive needs an integer literal
 // on the field, so the length is spelled out as `145` and pinned against
@@ -112,10 +112,10 @@ pub struct TborDarcTmkImportReq<'a> {
     pub masked_kex_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] whose `POTAPubKey` anchors
-    /// `remote_cert_chain`.  Length pinned to [`PART_POLICY_LEN`] (584 B).
+    /// `remote_cert_chain`.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B).
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 
     /// HPKE-Auth seal of the 32-byte TMK.  Always exactly
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn request_round_trips_fields() {
         let masked_kex = [0u8; MASKED_KEX_KEY_LEN];
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let sealed = [0xABu8; SEALED_TMK_LEN];
         let descs = [
             CertDescriptor {
@@ -188,7 +188,7 @@ mod tests {
             .finish();
 
         assert_eq!(frame.masked_kex_key().len(), MASKED_KEX_KEY_LEN);
-        assert_eq!(frame.policy().len(), PART_POLICY_LEN);
+        assert_eq!(frame.policy().len(), PART_POLICY_MAX_LEN);
         assert_eq!(frame.sealed_tmk().len(), SEALED_TMK_LEN);
         // The typed-slice buffer getter returns the packed descriptor
         // bytes (3 B each), mirroring `PartFinal`'s `cert_descriptors`.
@@ -215,7 +215,7 @@ mod tests {
         // The `#[tbor(... len = N)]` attributes must remain numeric
         // literals; pin them against the exported consts.
         const _: () = assert!(280 == MASKED_KEX_KEY_LEN);
-        const _: () = assert!(584 == PART_POLICY_LEN);
+        const _: () = assert!(384 == PART_POLICY_MAX_LEN);
         const _: () = assert!(145 == SEALED_TMK_LEN);
         const _: () = assert!(264 == MASKED_TMK_LEN);
         assert_eq!(TMK_LEN, 32);

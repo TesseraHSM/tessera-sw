@@ -163,8 +163,8 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
 /// mechanism (it writes the discriminant directly), so the undo log can
 /// restore any prior state through it.  This wrapper accepts only the two
 /// caller-facing transitions — `Enabled → Initializing` (`PartInit`,
-/// which additionally requires the four write-once provisioning fields —
-/// PTA key, UPS key, policy hash, POTA thumbprint — to be present) and
+/// which additionally requires the three write-once provisioning fields —
+/// PTA key, UPS key, policy hash — to be present) and
 /// `Initializing → Initialized` (`PartFinal`).  A same-state write is a
 /// no-op; any other pair is rejected with [`HsmError::InvalidArg`].
 pub fn part_set_state<P: HsmPartitionManager>(
@@ -177,8 +177,7 @@ pub fn part_set_state<P: HsmPartitionManager>(
         (HsmPartState::Enabled, HsmPartState::Initializing) => {
             let provisioned = prop_present(part_pta_key_id(pal, io))?
                 && prop_present(part_ups_key_id(pal, io))?
-                && prop_present(part_policy_hash(pal, io))?
-                && prop_present(part_pota_thumbprint(pal, io))?;
+                && prop_present(part_policy_hash(pal, io))?;
             if !provisioned {
                 return Err(HsmError::InvalidArg);
             }
@@ -979,69 +978,6 @@ pub fn part_set_policy_hash<P: HsmPartitionManager>(
 #[inline]
 pub const fn part_policy_hash_prop_id() -> HsmPartPropId {
     HsmPartPropId::POLICY_HASH
-}
-
-/// POTA thumbprint (48 B).  Set by `PartInit`.
-///
-/// Wraps [`HsmPartPropId::POTA_THUMBPRINT`] (`FixedBytes { len: 48 }`,
-/// `AbsentUntilSet`).
-pub fn part_pota_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::POTA_THUMBPRINT)
-}
-
-/// Write the POTA thumbprint.
-///
-/// `data` must be exactly 48 bytes.
-pub fn part_set_pota_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::POTA_THUMBPRINT, data)
-}
-
-/// [`HsmPartPropId`] backing [`part_pota_thumbprint`] /
-/// [`part_set_pota_thumbprint`].
-#[inline]
-pub const fn part_pota_thumbprint_prop_id() -> HsmPartPropId {
-    HsmPartPropId::POTA_THUMBPRINT
-}
-
-/// Read the SATA (Sealing Authority Trust Anchor) thumbprint.
-pub fn part_sata_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::SATA_THUMBPRINT)
-}
-
-/// Write the SATA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sata_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::SATA_THUMBPRINT, data)
-}
-
-/// Read the SAPOTA (Sealing Authority's POTA) thumbprint.
-pub fn part_sapota_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::SAPOTA_THUMBPRINT)
-}
-
-/// Write the SAPOTA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sapota_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::SAPOTA_THUMBPRINT, data)
 }
 
 /// Whether the PSK selected by `psk_id` is still the well-known
