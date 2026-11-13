@@ -31,6 +31,335 @@ fn supported_hkdf_hash_algos() -> &'static [HsmHashAlgo] {
     ]
 }
 
+const HKDF_OUTPUTS: [(HsmKeyKind, u32); 6] = [
+    (HsmKeyKind::Aes, 128),
+    (HsmKeyKind::Aes, 192),
+    (HsmKeyKind::Aes, 256),
+    (HsmKeyKind::HmacSha256, 256),
+    (HsmKeyKind::HmacSha384, 384),
+    (HsmKeyKind::HmacSha512, 512),
+];
+
+fn hkdf_output_props(kind: HsmKeyKind, bits: u32, session_key: bool) -> HsmKeyPropsBuilder {
+    let aes = kind == HsmKeyKind::Aes;
+    HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(kind)
+        .bits(bits)
+        .is_session(session_key)
+        .can_encrypt(aes)
+        .can_decrypt(aes)
+        .can_sign(!aes)
+        .can_verify(!aes)
+}
+
+fn derive_hkdf_with_props(
+    session: &HsmSession,
+    secret: &HsmGenericSecretKey,
+    props: HsmKeyProps,
+) -> HsmResult<HsmGenericSecretKey> {
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None)?;
+    HsmKeyManager::derive_key(session, &mut hkdf, secret, props)
+}
+
+fn assert_hkdf_output_props(
+    key: &HsmGenericSecretKey,
+    kind: HsmKeyKind,
+    bits: u32,
+    session_key: bool,
+    label: &[u8],
+) {
+    let aes = kind == HsmKeyKind::Aes;
+    assert_eq!(key.class(), HsmKeyClass::Secret);
+    assert_eq!(key.kind(), kind);
+    assert_eq!(key.bits(), bits);
+    assert_eq!(key.ecc_curve(), None);
+    assert_eq!(key.is_session(), session_key);
+    assert!(key.is_local());
+    assert!(key.is_sensitive());
+    assert!(key.is_extractable());
+    assert_eq!(key.can_encrypt(), aes);
+    assert_eq!(key.can_decrypt(), aes);
+    assert_eq!(key.can_sign(), !aes);
+    assert_eq!(key.can_verify(), !aes);
+    assert!(!key.can_derive());
+    assert!(!key.can_wrap());
+    assert!(!key.can_unwrap());
+    assert_eq!(key.label().as_slice(), label);
+}
+
+macro_rules! hkdf_curve_tests {
+    ($name:ident, $run:ident $(, $argument:expr)*) => {
+        mod $name {
+            use super::*;
+
+            #[session_test]
+            fn p256(session: HsmSession) {
+                $run(&session, HsmEccCurve::P256 $(, $argument)*);
+            }
+
+            #[session_test]
+            fn p384(session: HsmSession) {
+                $run(&session, HsmEccCurve::P384 $(, $argument)*);
+            }
+
+            #[session_test]
+            fn p521(session: HsmSession) {
+                $run(&session, HsmEccCurve::P521 $(, $argument)*);
+            }
+        }
+    };
+}
+
+fn run_hkdf_output_properties(session: &HsmSession, curve: HsmEccCurve, session_key: bool) {
+    const DOCUMENTED_LABEL_CAPACITY: usize = 128;
+    for (kind, bits) in HKDF_OUTPUTS {
+        let (secret, _) = derive_session_shared_secrets(session, curve);
+        for label in [
+            Vec::new(),
+            b"hkdf-attributes".to_vec(),
+            vec![b'x'; DOCUMENTED_LABEL_CAPACITY - 1],
+        ] {
+            let derived = derive_hkdf_with_props(
+                session,
+                &secret,
+                hkdf_output_props(kind, bits, session_key)
+                    .label(&label)
+                    .build()
+                    .unwrap(),
+            )
+            .expect("Valid HKDF output properties must be preserved");
+            assert_hkdf_output_props(&derived, kind, bits, session_key, &label);
+        }
+    }
+}
+
+hkdf_curve_tests!(
+    test_hkdf_session_properties,
+    run_hkdf_output_properties,
+    true
+);
+hkdf_curve_tests!(
+    test_hkdf_persistent_properties,
+    run_hkdf_output_properties,
+    false
+);
+
+fn run_hkdf_forbidden_usage(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+    aes: bool,
+    set_flag: impl Fn(HsmKeyPropsBuilder, bool) -> HsmKeyPropsBuilder,
+) {
+    for (kind, bits) in HKDF_OUTPUTS {
+        if (kind == HsmKeyKind::Aes) != aes {
+            continue;
+        }
+        for session_key in [true, false] {
+            let (secret, _) = derive_session_shared_secrets(session, curve);
+            let control = derive_hkdf_with_props(
+                session,
+                &secret,
+                set_flag(hkdf_output_props(kind, bits, session_key), false)
+                    .build()
+                    .unwrap(),
+            )
+            .expect("HKDF control with the selected flag disabled must succeed");
+            assert_hkdf_output_props(&control, kind, bits, session_key, b"");
+            drop(control);
+
+            let result = derive_hkdf_with_props(
+                session,
+                &secret,
+                set_flag(hkdf_output_props(kind, bits, session_key), true)
+                    .build()
+                    .unwrap(),
+            );
+            assert_eq!(
+                result.err(),
+                Some(HsmError::InvalidKeyProps),
+                "{kind:?}/{bits}, {curve:?}, session={session_key}"
+            );
+        }
+    }
+}
+
+hkdf_curve_tests!(
+    test_hkdf_aes_sign_rejected,
+    run_hkdf_forbidden_usage,
+    true,
+    |props, enabled| props.can_sign(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_aes_verify_rejected,
+    run_hkdf_forbidden_usage,
+    true,
+    |props, enabled| props.can_verify(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_aes_derive_rejected,
+    run_hkdf_forbidden_usage,
+    true,
+    |props, enabled| props.can_derive(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_aes_wrap_rejected,
+    run_hkdf_forbidden_usage,
+    true,
+    |props, enabled| props.can_wrap(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_aes_unwrap_rejected,
+    run_hkdf_forbidden_usage,
+    true,
+    |props, enabled| props.can_unwrap(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_hmac_encrypt_rejected,
+    run_hkdf_forbidden_usage,
+    false,
+    |props, enabled| props.can_encrypt(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_hmac_decrypt_rejected,
+    run_hkdf_forbidden_usage,
+    false,
+    |props, enabled| props.can_decrypt(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_hmac_derive_rejected,
+    run_hkdf_forbidden_usage,
+    false,
+    |props, enabled| props.can_derive(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_hmac_wrap_rejected,
+    run_hkdf_forbidden_usage,
+    false,
+    |props, enabled| props.can_wrap(enabled)
+);
+hkdf_curve_tests!(
+    test_hkdf_hmac_unwrap_rejected,
+    run_hkdf_forbidden_usage,
+    false,
+    |props, enabled| props.can_unwrap(enabled)
+);
+
+fn expect_hkdf_rejected_output(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+    kind: HsmKeyKind,
+    bits: u32,
+    change: impl Fn(HsmKeyPropsBuilder) -> HsmKeyPropsBuilder,
+    expected: HsmError,
+) {
+    for session_key in [true, false] {
+        let (secret, _) = derive_session_shared_secrets(session, curve);
+        let control = derive_hkdf_with_props(
+            session,
+            &secret,
+            hkdf_output_props(kind, bits, session_key).build().unwrap(),
+        )
+        .expect("HKDF control with canonical type-derived usages must succeed");
+        assert_hkdf_output_props(&control, kind, bits, session_key, b"");
+        drop(control);
+        let result = derive_hkdf_with_props(
+            session,
+            &secret,
+            change(hkdf_output_props(kind, bits, session_key))
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(
+            result.err(),
+            Some(expected),
+            "{kind:?}/{bits}, {curve:?}, session={session_key}"
+        );
+    }
+}
+
+fn run_hkdf_missing_usage(session: &HsmSession, curve: HsmEccCurve, aes: bool) {
+    for (kind, bits) in HKDF_OUTPUTS {
+        if (kind == HsmKeyKind::Aes) != aes {
+            continue;
+        }
+        for (first, second) in [(false, true), (true, false), (false, false)] {
+            expect_hkdf_rejected_output(
+                session,
+                curve,
+                kind,
+                bits,
+                |props| {
+                    if aes {
+                        props.can_encrypt(first).can_decrypt(second)
+                    } else {
+                        props.can_sign(first).can_verify(second)
+                    }
+                },
+                HsmError::InvalidKeyProps,
+            );
+        }
+    }
+}
+
+fn run_hkdf_wrong_class(session: &HsmSession, curve: HsmEccCurve) {
+    for (kind, bits) in HKDF_OUTPUTS {
+        for key_class in [HsmKeyClass::Private, HsmKeyClass::Public] {
+            expect_hkdf_rejected_output(
+                session,
+                curve,
+                kind,
+                bits,
+                |props| props.class(key_class),
+                HsmError::InvalidKeyProps,
+            );
+        }
+    }
+}
+
+fn run_hkdf_curve_property(session: &HsmSession, curve: HsmEccCurve) {
+    for (kind, bits) in HKDF_OUTPUTS {
+        expect_hkdf_rejected_output(
+            session,
+            curve,
+            kind,
+            bits,
+            |props| props.ecc_curve(curve),
+            HsmError::InvalidKeyProps,
+        );
+    }
+}
+
+fn run_hkdf_invalid_output_bits(session: &HsmSession, curve: HsmEccCurve) {
+    for (kind, bits) in HKDF_OUTPUTS {
+        for invalid_bits in [0, 1, bits - 1, bits + 1, u32::MAX] {
+            let expected = if invalid_bits == 0 || kind != HsmKeyKind::Aes {
+                HsmError::InvalidKeyProps
+            } else {
+                HsmError::InvalidArgument
+            };
+            expect_hkdf_rejected_output(
+                session,
+                curve,
+                kind,
+                bits,
+                |props| props.bits(invalid_bits),
+                expected,
+            );
+        }
+    }
+}
+
+hkdf_curve_tests!(test_hkdf_aes_required_usages, run_hkdf_missing_usage, true);
+hkdf_curve_tests!(
+    test_hkdf_hmac_required_usages,
+    run_hkdf_missing_usage,
+    false
+);
+hkdf_curve_tests!(test_hkdf_output_class_rejected, run_hkdf_wrong_class);
+hkdf_curve_tests!(test_hkdf_output_curve_rejected, run_hkdf_curve_property);
+hkdf_curve_tests!(test_hkdf_output_bits_rejected, run_hkdf_invalid_output_bits);
+
 /// Generates two ECDH keypairs and derives matching shared secrets for both parties
 fn derive_ecdh_shared_secrets(
     session: &HsmSession,
@@ -1133,16 +1462,38 @@ fn test_hkdf_invalid_key_class_fail(session: HsmSession) {
 
     let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
 
+    let control = HsmKeyManager::derive_key(
+        &session,
+        &mut hkdf,
+        &secret,
+        HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(HsmKeyKind::Aes)
+            .bits(256)
+            .can_encrypt(true)
+            .can_decrypt(true)
+            .build()
+            .unwrap(),
+    )
+    .expect("HKDF control with a secret-class AES template must succeed");
+    assert_eq!(control.kind(), HsmKeyKind::Aes);
+    assert_eq!(control.bits(), 256);
+    assert!(control.can_encrypt());
+    assert!(control.can_decrypt());
+    drop(control);
+
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Public) // invalid for HKDF
         .key_kind(HsmKeyKind::Aes)
         .bits(256)
+        .can_encrypt(true)
+        .can_decrypt(true)
         .build()
         .unwrap();
 
     let result = HsmKeyManager::derive_key(&session, &mut hkdf, &secret, props);
 
-    assert!(result.is_err());
+    assert_eq!(result.err(), Some(HsmError::InvalidKeyProps));
 }
 
 /// Verifies same HKDF params across curves do not interoperate

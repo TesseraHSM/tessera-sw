@@ -18,10 +18,18 @@
 //! covered by the MBOR `HkdfDerive` tests and the std-PAL KDF driver
 //! tests, which share the same `pal.hkdf_extract` / `pal.hkdf_expand`.
 
+use tsra_crypto::aead_envelope;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::*;
+use zerocopy::byteorder::LittleEndian;
+use zerocopy::byteorder::U16;
+use zerocopy::byteorder::U64;
+use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::KnownLayout;
+use zerocopy::Unaligned;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::CU;
@@ -33,7 +41,58 @@ use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// AEAD-GCM-256 masked-key envelope overhead:
 /// `header(8) ‖ iv(16) ‖ aad(192) ‖ tag(16)` = 232 B around padded plaintext.
-const MASK_OVERHEAD: usize = 8 + 16 + 192 + 16;
+const MASK_METADATA_LEN: usize = 192;
+const MASK_OVERHEAD: usize = 8 + 16 + MASK_METADATA_LEN + 16;
+
+#[repr(C)]
+#[derive(FromBytes, Immutable, KnownLayout, Unaligned)]
+struct HkdfMetadataHeader {
+    magic: [u8; 4],
+    version: U16<LittleEndian>,
+    _key_kind: u8,
+    _label_len: u8,
+    usage_flags: U64<LittleEndian>,
+}
+
+const _: () = assert!(size_of::<HkdfMetadataHeader>() == 16);
+
+fn assert_hkdf_type_usages(masked: &[u8], key_type: u8) {
+    const LOCAL: u64 = 1 << 5;
+    const ENCRYPT: u64 = 1 << 10;
+    const DECRYPT: u64 = 1 << 11;
+    const SIGN: u64 = 1 << 12;
+    const VERIFY: u64 = 1 << 13;
+    const WRAP: u64 = 1 << 14;
+    const UNWRAP: u64 = 1 << 15;
+    const DERIVE: u64 = 1 << 16;
+    const USAGES: u64 = ENCRYPT | DECRYPT | SIGN | VERIFY | WRAP | UNWRAP | DERIVE;
+    const SCOPE_SHIFT: u32 = 17;
+    const SCOPE_MASK: u64 = 0b111;
+
+    let envelope = aead_envelope::inspect(masked).expect("valid HKDF masked-key envelope");
+    assert_eq!(envelope.aad.len(), MASK_METADATA_LEN);
+    let (metadata, _) = HkdfMetadataHeader::ref_from_prefix(envelope.aad)
+        .expect("valid HKDF masked-key metadata prefix");
+    assert_eq!(metadata.magic, *b"MKEY");
+    assert_eq!(metadata.version.get(), 1);
+    let expected = match key_type {
+        KDF_KEY_TYPE_AES128 | KDF_KEY_TYPE_AES192 | KDF_KEY_TYPE_AES256 => ENCRYPT | DECRYPT,
+        KDF_KEY_TYPE_HMAC_SHA256
+        | KDF_KEY_TYPE_HMAC_SHA384
+        | KDF_KEY_TYPE_HMAC_SHA512
+        | KDF_KEY_TYPE_VAR_HMAC256
+        | KDF_KEY_TYPE_VAR_HMAC384
+        | KDF_KEY_TYPE_VAR_HMAC512 => SIGN | VERIFY,
+        _ => panic!("unsupported HKDF output type in fixture: {key_type}"),
+    };
+    let attributes = metadata.usage_flags.get();
+    assert_eq!(attributes & USAGES, expected, "key type {key_type}");
+    assert_ne!(attributes & LOCAL, 0, "HKDF output must be locally derived");
+    assert_eq!(
+        (attributes >> SCOPE_SHIFT) & SCOPE_MASK,
+        u64::from(SCOPE_LOCAL)
+    );
+}
 
 /// Derive a fresh masked ECDH shared secret on the requested curve.
 fn fresh_masked_secret_for_curve(ctx: &TestCtx, session_id: u16, curve: u8) -> Vec<u8> {
@@ -144,6 +203,7 @@ fn hkdf_derive_all_key_types() {
                 masked.iter().any(|&b| b != 0),
                 "masked derived key must not be all-zero (type {key_type})",
             );
+            assert_hkdf_type_usages(&masked, key_type);
         }
     }
 }
