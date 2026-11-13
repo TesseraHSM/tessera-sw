@@ -56,7 +56,7 @@ struct HkdfMetadataHeader {
 
 const _: () = assert!(size_of::<HkdfMetadataHeader>() == 16);
 
-fn assert_hkdf_type_usages(masked: &[u8], key_type: u8) {
+fn assert_hkdf_type_usages(masked: &[u8], key_usage: u64, scope: u8) {
     const LOCAL: u64 = 1 << 5;
     const ENCRYPT: u64 = 1 << 10;
     const DECRYPT: u64 = 1 << 11;
@@ -75,23 +75,18 @@ fn assert_hkdf_type_usages(masked: &[u8], key_type: u8) {
         .expect("valid HKDF masked-key metadata prefix");
     assert_eq!(metadata.magic, *b"MKEY");
     assert_eq!(metadata.version.get(), 1);
-    let expected = match key_type {
-        KDF_KEY_TYPE_AES128 | KDF_KEY_TYPE_AES192 | KDF_KEY_TYPE_AES256 => ENCRYPT | DECRYPT,
-        KDF_KEY_TYPE_HMAC_SHA256
-        | KDF_KEY_TYPE_HMAC_SHA384
-        | KDF_KEY_TYPE_HMAC_SHA512
-        | KDF_KEY_TYPE_VAR_HMAC256
-        | KDF_KEY_TYPE_VAR_HMAC384
-        | KDF_KEY_TYPE_VAR_HMAC512 => SIGN | VERIFY,
-        _ => panic!("unsupported HKDF output type in fixture: {key_type}"),
+    let expected = if key_usage == (KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT) {
+        ENCRYPT | DECRYPT
+    } else if key_usage == (KEY_USAGE_SIGN | KEY_USAGE_VERIFY) {
+        SIGN | VERIFY
+    } else {
+        assert_eq!(key_usage, KEY_USAGE_DERIVE);
+        DERIVE
     };
     let attributes = metadata.usage_flags.get();
-    assert_eq!(attributes & USAGES, expected, "key type {key_type}");
+    assert_eq!(attributes & USAGES, expected, "requested usage {key_usage}");
     assert_ne!(attributes & LOCAL, 0, "HKDF output must be locally derived");
-    assert_eq!(
-        (attributes >> SCOPE_SHIFT) & SCOPE_MASK,
-        u64::from(SCOPE_LOCAL)
-    );
+    assert_eq!((attributes >> SCOPE_SHIFT) & SCOPE_MASK, u64::from(scope));
 }
 
 /// Derive a fresh masked ECDH shared secret on the requested curve.
@@ -138,19 +133,26 @@ fn hkdf(
     salt: Vec<u8>,
     info: Vec<u8>,
 ) -> Vec<u8> {
-    ctx.tbor(&TborHkdfDeriveReq {
+    let req = TborHkdfDeriveReq {
         session_id,
         scope,
         hash_algo,
         key_type,
         key_length,
+        key_usage: match key_type {
+            KDF_KEY_TYPE_AES128 | KDF_KEY_TYPE_AES192 | KDF_KEY_TYPE_AES256 => {
+                KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT
+            }
+            _ => KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        },
         masked_secret,
         salt,
         info,
         key_label: Vec::new(),
-    })
-    .expect("HkdfDerive")
-    .masked_key
+    };
+    let masked = ctx.tbor(&req).expect("HkdfDerive").masked_key;
+    assert_hkdf_type_usages(&masked, req.key_usage, scope);
+    masked
 }
 
 /// Derives every supported fixed and variable-length output key type.
@@ -182,28 +184,195 @@ fn hkdf_derive_all_key_types() {
         HASH_ALGO_SHA512,
     ] {
         for &(key_type, key_length, okm_len) in cases {
+            let usages: &[u64] = match key_type {
+                KDF_KEY_TYPE_AES128 | KDF_KEY_TYPE_AES192 | KDF_KEY_TYPE_AES256 => {
+                    &[KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT]
+                }
+                _ => &[KEY_USAGE_SIGN | KEY_USAGE_VERIFY, KEY_USAGE_DERIVE],
+            };
+            for &key_usage in usages {
+                let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
+                let masked = ctx
+                    .tbor(&TborHkdfDeriveReq {
+                        session_id: session.session_id,
+                        scope: SCOPE_LOCAL,
+                        hash_algo: hash,
+                        key_type,
+                        key_length,
+                        key_usage,
+                        masked_secret: ikm,
+                        salt: b"salt".to_vec(),
+                        info: b"info".to_vec(),
+                        key_label: Vec::new(),
+                    })
+                    .expect("HkdfDerive")
+                    .masked_key;
+                assert_eq!(
+                    masked.len(),
+                    MASK_OVERHEAD + okm_len.next_multiple_of(16),
+                    "masked derived-key length must match type {key_type}",
+                );
+                assert!(masked.iter().any(|&byte| byte != 0));
+                assert_hkdf_type_usages(&masked, key_usage, SCOPE_LOCAL);
+            }
+        }
+    }
+}
+
+/// The same HMAC key type permits MACs only with sign/verify usage.
+#[test]
+fn hkdf_derive_hmac_usage_modes() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let cases = [
+        (KDF_KEY_TYPE_HMAC_SHA256, 0, 32),
+        (KDF_KEY_TYPE_HMAC_SHA384, 0, 48),
+        (KDF_KEY_TYPE_HMAC_SHA512, 0, 64),
+        (KDF_KEY_TYPE_VAR_HMAC256, 32, 32),
+        (KDF_KEY_TYPE_VAR_HMAC384, 48, 48),
+        (KDF_KEY_TYPE_VAR_HMAC512, 64, 64),
+    ];
+
+    for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+        for (key_type, key_length, tag_len) in cases {
             let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
-            let masked = hkdf(
-                &ctx,
-                session.session_id,
-                SCOPE_LOCAL,
-                hash,
+            let req = TborHkdfDeriveReq {
+                session_id: session.session_id,
+                scope,
+                hash_algo: HASH_ALGO_SHA256,
                 key_type,
                 key_length,
-                ikm,
-                b"salt".to_vec(),
-                b"info".to_vec(),
+                key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                masked_secret: ikm,
+                salt: Vec::new(),
+                info: Vec::new(),
+                key_label: Vec::new(),
+            };
+            let signing = ctx.tbor(&req).expect("sign/verify HMAC output").masked_key;
+            let deriving = ctx
+                .tbor(&TborHkdfDeriveReq {
+                    key_usage: KEY_USAGE_DERIVE,
+                    ..req
+                })
+                .expect("derive-only HMAC output")
+                .masked_key;
+            assert_hkdf_type_usages(&signing, KEY_USAGE_SIGN | KEY_USAGE_VERIFY, scope);
+            assert_hkdf_type_usages(&deriving, KEY_USAGE_DERIVE, scope);
+
+            let tag = ctx
+                .tbor(&TborHmacReq {
+                    session_id: session.session_id,
+                    masked_key: signing,
+                    msg: b"HKDF usage probe".to_vec(),
+                })
+                .expect("sign/verify key can compute a MAC")
+                .tag;
+            assert_eq!(tag.len(), tag_len);
+            ctx.expect_fw_reject(
+                &TborHmacReq {
+                    session_id: session.session_id,
+                    masked_key: deriving,
+                    msg: b"HKDF usage probe".to_vec(),
+                },
+                TborStatus::InvalidPermissions,
             );
-            assert_eq!(
-                masked.len(),
-                MASK_OVERHEAD + okm_len.next_multiple_of(16),
-                "masked derived-key envelope length must match the output type (type {key_type})",
+        }
+    }
+}
+
+/// Derive-only usage does not change variable HMAC key-length validation.
+#[test]
+fn hkdf_derive_hmac_derive_only_lengths_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    for (key_type, min, max) in [
+        (KDF_KEY_TYPE_VAR_HMAC256, 32, 64),
+        (KDF_KEY_TYPE_VAR_HMAC384, 48, 128),
+        (KDF_KEY_TYPE_VAR_HMAC512, 64, 128),
+    ] {
+        let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
+        let req = TborHkdfDeriveReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            hash_algo: HASH_ALGO_SHA256,
+            key_type,
+            key_length: min,
+            key_usage: KEY_USAGE_DERIVE,
+            masked_secret: ikm,
+            salt: Vec::new(),
+            info: Vec::new(),
+            key_label: Vec::new(),
+        };
+        let valid = ctx.tbor(&req).expect("valid HMAC length").masked_key;
+        assert_hkdf_type_usages(&valid, KEY_USAGE_DERIVE, SCOPE_LOCAL);
+
+        for key_length in [0, min - 1, max + 1] {
+            ctx.expect_fw_reject(
+                &TborHkdfDeriveReq {
+                    key_length,
+                    ..req.clone()
+                },
+                if key_length == 0 {
+                    TborStatus::InvalidKeyType
+                } else {
+                    TborStatus::InvalidKeyLength
+                },
             );
-            assert!(
-                masked.iter().any(|&b| b != 0),
-                "masked derived key must not be all-zero (type {key_type})",
+        }
+    }
+}
+
+/// Rejects empty, mixed, partial, unknown, and unsupported usage masks.
+#[test]
+fn hkdf_derive_invalid_usages_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (key_type, key_usage, forbidden) in [
+        (
+            KDF_KEY_TYPE_AES256,
+            KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+            KEY_USAGE_DERIVE,
+        ),
+        (
+            KDF_KEY_TYPE_HMAC_SHA256,
+            KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+        ),
+    ] {
+        let req = TborHkdfDeriveReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            hash_algo: HASH_ALGO_SHA256,
+            key_type,
+            key_length: 0,
+            key_usage,
+            masked_secret: fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256),
+            salt: Vec::new(),
+            info: Vec::new(),
+            key_label: Vec::new(),
+        };
+        ctx.tbor(&req).expect("valid usage control");
+        for key_usage in [
+            0,
+            KEY_USAGE_SIGN,
+            KEY_USAGE_VERIFY,
+            KEY_USAGE_ENCRYPT,
+            KEY_USAGE_DECRYPT,
+            KEY_USAGE_SIGN | KEY_USAGE_VERIFY | KEY_USAGE_DERIVE,
+            KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT | KEY_USAGE_DERIVE,
+            KEY_USAGE_WRAP,
+            KEY_USAGE_UNWRAP,
+            forbidden,
+            u64::MAX,
+        ] {
+            ctx.expect_fw_reject(
+                &TborHkdfDeriveReq {
+                    key_usage,
+                    ..req.clone()
+                },
+                TborStatus::InvalidPermissions,
             );
-            assert_hkdf_type_usages(&masked, key_type);
         }
     }
 }
@@ -386,6 +555,7 @@ fn hkdf_derive_unknown_hash_rejected() {
                 hash_algo,
                 key_type: KDF_KEY_TYPE_AES256,
                 key_length: 0,
+                key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
                 masked_secret: ikm.clone(),
                 salt: Vec::new(),
                 info: Vec::new(),
@@ -411,6 +581,7 @@ fn hkdf_derive_unknown_key_type_rejected() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: 99,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -434,6 +605,7 @@ fn hkdf_derive_unsupported_scope_rejected() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -460,6 +632,7 @@ fn hkdf_derive_var_hmac_missing_length_rejected() {
             hash_algo: HASH_ALGO_SHA256,
             key_type: KDF_KEY_TYPE_VAR_HMAC256,
             key_length: 0,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -484,6 +657,7 @@ fn hkdf_derive_var_hmac_out_of_range_length_rejected() {
             hash_algo: HASH_ALGO_SHA256,
             key_type: KDF_KEY_TYPE_VAR_HMAC256,
             key_length: 16,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -518,6 +692,7 @@ fn hkdf_derive_non_secret_ikm_rejected() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ecc.masked_key,
             salt: Vec::new(),
             info: Vec::new(),
@@ -543,6 +718,7 @@ fn hkdf_derive_tampered_masked_secret_rejected() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -594,6 +770,7 @@ fn hkdf_derive_invalid_session_id_rejected() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -698,6 +875,7 @@ fn hkdf_derive_var_hmac_above_max_length_rejected() {
             hash_algo: HASH_ALGO_SHA256,
             key_type: KDF_KEY_TYPE_VAR_HMAC256,
             key_length: 65,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -724,23 +902,34 @@ fn hkdf_derive_allowed_on_cu_session() {
         HASH_ALGO_SHA384,
         HASH_ALGO_SHA512,
     ] {
-        let masked = hkdf(
-            &ctx,
-            session.session_id,
-            SCOPE_SESSION,
-            hash,
-            KDF_KEY_TYPE_AES256,
-            0,
-            ikm.clone(),
-            b"salt".to_vec(),
-            b"info".to_vec(),
-        );
+        for (key_type, key_usage) in [
+            (KDF_KEY_TYPE_AES256, KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT),
+            (KDF_KEY_TYPE_HMAC_SHA256, KEY_USAGE_SIGN | KEY_USAGE_VERIFY),
+            (KDF_KEY_TYPE_HMAC_SHA256, KEY_USAGE_DERIVE),
+        ] {
+            let masked = ctx
+                .tbor(&TborHkdfDeriveReq {
+                    session_id: session.session_id,
+                    scope: SCOPE_SESSION,
+                    hash_algo: hash,
+                    key_type,
+                    key_length: 0,
+                    key_usage,
+                    masked_secret: ikm.clone(),
+                    salt: b"salt".to_vec(),
+                    info: b"info".to_vec(),
+                    key_label: Vec::new(),
+                })
+                .expect("CU HkdfDerive")
+                .masked_key;
 
-        assert_eq!(
-            masked.len(),
-            MASK_OVERHEAD + 32,
-            "CU HKDF output length mismatch (hash {hash})",
-        );
+            assert_eq!(
+                masked.len(),
+                MASK_OVERHEAD + 32,
+                "CU HKDF output length mismatch (hash {hash}, type {key_type})",
+            );
+            assert_hkdf_type_usages(&masked, key_usage, SCOPE_SESSION);
+        }
     }
 }
 
@@ -759,6 +948,7 @@ fn hkdf_derive_default_cu_psk_rejected() {
             hash_algo: HASH_ALGO_SHA256,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: vec![0u8; MASK_OVERHEAD + 32],
             salt: Vec::new(),
             info: Vec::new(),
@@ -786,6 +976,7 @@ fn hkdf_derive_cu_invalid_session_id_rejected() {
             hash_algo: HASH_ALGO_SHA256,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
@@ -908,6 +1099,7 @@ fn hkdf_derive_cu_invalid_request_preserves_session() {
             hash_algo: u8::MAX,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm.clone(),
             salt: Vec::new(),
             info: Vec::new(),
@@ -947,6 +1139,7 @@ fn hkdf_derive_rejects_bad_masked_key_layout() {
             hash_algo: HASH_ALGO_SHA384,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
             masked_secret: ikm,
             salt: Vec::new(),
             info: Vec::new(),
