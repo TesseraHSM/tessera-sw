@@ -40,6 +40,8 @@ pub enum HsmError {
     TborMissingField = 0x08680019,
     TborDuplicateField = 0x0868001A,
     TborInvalidEnumValue = 0x0868001B,
+    TborMisalignedField = 0x08680020,
+    TborNonCanonicalLayout = 0x08680021,
     // TBOR wire-encode failures.
     TborBufferTooSmall = 0x0868001C,
     TborTooManyTocEntries = 0x0868001D,
@@ -463,6 +465,10 @@ pub enum HsmError {
 
     /// Admin could not quiesce host IO for the periodic RNG test after all retries.
     RngSelfTestRetriesExhausted = 0x08700112,
+
+    /// A protected IO transport failed: the request failed authentication,
+    /// or its session has no transport keys.
+    SessionTransportError = 0x08700113,
 
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol

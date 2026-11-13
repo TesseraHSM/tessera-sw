@@ -94,6 +94,27 @@ Each mode prints a startup message once its partition is ready, e.g.:
 TSRA DDI server listening on unix:///path/to/ddi_sock_server.sock; partition 10
 ```
 
+Each process hosts one emulated device, selected at startup by SDK API
+revision. Pass `--api-rev MAJOR_MINOR` before the endpoint (otherwise the
+`api_rev` key of `TSRA_TEST_ARGS` is used when built with the `test-args`
+feature, else Uno):
+
+```bash
+cargo run --release -p ddi_sock_server -- --api-rev 2_0 tcp://127.0.0.1:1234
+```
+
+Revision 1.x selects Uno (64-byte command SQEs plus the 128-byte bulk queue);
+2.x selects Duo, whose 128-byte SQEs and 64-byte CQEs travel in the same
+32/16-dword fields that carry bulk entries on Uno. Duo sessions are owned by
+the connection whose `SessionOpenInit` created them; `TborSecure` and
+`FlushSession` submissions from other connections fail with
+`TRANSPORT_SESSION_NOT_OWNED`. An unsupported revision fails startup.
+
+Clients identify the hosted device with an in-band `RequestFrame::Discover`,
+answered with its model and supported API revision range. `DdiSockDev` sends
+it once per connection, then builds Uno or Duo SQEs accordingly; on Duo it
+rejects MBOR and bulk requests with `UnsupportedEncoding`.
+
 Keep the process running for the lifetime of its clients; its emulator state
 is shared by every connection and is lost when the process exits.
 

@@ -6,7 +6,7 @@
 //!
 //! This crate is the **central contract** between the platform-agnostic
 //! HSM core (`tsra_fw_hsm_core`) and platform-specific implementations
-//! (e.g. `tsra_fw_hsm_pal_std` for host-native simulation,
+//! (e.g. `tsra_fw_hsm_pal_std_uno` for host-native simulation,
 //! `tsra_fw_uno_pal` for hardware).  It is `#![no_std]` and
 //! has no external dependencies beyond `open_enum`, so it compiles on
 //! bare-metal targets.
@@ -109,6 +109,7 @@ mod cmd_buf;
 mod crypto;
 mod dispatch;
 mod error;
+mod features;
 mod gdma;
 mod io;
 mod key_masking;
@@ -126,6 +127,7 @@ pub use cmd_buf::*;
 pub use crypto::*;
 pub use dispatch::*;
 pub use error::*;
+pub use features::*;
 pub use gdma::*;
 pub use io::*;
 pub use key_masking::*;
@@ -318,8 +320,11 @@ pub const SESSION_SEED_LEN: usize = 32;
 /// (1 B), suite (1 B), and credential binding (68 B). The host-supplied
 /// `seed` is no longer part of the Pending
 /// blob (it arrives encrypted in `OpenSessionFinish` instead).
+/// On [`HsmIoProtocol::Duo`] the blob additionally ends with the session
+/// transport keys `h2m ‖ m2h` (2 × [`SESSION_TRANSPORT_KEY_LEN`]), so
+/// `SessionOpenFinish` can already travel on the secure channel.
 /// Rounded up to give a small implementation margin.
-pub const SESSION_PENDING_BLOB_MAX: usize = 320;
+pub const SESSION_PENDING_BLOB_MAX: usize = 384;
 
 /// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
 pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
@@ -362,6 +367,25 @@ pub const SESSION_MAC_TX_LABEL: &[u8] = b"tsra-session-mac-tx-v1";
 /// HKDF-Expand label producing the **HSM→VM** message-MAC key.
 /// Derived only for Authenticated sessions.
 pub const SESSION_MAC_RX_LABEL: &[u8] = b"tsra-session-mac-rx-v1";
+
+/// HKDF-Expand label producing the **VM→HSM** session transport key.
+pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
+
+/// HKDF-Expand label producing the **HSM→VM** session transport key.
+pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
+
+/// Length in bytes of each directional AES-256-GCM session transport key.
+///
+/// On [`HsmIoProtocol::Duo`], every session carries one key per direction,
+/// installed through [`HsmSessionManager::session_promote`]'s
+/// `mac_tx_key` (VM→HSM) and `mac_rx_key` (HSM→VM) arguments.
+pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
+
+/// AES-GCM IV length of a session transport message.
+pub const SESSION_TRANSPORT_IV_LEN: usize = 12;
+
+/// AES-GCM tag length of a session transport message.
+pub const SESSION_TRANSPORT_TAG_LEN: usize = 16;
 
 /// SP 800-108 KBKDF label for deriving `BK_SESSION` from `BK_BOOT` and
 /// the host-supplied `seed`.  Domain-separates the session-resumption

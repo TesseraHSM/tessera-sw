@@ -143,7 +143,7 @@ pub struct TborUnwrapKeyResp {
     pub key_kind: u8,
 
     /// The recovered key, masked under the scope's masking key.
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// The recovered key's wire public key for RSA / ECC; empty for

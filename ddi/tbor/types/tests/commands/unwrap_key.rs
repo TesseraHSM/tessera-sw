@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
 
@@ -179,11 +180,7 @@ fn unwrap_key_all_oaep_hashes() {
     let ecc_key = EccPrivateKey::from_curve(EccCurve::P256).expect("generate ECC key");
     let ecc_der = ecc_key.to_vec().expect("export ECC key");
     let (x_be, y_be) = ecc_key.coord_vec().expect("export ECC public coordinates");
-    let expected_pub: Vec<u8> = x_be
-        .into_iter()
-        .rev()
-        .chain(y_be.into_iter().rev())
-        .collect();
+    let expected_pub = [dev_rev(&x_be), dev_rev(&y_be)].concat();
     let aes_key = [0x42u8; 32];
 
     for (hash_id, hash) in [

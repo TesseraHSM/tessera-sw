@@ -1,0 +1,800 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#![no_std]
+
+//! Typed SQE / CQE layout — the HSM I/O ABI.
+//!
+//! This module covers the Uno layout; the Duo (api_rev 2.0) layout lives
+//! in [`duo`]. The Uno codec supports 16-word submissions ([`RawSqe`]) and
+//! 4-word completions ([`RawCqe`]), validating slice lengths before
+//! decoding. [`SqeEntry`] and [`CqeEntry`] implement the PAL's [`HsmSqe`]
+//! and [`HsmCqe`] traits over them; [`host_status`] maps an [`HsmError`]
+//! to its wire status. It provides typed, zero-cost accessors and
+//! builders for the individual fields, shared by every party that sits
+//! on the SQE/CQE boundary:
+//!
+//! - platform PALs decode the SQE and encode the CQE,
+//! - the socket server (simulator) builds the SQE and reads the CQE.
+//!
+//! Keeping the bit layout in one place avoids the drift bugs that arise
+//! when the same packing is hand-rolled in multiple consumers.
+//!
+//! The core does not depend on this crate: it dispatches on the raw
+//! opcode and defines the opcode values itself. The values here must
+//! match `tsra_fw_hsm_core`'s (checked by the std platform tests).
+//!
+//! # SQE layout
+//!
+//! | DWORD | Field(s)                                          |
+//! |-------|---------------------------------------------------|
+//! | DW0   | [`CmdDword`] — op, set, psdt, cmd id               |
+//! | DW1   | source length (bytes)                             |
+//! | DW2-3 | source PRP1 ([`HsmDmaAddr`])                       |
+//! | DW4-5 | source PRP2                                        |
+//! | DW6   | destination length (bytes)                        |
+//! | DW7-8 | destination PRP1                                   |
+//! | DW9-10| destination PRP2                                   |
+//! | DW11  | [`SessionFlags`]                                   |
+//! | DW12  | session id (low 16 bits)                          |
+//! | DW13-14| out-of-band (OOB) SGL-descriptor-page pointer ([`HsmDmaAddr`])|
+//! | DW15  | out-of-band (OOB) total byte count                |
+//!
+//! # CQE layout
+//!
+//! | DWORD | Field(s)                                          |
+//! |-------|---------------------------------------------------|
+//! | DW0   | [`CqeDw0`] — dst_len, session flags                |
+//! | DW1   | [`CqeDw1`] — session id, app vault id              |
+//! | DW2   | [`CqeDw2`] — sq head, sq id                        |
+//! | DW3   | [`CqeDw3`] — cmd id, phase, status                 |
+
+pub mod duo;
+mod status;
+mod validate;
+
+use bitfield_struct::bitfield;
+pub use status::*;
+use tsra_fw_hsm_pal_traits::HsmCqe;
+use tsra_fw_hsm_pal_traits::HsmCqeSession;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmSessCtrl;
+use tsra_fw_hsm_pal_traits::HsmSqe;
+pub use validate::*;
+
+/// Number of dwords in this protocol's submission queue entry.
+pub const SQE_DWORDS: usize = 16;
+
+/// Number of dwords in this protocol's completion queue entry.
+pub const CQE_DWORDS: usize = 4;
+
+/// Owned submission queue entry for this protocol.
+pub type RawSqe = [u32; SQE_DWORDS];
+
+/// Owned completion queue entry for this protocol.
+pub type RawCqe = [u32; CQE_DWORDS];
+
+// ── Opcode constants ────────────────────────────────────────────────
+
+/// MBOR opcode — standard IO command carrying an MBOR-encoded DDI body.
+pub const OP_MBOR: u16 = 0;
+
+/// Flush opcode — flush pending IO.
+pub const OP_FLUSH: u16 = 1;
+
+/// TBOR opcode — standard IO command carrying a TBOR-encoded DDI body.
+pub const OP_TBOR: u16 = 2;
+
+// ── SQE bitfield dwords ─────────────────────────────────────────────
+
+/// Command dword (SQE DW0) bitfield.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct CmdDword {
+    /// Opcode (0 = MBOR, 1 = Flush, 2 = TBOR).
+    #[bits(10)]
+    pub op: u16,
+
+    /// Command set.
+    #[bits(4)]
+    pub set: u8,
+
+    /// PRP or SGL data transfer format.
+    #[bits(2)]
+    pub psdt: u8,
+
+    /// Command identifier.
+    #[bits(16)]
+    pub id: u16,
+}
+
+/// Session flags dword (SQE DW11) bitfield.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct SessionFlags {
+    /// Session control kind.
+    #[bits(2)]
+    pub ctrl: u8,
+
+    /// Session ID is valid.
+    #[bits(1)]
+    pub id_valid: bool,
+
+    /// App vault ID is valid.
+    #[bits(1)]
+    pub app_vault_id_valid: bool,
+
+    /// Session is closed.
+    #[bits(1)]
+    pub session_closed: bool,
+
+    /// Reserved.
+    #[bits(3)]
+    _rsvd0: u8,
+
+    /// Reserved.
+    #[bits(24)]
+    _rsvd1: u32,
+}
+
+// ── CQE bitfield dwords ─────────────────────────────────────────────
+
+/// CQE DW0 bitfield: dst_len + session flags.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct CqeDw0 {
+    /// Length of data copied to destination buffer.
+    #[bits(16)]
+    pub dst_len: u16,
+
+    /// Session control kind.
+    #[bits(2)]
+    pub session_ctrl: u8,
+
+    /// Session ID is valid.
+    #[bits(1)]
+    pub session_id_valid: bool,
+
+    /// App vault ID is valid.
+    #[bits(1)]
+    pub app_vault_id_valid: bool,
+
+    /// Session is closed.
+    #[bits(1)]
+    pub session_closed: bool,
+
+    /// Reserved.
+    #[bits(3)]
+    _rsvd0: u8,
+
+    /// Reserved.
+    #[bits(8)]
+    _rsvd1: u8,
+}
+
+/// CQE DW1 bitfield: session_id + app_vault_id.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct CqeDw1 {
+    /// Session identifier.
+    #[bits(16)]
+    pub session_id: u16,
+
+    /// Application vault identifier.
+    #[bits(8)]
+    pub app_vault_id: u8,
+
+    /// Reserved.
+    #[bits(8)]
+    _rsvd: u8,
+}
+
+/// CQE DW2 bitfield: sq_head + sq_id.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct CqeDw2 {
+    /// Submission queue head pointer.
+    #[bits(16)]
+    pub sq_head: u16,
+
+    /// Submission queue identifier.
+    #[bits(16)]
+    pub sq_id: u16,
+}
+
+/// CQE DW3 bitfield: cmd_id + phase/status.
+#[bitfield(u32)]
+#[derive(PartialEq, Eq)]
+pub struct CqeDw3 {
+    /// Command identifier (echoed from SQE).
+    #[bits(16)]
+    pub cmd_id: u16,
+
+    /// Phase bit.
+    #[bits(1)]
+    pub phase: bool,
+
+    /// Host status code.
+    #[bits(11)]
+    pub status: u16,
+
+    /// Reserved.
+    #[bits(4)]
+    _rsvd: u8,
+}
+
+// ── SQE read view ───────────────────────────────────────────────────
+
+/// Typed read-only wrapper around a raw SQE.
+///
+/// Zero-cost — borrows the underlying `[u32; 16]` and reads fields on
+/// demand via bitfield parsing or direct indexing. Slice conversion
+/// rejects lengths other than [`SQE_DWORDS`] with [`HsmError::InvalidArg`].
+#[derive(Debug)]
+pub struct Sqe<'a>(&'a RawSqe);
+
+impl<'a> From<&'a RawSqe> for Sqe<'a> {
+    #[inline]
+    fn from(sqe: &'a RawSqe) -> Self {
+        Self(sqe)
+    }
+}
+
+impl<'a> TryFrom<&'a [u32]> for Sqe<'a> {
+    type Error = HsmError;
+
+    #[inline]
+    fn try_from(sqe: &'a [u32]) -> Result<Self, Self::Error> {
+        let raw = sqe.try_into().map_err(|_| HsmError::InvalidArg)?;
+        Ok(Self(raw))
+    }
+}
+
+#[allow(dead_code)]
+impl Sqe<'_> {
+    // ── DW0: command ────────────────────────────────────────────
+
+    /// Returns the parsed command dword (DW0).
+    #[inline]
+    pub fn cmd(&self) -> CmdDword {
+        CmdDword::from(self.0[0])
+    }
+
+    /// Shorthand for `cmd().op()`.
+    #[inline]
+    pub fn op(&self) -> u16 {
+        self.cmd().op()
+    }
+
+    /// Shorthand for `cmd().id()`.
+    #[inline]
+    pub fn cmd_id(&self) -> u16 {
+        self.cmd().id()
+    }
+
+    // ── DW1: source length ──────────────────────────────────────
+
+    /// Source DMA buffer length in bytes (DW1).
+    #[inline]
+    pub fn src_len(&self) -> u32 {
+        self.0[1]
+    }
+
+    // ── DW2–5: source PRP pair ──────────────────────────────────
+
+    /// Source PRP1 address (DW2–3).
+    #[inline]
+    pub fn src_prp1(&self) -> HsmDmaAddr {
+        HsmDmaAddr {
+            lo: self.0[2],
+            hi: self.0[3],
+        }
+    }
+
+    /// Source PRP2 address (DW4–5).
+    #[inline]
+    pub fn src_prp2(&self) -> HsmDmaAddr {
+        HsmDmaAddr {
+            lo: self.0[4],
+            hi: self.0[5],
+        }
+    }
+
+    // ── DW6: destination length ─────────────────────────────────
+
+    /// Destination DMA buffer length in bytes (DW6).
+    #[inline]
+    pub fn dst_len(&self) -> u32 {
+        self.0[6]
+    }
+
+    // ── DW7–10: destination PRP pair ────────────────────────────
+
+    /// Destination PRP1 address (DW7–8).
+    #[inline]
+    pub fn dst_prp1(&self) -> HsmDmaAddr {
+        HsmDmaAddr {
+            lo: self.0[7],
+            hi: self.0[8],
+        }
+    }
+
+    /// Destination PRP2 address (DW9–10).
+    #[inline]
+    pub fn dst_prp2(&self) -> HsmDmaAddr {
+        HsmDmaAddr {
+            lo: self.0[9],
+            hi: self.0[10],
+        }
+    }
+
+    // ── DW11: session flags ─────────────────────────────────────
+
+    /// Returns the parsed session flags dword (DW11).
+    #[inline]
+    pub fn session_flags(&self) -> SessionFlags {
+        SessionFlags::from(self.0[11])
+    }
+
+    // ── DW12: session ID ────────────────────────────────────────
+
+    /// Session ID (DW12, low 16 bits).
+    #[inline]
+    pub fn session_id(&self) -> u16 {
+        self.0[12] as u16
+    }
+
+    // ── DW13–15: out-of-band (OOB) side-band ────────────────────
+
+    /// Out-of-band SGL-descriptor-page pointer (DW13–14).
+    ///
+    /// Points at a host page holding an array of 16-byte **NVMe SGL Data
+    /// Block descriptors** (`address(8) ‖ length(4) ‖ rsvd(3) ‖
+    /// type(1)`).  A TBOR message references an OOB item by its **index**
+    /// into this array; the firmware reads the indexed descriptor and
+    /// SGL-copies the item's bytes.  Zero = no OOB data.
+    #[inline]
+    pub fn oob_prp(&self) -> HsmDmaAddr {
+        HsmDmaAddr {
+            lo: self.0[13],
+            hi: self.0[14],
+        }
+    }
+
+    /// Out-of-band SGL-descriptor-array byte count (DW15).
+    ///
+    /// Total size of the 16-byte SGL descriptor array at
+    /// [`oob_prp`](Self::oob_prp) — i.e. `num_entries * 16`.  Bounds the
+    /// index a TBOR message may reference: `index * 16 + 16 <= oob_len`.
+    /// Zero = no OOB data.
+    #[inline]
+    pub fn oob_len(&self) -> u32 {
+        self.0[15]
+    }
+}
+
+// ── SQE builder (host side) ─────────────────────────────────────────
+
+/// Fluent builder for a [`RawSqe`].
+///
+/// Host transports use this to construct a submission entry referencing
+/// host DMA buffers, exactly as the IIC DMA engine would deliver one to
+/// the firmware.
+#[derive(Debug, Default)]
+pub struct SqeBuilder(RawSqe);
+
+impl SqeBuilder {
+    /// Start a new zeroed SQE.
+    #[inline]
+    pub fn new() -> Self {
+        Self([0u32; SQE_DWORDS])
+    }
+
+    /// Set the command dword (DW0: op, set, psdt, cmd id).
+    #[inline]
+    pub fn cmd(mut self, cmd: CmdDword) -> Self {
+        self.0[0] = cmd.into();
+        self
+    }
+
+    /// Set the source (DW1) and destination (DW6) buffer lengths.
+    #[inline]
+    pub fn buf_lens(mut self, src_len: u32, dst_len: u32) -> Self {
+        self.0[1] = src_len;
+        self.0[6] = dst_len;
+        self
+    }
+
+    /// Set the source PRP1 address (DW2–3).
+    #[inline]
+    pub fn src_prp1(mut self, addr: u64) -> Self {
+        self.0[2] = addr as u32;
+        self.0[3] = (addr >> 32) as u32;
+        self
+    }
+
+    /// Set the destination PRP1 address (DW7–8).
+    #[inline]
+    pub fn dst_prp1(mut self, addr: u64) -> Self {
+        self.0[7] = addr as u32;
+        self.0[8] = (addr >> 32) as u32;
+        self
+    }
+
+    /// Set the session flags dword (DW11).
+    #[inline]
+    pub fn session_flags(mut self, flags: SessionFlags) -> Self {
+        self.0[11] = flags.into();
+        self
+    }
+
+    /// Set the session ID (DW12, low 16 bits).
+    #[inline]
+    pub fn session_id(mut self, id: u16) -> Self {
+        self.0[12] = u32::from(id);
+        self
+    }
+
+    /// Set the out-of-band SGL-descriptor-page pointer (DW13–14).
+    #[inline]
+    pub fn oob_prp(mut self, addr: u64) -> Self {
+        self.0[13] = addr as u32;
+        self.0[14] = (addr >> 32) as u32;
+        self
+    }
+
+    /// Set the out-of-band SGL-descriptor-array byte count (DW15).
+    #[inline]
+    pub fn oob_len(mut self, len: u32) -> Self {
+        self.0[15] = len;
+        self
+    }
+
+    /// Finish and return the owned [`RawSqe`].
+    #[inline]
+    pub fn build(self) -> RawSqe {
+        self.0
+    }
+}
+
+// ── CQE read/write view ─────────────────────────────────────────────
+
+/// Typed read/write wrapper around a raw CQE.
+///
+/// Zero-cost — borrows the underlying `[u32; 4]` mutably and reads/writes
+/// fields on demand via bitfield parsing or direct indexing. The firmware
+/// uses the setters to populate a completion; host transports use the
+/// read accessors ([`dst_len`](Self::dst_len), [`status`](Self::status),
+/// [`cmd_id`](Self::cmd_id)) on a returned completion.
+/// Slice conversion rejects lengths other than [`CQE_DWORDS`] with
+/// [`HsmError::InvalidArg`].
+#[derive(Debug)]
+pub struct Cqe<'a>(&'a mut RawCqe);
+
+impl<'a> From<&'a mut RawCqe> for Cqe<'a> {
+    #[inline]
+    fn from(cqe: &'a mut RawCqe) -> Self {
+        Self(cqe)
+    }
+}
+
+impl<'a> TryFrom<&'a mut [u32]> for Cqe<'a> {
+    type Error = HsmError;
+
+    #[inline]
+    fn try_from(cqe: &'a mut [u32]) -> Result<Self, Self::Error> {
+        let raw = cqe.try_into().map_err(|_| HsmError::InvalidArg)?;
+        Ok(Self(raw))
+    }
+}
+
+#[allow(dead_code)]
+impl Cqe<'_> {
+    /// Zero all dwords.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.0.fill(0);
+    }
+
+    // ── Convenience read accessors (host side) ──────────────────
+
+    /// Length of data the firmware wrote to the destination buffer
+    /// (DW0[15:0]).
+    #[inline]
+    pub fn dst_len(&self) -> u16 {
+        self.dw0().dst_len()
+    }
+
+    /// Host status code (DW3[27:17]); 0 = success.
+    #[inline]
+    pub fn status(&self) -> u16 {
+        self.dw3().status()
+    }
+
+    /// Command id echoed from the SQE (DW3[15:0]).
+    #[inline]
+    pub fn cmd_id(&self) -> u16 {
+        self.dw3().cmd_id()
+    }
+
+    // ── DW0: dst_len + session flags ────────────────────────────
+
+    /// Returns the parsed DW0.
+    #[inline]
+    pub fn dw0(&self) -> CqeDw0 {
+        CqeDw0::from(self.0[0])
+    }
+
+    /// Overwrites DW0 from a [`CqeDw0`] bitfield.
+    #[inline]
+    pub fn set_dw0(&mut self, v: CqeDw0) {
+        self.0[0] = v.into();
+    }
+
+    /// Sets the destination length (DW0[15:0]).
+    #[inline]
+    pub fn set_dst_len(&mut self, len: u16) {
+        self.0[0] = self.dw0().with_dst_len(len).into();
+    }
+
+    /// Sets session control flags in DW0.
+    #[inline]
+    pub fn set_session_ctrl(&mut self, ctrl: u8) {
+        self.0[0] = self.dw0().with_session_ctrl(ctrl).into();
+    }
+
+    /// Sets session ID valid flag in DW0.
+    #[inline]
+    pub fn set_session_id_valid(&mut self, valid: bool) {
+        self.0[0] = self.dw0().with_session_id_valid(valid).into();
+    }
+
+    /// Sets app vault ID valid flag in DW0.
+    #[inline]
+    pub fn set_app_vault_id_valid(&mut self, valid: bool) {
+        self.0[0] = self.dw0().with_app_vault_id_valid(valid).into();
+    }
+
+    /// Sets session closed flag in DW0.
+    #[inline]
+    pub fn set_session_closed(&mut self, closed: bool) {
+        self.0[0] = self.dw0().with_session_closed(closed).into();
+    }
+
+    // ── DW1: session_id + app_vault_id ──────────────────────────
+
+    /// Returns the parsed DW1.
+    #[inline]
+    pub fn dw1(&self) -> CqeDw1 {
+        CqeDw1::from(self.0[1])
+    }
+
+    /// Overwrites DW1 from a [`CqeDw1`] bitfield.
+    #[inline]
+    pub fn set_dw1(&mut self, v: CqeDw1) {
+        self.0[1] = v.into();
+    }
+
+    /// Sets the session ID (DW1[15:0]).
+    #[inline]
+    pub fn set_session_id(&mut self, id: u16) {
+        self.0[1] = self.dw1().with_session_id(id).into();
+    }
+
+    /// Sets the app vault ID (DW1[23:16]).
+    #[inline]
+    pub fn set_app_vault_id(&mut self, id: u8) {
+        self.0[1] = self.dw1().with_app_vault_id(id).into();
+    }
+
+    // ── DW2: sq_head + sq_id ────────────────────────────────────
+
+    /// Returns the parsed DW2.
+    #[inline]
+    pub fn dw2(&self) -> CqeDw2 {
+        CqeDw2::from(self.0[2])
+    }
+
+    /// Overwrites DW2 from a [`CqeDw2`] bitfield.
+    #[inline]
+    pub fn set_dw2(&mut self, v: CqeDw2) {
+        self.0[2] = v.into();
+    }
+
+    /// Sets the submission queue head pointer (DW2[15:0]).
+    #[inline]
+    pub fn set_sq_head(&mut self, head: u16) {
+        self.0[2] = self.dw2().with_sq_head(head).into();
+    }
+
+    /// Sets the submission queue ID (DW2[31:16]).
+    #[inline]
+    pub fn set_sq_id(&mut self, id: u16) {
+        self.0[2] = self.dw2().with_sq_id(id).into();
+    }
+
+    // ── DW3: cmd_id + phase/status ──────────────────────────────
+
+    /// Returns the parsed DW3.
+    #[inline]
+    pub fn dw3(&self) -> CqeDw3 {
+        CqeDw3::from(self.0[3])
+    }
+
+    /// Overwrites DW3 from a [`CqeDw3`] bitfield.
+    #[inline]
+    pub fn set_dw3(&mut self, v: CqeDw3) {
+        self.0[3] = v.into();
+    }
+
+    /// Sets the command ID (DW3[15:0]).
+    #[inline]
+    pub fn set_cmd_id(&mut self, id: u16) {
+        self.0[3] = self.dw3().with_cmd_id(id).into();
+    }
+
+    /// Sets the phase bit (DW3[16]).
+    #[inline]
+    pub fn set_phase(&mut self, phase: bool) {
+        self.0[3] = self.dw3().with_phase(phase).into();
+    }
+
+    /// Sets the host status code (DW3[27:17]).
+    #[inline]
+    pub fn set_status(&mut self, status: u16) {
+        self.0[3] = self.dw3().with_status(status).into();
+    }
+}
+
+// ── Entries ─────────────────────────────────────────────────────────
+
+/// CQE `session_ctrl` wire value of `ctrl`.
+#[inline]
+pub const fn sess_ctrl_wire(ctrl: HsmSessCtrl) -> u8 {
+    match ctrl {
+        HsmSessCtrl::Unspecified | HsmSessCtrl::NoSession => 0,
+        HsmSessCtrl::Open => 1,
+        HsmSessCtrl::Close => 2,
+        HsmSessCtrl::InSession => 3,
+    }
+}
+
+/// Session control of the SQE `session_ctrl` wire value `ctrl`.
+#[inline]
+pub const fn sess_ctrl_from_wire(ctrl: u8) -> HsmSessCtrl {
+    match ctrl & 0x3 {
+        0 => HsmSessCtrl::NoSession,
+        1 => HsmSessCtrl::Open,
+        2 => HsmSessCtrl::Close,
+        _ => HsmSessCtrl::InSession,
+    }
+}
+
+/// An Uno submission queue entry.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SqeEntry(pub RawSqe);
+
+impl SqeEntry {
+    /// Typed view of the entry.
+    #[inline]
+    pub fn view(&self) -> Sqe<'_> {
+        Sqe(&self.0)
+    }
+}
+
+impl HsmSqe for SqeEntry {
+    #[inline]
+    fn opcode(&self) -> u16 {
+        self.view().op()
+    }
+
+    #[inline]
+    fn session_id(&self) -> Option<u16> {
+        let sqe = self.view();
+        sqe.session_flags().id_valid().then(|| sqe.session_id())
+    }
+
+    #[inline]
+    fn session_ctrl(&self) -> HsmSessCtrl {
+        sess_ctrl_from_wire(self.view().session_flags().ctrl())
+    }
+}
+
+/// An Uno completion queue entry.
+///
+/// The platform stamps its identity ([`Cqe::set_cmd_id`]) and routing
+/// fields; [`HsmCqe`] writes DW0, DW1 and the status.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CqeEntry(pub RawCqe);
+
+impl CqeEntry {
+    /// Typed view of the entry.
+    #[inline]
+    pub fn view(&mut self) -> Cqe<'_> {
+        Cqe(&mut self.0)
+    }
+}
+
+impl HsmCqe for CqeEntry {
+    #[inline]
+    fn set_ok(&mut self, dst_len: u32) {
+        self.set_ok_ex(dst_len, HsmCqeSession::default());
+    }
+
+    #[inline]
+    fn set_ok_ex(&mut self, dst_len: u32, sess: HsmCqeSession) {
+        let mut cqe = self.view();
+        cqe.set_dw0(
+            CqeDw0::new()
+                .with_dst_len(dst_len as u16)
+                .with_session_ctrl(sess_ctrl_wire(sess.ctrl))
+                .with_session_id_valid(sess.id.is_some())
+                .with_app_vault_id_valid(sess.vault_id.is_some())
+                .with_session_closed(sess.closed),
+        );
+        cqe.set_dw1(
+            CqeDw1::new()
+                .with_session_id(sess.id.unwrap_or(0))
+                .with_app_vault_id(sess.vault_id.unwrap_or(0)),
+        );
+        cqe.set_status(HostStatus::SUCCESS);
+    }
+
+    #[inline]
+    fn set_err(&mut self, err: HsmError) {
+        let mut cqe = self.view();
+        cqe.set_dw0(CqeDw0::new());
+        cqe.set_dw1(CqeDw1::new());
+        cqe.set_status(host_status(err));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slice_views_read_and_write_current_format() {
+        let raw_sqe = SqeBuilder::new()
+            .cmd(CmdDword::new().with_id(42))
+            .oob_len(128)
+            .build();
+        let sqe = Sqe::try_from(raw_sqe.as_slice()).expect("current-format SQE");
+        assert_eq!(sqe.cmd_id(), 42);
+        assert_eq!(sqe.oob_len(), 128);
+
+        let mut raw_cqe = [0; CQE_DWORDS];
+        let mut cqe = Cqe::try_from(raw_cqe.as_mut_slice()).expect("current-format CQE");
+        cqe.set_cmd_id(sqe.cmd_id());
+        cqe.set_status(2);
+        let cqe = Cqe::from(&mut raw_cqe);
+        assert_eq!(cqe.cmd_id(), 42);
+        assert_eq!(cqe.status(), 2);
+    }
+
+    #[test]
+    fn sqe_slice_rejects_unsupported_lengths() {
+        let words = [0; SQE_DWORDS + 1];
+        for len in [0, SQE_DWORDS - 1, SQE_DWORDS + 1] {
+            assert_eq!(
+                Sqe::try_from(&words[..len]).expect_err("unsupported SQE length"),
+                HsmError::InvalidArg
+            );
+        }
+    }
+
+    #[test]
+    fn cqe_slice_rejects_unsupported_lengths_without_writes() {
+        let mut words = [u32::MAX; CQE_DWORDS + 1];
+        for len in [0, CQE_DWORDS - 1, CQE_DWORDS + 1] {
+            assert_eq!(
+                Cqe::try_from(&mut words[..len]).expect_err("unsupported CQE length"),
+                HsmError::InvalidArg
+            );
+            assert_eq!(words, [u32::MAX; CQE_DWORDS + 1]);
+        }
+    }
+}

@@ -92,7 +92,7 @@ fn set_test_arg(sh: &Shell, key: &str, value: &str, overwrite: bool) {
 pub const TRANSPORTS: [&str; 2] = ["sock", "ioctl"];
 
 /// API revision values accepted by `--api-rev`.
-pub const API_REVS: [&str; 2] = ["1_0", "1_1"];
+pub const API_REVS: [&str; 3] = ["1_0", "1_1", "2_0"];
 
 /// Add the requested transport/API revision selection to `TSRA_TEST_ARGS` for the
 /// test processes and, when the effective transport is `sock` (the

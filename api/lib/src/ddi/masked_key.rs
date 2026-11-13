@@ -122,7 +122,12 @@ impl TborMaskedKeyKind {
             Self::Rsa2kPrivateCrt | Self::Rsa3kPrivateCrt | Self::Rsa4kPrivateCrt => {
                 return payload_len == key_bytes * 9 / 2 + 4 || payload_len == key_bytes * 5 + 4;
             }
-            Self::EccP256 | Self::EccP384 | Self::EccP521 => key_bytes.next_multiple_of(4),
+            Self::EccP256 | Self::EccP384 => key_bytes,
+            // Little-endian firmware word-pads the P-521 scalar (66 -> 68);
+            // big-endian firmware stores it at its exact width.
+            Self::EccP521 => {
+                return payload_len == key_bytes || payload_len == key_bytes.next_multiple_of(4);
+            }
             _ => key_bytes,
         };
         payload_len == expected_len
@@ -849,6 +854,10 @@ mod tests {
         let ecc = unchecked_padded_blob(KEY_KIND_ECC521_PRIVATE, 68);
         assert_eq!(ecc.len(), 312);
         assert_eq!(HsmMaskedKey::ecc_curve(&ecc), Ok(HsmEccCurve::P521));
+
+        // Big-endian firmware stores the P-521 scalar at its exact width.
+        let ecc_be = unchecked_padded_blob(KEY_KIND_ECC521_PRIVATE, 66);
+        assert_eq!(HsmMaskedKey::ecc_curve(&ecc_be), Ok(HsmEccCurve::P521));
 
         // The host sees ciphertext, so it must not check zero padding bytes.
         let secret = unchecked_padded_blob(KEY_KIND_SECRET521, 66);

@@ -30,17 +30,25 @@ use core::ops::AsyncFnOnce;
 
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
-use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::CqeEntry;
+use tsra_fw_hsm_io::OOB_ENTRY_LEN;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
+use tsra_fw_hsm_io::SqeEntry;
+use tsra_fw_hsm_io::oob_entry_addr;
+use tsra_fw_hsm_io::validate_io_fields;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
+use tsra_fw_hsm_pal_traits::HsmRequest;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::HsmSqe;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
@@ -72,21 +80,22 @@ const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *c
 /// eight-word bursts fetch the whole 64-byte entry for about the price of
 /// two loads. The hardware writes `IO_SQ[index]` only while the slot is
 /// free, so the copy stays valid until the IO is dropped.
-struct SqeCopies(UnsafeCell<[RawSqe; IO_SQ_COUNT as usize]>);
+struct SqeCopies(UnsafeCell<[SqeEntry; IO_SQ_COUNT as usize]>);
 
 // SAFETY: single-core firmware with cooperative scheduling; a slot's copy
 // is written only by `accept_io`, before its IO exists, and read only
 // through that IO.
 unsafe impl Sync for SqeCopies {}
 
-static SQE_COPIES: SqeCopies = SqeCopies(UnsafeCell::new([[0; 16]; IO_SQ_COUNT as usize]));
+static SQE_COPIES: SqeCopies =
+    SqeCopies(UnsafeCell::new([SqeEntry([0; 16]); IO_SQ_COUNT as usize]));
 
 /// Copies host slot `index`'s SQE out of `IO_SQ` with two eight-word bursts.
 fn copy_sqe(index: usize) {
     let src = &IO_Q.io_sq[index] as *const IoSqEntry as *const u32;
     // SAFETY: `index` is a host slot, so its copy exists; nothing else
     // borrows it while the slot is free (see `SqeCopies`).
-    let dst = unsafe { (*SQE_COPIES.0.get())[index].as_mut_ptr() };
+    let dst = unsafe { (*SQE_COPIES.0.get())[index].0.as_mut_ptr() };
     #[cfg(target_arch = "arm")]
     // SAFETY: both are 64-byte, word-aligned SQEs: the IO_SQ entry and its
     // DTCM copy.
@@ -249,11 +258,14 @@ impl UnoHsmIo {
 }
 
 impl HsmIo for UnoHsmIo {
+    type Sqe = SqeEntry;
+    type Cqe = CqeEntry;
+
     /// Returns the SQE from `IO_SQ[index]`.
     ///
     /// IIC DMAs the host-side 64-byte SQE into `IO_SQ[index]`; a host IO
     /// reads the copy [`accept_io`](UnoHsmPal::accept_io) took of it.
-    fn sqe(&self) -> &HsmSqe {
+    fn sqe(&self) -> &SqeEntry {
         const _ASSERT_SQE_SIZE: () =
             assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<RawSqe>());
         const _ASSERT_SQE_ALIGN: () =
@@ -265,25 +277,22 @@ impl HsmIo for UnoHsmIo {
             return unsafe { &(*SQE_COPIES.0.get())[self.index as usize] };
         }
         let io_sq = &IO_Q.io_sq[self.index as usize];
-        // SAFETY: The queue entry and RawSqe share the asserted layout; this IO owns the slot.
-        unsafe { &*(io_sq as *const IoSqEntry as *const RawSqe) }
+        // SAFETY: The queue entry and RawSqe (and so the transparent
+        // SqeEntry) share the asserted layout; this IO owns the slot.
+        unsafe { &*(io_sq as *const IoSqEntry as *const SqeEntry) }
     }
 
     /// Returns a mutable reference to the CQE at `IO_CQ[index]`.
     ///
     /// The HSM core writes completion status here; the OIC driver
     /// reads it when sending the completion back to the host.
-    fn cqe(&mut self) -> &mut HsmCqe {
+    fn cqe(&mut self) -> &mut CqeEntry {
         const _ASSERT_CQE_SIZE: () =
             assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<RawCqe>());
         const _ASSERT_CQE_ALIGN: () =
             assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<RawCqe>());
 
-        // SAFETY: The asserted layout matches RawCqe; the mutable IO borrow owns its CQ slot.
-        unsafe {
-            let ptr = core::ptr::addr_of!(IO_Q.io_cq[self.index as usize]) as *mut RawCqe;
-            &mut *ptr
-        }
+        slot_cqe(self.index)
     }
 }
 
@@ -311,36 +320,91 @@ impl HsmIoController for UnoHsmPal {
     /// Posts the CQE only; the IO_SQ slot is returned to the ISQ
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
+    async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
+        let sqe = io.sqe().view();
+        if sqe.cmd().psdt() != 0 {
+            return Err(HsmError::SqeInvalidPsdt);
+        }
+        validate_io_fields(
+            sqe.src_len(),
+            sqe.dst_len(),
+            sqe.src_prp1(),
+            sqe.dst_prp1(),
+            sqe.oob_len(),
+            sqe.oob_prp(),
+        )?;
+        let len = sqe.src_len() as usize;
+        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+        self.copy_mem_from_host(
+            io,
+            sqe.src_prp1(),
+            sqe.src_prp2(),
+            &mut buf.buffer_mut()[..len],
+            true,
+        )
+        .await
+        .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+        Ok(HsmRequest {
+            buf,
+            len,
+            resp_capacity: sqe.dst_len() as usize,
+        })
+    }
+
+    async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
+        let sqe = io.sqe().view();
+        if resp.len() > sqe.dst_len() as usize {
+            return Err(HsmError::InvalidArg);
+        }
+        self.copy_mem_to_host(io, resp, sqe.dst_prp1(), sqe.dst_prp2(), true)
+            .await
+            .map_err(|_| HsmError::FailedToStartDmaTransaction)
+    }
+
+    async fn recv_oob(&self, io: &UnoHsmIo, index: usize, dst: &mut HsmDmaBuf) -> HsmResult<()> {
+        let desc = self.oob_desc(io, index).await?;
+        self.copy_mem_from_host_raw(io, &desc, dst, false).await
+    }
+
+    /// Writes `src` to the host buffer of OOB descriptor `index`, which
+    /// must be an SGL Data Block of exactly `src.len()` bytes.
+    async fn send_oob(&self, io: &UnoHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
+        const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
+
+        let desc = self.oob_desc(io, index).await?;
+        let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
+        if desc[15] >> 4 != SGL_TYPE_DATA_BLOCK || len as usize != src.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        self.gdma
+            .copy_mem(
+                crate::gdma::device_dma_buf(src.as_ptr(), len),
+                MemInterface::Device,
+                len,
+                crate::gdma::sgl_desc_buf(&desc),
+                crate::gdma::host_interface(io.pid())?,
+                len,
+            )?
+            .await
+    }
+
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
-        Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
+        io.cqe().view().set_sq_id(queue_id);
         self.oic.send(io.index, queue_id as u8)?.await
     }
 
-    /// Drops an IO without sending a completion (e.g. for disabled
-    /// partitions). Scrubs the slot's scratch buffers, then returns the
-    /// IO_SQ slot to the ISQ.
-    ///
-    /// This is the universal IO teardown point (the core dispatch loop
-    /// calls it on both the completed and the dropped paths), so the
-    /// per-IO buffer scrub lives here. See
-    /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot). It also ends the IO's
-    /// in-flight count, in the same step that returns the slot.
     /// Starts the reply copy as a detached GDMA transfer, whose completion
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
     /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
     /// IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
-    fn finish_io(
-        &self,
-        io: Self::Io,
-        resp: &HsmDmaBuf,
-        dst: HsmDmaAddr,
-        dst2: HsmDmaAddr,
-        copy_failed: fn(&mut HsmCqe),
-    ) -> Result<(), Self::Io> {
+    fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io> {
         let index = io.index;
+        let sqe = io.sqe().view();
+        let (dst, dst2) = (sqe.dst_prp1(), sqe.dst_prp2());
         if index as u32 >= IO_SQ_COUNT
+            || resp.len() > sqe.dst_len() as usize
             || crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX
         {
             return Err(io);
@@ -366,11 +430,19 @@ impl HsmIoController for UnoHsmPal {
         }
         self.detached[index as usize].set(DetachedIo {
             queue_id: io.queue_id(),
-            copy_failed,
         });
         Ok(())
     }
 
+    /// Drops an IO without sending a completion (e.g. for disabled
+    /// partitions). Scrubs the slot's scratch buffers, then returns the
+    /// IO_SQ slot to the ISQ.
+    ///
+    /// This is the universal IO teardown point (the core dispatch loop
+    /// calls it on both the completed and the dropped paths), so the
+    /// per-IO buffer scrub lives here. See
+    /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot). It also ends the IO's
+    /// in-flight count, in the same step that returns the slot.
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         // Scrub both per-IO scratch buffers *before* returning the slot to
@@ -388,23 +460,40 @@ impl HsmIoController for UnoHsmPal {
 #[derive(Clone, Copy)]
 pub(crate) struct DetachedIo {
     queue_id: u16,
-    copy_failed: fn(&mut HsmCqe),
 }
 
 impl DetachedIo {
-    pub(crate) const NONE: Self = Self {
-        queue_id: 0,
-        copy_failed: |_| {},
-    };
+    pub(crate) const NONE: Self = Self { queue_id: 0 };
 }
 
-/// The CQE of host IO slot `index`, as [`HsmIo::cqe`] exposes it.
-fn slot_cqe(index: u16) -> &'static mut HsmCqe {
-    // SAFETY: as in `HsmIo::cqe`: the layouts match, and only the slot's
-    // owner -- here the platform, finishing a detached IO -- touches it.
+/// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it.
+fn slot_cqe(index: u16) -> &'static mut CqeEntry {
+    // SAFETY: the queue entry and RawCqe (and so the transparent CqeEntry)
+    // share the asserted layout, and only the slot's owner -- its IO, or
+    // the platform finishing a detached IO -- touches it.
     unsafe {
-        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut RawCqe;
+        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut CqeEntry;
         &mut *ptr
+    }
+}
+
+impl UnoHsmPal {
+    /// Reads OOB descriptor `index` of `io` from host memory.
+    pub(crate) async fn oob_desc(
+        &self,
+        io: &UnoHsmIo,
+        index: usize,
+    ) -> HsmResult<[u8; OOB_ENTRY_LEN as usize]> {
+        let sqe = io.sqe().view();
+        let addr = oob_entry_addr(sqe.oob_prp(), sqe.oob_len(), index)?;
+        self.alloc_scoped_async(io, async |scoped| {
+            let entry = scoped.dma_alloc(OOB_ENTRY_LEN as usize)?;
+            self.copy_mem_from_host(io, addr, HsmDmaAddr::ZERO, entry, true)
+                .await?;
+            let bytes: &[u8] = entry;
+            bytes.try_into().map_err(|_| HsmError::InternalError)
+        })
+        .await
     }
 }
 
@@ -419,11 +508,9 @@ impl UnoHsmPal {
             let d = self.detached[index as usize].get();
             let cqe = slot_cqe(index);
             if !ok {
-                (d.copy_failed)(cqe);
+                cqe.set_err(HsmError::FailedToStartDmaTransaction);
             }
-            if let Ok(mut cqe) = Cqe::try_from(cqe) {
-                cqe.set_sq_id(d.queue_id);
-            }
+            cqe.view().set_sq_id(d.queue_id);
             self.post_detached(index);
         }
         let mut pending = self.detached_post_pending.get();
@@ -464,6 +551,11 @@ impl UnoHsmPal {
         reset_io_alloc(self, index);
         if (index as u32) < IO_SQ_COUNT {
             copy_sqe(index as usize);
+            // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.
+            let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] };
+            let mut cqe = CqeEntry::default();
+            cqe.view().set_cmd_id(sqe.view().cmd_id());
+            *slot_cqe(index) = cqe;
         }
         // The routing comes with the IO, as the IIC driver read it from the
         // ICQ entry, rather than back out of IO_META.

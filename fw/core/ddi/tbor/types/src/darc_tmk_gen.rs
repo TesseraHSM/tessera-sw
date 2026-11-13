@@ -56,7 +56,7 @@ pub struct TborDarcTmkGenReq {
 pub struct TborDarcTmkGenResp<'a> {
     /// The minted TMK, masked (AEAD-GCM-256) under the partition SDMK.
     /// Always exactly [`MASKED_TMK_LEN`] (264 B).
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 }
 

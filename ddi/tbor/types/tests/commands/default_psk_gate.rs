@@ -36,7 +36,6 @@
 //! begin at their canonical defaults.
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::assertions::assert_tbor_decode_error;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -545,7 +544,7 @@ fn default_psk_gate_second_close_of_same_session_is_rejected() {
         .session_close(session_id)
         .expect_err("second SessionClose for the same session must be rejected");
 
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 
     let replacement = ctx
         .open_session(CO, SessionType::Authenticated)

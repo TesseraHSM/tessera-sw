@@ -4,7 +4,7 @@
 //! TBOR `GetUnwrappingKey` command handler.
 //!
 //! Within an open session, return the partition's RSA-2048 **unwrapping**
-//! public key (raw wire `n_le ‖ e_le`), which the host uses to RSA-AES
+//! public key (raw wire `n ‖ e`, device byte order), which the host uses to RSA-AES
 //! key-wrap a payload for `UnwrapKey`.  The unwrapping key is a
 //! device-provisioned partition-internal key; only its public half is
 //! returned — the private half never leaves the device and `UnwrapKey`

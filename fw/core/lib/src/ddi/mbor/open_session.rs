@@ -42,6 +42,7 @@ use tsra_fw_ddi_mbor_types::open_session::DdiOpenSessionReq;
 use tsra_fw_ddi_mbor_types::open_session::DdiOpenSessionResp;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
 use tsra_fw_ddi_mbor_types::DdiPublicKey;
+use tsra_fw_hsm_byte_order as byte_order;
 
 use super::*;
 
@@ -317,11 +318,10 @@ pub(super) async fn derive_session_credential_keys<P: HsmPal>(
         .await?;
     }
 
-    // The ECDH secret is returned PKA-native little-endian; reverse it to the
-    // host's big-endian (openssl) order so the firmware HKDF matches the host,
-    // which runs the same HKDF over its openssl-BE secret. Byte-order
-    // conversion lives in the handler now, not the PAL.
-    secret[..HsmEccCurve::P384.secret_len()].reverse();
+    // The ECDH secret is returned in operand order; convert it to the
+    // host's big-endian (openssl) order so the firmware HKDF matches the
+    // host, which runs the same HKDF over its openssl-BE secret.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut secret[..HsmEccCurve::P384.secret_len()]);
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;

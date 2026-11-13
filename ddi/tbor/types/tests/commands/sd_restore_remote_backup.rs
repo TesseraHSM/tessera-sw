@@ -41,6 +41,7 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
@@ -346,4 +347,30 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_restore_remote_backup_rejects_bad_masked_key_layout() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_remote_backup(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let init = ctx
+        .part_init(&session, &seed, &backup.policy, &pota_thumbprint())
+        .expect("PartInit (device 2)");
+    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("PartFinal must restore PartLocalMK from the prior backup");
+
+    assert_masked_key_layout_rejected(&ctx, &restore_remote_req(session.session_id, &backup));
 }

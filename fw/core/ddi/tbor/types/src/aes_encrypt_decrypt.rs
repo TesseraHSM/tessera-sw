@@ -140,7 +140,7 @@ pub struct TborAesEncryptDecryptReq<'a> {
     /// AEAD-GCM-256 envelope of 248..=264 B, unmasked and wiped in place.
     /// Placed after `iv` / `msg` so those fields can become the compact
     /// response without overlapping the live key.
-    #[tbor(buffer, min_len = 248, max_len = 264, mutable)]
+    #[tbor(align = 4, buffer, min_len = 248, max_len = 264, mutable)]
     pub masked_key: &'a [u8],
 }
 

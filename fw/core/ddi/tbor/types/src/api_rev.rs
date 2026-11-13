@@ -4,9 +4,9 @@
 //! TBOR `ApiRev` wire schema.
 //!
 //! `ApiRev` is the bootstrap TBOR command. The host sends an empty
-//! request; the firmware responds with the inclusive range of TBOR
-//! wire-protocol versions it supports. The host then picks a compatible
-//! version for subsequent commands.
+//! request; the firmware responds with the inclusive range of SDK API
+//! revisions (`major.minor`) it supports. The host then picks a
+//! compatible revision for subsequent commands.
 //!
 //! All firmware versions are required to be able to decode a v1 request
 //! and encode a v1 response — `ApiRev` is the well-known bootstrap,
@@ -17,7 +17,7 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
-use crate::tbor_int::U8;
+use crate::tbor_int::U16;
 
 /// TBOR opcode for `ApiRev`.
 pub const TBOR_OP_API_REV: u8 = 0x01;
@@ -33,13 +33,19 @@ pub struct TborApiRevReq;
 
 /// `ApiRev` response schema.
 ///
-/// Advertises the inclusive range of TBOR wire-protocol versions the
-/// firmware supports.
+/// Advertises the inclusive range of SDK API revisions the firmware
+/// supports.
 #[tbor(response, pair = TborApiRevReq)]
 pub struct TborApiRevResp {
-    /// Lowest TBOR wire-protocol version the firmware speaks.
-    pub min_ver: U8,
+    /// Major version of the lowest supported API revision.
+    pub min_major: U16,
 
-    /// Highest TBOR wire-protocol version the firmware speaks.
-    pub max_ver: U8,
+    /// Minor version of the lowest supported API revision.
+    pub min_minor: U16,
+
+    /// Major version of the highest supported API revision.
+    pub max_major: U16,
+
+    /// Minor version of the highest supported API revision.
+    pub max_minor: U16,
 }

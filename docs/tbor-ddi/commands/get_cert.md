@@ -24,14 +24,14 @@ the request does not carry a partition selector.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries.
+Wire layout: 8-byte header, followed by the TOC entries.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition. |
-| 8 | `cert_id` | `uint8` (inline) | Zero-based certificate index; `0` = root, last index (`count - 1`) = partition leaf.  Must satisfy `cert_id < num_certs`. |
+| 8 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition. |
+| 12 | `cert_id` | `uint8` (inline) | Zero-based certificate index; `0` = root, last index (`count - 1`) = partition leaf.  Must satisfy `cert_id < num_certs`. |
 
 ## Response
 

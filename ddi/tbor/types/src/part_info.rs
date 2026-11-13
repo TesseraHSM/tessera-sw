@@ -30,7 +30,7 @@ pub const TBOR_OP_PART_INFO: u8 = 0x02;
 pub const PID_LEN: usize = 16;
 
 /// Length of the raw ECC-P384 identity public key (`x ‖ y`), with each
-/// 48-byte coordinate in little-endian (HSM wire format; SEC1 `0x04` prefix stripped).
+/// 48-byte coordinate big-endian on every device (SEC1 `0x04` prefix stripped).
 pub const PID_PUB_KEY_LEN: usize = 96;
 
 /// Host-facing TBOR `PartInfo` request. Carries no per-call data.

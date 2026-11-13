@@ -79,7 +79,7 @@ pub struct TborAesGcmEncryptDecryptReq {
 
     /// The masked AES-256 key, placed last so firmware can return
     /// `iv` / `tag` in place.
-    #[tbor(min_len = 264, max_len = 264)]
+    #[tbor(align = 4, min_len = 264, max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 

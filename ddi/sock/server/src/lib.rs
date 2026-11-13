@@ -16,6 +16,12 @@
 //! (fast-path AES-GCM/XTS) buffers into server-owned SGL data. Sideband reset
 //! disables and re-enables this endpoint's partition, coordinated across all
 //! connections. Independent root/leaf instances need separate server processes.
+//!
+//! Each process hosts one device, chosen at startup by SDK API revision:
+//! `--api-rev MAJOR_MINOR` (before the endpoint), else the `api_rev` key of
+//! `TSRA_TEST_ARGS` with the `test-args` feature, else Uno. Uno serves 1.x
+//! (64 B command / 128 B bulk SQEs); Duo serves 2.x (128 B SQEs, 64 B CQEs,
+//! no bulk queue).
 
 #[cfg(feature = "test-args")]
 mod test_args;
@@ -69,7 +75,8 @@ use tsra_fw_hsm_io::OP_MBOR;
 use tsra_fw_hsm_io::OP_TBOR;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
-use tsra_fw_hsm_std::StdHsm;
+
+use crate::device::Device;
 
 // This crate's own unit tests build their own `StdHsm`, so they never
 // autostart one.
@@ -77,9 +84,13 @@ use tsra_fw_hsm_std::StdHsm;
 mod autostart;
 #[cfg(all(feature = "autostart", not(test)))]
 pub use autostart::autostarted;
+mod device;
+mod duo;
 mod tcp;
 #[cfg(unix)]
 mod unix;
+#[cfg(test)]
+mod wire_compat;
 
 pub use tcp::spawn_loopback;
 
@@ -161,7 +172,7 @@ where
 struct DmaBuf<const N: usize>([u8; N]);
 
 struct SocketHsm {
-    hsm: Arc<StdHsm>,
+    hsm: Device,
     execution: tokio::sync::RwLock<()>,
     sessions: tokio::sync::RwLock<HashMap<u16, SessionOwner>>,
     pending_cleanups: AtomicUsize,
@@ -211,7 +222,7 @@ impl SessionLease {
 }
 
 impl SocketHsm {
-    fn new(hsm: Arc<StdHsm>) -> Self {
+    fn new(hsm: Device) -> Self {
         Self {
             hsm,
             execution: tokio::sync::RwLock::new(()),
@@ -289,6 +300,9 @@ impl Connection {
             let RequestFrame::Submit(submission) = &request else {
                 return Ok(execute_frame(server, request).await);
             };
+            if matches!(server.hsm, Device::Duo(_)) {
+                return Ok(duo::execute_submission(server, &mut state, request).await);
+            }
             if submission.sqe.len() == BULK_SQE_DWORDS {
                 // Partition-scoped bulk keys do not validate session state in
                 // firmware, so ownership alone is insufficient here.
@@ -475,6 +489,9 @@ impl Drop for Connection {
 }
 
 async fn close_session(server: Arc<SocketHsm>, id: u16) -> Result<(), String> {
+    if matches!(server.hsm, Device::Duo(_)) {
+        return duo::close_session(server, id).await;
+    }
     // Driver-style flush is idempotent if a failed handshake already
     // destroyed its Pending slot. Caller holds the ownership write lock.
     let sqe = SqeBuilder::new()
@@ -512,7 +529,7 @@ async fn close_session(server: Arc<SocketHsm>, id: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
+fn patch_prp1(sqe: &mut [u32], low_dword: usize, address: u64) {
     sqe[low_dword] = address as u32;
     sqe[low_dword + 1] = (address >> 32) as u32;
 }
@@ -533,6 +550,9 @@ fn transport_error(status: u32) -> Response {
 }
 
 async fn execute_request(server: &SocketHsm, request: Request) -> Response {
+    if let Device::Duo(hsm) = &server.hsm {
+        return duo::execute(server, hsm, request).await;
+    }
     match <RawBulkSqe>::try_from(request.sqe.as_slice()) {
         Ok(sqe) => execute_bulk(server, sqe, request).await,
         Err(_) => execute_normal(server, request).await,
@@ -579,9 +599,11 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
         gcm_tail.dst = gcm_tail.src;
     }
 
+    let Device::Uno(hsm) = &server.hsm else {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    };
     let _execution = server.execution.read().await;
-    let cqe = match server
-        .hsm
+    let cqe = match hsm
         .bulk_io(sqe.encode(), HSM_PARTITION_ID, HSM_BULK_QID, 0)
         .await
     {
@@ -601,6 +623,84 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
     }
 }
 
+/// Server-owned DMA buffers a command SQE's source, destination and OOB
+/// items are re-homed into; they must outlive the firmware completion.
+struct Staged {
+    src: Box<DmaBuf<DMA_BUF_SIZE>>,
+    dst: Box<DmaBuf<DMA_BUF_SIZE>>,
+    oob_page: Box<DmaBuf<DMA_PAGE_SIZE>>,
+    /// `(is_output, bytes)` per OOB item, in index order.
+    oob: Vec<(bool, Vec<u8>)>,
+}
+
+impl Staged {
+    /// Copies `payload` (at most [`DMA_BUF_SIZE`]) into the source buffer
+    /// and lays out one SGL descriptor per OOB item (at most
+    /// [`MAX_OOB_ITEMS`]) in the OOB page.
+    fn new(payload: &[u8], oob_items: Vec<OobItem>) -> Self {
+        let mut src = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
+        let mut oob_page = Box::new(DmaBuf([0; DMA_PAGE_SIZE]));
+        src.0[..payload.len()].copy_from_slice(payload);
+        let mut oob: Vec<(bool, Vec<u8>)> = oob_items
+            .into_iter()
+            .map(|item| match item {
+                OobItem::In(bytes) => (false, bytes),
+                OobItem::Out(len) => (true, vec![0; len as usize]),
+            })
+            .collect();
+        for (index, (_, item)) in oob.iter_mut().enumerate() {
+            let off = index * 16;
+            oob_page.0[off..off + 8].copy_from_slice(&(item.as_mut_ptr() as u64).to_le_bytes());
+            oob_page.0[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
+        }
+        Self {
+            src,
+            dst: Box::new(DmaBuf([0; DMA_BUF_SIZE])),
+            oob_page,
+            oob,
+        }
+    }
+
+    fn src_addr(&self, offset: usize) -> u64 {
+        self.src.0[offset..].as_ptr() as u64
+    }
+
+    fn dst_addr(&mut self, offset: usize) -> u64 {
+        self.dst.0[offset..].as_mut_ptr() as u64
+    }
+
+    /// The SGL descriptor page, if there are OOB items.
+    fn oob_page_addr(&self) -> Option<u64> {
+        (!self.oob.is_empty()).then_some(self.oob_page.0.as_ptr() as u64)
+    }
+
+    /// Builds the response from the completion and the first `dst_len`
+    /// destination bytes, returning output OOB items in index order.
+    fn into_response(self, cqe: Vec<u32>, dst_len: usize) -> Response {
+        Response {
+            status: 0,
+            cqe,
+            payload: self.dst.0[..dst_len].to_vec(),
+            oob_items: self
+                .oob
+                .into_iter()
+                .filter_map(|(out, item)| out.then_some(item))
+                .collect(),
+            tail: Vec::new(),
+        }
+    }
+}
+
+/// Whether a request's OOB items fit the transport limits and match the
+/// SQE's descriptor byte count `oob_len`.
+fn oob_items_valid(items: &[OobItem], oob_len: u32) -> bool {
+    items.len() <= MAX_OOB_ITEMS
+        && items
+            .iter()
+            .all(|item| !item.is_empty() && item.len() <= MAX_OOB_ITEM as usize)
+        && oob_len as usize == items.len() * 16
+}
+
 async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
     let Ok(mut sqe) = <[u32; 16]>::try_from(request.sqe.as_slice()) else {
         return transport_error(TRANSPORT_INVALID_REQUEST);
@@ -610,12 +710,7 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
     if sqe[2..6].iter().any(|&word| word != 0)
         || sqe[7..11].iter().any(|&word| word != 0)
         || sqe[13..15].iter().any(|&word| word != 0)
-        || request.oob_items.len() > MAX_OOB_ITEMS
-        || request
-            .oob_items
-            .iter()
-            .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
-        || sqe[15] as usize != request.oob_items.len() * 16
+        || !oob_items_valid(&request.oob_items, sqe[15])
         || (!request.oob_items.is_empty() && sqe[0] & 0x3ff != 2)
         || src_len != request.payload.len()
         || src_len > DMA_BUF_SIZE
@@ -625,36 +720,22 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
         return transport_error(TRANSPORT_INVALID_REQUEST);
     }
 
-    let mut src = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
-    let mut dst = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
-    let mut oob_page = Box::new(DmaBuf([0; DMA_PAGE_SIZE]));
-    src.0[..src_len].copy_from_slice(&request.payload);
-    let mut oob: Vec<(bool, Vec<u8>)> = request
-        .oob_items
-        .into_iter()
-        .map(|item| match item {
-            OobItem::In(bytes) => (false, bytes),
-            OobItem::Out(len) => (true, vec![0; len as usize]),
-        })
-        .collect();
-    for (index, (_, item)) in oob.iter_mut().enumerate() {
-        let off = index * 16;
-        oob_page.0[off..off + 8].copy_from_slice(&(item.as_mut_ptr() as u64).to_le_bytes());
-        oob_page.0[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
-    }
-
-    patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
-    patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
+    let mut staged = Staged::new(&request.payload, request.oob_items);
+    patch_prp1(&mut sqe, 2, staged.src_addr(0));
+    patch_prp1(&mut sqe, 7, staged.dst_addr(0));
     if src_len > DMA_PAGE_SIZE {
-        patch_prp1(&mut sqe, 4, src.0[DMA_PAGE_SIZE..].as_ptr() as u64);
+        patch_prp1(&mut sqe, 4, staged.src_addr(DMA_PAGE_SIZE));
     }
     if dst_cap > DMA_PAGE_SIZE {
-        patch_prp1(&mut sqe, 9, dst.0[DMA_PAGE_SIZE..].as_mut_ptr() as u64);
+        patch_prp1(&mut sqe, 9, staged.dst_addr(DMA_PAGE_SIZE));
     }
-    if !oob.is_empty() {
-        patch_prp1(&mut sqe, 13, oob_page.0.as_ptr() as u64);
+    if let Some(page) = staged.oob_page_addr() {
+        patch_prp1(&mut sqe, 13, page);
     }
 
+    let Device::Uno(hsm) = &server.hsm else {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    };
     let _execution = server.execution.read().await;
     #[cfg(test)]
     let completion = if let Some(probe) = server.submission_probe.lock().await.take() {
@@ -664,7 +745,7 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
     } else {
         None
     };
-    let cqe = match server.hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
+    let cqe = match hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
         Ok(cqe) => cqe,
         Err(error) => {
             tracing::error!(?error, "StdHsm request failed");
@@ -676,16 +757,7 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
         return transport_error(TRANSPORT_HSM_ERROR);
     }
 
-    let response = Response {
-        status: 0,
-        cqe: cqe.to_vec(),
-        payload: dst.0[..dst_len].to_vec(),
-        oob_items: oob
-            .into_iter()
-            .filter_map(|(out, item)| out.then_some(item))
-            .collect(),
-        tail: Vec::new(),
-    };
+    let response = staged.into_response(cqe.to_vec(), dst_len);
     #[cfg(test)]
     if let Some(completion) = completion {
         completion
@@ -727,6 +799,7 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
                 };
                 ResponseFrame::Reset { status }
             }
+            RequestFrame::Discover => ResponseFrame::Discover(server.hsm.info()),
         }
     })
     .await
@@ -773,17 +846,45 @@ fn resource_count() -> Result<u32, String> {
     Ok(1)
 }
 
+/// API revision requested with `--api-rev`, set once by [`run`].
+static CLI_API_REV: std::sync::OnceLock<(u16, u16)> = std::sync::OnceLock::new();
+
+/// Parses a `MAJOR_MINOR` API revision such as `2_0`.
+fn parse_api_rev(value: &str) -> Option<(u16, u16)> {
+    let (major, minor) = value.split_once('_')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// API revision that selects the served device: `--api-rev`, else the
+/// `api_rev` key of `TSRA_TEST_ARGS` with the `test-args` feature, else
+/// none (Uno).
+fn api_rev() -> Result<Option<(u16, u16)>, String> {
+    if let Some(rev) = CLI_API_REV.get() {
+        return Ok(Some(*rev));
+    }
+    #[cfg(feature = "test-args")]
+    if let Some((major, minor)) = TestArgs::from_env().api_rev_parts() {
+        return match (u16::try_from(major), u16::try_from(minor)) {
+            (Ok(major), Ok(minor)) => Ok(Some((major, minor))),
+            _ => Err(format!(
+                "TSRA_TEST_ARGS api_rev={major}_{minor} is out of range"
+            )),
+        };
+    }
+    Ok(None)
+}
+
 async fn init_partition(server: &SocketHsm) -> Result<(), String> {
     server
         .hsm
         .part_alloc(HSM_PARTITION_ID, part_res_mask(resource_count()?))
         .await
-        .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
+        .map_err(|error| format!("failed to allocate HSM partition: {error}"))?;
     server
         .hsm
         .part_enable(HSM_PARTITION_ID)
         .await
-        .map_err(|error| format!("failed to enable HSM partition: {error:?}"))
+        .map_err(|error| format!("failed to enable HSM partition: {error}"))
 }
 
 fn run_with_hsm<F>(serve: impl FnOnce(Arc<SocketHsm>) -> F) -> Result<(), String>
@@ -799,13 +900,14 @@ where
     // The Embassy executor is process-global and its destructor cannot terminate
     // it. Retain an owner until process exit so errors can reach main without
     // hanging in StdHsm::drop.
-    static HSM: std::sync::OnceLock<Arc<SocketHsm>> = std::sync::OnceLock::new();
-    let hsm = HSM.get_or_init(|| {
-        Arc::new(SocketHsm::new(Arc::new(StdHsm::with_tokio(
-            runtime.handle().clone(),
-        ))))
-    });
-    runtime.block_on(serve(Arc::clone(hsm)))
+    static HSM: std::sync::OnceLock<Result<Arc<SocketHsm>, String>> = std::sync::OnceLock::new();
+    let hsm = HSM
+        .get_or_init(|| {
+            let device = Device::start(api_rev()?, runtime.handle().clone())?;
+            Ok(Arc::new(SocketHsm::new(device)))
+        })
+        .clone()?;
+    runtime.block_on(serve(hsm))
 }
 
 #[cfg(test)]
@@ -816,14 +918,38 @@ fn test_partition_lock() -> parking_lot::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 fn test_hsm() -> Arc<SocketHsm> {
-    static HSM: std::sync::LazyLock<Arc<SocketHsm>> =
-        std::sync::LazyLock::new(|| Arc::new(SocketHsm::new(Arc::new(StdHsm::new()))));
+    static HSM: std::sync::LazyLock<Arc<SocketHsm>> = std::sync::LazyLock::new(|| {
+        Arc::new(SocketHsm::new(Device::Uno(
+            tsra_fw_hsm_std_uno::StdHsm::new(),
+        )))
+    });
     static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("partition setup runtime");
         runtime
+            .block_on(init_partition(&HSM))
+            .expect("partition setup");
+    });
+    std::sync::LazyLock::force(&PARTITION);
+    Arc::clone(&HSM)
+}
+
+/// Shared Duo test server. Partition setup blocks on its own runtime, so
+/// call this before entering a test runtime.
+#[cfg(test)]
+fn test_duo_hsm() -> Arc<SocketHsm> {
+    static HSM: std::sync::LazyLock<Arc<SocketHsm>> = std::sync::LazyLock::new(|| {
+        Arc::new(SocketHsm::new(Device::Duo(
+            tsra_fw_hsm_std_duo::StdHsm::new(),
+        )))
+    });
+    static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("partition setup runtime")
             .block_on(init_partition(&HSM))
             .expect("partition setup");
     });
@@ -1361,7 +1487,19 @@ impl std::fmt::Display for Listening {
 /// Run the server using the endpoint from the command line, calling
 /// `on_listening` once it accepts clients.
 pub fn run(on_listening: impl FnOnce(&Listening)) -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
+    const USAGE: &str = "usage: ddi_sock_server [--api-rev MAJOR_MINOR] \
+                         [tcp://HOST:PORT | unix://PATH | vsock://*:1234]";
+    let mut args = std::env::args().skip(1).peekable();
+    if args.next_if(|arg| arg == "--api-rev").is_some() {
+        let rev = args
+            .next()
+            .as_deref()
+            .and_then(parse_api_rev)
+            .ok_or(USAGE)?;
+        CLI_API_REV
+            .set(rev)
+            .map_err(|_| "--api-rev already set".to_owned())?;
+    }
     let endpoint = args.next().unwrap_or_else(|| {
         if cfg!(target_os = "linux") {
             "vsock://*:1234".to_owned()
@@ -1370,9 +1508,7 @@ pub fn run(on_listening: impl FnOnce(&Listening)) -> Result<(), String> {
         }
     });
     if args.next().is_some() {
-        return Err(
-            "usage: ddi_sock_server [tcp://HOST:PORT | unix://PATH | vsock://*:1234]".into(),
-        );
+        return Err(USAGE.into());
     }
     if let Some(address) = endpoint.strip_prefix("tcp://") {
         tcp::run(address, on_listening)

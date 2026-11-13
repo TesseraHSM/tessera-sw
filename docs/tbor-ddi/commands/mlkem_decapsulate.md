@@ -29,10 +29,11 @@ implementation is registered.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the returned shared secret. |
-| — | `masked_key` | `buffer` (196 B) | The masked ML-KEM `(d ‖ z)` seed material; unmasked on-device by the future handler.  Seed-only wire: 64-byte seed + 132 B envelope. |
-| — | `ciphertext` | `buffer` (up to 1568 B) | ML-KEM ciphertext bytes. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the returned shared secret. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (196 B) | The masked ML-KEM `(d ‖ z)` seed material; unmasked on-device by the future handler.  Seed-only wire: 64-byte seed + 132 B envelope. |
+| 24 | `ciphertext` | `buffer` (up to 1568 B) | ML-KEM ciphertext bytes. |
 
 ### Data section
 
@@ -48,7 +49,8 @@ transport buffer.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_shared_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
 
 ### Data section
 

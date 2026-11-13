@@ -21,12 +21,12 @@
 //!   kind recovers the modulus size and CRT form.
 //! * `op_type` — the [`RsaOp`] selecting which usage attribute gates the
 //!   operation (`Decrypt` → `decrypt`, `Sign` → `sign`).
-//! * `y` — the input integer in wire little-endian order, exactly the
+//! * `y` — the input integer in device byte order, exactly the
 //!   key's modulus length (256 / 384 / 512 B for RSA-2048 / 3072 / 4096).
 //!
 //! Outputs:
 //!
-//! * `x` — the result `y^d mod n` in wire little-endian order, exactly the
+//! * `x` — the result `y^d mod n` in device byte order, exactly the
 //!   key's modulus length.
 
 use open_enum::open_enum;
@@ -88,7 +88,7 @@ pub struct TborRsaModExpReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// The input integer `y` in wire little-endian order, exactly the key's
+    /// The input integer `y` in device byte order, exactly the key's
     /// modulus length (256 / 384 / 512 B), replaced in place by the result.
     #[tbor(buffer, max_len = 512, mutable)]
     pub y: &'a [u8],
@@ -96,7 +96,7 @@ pub struct TborRsaModExpReq<'a> {
     /// The masked RSA private key (from `UnwrapKey`), an AEAD-GCM-256
     /// envelope of 264..=3168 B.  Its kind recovers the modulus size and
     /// CRT form.
-    #[tbor(buffer, min_len = 264, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The private-key operation, 1-byte [`RsaOp`] (gates on `decrypt` /
@@ -111,7 +111,7 @@ pub struct TborRsaModExpReq<'a> {
 /// the PAL write `y^d mod n` straight into it (`decode_mut`).
 #[tbor(response, pair = TborRsaModExpReq)]
 pub struct TborRsaModExpResp<'a> {
-    /// The result `x = y^d mod n` in wire little-endian order, exactly the
+    /// The result `x = y^d mod n` in device byte order, exactly the
     /// key's modulus length (256 / 384 / 512 B).
     #[tbor(buffer, max_len = 512, mutable)]
     pub x: &'a [u8],

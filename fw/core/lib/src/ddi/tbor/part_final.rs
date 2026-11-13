@@ -41,8 +41,6 @@ use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborPartFinalReq;
 use tsra_fw_ddi_tbor_types::TborPartFinalResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
-use tsra_fw_hsm_oob::copy_oob;
-use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -116,7 +114,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
@@ -149,7 +146,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // std/emu 8 KiB DMA heap, failing a valid finalization with
         // `NotEnoughSpace`.
         pal.alloc_scoped_async(io, async |val_alloc| {
-            validate_pta_chain(pal, io, val_alloc, oob, req.cert_descriptors, policy).await
+            validate_pta_chain(pal, io, val_alloc, req.cert_descriptors, policy).await
         })
         .await?;
 
@@ -264,7 +261,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
 /// Walk the supplied PTA certificate chain and prove partition trust.
 ///
 /// The chain travels **out of band** (each certificate read via
-/// [`copy_oob`] by its descriptor `index`), and is walked root → leaf by
+/// [`HsmIoController::recv_oob`] by its descriptor `index`), and is walked root → leaf by
 /// the firmware [`validate_chain`] state machine.  Two conditions gate
 /// finalization:
 ///
@@ -275,7 +272,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
 ///    intermediate CA) must carry this partition's PTA public key.
 ///
 /// # Errors
-/// * [`HsmError::InvalidArg`] — no OOB region, a bad descriptor count, or
+/// * [`HsmError::InvalidArg`] — a missing OOB region, a bad descriptor count, or
 ///   a malformed / unanchored chain.
 /// * [`HsmError::PartFinalPtaMismatch`] — the chain is valid and
 ///   POTA-anchored, but its terminal (PTA) certificate's key is not the
@@ -286,13 +283,11 @@ async fn validate_pta_chain<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    oob: Option<OobPtr>,
     cert_descriptors: &[CertDescriptor],
     policy: &PartPolicy,
 ) -> HsmResult<()> {
     // The PTA chain travels out of band; without an OOB region there is
     // nothing to read.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     if cert_descriptors.is_empty() || cert_descriptors.len() > MAX_CERTS {
         return Err(HsmError::InvalidArg);
@@ -337,7 +332,7 @@ async fn validate_pta_chain<P: HsmPal>(
         return Err(HsmError::InvalidArg);
     }
     let pta_der = alloc.dma_alloc(terminal_len)?;
-    copy_oob(pal, io, &oob, terminal_index, pta_der).await?;
+    pal.recv_oob(io, terminal_index, pta_der).await?;
 
     // Walk the chain root → leaf, validating the terminal as an *issuing*
     // CA (it will later sign the on-demand slot-2 PID leaf): this enforces
@@ -368,7 +363,7 @@ async fn validate_pta_chain<P: HsmPal>(
                 buf.copy_from_slice(snapshot);
                 Ok(())
             } else {
-                copy_oob(pal, io, &oob, index, buf).await
+                pal.recv_oob(io, index, buf).await
             }
         },
     )
@@ -429,8 +424,14 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
     part_policy: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, part_policy, digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        part_policy,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
 
     let stored = super::super::part_state::part_policy_hash(pal, io)?;
     if digest[..] != stored[..] {

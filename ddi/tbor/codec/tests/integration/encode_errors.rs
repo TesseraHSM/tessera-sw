@@ -55,3 +55,10 @@ fn encode_rejects_data_offset_overflow() -> TestResult {
     assert!(matches!(result, Err(EncodeError::DataOffsetOverflow)));
     Ok(())
 }
+
+#[test]
+fn encode_rejects_zero_alignment() {
+    let mut buf = [0u8; 256];
+    let result = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE).align_to(0);
+    assert!(matches!(result, Err(EncodeError::InvalidAlignment)));
+}

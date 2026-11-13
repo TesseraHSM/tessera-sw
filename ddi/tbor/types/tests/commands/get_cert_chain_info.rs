@@ -77,6 +77,10 @@ fn repeated_stable() {
 #[test]
 fn matches_mbor_path() {
     let ctx = TestCtx::new();
+    if ctx.is_duo() {
+        // Duo has no MBOR channel.
+        return;
+    }
     let tbor = ctx
         .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
         .expect("TBOR GetCertChainInfo");

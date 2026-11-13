@@ -8,6 +8,9 @@ cryptographic commands.
 The session uses the API revision that was selected when the partition
 was opened with [`tsra_part_open`](#tsra_part_open).
 
+Not supported at API revision 2.0 (it fails with an error status); use
+[`tsra_sess_ex_open`](#tsra_sess_ex_open) instead.
+
 ```cpp
 tsra_status tsra_sess_open(
     tsra_handle dev_handle,
