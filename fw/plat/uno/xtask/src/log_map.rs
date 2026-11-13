@@ -696,11 +696,23 @@ pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result
         ),
     }
 }
+/// Paths, relative to the repository root, where earlier revisions kept the
+/// message map. A change that moves or renames the map adds the old path
+/// here, so that [`check_against_base`] still finds the base's map.
+pub const FORMER_MAPS: &[&str] = &[];
+
 /// Checks the map on its own and against the map at the git revision `base`:
 /// `base`'s map must be an exact prefix, and each row after it must give its
-/// crate the component of the crate's place in the tree. Fails if `base`
-/// can't be read. If `base` has no map yet, every row counts as new.
+/// crate the component of the crate's place in the tree. `base`'s map is the
+/// file at [`MAP`], or else at the first of [`FORMER_MAPS`] that `base` has.
+/// Fails if `base` can't be read, or if `base` has neither file but another
+/// of its files holds one of the map's rows, because then the map moved. If
+/// `base` has no map at all, every row counts as new.
 pub fn check_against_base(ctx: &XtaskCtx, base: &str) -> anyhow::Result<()> {
+    check_against_base_with(ctx, base, FORMER_MAPS)
+}
+
+fn check_against_base_with(ctx: &XtaskCtx, base: &str, former_maps: &[&str]) -> anyhow::Result<()> {
     let repo = repo_root(ctx)?;
     let head_text = fs::read_to_string(ctx.root.join(MAP))
         .with_context(|| format!("can't read fw/plat/uno/{MAP}"))?;
@@ -720,16 +732,12 @@ pub fn check_against_base(ctx: &XtaskCtx, base: &str) -> anyhow::Result<()> {
         .with_context(|| {
             format!("can't read {base}; fetch it first, for example with `git fetch origin main`")
         })?;
-    let path = format!("fw/plat/uno/{MAP}");
-    let listed = cmd!(sh, "git ls-tree --name-only {base} -- {path}")
-        .quiet()
-        .read()?;
-    let base_text = if listed.trim().is_empty() {
-        log::warn!("{base} has no message map; counting it as empty, so every row is new");
-        String::new()
-    } else {
-        let spec = format!("{base}:{path}");
-        cmd!(sh, "git show {spec}").quiet().read()?
+    let base_text = match base_map(&sh, base, former_maps, &head)? {
+        Some(text) => text,
+        None => {
+            log::warn!("{base} has no message map; counting it as empty, so every row is new");
+            String::new()
+        }
     };
     if let Err(e) = tsra_log_map::check_prefix(&base_text, &head_text) {
         problems.push(e.to_string());
@@ -763,6 +771,60 @@ pub fn check_against_base(ctx: &XtaskCtx, base: &str) -> anyhow::Result<()> {
         head.rows().count() - base_rows
     );
     Ok(())
+}
+
+/// Reads `base`'s message map: the file at [`MAP`], or else at the first of
+/// `former_maps` that `base` has. Returns `None` if `base` has neither, and
+/// fails if another file in `base` holds one of `head`'s rows.
+fn base_map(
+    sh: &Shell,
+    base: &str,
+    former_maps: &[&str],
+    head: &Map,
+) -> anyhow::Result<Option<String>> {
+    let map = format!("fw/plat/uno/{MAP}");
+    for path in std::iter::once(map.as_str()).chain(former_maps.iter().copied()) {
+        let listed = cmd!(sh, "git ls-tree --name-only {base} -- {path}")
+            .quiet()
+            .read()?;
+        if !listed.trim().is_empty() {
+            let spec = format!("{base}:{path}");
+            return Ok(Some(cmd!(sh, "git show {spec}").quiet().read()?));
+        }
+    }
+    let patterns: Vec<String> = head
+        .rows()
+        .flat_map(|row| ["-e".to_string(), row.to_line()])
+        .collect();
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    // `git grep` exits with 1 when nothing matches.
+    let output = cmd!(sh, "git grep -I -l -F {patterns...} {base} --")
+        .quiet()
+        .ignore_status()
+        .output()?;
+    match output.status.code() {
+        Some(1) => Ok(None),
+        Some(0) => {
+            let prefix = format!("{base}:");
+            let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(|line| line.strip_prefix(&prefix).unwrap_or(line).to_string())
+                .collect();
+            anyhow::bail!(
+                "{base} has no message map at {map}, but {} holds rows of the map. If this \
+                 change moves or renames the map, add the old path to FORMER_MAPS in \
+                 fw/plat/uno/xtask/src/log_map.rs, so that the check compares the map with \
+                 the one at the old path.",
+                files.join(" and ")
+            )
+        }
+        _ => anyhow::bail!(
+            "can't search {base} for a moved message map: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
 }
 
 /// Add message-map rows for debug-log output, and update the decoder header.
@@ -1091,7 +1153,13 @@ mod tests {
 
         /// Checks the map in the working tree against `base`.
         fn check(&self, base: &str) -> Result<(), String> {
-            check_against_base(&self.ctx(), base).map_err(|e| format!("{e:#}"))
+            self.check_with(base, &[])
+        }
+
+        /// Checks the map in the working tree against `base`, with
+        /// `former_maps` as the map's old paths.
+        fn check_with(&self, base: &str, former_maps: &[&str]) -> Result<(), String> {
+            check_against_base_with(&self.ctx(), base, former_maps).map_err(|e| format!("{e:#}"))
         }
     }
 
@@ -1139,6 +1207,11 @@ mod tests {
     #[test]
     fn a_base_without_a_map_counts_as_empty() {
         let repo = TempRepo::new();
+        // Another map, with none of this map's rows, doesn't count.
+        repo.write(
+            "fw/plat/uno/xtask/fixtures/log_image/log_map.tsv",
+            &format!("{MAP_HEAD}0\tuno\tI\ttsra_log_fixture\tfixture\tready\n"),
+        );
         let base = repo.commit();
         repo.write_map(&format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}"));
         assert_eq!(repo.check(&base), Ok(()));
@@ -1149,6 +1222,28 @@ mod tests {
             error.contains("must take the next number in its component, 0"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_moved_map_must_name_its_old_path() {
+        // Moved to another directory, and renamed.
+        for old in [
+            "fw/plat/uno/fw/old/log_map.tsv",
+            "fw/plat/uno/fw/pal/messages.tsv",
+        ] {
+            let repo = TempRepo::new();
+            let base_text = format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}");
+            repo.write(old, &base_text);
+            let base = repo.commit();
+            fs::remove_file(repo.root.join(old)).expect("the old map");
+            repo.write_map(&format!("{base_text}{UNO_ROW_1}"));
+            let error = repo.check(&base).expect_err("a moved map");
+            assert!(error.contains(&format!("but {old} holds rows")), "{error}");
+            assert_eq!(repo.check_with(&base, &[old]), Ok(()));
+            repo.write_map(&base_text.replace("ready", "set"));
+            let error = repo.check_with(&base, &[old]).expect_err("an edited row");
+            assert!(error.contains("differs from the base map"), "{error}");
+        }
     }
 
     #[test]
