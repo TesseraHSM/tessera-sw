@@ -162,7 +162,7 @@ pub(crate) fn part_init_ex(
     pota_thumbprint: &[u8],
     sata_thumbprint: &[u8],
     sapota_thumbprint: Option<&[u8]>,
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<HsmPartInitExResult> {
     if pota_thumbprint.len() != POTA_THUMBPRINT_LEN || sata_thumbprint.len() != SATA_THUMBPRINT_LEN
     {
@@ -196,7 +196,7 @@ pub(crate) fn part_init_ex(
     // this session across calls (per the `exec_op_tbor` contract in
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, None, cookie)
             .map(HsmPartInitExResult::from)
             .map_err(HsmError::from)
@@ -237,7 +237,7 @@ pub(crate) fn part_final_ex(
     part_policy: &PartPolicy,
     pta_cert_chain: &[HsmCert<'_>],
     prev_local_mk_backup: Option<&[u8]>,
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<HsmPartFinalExResult> {
     // The firmware treats a non-empty `prev_local_mk_backup` as a
     // fixed-size envelope of exactly `LOCAL_MK_BACKUP_LEN` bytes, so
@@ -264,7 +264,7 @@ pub(crate) fn part_final_ex(
     let dev = inner.dev();
     // See `part_init_ex`: thread the session's cookie explicitly since
     // this call also runs outside `with_session_cookie`'s scope.
-    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+    let resp = with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, Some(&oob), cookie)
     });
     let resp = resp.map_err(HsmError::from)?;

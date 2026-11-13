@@ -125,6 +125,9 @@ pub(crate) struct OpenSessionExResult {
     /// continuity state (see `ddi/interface`) can recognize the same
     /// live handle across calls.
     pub(crate) ddi_cookie: Option<u64>,
+    /// Transport the session's in-session and close commands are sealed
+    /// with: present for an encrypted (API revision 2.0) session.
+    pub(crate) transport: Option<SessionTransport>,
 }
 
 /// Exchange one TBOR request as part of the SD handshake, threading
@@ -421,6 +424,7 @@ fn finish_handshake_tbor(
         param_key,
         bmk_session: Zeroizing::new(resp.bmk_session),
         ddi_cookie: cookie,
+        transport: None,
     })
 }
 
@@ -438,10 +442,10 @@ fn open_session_ex_finish(
     // encrypted under the transport keys derived from the handshake.
     let transport = SessionTransport::derive(&pending.exported)?;
     match finish_handshake_tbor(dev, &pending, Some(&transport)) {
-        Ok(result) => {
-            dev.set_session_transport(pending.session_id, transport);
-            Ok(result)
-        }
+        Ok(result) => Ok(OpenSessionExResult {
+            transport: Some(transport),
+            ..result
+        }),
         Err(err) => {
             // Release the reserved slot; the error is the finish failure.
             let _ = dev.flush_session(pending.session_id);
@@ -465,11 +469,12 @@ fn open_session_ex_finish(
 /// * `param_key` - The session's per-session AES wrap key used to seal
 ///   the new PSK.
 /// * `new_psk` - The 32-byte replacement PSK ([`crate::PSK_LEN`]).
-/// * `ddi_cookie` - The session's opaque continuity token, threaded
-///   through so any DDI backend that tracks per-session continuity
-///   state (see `ddi/interface`) recognizes this request as belonging
-///   to the still-live session rather than rejecting it as missing a
-///   token.
+/// * `ddi_session` - The session's DDI state: its opaque continuity
+///   token, threaded through so any DDI backend that tracks per-session
+///   continuity state (see `ddi/interface`) recognizes this request as
+///   belonging to the still-live session rather than rejecting it as
+///   missing a token, and, for an encrypted session, the transport the
+///   request is sealed with.
 ///
 /// # Errors
 ///
@@ -480,7 +485,7 @@ pub(crate) fn psk_change(
     session_id: u16,
     param_key: &AesKey,
     new_psk: &[u8; crate::PSK_LEN],
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<()> {
     let aad = build_psk_change_aad(session_id);
     let iv = Rng::rand_vec(tsra_crypto::aead_envelope::AeadAlg::AesGcm256.iv_len())
@@ -516,7 +521,7 @@ pub(crate) fn psk_change(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    with_explicit_cookie(ddi_session, |cookie| {
         let _resp: TborPskChangeResp = dev
             .exec_op_tbor(&req, None, cookie)
             .map_err(HsmError::from)?;
@@ -537,8 +542,7 @@ pub(crate) fn psk_change(
 ///
 /// * `partition` - The HSM partition handle.
 /// * `session_id` - The TBOR session identifier to tear down.
-/// * `ddi_cookie` - The session's generation-bound backend token; see
-///   [`psk_change`].
+/// * `ddi_session` - The session's DDI state; see [`psk_change`].
 ///
 /// # Errors
 ///
@@ -546,18 +550,18 @@ pub(crate) fn psk_change(
 pub(crate) fn close_session_ex(
     partition: &HsmPartition,
     session_id: u16,
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<()> {
     let inner = partition.inner().read();
     let dev = inner.dev();
 
     let req = TborSessionCloseReq { session_id };
-    let result = with_explicit_cookie(ddi_cookie, |cookie| {
+    let result = with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, None, cookie)
             .map_err(HsmError::from)
             .map(|_| ())
     });
-    if dev.remove_session_transport(session_id) && result.is_err() {
+    if ddi_session.is_encrypted() && result.is_err() {
         // Release the slot of an encrypted session the close left open.
         let _ = dev.flush_session(session_id);
     }

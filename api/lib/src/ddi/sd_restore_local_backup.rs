@@ -53,7 +53,7 @@ pub(crate) fn sd_restore_local_backup_ex(
     session_id: u16,
     pok_local_backup: &[u8],
     sd_mk_backup: &[u8],
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<HsmSdRestoreResult> {
     // The wire fields are `Vec`, but the firmware requires exactly these
     // lengths; enforce them via fixed-size array conversion.
@@ -75,7 +75,7 @@ pub(crate) fn sd_restore_local_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, None, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)

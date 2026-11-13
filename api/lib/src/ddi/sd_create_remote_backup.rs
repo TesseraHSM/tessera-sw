@@ -62,7 +62,7 @@ pub(crate) fn sd_create_remote_backup_ex(
     receiver_cert_chain: &[HsmCert<'_>],
     receiver_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<HsmSdRemoteBackupResult> {
     // Exact-length array conversion enforces MASKED_SEALING_KEY_LEN.
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
@@ -104,7 +104,7 @@ pub(crate) fn sd_create_remote_backup_ex(
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, oob_items, cookie)
             .map(HsmSdRemoteBackupResult::from)
             .map_err(HsmError::from)

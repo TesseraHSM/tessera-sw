@@ -8,12 +8,11 @@
 //! and device access operations.
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::LazyLock;
+use std::thread::LocalKey;
 
 use parking_lot::Mutex;
 use tsra_ddi_tbor_types::TborApiRevReq;
@@ -135,16 +134,67 @@ impl From<HsmApiRev> for DdiApiRev {
 /// for HSM device operations while maintaining deref access to the
 /// underlying device.
 #[derive(Debug)]
-pub(crate) struct HsmDev(TsraDev, SessionTransports);
+pub(crate) struct HsmDev(TsraDev);
 
-/// Transport keys of the device's encrypted (API revision 2.0) sessions,
-/// by session id.
-#[derive(Default)]
-struct SessionTransports(Mutex<HashMap<u16, Arc<SessionTransport>>>);
+/// Per-session DDI state owned by a session handle: the backend
+/// continuity cookie and, for an encrypted (API revision 2.0) session,
+/// the transport its in-session and close commands are sealed with.
+///
+/// The transport is fixed for the session's lifetime, so it is read
+/// without locking; only the cookie, which a backend may refresh, sits
+/// behind a mutex.
+pub(crate) struct DdiSession {
+    id: u16,
+    cookie: Mutex<Option<DdiCookie>>,
+    transport: Option<SessionTransport>,
+}
 
-impl std::fmt::Debug for SessionTransports {
+impl DdiSession {
+    pub(crate) fn new(
+        id: u16,
+        cookie: Option<DdiCookie>,
+        transport: Option<SessionTransport>,
+    ) -> Self {
+        Self {
+            id,
+            cookie: Mutex::new(cookie),
+            transport,
+        }
+    }
+
+    /// The session's backend continuity cookie.
+    pub(crate) fn cookie(&self) -> &Mutex<Option<DdiCookie>> {
+        &self.cookie
+    }
+
+    /// Whether the session's commands are sealed with a session transport.
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.transport.is_some()
+    }
+
+    /// The transport to seal `req` with: this session's, if `req` is one
+    /// of its in-session or close commands.
+    fn transport_for<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        req: &T,
+    ) -> Option<&SessionTransport> {
+        let transport = self.transport.as_ref()?;
+        let in_session = matches!(
+            req.session_ctrl(),
+            tsra_ddi_tbor_types::SessionControlKind::InSession
+                | tsra_ddi_tbor_types::SessionControlKind::Close
+        );
+        (in_session && req.get_session_id() == Some(self.id)).then_some(transport)
+    }
+}
+
+impl std::fmt::Debug for DdiSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SessionTransports")
+        f.debug_struct("DdiSession")
+            .field("id", &self.id)
+            .field("cookie", &self.cookie)
+            .field("encrypted", &self.is_encrypted())
+            .finish()
     }
 }
 
@@ -162,65 +212,72 @@ const SECURE_REQ_CAP: usize = 8192;
 // call on the same session's cookie blocks on the mutex until this one's
 // `f()` returns, rather than racing to read a possibly-stale cookie and
 // later clobbering a refreshed one on write-back.
+//
+// `ACTIVE_SESSION_TRANSPORT` likewise scopes an encrypted session onto the
+// TBOR exec paths so its commands are sealed with its own transport. It is
+// per thread and per session, so sending a command takes no lock shared
+// across sessions; an unencrypted session leaves it `None`.
 thread_local! {
     static ACTIVE_SESSION_COOKIE: Cell<Option<NonNull<Option<DdiCookie>>>> =
         const { Cell::new(None) };
+    static ACTIVE_SESSION_TRANSPORT: Cell<Option<NonNull<DdiSession>>> =
+        const { Cell::new(None) };
 }
 
-pub(crate) fn with_session_cookie<R>(
-    cookie: &Mutex<Option<DdiCookie>>,
+/// Runs `f` with `key` set to `value`, restoring the previous value after.
+fn with_scoped<T: Copy + 'static, R>(
+    key: &'static LocalKey<Cell<T>>,
+    value: T,
     f: impl FnOnce() -> R,
 ) -> R {
-    let mut guard = cookie.lock();
+    struct Restore<T: Copy + 'static>(&'static LocalKey<Cell<T>>, T);
+    impl<T: Copy + 'static> Drop for Restore<T> {
+        fn drop(&mut self) {
+            self.0.with(|active| active.set(self.1));
+        }
+    }
+    let _restore = Restore(key, key.with(|active| active.replace(value)));
+    f()
+}
+
+/// Runs `f` with `session`'s transport (if any) scoped onto the TBOR exec
+/// paths, without touching its cookie.
+pub(crate) fn with_session_transport<R>(session: &DdiSession, f: impl FnOnce() -> R) -> R {
+    // SAFETY: `session` outlives this call, and the thread-local is only
+    // read back out (as a shared reference) synchronously on this thread
+    // within `f()`'s dynamic extent, before it is restored.
+    let ptr = session.is_encrypted().then(|| NonNull::from(session));
+    with_scoped(&ACTIVE_SESSION_TRANSPORT, ptr, f)
+}
+
+pub(crate) fn with_session_cookie<R>(session: &DdiSession, f: impl FnOnce() -> R) -> R {
+    let mut guard = session.cookie.lock();
     // SAFETY: `ptr` points into `*guard`, which stays locked (and so
     // remains live and exclusively ours) for this entire function body.
     // The thread-local is only ever read back out from `exec_op_mbor`/
     // `exec_op_tbor`/`exec_op_tbor_oob` while running synchronously,
     // on this thread, within `f()`'s dynamic extent below — i.e. before
-    // `_restore` clears it and before `guard` unlocks.
+    // it is restored and before `guard` unlocks.
     let ptr = NonNull::from(&mut *guard);
-    let previous = ACTIVE_SESSION_COOKIE.with(|active| active.replace(Some(ptr)));
-    struct RestoreScope(Option<NonNull<Option<DdiCookie>>>);
-    impl Drop for RestoreScope {
-        fn drop(&mut self) {
-            ACTIVE_SESSION_COOKIE.with(|active| active.set(self.0));
-        }
-    }
-    let _restore = RestoreScope(previous);
-    f()
+    with_scoped(&ACTIVE_SESSION_COOKIE, Some(ptr), || {
+        with_session_transport(session, f)
+    })
+}
+
+/// The active encrypted session's transport for `req`, if any.
+#[allow(unsafe_code)]
+fn active_transport<'a, T: tsra_ddi_tbor_types::TborOpReq>(
+    req: &'a T,
+) -> Option<(u16, &'a SessionTransport)> {
+    let session = ACTIVE_SESSION_TRANSPORT.with(Cell::get)?;
+    // SAFETY: see `with_session_transport`; the reference is used only
+    // for the current exec call (bounded by its `req` borrow), within
+    // that scope.
+    let session: &'a DdiSession = unsafe { session.as_ref() };
+    Some((session.id, session.transport_for(req)?))
 }
 
 impl HsmDev {
-    /// Route later in-session and close commands for `session_id` over the
-    /// session transport.
-    pub(crate) fn set_session_transport(&self, session_id: u16, transport: SessionTransport) {
-        self.1.0.lock().insert(session_id, Arc::new(transport));
-    }
-
-    /// Stop routing `session_id` over the session transport. Returns
-    /// whether it was.
-    pub(crate) fn remove_session_transport(&self, session_id: u16) -> bool {
-        self.1.0.lock().remove(&session_id).is_some()
-    }
-
-    /// The session transport for `req`, if it is an in-session or close
-    /// command of an encrypted session.
-    fn session_transport<T: tsra_ddi_tbor_types::TborOpReq>(
-        &self,
-        req: &T,
-    ) -> Option<(u16, Arc<SessionTransport>)> {
-        if !matches!(
-            req.session_ctrl(),
-            tsra_ddi_tbor_types::SessionControlKind::InSession
-                | tsra_ddi_tbor_types::SessionControlKind::Close
-        ) {
-            return None;
-        }
-        let id = req.get_session_id()?;
-        let transport = self.1.0.lock().get(&id).cloned()?;
-        Some((id, transport))
-    }
-
     /// Encode `req`, seal it with `transport`, execute it, and open and
     /// decode the response.
     pub(crate) fn exec_op_tbor_sealed<T: tsra_ddi_tbor_types::TborOpReq>(
@@ -278,13 +335,13 @@ impl HsmDev {
         oob_items: Option<&[&[u8]]>,
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        if let Some((id, transport)) = self.session_transport(req) {
+        if let Some((id, transport)) = active_transport(req) {
             let mut items: Vec<_> = oob_items
                 .unwrap_or_default()
                 .iter()
                 .map(|item| TborOobItem::In(item))
                 .collect();
-            return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
+            return self.exec_op_tbor_sealed(id, transport, req, &mut items);
         }
         let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
             return self.0.exec_op_tbor(req, oob_items, cookie);
@@ -308,8 +365,8 @@ impl HsmDev {
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        if let Some((id, transport)) = self.session_transport(req) {
-            return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
+        if let Some((id, transport)) = active_transport(req) {
+            return self.exec_op_tbor_sealed(id, transport, req, oob_items);
         }
         let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
             return self.0.exec_op_tbor_oob(req, oob_items, cookie);
@@ -331,10 +388,10 @@ impl HsmDev {
 /// blocks until `f` returns, instead of racing to snapshot a possibly
 /// stale cookie and later overwriting a refreshed one.
 pub(crate) fn with_explicit_cookie<R>(
-    cookie: &Mutex<Option<DdiCookie>>,
+    session: &DdiSession,
     f: impl FnOnce(&mut Option<DdiCookie>) -> R,
 ) -> R {
-    f(&mut cookie.lock())
+    with_session_transport(session, || f(&mut session.cookie.lock()))
 }
 
 impl Deref for HsmDev {
@@ -420,10 +477,7 @@ pub(crate) fn dev_info_by_path(path: &str) -> HsmResult<DevInfo> {
 /// - The underlying DDI operation fails
 #[tracing::instrument(skip_all, fields(path = path))]
 pub(crate) fn open_dev(path: &str) -> HsmResult<HsmDev> {
-    let dev = DDI
-        .open_dev(path)
-        .map(|dev| HsmDev(dev, SessionTransports::default()))
-        .map_err(HsmError::from)?;
+    let dev = DDI.open_dev(path).map(HsmDev).map_err(HsmError::from)?;
 
     // Probe the device with GetApiRev + GetDeviceInfo at open time so
     // that transient IO faults surface here (where the resiliency
@@ -484,13 +538,13 @@ mod tests {
     /// after the refresh completes, clobber it.
     #[test]
     fn with_session_cookie_holds_the_lock_for_the_whole_transaction() {
-        let cookie = Arc::new(parking_lot::Mutex::new(Some(1u64)));
+        let session = Arc::new(DdiSession::new(1, Some(1u64), None));
         let (entered_tx, entered_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
-        let cookie_a = Arc::clone(&cookie);
+        let session_a = Arc::clone(&session);
         let a = thread::spawn(move || {
-            with_session_cookie(&cookie_a, || {
+            with_session_cookie(&session_a, || {
                 entered_tx.send(()).expect("signal entered");
                 release_rx
                     .recv_timeout(Duration::from_secs(5))
@@ -504,7 +558,7 @@ mod tests {
         // `a` is inside `f()`; a concurrent attempt to lock the same
         // cookie must fail until `a`'s whole transaction completes.
         assert!(
-            cookie.try_lock().is_none(),
+            session.cookie().try_lock().is_none(),
             "the cookie mutex must still be held mid-transaction"
         );
 
@@ -512,7 +566,7 @@ mod tests {
         a.join().expect("thread a");
 
         // Once `a` has returned, the lock must be free again.
-        assert!(cookie.try_lock().is_some());
+        assert!(session.cookie().try_lock().is_some());
     }
 
     /// Mirrors the above for the explicit-cookie call sites (`erase`,
@@ -520,13 +574,13 @@ mod tests {
     /// go through the thread-local scope at all.
     #[test]
     fn with_explicit_cookie_holds_the_lock_for_the_whole_transaction() {
-        let cookie = Arc::new(parking_lot::Mutex::new(Some(1u64)));
+        let session = Arc::new(DdiSession::new(1, Some(1u64), None));
         let (entered_tx, entered_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
-        let cookie_a = Arc::clone(&cookie);
+        let session_a = Arc::clone(&session);
         let a = thread::spawn(move || {
-            with_explicit_cookie(&cookie_a, |_active| {
+            with_explicit_cookie(&session_a, |_active| {
                 entered_tx.send(()).expect("signal entered");
                 release_rx
                     .recv_timeout(Duration::from_secs(5))
@@ -538,13 +592,35 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("a entered its transaction");
         assert!(
-            cookie.try_lock().is_none(),
+            session.cookie().try_lock().is_none(),
             "the cookie mutex must still be held mid-transaction"
         );
 
         release_tx.send(()).expect("release a");
         a.join().expect("thread a");
 
-        assert!(cookie.try_lock().is_some());
+        assert!(session.cookie().try_lock().is_some());
+    }
+
+    /// Only an encrypted session's own in-session and close commands are
+    /// sealed, and only while it is scoped onto the exec paths.
+    #[test]
+    fn active_transport_is_scoped_to_the_encrypted_session() {
+        let close = |session_id| tsra_ddi_tbor_types::TborSessionCloseReq { session_id };
+        let transport = SessionTransport::derive(&[7u8; 48]).expect("derive transport");
+        let encrypted = DdiSession::new(5, None, Some(transport));
+        let plain = DdiSession::new(5, None, None);
+
+        assert!(active_transport(&close(5)).is_none());
+        with_session_transport(&encrypted, || {
+            assert_eq!(active_transport(&close(5)).map(|(id, _)| id), Some(5));
+            assert!(active_transport(&close(6)).is_none());
+            assert!(active_transport(&TborApiRevReq).is_none());
+            with_session_transport(&plain, || {
+                assert!(active_transport(&close(5)).is_none());
+            });
+            assert!(active_transport(&close(5)).is_some());
+        });
+        assert!(active_transport(&close(5)).is_none());
     }
 }

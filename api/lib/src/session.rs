@@ -10,7 +10,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
@@ -87,7 +86,7 @@ impl HsmSession {
     }
 
     pub(crate) fn ddi_cookie(&self) -> Option<u64> {
-        *self.inner.read().ddi_cookie.lock()
+        *self.inner.read().ddi_session.cookie().lock()
     }
 
     /// Updates the session's continuity cookie after a successful
@@ -97,7 +96,7 @@ impl HsmSession {
     /// (and the eventual close) rejected as belonging to an unknown
     /// session.
     pub(crate) fn set_ddi_cookie(&self, ddi_cookie: Option<u64>) {
-        *self.inner.read().ddi_cookie.lock() = ddi_cookie;
+        *self.inner.read().ddi_session.cookie().lock() = ddi_cookie;
     }
 
     /// Serializes session-reopen attempts for a given epoch.
@@ -194,7 +193,7 @@ impl HsmSession {
                 inner.id,
                 param_key,
                 new_psk,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -239,7 +238,7 @@ impl HsmSession {
                 pota_thumbprint,
                 sata_thumbprint,
                 sapota_thumbprint,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -265,7 +264,7 @@ impl HsmSession {
                 part_policy,
                 pta_cert_chain,
                 prev_local_mk_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -299,7 +298,7 @@ impl HsmSession {
                 receiver_cert_chain,
                 receiver_evidence,
                 part_policy.as_bytes(),
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -395,7 +394,7 @@ impl HsmSession {
                 dest_evidence,
                 part_policy.as_bytes(),
                 src_remote_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -430,7 +429,7 @@ impl HsmSession {
                 part_policy.as_bytes(),
                 src_remote_backup,
                 prev_sd_mk_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -459,7 +458,7 @@ impl HsmSession {
                 dst_evidence,
                 part_policy.as_bytes(),
                 pok_local_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -492,7 +491,7 @@ impl HsmSession {
                 part_policy.as_bytes(),
                 pok_peer_backup,
                 prev_sd_mk_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -517,7 +516,7 @@ impl HsmSession {
                 inner.id,
                 pok_local_backup,
                 sd_mk_backup,
-                &inner.ddi_cookie,
+                &inner.ddi_session,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -615,20 +614,25 @@ struct HsmSessionInner {
     id: u16,
     rev: HsmApiRev,
     partition: HsmPartition,
-    /// Opaque per-session continuity token handed back by the DDI
-    /// backend (see `DdiCookie` in `ddi/interface`) and threaded into
-    /// every subsequent `exec_op_tbor`/`exec_op_mbor` call for this
-    /// session. Most backends ignore it, but any backend that tracks
-    /// session state across calls (e.g. to recognize a session across a
-    /// transport-level reset) relies on seeing the same cookie on every
-    /// call for a given session id — including calls issued outside
-    /// `with_dev`'s automatic `with_session_cookie` scope (see
-    /// `ddi/partition_ex.rs`, `ddi/sd_restore_local_backup.rs`,
-    /// `ddi/sd_create_remote_backup.rs`, `ddi/sd_reseal_remote_backup.rs`,
-    /// `ddi/sd_restore_remote_backup.rs`, `ddi/sd_create_peer_backup.rs`,
-    /// `ddi/sd_restore_peer_backup.rs`), which must read, pass, and write
-    /// back this field explicitly instead of passing `&mut None`.
-    ddi_cookie: Mutex<Option<u64>>,
+    /// Per-session DDI state, threaded into every subsequent
+    /// `exec_op_tbor`/`exec_op_mbor` call for this session:
+    ///
+    /// - The opaque continuity token handed back by the DDI backend (see
+    ///   `DdiCookie` in `ddi/interface`). Most backends ignore it, but
+    ///   any backend that tracks session state across calls (e.g. to
+    ///   recognize a session across a transport-level reset) relies on
+    ///   seeing the same cookie on every call for a given session id.
+    /// - For an encrypted (API revision 2.0) session, the transport its
+    ///   in-session and close commands are sealed with.
+    ///
+    /// This includes calls issued outside `with_dev`'s automatic
+    /// `with_session_cookie` scope (see `ddi/partition_ex.rs`,
+    /// `ddi/sd_restore_local_backup.rs`, `ddi/sd_create_remote_backup.rs`,
+    /// `ddi/sd_reseal_remote_backup.rs`, `ddi/sd_restore_remote_backup.rs`,
+    /// `ddi/sd_create_peer_backup.rs`, `ddi/sd_restore_peer_backup.rs`),
+    /// which must pass this field explicitly via `with_explicit_cookie`
+    /// instead of passing `&mut None`.
+    ddi_session: ddi::DdiSession,
     /// The partition restore epoch at which this session was last reopened.
     /// Compared against `ResiliencyState::restore_epoch` to decide whether
     /// a `reopen_session` call is needed before retrying a key operation.
@@ -649,7 +653,7 @@ impl Drop for HsmSessionInner {
                 self.with_dev(|dev| ddi::close_session(dev, self.id, self.rev))
             }
             SessionKind::Ver2 { .. } => {
-                ddi::close_session_ex(&self.partition, self.id, &self.ddi_cookie)
+                ddi::close_session_ex(&self.partition, self.id, &self.ddi_session)
             }
         };
 
@@ -703,7 +707,7 @@ impl HsmSessionInner {
             id,
             rev,
             partition,
-            ddi_cookie: Mutex::new(ddi_cookie),
+            ddi_session: ddi::DdiSession::new(id, ddi_cookie, None),
             last_restore_epoch: epoch,
             kind: SessionKind::Ver1 {
                 app_id,
@@ -726,7 +730,11 @@ impl HsmSessionInner {
             id: result.session_id,
             rev,
             partition,
-            ddi_cookie: Mutex::new(result.ddi_cookie),
+            ddi_session: ddi::DdiSession::new(
+                result.session_id,
+                result.ddi_cookie,
+                result.transport,
+            ),
             last_restore_epoch: epoch,
             kind: SessionKind::Ver2 {
                 psk_id: result.psk_id,
@@ -830,7 +838,7 @@ impl HsmSessionInner {
     {
         let part = self.partition().inner().read();
         let dev = part.dev();
-        ddi::with_session_cookie(&self.ddi_cookie, || f(dev))
+        ddi::with_session_cookie(&self.ddi_session, || f(dev))
     }
 
     /// Executes a closure with access to the underlying device handle,
@@ -862,7 +870,7 @@ impl HsmSessionInner {
     {
         let part = self.partition().inner().read();
         let dev = part.dev();
-        f(dev)
+        ddi::with_session_transport(&self.ddi_session, || f(dev))
     }
 
     /// Returns the partition restore epoch at which this session was last

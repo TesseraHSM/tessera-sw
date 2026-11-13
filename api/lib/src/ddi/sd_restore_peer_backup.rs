@@ -66,7 +66,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     policy: &[u8],
     pok_peer_backup: &[u8],
     prev_sd_mk_backup: &[u8],
-    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+    ddi_session: &DdiSession,
 ) -> HsmResult<HsmSdRestoreResult> {
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
         .try_into()
@@ -101,7 +101,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    with_explicit_cookie(ddi_session, |cookie| {
         dev.exec_op_tbor(&req, oob_items, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)
