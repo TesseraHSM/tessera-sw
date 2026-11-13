@@ -403,9 +403,9 @@ fuzz_target!(|input: FuzzInput| {
             Fault::MissingOob => Some(TborStatus::InvalidArg),
             Fault::PolicyMismatch => Some(TborStatus::InvalidArg),
             Fault::CloningDisabled => Some(TborStatus::SdPeerCloningNotAllowed),
-            Fault::EmptyMfgrChain | Fault::EmptyOwnerChain | Fault::EmptyPartOwnerChain => {
-                Some(TborStatus::InvalidArg)
-            }
+            // The device-owner chain is optional; the other two chains are required.
+            Fault::EmptyOwnerChain => None,
+            Fault::EmptyMfgrChain | Fault::EmptyPartOwnerChain => Some(TborStatus::InvalidArg),
             Fault::WrongPotaAnchor | Fault::MismatchedEvidenceLeaf => Some(TborStatus::InvalidArg),
             Fault::InvalidReportSignature if !mutation_is_noop => Some(TborStatus::InvalidArg),
             Fault::InvalidSenderTag if !mutation_is_noop => {
@@ -441,7 +441,14 @@ fuzz_target!(|input: FuzzInput| {
                 ctx.expect_fw_reject(&req, status);
             } else {
                 let oob = evidence.oob_slices();
-                ctx.expect_fw_reject_oob(&req, &oob, status);
+                if matches!(input.fault, Fault::InactiveCoSession) {
+                    let err = ctx
+                        .tbor_oob(&req, &oob)
+                        .expect_err("closed session must be rejected");
+                    assertions::assert_session_rejects(&err, status);
+                } else {
+                    ctx.expect_fw_reject_oob(&req, &oob, status);
+                }
             }
         }
 

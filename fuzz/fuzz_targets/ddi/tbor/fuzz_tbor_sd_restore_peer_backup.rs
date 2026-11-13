@@ -479,6 +479,12 @@ fuzz_target!(|input: FuzzInput| {
         let must_succeed = input.key_scope == common::KeyScope::Local && !changed;
 
         match result {
+            Err(err) if req.session_id != backup.session_id => {
+                assertions::assert_session_rejects(
+                    &err,
+                    TborStatus::FileHandleSessionIdDoesNotMatch,
+                );
+            }
             Err(DdiError::TborStatus(_)) if !must_succeed => {}
             Err(DdiError::TborEncodeError)
                 if req.src_mfgr_cert_chain.len() > EVIDENCE_CHAIN_MAX_CERTS

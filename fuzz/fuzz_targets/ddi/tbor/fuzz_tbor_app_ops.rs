@@ -10,6 +10,8 @@ use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
@@ -29,17 +31,17 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
         for op in ops.iter().take(MAX_OPS) {
             match op {
                 TestAppOps::OpenSession(user_id, pin) => {
-                    // The existing TBOR session occupies this file handle, so
-                    // another SessionOpenInit must hit the per-handle limit.
-                    let result = ctx.session_open_init(CO_PSK_ID, SessionType::Authenticated);
-                    assert!(
-                        matches!(
-                            result,
-                            Err(DdiError::TborStatus(status))
-                                if status == TborStatus::FileHandleSessionLimitReached
-                        ),
-                        "SessionOpenInit on an occupied file handle should hit the session limit"
-                    );
+                    // Socket connections allow multiple sessions, so the
+                    // bootstrap's occupied CO slot is the limiting factor.
+                    let expected_status = if tsra_ddi::sock_selected() {
+                        TborStatus::VaultSessionLimitReached
+                    } else {
+                        TborStatus::FileHandleSessionLimitReached
+                    };
+                    let error = ctx
+                        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+                        .expect_err("a second CO session should hit the session limit");
+                    assert_fw_rejects(&error, expected_status);
 
                     // The bootstrap occupies the single CO slot. Open the
                     // secondary session as CU so Phase 1 can reach Phase 2.
@@ -83,15 +85,10 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
                             "SessionOpenFinish with a mutated MAC should fail authentication"
                         );
 
-                        let close_result = secondary.session_close(pending_session_id);
-                        assert!(
-                            matches!(
-                                close_result,
-                                Err(DdiError::TborStatus(status))
-                                    if status == TborStatus::SessionNotFound
-                            ),
-                            "SessionClose on a failed handshake should report SessionNotFound"
-                        );
+                        let error = secondary
+                            .session_close(pending_session_id)
+                            .expect_err("SessionClose on a failed handshake should fail");
+                        assert_session_rejects(&error, TborStatus::SessionNotFound);
                     }
                 }
                 TestAppOps::CloseSession(session_id) => {
@@ -100,13 +97,12 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
                         if *session_id == opened_session_id {
                             result.expect("SessionClose for the matching session should succeed");
                         } else {
-                            assert!(
-                                matches!(
-                                    result,
-                                    Err(DdiError::TborStatus(status))
-                                        if status == TborStatus::FileHandleSessionIdDoesNotMatch
-                                ),
-                                "SessionClose for a different session ID should be rejected"
+                            let error = result.expect_err(
+                                "SessionClose for a different session ID should be rejected",
+                            );
+                            assert_session_rejects(
+                                &error,
+                                TborStatus::FileHandleSessionIdDoesNotMatch,
                             );
                             file_handle
                                 .session_close(opened_session_id)

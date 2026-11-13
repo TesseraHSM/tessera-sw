@@ -158,8 +158,7 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput) -> SessionGuard<'a> {
     SessionGuard::new(ctx, handshake)
 }
 
-/// Submit owned writable descriptors so arbitrary indices, including equal
-/// indices, cannot make firmware write through an immutable Rust reference.
+/// Keep the destination writable, including when it aliases the source.
 fn submit(
     ctx: &TestCtx,
     req: &TborAesGcmEncryptDecryptReq,
@@ -170,7 +169,14 @@ fn submit(
     }
     let mut items: Vec<_> = buffers
         .iter_mut()
-        .map(|buf| TborOobItem::Out(buf))
+        .enumerate()
+        .map(|(i, buf)| {
+            if i == usize::from(req.in_index) && i != usize::from(req.out_index) {
+                TborOobItem::In(buf)
+            } else {
+                TborOobItem::Out(buf)
+            }
+        })
         .collect();
     ctx.tbor_oob_io(req, &mut items)
 }
@@ -603,7 +609,15 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     } else {
         buffers
             .get(usize::from(req.in_index))
-            .cloned()
+            .map(|buf| {
+                if req.in_index == req.out_index && tsra_ddi::sock_selected() {
+                    // The socket transport sends only Out lengths, so an
+                    // aliased input reaches the device as zeros, not plaintext.
+                    vec![0; buf.len()]
+                } else {
+                    buf.clone()
+                }
+            })
             .unwrap_or_default()
     };
     let result = submit(ctx, &req, &mut buffers);
@@ -659,6 +673,10 @@ mod tests {
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");
+            common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
+        }
+        for seed in [[0xEF, 0xBE], [0, 0xBE], [1, 0xBE]] {
+            let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("nonzero seed");
             common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
         }
         boundary_scenarios();
