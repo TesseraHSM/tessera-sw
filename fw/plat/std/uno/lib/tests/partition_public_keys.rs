@@ -17,6 +17,7 @@ use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 
 #[test]
 fn public_keys_follow_vault_references_and_preserve_big_endian_encoding() {
@@ -97,6 +98,7 @@ async fn check_public_keys() {
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             HsmVaultKeyAttrs::new().with_internal(true),
+            HsmVaultPct::None,
         )
         .await
         .expect("PTA key");
@@ -125,6 +127,7 @@ async fn check_public_keys() {
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             HsmVaultKeyAttrs::new().with_internal(true),
+            HsmVaultPct::None,
         )
         .await
         .expect("replacement PTA key");

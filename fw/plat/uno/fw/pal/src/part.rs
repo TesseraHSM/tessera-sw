@@ -311,9 +311,7 @@ impl UnoHsmPal {
     /// Generates an internal ECC P-384 key pair, stores the private key in
     /// partition `pid`'s vault, and returns `(key_handle, public_key)`.
     ///
-    /// Mirrors the reference firmware's `create_internal_ecc384_key`. The
-    /// `pct` argument is accepted for parity with the trait; the uno PKA
-    /// path performs no pairwise-consistency self-test.
+    /// Runs the selected PCT and reports the partition-key-specific failure.
     async fn create_internal_ecc384(
         &self,
         pid: HsmPartId,
@@ -337,9 +335,31 @@ impl UnoHsmPal {
                     alloc,
                     HsmEccCurve::P384,
                     Some((priv_buf, pub_buf)),
-                    pct,
+                    HsmEccPct::None,
                 )
                 .await?;
+            if !tsra_fw_uno_pct::ecc_pct(
+                self,
+                admin_io,
+                alloc,
+                HsmEccCurve::P384,
+                &pct,
+                priv_buf,
+                pub_buf,
+            )
+            .await?
+            {
+                let error = match kind {
+                    HsmVaultKeyKind::EstablishCred => {
+                        HsmError::PctValidationEstablishCredEncKeyFailed
+                    }
+                    HsmVaultKeyKind::SessionEncryption => {
+                        HsmError::PctValidationSessionEncKeyFailed
+                    }
+                    _ => HsmError::PartitionIdKeyGenerationPctFailed,
+                };
+                tsra_fw_uno_fault::enter_error_state(error);
+            }
 
             if pub_len != ID_PUB_KEY_LEN {
                 return Err(HsmError::InternalError);

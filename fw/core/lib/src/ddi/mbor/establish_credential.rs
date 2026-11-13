@@ -303,8 +303,15 @@ async fn reimport_unwrapping_key<P: HsmPal>(
                 &masked[layout.plaintext_offset..layout.plaintext_offset + key_len],
             );
 
-            pal.vault_key_create(io, key_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)
-                .await
+            pal.vault_key_create(
+                io,
+                key_buf,
+                HsmVaultKeyKind::Rsa2kPrivate,
+                None,
+                attrs,
+                HsmVaultPct::UnwrappingKey,
+            )
+            .await
         })
         .await?;
 
@@ -671,6 +678,7 @@ async fn provision_mk<P: HsmPal>(
                 HsmVaultKeyKind::MaskingKey,
                 None,
                 MK_VAULT_ATTRS,
+                HsmVaultPct::None,
             )
             .await;
     }
@@ -680,8 +688,15 @@ async fn provision_mk<P: HsmPal>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let mk_pt = &bmk[layout.plaintext_offset..layout.plaintext_offset + BK_LEN];
-    pal.vault_key_create(io, mk_pt, HsmVaultKeyKind::MaskingKey, None, MK_VAULT_ATTRS)
-        .await
+    pal.vault_key_create(
+        io,
+        mk_pt,
+        HsmVaultKeyKind::MaskingKey,
+        None,
+        MK_VAULT_ATTRS,
+        HsmVaultPct::None,
+    )
+    .await
 }
 
 /// Envelopes the vault-resident `MK` (referenced by `mk_key_id`) under

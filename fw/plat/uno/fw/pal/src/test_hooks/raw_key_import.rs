@@ -41,6 +41,7 @@ use tsra_fw_hsm_pal_traits::HsmSeedStore;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_part_store::Partition;
 use tsra_fw_uno_drivers_part_store::UnwrappingKeySlot;
@@ -167,7 +168,7 @@ async fn dispatch_request<'p>(
     key_buf.copy_from_slice(request.raw);
 
     let key_handle = pal
-        .vault_key_create(io, key_buf, vault_kind, None, attrs)
+        .vault_key_create(io, key_buf, vault_kind, None, attrs, HsmVaultPct::None)
         .await;
 
     let key_handle = key_handle?;
@@ -249,7 +250,14 @@ async fn raw_import_unwrapping_key<'p>(
     key_buf.copy_from_slice(request.raw);
 
     let key_id = pal
-        .vault_key_create(io, key_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)
+        .vault_key_create(
+            io,
+            key_buf,
+            HsmVaultKeyKind::Rsa2kPrivate,
+            None,
+            attrs,
+            HsmVaultPct::UnwrappingKey,
+        )
         .await;
 
     let key_id = key_id?;

@@ -9,6 +9,8 @@
 //! caller selects: a sign/verify round trip for signing keys, a two-way ECDH
 //! agreement with a fixed test key pair for key-agreement keys, and an
 //! encrypt/decrypt round trip for RSA decryption keys.
+//! [`mldsa_pct`] signs/verifies a fixed message; [`mlkem_pct`] encapsulates
+//! and checks that decapsulation recovers the same shared secret.
 //!
 //! The PCT functions report an inconsistent key pair as `Ok(false)` and a
 //! failed operation as `Err`. The caller decides what each outcome means: an
@@ -19,6 +21,7 @@
 #![cfg_attr(not(test), no_std)]
 
 mod ecc;
+mod ml;
 mod rsa;
 mod vectors;
 
@@ -26,6 +29,8 @@ mod vectors;
 mod tests;
 
 pub use ecc::ecc_pct;
+pub use ml::mldsa_pct;
+pub use ml::mlkem_pct;
 pub use rsa::rsa_pct;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmResult;

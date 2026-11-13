@@ -91,6 +91,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
                 super::from_pal::ecdh_secret(curve),
                 target_attrs.session().then_some(HsmSessId::from(sess_id)),
                 target_attrs,
+                HsmVaultPct::None,
             )
             .await?
             .into();

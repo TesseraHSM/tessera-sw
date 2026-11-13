@@ -32,6 +32,21 @@ use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKeyMut;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
+use tsra_fw_hsm_pal_traits::HsmMlKem;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlKemPct;
+use tsra_fw_hsm_pal_traits::HsmMlKemPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlKemPubKey;
+use tsra_fw_hsm_pal_traits::HsmMlKemPubKeyMut;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
@@ -42,6 +57,8 @@ use tsra_fw_hsm_pal_traits::HsmSqe;
 
 use super::ct_eq;
 use super::ecc_pct;
+use super::mldsa_pct;
+use super::mlkem_pct;
 use super::rsa_pct;
 
 const CURVES: [HsmEccCurve; 3] = [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521];
@@ -125,6 +142,10 @@ struct FakePal {
     ecdh_calls: Cell<usize>,
     mod_exp_priv: Op,
     mod_exp_pub: Op,
+    mldsa_sign: Op,
+    mldsa_verify: HsmResult<bool>,
+    mlkem_encaps: Op,
+    mlkem_decaps: Op,
 }
 
 impl Default for FakePal {
@@ -138,6 +159,10 @@ impl Default for FakePal {
             ecdh_calls: Cell::new(0),
             mod_exp_priv: Op::Xor(RSA_MASK),
             mod_exp_pub: Op::Xor(RSA_MASK),
+            mldsa_sign: Op::Fill(0x22),
+            mldsa_verify: Ok(true),
+            mlkem_encaps: Op::Fill(0x33),
+            mlkem_decaps: Op::Fill(0x33),
         }
     }
 }
@@ -148,6 +173,118 @@ impl HsmIoTypes for FakePal {
 
 impl HsmCryptoOrder for FakePal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+}
+
+impl HsmMlDsa for FakePal {
+    async fn mldsa_gen_keypair(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlSeedSrc,
+        _: HsmMlDsaPct,
+        _: &mut HsmDmaBuf,
+        _: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mldsa_gen_seed(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPct,
+        _: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mldsa_sign(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPrivKey<'_>,
+        _: HsmMlDsaHedge,
+        _: HsmMlDsaMsg<'_>,
+        sig: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let sig = sig.expect("PCT signs in use mode");
+        self.mldsa_sign.run(&self.calls, &[], sig)?;
+        Ok(sig.len())
+    }
+    async fn mldsa_sign_in_place(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPrivKeyMut<'_>,
+        _: HsmMlDsaHedge,
+        _: HsmMlDsaMsg<'_>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mldsa_verify(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPubKey<'_>,
+        _: HsmMlDsaMsg<'_>,
+        _: &HsmDmaBuf,
+    ) -> HsmResult<bool> {
+        self.calls.set(self.calls.get() + 1);
+        self.mldsa_verify
+    }
+}
+
+impl HsmMlKem for FakePal {
+    async fn mlkem_gen_keypair(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlSeedSrc,
+        _: HsmMlKemPct,
+        _: &mut HsmDmaBuf,
+        _: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mlkem_gen_seed(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPct,
+        _: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mlkem_encaps(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPubKey<'_>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        let (ct, ss) = out.expect("PCT encapsulates in use mode");
+        self.mlkem_encaps.run(&self.calls, &[], ss)?;
+        Ok((ct.len(), ss.len()))
+    }
+    async fn mlkem_encaps_in_place(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPubKeyMut<'_>,
+        _: &mut HsmDmaBuf,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mlkem_decaps(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPrivKey<'_>,
+        _: &HsmDmaBuf,
+        ss: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let ss = ss.expect("PCT decapsulates in use mode");
+        self.mlkem_decaps.run(&self.calls, &[], ss)?;
+        Ok(ss.len())
+    }
 }
 
 impl HsmHash for FakePal {
@@ -608,6 +745,146 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     }
 }
 
+#[test]
+fn mldsa_pct_covers_all_parameters_and_operation_failures() {
+    for param in [
+        HsmMlDsaParamSet::MlDsa44,
+        HsmMlDsaParamSet::MlDsa65,
+        HsmMlDsaParamSet::MlDsa87,
+    ] {
+        let run = |pal: &FakePal, alloc: &FakeAlloc| {
+            block_on(mldsa_pct(
+                pal,
+                &FakeIo::default(),
+                alloc,
+                param,
+                key(param.sk_len()),
+                key(param.pk_len()),
+            ))
+        };
+        let pal = FakePal::default();
+        assert_eq!(run(&pal, &FakeAlloc::default()), Ok(true));
+        assert_eq!(pal.calls.get(), 2);
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_verify: Ok(false),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_sign: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_verify: Err(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        for index in 0..2 {
+            assert_eq!(
+                run(
+                    &FakePal::default(),
+                    &FakeAlloc {
+                        fail_at: Some(index),
+                        ..FakeAlloc::default()
+                    }
+                ),
+                Err(HsmError::NotEnoughSpace)
+            );
+        }
+    }
+}
+
+#[test]
+fn mlkem_pct_covers_all_parameters_and_operation_failures() {
+    for param in [
+        HsmMlKemParamSet::MlKem512,
+        HsmMlKemParamSet::MlKem768,
+        HsmMlKemParamSet::MlKem1024,
+    ] {
+        let run = |pal: &FakePal, alloc: &FakeAlloc| {
+            block_on(mlkem_pct(
+                pal,
+                &FakeIo::default(),
+                alloc,
+                param,
+                key(param.sk_len()),
+                key(param.pk_len()),
+            ))
+        };
+        let pal = FakePal::default();
+        assert_eq!(run(&pal, &FakeAlloc::default()), Ok(true));
+        assert_eq!(pal.calls.get(), 2);
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_decaps: Op::Fill(0x44),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_encaps: Op::Nothing,
+                    mlkem_decaps: Op::Nothing,
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_encaps: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_decaps: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        for index in 0..3 {
+            assert_eq!(
+                run(
+                    &FakePal::default(),
+                    &FakeAlloc {
+                        fail_at: Some(index),
+                        ..FakeAlloc::default()
+                    }
+                ),
+                Err(HsmError::NotEnoughSpace)
+            );
+        }
+    }
+}
 /// Runs the ECC PCT that `pct` selects.
 fn run_ecc(
     pal: &FakePal,
