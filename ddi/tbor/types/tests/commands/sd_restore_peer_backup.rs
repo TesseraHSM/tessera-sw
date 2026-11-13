@@ -24,11 +24,15 @@
 //! * One-shot — restore onto an already-initialized SD → `SdAlreadyInitialized`.
 //! * Policy without `allow_peer_cloning` → `SdPeerCloningNotAllowed`.
 //! * Restore before finalize → `InvalidArg`.
+//! * Sender partition-owner chain rooted at SATA instead of POTA →
+//!   `InvalidArg`; the genuine POTA-rooted evidence then restores.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
+use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::PartPolicy;
@@ -48,13 +52,15 @@ use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_peer_backup::create_peer_req;
 use crate::commands::sd_create_peer_backup::finalize_peer_partition;
 use crate::commands::sd_create_remote_backup::backup_request;
-use crate::commands::sd_create_remote_backup::build_receiver_evidence;
+use crate::commands::sd_create_remote_backup::build_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 use crate::commands::sd_create_remote_backup::ReceiverEvidence;
 
 /// A peer backup produced by the first device's `CreatePeerBackup`,
 /// replayed on the second (rebooted) device to restore the security domain.
 struct PeerBackup {
+    /// The partition identity (PID) public key that signed the evidence.
+    pid_pub: [u8; RAW_PUB_LEN],
     /// The receiver's masked SD-sealing key (used to open the backup).
     masked_sealing_key: Vec<u8>,
     /// Sender attestation evidence (OOB items + descriptors).  In a
@@ -79,7 +85,7 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
     let session_id = part.session.session_id;
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, sata, pota, &report);
     let created = ctx
         .tbor_oob(
             &backup_request(session_id, masked.clone(), &evidence, &part.policy),
@@ -100,6 +106,7 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
         .expect("SdCreatePeerBackup");
 
     PeerBackup {
+        pid_pub: part.pid_pub,
         masked_sealing_key: masked,
         evidence,
         policy: part.policy,
@@ -111,6 +118,16 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
 
 /// Assemble a `SdRestorePeerBackup` request from a captured backup.
 fn restore_peer_req(session_id: u16, backup: &PeerBackup) -> TborSdRestorePeerBackupReq {
+    restore_peer_req_with(session_id, backup, &backup.evidence)
+}
+
+/// Like [`restore_peer_req`], but takes the sender evidence descriptors
+/// from `evidence` instead of the captured backup.
+fn restore_peer_req_with(
+    session_id: u16,
+    backup: &PeerBackup,
+    evidence: &ReceiverEvidence,
+) -> TborSdRestorePeerBackupReq {
     TborSdRestorePeerBackupReq {
         session_id,
         masked_sealing_key: backup
@@ -119,13 +136,34 @@ fn restore_peer_req(session_id: u16, backup: &PeerBackup) -> TborSdRestorePeerBa
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
         policy: PartPolicy::try_read_from_bytes(&backup.policy).expect("policy image is canonical"),
-        src_mfgr_cert_chain: backup.evidence.mfgr.clone(),
-        src_owner_cert_chain: backup.evidence.owner.clone(),
-        src_part_owner_cert_chain: backup.evidence.part_owner.clone(),
-        src_report: backup.evidence.report,
+        src_mfgr_cert_chain: evidence.mfgr.clone(),
+        src_owner_cert_chain: evidence.owner.clone(),
+        src_part_owner_cert_chain: evidence.part_owner.clone(),
+        src_report: evidence.report,
         pok_peer_backup: backup.pok_peer_backup,
         prev_sd_mk_backup: backup.prev_sd_mk_backup,
     }
+}
+
+/// Drive device 2 (factory-reset, same machine seed): finalize with the
+/// captured policy and restore `PartLocalMK`, leaving the partition
+/// initialized but SD-uninitialized.  Returns the context and session id.
+fn restore_target(seed: &[u8], pota: &CaKey, backup: &PeerBackup) -> (TestCtx, u16) {
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let init = ctx
+        .part_init(&session, seed, &backup.policy, &pota_thumbprint())
+        .expect("PartInit (device 2)");
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("PartFinal must restore PartLocalMK from the prior backup");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    (ctx, session.session_id)
 }
 
 #[test]
@@ -140,22 +178,9 @@ fn sd_restore_peer_backup_roundtrip() {
 
     // Device 2 (reboot): restore PartLocalMK (so the captured sealing key
     // unmasks), then restore the SD from the peer backup.
-    let ctx = TestCtx::new();
-    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    let init = ctx
-        .part_init(&session, &seed, &backup.policy, &pota_thumbprint())
-        .expect("PartInit (device 2)");
-    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
-    ctx.part_final(
-        &session,
-        &backup.policy,
-        &backup.local_mk_backup,
-        &chain.der_items(),
-    )
-    .expect("PartFinal must restore PartLocalMK from the prior backup");
-    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    let (ctx, session_id) = restore_target(&seed, &pota, &backup);
 
-    let req = restore_peer_req(session.session_id, &backup);
+    let req = restore_peer_req(session_id, &backup);
     let resp = ctx
         .tbor_oob(&req, &backup.evidence.oob())
         .expect("SdRestorePeerBackup roundtrip");
@@ -188,7 +213,7 @@ fn sd_restore_peer_backup_is_one_shot() {
     let session_id = part.session.session_id;
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
             &backup_request(session_id, masked.clone(), &evidence, &part.policy),
@@ -209,6 +234,7 @@ fn sd_restore_peer_backup_is_one_shot() {
         .expect("SdCreatePeerBackup");
 
     let backup = PeerBackup {
+        pid_pub: part.pid_pub,
         masked_sealing_key: masked,
         evidence,
         policy: part.policy,
@@ -238,8 +264,9 @@ fn sd_restore_peer_backup_rejects_without_peer_cloning() {
     let session_id = part.session.session_id;
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
-    let evidence = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let backup = PeerBackup {
+        pid_pub: part.pid_pub,
         masked_sealing_key: masked,
         evidence,
         policy: part.policy,
@@ -273,4 +300,29 @@ fn sd_restore_peer_backup_rejects_before_finalize() {
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_sata_anchored_sender_evidence() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = restore_target(&seed, &pota, &backup);
+
+    // Replace only the sender partition-owner chain with one rooted at the
+    // policy SATA key: peer evidence must chain to the policy POTA key.
+    let sata_rooted = backup
+        .evidence
+        .with_part_owner_chain(&make_chain(&sata, &backup.pid_pub));
+    let req = restore_peer_req_with(session_id, &backup, &sata_rooted);
+    ctx.expect_fw_reject_oob(&req, &sata_rooted.oob(), TborStatus::InvalidArg);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    // The genuine POTA-rooted evidence still restores the domain.
+    let req = restore_peer_req(session_id, &backup);
+    ctx.tbor_oob(&req, &backup.evidence.oob())
+        .expect("SdRestorePeerBackup with POTA-rooted evidence");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }

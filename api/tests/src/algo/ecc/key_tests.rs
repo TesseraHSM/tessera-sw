@@ -1008,8 +1008,9 @@ fn test_ecc_keygen_reject_private_verify_without_sign_p256(session: HsmSession) 
     let result =
         HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props);
 
-    assert!(
-        result.is_err(),
+    assert_eq!(
+        result.err(),
+        Some(HsmError::InvalidKeyProps),
         "Expected failure for invalid private flags"
     );
 }
@@ -1023,9 +1024,9 @@ fn test_ecc_keygen_reject_private_verify_without_sign_p384(session: HsmSession) 
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1038,9 +1039,9 @@ fn test_ecc_keygen_reject_private_verify_without_sign_p521(session: HsmSession) 
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1054,6 +1055,7 @@ fn test_ecc_keygen_reject_public_sign_flag_p256(session: HsmSession) {
         .key_kind(HsmKeyKind::Ecc)
         .ecc_curve(HsmEccCurve::P256)
         .can_sign(true)
+        .can_verify(true)
         .build()
         .unwrap();
 
@@ -1062,7 +1064,11 @@ fn test_ecc_keygen_reject_public_sign_flag_p256(session: HsmSession) {
     let result =
         HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props);
 
-    assert!(result.is_err(), "Expected failure for invalid public flags");
+    assert_eq!(
+        result.err(),
+        Some(HsmError::InvalidKeyProps),
+        "Expected failure for invalid public flags"
+    );
 }
 
 /// Verifies ecc key p384 generation fails when public key incorrectly has SIGN capability.
@@ -1075,14 +1081,15 @@ fn test_ecc_keygen_reject_public_sign_flag_p384(session: HsmSession) {
         .key_kind(HsmKeyKind::Ecc)
         .ecc_curve(HsmEccCurve::P384)
         .can_sign(true)
+        .can_verify(true)
         .build()
         .unwrap();
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1096,14 +1103,15 @@ fn test_ecc_keygen_reject_public_sign_flag_p521(session: HsmSession) {
         .key_kind(HsmKeyKind::Ecc)
         .ecc_curve(HsmEccCurve::P521)
         .can_sign(true)
+        .can_verify(true)
         .build()
         .unwrap();
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1119,7 +1127,11 @@ fn test_ecc_keygen_reject_curve_mismatch_p256(session: HsmSession) {
     let result =
         HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props);
 
-    assert!(result.is_err(), "Expected failure for curve mismatch");
+    assert_eq!(
+        result.err(),
+        Some(HsmError::InvalidKeyProps),
+        "Expected failure for curve mismatch"
+    );
 }
 
 /// Verifies  ecc key P384 generation fails when private and public curves do not match.
@@ -1130,9 +1142,9 @@ fn test_ecc_keygen_reject_curve_mismatch_p384(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1144,9 +1156,9 @@ fn test_ecc_keygen_reject_curve_mismatch_p521(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1161,7 +1173,11 @@ fn test_ecc_keygen_reject_verify_without_private_sign(session: HsmSession) {
     let result =
         HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props);
 
-    assert!(result.is_err(), "Expected failure when VERIFY without SIGN");
+    assert_eq!(
+        result.err(),
+        Some(HsmError::InvalidKeyProps),
+        "Expected failure when VERIFY without SIGN"
+    );
 }
 
 /// Verifies ECC P521 key generation fails when private key sets both SIGN and DERIVE simultaneously.
@@ -1172,9 +1188,9 @@ fn test_ecc_keygen_reject_private_sign_and_derive_p521(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1187,9 +1203,9 @@ fn test_ecc_keygen_reject_public_verify_and_derive(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1202,9 +1218,9 @@ fn test_ecc_keygen_reject_no_usage_flags_p256(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1217,9 +1233,9 @@ fn test_ecc_keygen_reject_no_usage_flags_p384(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1232,9 +1248,9 @@ fn test_ecc_keygen_reject_no_usage_flags_p521(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 
@@ -1252,9 +1268,9 @@ fn test_ecc_keygen_reject_wrong_key_kind(session: HsmSession) {
 
     let mut algo = HsmEccKeyGenAlgo::default();
 
-    assert!(
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)
-            .is_err()
+    assert_eq!(
+        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props).err(),
+        Some(HsmError::InvalidKeyProps)
     );
 }
 

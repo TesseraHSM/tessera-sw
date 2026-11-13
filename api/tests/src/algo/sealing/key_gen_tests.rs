@@ -478,9 +478,11 @@ fn sealing_key_gen_sd_scope_reopen() {
     }
     let _guard = PARTITION_LOCK.lock();
     let sata = sd_provision::CaKey::generate();
-    let (session, policy, pid_pub) = sd_provision::finalized_backing_session(&sata);
+    let pota = sd_provision::CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) =
+        sd_provision::provision_backing(&sata, &pota, None, None);
     let (local_masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
-    let evidence = sd_provision::build_receiver_evidence(&pid_pub, &receiver_pub, &sata, &report);
+    let evidence = sd_provision::build_evidence(&pid_pub, &receiver_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|receiver_chain, receiver| {
             session.sd_create_remote_backup(&policy, &local_masked, receiver_chain, receiver)

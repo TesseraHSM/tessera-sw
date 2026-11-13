@@ -4,6 +4,9 @@
 use tsra_api::*;
 use tsra_api_tests_macro::*;
 
+use super::common::ecc_key_pair_props_builders;
+use super::common::gen_ecc_key_pair;
+
 // ================================
 // Helper functions
 // ================================
@@ -17,37 +20,8 @@ pub(crate) fn generate_ecc_keypair_with_derive(
     curve: HsmEccCurve,
     can_derive: bool,
 ) -> HsmResult<(HsmEccPrivateKey, HsmEccPublicKey)> {
-    // Create key properties for the private key.
-    //
-    // Note: ECC keys are not symmetric cipher keys; do not set encrypt/decrypt usage flags here.
-    // For negative ECDH testing, we generate a valid ECC key that simply lacks `can_derive(true)`.
-    let priv_key_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(curve)
-        .is_session(true)
-        .can_derive(can_derive)
-        .can_sign(!can_derive)
-        .build()?;
-
-    // Create key properties for the public key.
-    let pub_key_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(curve)
-        .can_derive(can_derive)
-        .can_verify(!can_derive)
-        .is_session(true)
-        .build()?;
-
-    // Create the ECC key generation algorithm.
-    let mut algo = HsmEccKeyGenAlgo::default();
-
-    // Generate the key pair.
-    let (priv_key, pub_key) =
-        HsmKeyManager::generate_key_pair(&session, &mut algo, priv_key_props, pub_key_props)?;
-
-    Ok((priv_key, pub_key))
+    let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
+    gen_ecc_key_pair(&session, priv_builder.build()?, pub_builder.build()?)
 }
 
 /// Perform ECDH key agreement against a peer public key.

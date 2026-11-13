@@ -150,6 +150,16 @@ pub(crate) fn finalized_backing_session(
     ctx: &TestCtx,
     sata_key: &CaKey,
 ) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+    finalized_backing_session_with_pota(ctx, sata_key, &CaKey::generate())
+}
+
+/// [`finalized_backing_session`] with a caller-held POTA key, for commands
+/// whose evidence must chain to the partition's POTA.
+pub(crate) fn finalized_backing_session_with_pota(
+    ctx: &TestCtx,
+    sata_key: &CaKey,
+    pota: &CaKey,
+) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
 
     // PID / PID public key are materialized before PartInit.
@@ -158,7 +168,6 @@ pub(crate) fn finalized_backing_session(
     pid_pub.copy_from_slice(&info.pid_pub_key);
 
     // POTA anchor for the PTA certificate chain `PartFinal` validates.
-    let pota = CaKey::generate();
     let policy = backing_part_policy(
         &info.pid,
         &info.pid_pub_key,
@@ -169,7 +178,7 @@ pub(crate) fn finalized_backing_session(
     let init = ctx
         .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
         .expect("PartInit");
-    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
@@ -313,6 +322,24 @@ impl ReceiverEvidence {
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
     }
+
+    /// Copy this evidence, replacing only the partition-owner chain with
+    /// `part_owner` (appended as new OOB items).
+    pub(crate) fn with_part_owner_chain(&self, part_owner: &GeneratedChain) -> Self {
+        let mut oob_items = self.oob_items.clone();
+        let part_owner_desc = vec![
+            push_item(&mut oob_items, &part_owner.root_der),
+            push_item(&mut oob_items, &part_owner.leaf_der),
+        ];
+        Self {
+            oob_items,
+            receiver: self.receiver.clone(),
+            mfgr: self.mfgr.clone(),
+            owner: self.owner.clone(),
+            part_owner: part_owner_desc,
+            report: self.report,
+        }
+    }
 }
 
 /// Append `der` as the next OOB item and return a descriptor for it.
@@ -381,10 +408,23 @@ pub(crate) fn build_receiver_evidence(
     sata_key: &CaKey,
     report: &[u8],
 ) -> ReceiverEvidence {
+    build_evidence(pid_pub, rcvr_pub, sata_key, sata_key, report)
+}
+
+/// Like [`build_receiver_evidence`], but roots the partition-owner chain at
+/// `part_owner_anchor` (the policy POTA key for peer and reseal evidence)
+/// while the receiver chain stays rooted at `sata_key`.
+pub(crate) fn build_evidence(
+    pid_pub: &[u8; RAW_PUB_LEN],
+    rcvr_pub: &[u8; RAW_PUB_LEN],
+    sata_key: &CaKey,
+    part_owner_anchor: &CaKey,
+    report: &[u8],
+) -> ReceiverEvidence {
     let receiver = make_chain(sata_key, rcvr_pub);
     let mfgr = make_chain(&CaKey::generate(), pid_pub);
     let owner = make_chain(&CaKey::generate(), pid_pub);
-    let part_owner = make_chain(sata_key, pid_pub);
+    let part_owner = make_chain(part_owner_anchor, pid_pub);
     evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, report)
 }
 

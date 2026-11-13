@@ -27,7 +27,7 @@
 //!    `policy_hash`, require its `allow_peer_cloning` flag
 //!    ([`SdPeerCloningNotAllowed`](HsmError::SdPeerCloningNotAllowed)), then
 //!    verify the **sender** peer evidence against it: its cert chains are
-//!    validated and anchored to the policy SATA key, its report's v2
+//!    validated and anchored to the policy POTA key, its report's v2
 //!    `policy_hash` must equal `SHA-384(policy)`, and its attested COSE_Key
 //!    is recovered as `SndrPub`.
 //! 3. Unmask `masked_sealing_key` → `RcvrPriv` (must be an
@@ -172,8 +172,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 return Err(HsmError::SdPeerCloningNotAllowed);
             }
 
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
+            let pota = &part_policy.pota_pub_key;
+            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
                 return Err(HsmError::InvalidArg);
             }
 
@@ -196,7 +196,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_sndr,
