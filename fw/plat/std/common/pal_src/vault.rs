@@ -16,6 +16,9 @@
 //! [`KeyVault`]: crate::drivers::vault::KeyVault
 //! [`PartitionEntry`]: crate::part::PartitionEntry
 
+use tsra_crypto::PrivateKey;
+use tsra_crypto::RsaPrivateKey;
+
 use super::*;
 use crate::drivers::vault::KeyVault;
 use crate::StdHsmPal;
@@ -82,10 +85,30 @@ impl HsmVault for StdHsmPal {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId> {
         // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if crate::bulk::is_bulk_kind(kind) {
             return Err(HsmError::InvalidKeyType);
+        }
+
+        let unwrapping =
+            kind == HsmVaultKeyKind::Rsa2kPrivate && attrs.internal() && attrs.unwrap();
+        if unwrapping != (pct == HsmVaultPct::UnwrappingKey) || (unwrapping && session_id.is_some())
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        if pct == HsmVaultPct::UnwrappingKey {
+            let private = RsaPrivateKey::from_hsm_bytes(key).map_err(|_| HsmError::InvalidArg)?;
+            let public = private
+                .public_key()
+                .map_err(|_| HsmError::RsaGenerateError)?;
+            if !self
+                .rsa_pair_pct(&private, &public, HsmRsaPct::EncryptDecrypt)
+                .await?
+            {
+                return Err(HsmError::PctValidationUnwrappingKeyFailed);
+            }
         }
         self.vault_store(io, key, kind, session_id, attrs)
     }
@@ -160,5 +183,84 @@ impl HsmVault for StdHsmPal {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;
         entry.vault.key_attrs(key_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tsra_crypto::ExportableHsmKey;
+    use tsra_crypto::KeyGenerationOp;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn unwrapping_pct_is_explicit_and_failure_does_not_store_key() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let pid = HsmPartId::from(1u8);
+        pal.part_alloc_internal(1, 1)
+            .await
+            .expect("allocate partition");
+        let io = StdHsmIo::admin(pid, 0, reply_tx);
+        let pk = RsaPrivateKey::generate(256).expect("generate RSA key");
+        let attrs = HsmVaultKeyAttrs::new()
+            .with_internal(true)
+            .with_unwrap(true);
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let key = alloc.dma_alloc(pk.hsm_bytes_len()).expect("key buffer");
+            pk.to_hsm_bytes(key).expect("export key");
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::None
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    HsmVaultKeyAttrs::new(),
+                    HsmVaultPct::UnwrappingKey
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            pal.rsa_pct_fail.set(true);
+            assert_eq!(
+                pal.vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::UnwrappingKey
+                )
+                .await,
+                Err(HsmError::PctValidationUnwrappingKeyFailed)
+            );
+            pal.rsa_pct_fail.set(false);
+            let id = pal
+                .vault_key_create(
+                    &io,
+                    key,
+                    HsmVaultKeyKind::Rsa2kPrivate,
+                    None,
+                    attrs,
+                    HsmVaultPct::UnwrappingKey,
+                )
+                .await
+                .expect("store tested key");
+            assert!(pal.vault_key(&io, id).expect("stored key") == key);
+        })
+        .await;
     }
 }

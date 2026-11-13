@@ -402,7 +402,7 @@ pub trait HsmMlDsa: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `param` — the ML-DSA parameter set.
     /// - `seed_src` — whether `ξ` is generated or supplied in `seed`.
-    /// - `pct` — pairwise consistency test selector.
+    /// - `pct` — PCT run before use-mode success; `None` skips it.
     /// - `seed` — the seed `ξ`, exactly [`MLDSA_SEED_LEN`] bytes.  Filled
     ///   for [`HsmMlSeedSrc::Random`], read for
     ///   [`HsmMlSeedSrc::Caller`]; either way it holds the key pair's `ξ`
@@ -417,7 +417,9 @@ pub trait HsmMlDsa: HsmIoTypes {
     ///   bytes written (use mode).
     /// - `Err(HsmError::InvalidArg)` — `seed` is not [`MLDSA_SEED_LEN`]
     ///   bytes (checked in both modes), or an output buffer is too short.
-    /// - `Err(HsmError)` — RNG, offload, or PCT failure.
+    /// - `Err(HsmError::PctValidationMlDsaGenKeyFailed)` — the PCT failed
+    ///   (physical Uno enters its FIPS error state).
+    /// - `Err(HsmError)` — RNG or offload failure.
     async fn mldsa_gen_keypair(
         &self,
         io: &Self::Io,
@@ -539,7 +541,7 @@ pub trait HsmMlKem: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `param` — the ML-KEM parameter set.
     /// - `seed_src` — whether `d || z` is generated or supplied in `seed`.
-    /// - `pct` — pairwise consistency test selector.
+    /// - `pct` — PCT run before use-mode success; `None` skips it.
     /// - `seed` — the seed pair `d || z`, exactly [`MLKEM_SEED_LEN`] bytes.
     ///   Filled for [`HsmMlSeedSrc::Random`], read for
     ///   [`HsmMlSeedSrc::Caller`]; either way it holds the key pair's
@@ -554,7 +556,9 @@ pub trait HsmMlKem: HsmIoTypes {
     ///   bytes written (use mode).
     /// - `Err(HsmError::InvalidArg)` — `seed` is not [`MLKEM_SEED_LEN`]
     ///   bytes (checked in both modes), or an output buffer is too short.
-    /// - `Err(HsmError)` — RNG, offload, or PCT failure.
+    /// - `Err(HsmError::PctValidationMlKemGenKeyFailed)` — the PCT failed
+    ///   (physical Uno enters its FIPS error state).
+    /// - `Err(HsmError)` — RNG or offload failure.
     async fn mlkem_gen_keypair(
         &self,
         io: &Self::Io,

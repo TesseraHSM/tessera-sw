@@ -573,6 +573,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionLocalMaskingKey,
             None,
             PART_LOCAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(local_id)?;
@@ -584,6 +585,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionEphemeralMaskingKey,
             None,
             EPHEMERAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ephemeral_id)?;
@@ -595,6 +597,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ups_id)?;

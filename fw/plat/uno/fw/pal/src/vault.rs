@@ -54,6 +54,7 @@ use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_vault::VaultStorage;
 use tsra_fw_uno_key_vault::KeyVault;
@@ -125,6 +126,7 @@ impl HsmVault for UnoHsmPal {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId> {
         // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if is_bulk_kind(kind) {
@@ -134,9 +136,12 @@ impl HsmVault for UnoHsmPal {
         // installed by the `RawKeyImport` test hook, gets its pairwise
         // consistency test before it's stored. A key that fails sends the
         // module to the FIPS error state.
-        if crate::unwrapping_key::is_unwrapping_key(kind, attrs)
-            && !self.unwrapping_key_pct(io, key).await?
+        let unwrapping = crate::unwrapping_key::is_unwrapping_key(kind, attrs);
+        if unwrapping != (pct == HsmVaultPct::UnwrappingKey) || (unwrapping && session_id.is_some())
         {
+            return Err(HsmError::InvalidArg);
+        }
+        if pct == HsmVaultPct::UnwrappingKey && !self.unwrapping_key_pct(io, key).await? {
             tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed);
         }
         let app_id = u8::from(io.pid());

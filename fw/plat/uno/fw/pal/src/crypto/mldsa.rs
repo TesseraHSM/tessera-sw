@@ -21,6 +21,7 @@
 //! written to the PQC mailboxes (which overlay that firmware's HSM↔FP IPC
 //! rings in PSRAM), and the driver calls are compiled out.
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
@@ -38,6 +39,8 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
 use tsra_fw_uno_drivers_pqc::mldsa_check_msg;
+use tsra_fw_uno_pct::mldsa_pct;
+use tsra_fw_uno_pct::mlkem_pct;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmIo;
@@ -85,14 +88,12 @@ const MLDSA_SEED_LEN: usize = 32;
 // the module docs.
 #[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
 impl HsmMlDsa for UnoHsmPal {
-    /// PCTs are deferred: `pct` is accepted but not run; see
-    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
     async fn mldsa_gen_keypair(
         &self,
-        _io: &UnoHsmIo,
+        io: &UnoHsmIo,
         param: HsmMlDsaParam,
         seed_src: HsmMlSeedSrc,
-        _pct: HsmMlDsaPct,
+        pct: HsmMlDsaPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
@@ -151,6 +152,17 @@ impl HsmMlDsa for UnoHsmPal {
                     &mut sk[..sk_len],
                 )
                 .await?;
+            if pct == HsmMlDsaPct::SignVerify {
+                self.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+                    if !mldsa_pct(self, io, alloc, param, &sk[..sk_len], &pk[..pk_len]).await? {
+                        tsra_fw_uno_fault::enter_error_state(
+                            HsmError::PctValidationMlDsaGenKeyFailed,
+                        );
+                    }
+                    Ok(())
+                })
+                .await?;
+            }
             Ok((sk_len, pk_len))
         }
         .await;
@@ -289,14 +301,12 @@ impl HsmMlDsa for UnoHsmPal {
     allow(unreachable_code, unused_assignments, unused_variables)
 )]
 impl HsmMlKem for UnoHsmPal {
-    /// PCTs are deferred: `pct` is accepted but not run; see
-    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
     async fn mlkem_gen_keypair(
         &self,
-        _io: &UnoHsmIo,
+        io: &UnoHsmIo,
         param: HsmMlKemParam,
         seed_src: HsmMlSeedSrc,
-        _pct: HsmMlKemPct,
+        pct: HsmMlKemPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
@@ -348,6 +358,17 @@ impl HsmMlKem for UnoHsmPal {
                     &mut sk[..sk_len],
                 )
                 .await?;
+            if pct == HsmMlKemPct::EncapsDecaps {
+                self.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+                    if !mlkem_pct(self, io, alloc, param, &sk[..sk_len], &pk[..pk_len]).await? {
+                        tsra_fw_uno_fault::enter_error_state(
+                            HsmError::PctValidationMlKemGenKeyFailed,
+                        );
+                    }
+                    Ok(())
+                })
+                .await?;
+            }
             Ok((sk_len, pk_len))
         }
         .await;

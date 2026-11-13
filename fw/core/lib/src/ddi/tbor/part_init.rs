@@ -640,6 +640,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(root_key_id)?;
@@ -651,6 +652,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             PTA_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(pta_key_id)?;

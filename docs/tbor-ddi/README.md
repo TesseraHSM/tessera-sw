@@ -65,6 +65,31 @@ the order from the negotiated API revision and converts at the DDI
 boundary. `PartInfo.pid_pub_key` is the exception: it is big-endian on
 every device.
 
+## Pairwise consistency tests
+
+The std Uno, std Duo, and physical Uno PALs honor selected key-generation
+PCTs: sign/verify for ECC and ML-DSA, two-way agreement for ECDH, RSA
+sign/verify or encrypt/decrypt, and ML-KEM encapsulate/decapsulate. RSA
+generation is supported only by the std PALs. Query
+mode performs no generation, entropy draw, or PCT; `None` explicitly skips
+the test. TBOR ML key generation requests its PCT before masking or returning
+the generated key.
+
+An inconsistent generated key enters physical Uno's FIPS error state.
+The simulator returns the matching PCT error without publishing the key.
+ML-DSA and ML-KEM failures use `PctValidationMlDsaGenKeyFailed`
+(`0x087000E8`) and `PctValidationMlKemGenKeyFailed` (`0x087000E9`).
+Partition identity, establish-credential, and session-encryption failures
+retain their distinct statuses. An operation that cannot complete a PCT
+returns its operation error rather than treating it as a consistency failure.
+
+Restoring the partition unwrapping key explicitly requests
+`HsmVaultPct::UnwrappingKey`, an RSA-2048 encrypt/decrypt PCT before vault
+storage. The simulator also tests its lazily generated unwrapping key.
+Imported ECC/RSA keys retain their component-validation checks and selected
+PCTs, with import-specific errors rather than generated-key error-state
+handling. PCT secret scratch is zeroized or owned by scrubbed IO storage.
+
 ## Paired TOC footprint
 
 Each command reserves the larger of its request and response schema TOC

@@ -100,11 +100,20 @@ pub struct StdHsmPal {
     /// ECC driver — key generation, signing, verification, ECDH.
     pub(crate) ecc: StdEcc,
 
+    #[cfg(test)]
+    pub(crate) ecc_pct_fail: core::cell::Cell<bool>,
+
     /// AES driver — key generation, CBC, ECB encryption/decryption.
     pub(crate) aes: StdAes,
 
     /// PQC driver — ML-DSA signatures and ML-KEM encapsulation.
     pub(crate) pqc: StdPqc,
+
+    #[cfg(test)]
+    pub(crate) mldsa_pct_fail: core::cell::Cell<bool>,
+
+    #[cfg(test)]
+    pub(crate) mlkem_pct_fail: core::cell::Cell<bool>,
 
     /// HMAC driver — key generation, signing, verification.
     pub(crate) hmac: StdHmac,
@@ -114,6 +123,9 @@ pub struct StdHsmPal {
 
     /// RSA driver — key generation, modular exponentiation.
     pub(crate) rsa: StdRsa,
+
+    #[cfg(test)]
+    pub(crate) rsa_pct_fail: core::cell::Cell<bool>,
 
     /// Tokio-backed worker pool for offloading async work.
     #[allow(dead_code)]
@@ -188,11 +200,19 @@ impl StdHsmPal {
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(tokio_handle.clone())),
             ecc: StdEcc::new(WorkerPool::new(tokio_handle.clone()), Self::BYTE_ORDER),
+            #[cfg(test)]
+            ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(tokio_handle.clone())),
             pqc: StdPqc::new(WorkerPool::new(tokio_handle.clone())),
+            #[cfg(test)]
+            mldsa_pct_fail: core::cell::Cell::new(false),
+            #[cfg(test)]
+            mlkem_pct_fail: core::cell::Cell::new(false),
             hmac: StdHmac::new(WorkerPool::new(tokio_handle.clone())),
             kdf: StdKdf::new(WorkerPool::new(tokio_handle.clone())),
             rsa: StdRsa::new(WorkerPool::new(tokio_handle.clone()), Self::BYTE_ORDER),
+            #[cfg(test)]
+            rsa_pct_fail: core::cell::Cell::new(false),
             pool: WorkerPool::new(tokio_handle),
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
@@ -222,11 +242,19 @@ impl Default for StdHsmPal {
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(handle.clone())),
             ecc: StdEcc::new(WorkerPool::new(handle.clone()), Self::BYTE_ORDER),
+            #[cfg(test)]
+            ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(handle.clone())),
             pqc: StdPqc::new(WorkerPool::new(handle.clone())),
+            #[cfg(test)]
+            mldsa_pct_fail: core::cell::Cell::new(false),
+            #[cfg(test)]
+            mlkem_pct_fail: core::cell::Cell::new(false),
             hmac: StdHmac::new(WorkerPool::new(handle.clone())),
             kdf: StdKdf::new(WorkerPool::new(handle.clone())),
             rsa: StdRsa::new(WorkerPool::new(handle.clone()), Self::BYTE_ORDER),
+            #[cfg(test)]
+            rsa_pct_fail: core::cell::Cell::new(false),
             pool: WorkerPool::new(handle),
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),

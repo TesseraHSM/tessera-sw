@@ -44,6 +44,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_hsm_undo::UndoLog;
 use zeroize::Zeroize;
 
@@ -263,8 +264,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 let created = async {
                     let decoded = decode(pal, io, &mut *material, dclass, attrs).await?;
                     // Transient, partition-scoped (`None` session): deleted below.
-                    pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
-                        .await
+                    pal.vault_key_create(
+                        io,
+                        decoded.material,
+                        decoded.kind,
+                        None,
+                        attrs,
+                        HsmVaultPct::None,
+                    )
+                    .await
                 }
                 .await;
                 material.zeroize();

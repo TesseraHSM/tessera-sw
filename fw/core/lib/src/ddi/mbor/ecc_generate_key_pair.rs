@@ -89,6 +89,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
             vault_kind,
             session_binding,
             attrs,
+            HsmVaultPct::None,
         )
         .await?
         .into();

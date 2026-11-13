@@ -108,14 +108,12 @@ fn deterministic(hedge: HsmMlDsaHedge) -> bool {
 }
 
 impl HsmMlDsa for StdHsmPal {
-    /// PCTs are deferred: `pct` is accepted but not run; see
-    /// <https://github.com/TesseraHSM/tessera-sw/issues/117>.
     async fn mldsa_gen_keypair(
         &self,
         io: &StdHsmIo,
         param: HsmMlDsaParam,
         seed_src: HsmMlSeedSrc,
-        _pct: HsmMlDsaPct,
+        pct: HsmMlDsaPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
@@ -139,6 +137,28 @@ impl HsmMlDsa for StdHsmPal {
         }
 
         let (pk_bytes, sk_bytes) = self.pqc.mldsa_keygen(variant, seed).await?;
+        let sk_bytes = Zeroizing::new(sk_bytes);
+        if pct == HsmMlDsaPct::SignVerify {
+            let signature = self
+                .pqc
+                .mldsa_sign(variant, &sk_bytes, false, true, b"ML-DSA PCT", b"")
+                .await?;
+            #[cfg(test)]
+            let signature = {
+                let mut signature = signature;
+                if self.mldsa_pct_fail.get() {
+                    signature[0] ^= 1;
+                }
+                signature
+            };
+            if !self
+                .pqc
+                .mldsa_verify(variant, &pk_bytes, false, b"ML-DSA PCT", b"", &signature)
+                .await?
+            {
+                return Err(HsmError::PctValidationMlDsaGenKeyFailed);
+            }
+        }
         write_exact(&mut pk[..pk_len], &pk_bytes)?;
         write_exact(&mut sk[..sk_len], &sk_bytes)?;
         Ok((sk_len, pk_len))
@@ -234,14 +254,12 @@ impl HsmMlDsa for StdHsmPal {
 }
 
 impl HsmMlKem for StdHsmPal {
-    /// PCTs are deferred: `pct` is accepted but not run; see
-    /// <https://github.com/TesseraHSM/tessera-sw/issues/117>.
     async fn mlkem_gen_keypair(
         &self,
         io: &StdHsmIo,
         param: HsmMlKemParam,
         seed_src: HsmMlSeedSrc,
-        _pct: HsmMlKemPct,
+        pct: HsmMlKemPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
@@ -264,6 +282,27 @@ impl HsmMlKem for StdHsmPal {
 
         let (pk_bytes, sk_bytes) = self.pqc.mlkem_keygen(variant, seed).await?;
         let sk_bytes = Zeroizing::new(sk_bytes);
+        if pct == HsmMlKemPct::EncapsDecaps {
+            let (ct, shared) = self.pqc.mlkem_encapsulate(variant, &pk_bytes).await?;
+            let shared = Zeroizing::new(shared);
+            #[cfg(test)]
+            let ct = {
+                let mut ct = ct;
+                if self.mlkem_pct_fail.get() {
+                    ct[0] ^= 1;
+                }
+                ct
+            };
+            let recovered =
+                Zeroizing::new(self.pqc.mlkem_decapsulate(variant, &sk_bytes, &ct).await?);
+            let diff = shared
+                .iter()
+                .zip(recovered.iter())
+                .fold(0u8, |diff, (a, b)| diff | (a ^ b));
+            if core::hint::black_box(diff) != 0 {
+                return Err(HsmError::PctValidationMlKemGenKeyFailed);
+            }
+        }
         write_exact(&mut pk[..pk_len], &pk_bytes)?;
         write_exact(&mut sk[..sk_len], &sk_bytes)?;
         Ok((sk_len, pk_len))
@@ -384,6 +423,141 @@ mod tests {
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
         (pal, io)
+    }
+
+    #[tokio::test]
+    async fn mldsa_selected_pct_covers_all_parameters_and_failure_paths() {
+        for (param, pk_len, sk_len, _) in MLDSA_SETS {
+            let (pal, io) = pal_and_io();
+            let mut seed = [0x5a; MLDSA_SEED_LEN];
+            let (mut pk, mut sk) = (vec![0xa5; pk_len + 7], vec![0xa5; sk_len + 7]);
+            for source in [HsmMlSeedSrc::Random, HsmMlSeedSrc::Caller] {
+                let previous = seed;
+                pal.mldsa_gen_keypair(
+                    &io,
+                    param,
+                    source,
+                    HsmMlDsaPct::SignVerify,
+                    dma_mut(&mut seed),
+                    Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+                )
+                .await
+                .expect("PCT passed");
+                if source == HsmMlSeedSrc::Caller {
+                    assert_eq!(seed, previous);
+                }
+                assert_eq!(&pk[pk_len..], &[0xa5; 7]);
+                assert_eq!(&sk[sk_len..], &[0xa5; 7]);
+            }
+            pal.mldsa_pct_fail.set(true);
+            assert_eq!(
+                pal.mldsa_gen_keypair(
+                    &io,
+                    param,
+                    HsmMlSeedSrc::Random,
+                    HsmMlDsaPct::SignVerify,
+                    dma_mut(&mut seed),
+                    None
+                )
+                .await,
+                Ok((sk_len, pk_len))
+            );
+            let previous = seed;
+            pk.fill(0xa5);
+            sk.fill(0xa5);
+            assert_eq!(
+                pal.mldsa_gen_keypair(
+                    &io,
+                    param,
+                    HsmMlSeedSrc::Caller,
+                    HsmMlDsaPct::SignVerify,
+                    dma_mut(&mut seed),
+                    Some((dma_mut(&mut sk), dma_mut(&mut pk)))
+                )
+                .await,
+                Err(HsmError::PctValidationMlDsaGenKeyFailed)
+            );
+            assert_eq!(seed, previous);
+            assert!(pk.iter().chain(&sk).all(|&b| b == 0xa5));
+            pal.mldsa_gen_keypair(
+                &io,
+                param,
+                HsmMlSeedSrc::Caller,
+                HsmMlDsaPct::None,
+                dma_mut(&mut seed),
+                Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+            )
+            .await
+            .expect("explicit skip");
+        }
+    }
+
+    #[tokio::test]
+    async fn mlkem_selected_pct_covers_all_parameters_and_failure_paths() {
+        for (param, pk_len, sk_len, _) in MLKEM_SETS {
+            let (pal, io) = pal_and_io();
+            let mut seed = [0x5a; MLKEM_SEED_LEN];
+            let (mut pk, mut sk) = (vec![0xa5; pk_len + 7], vec![0xa5; sk_len + 7]);
+            for source in [HsmMlSeedSrc::Random, HsmMlSeedSrc::Caller] {
+                let previous = seed;
+                pal.mlkem_gen_keypair(
+                    &io,
+                    param,
+                    source,
+                    HsmMlKemPct::EncapsDecaps,
+                    dma_mut(&mut seed),
+                    Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+                )
+                .await
+                .expect("PCT passed");
+                if source == HsmMlSeedSrc::Caller {
+                    assert_eq!(seed, previous);
+                }
+                assert_eq!(&pk[pk_len..], &[0xa5; 7]);
+                assert_eq!(&sk[sk_len..], &[0xa5; 7]);
+            }
+            pal.mlkem_pct_fail.set(true);
+            let previous = seed;
+            assert_eq!(
+                pal.mlkem_gen_keypair(
+                    &io,
+                    param,
+                    HsmMlSeedSrc::Random,
+                    HsmMlKemPct::EncapsDecaps,
+                    dma_mut(&mut seed),
+                    None
+                )
+                .await,
+                Ok((sk_len, pk_len))
+            );
+            assert_eq!(seed, previous);
+            pk.fill(0xa5);
+            sk.fill(0xa5);
+            assert_eq!(
+                pal.mlkem_gen_keypair(
+                    &io,
+                    param,
+                    HsmMlSeedSrc::Caller,
+                    HsmMlKemPct::EncapsDecaps,
+                    dma_mut(&mut seed),
+                    Some((dma_mut(&mut sk), dma_mut(&mut pk)))
+                )
+                .await,
+                Err(HsmError::PctValidationMlKemGenKeyFailed)
+            );
+            assert_eq!(seed, previous);
+            assert!(pk.iter().chain(&sk).all(|&b| b == 0xa5));
+            pal.mlkem_gen_keypair(
+                &io,
+                param,
+                HsmMlSeedSrc::Caller,
+                HsmMlKemPct::None,
+                dma_mut(&mut seed),
+                Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+            )
+            .await
+            .expect("explicit skip");
+        }
     }
 
     #[allow(unsafe_code)]
