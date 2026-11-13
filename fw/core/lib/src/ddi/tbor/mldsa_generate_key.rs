@@ -26,7 +26,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
-use super::from_pal::mldsa_param;
+use super::from_pal::mldsa_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -65,8 +65,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // Map the wire kind onto the vault kind the PAL speaks. Byte-identical
         // discriminants, and the match above already rejected anything else.
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let param = mldsa_param(vault_kind)?;
-        let pub_len = param.pk_len();
+        let param_set = mldsa_param_set(vault_kind)?;
+        let pub_len = param_set.pk_len();
 
         // Platform identity bound into the masked blob (anti-rollback on
         // re-import): SVN and owner-seed id.
@@ -79,7 +79,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // key, masked as a unit. Keeping the seed means the public key can
         // still be regenerated from the blob alone; keeping the expanded key
         // means signing never has to re-derive it.
-        let sec_len = param.sk_len();
+        let sec_len = param_set.sk_len();
         let plain_len = MLDSA_SEED_LEN + sec_len;
 
         // IO teardown wipes the allocation,
@@ -121,7 +121,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 let (written, _) = pal
                     .mldsa_gen_keypair(
                         io,
-                        param,
+                        param_set,
                         HsmMlSeedSrc::Random,
                         HsmMlDsaPct::SignVerify,
                         seed,
