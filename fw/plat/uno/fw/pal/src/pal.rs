@@ -303,7 +303,7 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     // AES and SHA each route two vectors (Done and Error) to the same
     // driver wake handler — the engine fires exactly one of them per
     // command completion.
-    (Interrupt::IIC_ICQ as u16, |pal, irq| pal.iic.wake(irq)),
+    (Interrupt::IIC_ICQ as u16, |pal, irq| pal.wake_iic(irq)),
     (Interrupt::OIC_OCQ as u16, |pal, irq| pal.oic.wake(irq)),
     #[cfg(not(feature = "bulk_crypto"))]
     (Interrupt::IIC_ICQ_FP1 as u16, |pal, irq| {
@@ -520,6 +520,9 @@ pub struct UnoHsmPal {
     /// IO starts while partition keys are being deleted and no pre-reset IO
     /// runs after the reset.
     io_paused: Cell<bool>,
+    /// Where the run loop hands each received host IO, once the app has
+    /// set it. See [`set_io_dispatch`](Self::set_io_dispatch).
+    pub(crate) io_dispatch: Cell<Option<crate::io::IoDispatch>>,
     /// Per-partition claim on the SP-published unwrapping key's pairwise
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
@@ -760,6 +763,7 @@ impl Default for UnoHsmPal {
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
+            io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
         }
     }
@@ -1410,10 +1414,11 @@ impl UnoHsmPal {
                 }
             }
             // Recycle IO still queued in the ICQ. `poll_io` only takes entries
-            // it has been woken for, so an entry left in the ICQ would be
-            // dispatched once the flag clears and could reach a partition
-            // re-enabled after the acknowledgement. Nothing awaits between
-            // finding the ICQ empty and clearing the flag.
+            // it has been woken for, and the run loop takes none while the
+            // flag is set, so an entry left in the ICQ would be dispatched
+            // once the flag clears and could reach a partition re-enabled
+            // after the acknowledgement. Nothing awaits between finding the
+            // ICQ empty and clearing the flag.
             while let Some(rx) = self.iic.try_recv() {
                 let io = self.accept_io(rx, HsmIoKind::Cmd);
                 self.recycle_reset_io(io).await;

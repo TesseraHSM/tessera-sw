@@ -9,9 +9,9 @@
 //! # Task architecture
 //!
 //! ```text
-//!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
-//!                            │
-//!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
+//!  main ──► init PAL ──► spawn poll_ipc ──► run (NVIC polling loop)
+//!                                               │
+//!                          ICQ IRQ ──► accept IO ──► signal io_worker[slot]
 //!                                                       │
 //!                                                   HSM core pipeline:
 //!                                                   SQE parse → in-DMA
@@ -21,9 +21,12 @@
 //! ```
 //!
 //! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
-//!   spawns the IO receive loop, then enters the NVIC polling loop.
-//! - **`poll_io`** (single instance): Awaits IOs from the IIC drivers
-//!   and hands each one to the worker of its IO slot.
+//!   spawns the IPC loop, then enters the NVIC polling loop, which hands
+//!   each inbound command IO to the `io_worker` of its IO slot once boot
+//!   completes.
+//! - **`poll_io`** (single instance): Receives the IOs the run loop leaves
+//!   (bulk IOs, and command IOs that come while host IO is paused for a
+//!   PCIe reset) and hands each one to the worker of its IO slot.
 //! - **`io_worker`** (one per host IO slot, 32): Owns its slot's IO for
 //!   the IO's lifetime, delegating to the HSM core for SQE parsing, DMA,
 //!   and CQE delivery, then waits for the slot's next IO.
@@ -105,21 +108,40 @@ static IO_HANDOFF: IoHandoff<IO_WORKERS> = IoHandoff([const { Signal::new() }; I
 static BULK_IO_HANDOFF: IoHandoff<BULK_IO_WORKERS> =
     IoHandoff([const { Signal::new() }; BULK_IO_WORKERS]);
 
+/// Hands `io` to the worker that owns its slot: an [`io_worker`] for a
+/// command IO, a [`bulk_io_worker`] for a bulk IO (command and bulk IOs
+/// index separate slot arrays).
+///
+/// A slot is not handed out again until its IO is dropped, by which time
+/// the slot's worker is waiting for the next one. An IO from a slot with no
+/// worker is dropped.
+fn dispatch_io(io: UnoHsmIo) {
+    #[cfg(not(feature = "bulk_crypto"))]
+    let handoff: &[_] = if io.kind() == HsmIoKind::Bulk {
+        &BULK_IO_HANDOFF.0
+    } else {
+        &IO_HANDOFF.0
+    };
+    #[cfg(feature = "bulk_crypto")]
+    let handoff: &[_] = &IO_HANDOFF.0;
+    if let Some(slot) = handoff.get(usize::from(io.index())) {
+        slot.signal(io);
+    }
+}
+
 /// IO receive loop — runs forever as a single Embassy task.
 ///
-/// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC drivers and hands it to the worker that owns its slot: an
-/// [`io_worker`] for a command IO, a [`bulk_io_worker`] for a bulk IO
-/// (command and bulk IOs index separate slot arrays). A slot is not handed
-/// out again until its IO is dropped, by which time the slot's worker is
-/// waiting for the next one. An IO from a slot with no worker is dropped
-/// and the loop retries on the next iteration.
+/// Once boot completes the PAL's run loop hands each inbound command IO to
+/// its worker itself (see [`UnoHsmPal::set_io_dispatch`]); this task
+/// receives the rest through [`HsmIoController::poll_io`]: bulk IOs, and
+/// the command IO that comes while host IO is paused for a PCIe reset,
+/// which `poll_io` recycles. It hands on any IO it returns.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent receive-and-dispatch loop.
 ///
 /// # Side Effects
-/// - Continuously drains inbound IO work from PAL.
+/// - Drains inbound IO work from PAL that the run loop leaves.
 /// - Wakes the worker of each received IO's slot.
 #[embassy_executor::task]
 async fn poll_io() -> ! {
@@ -128,25 +150,15 @@ async fn poll_io() -> ! {
         let Ok(io) = hsm.pal().poll_io().await else {
             continue;
         };
-
-        #[cfg(not(feature = "bulk_crypto"))]
-        let handoff: &[_] = if io.kind() == HsmIoKind::Bulk {
-            &BULK_IO_HANDOFF.0
-        } else {
-            &IO_HANDOFF.0
-        };
-        #[cfg(feature = "bulk_crypto")]
-        let handoff: &[_] = &IO_HANDOFF.0;
-        if let Some(slot) = handoff.get(usize::from(io.index())) {
-            slot.signal(io);
-        }
+        dispatch_io(io);
     }
 }
 
 /// Processes the IOs of one slot, one at a time, each to completion.
 ///
-/// Waits for [`poll_io`] to hand over the slot's next [`UnoHsmIo`], keeping
-/// the underlying IO_SQ slot reserved until the completion DMA finishes.
+/// Waits for the run loop or [`poll_io`] to hand over the slot's next
+/// [`UnoHsmIo`], keeping the underlying IO_SQ slot reserved until the
+/// completion DMA finishes.
 /// First lets the PAL certify the partition's SP-published unwrapping key
 /// (a FIPS 140-3 pairwise consistency test that runs once per published
 /// key), then delegates SQE parsing, inbound/outbound DMA, DDI dispatch,
@@ -264,6 +276,7 @@ async fn poll_ipc(spawner: Spawner) -> ! {
             if let Ok(token) = poll_io() {
                 spawner.spawn(token);
             }
+            hsm.pal().set_io_dispatch(dispatch_io);
             if let Ok(token) = periodic_self_tests() {
                 spawner.spawn(token);
             }
