@@ -389,6 +389,9 @@ struct BcpState {
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; IDS],
+    /// The DFL element [`write_dfl`] builds before writing it out: words it
+    /// does not set stay zero, so a command need not clear it first.
+    dfl: [u32; DFL_DWORDS],
 }
 
 /// Async BCP driver.
@@ -431,6 +434,7 @@ impl BcpDriver {
                     deadline: Instant::from_ticks(0),
                     chunks: 0,
                 }),
+                dfl: [0; DFL_DWORDS],
             }),
         }
     }
@@ -550,7 +554,7 @@ impl Future for GcmFuture<'_> {
                     this.id = Some(id);
 
                     load_key(id, req.key);
-                    write_dfl(id, req);
+                    write_dfl(&mut s.dfl, id, req);
                     submit(s, id, req.op, req.data.src().1);
                     id
                 }
@@ -977,10 +981,12 @@ fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
 /// SGL data-block descriptors (DW6-15), then the GCM aux command (key
 /// index, unpadded AAD length, expected tag, IV, padded AAD length).
 ///
+/// The element is built in `dw`, whose other words are zero, and then
+/// written out: every word set here is set on every command.
+///
 /// The destination is as long as the source: the engine writes the padded
 /// AAD through ahead of the text, as the host fast path expected.
-fn write_dfl(id: usize, req: &GcmRequest<'_>) {
-    let mut dw = [0u32; DFL_DWORDS];
+fn write_dfl(dw: &mut [u32; DFL_DWORDS], id: usize, req: &GcmRequest<'_>) {
     let (src, src_len) = req.data.src();
     let (dst, _) = req.data.dst();
     let len = src_len as u32;
@@ -997,9 +1003,11 @@ fn write_dfl(id: usize, req: &GcmRequest<'_>) {
     dw[17] = id as u32;
     dw[18] = req.unpadded_aad_len as u32;
     if req.op == GcmOp::Decrypt {
-        put_bytes(&mut dw, 19, req.tag);
+        put_bytes(dw, 19, req.tag);
+    } else {
+        dw[19..23].fill(0);
     }
-    put_bytes(&mut dw, 23, req.iv);
+    put_bytes(dw, 23, req.iv);
     dw[26] = req.aad_len as u32;
 
     // Burst-write the element: the ring sits in memory the CPU writes
@@ -1008,8 +1016,8 @@ fn write_dfl(id: usize, req: &GcmRequest<'_>) {
     // SAFETY: `dfl_ptr(id)` is DFL element `id` of the GSRAM ring
     // (`id < DEPTH`), `DFL_DWORDS` words long and word-aligned, and only
     // this command uses it.
-    let dst = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
-    tsra_fw_bulk_copy::copy_slice(dst, &dw);
+    let out = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
+    tsra_fw_bulk_copy::copy_slice(out, dw);
 }
 
 /// Read the completion-ring entry at `ci`, with one burst.

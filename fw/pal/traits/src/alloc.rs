@@ -262,6 +262,38 @@ impl HsmDmaBuf {
         true
     }
 
+    /// Copies the first `dst.len()` bytes of this buffer into `dst` as
+    /// [`copy_to_slice`](Self::copy_to_slice) does, and returns them there,
+    /// initialized: a copy about to be overwritten whole need not be zeroed
+    /// first.
+    ///
+    /// Returns `None`, copying nothing, if `dst` is longer than this buffer.
+    #[inline]
+    pub fn copy_to_uninit<'b>(
+        &self,
+        dst: &'b mut [core::mem::MaybeUninit<u8>],
+    ) -> Option<&'b mut [u8]> {
+        let len = dst.len();
+        let src = self.inner.get(..len)?;
+        let d = dst.as_mut_ptr().cast::<u8>();
+        #[cfg(target_arch = "arm")]
+        let done = if (src.as_ptr() as usize | d as usize) % 4 == 0 {
+            let blocks = len / 32;
+            // SAFETY: both are word-aligned and hold at least `blocks * 32`
+            // bytes, and are disjoint, `dst` being exclusively borrowed.
+            unsafe { burst_copy(d, src.as_ptr(), blocks) };
+            blocks * 32
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "arm"))]
+        let done = 0;
+        // SAFETY: the rest of both, in bounds and disjoint as above.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(done), d.add(done), len - done) };
+        // SAFETY: all `len` bytes of `dst` were just written.
+        Some(unsafe { core::slice::from_raw_parts_mut(d, len) })
+    }
+
     /// The first `N` bytes of this buffer, or `None` if it is shorter.
     ///
     /// When they are word-aligned and `N` is a whole number of words, they
