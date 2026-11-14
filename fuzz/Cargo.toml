@@ -218,6 +218,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_mlkem_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mlkem_generate_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_ecc_sign"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_sign.rs"
 test = false
@@ -269,6 +276,13 @@ bench = false
 doc = false
 name = "fuzz_tbor_unwrap_key"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_unwrap_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_verify_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_verify_key.rs"
 test = false
 
 [[bin]]
