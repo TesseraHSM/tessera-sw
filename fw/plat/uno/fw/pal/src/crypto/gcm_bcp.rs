@@ -75,6 +75,13 @@ const GCM_AAD_PAD: usize = 32;
 
 type Block = [u8; AES_BLOCK_SIZE];
 
+/// A tag as [`UnoHsmPal::gcm_run`] returns it. Word-aligned, so that it is
+/// carried through the futures a word at a time: a bare [`Block`] in an
+/// [`HsmResult`] sits at offset 1, where it is moved a byte at a time.
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+struct Tag(Block);
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -245,7 +252,7 @@ impl UnoHsmPal {
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
-    ) -> HsmResult<Block> {
+    ) -> HsmResult<Tag> {
         if key.len() != BCP_KEY_LEN {
             return Err(HsmError::InvalidArg);
         }
@@ -368,7 +375,7 @@ impl UnoHsmPal {
                         g.update(&pad_ks);
                     }
                     g.update(&len_fix);
-                    Ok(xor(&engine_tag, &g.finish()))
+                    Ok(Tag(xor(&engine_tag.0, &g.finish())))
                 }
                 _ => Ok(engine_tag),
             }
@@ -386,7 +393,7 @@ impl UnoHsmPal {
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
-    ) -> HsmResult<Block> {
+    ) -> HsmResult<Tag> {
         self.alloc_scoped_async(io, async |scope| {
             // [0¹²⁸ | J₀] → [H | E_K(J₀)].
             let blocks = scope.dma_alloc_zeroed(2 * AES_BLOCK_SIZE)?;
@@ -414,7 +421,7 @@ impl UnoHsmPal {
             if let Bufs::Copy { src, dst } = &mut bufs {
                 dst.copy_from_slice(src);
             }
-            Ok(tag)
+            Ok(Tag(tag))
         })
         .await
     }
@@ -445,7 +452,7 @@ impl UnoHsmPal {
         let t = self
             .gcm_run(io, key, iv, aad_len, Dir::Encrypt, bufs)
             .await?;
-        tag.copy_from_slice(&t);
+        tag.copy_from_slice(&t.0);
         Ok(())
     }
 
@@ -465,7 +472,7 @@ impl UnoHsmPal {
         let t = self
             .gcm_run(io, key, iv, aad_len, Dir::Encrypt, Bufs::InPlace(data))
             .await?;
-        tag.copy_from_slice(&t);
+        tag.copy_from_slice(&t.0);
         Ok(())
     }
 
@@ -520,11 +527,13 @@ impl UnoHsmPal {
 /// Interpret an engine completion: the engine's tag for an encrypt, or the
 /// verdict on a decrypt.
 #[inline]
-fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Block> {
+fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Tag> {
     let done = done?;
     match dir {
-        Dir::Encrypt if done.ok() => Ok(done.tag),
-        Dir::Decrypt(_) if done.ok() && constant_time_eq(&done.tag, engine_tag) => Ok(done.tag),
+        Dir::Encrypt if done.ok() => Ok(Tag(done.tag)),
+        Dir::Decrypt(_) if done.ok() && constant_time_eq(&done.tag, engine_tag) => {
+            Ok(Tag(done.tag))
+        }
         Dir::Decrypt(_) if done.ok() || done.tag_mismatch_only() => {
             Err(HsmError::AesGcmDecryptTagDoesNotMatch)
         }
