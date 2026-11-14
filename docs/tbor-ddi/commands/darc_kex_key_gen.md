@@ -14,6 +14,10 @@ Generates a new DARC key-exchange key and returns the **masked** private
 key together with the public key.  The key-exchange key is a **P-384 ECC
 keypair for ECDH key agreement**.
 
+This is the HPKE **recipient** key for DARC TMK imports. Outgoing DARC
+transfers use HPKE Base and authenticate with a source PID-signed
+operation report, not a source KEX identity.
+
 The private key is **not** stored on the device.  It is masked
 (AEAD-GCM-256) under the masking key associated with the requested
 `scope` and the masked blob is returned to the caller, which re-imports
@@ -64,13 +68,13 @@ section carrying the masked key and public key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (180 B) | The key-exchange key's ECC-P384 private half, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(48) ‖ tag(16)`. Not stored on-device. |
-| 20 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new key-exchange key. Not a SEC1 point encoding (no `0x04` prefix). |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (280 B) | The P-384 private key masked under the scope's masking key. Not stored on-device. |
+| 16 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new key-exchange key. Not a SEC1 point encoding (no `0x04` prefix). |
 
 ### Data section
 
-Carries the 180-byte `masked_key` followed by the 96-byte `pub_key`.
+Carries the 280-byte `masked_key` followed by the 96-byte `pub_key`.
 
 ## Errors
 

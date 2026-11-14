@@ -12,6 +12,7 @@ mod shared_types;
 pub mod traits;
 
 pub use algo::*;
+pub use ddi::DARC_REPORT_MAX_LEN;
 pub use ddi::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 pub use ddi::DARC_UNWRAP_PUB_KEY_MAX_LEN;
 pub use ddi::DARC_UNWRAP_WRAPPED_KEY_MAX_LEN;

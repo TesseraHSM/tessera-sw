@@ -1812,6 +1812,7 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     ctx.policy = std::move(policy);
     ctx.data_key = std::move(data_ca);
     ctx.pota_key = std::move(pota_ca);
+    ctx.pid_pub = std::move(pid_pub);
     return ctx;
 }
 

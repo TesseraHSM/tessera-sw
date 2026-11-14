@@ -871,13 +871,8 @@ struct tsra_darc_cert_chain
 struct tsra_darc_tmk_export_params
 {
     /*
-     Source's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (276 B).
-     */
-    const struct tsra_buffer *masked_sender_key;
-    /*
      Masked TMK (from `tsra_darc_tmk_gen`), exactly `MASKED_TMK_LEN`
-     (260 B).
+     (264 B).
      */
     const struct tsra_buffer *masked_tmk;
     /*
@@ -899,7 +894,7 @@ struct tsra_darc_tmk_import_params
 {
     /*
      Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (276 B).
+     exactly `MASKED_KEX_KEY_LEN` (280 B).
      */
     const struct tsra_buffer *masked_kex_key;
     /*
@@ -910,11 +905,15 @@ struct tsra_darc_tmk_import_params
     const struct tsra_buffer *policy;
     /*
      Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-     (145 B).
+     (258 B).
      */
     const struct tsra_buffer *sealed_tmk;
     /*
-     POTA-anchored source certificate chain (1..=2 certs).
+     PID-signed `Darc` report returned with the sealed TMK.
+     */
+    const struct tsra_buffer *report;
+    /*
+     POTA-anchored source PID certificate chain (1..=3 certs).
      */
     struct tsra_darc_cert_chain remote_cert_chain;
 };
@@ -930,7 +929,7 @@ struct tsra_darc_key_wrap_params
     tsra_handle source_key;
     /*
      Masked TMK (from `tsra_darc_tmk_gen` or `tsra_darc_tmk_import`),
-     exactly `MASKED_TMK_LEN` (260 B).
+     exactly `MASKED_TMK_LEN` (264 B).
      */
     const struct tsra_buffer *masked_tmk;
 };
@@ -991,7 +990,7 @@ struct tsra_darc_key_unwrap_params
 {
     /*
      Masked TMK (from `tsra_darc_tmk_import`), exactly `MASKED_TMK_LEN`
-     (260 B).
+     (264 B).
      */
     const struct tsra_buffer *masked_tmk;
     /*
@@ -2227,14 +2226,14 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
  Generates a new DARC key-exchange key (ECC-P384) on the calling
  session's partition and returns the masked private key plus its raw
  P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
- the target it yields the HPKE receiver identity; run on the source it
- yields the HPKE sender-auth identity. The key is not stored on the
+ the target it yields the HPKE recipient key. The source uses its PID
+ to authenticate export reports. The key is not stored on the
  device.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
  @param[in,out] masked_key Output buffer for the masked KEX private key
-                (`MASKED_KEX_KEY_LEN`, 276 B)
+                (`MASKED_KEX_KEY_LEN`, 280 B)
  @param[in,out] pub_key Output buffer for the raw P-384 public key
                 (`KEX_PUB_KEY_LEN`, 96 B)
 
@@ -2264,7 +2263,7 @@ tsra_status tsra_darc_kex_key_gen(
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in,out] masked_tmk Output buffer for the masked TMK
-                (`MASKED_TMK_LEN`, 260 B)
+                (`MASKED_TMK_LEN`, 264 B)
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2279,14 +2278,18 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
 /*
  @brief Seal a DARC TMK to an authenticated target
 
- Validates the target certificate chain against the policy DATA key thumbprint,
- then HPKE-Auth seals the TMK to the target's KEX key, returning the
- sealed TMK.
+ Validates the target certificate chain against the policy `data_spki_thumbprint`,
+ then HPKE Base seals the TMK to the target's KEX key and PID-signs the
+ operation report. Retain and transfer both outputs together.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Export input buffers
  @param[in,out] sealed_tmk Output buffer for the sealed TMK
-                (`SEALED_TMK_LEN`, 145 B)
+                (`SEALED_TMK_LEN`, 258 B)
+ @param[in,out] report Output buffer for the PID-signed `Darc` report.
+                Probe/fill validates the `DARC_REPORT_MAX_LEN` (896 B)
+                upper bound before issuing the command, then returns the
+                actual report length on success.
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2295,26 +2298,27 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
  - `sess_handle` must be a valid security-domain session handle.
  - `params` and each of its buffer pointers must be valid; the
    `target_cert_chain.certs` array must hold `len` valid `tsra_buffer`s.
- - `sealed_tmk` must be a valid `tsra_buffer` with writable backing
-   storage of the advertised length.
+ - Both output buffers must be valid, writable, and distinct.
  */
 tsra_status tsra_darc_tmk_export(
     tsra_handle sess_handle,
     const struct tsra_darc_tmk_export_params *params,
-    struct tsra_buffer *sealed_tmk
+    struct tsra_buffer *sealed_tmk,
+    struct tsra_buffer *report
 );
 
 /*
  @brief Import (open) a sealed DARC TMK on the target
 
- Validates the source certificate chain against the policy POTA key thumbprint,
- HPKE-Auth opens the sealed TMK, and re-masks it under the partition
+ Authorizes the source PID chain against the policy `pota_spki_thumbprint`,
+ verifies the `Darc` report and exact recipient/envelope binding,
+ HPKE Base opens the sealed TMK, and re-masks it under the partition
  SDMK, returning the masked TMK.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Import input buffers
  @param[in,out] masked_tmk Output buffer for the imported masked TMK
-                (`MASKED_TMK_LEN`, 260 B)
+                (`MASKED_TMK_LEN`, 264 B)
 
  @return `TsraStatus` indicating the result of the operation
 

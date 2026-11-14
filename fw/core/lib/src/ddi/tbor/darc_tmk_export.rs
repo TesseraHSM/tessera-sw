@@ -1,53 +1,24 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! TBOR `DarcTmkExport` handler.
-//!
-//! Seals a locally-masked DARC Transfer Masking Key (TMK) to a remote
-//! **target** so the target can import it with
-//! [`DarcTmkImport`](super::darc_tmk_import).  It is the source-side
-//! mirror of `DarcTmkImport`: where import opens a `sealed_tmk` and
-//! re-masks it under the SDMK, export unmasks a local `masked_tmk` and
-//! HPKE-Auth-seals it to the target.
-//!
-//! It is `SdCreateRemoteBackup`'s **seal front-end** narrowed to a single
-//! DATA-anchored certificate chain (the export-side mirror of the
-//! `pota_spki_thumbprint`-anchored sender chain `DarcTmkImport` verifies).
-//!
-//! Flow:
-//!
-//! 1. Decode; gate to a Crypto-Officer, `Active` session on an
-//!    `Initialized` partition whose security domain is initialized.
-//! 2. Bind the caller-supplied [`PartPolicy`] to the partition's fixed
-//!    `policy_hash`, then validate `target_cert_chain` anchored to the
-//!    policy `data_spki_thumbprint`, recovering the terminal certificate's public
-//!    key as `RcvrPub`.
-//! 3. Unmask `masked_sender_key` → `SndrPriv` (must be a
-//!    [`DarcKex`](HsmVaultKeyKind::DarcKex) key) and derive `SndrPub`.
-//! 4. Unmask `masked_tmk` → the 32-byte **TMK** (must be a
-//!    [`DarcTmk`](HsmVaultKeyKind::DarcTmk) key).
-//! 5. HPKE-Auth-seal the TMK to `RcvrPub` (sender-auth `SndrPriv`) →
-//!    the 145-byte `sealed_tmk`, byte-compatible with `DarcTmkImport`.
-//!
-//! The command **persists nothing** (no vault write, no lifecycle
-//! advance), so it records no rollback on the undo log.  This command is
-//! **Crypto-Officer-only**. IO teardown scrubs recovered secrets
-//! (`SndrPriv`, the TMK).
-//!
-//! [`PartPolicy`]: super::policy
+//! Export a local DARC TMK to a DATA-authorized recipient using P-384 HPKE
+//! Base, then PID-sign an operation report over the exact encrypted envelope.
+//! No sender KEX key, caller-supplied report claims, or persistent writes.
 
-use tsra_fw_core_crypto_hpke::seal;
-use tsra_fw_core_crypto_hpke::AuthParams;
-use tsra_fw_core_crypto_hpke::HpkeSealConfig;
-use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_report::report;
+use tsra_fw_core_crypto_key_report::transfer::p384_key_id;
+use tsra_fw_core_crypto_key_report::transfer::seal_transfer;
+use tsra_fw_core_crypto_key_report::transfer::transfer_envelope_hash;
+use tsra_fw_core_crypto_key_report::transfer::transfer_report_params;
+use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
+use tsra_fw_core_crypto_key_report::transfer::DARC_ENVELOPE_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain;
-use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportResp;
-use tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN;
+use tsra_fw_ddi_tbor_types::DARC_REPORT_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
@@ -56,7 +27,6 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -69,212 +39,112 @@ use super::part_final::verify_policy_hash;
 use super::validate_crypto_officer_active_session;
 use crate::part_state;
 
-/// NIST curve for the DARC key-exchange key and the HPKE seal.
-const DARC_CURVE: HsmEccCurve = HsmEccCurve::P384;
+const _: () = assert!(SEALED_TMK_LEN == DARC_ENVELOPE_LEN);
+const _: () = assert!(DARC_REPORT_MAX_LEN == tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN);
 
-/// HPKE ciphersuite for the sealed TMK.
-const HPKE_SUITE: HpkeSuite = HpkeSuite::DHKemP384Sha384AesGcm256;
-
-/// SEC1 uncompressed point tag (`0x04 ‖ X ‖ Y`).
-const SEC1_UNCOMPRESSED: u8 = 0x04;
-
-/// Validate `target_cert_chain` and recover the terminal (leaf)
-/// certificate's public key as the HPKE receiver key `RcvrPub`.
-///
-/// The chain travels out of band; it must carry `1..=MAX_CERTS`
-/// certificates and be cryptographically anchored to the policy
-/// `data_spki_thumbprint`.  On success `rcvr_pub` is the SEC1-uncompressed
-/// (`0x04 ‖ X ‖ Y`) receiver public key.
 async fn recover_target_pub<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     req_buf: &HsmDmaBuf,
-    rcvr_pub: &mut HsmDmaBuf,
+    public: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    // The re-supplied policy must match the one bound at `PartInit`; only
-    // then is its `data_spki_thumbprint` a trustworthy anchor.
     let req = TborDarcTmkExportReq::decode(req_buf)?;
-    let policy = req.policy();
-    verify_policy_hash(pal, io, alloc, policy).await?;
-
-    let part_policy = super::policy::from_bytes(policy)?;
-    let anchor = part_policy
-        .data_spki_thumbprint
-        .ok_or(HsmError::InvalidArg)?;
-
-    let cert_descriptors = req.target_cert_chain();
-    if cert_descriptors.is_empty() || cert_descriptors.len() > MAX_CERTS {
+    verify_policy_hash(pal, io, alloc, req.policy()).await?;
+    let policy = super::policy::from_bytes(req.policy())?;
+    let data = policy.data_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
+    let chain = req.target_cert_chain();
+    if chain.is_empty() || chain.len() > MAX_CERTS {
         return Err(HsmError::InvalidArg);
     }
-
-    // `validate_chain` fills `leaf_out` with the leaf public key (raw
-    // big-endian `X ‖ Y`); recover it into the SEC1 buffer's coordinate
-    // region and prepend the uncompressed tag.
     validate_chain(
         pal,
         io,
         alloc,
-        cert_descriptors,
-        Some(anchor),
-        &mut rcvr_pub[1..1 + P384_POINT_LEN],
+        chain,
+        Some(data),
+        &mut public[1..],
         async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
-    rcvr_pub[0] = SEC1_UNCOMPRESSED;
-
+    public[0] = 4;
     Ok(())
 }
 
-/// Handle a TBOR `DarcTmkExport` request.
-///
-/// **Stateless**: recovers the local TMK and returns it HPKE-Auth-sealed
-/// to the target without writing the vault or advancing any lifecycle, so
-/// it records no rollback on the `undo` log.
+/// CO-only, SD-initialized, stateless export. IO teardown scrubs the TMK.
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    // Session/state gating + masking-key routing use only the shared
-    // `decode` view.  Both ids are `Copy`, so they outlive the view.
-    let (sender_mk_id, tmk_mk_id): (HsmKeyId, HsmKeyId) = {
+    let tmk_mk_id = {
         let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
-        let sess_id = HsmSessId::from(u16::from(req.session_id()));
-        validate_crypto_officer_active_session(pal, io, sess_id)?;
-
-        // The SDMK the input TMK is masked under is provisioned by SD
-        // setup, which requires a finalized partition.
-        if part_state::part_state(pal, io)? != HsmPartState::Initialized {
-            return Err(HsmError::InvalidArg);
-        }
-        if !part_state::part_is_sd_initialized(pal, io)? {
-            return Err(HsmError::InvalidArg);
-        }
-
-        // Route each masked input to its masking key via the cleartext,
-        // tag-bound metadata (before unmasking).
-        let sender_scope = peek_metadata(req.masked_sender_key())?
-            .usage_flags()
-            .scope();
-        let sender_mk_id = masking_key_id_for_scope(pal, io, sender_scope)?;
-        let tmk_scope = peek_metadata(req.masked_tmk())?.usage_flags().scope();
-        let tmk_mk_id = masking_key_id_for_scope(pal, io, tmk_scope)?;
-        (sender_mk_id, tmk_mk_id)
-    };
-
-    // The target certificate chain is mandatory side-band data carried in
-    // the out-of-band SGL page.
-
-    // Allocate the fixed-size output seal in the IO scope so it survives
-    // the crypto scratch allocator's reset.
-    let sealed_tmk_out = pal.dma_alloc(io, SEALED_TMK_LEN)?;
-
-    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-        let coord = DARC_CURVE.priv_key_len();
-
-        // ── Phase 1: policy binding + DATA-anchored target chain ──
-        let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-        recover_target_pub(pal, io, alloc, cmd_buf.request(), pk_r).await?;
-
-        // ── Phase 2: recover SndrPriv + TMK, then HPKE-Auth seal the TMK
-        // to RcvrPub.  The masked inputs are copied into crypto scratch so
-        // the request-buffer borrow is confined; `unmask` decrypts in place.
-        let sender_blob = alloc.dma_alloc(MASKED_KEX_KEY_LEN)?;
-        let tmk_blob = alloc.dma_alloc(MASKED_TMK_LEN)?;
+        validate_crypto_officer_active_session(
+            pal,
+            io,
+            HsmSessId::from(u16::from(req.session_id())),
+        )?;
+        if part_state::part_state(pal, io)? != HsmPartState::Initialized
+            || !part_state::part_is_sd_initialized(pal, io)?
         {
-            let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
-            sender_blob.copy_from_slice(req.masked_sender_key());
-            tmk_blob.copy_from_slice(req.masked_tmk());
+            return Err(HsmError::InvalidArg);
         }
+        masking_key_id_for_scope(
+            pal,
+            io,
+            peek_metadata(req.masked_tmk())?.usage_flags().scope(),
+        )?
+    };
+    let sealed = pal.dma_alloc(io, SEALED_TMK_LEN)?;
+    let signed_report = pal.dma_alloc(io, DARC_REPORT_MAX_LEN)?;
+    let report_len = pal
+        .alloc_scoped_async(io, async |alloc| {
+            let recipient = alloc.dma_alloc(97)?;
+            recover_target_pub(pal, io, alloc, cmd_buf.request(), recipient).await?;
 
-        // Unmask the sender key into `sender_blob`, copy the recovered
-        // private key out into its own scratch.
-        let sender_masking_key = pal.vault_key(io, sender_mk_id)?;
-        let unmask_sender = async {
-            let view = unmask(pal, io, sender_masking_key, sender_blob).await?;
-            if !matches!(view.key_kind, HsmVaultKeyKind::DarcKex) {
+            let blob = alloc.dma_alloc(MASKED_TMK_LEN)?;
+            blob.copy_from_slice(TborDarcTmkExportReq::decode(cmd_buf.request())?.masked_tmk());
+            let view = unmask(pal, io, pal.vault_key(io, tmk_mk_id)?, blob).await?;
+            if view.key_kind != HsmVaultKeyKind::DarcTmk {
                 return Err(HsmError::UnsupportedKeyType);
             }
-            let sndr_priv = alloc.dma_alloc(view.target_key.len())?;
-            sndr_priv.copy_from_slice(view.target_key);
-            Ok::<_, HsmError>(sndr_priv)
-        }
-        .await;
-        let sndr_priv = unmask_sender?;
-
-        let crypto_res = async {
-            let tmk = alloc.dma_alloc(TMK_LEN)?;
-            let inner = async {
-                // Unmask the masked TMK into `tmk_blob`, copy the 32-byte
-                // TMK out into its own scratch.
-                let tmk_masking_key = pal.vault_key(io, tmk_mk_id)?;
-                let unmask_tmk = async {
-                    let view = unmask(pal, io, tmk_masking_key, tmk_blob).await?;
-                    if !matches!(view.key_kind, HsmVaultKeyKind::DarcTmk) {
-                        return Err(HsmError::UnsupportedKeyType);
-                    }
-                    if view.target_key.len() != TMK_LEN {
-                        return Err(HsmError::InvalidArg);
-                    }
-                    tmk.copy_from_slice(view.target_key);
-                    Ok::<_, HsmError>(())
-                }
-                .await;
-                unmask_tmk?;
-
-                // Sender public key (`SndrPub`) in SEC1 BE, derived
-                // on-device from the recovered private key.  The PAL emits
-                // operand-order `X ‖ Y`; converting each coordinate in place
-                // yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
-                let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-                pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
-                    .await?;
-                pk_s[0] = SEC1_UNCOMPRESSED;
-                byte_order::pair_to_be::<P>(DARC_CURVE, &mut pk_s[1..])?;
-
-                // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
-                let cfg = HpkeSealConfig::auth(
-                    HPKE_SUITE,
-                    pk_r,
-                    &[],
-                    &[],
-                    AuthParams {
-                        sk_s: sndr_priv,
-                        pk_s,
-                    },
-                );
-
-                // Size query, then split the response buffer into the `enc`
-                // and `ct` regions the seal writes.
-                let sizes = seal(pal, io, &cfg, tmk, None, None, alloc).await?;
-                if sizes.enc_len + sizes.ct_len != SEALED_TMK_LEN {
-                    return Err(HsmError::InternalError);
-                }
-                let (enc, ct) = sealed_tmk_out.split_at_mut(sizes.enc_len);
-                seal(pal, io, &cfg, tmk, Some(enc), Some(ct), alloc).await?;
-                Ok::<_, HsmError>(())
+            if view.target_key.len() != TMK_LEN {
+                return Err(HsmError::InvalidArg);
             }
-            .await;
-            inner
-        }
-        .await;
 
-        // Scrub the recovered sender private key on every path.
-        crypto_res
-    })
-    .await?;
+            let pid_private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
+            let pid_public = alloc.dma_alloc(97)?;
+            pid_public[0] = 4;
+            pal.ecc_pub_from_priv(io, HsmEccCurve::P384, pid_private, &mut pid_public[1..])
+                .await?;
+            byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut pid_public[1..])?;
+            let ids = alloc.dma_alloc(96)?;
+            let (source_id, recipient_id) = ids.split_at_mut(48);
+            p384_key_id(pal, io, pid_public, source_id, alloc).await?;
+            p384_key_id(pal, io, recipient, recipient_id, alloc).await?;
+            let source_bytes: &[u8] = source_id;
+            let recipient_bytes: &[u8] = recipient_id;
+            let header = TransferHeader::Darc {
+                source_pid_key_id: source_bytes
+                    .try_into()
+                    .map_err(|_| HsmError::InternalError)?,
+                recipient_key_id: recipient_bytes
+                    .try_into()
+                    .map_err(|_| HsmError::InternalError)?,
+            };
+            seal_transfer(pal, io, &header, recipient, view.target_key, sealed, alloc).await?;
+            let digest = alloc.dma_alloc(48)?;
+            transfer_envelope_hash(pal, io, sealed, digest, alloc).await?;
+            let params = transfer_report_params(sealed, digest)?;
+            report(pal, io, alloc, &params, pid_private, Some(signed_report)).await
+        })
+        .await?;
 
-    encode_response(cmd_buf, sealed_tmk_out)
-}
-
-/// Encode the `DarcTmkExport` response around the sealed TMK.
-fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, sealed_tmk: &HsmDmaBuf) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkExportResp::encode_for_request(buf, 0, false)?
-            .sealed_tmk(sealed_tmk)?
+    cmd_buf.encode_response(|buf| {
+        let frame = TborDarcTmkExportResp::encode(buf, 0, false)?
+            .sealed_tmk(sealed)?
+            .report(&signed_report[..report_len])?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }
