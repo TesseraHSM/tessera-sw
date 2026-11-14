@@ -51,7 +51,7 @@ pub fn part_init(
         part_policy: part_policy.to_vec(),
     };
 
-    dev.exec_op_tbor(&req, None, &mut None)
+    dev.exec_op_tbor(&req, &mut [], &mut None)
 }
 
 /// Build the wire-ready AEAD-GCM envelope for a `PartInit` `mach_seed`

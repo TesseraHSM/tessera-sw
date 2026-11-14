@@ -369,23 +369,30 @@ impl HsmIoController for UnoHsmPal {
     /// Writes `src` to the host buffer of OOB descriptor `index`, which
     /// must be an SGL Data Block of exactly `src.len()` bytes.
     async fn send_oob(&self, io: &UnoHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
-        const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
-
         let desc = self.oob_desc(io, index).await?;
-        let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
-        if desc[15] >> 4 != SGL_TYPE_DATA_BLOCK || len as usize != src.len() {
+        if sgl_block_len(&desc)? as usize != src.len() {
             return Err(HsmError::InvalidArg);
         }
-        self.gdma
-            .copy_mem(
-                crate::gdma::device_dma_buf(src.as_ptr(), len),
-                MemInterface::Device,
-                len,
-                crate::gdma::sgl_desc_buf(&desc),
-                crate::gdma::host_interface(io.pid())?,
-                len,
-            )?
-            .await
+        self.send_oob_desc(io, desc, src).await
+    }
+
+    /// Writes `src` to the start of the host buffer of OOB descriptor
+    /// `index`, an SGL Data Block of at least `src.len()` bytes.
+    async fn send_oob_bounded(
+        &self,
+        io: &UnoHsmIo,
+        index: usize,
+        src: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let mut desc = self.oob_desc(io, index).await?;
+        if (sgl_block_len(&desc)? as usize) < src.len() {
+            return Err(HsmError::InsufficientBuffer);
+        }
+        // Narrow the block to the bytes written so the transfer never
+        // touches the rest of the caller's buffer.
+        let len = u32::try_from(src.len()).map_err(|_| HsmError::InvalidArg)?;
+        desc[8..12].copy_from_slice(&len.to_le_bytes());
+        self.send_oob_desc(io, desc, src).await
     }
 
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
@@ -477,7 +484,42 @@ fn slot_cqe(index: u16) -> &'static mut CqeEntry {
     }
 }
 
+/// Length of an SGL Data Block descriptor.
+///
+/// # Errors
+///
+/// `InvalidArg` if `desc` is not a Data Block.
+fn sgl_block_len(desc: &[u8; OOB_ENTRY_LEN as usize]) -> HsmResult<u32> {
+    const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
+
+    if desc[15] >> 4 != SGL_TYPE_DATA_BLOCK {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]))
+}
+
 impl UnoHsmPal {
+    /// Copies `src` to the host buffer of SGL Data Block `desc`, whose
+    /// length the caller has checked equals `src.len()`.
+    async fn send_oob_desc(
+        &self,
+        io: &UnoHsmIo,
+        desc: [u8; OOB_ENTRY_LEN as usize],
+        src: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let len = u32::try_from(src.len()).map_err(|_| HsmError::InvalidArg)?;
+        self.gdma
+            .copy_mem(
+                crate::gdma::device_dma_buf(src.as_ptr(), len),
+                MemInterface::Device,
+                len,
+                crate::gdma::sgl_desc_buf(&desc),
+                crate::gdma::host_interface(io.pid())?,
+                len,
+            )?
+            .await
+    }
+
     /// Reads OOB descriptor `index` of `io` from host memory.
     pub(crate) async fn oob_desc(
         &self,

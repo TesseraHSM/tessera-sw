@@ -1016,26 +1016,10 @@ impl DdiDev for DdiWinDev {
     /// `opc` and `cmdset` ioctl fields verbatim into the SQE. Requests
     /// with OOB items use its V2 data-transfer IOCTL so each item is
     /// represented by an NVMe SGL Data Block descriptor.
-    fn exec_op_tbor<T: TborOpReq>(
-        &self,
-        req: &T,
-        oob_items: Option<&[&[u8]]>,
-        cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        let mut items: Vec<TborOobItem<'_>> = oob_items
-            .unwrap_or(&[])
-            .iter()
-            .map(|item| TborOobItem::In(item))
-            .collect();
-        self.exec_op_tbor_oob(req, &mut items, cookie)
-    }
-
-    /// Execute a TBOR command whose OOB items may be written by the device.
     ///
-    /// Uses the same data-transfer IOCTL as [`Self::exec_op_tbor`]. Its
-    /// buffer table carries no direction, so the driver must map every
+    /// The buffer table carries no direction, so the driver must map every
     /// item for device writes for [`TborOobItem::Out`] results to land.
-    fn exec_op_tbor_oob<T: TborOpReq>(
+    fn exec_op_tbor<T: TborOpReq>(
         &self,
         req: &T,
         oob_items: &mut [TborOobItem<'_>],

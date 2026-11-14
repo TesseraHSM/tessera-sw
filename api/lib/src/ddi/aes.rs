@@ -334,7 +334,7 @@ fn aes_generate_key_tbor(
     };
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -389,7 +389,7 @@ fn aes_encrypt_decrypt_tbor(
     };
     let mut cookie = None;
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -689,7 +689,7 @@ fn aes_xts_encrypt_decrypt_tbor(
     };
     let mut items = [TborOobItem::In(input), TborOobItem::Out(&mut output[..len])];
     key.with_dev(|dev| {
-        dev.exec_op_tbor_oob(&req, &mut items, &mut None)
+        dev.exec_op_tbor(&req, &mut items, &mut None)
             .map_err(HsmError::from)
     })?;
     Ok(len)
@@ -725,7 +725,7 @@ pub(crate) fn aes_xts_generate_key_tbor(
         key_label: key_label.to_vec(),
     };
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut None)
+        dev.exec_op_tbor(&req, &mut [], &mut None)
             .map_err(HsmError::from)
     })?;
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
@@ -883,7 +883,7 @@ fn aes_gcm_encrypt_decrypt_tbor(
     let mut items = [TborOobItem::In(&inbuf), TborOobItem::Out(&mut outbuf)];
     let items: &mut [TborOobItem<'_>] = if data_len == 0 { &mut [] } else { &mut items };
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor_oob(&req, items, &mut None)
+        dev.exec_op_tbor(&req, items, &mut None)
             .map_err(HsmError::from)
     })?;
     let resp_tag: [u8; 16] = resp

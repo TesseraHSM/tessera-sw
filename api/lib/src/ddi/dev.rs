@@ -56,7 +56,7 @@ static DDI: LazyLock<HsmDdi> = LazyLock::new(HsmDdi::default);
 /// - The device is not responding
 pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
     // TBOR first; MBOR-only firmware rejects it.
-    match dev.exec_op_tbor(&TborApiRevReq, None, &mut None) {
+    match dev.exec_op_tbor(&TborApiRevReq, &mut [], &mut None) {
         Ok(resp) => {
             let rev = |major: u16, minor: u16| HsmApiRev {
                 major: major.into(),
@@ -91,7 +91,7 @@ pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
 /// Returns `false` when the backend or device does not support the command.
 /// Other device failures and invalid initialization values return an error.
 pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<bool> {
-    let resp = match dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut None) {
+    let resp = match dev.exec_op_tbor(&TborPartInfoReq::new(), &mut [], &mut None) {
         Ok(resp) => resp,
         Err(
             DdiError::UnsupportedEncoding
@@ -175,7 +175,7 @@ pub(crate) fn with_session_cookie<R>(
     // SAFETY: `ptr` points into `*guard`, which stays locked (and so
     // remains live and exclusively ours) for this entire function body.
     // The thread-local is only ever read back out from `exec_op_mbor`/
-    // `exec_op_tbor`/`exec_op_tbor_oob` while running synchronously,
+    // `exec_op_tbor`/`exec_op_tbor` while running synchronously,
     // on this thread, within `f()`'s dynamic extent below — i.e. before
     // `_restore` clears it and before `guard` unlocks.
     let ptr = NonNull::from(&mut *guard);
@@ -266,43 +266,18 @@ impl HsmDev {
         self.0.exec_op_mbor(req, unsafe { active_cookie.as_mut() })
     }
 
-    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): session-bound TBOR
-    /// ops traditionally pass `&mut None` through the DDI layer too, so
-    /// scope them onto the active [`with_session_cookie`] handle's
-    /// backend cookie the same way, keeping V2 (TBOR) sessions'
-    /// generation-bound tokens threaded through transparently.
+    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): TBOR ops traditionally
+    /// pass `&mut None` through the DDI layer too, so scope them onto the
+    /// active [`with_session_cookie`] handle's backend cookie the same way,
+    /// keeping V2 (TBOR) sessions' generation-bound tokens threaded through
+    /// transparently. Without this wrapper, callers reaching `exec_op_tbor`
+    /// through `Deref` would bypass `ACTIVE_SESSION_COOKIE` entirely and
+    /// always send no cookie, even inside a `with_session_cookie` scope.
+    ///
+    /// In-session and close commands of an encrypted session are routed
+    /// over its session transport.
     #[allow(unsafe_code)]
     pub(crate) fn exec_op_tbor<T: tsra_ddi_tbor_types::TborOpReq>(
-        &self,
-        req: &T,
-        oob_items: Option<&[&[u8]]>,
-        cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        if let Some((id, transport)) = self.session_transport(req) {
-            let mut items: Vec<_> = oob_items
-                .unwrap_or_default()
-                .iter()
-                .map(|item| TborOobItem::In(item))
-                .collect();
-            return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
-        }
-        let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
-            return self.0.exec_op_tbor(req, oob_items, cookie);
-        };
-        // SAFETY: see `with_session_cookie`.
-        self.0
-            .exec_op_tbor(req, oob_items, unsafe { active_cookie.as_mut() })
-    }
-
-    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): out-of-band TBOR ops
-    /// (e.g. AES-GCM/AES-XTS) traditionally pass `&mut None` through the
-    /// DDI layer too, so scope them onto the active
-    /// [`with_session_cookie`] handle's backend cookie the same way.
-    /// Without this wrapper, callers reaching `exec_op_tbor_oob` through
-    /// `Deref` would bypass `ACTIVE_SESSION_COOKIE` entirely and always
-    /// send no cookie, even inside a `with_session_cookie` scope.
-    #[allow(unsafe_code)]
-    pub(crate) fn exec_op_tbor_oob<T: tsra_ddi_tbor_types::TborOpReq>(
         &self,
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
@@ -312,11 +287,11 @@ impl HsmDev {
             return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
         }
         let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
-            return self.0.exec_op_tbor_oob(req, oob_items, cookie);
+            return self.0.exec_op_tbor(req, oob_items, cookie);
         };
         // SAFETY: see `with_session_cookie`.
         self.0
-            .exec_op_tbor_oob(req, oob_items, unsafe { active_cookie.as_mut() })
+            .exec_op_tbor(req, oob_items, unsafe { active_cookie.as_mut() })
     }
 }
 

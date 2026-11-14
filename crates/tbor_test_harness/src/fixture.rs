@@ -270,31 +270,13 @@ impl TestDev {
     pub fn exec_op_tbor<T: TborOpReq>(
         &self,
         req: &T,
-        oob_items: Option<&[&[u8]]>,
-        cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        if let Some((id, transport)) = self.session_transport(req) {
-            let mut items: Vec<_> = oob_items
-                .unwrap_or_default()
-                .iter()
-                .map(|item| TborOobItem::In(item))
-                .collect();
-            return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
-        }
-        self.dev.exec_op_tbor(req, oob_items, cookie)
-    }
-
-    /// [`DdiDev::exec_op_tbor_oob`], routed like [`Self::exec_op_tbor`].
-    pub fn exec_op_tbor_oob<T: TborOpReq>(
-        &self,
-        req: &T,
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
         if let Some((id, transport)) = self.session_transport(req) {
             return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
         }
-        self.dev.exec_op_tbor_oob(req, oob_items, cookie)
+        self.dev.exec_op_tbor(req, oob_items, cookie)
     }
 
     /// Factory-reset the device, dropping every session transport.

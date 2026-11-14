@@ -1132,29 +1132,11 @@ impl DdiDev for DdiNixDev {
     /// The Linux kernel driver is wire-agnostic — it forwards the
     /// `opc` and `cmdset` ioctl fields verbatim into the SQE — so
     /// no driver change is required to route TBOR.
-    fn exec_op_tbor<T: TborOpReq>(
-        &self,
-        req: &T,
-        oob_items: Option<&[&[u8]]>,
-        _cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        let oob: Vec<OobRaw> = oob_items
-            .unwrap_or(&[])
-            .iter()
-            .map(|item| OobRaw {
-                addr: item.as_ptr(),
-                len: item.len(),
-                dev_write: false,
-            })
-            .collect();
-        self.exec_tbor(req, &oob)
-    }
-
-    /// TBOR exec path with device-writable out-of-band items:
+    ///
     /// [`TborOobItem::Out`] buffers are flagged
     /// `TSRA_DATA_XFER_BUF_DEV_WRITE` so the driver maps them
     /// `DMA_FROM_DEVICE`.
-    fn exec_op_tbor_oob<T: TborOpReq>(
+    fn exec_op_tbor<T: TborOpReq>(
         &self,
         req: &T,
         oob_items: &mut [TborOobItem<'_>],

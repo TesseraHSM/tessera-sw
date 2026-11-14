@@ -51,7 +51,7 @@ pub(crate) fn darc_key_wrap(
 
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 

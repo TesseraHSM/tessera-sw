@@ -13,6 +13,7 @@
 //! are shipped as `oob_items`, mirroring the `PartFinal` cert-chain
 //! transport.
 
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
@@ -66,7 +67,7 @@ impl EvidenceDescriptors {
 /// empty evidence.
 pub(crate) fn push_evidence_if_present<'a>(
     evidence: &HsmSdEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut Vec<TborOobItem<'a>>,
 ) -> HsmResult<EvidenceDescriptors> {
     let is_empty = evidence.mfgr_cert_chain.is_empty()
         && evidence.owner_cert_chain.is_empty()
@@ -85,7 +86,7 @@ pub(crate) fn push_evidence_if_present<'a>(
 /// contiguous.
 pub(crate) fn push_evidence<'a>(
     evidence: &HsmSdEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut Vec<TborOobItem<'a>>,
 ) -> HsmResult<EvidenceDescriptors> {
     Ok(EvidenceDescriptors {
         mfgr: push_cert_chain(evidence.mfgr_cert_chain, oob, EVIDENCE_CHAIN_MAX_CERTS)?,
@@ -106,7 +107,7 @@ pub(crate) fn push_evidence<'a>(
 /// Operation reports are always sent; SA identity chains remain optional.
 pub(crate) fn push_transfer_evidence<'a>(
     evidence: &HsmSdEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut Vec<TborOobItem<'a>>,
 ) -> HsmResult<EvidenceDescriptors> {
     if evidence.report.is_empty() || evidence.report.len() > SD_BACKUP_REPORT_MAX_LEN {
         return Err(HsmError::InvalidArgument);

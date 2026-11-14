@@ -17,5 +17,5 @@ use crate::fixture::TestDev;
 pub fn helper_api_rev_tbor(dev: &TestDev) -> Result<TborApiRevResp, DdiError> {
     let req = TborApiRevReq::new();
     let mut cookie = None;
-    dev.exec_op_tbor(&req, None, &mut cookie)
+    dev.exec_op_tbor(&req, &mut [], &mut cookie)
 }

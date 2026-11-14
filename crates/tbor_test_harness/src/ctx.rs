@@ -158,7 +158,7 @@ impl TestCtx {
     /// [`Self::expect_fw_reject`].
     pub fn tbor<R: TborOpReq>(&self, req: &R) -> DdiResult<R::OpResp> {
         let mut cookie = None;
-        self.dev.exec_op_tbor(req, None, &mut cookie)
+        self.dev.exec_op_tbor(req, &mut [], &mut cookie)
     }
 
     /// Issue an `OP_TBOR` request carrying out-of-band SGL items.
@@ -169,8 +169,8 @@ impl TestCtx {
     /// commands whose bulk evidence rides outside the 4-KiB request
     /// buffer (e.g. `SdCreateRemoteBackup`'s receiver `KeyReport`).
     pub fn tbor_oob<R: TborOpReq>(&self, req: &R, oob_items: &[&[u8]]) -> DdiResult<R::OpResp> {
-        let mut cookie = None;
-        self.dev.exec_op_tbor(req, Some(oob_items), &mut cookie)
+        let mut items: Vec<_> = oob_items.iter().map(|item| TborOobItem::In(item)).collect();
+        self.tbor_oob_io(req, &mut items)
     }
 
     /// Issue an `OP_TBOR` request carrying out-of-band SGL items that the
@@ -183,7 +183,7 @@ impl TestCtx {
         oob_items: &mut [TborOobItem<'_>],
     ) -> DdiResult<R::OpResp> {
         let mut cookie = None;
-        self.dev.exec_op_tbor_oob(req, oob_items, &mut cookie)
+        self.dev.exec_op_tbor(req, oob_items, &mut cookie)
     }
 
     /// The status the device reports for `req` when firmware would

@@ -173,7 +173,7 @@ pub(crate) fn part_init_ex(
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, None, cookie)
+        dev.exec_op_tbor(&req, &mut [], cookie)
             .map(HsmPartInitExResult::from)
             .map_err(HsmError::from)
     })
@@ -224,7 +224,7 @@ pub(crate) fn part_final_ex(
     }
 
     // Each DER cert ships as its own out-of-band SGL Data Block.
-    let mut oob: Vec<&[u8]> = Vec::with_capacity(pta_cert_chain.len());
+    let mut oob: Vec<TborOobItem<'_>> = Vec::with_capacity(pta_cert_chain.len());
     let cert_descriptors = push_cert_chain(pta_cert_chain, &mut oob, MAX_CERTS)?;
 
     let mut req = TborPartFinalReq {
@@ -242,7 +242,7 @@ pub(crate) fn part_final_ex(
     // See `part_init_ex`: thread the session's cookie explicitly since
     // this call also runs outside `with_session_cookie`'s scope.
     let resp = with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, Some(&oob), cookie)
+        dev.exec_op_tbor(&req, &mut oob, cookie)
     });
     let resp = resp.map_err(HsmError::from)?;
 
@@ -292,7 +292,7 @@ pub(crate) fn part_info(partition: &HsmPartition) -> HsmResult<HsmPartInfo> {
     let inner = partition.inner().read();
     let dev = inner.dev();
     let mut cookie = None;
-    dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut cookie)
+    dev.exec_op_tbor(&TborPartInfoReq::new(), &mut [], &mut cookie)
         .map(HsmPartInfo::from)
         .map_err(HsmError::from)
 }
@@ -346,7 +346,7 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 pub(super) fn get_cert_chain_info_tbor(dev: &HsmDev, slot_id: u8) -> HsmResult<(u8, Vec<u8>)> {
     let mut cookie = None;
     let resp = dev
-        .exec_op_tbor(&TborGetCertChainInfoReq::new(slot_id), None, &mut cookie)
+        .exec_op_tbor(&TborGetCertChainInfoReq::new(slot_id), &mut [], &mut cookie)
         .map_err(HsmError::from)?;
     Ok((resp.num_certs, resp.thumbprint.to_vec()))
 }
@@ -356,7 +356,7 @@ pub(super) fn get_cert_chain_info_tbor(dev: &HsmDev, slot_id: u8) -> HsmResult<(
 pub(super) fn get_cert_tbor(dev: &HsmDev, slot_id: u8, cert_id: u8) -> HsmResult<Vec<u8>> {
     let mut cookie = None;
     let resp = dev
-        .exec_op_tbor(&TborGetCertReq::new(slot_id, cert_id), None, &mut cookie)
+        .exec_op_tbor(&TborGetCertReq::new(slot_id, cert_id), &mut [], &mut cookie)
         .map_err(HsmError::from)?;
     Ok(resp.certificate)
 }

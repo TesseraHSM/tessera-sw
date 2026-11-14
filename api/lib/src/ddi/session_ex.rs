@@ -142,7 +142,7 @@ fn exec_handshake_tbor<D: DdiDev, T: TborOpReq>(
     cookie_in: Option<DdiCookie>,
 ) -> DdiResult<(T::OpResp, Option<DdiCookie>)> {
     let mut cookie = cookie_in;
-    let resp = dev.exec_op_tbor(req, None, &mut cookie)?;
+    let resp = dev.exec_op_tbor(req, &mut [], &mut cookie)?;
     Ok((resp, cookie))
 }
 
@@ -518,7 +518,7 @@ pub(crate) fn psk_change(
     let dev = inner.dev();
     with_explicit_cookie(ddi_cookie, |cookie| {
         let _resp: TborPskChangeResp = dev
-            .exec_op_tbor(&req, None, cookie)
+            .exec_op_tbor(&req, &mut [], cookie)
             .map_err(HsmError::from)?;
         Ok(())
     })
@@ -553,7 +553,7 @@ pub(crate) fn close_session_ex(
 
     let req = TborSessionCloseReq { session_id };
     let result = with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, None, cookie)
+        dev.exec_op_tbor(&req, &mut [], cookie)
             .map_err(HsmError::from)
             .map(|_| ())
     });

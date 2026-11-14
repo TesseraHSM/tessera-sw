@@ -16,6 +16,7 @@
 //! [`push_cert_chain`]. Runs **inside an already-open** security-domain
 //! (V2) session.
 
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
@@ -61,7 +62,7 @@ pub(crate) fn darc_tmk_import(
         return Err(HsmError::InvalidArgument);
     }
 
-    let mut oob: Vec<&[u8]> = Vec::new();
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
     let remote_cert_chain = push_cert_chain(
         remote_cert_chain,
         &mut oob,
@@ -78,9 +79,8 @@ pub(crate) fn darc_tmk_import(
     };
 
     let mut cookie = None;
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, oob_items, &mut cookie)
+        dev.exec_op_tbor(&req, &mut oob, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

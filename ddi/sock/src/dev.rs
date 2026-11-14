@@ -1156,23 +1156,9 @@ impl DdiDev for DdiSockDev {
         Ok(typed_resp)
     }
 
+    /// Output out-of-band buffers travel as lengths; the server returns
+    /// their contents.
     fn exec_op_tbor<T: TborOpReq>(
-        &self,
-        req: &T,
-        oob_items: Option<&[&[u8]]>,
-        _cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        let oob_items = oob_items
-            .unwrap_or(&[])
-            .iter()
-            .map(|item| OobItem::In(item.to_vec()))
-            .collect();
-        self.exec_tbor(req, oob_items).map(|(resp, _)| resp)
-    }
-
-    /// TBOR exec path with device-writable out-of-band items. Output
-    /// buffers travel as lengths; the server returns their contents.
-    fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
         req: &T,
         oob_items: &mut [TborOobItem<'_>],

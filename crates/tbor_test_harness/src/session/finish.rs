@@ -150,14 +150,14 @@ pub fn session_open_finish_with_mac(
     };
     // On Duo this travels sealed under the transport registered at Phase 1.
     let mut cookie = None;
-    let resp: TborSessionOpenFinishResp =
-        dev.exec_op_tbor(&req, None, &mut cookie)
-            .inspect_err(|err| {
-                // Firmware reclaims the slot after an authentication failure.
-                if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
-                    dev.remove_session_transport(pending.session_id);
-                }
-            })?;
+    let resp: TborSessionOpenFinishResp = dev
+        .exec_op_tbor(&req, &mut [], &mut cookie)
+        .inspect_err(|err| {
+            // Firmware reclaims the slot after an authentication failure.
+            if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
+                dev.remove_session_transport(pending.session_id);
+            }
+        })?;
 
     Ok(SessionHandshake {
         session_id: pending.session_id,

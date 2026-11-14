@@ -13,6 +13,7 @@
 //! the SQE-carried session id. Attestation evidence travels out of band
 //! (see [`super::sd_evidence`]).
 
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
@@ -85,7 +86,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
     // Flatten the sender cert chain and evidence into descriptors + shared
     // OOB items.  The sender chain is pushed first so its descriptor
     // indices precede the evidence items.
-    let mut oob: Vec<&[u8]> = Vec::new();
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
 
     // The report is mandatory; the device decides whether supplied identity
     // chains must establish trusted-SA authorization.
@@ -109,9 +110,8 @@ pub(crate) fn sd_restore_remote_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(&req, &mut oob, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)
     })

@@ -33,13 +33,13 @@ pub fn fetch_leaf_cert_der(dev: &TestDev) -> Result<Vec<u8>, DdiError> {
     if dev.uses_session_transport() {
         let mut cookie = None;
         let info: TborGetCertChainInfoResp =
-            dev.exec_op_tbor(&TborGetCertChainInfoReq::new(0), None, &mut cookie)?;
+            dev.exec_op_tbor(&TborGetCertChainInfoReq::new(0), &mut [], &mut cookie)?;
         let num_certs = info.num_certs;
         if num_certs == 0 {
             return Err(DdiError::InvalidParameter);
         }
         let leaf: TborGetCertResp =
-            dev.exec_op_tbor(&TborGetCertReq::new(0, num_certs - 1), None, &mut cookie)?;
+            dev.exec_op_tbor(&TborGetCertReq::new(0, num_certs - 1), &mut [], &mut cookie)?;
         return Ok(leaf.certificate);
     }
     let info = helper_get_cert_chain_info(dev)?;

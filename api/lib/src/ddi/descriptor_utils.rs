@@ -9,6 +9,7 @@
 //! by the descriptor's `index` (its position in the shared `oob` item
 //! list) and reads `length` bytes from it.
 
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
@@ -19,7 +20,7 @@ use super::*;
 /// whose length overflows the 16-bit descriptor field.
 pub(crate) fn push_cert_chain<'a>(
     chain: &'a [HsmCert<'a>],
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut Vec<TborOobItem<'a>>,
     max_certs: usize,
 ) -> HsmResult<Vec<CertDescriptor>> {
     // Firmware evidence verification rejects an empty chain as InvalidArg;
@@ -39,7 +40,7 @@ pub(crate) fn push_cert_chain<'a>(
             index,
             length: tbor_int::U16::new(der.len() as u16),
         });
-        oob.push(der);
+        oob.push(TborOobItem::In(der));
     }
     Ok(descriptors)
 }
@@ -49,7 +50,7 @@ pub(crate) fn push_cert_chain<'a>(
 /// 0` as InvalidArg) or one exceeding the 16-bit length.
 pub(crate) fn push_report<'a>(
     report: &'a [u8],
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut Vec<TborOobItem<'a>>,
 ) -> HsmResult<ReportDescriptor> {
     if report.is_empty() || report.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArgument);
@@ -59,6 +60,6 @@ pub(crate) fn push_report<'a>(
         index,
         length: tbor_int::U16::new(report.len() as u16),
     };
-    oob.push(report);
+    oob.push(TborOobItem::In(report));
     Ok(descriptor)
 }

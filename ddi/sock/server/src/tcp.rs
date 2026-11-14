@@ -208,7 +208,7 @@ mod tests {
 
     fn tbor<R: TborOpReq>(device: &DdiSockDev, request: &R) -> R::OpResp {
         device
-            .exec_op_tbor(request, None, &mut None)
+            .exec_op_tbor(request, &mut [], &mut None)
             .expect("TBOR command")
     }
 
@@ -332,7 +332,7 @@ mod tests {
 
     fn assert_not_owned<R: TborOpReq>(device: &DdiSockDev, request: &R) {
         assert!(matches!(
-            device.exec_op_tbor(request, None, &mut None),
+            device.exec_op_tbor(request, &mut [], &mut None),
             Err(DdiError::DdiStatus(
                 DdiStatus::FileHandleSessionIdDoesNotMatch
             ))
@@ -371,7 +371,7 @@ mod tests {
 
             pending.mac_fin[0] ^= 1;
             assert!(matches!(
-                owner.exec_op_tbor(&pending, None, &mut None),
+                owner.exec_op_tbor(&pending, &mut [], &mut None),
                 Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
             ));
             assert!(
@@ -519,8 +519,9 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 };
+                let mut oob: Vec<_> = certs.iter().map(|cert| TborOobItem::In(cert)).collect();
                 device
-                    .exec_op_tbor(&final_request, Some(&certs), &mut None)
+                    .exec_op_tbor(&final_request, &mut oob, &mut None)
                     .expect("finalize partition");
                 let key = tbor(
                     &device,
@@ -548,7 +549,7 @@ mod tests {
                 let input = [0x42; 16];
                 let mut output = [0; 16];
                 let expected = device
-                    .exec_op_tbor_oob(
+                    .exec_op_tbor(
                         &request,
                         &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
                         &mut None,
@@ -565,7 +566,7 @@ mod tests {
                 submit_rx.blocking_recv().expect("submit cancelled request");
                 assert!(
                     device
-                        .exec_op_tbor_oob(
+                        .exec_op_tbor(
                             &request,
                             &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
                             &mut None,
@@ -705,7 +706,7 @@ mod tests {
             let lease = generation(&hsm, pending.session_id);
             pending.mac_fin[0] ^= 1;
             assert!(matches!(
-                owner.exec_op_tbor(&pending, None, &mut None),
+                owner.exec_op_tbor(&pending, &mut [], &mut None),
                 Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
             ));
             drop(owner);
@@ -1221,7 +1222,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(matches!(
-                device.exec_op_tbor(&init, None, &mut None),
+                device.exec_op_tbor(&init, &mut [], &mut None),
                 Err(DdiError::TborStatus(TborStatus::VaultSessionLimitReached))
             ));
             for (id, keys) in &active {

@@ -219,7 +219,7 @@ fn rsa_aes_unwrap_key_tbor(
     };
     let mut cookie = None;
     let resp = unwrapping_key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -494,7 +494,7 @@ fn rsa_mod_exp_tbor(
     };
     let mut cookie = None;
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -526,7 +526,7 @@ fn get_rsa_unwrapping_key_tbor(
     };
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -597,7 +597,7 @@ fn rsa_aes_unwrap_key_pair_tbor(
     };
     let mut cookie = None;
     let resp = unwrapping_key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(&req, &mut [], &mut cookie)
             .map_err(|err| map_tbor_key_pair_unwrap_error(priv_key_props.kind(), err))
     })?;
 

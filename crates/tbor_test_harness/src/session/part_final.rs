@@ -24,6 +24,7 @@
 //! walk must pass real certificates.
 
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
 use tsra_ddi_tbor_types::TborPartFinalReq;
@@ -80,9 +81,9 @@ pub fn part_final(
         prev_local_mk_backup: prev_local_mk_backup.to_vec(),
     };
 
-    let oob = (!certs.is_empty()).then_some(certs);
+    let mut oob: Vec<_> = certs.iter().map(|cert| TborOobItem::In(cert)).collect();
 
-    dev.exec_op_tbor(&req, oob, &mut None)
+    dev.exec_op_tbor(&req, &mut oob, &mut None)
 }
 
 /// Like [`part_final`], but with caller-controlled `(index, length)`
@@ -120,7 +121,7 @@ pub fn part_final_raw(
         prev_local_mk_backup: prev_local_mk_backup.to_vec(),
     };
 
-    let oob = (!oob_items.is_empty()).then_some(oob_items);
+    let mut oob: Vec<_> = oob_items.iter().map(|item| TborOobItem::In(item)).collect();
 
-    dev.exec_op_tbor(&req, oob, &mut None)
+    dev.exec_op_tbor(&req, &mut oob, &mut None)
 }

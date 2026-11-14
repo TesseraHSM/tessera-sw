@@ -335,9 +335,12 @@ pub trait DdiDev {
     ///
     /// # Arguments
     /// * `req`       - TBOR-encodable request
-    /// * `oob_items` - Optional out-of-band payloads (each becomes one
-    ///   NVMe SGL Data Block descriptor the device indexes by position).
-    ///   Pass `None` for commands that carry no out-of-band data.
+    /// * `oob_items` - Out-of-band items, each one NVMe SGL Data Block
+    ///   descriptor the device indexes by position. [`TborOobItem::In`]
+    ///   buffers are read by the device; [`TborOobItem::Out`] buffers are
+    ///   written by it. An `Out` item's length is a capacity: the device
+    ///   may write a prefix and report the written length in the response.
+    ///   Pass an empty slice for commands without out-of-band data.
     /// * `cookie`    - Optional cookie threaded through to the backend
     ///
     /// # Default
@@ -347,41 +350,10 @@ pub trait DdiDev {
     fn exec_op_tbor<T: TborOpReq>(
         &self,
         _req: &T,
-        _oob_items: Option<&[&[u8]]>,
+        _oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
         Err(DdiError::UnsupportedEncoding)
-    }
-
-    /// Execute a TBOR command whose out-of-band items may be written by
-    /// the device.
-    ///
-    /// Like [`Self::exec_op_tbor`], but each item carries a direction:
-    /// [`TborOobItem::In`] buffers are read by the device and
-    /// [`TborOobItem::Out`] buffers are written by it (e.g. the output of
-    /// an out-of-band AES-GCM / AES-XTS operation). Items are indexed by
-    /// position, as in [`Self::exec_op_tbor`].
-    ///
-    /// # Default
-    ///
-    /// Forwards to [`Self::exec_op_tbor`] when every item is
-    /// [`TborOobItem::In`]; otherwise returns
-    /// [`DdiError::UnsupportedEncoding`]. Override on backends that can
-    /// map device-writable buffers.
-    fn exec_op_tbor_oob<T: TborOpReq>(
-        &self,
-        req: &T,
-        oob_items: &mut [TborOobItem<'_>],
-        cookie: &mut Option<DdiCookie>,
-    ) -> DdiResult<T::OpResp> {
-        let mut inputs = Vec::with_capacity(oob_items.len());
-        for item in oob_items.iter() {
-            match item {
-                TborOobItem::In(buf) => inputs.push(*buf),
-                TborOobItem::Out(_) => return Err(DdiError::UnsupportedEncoding),
-            }
-        }
-        self.exec_op_tbor(req, Some(&inputs), cookie)
     }
 
     /// Identify the device model.
@@ -401,7 +373,7 @@ pub trait DdiDev {
     /// host-to-device key and `seal` its IV and tag. On success, returns the
     /// response still sealed with the device-to-host key, with its seal.
     /// `oob_items` travel outside the transport encryption, as in
-    /// [`Self::exec_op_tbor_oob`].
+    /// [`Self::exec_op_tbor`].
     ///
     /// # Default
     ///
@@ -427,7 +399,7 @@ pub trait DdiDev {
 }
 
 /// One out-of-band item of a TBOR command (see
-/// [`DdiDev::exec_op_tbor_oob`]).
+/// [`DdiDev::exec_op_tbor`]).
 #[derive(Debug)]
 pub enum TborOobItem<'a> {
     /// A buffer the device reads.

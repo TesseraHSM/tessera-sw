@@ -12,6 +12,7 @@
 //! cross-checks against the SQE-carried session id. Attestation evidence
 //! travels out of band (see [`super::sd_evidence`]).
 
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
@@ -65,7 +66,7 @@ pub(crate) fn sd_create_remote_backup_ex(
     // Flatten the receiver cert chain and evidence into descriptors +
     // shared OOB items.  The receiver chain is pushed first so its
     // descriptor indices precede the evidence items.
-    let mut oob: Vec<&[u8]> = Vec::new();
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
     let receiver_chain = push_cert_chain(receiver_cert_chain, &mut oob, EVIDENCE_CHAIN_MAX_CERTS)?;
 
     // The attestation evidence is verified by the firmware only when the
@@ -88,9 +89,8 @@ pub(crate) fn sd_create_remote_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(&req, &mut oob, cookie)
             .map(HsmSdRemoteBackupResult::from)
             .map_err(HsmError::from)
     })

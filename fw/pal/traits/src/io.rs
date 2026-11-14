@@ -285,6 +285,18 @@ pub trait HsmIoController: HsmIoTypes {
     /// As for [`recv_oob`](Self::recv_oob).
     async fn send_oob(&self, io: &Self::Io, index: usize, src: &HsmDmaBuf) -> HsmResult<()>;
 
+    /// Copies `src` to the start of out-of-band item `index` of `io` in
+    /// host memory. The item's length is a capacity: it must be at least
+    /// `src.len()`, and bytes past `src.len()` are left untouched. The
+    /// command reports the written length in its response.
+    ///
+    /// # Errors
+    ///
+    /// - `InsufficientBuffer` — the item is shorter than `src`.
+    /// - Otherwise as for [`recv_oob`](Self::recv_oob).
+    async fn send_oob_bounded(&self, io: &Self::Io, index: usize, src: &HsmDmaBuf)
+    -> HsmResult<()>;
+
     /// Posts the completion entry (CQE) for `io` to the host.
     ///
     /// Borrows `io` by `&mut` and leaves its queue slot **allocated**, so
