@@ -10,6 +10,7 @@ use core::mem::MaybeUninit;
 
 use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
+use tsra_fw_core_crypto_aead_envelope::AeadPeek;
 use tsra_fw_core_crypto_aead_envelope::HEADER_LEN;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -95,16 +96,39 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
     key: &HsmDmaBuf,
     blob: &'a mut HsmDmaBuf,
 ) -> HsmResult<UnmaskedView<'a>> {
-    let env = aead_peek(blob)?;
-    if env.alg != AeadAlg::AesGcm256
-        || env.aad.len() != META_LEN
-        || !(blob.len() - env.alg.envelope_len(0, META_LEN)).is_multiple_of(16)
-    {
-        return Err(HsmError::MaskedKeyDecodeFailed);
+    unmask_in(crypto, io, key, blob, None).await
+}
+
+/// [`unmask`] of a blob whose framing [`peek_frame`] has checked, as
+/// `frame` attests: the framing is not read out of the blob again.
+///
+/// `frame` attests only the blob at the address and of the length
+/// [`peek_frame`] saw, unchanged since; for any other, the framing is
+/// checked as [`unmask`] checks it.
+pub async fn unmask_framed<'a, P: HsmKeyMasking>(
+    crypto: &P,
+    io: &P::Io,
+    key: &HsmDmaBuf,
+    blob: &'a mut HsmDmaBuf,
+    frame: MaskedFrame,
+) -> HsmResult<UnmaskedView<'a>> {
+    unmask_in(crypto, io, key, blob, Some(frame)).await
+}
+
+async fn unmask_in<'a, P: HsmKeyMasking>(
+    crypto: &P,
+    io: &P::Io,
+    key: &HsmDmaBuf,
+    blob: &'a mut HsmDmaBuf,
+    frame: Option<MaskedFrame>,
+) -> HsmResult<UnmaskedView<'a>> {
+    if !frame.is_some_and(|f| f.attests(blob)) {
+        check_frame(blob)?;
     }
-    let aad_at = HEADER_LEN + env.alg.iv_len();
+    let alg = AeadAlg::AesGcm256;
+    let aad_at = HEADER_LEN + alg.iv_len();
     let payload_at = aad_at + META_LEN;
-    let tag_at = blob.len() - env.alg.tag_len();
+    let tag_at = blob.len() - alg.tag_len();
     crypto
         .key_unmask_in_place(io, key, META_LEN, &mut blob[HEADER_LEN..])
         .await?;
@@ -171,6 +195,48 @@ const USAGE_FLAGS_OFF: usize = 8;
 /// So the validation is not skipped, only moved to the point where its
 /// input is trustworthy -- which is where it belonged.
 pub fn peek_scope(blob: &HsmDmaBuf) -> HsmResult<HsmKeyScope> {
+    peek_frame(blob).map(|(scope, _)| scope)
+}
+
+/// That a masked blob's envelope framing is a v1 masked key's, as
+/// [`peek_frame`] found it: the blob it was peeked at, by address and
+/// length. [`unmask_framed`] takes it in place of reading the framing
+/// again, which holds while the blob is unchanged.
+#[derive(Clone, Copy, Debug)]
+pub struct MaskedFrame {
+    addr: usize,
+    len: usize,
+}
+
+impl MaskedFrame {
+    /// Whether this attests `blob`'s framing.
+    fn attests(&self, blob: &HsmDmaBuf) -> bool {
+        self.addr == blob.as_ptr() as usize && self.len == blob.len()
+    }
+}
+
+/// [`peek_scope`], also returning a [`MaskedFrame`] for [`unmask_framed`],
+/// which then need not read the framing out of the blob again.
+pub fn peek_frame(blob: &HsmDmaBuf) -> HsmResult<(HsmKeyScope, MaskedFrame)> {
+    let env = check_frame(blob)?;
+    let raw = env
+        .aad
+        .get(USAGE_FLAGS_OFF..USAGE_FLAGS_OFF + 8)
+        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .ok_or(HsmError::MaskedKeyDecodeFailed)?;
+    let frame = MaskedFrame {
+        addr: blob.as_ptr() as usize,
+        len: blob.len(),
+    };
+    Ok((
+        HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope(),
+        frame,
+    ))
+}
+
+/// `blob`'s envelope, if its framing is a v1 masked key's: AES-256-GCM,
+/// with the metadata record as AAD and whole blocks of payload.
+fn check_frame(blob: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
     let env = aead_peek(blob)?;
     if env.alg != AeadAlg::AesGcm256
         || env.aad.len() != META_LEN
@@ -178,12 +244,7 @@ pub fn peek_scope(blob: &HsmDmaBuf) -> HsmResult<HsmKeyScope> {
     {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
-    let raw = env
-        .aad
-        .get(USAGE_FLAGS_OFF..USAGE_FLAGS_OFF + 8)
-        .and_then(|b| <[u8; 8]>::try_from(b).ok())
-        .ok_or(HsmError::MaskedKeyDecodeFailed)?;
-    Ok(HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope())
+    Ok(env)
 }
 
 /// Peek the cleartext [`MaskedKeyMetadata`] of a masked-key blob **without
