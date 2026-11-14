@@ -8,6 +8,7 @@
 
 #include "tsra_pkcs11_hsm.h"
 #include "tsra_pkcs11_internal.h"
+#include "tsra_pkcs11_key.h"
 
 #include <stdarg.h>
 
@@ -74,6 +75,79 @@ tsra_pkcs11_session_t *tsra_pkcs11_session_lookup(CK_SESSION_HANDLE h)
     return NULL;
 }
 
+/* The device's only AES-GCM key size. */
+#define P11_STORE_KEY_BITS 256
+
+/* Every record key encrypts one record only, so a fixed IV never repeats under a key. */
+static const CK_BYTE P11_STORE_IV[AES_GCM_IV_LEN] = { 0 };
+
+/* The device session of `slot`'s login, which every record key call runs in. */
+static uint32_t store_session(CK_SLOT_ID slot)
+{
+    return (slot < TSRA_PKCS11_MAX_SLOTS) ? g_tsra_pkcs11.slots[slot].hsm_session : 0;
+}
+
+static CK_RV store_key_generate(CK_SLOT_ID slot, CK_BYTE **blob, CK_ULONG *blob_len)
+{
+    uint32_t session = store_session(slot);
+    if (session == 0)
+    {
+        return CKR_USER_NOT_LOGGED_IN;
+    }
+    return tsra_pkcs11_key_aes_generate(
+        session,
+        TSRA_PKCS11_KIND_AES_GCM,
+        P11_STORE_KEY_BITS,
+        TSRA_PKCS11_SCOPE_PARTITION,
+        blob,
+        blob_len
+    );
+}
+
+static CK_RV store_gcm(
+    CK_SLOT_ID slot,
+    bool encrypt,
+    const CK_BYTE *key,
+    CK_ULONG key_len,
+    const CK_BYTE *aad,
+    CK_ULONG aad_len,
+    CK_BYTE *data,
+    CK_ULONG data_len,
+    CK_BYTE *tag
+)
+{
+    uint32_t session = store_session(slot);
+    if (session == 0)
+    {
+        return CKR_USER_NOT_LOGGED_IN;
+    }
+    uint32_t hkey = 0;
+    CK_RV rv = tsra_pkcs11_key_aes_unmask(session, TSRA_PKCS11_KIND_AES_GCM, key, key_len, &hkey);
+    if (rv == CKR_OK)
+    {
+        CK_ULONG out_len = data_len;
+        rv = tsra_pkcs11_key_aes_gcm(
+            encrypt,
+            hkey,
+            P11_STORE_IV,
+            aad,
+            aad_len,
+            data,
+            data_len,
+            tag,
+            data,
+            &out_len
+        );
+        tsra_pkcs11_key_release(hkey);
+    }
+    return rv;
+}
+
+static const tsra_pkcs11_store_cipher STORE_CIPHER = {
+    .key_generate = store_key_generate,
+    .gcm = store_gcm,
+};
+
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 {
     bool os_locking_ok = true;
@@ -125,7 +199,7 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
     }
     else if (cfg.store_persist)
     {
-        rv = tsra_pkcs11_objstore_file_create(&g_tsra_pkcs11.store, &cfg);
+        rv = tsra_pkcs11_objstore_file_create(&g_tsra_pkcs11.store, &cfg, &STORE_CIPHER);
         if (rv != CKR_OK)
         {
             TSRA_PKCS11_LOG(

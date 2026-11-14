@@ -36,8 +36,9 @@ the spec requires). Implemented so far:
   template takes at most 64 attributes (`CKR_ARGUMENTS_BAD`, also for
   `C_GetAttributeValue`) and 1 MiB of values (`CKR_ATTRIBUTE_VALUE_INVALID`).
   The file store keeps a token object in a record of at most 256 KiB,
-  attribute values and masked key body included; a larger one is
-  `CKR_DEVICE_MEMORY`. `C_CreateObject` needs `CKA_CLASS`
+  attribute values, masked key body and, for a private object, its seal
+  included; a larger one is `CKR_DEVICE_MEMORY`. Private token objects are
+  sealed (see Private objects at rest). `C_CreateObject` needs `CKA_CLASS`
   (`CKR_TEMPLATE_INCOMPLETE`) naming a data object, a certificate or a key
   (any other class is `CKR_ATTRIBUTE_VALUE_INVALID`), creates no secret or
   private key (see Deviations), and refuses the attributes only the token
@@ -192,12 +193,49 @@ What a token key survives:
 - `C_Logout` and `C_Login`, the close of the slot's last session, and
   `C_CloseAllSessions`: yes. `C_Finalize` and `C_Initialize` in the same
   process: yes, with the file store.
-- Another process on the same device: not shown yet. The emulator
-  provisions every process from scratch, so a key from another process does
-  not unmask there (`CKR_KEY_HANDLE_INVALID`). Hardware checklist item H-d.
+- Another process on the same device: yes. On the simulator every process of
+  one server run shares the device (`persist.a_second_process_reads_the_private_object`
+  unmasks a record key of another process). Hardware checklist item H-d.
 - A power cycle or a partition reset: no, not until the module replays the
   partition's backup masking key at re-provisioning. Hardware checklist item
   H-e.
+
+## Private objects at rest
+
+The file store keeps public token objects in clear and seals every private
+one (`CKA_PRIVATE` TRUE) with AES-GCM on the device:
+
+- Every write of a private object, a change of its attributes included, has
+  the device generate a new AES-256 GCM key, masked under the partition
+  masking key like every other key. The device encrypts the object's
+  attributes and key body with it, and the module deletes the device key.
+  The record holds the masked key, the ciphertext and the 16-byte tag. Its
+  header (format version, attribute count, key body length) stays in clear
+  and is covered by the tag, as are the record's slot and object number,
+  which are not stored: a record copied over another object, or into another
+  slot, fails its tag. An older copy of the same record still opens; the
+  store does not detect a rollback.
+- Each key encrypts one record only, so the GCM nonce is fixed (all zero)
+  and never repeats under a key. This needs no random generator, which the
+  device does not offer the host, and no counter on disk. The cost is one
+  device key generation per private write.
+- Reading a private object needs the login, whose device session unmasks the
+  record's key and decrypts the record. A record whose tag does not match, or
+  a clear record that claims `CKA_PRIVATE`, is refused:
+  `CKR_FUNCTION_FAILED`. So is every search that meets it, with a debug line
+  naming the file, until the record is removed: the device reports a tag
+  mismatch and its own fault alike, so leaving the record out could hide an
+  object.
+- A record whose key the device does not unmask (the partition was
+  provisioned afresh, as after a power cycle; on the simulator, a new server)
+  is invisible
+  (`CKR_OBJECT_HANDLE_INVALID`, left out of searches) until the device
+  unmasks that key again, as for token keys. New private objects work
+  meanwhile.
+- The record format is version 2. A version-1 record, from an earlier build,
+  is refused with a debug line; remove its slot directory.
+
+Public objects are not authenticated.
 
 ## Layering
 
@@ -207,7 +245,7 @@ What a token key survives:
 | Framework | `tsra_pkcs11_module.c`, `tsra_pkcs11_slot.c`, `tsra_pkcs11_session.c`, `tsra_pkcs11_mech.c` | init, slots, sessions, login, operation state machine; the mechanism table is a device-free unit of its own |
 | Host crypto | `tsra_pkcs11_digest.c` | self-contained SHA-1/256/384/512 (PKCS#11 digests must work in public sessions; the SDK digest needs a login) |
 | Object store | `tsra_pkcs11_objstore.h`, `tsra_pkcs11_objstore_mem.c` | host-side objects behind a vtable seam; the in-memory backend |
-| File store | `tsra_pkcs11_objstore_file.c`, `tsra_pkcs11_store_record.c`, `tsra_pkcs11_store_io.c` | the persistent backend for token objects (session objects stay in memory): one record file per object, the record codec, and the crash-safe, owner-only filesystem primitives with a cross-process lock |
+| File store | `tsra_pkcs11_objstore_file.c`, `tsra_pkcs11_store_record.c`, `tsra_pkcs11_store_io.c` | the persistent backend for token objects (session objects stay in memory): one record file per object, private ones sealed through the device, the record codec, and the crash-safe, owner-only filesystem primitives with a cross-process lock |
 | Object policy | `tsra_pkcs11_attr_types.c`, `tsra_pkcs11_attr_policy.c` | the attribute type table and template ceilings every template entry point uses; what `C_CreateObject` may create and which attributes `C_SetAttributeValue` may change, per class; device-free units of their own |
 | Key operations | `tsra_pkcs11_crypt.c`, `tsra_pkcs11_template.c` | key-backed entry points: operation state and the masked-blob store/unmask flow (CK_RV only); the keygen template validation, key-family choice and cipher mechanism policy are a device-free unit of their own |
 | Configuration | `tsra_pkcs11_config.c` | the configuration file and environment, the PIN rules and the owner backup key file; a device-free unit of its own |
@@ -345,8 +383,9 @@ families, one-shot CBC, GCM and XTS round trips, the two-call sizing
 discipline, the operation state machine and init precedence, an init path
 for every advertised mechanism, attribute changes and object sizes, the
 object policy and attribute typing, key survival across every event that ends
-the device session, what `C_Logout` does to session objects, the
-configuration at `C_Initialize`, the interface list, and the login rules (each
+the device session, what `C_Logout` does to session objects, private token
+objects sealed at rest, the configuration at `C_Initialize`, the interface
+list, and the login rules (each
 login case in a process of its own, because the first login of a process
 provisions the emulated partition with its PIN). So it needs the emulator or
 hardware build (see the CMakeLists.txt header for

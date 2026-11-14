@@ -4,19 +4,22 @@
 #include "tsra_pkcs11_store_record.h"
 #include "tsra_pkcs11_wipe.h"
 
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 /*
- * P11O object record header (little-endian):
- *   magic[4] "P11O" | u16 version | u16 reserved(0) |
+ * P11O object record (little-endian):
+ *   magic[4] "P11O" | u16 version | u16 flags |
  *   u32 attr_count | u32 body_len | u32 total_len
- * followed by attr_count * (u32 type | u32 value_len | value bytes) and then
- * body_len masked-blob bytes. total_len is the whole record size.
+ * then, for a sealed record only, u32 key_len | key[key_len],
+ * then the payload: attr_count * (u32 type | u32 value_len | value bytes) and
+ * body_len masked-blob bytes, followed for a sealed record by the 16-byte tag.
+ * total_len is the whole record size.
  */
 static const unsigned char P11O_MAGIC[4] = { 'P', '1', '1', 'O' };
 static const unsigned char P11M_MAGIC[4] = { 'P', '1', '1', 'M' };
+
+#define P11O_FLAG_SEALED 0x0001u
 
 /* Header sizes are composed from sizeof of the fields actually written, so the
  * offset arithmetic below cannot drift from the layout; the on-disk format
@@ -95,7 +98,12 @@ static void free_attrs(tsra_pkcs11_rec_attr *attrs, CK_ULONG n)
     free(attrs);
 }
 
-CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char *buf, size_t *len)
+CK_RV tsra_pkcs11_record_encode(
+    const tsra_pkcs11_rec_object *obj,
+    const tsra_pkcs11_record_seal *seal,
+    unsigned char *buf,
+    size_t *len
+)
 {
     if (obj == NULL || len == NULL)
     {
@@ -105,13 +113,17 @@ CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char
     {
         return CKR_ARGUMENTS_BAD;
     }
+    if ((seal != NULL) && ((seal->gcm == NULL) || (seal->key == NULL) || (seal->key_len == 0)))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
 
     /* Required size, accumulated so it cannot overflow the u32 length fields. */
-    uint64_t need = P11O_HEADER_SIZE;
     if (obj->attr_count > 0xFFFFFFFFu || obj->body_len > 0xFFFFFFFFu)
     {
         return CKR_DATA_LEN_RANGE;
     }
+    uint64_t payload = 0;
     for (CK_ULONG i = 0; i < obj->attr_count; i++)
     {
         const tsra_pkcs11_rec_attr *a = &obj->attrs[i];
@@ -123,9 +135,21 @@ CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char
         {
             return CKR_DATA_LEN_RANGE;
         }
-        need += P11O_ATTR_HEADER_SIZE + (uint64_t)a->len;
+        payload += P11O_ATTR_HEADER_SIZE + (uint64_t)a->len;
     }
-    need += (uint64_t)obj->body_len;
+    payload += (uint64_t)obj->body_len;
+    uint64_t prefix = P11O_HEADER_SIZE;
+    uint64_t need = 0;
+    if (seal != NULL)
+    {
+        if (seal->key_len > 0xFFFFFFFFu)
+        {
+            return CKR_DATA_LEN_RANGE;
+        }
+        prefix += sizeof(uint32_t) + (uint64_t)seal->key_len;
+        need = P11_RECORD_TAG_LEN;
+    }
+    need += prefix + payload;
     if (need > 0xFFFFFFFFu) /* total_len is a u32 field */
     {
         return CKR_DATA_LEN_RANGE;
@@ -146,7 +170,7 @@ CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char
     p += sizeof(P11O_MAGIC);
     put_u16(p, P11_RECORD_VERSION);
     p += sizeof(uint16_t);
-    put_u16(p, 0); /* reserved */
+    put_u16(p, (seal != NULL) ? P11O_FLAG_SEALED : 0);
     p += sizeof(uint16_t);
     put_u32(p, (uint32_t)obj->attr_count);
     p += sizeof(uint32_t);
@@ -154,6 +178,13 @@ CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char
     p += sizeof(uint32_t);
     put_u32(p, (uint32_t)need); /* total_len */
     p += sizeof(uint32_t);
+    if (seal != NULL)
+    {
+        put_u32(p, (uint32_t)seal->key_len);
+        p += sizeof(uint32_t);
+        memcpy(p, seal->key, seal->key_len);
+        p += seal->key_len;
+    }
     for (CK_ULONG i = 0; i < obj->attr_count; i++)
     {
         const tsra_pkcs11_rec_attr *a = &obj->attrs[i];
@@ -172,40 +203,42 @@ CK_RV tsra_pkcs11_record_encode(const tsra_pkcs11_rec_object *obj, unsigned char
         memcpy(p, obj->body, obj->body_len);
         p += obj->body_len;
     }
+    if (seal != NULL)
+    {
+        CK_RV rv = seal->gcm(
+            seal->ctx,
+            true,
+            seal->key,
+            seal->key_len,
+            buf,
+            (size_t)prefix,
+            buf + prefix,
+            (size_t)payload,
+            p
+        );
+        if (rv != CKR_OK)
+        {
+            tsra_pkcs11_wipe(buf, (size_t)need); /* the payload may still be plaintext */
+            return rv;
+        }
+    }
     *len = (size_t)need;
     return CKR_OK;
 }
 
-CK_RV tsra_pkcs11_record_decode(const unsigned char *buf, size_t len, tsra_pkcs11_rec_object *out)
+/* Parse a payload of attr_count attributes and a body_len body that must fill
+ * buf[len] exactly. */
+static CK_RV decode_payload(
+    const unsigned char *buf,
+    size_t len,
+    uint32_t attr_count,
+    uint32_t body_len,
+    tsra_pkcs11_rec_object *out
+)
 {
-    if (buf == NULL || out == NULL)
-    {
-        return CKR_ARGUMENTS_BAD;
-    }
-    memset(out, 0, sizeof(*out));
-    if (len < P11O_HEADER_SIZE || memcmp(buf, P11O_MAGIC, sizeof(P11O_MAGIC)) != 0)
-    {
-        return CKR_FUNCTION_FAILED;
-    }
-    const unsigned char *hdr = buf + sizeof(P11O_MAGIC);
-    uint16_t version = get_u16(hdr);
-    hdr += sizeof(uint16_t);
-    uint16_t reserved = get_u16(hdr);
-    hdr += sizeof(uint16_t);
-    uint32_t attr_count = get_u32(hdr);
-    hdr += sizeof(uint32_t);
-    uint32_t body_len = get_u32(hdr);
-    hdr += sizeof(uint32_t);
-    uint32_t total_len = get_u32(hdr);
-    /* An unknown version or non-zero reserved field is a format we do not
-     * understand; total_len must match exactly so trailing garbage is rejected. */
-    if (version != P11_RECORD_VERSION || reserved != 0 || total_len != len)
-    {
-        return CKR_FUNCTION_FAILED;
-    }
     /* Bound attr_count before allocating: each attribute is at least its header,
-     * so it cannot exceed the remaining bytes / header size. */
-    if (attr_count > (len - P11O_HEADER_SIZE) / P11O_ATTR_HEADER_SIZE)
+     * so it cannot exceed the payload bytes / header size. */
+    if (attr_count > len / P11O_ATTR_HEADER_SIZE)
     {
         return CKR_FUNCTION_FAILED;
     }
@@ -220,7 +253,7 @@ CK_RV tsra_pkcs11_record_decode(const unsigned char *buf, size_t len, tsra_pkcs1
         }
     }
 
-    size_t pos = P11O_HEADER_SIZE;
+    size_t pos = 0;
     for (uint32_t i = 0; i < attr_count; i++)
     {
         if (len - pos < P11O_ATTR_HEADER_SIZE)
@@ -276,6 +309,100 @@ CK_RV tsra_pkcs11_record_decode(const unsigned char *buf, size_t len, tsra_pkcs1
     return CKR_OK;
 }
 
+CK_RV tsra_pkcs11_record_decode(
+    const unsigned char *buf,
+    size_t len,
+    const tsra_pkcs11_record_seal *seal,
+    tsra_pkcs11_rec_object *out
+)
+{
+    if (buf == NULL || out == NULL)
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    memset(out, 0, sizeof(*out));
+    if (len < P11O_HEADER_SIZE || memcmp(buf, P11O_MAGIC, sizeof(P11O_MAGIC)) != 0)
+    {
+        return CKR_FUNCTION_FAILED;
+    }
+    const unsigned char *hdr = buf + sizeof(P11O_MAGIC);
+    uint16_t version = get_u16(hdr);
+    hdr += sizeof(uint16_t);
+    uint16_t flags = get_u16(hdr);
+    hdr += sizeof(uint16_t);
+    uint32_t attr_count = get_u32(hdr);
+    hdr += sizeof(uint32_t);
+    uint32_t body_len = get_u32(hdr);
+    hdr += sizeof(uint32_t);
+    uint32_t total_len = get_u32(hdr);
+    /* An unknown version or flag is a format we do not understand; total_len
+     * must match exactly so trailing garbage is rejected. */
+    if ((version != P11_RECORD_VERSION) || ((flags & ~P11O_FLAG_SEALED) != 0) || (total_len != len))
+    {
+        return CKR_FUNCTION_FAILED;
+    }
+    size_t pos = P11O_HEADER_SIZE;
+    if ((flags & P11O_FLAG_SEALED) == 0)
+    {
+        return decode_payload(buf + pos, len - pos, attr_count, body_len, out);
+    }
+
+    if ((seal == NULL) || (seal->gcm == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if (len - pos < sizeof(uint32_t))
+    {
+        return CKR_FUNCTION_FAILED;
+    }
+    uint32_t key_len = get_u32(buf + pos);
+    pos += sizeof(uint32_t);
+    if ((key_len == 0) || ((uint64_t)(len - pos) < (uint64_t)key_len + P11_RECORD_TAG_LEN))
+    {
+        return CKR_FUNCTION_FAILED;
+    }
+    const unsigned char *key = buf + pos;
+    pos += key_len;
+    size_t payload_len = len - pos - P11_RECORD_TAG_LEN;
+
+    /* Opened in a private copy: the tag must check before any of it is parsed. */
+    unsigned char *plain = (unsigned char *)malloc(payload_len ? payload_len : 1);
+    if (plain == NULL)
+    {
+        return CKR_HOST_MEMORY;
+    }
+    if (payload_len > 0)
+    {
+        memcpy(plain, buf + pos, payload_len);
+    }
+    unsigned char tag[P11_RECORD_TAG_LEN];
+    memcpy(tag, buf + len - P11_RECORD_TAG_LEN, sizeof(tag));
+    CK_RV rv = seal->gcm(seal->ctx, false, key, key_len, buf, pos, plain, payload_len, tag);
+    if (rv == CKR_OK)
+    {
+        rv = decode_payload(plain, payload_len, attr_count, body_len, out);
+    }
+    tsra_pkcs11_wipe(plain, payload_len);
+    free(plain);
+    return rv;
+}
+
+CK_RV tsra_pkcs11_record_peek(const unsigned char *buf, size_t len, uint16_t *version, bool *sealed)
+{
+    if ((buf == NULL) || (version == NULL) || (sealed == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ((len < P11O_HEADER_SIZE) || (memcmp(buf, P11O_MAGIC, sizeof(P11O_MAGIC)) != 0))
+    {
+        return CKR_FUNCTION_FAILED;
+    }
+    const unsigned char *hdr = buf + sizeof(P11O_MAGIC);
+    *version = get_u16(hdr);
+    *sealed = (get_u16(hdr + sizeof(uint16_t)) & P11O_FLAG_SEALED) != 0;
+    return CKR_OK;
+}
+
 void tsra_pkcs11_record_free(tsra_pkcs11_rec_object *obj)
 {
     if (obj == NULL)
@@ -314,7 +441,7 @@ CK_RV tsra_pkcs11_meta_encode(
     unsigned char *p = buf;
     memcpy(p, P11M_MAGIC, sizeof(P11M_MAGIC));
     p += sizeof(P11M_MAGIC);
-    put_u16(p, P11_RECORD_VERSION);
+    put_u16(p, P11_META_VERSION);
     p += sizeof(uint16_t);
     put_u16(p, 0); /* reserved */
     p += sizeof(uint16_t);
@@ -354,7 +481,7 @@ tsra_pkcs11_meta_decode(
     p += sizeof(uint32_t);
     uint32_t reserved32 = get_u32(p);
     /* Validate every field before assigning the outputs. */
-    if (version != P11_RECORD_VERSION || reserved16 != 0 || reserved32 != 0)
+    if (version != P11_META_VERSION || reserved16 != 0 || reserved32 != 0)
     {
         return CKR_FUNCTION_FAILED;
     }

@@ -90,24 +90,31 @@ and the result of the last hardware run.
 ### H-d Second process on a provisioned partition
 
 - Run: a second process logs in with the same PIN, another PIN and an empty
-  PIN, and uses a token key the first process created.
+  PIN, uses a token key the first process created, and reads a private token
+  object the first process created on the file store.
 - Expect: the same PIN logs in; another PIN fails with `CKR_FUNCTION_FAILED`
   (not `CKR_PIN_INCORRECT` until the SDK names the status); an empty PIN
   fails with `CKR_PIN_LEN_RANGE` unless `TSRA_PKCS11_PIN` sets a default; the
-  token key works in the second process. The simulator cannot show this across a
-  power cycle: it keeps no state over a restart.
+  token key works and the private object reads back in the second process.
+  The simulator cannot show this across a power cycle: it keeps no state over
+  a restart.
 - Cases: `persist.a_second_process_sees_the_token_object` (the object, not
-  the key), `login.*`.
+  the key), `persist.a_second_process_reads_the_private_object`,
+  `persist.a_freshly_provisioned_device_reads_only_its_own_private_objects`
+  (simulator only), `login.*`.
 - Result: not run yet.
 
 ### H-e Power cycle and NSSR
 
-- Run: create token keys, power-cycle the device (and separately reset it
-  with NSSR), log in, use the keys.
-- Expect: fails today, with the keys unusable (-26), until the module
-  replays the backup masking key and the owner backup key at
+- Run: create token keys and private token objects, power-cycle the device
+  (and separately reset it with NSSR), log in, use the keys, read the
+  objects, create a private object.
+- Expect: fails today, with the keys unusable (-26) and the private objects
+  invisible (their keys do not unmask) while new private objects work, until
+  the module replays the backup masking key and the owner backup key at
   re-provisioning. With both replayed and the same endorsement key the keys
-  come back; with a fresh endorsement key they do not.
+  and the private objects come back; with a fresh endorsement key they do
+  not.
 - Result: not run yet.
 
 ### H-f First login wins
