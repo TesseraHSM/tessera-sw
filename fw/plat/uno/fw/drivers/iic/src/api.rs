@@ -381,6 +381,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     }
 
     /// [`free_io`](Self::free_io) with the driver state already borrowed.
+    #[inline]
     fn free_io_in(&self, s: &mut ChannelState, index: u16, queue_id: u16) {
         // Return buffer to DFL
         let buf_addr = self.buf_addr(index);
