@@ -48,6 +48,8 @@ typedef struct
     TSRA_KEY_PAIR_OBJ key;
     TSRA_RSA_GEN_CTX genctx;
     bool has_public, has_private;
+
+    BIGNUM *pub_n, *pub_e; /* Imported public key, not in the HSM */
 } TSRA_RSA_KEY;
 
 #ifdef __cplusplus
