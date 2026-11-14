@@ -232,6 +232,18 @@ pub fn peek(buf: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
     })
 }
 
+/// [`peek`]'s check of the framing of an envelope `len` bytes long whose
+/// header is `head`, returning its algorithm and AAD length: for a caller
+/// that read the header out of DMA memory together with bytes after it.
+///
+/// # Errors
+/// The same header and framing failures as [`peek`].
+pub fn peek_header(head: &[u8; HEADER_LEN], len: usize) -> HsmResult<(AeadAlg, usize)> {
+    let header = read_header(head)?;
+    region_offsets(header, len)?;
+    Ok((header.alg, header.aad_len))
+}
+
 /// [`read_header`] over a copy of the header taken a word at a time: the
 /// buffer may be uncached DMA memory, where reading the fields in place
 /// would cost a load per byte.

@@ -94,6 +94,7 @@ pub use format::write_header;
 pub use ops::open;
 pub use ops::payload_offset;
 pub use ops::peek;
+pub use ops::peek_header;
 pub use ops::seal;
 pub use ops::seal_in_place;
 pub use ops::AeadAlg;

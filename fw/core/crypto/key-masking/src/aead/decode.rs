@@ -9,6 +9,7 @@
 use core::mem::MaybeUninit;
 
 use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
+use tsra_fw_core_crypto_aead_envelope::peek_header as aead_peek_header;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_core_crypto_aead_envelope::AeadPeek;
 use tsra_fw_core_crypto_aead_envelope::HEADER_LEN;
@@ -218,33 +219,77 @@ impl MaskedFrame {
 /// [`peek_scope`], also returning a [`MaskedFrame`] for [`unmask_framed`],
 /// which then need not read the framing out of the blob again.
 pub fn peek_frame(blob: &HsmDmaBuf) -> HsmResult<(HsmKeyScope, MaskedFrame)> {
+    let frame = MaskedFrame {
+        addr: blob.as_ptr() as usize,
+        len: blob.len(),
+    };
+    // The header and the usage flags are in a blob's first ten words: when
+    // it is word-aligned, one burst reads them out of DMA memory rather than
+    // a load for each field.
+    if let Some(words) = blob.read_words::<PEEK_WORDS>() {
+        let mut head = [0u8; HEADER_LEN];
+        for (bytes, word) in head.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+            *bytes = word.to_ne_bytes();
+        }
+        let (alg, aad_len) = aead_peek_header(&head, blob.len())?;
+        check_framing(alg, aad_len, blob.len())?;
+        let mut raw = [0u8; 8];
+        for (bytes, word) in raw
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&words[FLAGS_WORD..])
+        {
+            *bytes = word.to_ne_bytes();
+        }
+        return Ok((
+            HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope(),
+            frame,
+        ));
+    }
     let env = check_frame(blob)?;
     let raw = env
         .aad
         .get(USAGE_FLAGS_OFF..USAGE_FLAGS_OFF + 8)
         .and_then(|b| <[u8; 8]>::try_from(b).ok())
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
-    let frame = MaskedFrame {
-        addr: blob.as_ptr() as usize,
-        len: blob.len(),
-    };
     Ok((
         HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope(),
         frame,
     ))
 }
 
+/// Word of a masked blob at which its usage flags start, after the envelope
+/// header, the IV and the AAD's first `USAGE_FLAGS_OFF` bytes.
+const FLAGS_WORD: usize = (HEADER_LEN + AeadAlg::AesGcm256.iv_len() + USAGE_FLAGS_OFF) / 4;
+
+/// Words of a masked blob that [`peek_frame`] reads: up to the end of the
+/// usage flags.
+const PEEK_WORDS: usize = FLAGS_WORD + 2;
+
+const _: () = assert!(
+    (HEADER_LEN + AeadAlg::AesGcm256.iv_len() + USAGE_FLAGS_OFF).is_multiple_of(4)
+        && PEEK_WORDS <= 10
+);
+
 /// `blob`'s envelope, if its framing is a v1 masked key's: AES-256-GCM,
 /// with the metadata record as AAD and whole blocks of payload.
 fn check_frame(blob: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
     let env = aead_peek(blob)?;
-    if env.alg != AeadAlg::AesGcm256
-        || env.aad.len() != META_LEN
-        || !(blob.len() - env.alg.envelope_len(0, META_LEN)).is_multiple_of(16)
+    check_framing(env.alg, env.aad.len(), blob.len())?;
+    Ok(env)
+}
+
+/// That an envelope of `len` bytes with algorithm `alg` and `aad_len` bytes
+/// of AAD, framing already checked, is framed as a v1 masked key.
+fn check_framing(alg: AeadAlg, aad_len: usize, len: usize) -> HsmResult<()> {
+    if alg != AeadAlg::AesGcm256
+        || aad_len != META_LEN
+        || !(len - alg.envelope_len(0, META_LEN)).is_multiple_of(16)
     {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
-    Ok(env)
+    Ok(())
 }
 
 /// Peek the cleartext [`MaskedKeyMetadata`] of a masked-key blob **without
