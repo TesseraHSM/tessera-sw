@@ -10,8 +10,10 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmRsaKey;
 
-/// Supported ECDSA signature algorithms.
+/// Supported certificate signature algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigAlgo {
     /// ECDSA with SHA-256 (OID 1.2.840.10045.4.3.2).
@@ -22,6 +24,15 @@ pub enum SigAlgo {
 
     /// ECDSA with SHA-512 (OID 1.2.840.10045.4.3.4).
     EcdsaSha512,
+
+    /// RSASSA-PKCS1-v1_5 with SHA-256, SHA-384, or SHA-512.
+    RsaPkcs1(HsmHashAlgo),
+
+    /// RSASSA-PSS with SHA-2 and the same digest for MGF1.
+    RsaPss(PssParams),
+
+    /// Pure ML-DSA with an empty context string.
+    MlDsa(HsmMlDsaParamSet),
 }
 
 impl SigAlgo {
@@ -29,43 +40,75 @@ impl SigAlgo {
     /// algorithm.
     ///
     /// Used by the chain validator to know which digest to compute
-    /// over the TBSCertificate before invoking ECDSA verify.
+    /// over the TBSCertificate before invoking ECDSA or RSA verify.
     ///
     /// # Parameters
     /// * `self` — the signature algorithm variant (consumed by value
     ///   since `SigAlgo` is `Copy`).
     ///
     /// # Returns
-    /// The matching [`HsmHashAlgo`] (`Sha256`, `Sha384`, or `Sha512`).
-    pub fn hash_algo(self) -> HsmHashAlgo {
+    /// The matching SHA-2 algorithm, or `None` for pure ML-DSA.
+    pub fn hash_algo(self) -> Option<HsmHashAlgo> {
         match self {
-            SigAlgo::EcdsaSha256 => HsmHashAlgo::Sha256,
-            SigAlgo::EcdsaSha384 => HsmHashAlgo::Sha384,
-            SigAlgo::EcdsaSha512 => HsmHashAlgo::Sha512,
+            SigAlgo::EcdsaSha256 => Some(HsmHashAlgo::Sha256),
+            SigAlgo::EcdsaSha384 => Some(HsmHashAlgo::Sha384),
+            SigAlgo::EcdsaSha512 => Some(HsmHashAlgo::Sha512),
+            SigAlgo::RsaPkcs1(hash) => Some(hash),
+            SigAlgo::RsaPss(params) => Some(params.hash),
+            SigAlgo::MlDsa(_) => None,
         }
     }
+}
 
-    /// Return the expected curve paired with this signature
-    /// algorithm.
-    ///
-    /// Per RFC 5480 §3, the standard pairings are:
-    /// - ECDSA-SHA-256 → P-256
-    /// - ECDSA-SHA-384 → P-384
-    /// - ECDSA-SHA-512 → P-521
-    ///
-    /// The validator uses this to reject certificates whose signer
-    /// curve does not match the declared signature algorithm.
-    ///
-    /// # Parameters
-    /// * `self` — the signature algorithm variant.
-    ///
-    /// # Returns
-    /// The [`HsmEccCurve`] expected on the issuer's public key.
-    pub fn expected_curve(self) -> HsmEccCurve {
+/// Supported RSASSA-PSS parameters (RFC 4055).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PssParams {
+    /// SHA-2 digest used for the message and MGF1.
+    pub hash: HsmHashAlgo,
+    /// Signature salt length, or minimum salt length on a restricted key.
+    pub salt_len: u16,
+}
+
+/// RSA public key borrowed from a PKCS#1 RSAPublicKey.
+#[derive(Debug, Clone, Copy)]
+pub struct RsaPubKey<'a> {
+    /// Modulus-size selector.
+    pub key_size: HsmRsaKey,
+    /// Big-endian modulus without the DER sign-padding byte.
+    pub modulus: &'a HsmDmaBuf,
+    /// Big-endian public exponent, at most four bytes.
+    pub exponent: &'a HsmDmaBuf,
+    /// Complete DER RSAPublicKey.
+    pub encoded: &'a HsmDmaBuf,
+    /// Whether SubjectPublicKeyInfo restricts this key to PSS.
+    pub pss_only: bool,
+    /// Optional PSS key restrictions; an absent value is unrestricted.
+    pub pss_params: Option<PssParams>,
+}
+
+/// Public key borrowed from a certificate's SubjectPublicKeyInfo.
+#[derive(Debug, Clone, Copy)]
+pub enum PubKey<'a> {
+    /// NIST P-256, P-384, or P-521.
+    Ec(EcPubKey<'a>),
+    /// RSA-2048, RSA-3072, or RSA-4096.
+    Rsa(RsaPubKey<'a>),
+    /// An encoded FIPS 204 public key.
+    MlDsa {
+        /// ML-DSA parameter set.
+        param: HsmMlDsaParamSet,
+        /// Raw public-key bytes.
+        key: &'a HsmDmaBuf,
+    },
+}
+
+impl PubKey<'_> {
+    /// Public-key bytes: EC `X || Y`, DER RSAPublicKey, or raw ML-DSA.
+    pub fn as_bytes(&self) -> &[u8] {
         match self {
-            SigAlgo::EcdsaSha256 => HsmEccCurve::P256,
-            SigAlgo::EcdsaSha384 => HsmEccCurve::P384,
-            SigAlgo::EcdsaSha512 => HsmEccCurve::P521,
+            Self::Ec(key) => key.point,
+            Self::Rsa(key) => key.encoded,
+            Self::MlDsa { key, .. } => key,
         }
     }
 }
@@ -75,7 +118,7 @@ impl SigAlgo {
 /// `point` is the uncompressed EC point **without** the 0x04 prefix —
 /// just the raw X || Y coordinate bytes, matching the format expected
 /// by [`HsmEcc::ecc_verify`].
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct EcPubKey<'a> {
     /// The named curve.
     pub curve: HsmEccCurve,
@@ -109,6 +152,18 @@ pub mod key_usage {
     /// CRL signatures.
     pub const DIGITAL_SIGNATURE: u16 = 0x8000;
 
+    /// `nonRepudiation` / `contentCommitment` (bit 1).
+    pub const NON_REPUDIATION: u16 = 0x4000;
+
+    /// `keyEncipherment` (bit 2).
+    pub const KEY_ENCIPHERMENT: u16 = 0x2000;
+
+    /// `dataEncipherment` (bit 3).
+    pub const DATA_ENCIPHERMENT: u16 = 0x1000;
+
+    /// `keyAgreement` (bit 4).
+    pub const KEY_AGREEMENT: u16 = 0x0800;
+
     /// `keyCertSign` (bit 5): the subject public key may sign
     /// certificates. Required on intermediate and root CA
     /// certificates.
@@ -117,6 +172,12 @@ pub mod key_usage {
     /// `cRLSign` (bit 6): the subject public key may sign
     /// Certificate Revocation Lists.
     pub const CRL_SIGN: u16 = 0x0200;
+
+    /// `encipherOnly` (bit 7), meaningful only with `keyAgreement`.
+    pub const ENCIPHER_ONLY: u16 = 0x0100;
+
+    /// `decipherOnly` (bit 8), meaningful only with `keyAgreement`.
+    pub const DECIPHER_ONLY: u16 = 0x0080;
 }
 
 /// Fields extracted from one DER-encoded X.509 certificate.
@@ -133,8 +194,8 @@ pub struct CertInfo<'a> {
     /// Signature algorithm used to sign this certificate.
     pub sig_algo: SigAlgo,
 
-    /// Raw ECDSA signature bytes from the certificate's signatureValue
-    /// BIT STRING. DER-encoded SEQUENCE of two INTEGERs (r, s).
+    /// Signature bytes from the certificate's signatureValue BIT STRING.
+    /// ECDSA uses a DER SEQUENCE of two INTEGERs; RSA and ML-DSA use raw bytes.
     /// Points into DMA-accessible memory.
     pub signature: &'a HsmDmaBuf,
 
@@ -149,7 +210,10 @@ pub struct CertInfo<'a> {
     pub subject_raw: &'a HsmDmaBuf,
 
     /// The certificate's public key.
-    pub pub_key: EcPubKey<'a>,
+    pub pub_key: PubKey<'a>,
+
+    /// Complete DER SubjectPublicKeyInfo, used to retain issuer metadata.
+    pub spki_raw: &'a HsmDmaBuf,
 
     /// Authority Key Identifier keyIdentifier value, if present.
     pub akid: Option<&'a [u8]>,
@@ -175,8 +239,8 @@ pub enum StepResult<'a> {
     /// The entire chain has been validated. The leaf certificate's
     /// public key and subject are available.
     Valid {
-        /// The validated leaf certificate's EC public key.
-        leaf_pub_key: &'a EcPubKey<'a>,
+        /// The validated leaf certificate's public key.
+        leaf_pub_key: &'a PubKey<'a>,
 
         /// Raw DER of the leaf certificate's subject Name.
         leaf_subject: &'a HsmDmaBuf,

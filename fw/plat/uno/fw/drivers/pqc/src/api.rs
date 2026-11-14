@@ -5,6 +5,7 @@
 
 use core::future::poll_fn;
 
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -221,7 +222,7 @@ impl PqcDriver {
         kind: HsmVaultKeyKind,
         pk: &[u8],
         msg_type: HsmMlDsaMsgType,
-        msg: &[u8],
+        msg: &HsmDmaBuf,
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {

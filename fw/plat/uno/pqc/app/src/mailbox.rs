@@ -172,6 +172,9 @@ mod word {
     pub const PUB_KEY_LEN: usize = 25;
     /// How the staged message is read (ML-DSA sign and verify only).
     pub const MSG_TYPE: usize = 26;
+    /// Address of a pure ML-DSA verify message in an IO DMA buffer; zero
+    /// when the message is staged in the operand slot.
+    pub const MSG_ADDR: usize = 27;
 }
 
 /// Operand slot layout.
@@ -354,6 +357,35 @@ pub struct Request {
     /// How the staged message is read, ML-DSA sign and verify only:
     /// [`MSG_TYPE_PURE`] or [`MSG_TYPE_EXTERNAL_MU`].
     pub msg_type: u32,
+
+    /// Address of the pure verify message when read in place; zero when it
+    /// is staged in the operand slot. Must pass [`io_dma_range`].
+    pub msg_addr: usize,
+}
+
+/// The IO DMA heap in shared GSRAM: 34 slots of 0x4000 bytes from
+/// 0x6102_0D60. Mirrors the HSM driver, which only posts an address inside
+/// one slot.
+const IO_DMA_BASE: usize = 0x6102_0D60;
+const IO_DMA_SLOT_SIZE: usize = 0x4000;
+const IO_DMA_SIZE: usize = IO_DMA_SLOT_SIZE * 34;
+
+/// `len` bytes at `addr` in the IO DMA heap as a shared slice, if the whole
+/// range lies in one slot of it. The HSM keeps the buffer in place until
+/// this core answers.
+pub fn io_dma_range(addr: usize, len: usize) -> Option<&'static [u8]> {
+    let end = addr.checked_add(len)?;
+    let first = addr.checked_sub(IO_DMA_BASE)?;
+    if len == 0 || end > IO_DMA_BASE + IO_DMA_SIZE {
+        return None;
+    }
+    if first / IO_DMA_SLOT_SIZE != (first + len - 1) / IO_DMA_SLOT_SIZE {
+        return None;
+    }
+    // SAFETY: the range is inside the shared IO DMA heap, which is mapped
+    // and readable by this core, and nothing writes the message while the
+    // request is outstanding.
+    Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
 }
 
 /// Base of `lane`'s operand slot.
@@ -540,6 +572,7 @@ pub fn take_request(core_id: u8) -> Option<(u8, Request)> {
                 sig_len: read_volatile(mb.add(word::SIG_LEN)) as usize,
                 pub_key_len: read_volatile(mb.add(word::PUB_KEY_LEN)) as usize,
                 msg_type: read_volatile(mb.add(word::MSG_TYPE)),
+                msg_addr: read_volatile(mb.add(word::MSG_ADDR)) as usize,
             },
         ))
     }

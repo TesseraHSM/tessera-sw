@@ -10,6 +10,8 @@
 //! Signing and verification take the message itself or an external `μ`;
 //! the pre-hash message types are not supported on Uno and are refused with
 //! [`HsmError::UnsupportedCmd`].
+//! Verification passes a pure message to the FP core by its IO DMA address,
+//! so it is neither copied nor limited to the mailbox message size.
 //!
 //! Signing is hedged, with randomness from the TRNG, unless the caller
 //! requires deterministic signing, which uses FIPS 204's all-zero `rnd` and
@@ -295,7 +297,6 @@ impl HsmMlDsa for UnoHsmPal {
             let HsmMlDsaPubKey::Encoded(pk) = pk else {
                 return Err(HsmError::UnsupportedCmd);
             };
-            check_msg(&msg)?;
             self.pqc
                 .mldsa_verify(
                     mldsa_kind(param_set),

@@ -3,6 +3,7 @@
 
 //! A claimed PQC engine, i.e. exclusive use of one FP core.
 
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
@@ -272,6 +273,7 @@ impl PqcEngine<'_> {
                 sig_len: 0,
                 pub_key_len: 0,
                 msg_type: mailbox::MSG_TYPE_PURE,
+                msg_addr: 0,
             })
             .await?;
 
@@ -388,6 +390,7 @@ impl PqcEngine<'_> {
                 sig_len: 0,
                 pub_key_len: 0,
                 msg_type,
+                msg_addr: 0,
             })
             .await?;
 
@@ -435,6 +438,7 @@ impl PqcEngine<'_> {
                 sig_len: 0,
                 pub_key_len: 0,
                 msg_type: mailbox::MSG_TYPE_PURE,
+                msg_addr: 0,
             })
             .await;
 
@@ -536,6 +540,7 @@ impl PqcEngine<'_> {
                 sig_len: 0,
                 pub_key_len: pk.len() as u32,
                 msg_type: mailbox::MSG_TYPE_PURE,
+                msg_addr: 0,
             })
             .await?;
 
@@ -592,6 +597,7 @@ impl PqcEngine<'_> {
                 sig_len: ct.len() as u32,
                 pub_key_len: 0,
                 msg_type: mailbox::MSG_TYPE_PURE,
+                msg_addr: 0,
             })
             .await;
 
@@ -612,6 +618,12 @@ impl PqcEngine<'_> {
     /// `msg_type` says how `msg` is read: the message itself, or an
     /// external `μ` (64 bytes, with an empty `ctx`).
     ///
+    /// A pure message is not copied: the FP core reads it where it lies in
+    /// the IO DMA heap, so it has no mailbox size limit and must live there.
+    /// Until the core answers, that buffer stays in use, and this call does
+    /// not return -- whether it completes, times out, or is dropped -- before
+    /// then; see [`FpReadGuard`].
+    ///
     /// Returns `Ok(true)` for a good signature and `Ok(false)` for a bad
     /// one; `Err` is reserved for transport and argument faults, so a
     /// caller cannot mistake a failed verification for a broken link.
@@ -620,23 +632,38 @@ impl PqcEngine<'_> {
         kind: HsmVaultKeyKind,
         pk: &[u8],
         msg_type: HsmMlDsaMsgType,
-        msg: &[u8],
+        msg: &HsmDmaBuf,
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
         if pk.len() != mldsa_pub_key_len(kind)? || sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
+        let (wire_type, msg_addr) = match msg_type {
+            HsmMlDsaMsgType::Pure if ctx.len() <= MLDSA_CTX_MAX && !msg.is_empty() => (
+                mailbox::MSG_TYPE_PURE,
+                mailbox::io_dma_addr(msg).ok_or(PqcError::INVALID_BUFFER_SIZE)?,
+            ),
+            HsmMlDsaMsgType::Pure if ctx.len() <= MLDSA_CTX_MAX => (mailbox::MSG_TYPE_PURE, 0),
+            _ => (mailbox_msg_type(msg_type, msg, ctx)?, 0),
+        };
 
         self.settle()?;
-        if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
+        // Only the lane's own operands are staged; a borrowed message is not.
+        if (msg_addr == 0 && !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg))
             || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
             || !mailbox::write_slot(self.id, mailbox::SLOT_SIG_OFFSET, sig)
             || !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
+
+        // Declared before the request is posted, so it outlives every exit
+        // from here on.
+        let _fp_reads_msg = FpReadGuard {
+            id: self.id,
+            armed: msg_addr != 0,
+        };
 
         // A bad signature comes back as a status, so use the status-tolerant
         // submit rather than letting every non-zero status become an error.
@@ -650,7 +677,8 @@ impl PqcEngine<'_> {
                 ctx_len: ctx.len() as u32,
                 sig_len: sig.len() as u32,
                 pub_key_len: pk.len() as u32,
-                msg_type,
+                msg_type: wire_type,
+                msg_addr,
             })
             .await?;
 
@@ -700,6 +728,7 @@ impl PqcEngine<'_> {
                     sig_len: out_len as u32,
                     pub_key_len: 0,
                     msg_type: mailbox::MSG_TYPE_PURE,
+                    msg_addr: 0,
                 })
                 .await?;
 
@@ -867,6 +896,30 @@ impl Drop for PqcEngine<'_> {
     /// six such leaks, PQC would wedge permanently.
     fn drop(&mut self) {
         self.give_back();
+    }
+}
+
+/// Keeps a borrowed operand valid while an FP core may still read it.
+///
+/// Dropping it blocks until the lane's request is answered, or the core has
+/// left a crash record, which it writes on its way down and so confirms it
+/// reads nothing further. This is the contract the BCP and UPKA guards
+/// keep: the caller frees or reuses the buffer as soon as the operation
+/// returns or is cancelled, so completion must precede that.
+struct FpReadGuard {
+    id: EngineId,
+    armed: bool,
+}
+
+impl Drop for FpReadGuard {
+    fn drop(&mut self) {
+        while self.armed
+            && mailbox::has_unanswered(self.id)
+            && mailbox::crash_record(self.id).is_none()
+        {
+            core::hint::spin_loop();
+        }
+        mailbox::dmb();
     }
 }
 
