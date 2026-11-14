@@ -77,8 +77,7 @@ pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
 fn vault_for_key(io: &UnoHsmIo, key_id: HsmKeyId) -> KeyVault<VaultStorage> {
     let word = KeyVault::<VaultStorage>::key_table(key_id) / 32;
     let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(word));
-    let res_mask = u128::from(bits).checked_shl(32 * word as u32).unwrap_or(0);
-    KeyVault::new(VaultStorage::new(res_mask))
+    KeyVault::new(VaultStorage::with_mask_word(word, bits))
 }
 
 /// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
