@@ -179,6 +179,10 @@ pub(super) async fn execute(server: &SocketHsm, hsm: &DuoHsm, request: Request) 
         return transport_error(TRANSPORT_INVALID_REQUEST);
     }
 
+    if matches!(DuoSqe::from(&sqe).op(), Ok(DuoOp::Tbor)) && !oob_directions_match(&request) {
+        return transport_error(TRANSPORT_OOB_DIRECTION_MISMATCH);
+    }
+
     let mut staged = Staged::new(&request.payload, request.oob_items);
     patch_prp1(&mut sqe, 7, staged.src_addr(0));
     patch_prp1(&mut sqe, 12, staged.dst_addr(0));
@@ -209,6 +213,10 @@ pub(super) async fn execute(server: &SocketHsm, hsm: &DuoHsm, request: Request) 
 
 #[cfg(test)]
 mod tests {
+    use tsra_ddi_tbor_types::GCM_IV_LEN;
+    use tsra_ddi_tbor_types::GCM_TAG_LEN;
+    use tsra_ddi_tbor_types::MASKED_AES_KEY_MAX_LEN;
+    use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
     use tsra_ddi_tbor_types::TborApiRevReq;
     use tsra_ddi_tbor_types::TborApiRevResp;
     use tsra_ddi_tbor_types::TborOpReq;
@@ -277,6 +285,36 @@ mod tests {
         TborSessionOpenInitResp::decode_response(&response.payload)
             .expect("open_init response")
             .session_id
+    }
+
+    #[test]
+    fn oob_direction_mismatch_rejected_before_firmware() {
+        run(async {
+            let connection = Connection::new(duo_hsm());
+            let data_len = u16::try_from(BLOCK_LEN).expect("AES block length");
+            let command = TborAesGcmEncryptDecryptReq {
+                data_len,
+                in_index: 0,
+                out_index: 1,
+                iv: vec![0; GCM_IV_LEN],
+                tag: vec![0; GCM_TAG_LEN],
+                masked_key: vec![0; MASKED_AES_KEY_MAX_LEN],
+                ..Default::default()
+            };
+            let RequestFrame::Submit(mut request) = tbor(DuoOp::Tbor, 0, &command) else {
+                unreachable!()
+            };
+            request.oob_items = vec![OobItem::Out(u32::from(data_len)); 2];
+            request.sqe = DuoSqeBuilder::new()
+                .cmd(DuoCmdDword::new().with_op(DuoOp::Tbor as u8))
+                .buf_lens(request.payload.len() as u32, MAX_DMA_BUFFER)
+                .oob_len((request.oob_items.len() * 16) as u32)
+                .build()
+                .to_vec();
+            let response = submit(&connection, RequestFrame::Submit(request)).await;
+            assert_eq!(response.status, TRANSPORT_OOB_DIRECTION_MISMATCH);
+            assert!(response.payload.is_empty());
+        });
     }
 
     #[test]

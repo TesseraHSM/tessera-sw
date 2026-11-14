@@ -52,14 +52,26 @@ use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
 use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::TRANSPORT_OOB_DIRECTION_MISMATCH;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::SessionControlKind;
+use tsra_ddi_tbor_types::TBOR_OP_AES_GCM_ENCRYPT_DECRYPT;
+use tsra_ddi_tbor_types::TBOR_OP_AES_XTS_ENCRYPT_DECRYPT;
+use tsra_ddi_tbor_types::TBOR_OP_DARC_TMK_EXPORT;
+use tsra_ddi_tbor_types::TBOR_OP_DARC_TMK_IMPORT;
+use tsra_ddi_tbor_types::TBOR_OP_PART_FINAL;
+use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_PEER_BACKUP;
+use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_REMOTE_BACKUP;
+use tsra_ddi_tbor_types::TBOR_OP_SD_RESEAL_REMOTE_BACKUP;
+use tsra_ddi_tbor_types::TBOR_OP_SD_RESTORE_PEER_BACKUP;
+use tsra_ddi_tbor_types::TBOR_OP_SD_RESTORE_REMOTE_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::codec::RequestView;
+use tsra_ddi_tbor_types::codec::TocEntry;
 use tsra_fw_hsm_bulk::BLOCK_LEN;
 use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
 use tsra_fw_hsm_bulk::BulkCqe;
@@ -623,6 +635,65 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
     }
 }
 
+fn oob_directions_match(request: &Request) -> bool {
+    let Ok(view) = RequestView::parse(&request.payload) else {
+        return true;
+    };
+    if matches!(
+        view.opcode(),
+        TBOR_OP_PART_FINAL
+            | TBOR_OP_DARC_TMK_IMPORT
+            | TBOR_OP_DARC_TMK_EXPORT
+            | TBOR_OP_SD_CREATE_PEER_BACKUP
+            | TBOR_OP_SD_CREATE_REMOTE_BACKUP
+            | TBOR_OP_SD_RESEAL_REMOTE_BACKUP
+            | TBOR_OP_SD_RESTORE_PEER_BACKUP
+            | TBOR_OP_SD_RESTORE_REMOTE_BACKUP
+    ) {
+        return request
+            .oob_items
+            .iter()
+            .all(|item| matches!(item, OobItem::In(_)));
+    }
+    let fields: Vec<_> = view.toc_iter().collect();
+    let (data_len, in_index, out_index) = match (view.opcode(), fields.as_slice()) {
+        (
+            TBOR_OP_AES_GCM_ENCRYPT_DECRYPT,
+            [
+                TocEntry::SessionId(_),
+                TocEntry::Uint8(_),
+                TocEntry::Uint8(_),
+                TocEntry::Uint16(_),
+                TocEntry::Uint16(data_len),
+                TocEntry::Uint8(in_index),
+                TocEntry::Uint8(out_index),
+                ..,
+            ],
+        )
+        | (
+            TBOR_OP_AES_XTS_ENCRYPT_DECRYPT,
+            [
+                TocEntry::SessionId(_),
+                TocEntry::Uint8(_),
+                TocEntry::Uint16(data_len),
+                TocEntry::Uint16(_),
+                TocEntry::Uint8(in_index),
+                TocEntry::Uint8(out_index),
+                ..,
+            ],
+        ) => (*data_len, *in_index, *out_index),
+        _ => return true,
+    };
+    data_len == 0
+        || (!matches!(
+            request.oob_items.get(usize::from(in_index)),
+            Some(OobItem::Out(_))
+        ) && !matches!(
+            request.oob_items.get(usize::from(out_index)),
+            Some(OobItem::In(_))
+        ))
+}
+
 /// Server-owned DMA buffers a command SQE's source, destination and OOB
 /// items are re-homed into; they must outlive the firmware completion.
 struct Staged {
@@ -718,6 +789,10 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
         || dst_cap > DMA_BUF_SIZE
     {
         return transport_error(TRANSPORT_INVALID_REQUEST);
+    }
+
+    if CmdDword::from(sqe[0]).op() == OP_TBOR && !oob_directions_match(&request) {
+        return transport_error(TRANSPORT_OOB_DIRECTION_MISMATCH);
     }
 
     let mut staged = Staged::new(&request.payload, request.oob_items);
@@ -1542,8 +1617,156 @@ pub fn run(on_listening: impl FnOnce(&Listening)) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncWriteExt;
+    use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
+
+    fn encoded_request(request: &impl TborOpReq) -> Request {
+        let mut bytes = vec![0; MAX_DMA_BUFFER as usize];
+        let payload = request
+            .encode_request(&mut bytes)
+            .expect("test request")
+            .to_vec();
+        Request {
+            sqe: SqeBuilder::new()
+                .cmd(CmdDword::new().with_op(OP_TBOR))
+                .buf_lens(payload.len() as u32, MAX_DMA_BUFFER)
+                .oob_len(0)
+                .build()
+                .to_vec(),
+            payload,
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        }
+    }
+
+    fn oob_request(opcode: u8, data_len: u16, in_index: u8, out_index: u8) -> Request {
+        use tsra_ddi_tbor_types::*;
+
+        match opcode {
+            TBOR_OP_AES_GCM_ENCRYPT_DECRYPT => encoded_request(&TborAesGcmEncryptDecryptReq {
+                data_len,
+                in_index,
+                out_index,
+                iv: vec![0; GCM_IV_LEN],
+                tag: vec![0; GCM_TAG_LEN],
+                masked_key: vec![0; MASKED_AES_KEY_MAX_LEN],
+                ..Default::default()
+            }),
+            TBOR_OP_AES_XTS_ENCRYPT_DECRYPT => encoded_request(&TborAesXtsEncryptDecryptReq {
+                data_len,
+                dul: data_len,
+                in_index,
+                out_index,
+                tweak: vec![0; XTS_TWEAK_LEN],
+                masked_key: vec![0; MASKED_AES_XTS_KEY_LEN],
+                ..Default::default()
+            }),
+            _ => panic!("unsupported test opcode"),
+        }
+    }
+
+    #[test]
+    fn oob_directions_cover_input_only_commands() {
+        use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
+        use tsra_ddi_tbor_types::codec::RequestEncoder;
+
+        for opcode in [
+            TBOR_OP_PART_FINAL,
+            TBOR_OP_DARC_TMK_IMPORT,
+            TBOR_OP_DARC_TMK_EXPORT,
+            TBOR_OP_SD_CREATE_PEER_BACKUP,
+            TBOR_OP_SD_CREATE_REMOTE_BACKUP,
+            TBOR_OP_SD_RESEAL_REMOTE_BACKUP,
+            TBOR_OP_SD_RESTORE_PEER_BACKUP,
+            TBOR_OP_SD_RESTORE_REMOTE_BACKUP,
+        ] {
+            let mut bytes = vec![0; MAX_DMA_BUFFER as usize];
+            let payload = RequestEncoder::new(&mut bytes, PROTOCOL_VERSION, opcode)
+                .session_id(0)
+                .expect("session field")
+                .finish()
+                .expect("input-only request")
+                .to_vec();
+            let mut request = Request {
+                sqe: Vec::new(),
+                payload,
+                oob_items: vec![OobItem::In(vec![0xA5]); 2],
+                tail: Vec::new(),
+            };
+            assert!(oob_directions_match(&request));
+            for index in 0..request.oob_items.len() {
+                request.oob_items[index] = OobItem::Out(1);
+                assert!(
+                    !oob_directions_match(&request),
+                    "input-only command marked Out"
+                );
+                request.oob_items[index] = OobItem::In(vec![0xA5]);
+            }
+        }
+    }
+
+    #[test]
+    fn oob_directions_follow_command_roles() {
+        let data_len = u16::try_from(BLOCK_LEN).expect("AES block length");
+        let input = OobItem::In(vec![0xA5; usize::from(data_len)]);
+        let output = OobItem::Out(u32::from(data_len));
+        for opcode in [
+            TBOR_OP_AES_GCM_ENCRYPT_DECRYPT,
+            TBOR_OP_AES_XTS_ENCRYPT_DECRYPT,
+        ] {
+            for (in_index, out_index) in [(0, 1), (1, 0)] {
+                let mut request = oob_request(opcode, data_len, in_index, out_index);
+                request.oob_items = vec![output.clone(); 2];
+                request.oob_items[usize::from(in_index)] = input.clone();
+                assert!(oob_directions_match(&request));
+                request.oob_items[usize::from(in_index)] = output.clone();
+                assert!(!oob_directions_match(&request), "input marked Out");
+                request.oob_items[usize::from(in_index)] = input.clone();
+                request.oob_items[usize::from(out_index)] = input.clone();
+                assert!(!oob_directions_match(&request), "output marked In");
+            }
+            let mut request = oob_request(opcode, data_len, 0, 0);
+            for item in [input.clone(), output.clone()] {
+                request.oob_items = vec![item];
+                assert!(!oob_directions_match(&request), "shared descriptor");
+            }
+        }
+    }
+
+    #[test]
+    fn oob_directions_leave_other_validation_to_firmware() {
+        let mut request = oob_request(TBOR_OP_AES_GCM_ENCRYPT_DECRYPT, 0, u8::MAX, u8::MAX);
+        assert!(oob_directions_match(&request));
+        request = oob_request(TBOR_OP_AES_GCM_ENCRYPT_DECRYPT, 16, 0, 1);
+        assert!(oob_directions_match(&request), "missing descriptors");
+        request.payload.truncate(1);
+        assert!(oob_directions_match(&request), "malformed payload");
+    }
+
+    #[test]
+    fn oob_direction_mismatch_rejected_before_firmware() {
+        let _guard = test_partition_lock();
+        let server = test_hsm();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let data_len = u16::try_from(BLOCK_LEN).expect("AES block length");
+            for opcode in [
+                TBOR_OP_AES_GCM_ENCRYPT_DECRYPT,
+                TBOR_OP_AES_XTS_ENCRYPT_DECRYPT,
+            ] {
+                let mut request = oob_request(opcode, data_len, 0, 1);
+                request.oob_items = vec![OobItem::Out(u32::from(data_len)); 2];
+                request.sqe[15] = (request.oob_items.len() * 16) as u32;
+                let response = execute_normal(&server, request).await;
+                assert_eq!(response.status, TRANSPORT_OOB_DIRECTION_MISMATCH);
+                assert!(response.payload.is_empty());
+            }
+        });
+    }
 
     #[test]
     fn part_res_mask_starts_at_partition_and_wraps() {

@@ -5,6 +5,9 @@
 //! isolated faults. The first byte selects one of 41 scenarios; absent
 //! controls default to zero, so even one-byte seeds execute the command.
 //!
+//! Normal scenarios use distinct input/output descriptors to reach crypto.
+//! Shared-descriptor rejection is tested only by a dedicated socket scenario.
+//!
 //! Canonical typed requests cannot exercise noncanonical TOC placement.
 //! Permission rejects are unreachable through current AES generation/import:
 //! both require ENCRYPT | DECRYPT together. Wrong-kind keys are authenticated,
@@ -22,7 +25,7 @@ use tsra_ddi_interface::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
-/// Bound the descriptor plan while allowing reordered and aliased indices.
+/// Bound the descriptor plan while allowing reordered indices.
 const OOB_ITEMS: usize = 4;
 /// Bound corpus-derived bytes independently of requested OOB lengths.
 const PATTERN_MAX_LEN: usize = 512;
@@ -82,6 +85,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 enum Expected {
     Success,
     Status(TborStatus),
+    DirectionMismatch,
     /// Arbitrary envelopes may fail framing, scope selection or authentication,
     /// but must never mask transport, driver or response-decoding failures.
     BadKey,
@@ -158,7 +162,8 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput) -> SessionGuard<'a> {
     SessionGuard::new(ctx, handshake)
 }
 
-/// Keep the destination writable, including when it aliases the source.
+/// Keep the source read-only and the destination writable. The dedicated
+/// shared-descriptor negative stays writable until the socket server rejects it.
 fn submit(
     ctx: &TestCtx,
     req: &TborAesGcmEncryptDecryptReq,
@@ -170,8 +175,8 @@ fn submit(
     let mut items: Vec<_> = buffers
         .iter_mut()
         .enumerate()
-        .map(|(i, buf)| {
-            if i == usize::from(req.in_index) && i != usize::from(req.out_index) {
+        .map(|(index, buf)| {
+            if index == usize::from(req.in_index) && index != usize::from(req.out_index) {
                 TborOobItem::In(buf)
             } else {
                 TborOobItem::Out(buf)
@@ -261,9 +266,9 @@ fn import_zero_key(ctx: &TestCtx, sid: u16) -> Vec<u8> {
     .masked_key
 }
 
-/// Predict schema, semantic, descriptor, key and authentication rejects in
-/// handler order. Length mutations in this bounded target still encode on
-/// the host; fixed-length enforcement happens during firmware decoding.
+/// Predict the dedicated socket rejection or firmware schema, semantic,
+/// descriptor, key and authentication checks. Length mutations still encode
+/// on the host; fixed-length enforcement happens during firmware decoding.
 fn expected(
     req: &TborAesGcmEncryptDecryptReq,
     active_sid: Option<u16>,
@@ -271,6 +276,7 @@ fn expected(
     buffers: &[Vec<u8>],
     scenario: u8,
     authentic: bool,
+    socket_direction_negative: bool,
 ) -> Expected {
     let reject = Expected::Status;
     if active_sid.is_none() {
@@ -278,6 +284,13 @@ fn expected(
     }
     if active_sid != Some(req.session_id) {
         return reject(TborStatus::FileHandleSessionIdDoesNotMatch);
+    }
+    if socket_direction_negative
+        && req.data_len != 0
+        && req.in_index == req.out_index
+        && usize::from(req.in_index) < buffers.len()
+    {
+        return Expected::DirectionMismatch;
     }
     if req.iv.len() != GCM_IV_LEN
         || req.tag.len() != GCM_TAG_LEN
@@ -391,6 +404,7 @@ fn check_output(
 /// then submit and check it. Expensive Local/import setup is scenario-specific.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario;
+    let socket_direction_negative = scenario == 34 && tsra_ddi::sock_selected();
     let session = open_session(ctx, input);
     let sid = session.session_id();
     let mut session = Some(session);
@@ -549,7 +563,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 .masked_key;
             assert_eq!(req.masked_key.len(), MASKED_AES_KEY_MAX_LEN);
         }
-        34 => req.out_index = req.in_index,
+        34 => {
+            if socket_direction_negative {
+                req.out_index = req.in_index;
+            } else {
+                std::mem::swap(&mut req.in_index, &mut req.out_index);
+            }
+        }
         35 => {
             // Mutate only encrypted key material, preserving envelope framing
             // and scope so the request reaches key authentication.
@@ -602,22 +622,25 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         }
         _ => unreachable!("scenario reduced modulo SCENARIOS"),
     }
+    if req.data_len != 0 && req.in_index == req.out_index && !socket_direction_negative {
+        req.out_index = req.out_index.wrapping_add(1);
+    }
     let active_sid = session.as_ref().map(SessionGuard::session_id);
-    let prediction = expected(&req, active_sid, &pristine, &buffers, scenario, authentic);
+    let prediction = expected(
+        &req,
+        active_sid,
+        &pristine,
+        &buffers,
+        scenario,
+        authentic,
+        socket_direction_negative,
+    );
     let source = if req.data_len == 0 {
         Vec::new()
     } else {
         buffers
             .get(usize::from(req.in_index))
-            .map(|buf| {
-                if req.in_index == req.out_index && tsra_ddi::sock_selected() {
-                    // The socket transport sends only Out lengths, so an
-                    // aliased input reaches the device as zeros, not plaintext.
-                    vec![0; buf.len()]
-                } else {
-                    buf.clone()
-                }
-            })
+            .cloned()
             .unwrap_or_default()
     };
     let result = submit(ctx, &req, &mut buffers);
@@ -639,6 +662,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             } else {
                 assertions::assert_fw_rejects(&err, status);
             }
+        }
+        Expected::DirectionMismatch => {
+            let err = result.expect_err("input marked Out unexpectedly accepted");
+            assert!(
+                matches!(err, DdiError::InvalidParameter),
+                "expected socket direction rejection, got {err}"
+            );
         }
         Expected::BadKey => {
             let err = result.expect_err("arbitrary masked key unexpectedly authenticated");
@@ -666,10 +696,69 @@ fuzz_target!(|input: FuzzInput| {
 mod tests {
     use super::*;
 
+    #[test]
+    fn crypto_scenarios_reach_firmware() {
+        let pristine = vec![0; MASKED_AES_KEY_MAX_LEN];
+        let buffers = vec![vec![0xA5; 16]; 2];
+        let request = TborAesGcmEncryptDecryptReq {
+            session_id: 1,
+            op: AES_OP_ENCRYPT,
+            iv_source: GCM_IV_SOURCE_HOST,
+            data_len: 16,
+            in_index: 0,
+            out_index: 1,
+            iv: vec![0; GCM_IV_LEN],
+            tag: vec![0; GCM_TAG_LEN],
+            masked_key: pristine.clone(),
+            ..Default::default()
+        };
+        for scenario in [0, 36] {
+            assert!(matches!(
+                expected(
+                    &request,
+                    Some(1),
+                    &pristine,
+                    &buffers,
+                    scenario,
+                    true,
+                    false
+                ),
+                Expected::Success
+            ));
+        }
+        let decrypt = TborAesGcmEncryptDecryptReq {
+            op: AES_OP_DECRYPT,
+            ..request.clone()
+        };
+        assert!(matches!(
+            expected(&decrypt, Some(1), &pristine, &buffers, 1, true, false),
+            Expected::Success
+        ));
+        assert!(matches!(
+            expected(&decrypt, Some(1), &pristine, &buffers, 26, false, false),
+            Expected::Status(TborStatus::AesGcmDecryptTagDoesNotMatch)
+        ));
+        let shared = TborAesGcmEncryptDecryptReq {
+            out_index: request.in_index,
+            ..request
+        };
+        assert!(matches!(
+            expected(&shared, Some(1), &pristine, &buffers, 34, true, true),
+            Expected::DirectionMismatch
+        ));
+        assert!(matches!(
+            expected(&shared, Some(1), &pristine, &buffers, 34, true, false),
+            Expected::Success
+        ));
+    }
+
     /// Replay short seeds and boundary controls in one test: the shared fuzz
     /// fixture's device-display state is not safe for parallel entry.
     #[test]
     fn structured_scenarios() {
+        let input = FuzzInput::arbitrary(&mut Unstructured::new(&[0xEF, 0xBE]))
+            .expect("CI regression seed");
+        common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");
