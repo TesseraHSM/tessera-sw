@@ -1245,41 +1245,33 @@ unsafe fn burst_read<const N: usize>(src: *const u32) -> [u32; N] {
     core::array::from_fn(|i| words[i])
 }
 
-/// Pack bytes into little-endian words at `dw[start..]`.
+/// Pack a 12-byte IV, or a 16-byte tag, tweak or SGL descriptor, into
+/// little-endian words at `dw[start..]`.
 ///
-/// Word-aligned bytes are read a word at a time, and a 12-byte IV or a
-/// 16-byte tag with one burst: they may sit in DMA memory (a frame's
-/// trailer, a masked blob), which the CPU reads uncached.
-fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
-    if bytes.as_ptr().align_offset(4) == 0 {
-        let src = bytes.as_ptr().cast::<u32>();
-        match bytes.len() {
-            12 => {
-                // SAFETY: `bytes` is 12 readable bytes at a 4-aligned address.
-                let words: [u32; 3] = unsafe { burst_read(src) };
-                dw[start..start + 3].copy_from_slice(&words);
-                return;
-            }
-            16 => {
-                // SAFETY: `bytes` is 16 readable bytes at a 4-aligned address.
-                let words: [u32; 4] = unsafe { burst_read(src) };
-                dw[start..start + 4].copy_from_slice(&words);
-                return;
-            }
-            _ => {}
-        }
-        let (words, rest) = bytes.as_chunks::<4>();
-        for (i, word) in words.iter().enumerate() {
-            // SAFETY: `word` is four readable bytes at a 4-aligned address.
-            dw[start + i] = unsafe { word.as_ptr().cast::<u32>().read() };
-        }
-        if !rest.is_empty() {
-            let mut word = [0u8; 4];
-            word[..rest.len()].copy_from_slice(rest);
-            dw[start + words.len()] = u32::from_le_bytes(word);
-        }
+/// Inlined at its call sites, where `N` and `start` are constants.
+/// Word-aligned bytes are read with one burst: they may sit in DMA memory
+/// (a frame's trailer, a masked blob), which the CPU reads uncached.
+#[inline(always)]
+fn put_bytes<const N: usize>(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8; N]) {
+    const { assert!(N == BCP_IV_LEN || N == BCP_TAG_LEN) };
+    if bytes.as_ptr().align_offset(4) != 0 {
+        put_unaligned(dw, start, bytes);
         return;
     }
+    if N == BCP_IV_LEN {
+        // SAFETY: `bytes` is 12 readable bytes at a 4-aligned address.
+        let words: [u32; 3] = unsafe { burst_read(bytes.as_ptr().cast()) };
+        dw[start..start + 3].copy_from_slice(&words);
+    } else {
+        // SAFETY: `bytes` is 16 readable bytes at a 4-aligned address.
+        let words: [u32; 4] = unsafe { burst_read(bytes.as_ptr().cast()) };
+        dw[start..start + 4].copy_from_slice(&words);
+    }
+}
+
+/// [`put_bytes`] for bytes that are not word-aligned.
+#[inline(never)]
+fn put_unaligned(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
     for (i, chunk) in bytes.chunks(4).enumerate() {
         let mut word = [0u8; 4];
         word[..chunk.len()].copy_from_slice(chunk);
