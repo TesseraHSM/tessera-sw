@@ -55,6 +55,7 @@
 //! [`part_free_internal`]: StdHsmPal::part_free_internal
 
 use tsra_crypto::*;
+use tsra_fw_hsm_pal_traits::MLDSA_SEED_LEN;
 use tsra_fw_hsm_pal_traits::POLICY_HASH_LEN;
 use zeroize::Zeroizing;
 
@@ -182,6 +183,10 @@ pub(crate) struct PartitionEntry {
     /// Vault key ID for the partition's identity ECC-384 private key.
     pub(crate) id_key_id: Option<HsmKeyId>,
 
+    /// Vault key ID for the partition's identity ML-DSA-87 seed.
+    /// Shares the lifecycle of [`Self::id_key_id`].
+    pub(crate) id_mldsa_seed_key_id: Option<HsmKeyId>,
+
     /// Cached DER-encoded partition leaf certificate (lazily generated).
     pub(crate) leaf_cert: [u8; MAX_CERT_DER_LEN],
 
@@ -295,6 +300,9 @@ pub(crate) struct PartitionEntry {
     /// Vault key ID of the Partition Trust Anchor private key.
     pta_key_id: Option<HsmKeyId>,
 
+    /// Vault key ID of the Partition Trust Anchor ML-DSA-87 seed.
+    pta_mldsa_seed_key_id: Option<HsmKeyId>,
+
     /// Vault key ID of the Partition Unique Machine Secret (UMS),
     /// bound by `PartInit`.  `None` until the one-shot
     /// [`HsmPartitionManager::part_set_ums_key`] succeeds; cleared on
@@ -325,6 +333,7 @@ impl Default for PartitionEntry {
             res_mask: 0,
             id: [0u8; PART_ID_LEN],
             id_key_id: None,
+            id_mldsa_seed_key_id: None,
             leaf_cert: [0u8; MAX_CERT_DER_LEN],
             leaf_cert_len: 0,
             session_table: SessionTable::new(),
@@ -350,6 +359,7 @@ impl Default for PartitionEntry {
             psk_co: None,
             psk_cu: None,
             pta_key_id: None,
+            pta_mldsa_seed_key_id: None,
             ups_key_id: None,
             local_mk_key_id: None,
             ephemeral_mk_key_id: None,
@@ -721,13 +731,22 @@ impl StdHsmPal {
             )
             .await;
 
+        let id_result = match id_result {
+            Ok(id_kid) => self
+                .create_internal_mldsa_seed(idx as u8)
+                .await
+                .map(|seed_kid| (id_kid, seed_kid)),
+            Err(e) => Err(e),
+        };
+
         // Commit or rollback.
         let table = self.table_mut();
         let entry = &mut table.entries[idx];
         match id_result {
-            Ok(id_kid) => {
+            Ok((id_kid, seed_kid)) => {
                 entry.id = id;
                 entry.id_key_id = Some(id_kid);
+                entry.id_mldsa_seed_key_id = Some(seed_kid);
             }
             Err(e) => {
                 // Rollback: release resources.
@@ -748,6 +767,7 @@ impl StdHsmPal {
             entry.res_mask = 0;
             entry.vault = KeyVault::new(0);
             entry.id_key_id = None;
+            entry.id_mldsa_seed_key_id = None;
             return Err(e);
         }
 
@@ -831,9 +851,11 @@ impl StdHsmPal {
                     &mut id_pub,
                 )
                 .await?;
+            let seed_kid = self.create_internal_mldsa_seed(pid).await?;
             let table = self.table_mut();
             let entry = &mut table.entries[idx];
             entry.id_key_id = Some(id_kid);
+            entry.id_mldsa_seed_key_id = Some(seed_kid);
             // Rebuild the leaf certificate against the fresh identity key.
             entry.leaf_cert[..entry.leaf_cert_len].fill(0);
             entry.leaf_cert_len = 0;
@@ -1049,6 +1071,40 @@ impl StdHsmPal {
         entry.vault.create(&key_blob, kind, None, attrs)
     }
 
+    /// Generate a random ML-DSA-87 seed (with sign/verify PCT) and store it
+    /// in partition `pid`'s vault as the identity ML-DSA seed.
+    async fn create_internal_mldsa_seed(&self, pid: u8) -> HsmResult<HsmKeyId> {
+        let slot = self.iic.pool().alloc().await;
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(pid), slot, tx);
+        let mut seed = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
+        let result = async {
+            let buf = self.dma_alloc(&io, MLDSA_SEED_LEN)?;
+            self.mldsa_gen_seed(
+                &io,
+                HsmMlDsaParamSet::MlDsa87,
+                HsmMlDsaPct::SignVerify,
+                Some(buf),
+            )
+            .await?;
+            seed.copy_from_slice(&buf[..MLDSA_SEED_LEN]);
+            Ok::<_, HsmError>(())
+        }
+        .await;
+        drop(io);
+        self.iic.pool().free(slot);
+        result?;
+
+        let attrs = HsmVaultKeyAttrs::new()
+            .with_internal(true)
+            .with_local(true)
+            .with_sign(true);
+        let entry = &mut self.table_mut().entries[pid as usize];
+        entry
+            .vault
+            .create(&seed[..], HsmVaultKeyKind::MlDsa87Seed, None, attrs)
+    }
+
     /// Clear all state associated with an enabled partition (internal keys,
     /// nonce, vault keys, sessions, boot-key material, BK3 state).  Does
     /// NOT change the state field.
@@ -1090,11 +1146,13 @@ impl StdHsmPal {
         drop_key(&mut entry.vault, &mut entry.mk_key_id);
         drop_key(&mut entry.vault, &mut entry.unwrapping_key_id);
         drop_key(&mut entry.vault, &mut entry.pta_key_id);
+        drop_key(&mut entry.vault, &mut entry.pta_mldsa_seed_key_id);
         drop_key(&mut entry.vault, &mut entry.ups_key_id);
         drop_key(&mut entry.vault, &mut entry.local_mk_key_id);
         drop_key(&mut entry.vault, &mut entry.ephemeral_mk_key_id);
         drop_key(&mut entry.vault, &mut entry.sd_mk_key_id);
         entry.id_key_id = None;
+        entry.id_mldsa_seed_key_id = None;
 
         // Public-key mirrors and other non-secret fixed buffers.
         entry.establish_cred_pub_key.fill(0);
@@ -1234,9 +1292,11 @@ impl PartitionEntry {
             HsmPartPropId::BK3_INITIALIZED => Ok(u32::from(self.bk3_initialized)),
             HsmPartPropId::SD_INITIALIZED => Ok(u32::from(self.sd_initialized)),
             HsmPartPropId::PART_ID_ECC_KEY_ID => key_id_to_u32(self.id_key_id),
+            HsmPartPropId::PART_ID_MLDSA_SEED_KEY_ID => key_id_to_u32(self.id_mldsa_seed_key_id),
             HsmPartPropId::MK_KEY_ID => key_id_to_u32(self.mk_key_id),
             HsmPartPropId::UPS_KEY_ID => key_id_to_u32(self.ups_key_id),
             HsmPartPropId::PTA_KEY_ID => key_id_to_u32(self.pta_key_id),
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => key_id_to_u32(self.pta_mldsa_seed_key_id),
             HsmPartPropId::RSA_UNWRAPPING_KEY_ID => key_id_to_u32(self.unwrapping_key_id),
             HsmPartPropId::SESSION_ENC_KEY_ID => key_id_to_u32(self.session_enc_key_id),
             HsmPartPropId::ESTABLISH_CRED_KEY_ID => key_id_to_u32(self.establish_cred_key_id),
@@ -1273,6 +1333,10 @@ impl PartitionEntry {
                 // Raw mechanism; write-once is upper-layer policy
                 // (`part_state::part_set_pta_key_id`).
                 self.pta_key_id = Some(HsmKeyId::from(value as u16));
+                Ok(())
+            }
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => {
+                self.pta_mldsa_seed_key_id = Some(HsmKeyId::from(value as u16));
                 Ok(())
             }
             HsmPartPropId::SESSION_ENC_KEY_ID => {
@@ -1329,7 +1393,7 @@ impl PartitionEntry {
                 self.sd_initialized = want;
                 Ok(())
             }
-            // GEN/SVN/RES_COUNT/PART_ID_ECC_KEY_ID are Ro
+            // GEN/SVN/RES_COUNT/PART_ID_ECC_KEY_ID/PART_ID_MLDSA_SEED_KEY_ID are Ro
             // — rejected by validate_set.  Non-scalar ids — rejected
             // by the kind check.
             _ => Err(HsmError::InvalidArg),
@@ -1495,6 +1559,10 @@ impl PartitionEntry {
             }
             HsmPartPropId::PTA_KEY_ID => {
                 self.pta_key_id = None;
+                Ok(())
+            }
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => {
+                self.pta_mldsa_seed_key_id = None;
                 Ok(())
             }
             HsmPartPropId::SESSION_ENC_KEY_ID => {

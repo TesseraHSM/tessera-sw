@@ -126,7 +126,8 @@ const RESERVED3_LEN: usize = 626
     - CREDENTIAL_LEN
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
-    - 2; // session_meta (pending_mask + psk_change_mask)
+    - 2 // session_meta (pending_mask + psk_change_mask)
+    - 2 * 2; // ML-DSA seed handles (identity + PTA)
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -426,6 +427,10 @@ struct Storage {
     // psk_change_mask (bit N set once slot N has consumed its one
     // allowed PSK change). Owned by the session_store driver.
     session_meta: [u8; 2],
+    // ML-DSA-87 seed vault handles (identity, PTA). Unshadowed: read
+    // straight from GSRAM, absent = `KEY_ABSENT`.
+    id_mldsa_seed_key_id: [u8; 2],
+    pta_mldsa_seed_key_id: [u8; 2],
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -625,6 +630,8 @@ impl Partition {
         slot.ephemeral_mk_key_id = absent;
         slot.sd_mk_key_id = absent;
         slot.unwrapping_key_id = absent;
+        slot.id_mldsa_seed_key_id = absent;
+        slot.pta_mldsa_seed_key_id = absent;
     }
 
     /// Zeroes the provisioned identity and drops its key handle.
@@ -632,6 +639,7 @@ impl Partition {
     pub fn clear_identity(mut self) {
         self.id_mut().fill(0);
         self.set_id_key_id(None);
+        self.set_id_mldsa_seed_key_id(None);
         self.slot_mut()
             .partition_identifier
             .reserved_pub_key
@@ -680,6 +688,7 @@ impl Partition {
         self.set_mk_key_id(None);
         self.set_ups_key_id(None);
         self.set_pta_key_id(None);
+        self.set_pta_mldsa_seed_key_id(None);
         self.set_local_mk_key_id(None);
         self.set_ephemeral_mk_key_id(None);
         self.set_sd_mk_key_id(None);
@@ -1273,6 +1282,30 @@ impl Partition {
     #[inline(never)]
     pub fn set_pta_key_id(mut self, key: Option<HsmKeyId>) {
         self.slot_mut().pta_key_id = write_handle(key);
+    }
+
+    /// Reads the identity ML-DSA-87 seed key handle.
+    #[inline(never)]
+    pub fn id_mldsa_seed_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().id_mldsa_seed_key_id)
+    }
+
+    /// Sets (or clears) the identity ML-DSA-87 seed key handle.
+    #[inline(never)]
+    pub fn set_id_mldsa_seed_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().id_mldsa_seed_key_id = write_handle(key);
+    }
+
+    /// Reads the PTA ML-DSA-87 seed key handle.
+    #[inline(never)]
+    pub fn pta_mldsa_seed_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().pta_mldsa_seed_key_id)
+    }
+
+    /// Sets (or clears) the PTA ML-DSA-87 seed key handle.
+    #[inline(never)]
+    pub fn set_pta_mldsa_seed_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().pta_mldsa_seed_key_id = write_handle(key);
     }
 
     /// Reads the RSA unwrapping key handle.
