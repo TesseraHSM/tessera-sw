@@ -10,6 +10,8 @@
 //! | Submodule | Trait                | Hardware backend |
 //! |-----------|----------------------|------------------|
 //! | [`aes`]   | [`HsmAes`], [`HsmAesGcm`] | AES core   |
+//! | [`gcm_sgl`] | [`HsmAesGcm`] (SGL)  | AES core + GDMA |
+//! | [`xts`]   | [`HsmAesXts`]         | AES core + GDMA |
 //! | [`kw`]    | [`HsmAesKw`]          | AES core        |
 //! | [`hash`]  | [`HsmHash`]           | SHA core        |
 //! | [`hmac`]  | [`HsmHmac`]           | SHA core        |
@@ -30,6 +32,7 @@
 //! [`HsmAes`]: tsra_fw_hsm_pal_traits::HsmAes
 //! [`HsmAesGcm`]: tsra_fw_hsm_pal_traits::HsmAesGcm
 //! [`HsmAesKw`]: tsra_fw_hsm_pal_traits::HsmAesKw
+//! [`HsmAesXts`]: tsra_fw_hsm_pal_traits::HsmAesXts
 //! [`HsmHash`]: tsra_fw_hsm_pal_traits::HsmHash
 //! [`HsmHmac`]: tsra_fw_hsm_pal_traits::HsmHmac
 //! [`HsmKdf`]: tsra_fw_hsm_pal_traits::HsmKdf
@@ -50,7 +53,8 @@ mod gcm;
 mod gcm_bcp;
 #[cfg(not(feature = "bulk_crypto"))]
 use gcm_bcp as gcm;
-mod ghash;
+mod gcm_sgl;
+use tsra_fw_uno_aes_sgl::ghash;
 #[allow(unsafe_code)]
 mod hash;
 mod hmac;
@@ -62,6 +66,7 @@ mod mldsa;
 #[allow(unsafe_code)]
 mod rng;
 mod rsa;
+mod xts;
 
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 
