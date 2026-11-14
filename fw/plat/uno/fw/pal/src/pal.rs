@@ -512,6 +512,11 @@ pub struct UnoHsmPal {
     /// Per host IO slot: what finishing a detached IO still needs.
     pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
 
+    /// Per host IO slot: the session key blob its sealed request was opened
+    /// with, for its response to be sealed with (see
+    /// [`session_key_blob`](Self::session_key_blob)).
+    pub(crate) io_session_key: [Cell<Option<crate::vault::SessionKeyBlob>>; IO_SQ_COUNT as usize],
+
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
 
@@ -761,6 +766,7 @@ impl Default for UnoHsmPal {
             io_in_flight: Cell::new(0),
             bulk_io_in_flight: Cell::new(0),
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
+            io_session_key: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),

@@ -864,6 +864,7 @@ impl UnoHsmPal {
             HsmIoKind::Cmd => {
                 reset_io_alloc(self, index);
                 if (index as u32) < IO_SQ_COUNT {
+                    self.io_session_key[index as usize].set(None);
                     copy_sqe(index as usize);
                     // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.
                     let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] };
