@@ -59,6 +59,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_TAG_LEN;
+use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_bcp::GcmCompletion;
 use tsra_fw_uno_drivers_gdma::MemInterface;
@@ -218,13 +219,33 @@ enum Prefetch {
     None,
     /// Copied into the exchange buffer at the start of the slot's DMA heap.
     Done,
+    /// Copied, and, sealed, opened there in place: authenticated and
+    /// decrypted.
+    Opened,
     /// The copy failed.
     Failed,
+    /// Copied, but sealed, and failed to open: the frame did not
+    /// authenticate (its text is wiped).
+    OpenFailed,
 }
 
 /// Marks the cookie of a detached GDMA copy as a request prefetch, rather
 /// than a reply copy, of the slot in the low bits.
 const PREFETCH_COOKIE: u16 = 0x8000;
+
+/// Marks the cookie of a request prefetch as that of a sealed request, which
+/// the run loop opens once it is copied in.
+const SEALED_PREFETCH_COOKIE: u16 = 0x4000;
+
+/// Per host IO slot: the tag its sealed request carries, while the run loop
+/// opens the request (see [`UnoHsmPal::open_request`]). Outside the PAL, so
+/// as not to grow it.
+static OPEN_TAG: SingleCell<[[u8; SESSION_TRANSPORT_TAG_LEN]; IO_SQ_COUNT as usize]> =
+    SingleCell::new([[0; SESSION_TRANSPORT_TAG_LEN]; IO_SQ_COUNT as usize]);
+
+/// Marks the cookie of a detached BCP command as a request open, rather than
+/// a reply seal, of the slot in the low bits.
+const OPEN_COOKIE: u16 = 0x4000;
 
 /// Takes a host IO the run loop received (see
 /// [`UnoHsmPal::set_io_dispatch`]) to the task that serves its slot. It runs
@@ -439,10 +460,11 @@ impl HsmIoController for UnoHsmPal {
                 .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
                 buf
             }
-            Prefetch::Done => {
+            Prefetch::Done | Prefetch::Opened => {
                 crate::alloc::prefetched_exchange(self, io.index, len.next_multiple_of(4))?
             }
             Prefetch::Failed => return Err(HsmError::FailedToStartDmaTransaction),
+            Prefetch::OpenFailed => return Err(HsmError::SessionTransportError),
         };
         let resp_capacity = sqe.dst_len() as usize;
         let Some(id) = sealed_id else {
@@ -452,7 +474,11 @@ impl HsmIoController for UnoHsmPal {
                 resp_capacity,
             });
         };
-        let len = sealed::sealed_open(self, io, id, &mut buf.buffer_mut()[..len]).await?;
+        let len = if io.prefetch == Prefetch::Opened {
+            sealed::sealed_opened_len(&buf.buffer_mut()[..len])?
+        } else {
+            sealed::sealed_open(self, io, id, &mut buf.buffer_mut()[..len]).await?
+        };
         Ok(HsmRequest {
             buf,
             len,
@@ -770,7 +796,11 @@ impl UnoHsmPal {
                 self.retry_sealed_copies();
             }
             if cookie & PREFETCH_COOKIE != 0 {
-                self.finish_prefetch(cookie & !PREFETCH_COOKIE, ok);
+                if cookie & SEALED_PREFETCH_COOKIE != 0 {
+                    self.finish_sealed_prefetch(cookie & !(PREFETCH_COOKIE | SEALED_PREFETCH_COOKIE), ok);
+                } else {
+                    self.finish_prefetch(cookie & !PREFETCH_COOKIE, ok);
+                }
                 continue;
             }
             let index = cookie;
@@ -806,8 +836,12 @@ impl UnoHsmPal {
     /// the run loop's pass.
     #[inline(never)]
     fn finish_detached_seals(&self) {
-        while let Some((index, done)) = self.bcp.take_detached() {
-            self.finish_seal(index, done);
+        while let Some((cookie, done)) = self.bcp.take_detached() {
+            if cookie & OPEN_COOKIE != 0 {
+                self.finish_open(cookie & !OPEN_COOKIE, done);
+            } else {
+                self.finish_seal(cookie, done);
+            }
         }
     }
 
@@ -956,10 +990,13 @@ impl UnoHsmPal {
     /// before touching its request), or the copy cannot start.
     fn prefetch_request(&self, io: UnoHsmIo) -> Option<UnoHsmIo> {
         let index = io.index;
-        if index as u32 >= IO_SQ_COUNT
-            || io.sqe().opcode() != OP_TBOR
-            || sealed::sealed_session(io.sqe()).is_err()
-            || !PartStore::partition(io.pid).is_ok_and(|p| {
+        if index as u32 >= IO_SQ_COUNT || io.sqe().opcode() != OP_TBOR {
+            return Some(io);
+        }
+        let Ok(sealed) = sealed::sealed_session(io.sqe()) else {
+            return Some(io);
+        };
+        if !PartStore::partition(io.pid).is_ok_and(|p| {
                 matches!(
                     p.state(),
                     Ok(HsmPartState::Enabled
@@ -1001,7 +1038,13 @@ impl UnoHsmPal {
                 crate::gdma::device_dma_buf(dst, len),
                 MemInterface::Device,
                 len,
-                index | PREFETCH_COOKIE,
+                index
+                    | PREFETCH_COOKIE
+                    | if sealed.is_some() {
+                        SEALED_PREFETCH_COOKIE
+                    } else {
+                        0
+                    },
             )
             .is_err()
         {
@@ -1019,6 +1062,107 @@ impl UnoHsmPal {
             return;
         };
         io.prefetch = if ok { Prefetch::Done } else { Prefetch::Failed };
+        // Set before the first prefetch, and never cleared.
+        if let Some(dispatch) = self.io_dispatch.get() {
+            dispatch(io);
+        }
+    }
+
+    /// [`finish_prefetch`](Self::finish_prefetch) for a sealed request: keeps
+    /// the IO parked while the request is opened (see
+    /// [`open_request`](Self::open_request)), if that starts. Out of line, to
+    /// keep it out of the run loop's pass.
+    #[inline(never)]
+    fn finish_sealed_prefetch(&self, index: u16, ok: bool) {
+        let Some(mut io) = self.prefetch_io.get(index as usize).and_then(Cell::take) else {
+            return;
+        };
+        if ok && self.open_request(&io) {
+            self.prefetch_io[index as usize].set(Some(io));
+            return;
+        }
+        io.prefetch = if ok { Prefetch::Done } else { Prefetch::Failed };
+        // Set before the first prefetch, and never cleared.
+        if let Some(dispatch) = self.io_dispatch.get() {
+            dispatch(io);
+        }
+    }
+
+    /// Starts opening the sealed request just copied in for `io`, in place,
+    /// as [`sealed_open`](sealed::sealed_open) would, with a detached BCP
+    /// command, whose completion [`finish_open`](Self::finish_open) judges:
+    /// the IO's task then wakes once, to the opened request. Returns whether
+    /// it started; if not, the task opens it.
+    fn open_request(&self, io: &UnoHsmIo) -> bool {
+        let Ok(Some(id)) = sealed::sealed_session(io.sqe()) else {
+            return false;
+        };
+        let len = io.sqe().view().src_len() as usize;
+        let Some(ct_len) = len
+            .checked_sub(sealed::SEALED_TRAILER_LEN)
+            .filter(|&n| n != 0 && n % sealed::SEALED_BLOCK_LEN == 0)
+        else {
+            return false;
+        };
+        let Ok(key) = self.session_transport_key(io, id, HsmSessionTransportDir::H2m) else {
+            return false;
+        };
+        let Ok(mut buf) =
+            crate::alloc::prefetched_exchange(self, io.index, len.next_multiple_of(4))
+        else {
+            return false;
+        };
+        let (ct, trailer) = buf.buffer_mut()[..len].split_at_mut(ct_len);
+        // The trailer, `iv ‖ tag`, in one burst out of DMA memory.
+        let Some(words) = trailer.read_words::<7>() else {
+            return false;
+        };
+        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        let mut tag = [0u8; SESSION_TRANSPORT_TAG_LEN];
+        for (bytes, word) in iv.as_chunks_mut::<4>().0.iter_mut().zip(&words[..3]) {
+            *bytes = word.to_ne_bytes();
+        }
+        for (bytes, word) in tag.as_chunks_mut::<4>().0.iter_mut().zip(&words[3..]) {
+            *bytes = word.to_ne_bytes();
+        }
+        if self
+            .gcm_decrypt_detached(key, &iv, &tag, ct, io.index | OPEN_COOKIE)
+            .is_err()
+        {
+            return false;
+        }
+        OPEN_TAG.with(|tags| {
+            if let Some(slot) = tags.get_mut(io.index as usize) {
+                *slot = tag;
+            }
+        });
+        true
+    }
+
+    /// Hands on the IO whose request [`open_request`](Self::open_request)
+    /// opened, marked with whether it authenticated; one that did not has
+    /// its text wiped, as a failed `sealed_open` leaves it.
+    fn finish_open(&self, index: u16, done: HsmResult<GcmCompletion>) {
+        let Some(mut io) = self.prefetch_io.get(index as usize).and_then(Cell::take) else {
+            return;
+        };
+        let ok = OPEN_TAG
+            .with(|tags| tags.get(index as usize).copied())
+            .is_some_and(|tag| Self::gcm_opened(&tag, done));
+        if !ok {
+            let len = io.sqe().view().src_len() as usize;
+            if let Ok(mut buf) =
+                crate::alloc::prefetched_exchange(self, index, len.next_multiple_of(4))
+            {
+                let ct_len = len.saturating_sub(sealed::SEALED_TRAILER_LEN);
+                buf.buffer_mut()[..ct_len].fill(0);
+            }
+        }
+        io.prefetch = if ok {
+            Prefetch::Opened
+        } else {
+            Prefetch::OpenFailed
+        };
         // Set before the first prefetch, and never cleared.
         if let Some(dispatch) = self.io_dispatch.get() {
             dispatch(io);

@@ -215,6 +215,22 @@ where
         .map_err(|_| HsmError::SessionTransportError)
 }
 
+/// Message length of `frame` once opened in place, as [`sealed_open`]
+/// opens it, by a platform that opened it itself: its padding checked.
+///
+/// # Errors
+///
+/// [`HsmError::SessionTransportError`] if the frame is malformed or the
+/// padding is invalid.
+pub fn sealed_opened_len(frame: &HsmDmaBuf) -> HsmResult<usize> {
+    let ct_len = frame
+        .len()
+        .checked_sub(SEALED_TRAILER_LEN)
+        .filter(|&n| n != 0 && n % SEALED_BLOCK_LEN == 0)
+        .ok_or(HsmError::SessionTransportError)?;
+    unpad(&frame[..ct_len]).ok_or(HsmError::SessionTransportError)
+}
+
 /// Message length of the padded plaintext `pt`, whole blocks, or `None` if
 /// its padding is invalid.
 ///

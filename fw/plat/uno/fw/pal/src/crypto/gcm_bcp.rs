@@ -549,6 +549,53 @@ impl UnoHsmPal {
         )
     }
 
+    /// Starts decrypting `data` in place under `key` and `iv` against `tag`,
+    /// AES-256-GCM with no AAD, as a detached BCP command, as
+    /// [`gcm_encrypt_detached`](Self::gcm_encrypt_detached) encrypts; its
+    /// completion is judged by [`gcm_opened`](Self::gcm_opened).
+    ///
+    /// # Errors
+    ///
+    /// As [`gcm_encrypt_detached`](Self::gcm_encrypt_detached).
+    pub(crate) fn gcm_decrypt_detached(
+        &self,
+        key: &HsmDmaBuf,
+        iv: &[u8; GCM_IV_LEN],
+        tag: &Block,
+        data: &mut HsmDmaBuf,
+        cookie: u16,
+    ) -> HsmResult<()> {
+        if key.len() != BCP_KEY_LEN
+            || data.is_empty()
+            || !data.len().is_multiple_of(AES_BLOCK_SIZE)
+            || data.len() > BCP_MAX_SRC_LEN
+            || !is_aligned(data)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let iv = AlignedIv(*iv);
+        self.service_pka();
+        self.bcp.gcm_detached(
+            GcmRequest {
+                op: GcmOp::Decrypt,
+                key,
+                iv: &iv.0,
+                aad_len: 0,
+                unpadded_aad_len: 0,
+                tag,
+                data: GcmData::InPlace(data),
+            },
+            cookie,
+        )
+    }
+
+    /// Whether the completion of a decrypt that
+    /// [`gcm_decrypt_detached`](Self::gcm_decrypt_detached) started against
+    /// `tag` authenticates it, as [`gcm_run`](Self::gcm_run) judges one.
+    pub(crate) fn gcm_opened(tag: &Block, done: HsmResult<GcmCompletion>) -> bool {
+        verdict(Dir::Decrypt(tag), tag, done).is_ok()
+    }
+
     /// AES-256-GCM decrypt from `ciphertext` into `plaintext`, both
     /// `[padded_AAD | text]`. On a tag mismatch the plaintext text is
     /// wiped.
