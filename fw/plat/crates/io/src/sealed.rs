@@ -201,12 +201,16 @@ where
     let key = pal
         .session_transport_key(io, id, HsmSessionTransportDir::M2h)
         .map_err(|_| HsmError::SessionTransportError)?;
-    let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
-    match pal.session_reply_iv(io, id) {
-        Some(next) => iv.copy_from_slice(&next),
-        None => pal.rng_fill_bytes(io, iv)?,
-    }
-    pal.gcm_encrypt_in_place(io, key, iv, 0, pt, tag)
+    let (iv_out, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
+    let iv = match pal.session_reply_iv(io, id) {
+        Some(next) => next,
+        None => {
+            let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+            pal.rng_fill_bytes(io, &mut iv)?;
+            iv
+        }
+    };
+    pal.gcm_encrypt_in_place_with_iv(io, key, &iv, iv_out, 0, pt, tag)
         .await
         .map_err(|_| HsmError::SessionTransportError)
 }

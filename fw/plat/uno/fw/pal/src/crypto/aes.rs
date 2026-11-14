@@ -619,6 +619,28 @@ impl HsmAesGcm for UnoHsmPal {
             .await
     }
 
+    /// AES-GCM encrypt in place under an IV the CPU holds: the engine is
+    /// fed the IV from `iv`, not read back out of `iv_out`.
+    #[cfg(not(feature = "bulk_crypto"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_encrypt_in_place_with_iv(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &[u8; GCM_IV_LEN],
+        iv_out: &mut HsmDmaBuf,
+        aad_len: usize,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        if iv_out.len() != GCM_IV_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        iv_out.copy_from_slice(iv);
+        self.gcm_encrypt_in_place_iv_impl(io, key, iv, aad_len, data, tag)
+            .await
+    }
+
     /// AES-GCM decrypt using AES-CTR plus software GHASH.
     #[allow(clippy::too_many_arguments)]
     async fn gcm_decrypt(

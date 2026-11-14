@@ -116,6 +116,37 @@ pub trait HsmAesGcm: HsmIoTypes {
         tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
+    /// AES-GCM encrypt in place, as
+    /// [`gcm_encrypt_in_place`](Self::gcm_encrypt_in_place), under the IV
+    /// `iv`, which is also written to `iv_out` for the caller to send with
+    /// the ciphertext.
+    ///
+    /// A platform that feeds its engine the IV through the CPU takes it
+    /// from `iv` rather than read it back out of DMA memory.
+    ///
+    /// # Returns
+    ///
+    /// - `Err(HsmError::InvalidArg)` — `iv_out` is not 12 bytes long.
+    /// - Otherwise as [`gcm_encrypt_in_place`](Self::gcm_encrypt_in_place).
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_encrypt_in_place_with_iv(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        iv: &[u8; 12],
+        iv_out: &mut HsmDmaBuf,
+        aad_len: usize,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        if iv_out.len() != iv.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        iv_out.copy_from_slice(iv);
+        self.gcm_encrypt_in_place(io, key, iv_out, aad_len, data, tag)
+            .await
+    }
+
     /// AES-GCM decrypt with separate input/output buffers.
     ///
     /// Decrypts the text portion of `ciphertext` using AES-GCM and writes

@@ -169,6 +169,17 @@ fn engine_buf<S: HsmScopedAlloc>(scope: &S, len: usize) -> HsmResult<&mut HsmDma
     Ok(&mut raw[off..off + len])
 }
 
+/// A GCM IV kept word-aligned: the engine's descriptor takes it with one
+/// burst, where an unaligned one goes in a word at a time through `memcpy`.
+#[repr(C, align(4))]
+struct AlignedIv([u8; GCM_IV_LEN]);
+
+/// `iv` as a GCM IV, if it is one's length.
+fn gcm_iv(iv: &HsmDmaBuf) -> HsmResult<&[u8; GCM_IV_LEN]> {
+    let iv: &[u8] = iv;
+    iv.try_into().map_err(|_| HsmError::InvalidArg)
+}
+
 fn is_aligned(buf: &HsmDmaBuf) -> bool {
     buf.as_ptr().align_offset(BCP_ADDR_ALIGN) == 0
 }
@@ -248,7 +259,7 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
-        iv: &HsmDmaBuf,
+        iv: &[u8; GCM_IV_LEN],
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
@@ -256,8 +267,6 @@ impl UnoHsmPal {
         if key.len() != BCP_KEY_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let iv: &[u8] = iv;
-        let iv: &[u8; GCM_IV_LEN] = iv.try_into().map_err(|_| HsmError::InvalidArg)?;
         let len = bufs.src().len();
         let pad = padded_aad_len(aad_len);
         let text_len = len
@@ -452,7 +461,7 @@ impl UnoHsmPal {
             dst,
         };
         let t = self
-            .gcm_run(io, key, iv, aad_len, Dir::Encrypt, bufs)
+            .gcm_run(io, key, gcm_iv(iv)?, aad_len, Dir::Encrypt, bufs)
             .await?;
         tag.copy_from_slice(&t.0);
         Ok(())
@@ -468,11 +477,28 @@ impl UnoHsmPal {
         data: &mut HsmDmaBuf,
         tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        self.gcm_encrypt_in_place_iv_impl(io, key, gcm_iv(iv)?, aad_len, data, tag)
+            .await
+    }
+
+    /// AES-256-GCM encrypt in place over `[padded_AAD | text]` under an IV
+    /// the CPU holds, which the engine takes from a word-aligned copy (see
+    /// [`AlignedIv`]).
+    pub(super) async fn gcm_encrypt_in_place_iv_impl(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &[u8; GCM_IV_LEN],
+        aad_len: usize,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
         }
+        let iv = AlignedIv(*iv);
         let t = self
-            .gcm_run(io, key, iv, aad_len, Dir::Encrypt, Bufs::InPlace(data))
+            .gcm_run(io, key, &iv.0, aad_len, Dir::Encrypt, Bufs::InPlace(data))
             .await?;
         tag.copy_from_slice(&t.0);
         Ok(())
@@ -502,7 +528,7 @@ impl UnoHsmPal {
             src: ciphertext,
             dst,
         };
-        self.gcm_run(io, key, iv, aad_len, Dir::Decrypt(tag), bufs)
+        self.gcm_run(io, key, gcm_iv(iv)?, aad_len, Dir::Decrypt(tag), bufs)
             .await
             .map(|_| ())
     }
@@ -520,9 +546,16 @@ impl UnoHsmPal {
     ) -> HsmResult<()> {
         let tag: &[u8] = tag;
         let tag: &Block = tag.try_into().map_err(|_| HsmError::InvalidArg)?;
-        self.gcm_run(io, key, iv, aad_len, Dir::Decrypt(tag), Bufs::InPlace(data))
-            .await
-            .map(|_| ())
+        self.gcm_run(
+            io,
+            key,
+            gcm_iv(iv)?,
+            aad_len,
+            Dir::Decrypt(tag),
+            Bufs::InPlace(data),
+        )
+        .await
+        .map(|_| ())
     }
 }
 
