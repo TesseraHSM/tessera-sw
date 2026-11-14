@@ -183,12 +183,15 @@ mod tests {
     use tsra_ddi_interface::DdiDeviceModel;
     use tsra_ddi_interface::DdiError;
     use tsra_ddi_interface::DdiTransportSeal;
+    use tsra_ddi_interface::TborOobItem;
     use tsra_ddi_mbor_types::*;
     use tsra_ddi_sock::DdiSock;
     use tsra_ddi_sock::DdiSockDev;
     use tsra_ddi_sock_proto::OobItem;
     use tsra_ddi_sock_proto::Request;
     use tsra_ddi_sock_proto::RequestFrame;
+    use tsra_ddi_tbor_types::CERT_BANK_ECC;
+    use tsra_ddi_tbor_types::CERT_MAX_LEN;
     use tsra_ddi_tbor_types::SESSION_SEED_LEN;
     use tsra_ddi_tbor_types::TborApiRevReq;
     use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
@@ -220,9 +223,17 @@ mod tests {
         device: &DdiSockDev,
         psk_id: u8,
     ) -> (TborSessionOpenFinishReq, Vec<u8>) {
-        let chain = tbor(device, &TborGetCertChainInfoReq::new(0));
-        let leaf = tbor(device, &TborGetCertReq::new(0, chain.num_certs - 1));
-        let cert = X509Certificate::from_der(&leaf.certificate).expect("partition certificate");
+        let chain = tbor(device, &TborGetCertChainInfoReq::new(0, CERT_BANK_ECC));
+        let mut der = vec![0u8; CERT_MAX_LEN];
+        let leaf = device
+            .exec_op_tbor(
+                &TborGetCertReq::new(0, CERT_BANK_ECC, chain.num_certs - 1),
+                &mut [TborOobItem::Out(&mut der)],
+                &mut None,
+            )
+            .expect("TBOR GetCertificate");
+        der.truncate(usize::from(leaf.cert_len.get()));
+        let cert = X509Certificate::from_der(&der).expect("partition certificate");
         let pk_hsm =
             EccPublicKey::from_bytes(&cert.get_public_key_der().expect("partition public key"))
                 .expect("decode partition public key");
@@ -1047,7 +1058,10 @@ mod tests {
             // idle-wait deadline; the "idle" connection sends nothing further
             // from here on.
             active_device = tokio::task::spawn_blocking(move || {
-                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+                tbor(
+                    &active_device,
+                    &TborGetCertChainInfoReq::new(0, CERT_BANK_ECC),
+                );
                 active_device
             })
             .await
@@ -1085,7 +1099,10 @@ mod tests {
             // The surviving session must still be fully usable, not merely
             // present in the ownership map.
             tokio::task::spawn_blocking(move || {
-                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+                tbor(
+                    &active_device,
+                    &TborGetCertChainInfoReq::new(0, CERT_BANK_ECC),
+                );
             })
             .await
             .expect("active session still usable after the peer's idle disconnect");

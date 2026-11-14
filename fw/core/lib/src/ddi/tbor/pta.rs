@@ -10,7 +10,6 @@ use tsra_fw_core_crypto_x509_builder::cert_builder::LeafCertParams;
 use tsra_fw_core_crypto_x509_builder::csr;
 use tsra_fw_core_crypto_x509_chain::key_usage;
 use tsra_fw_core_crypto_x509_chain::CertInfo;
-use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -217,6 +216,9 @@ pub fn subject_cn(digest: &[u8; 48]) -> [u8; csr::SUBJECT_CN_LEN] {
     cn
 }
 
+/// Scratch bound for a PTA-signed P-384 PID leaf.
+const PID_CERT_MAX_LEN: usize = 2048;
+
 /// Generate one PTA-signed PID leaf for this request, without caching it.
 pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
@@ -225,7 +227,7 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     if part_state::part_state(pal, io)? != HsmPartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
-    let out = pal.dma_alloc(io, CERT_MAX_LEN)?;
+    let out = pal.dma_alloc(io, PID_CERT_MAX_LEN)?;
     let len = pal
         .alloc_scoped_async(io, async |alloc| {
             let key_id = part_state::part_pta_key_id(pal, io)?;

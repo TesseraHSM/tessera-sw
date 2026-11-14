@@ -38,10 +38,12 @@ use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevResp;
+use tsra_ddi_tbor_types::TborGetCertReq;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_MAX_LEN;
 
 use crate::api_rev::helper_api_rev_tbor;
 use crate::assertions::assert_fw_rejects;
@@ -184,6 +186,35 @@ impl TestCtx {
     ) -> DdiResult<R::OpResp> {
         let mut cookie = None;
         self.dev.exec_op_tbor(req, oob_items, &mut cookie)
+    }
+
+    /// Fetch certificate `cert_id` of `bank` in chain `slot_id`. The DER
+    /// rides out-of-band item 0 into a [`CERT_MAX_LEN`] buffer.
+    pub fn get_cert(&self, slot_id: u8, bank: u8, cert_id: u8) -> DdiResult<Vec<u8>> {
+        let mut cert = vec![0u8; CERT_MAX_LEN];
+        let resp = self.tbor_oob_io(
+            &TborGetCertReq::new(slot_id, bank, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
+        )?;
+        cert.truncate(usize::from(resp.cert_len.get()));
+        Ok(cert)
+    }
+
+    /// [`Self::expect_fw_reject`] for [`Self::get_cert`].
+    #[track_caller]
+    pub fn expect_get_cert_reject(
+        &self,
+        slot_id: u8,
+        bank: u8,
+        cert_id: u8,
+        expected: TborStatus,
+    ) -> DdiError {
+        let mut cert = vec![0u8; CERT_MAX_LEN];
+        self.expect_fw_reject_oob_io(
+            &TborGetCertReq::new(slot_id, bank, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
+            expected,
+        )
     }
 
     /// The status the device reports for `req` when firmware would

@@ -56,10 +56,11 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
-use tsra_ddi_tbor_types::TborGetCertReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborPartInfoResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_BANK_ECC;
+use tsra_ddi_tbor_types::CERT_BANK_MLDSA;
 use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use x509::X509Certificate;
@@ -82,7 +83,10 @@ const PART_STATE_INITIALIZED: u8 = 5;
 fn slot2_pid_cert_after_finalization() {
     let ctx = TestCtx::new();
     // Slot 2 is empty until the partition is finalized.
-    ctx.expect_fw_reject(&TborGetCertChainInfoReq::new(2), TborStatus::InvalidArg);
+    ctx.expect_fw_reject(
+        &TborGetCertChainInfoReq::new(2, CERT_BANK_ECC),
+        TborStatus::InvalidArg,
+    );
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let pota = CaKey::generate();
@@ -93,28 +97,27 @@ fn slot2_pid_cert_after_finalization() {
     let chain = make_pta_chain_csr_subject(&pota, &init.pta_csr);
 
     // Still empty before finalization completes.
-    ctx.expect_fw_reject(&TborGetCertChainInfoReq::new(2), TborStatus::InvalidArg);
+    ctx.expect_fw_reject(
+        &TborGetCertChainInfoReq::new(2, CERT_BANK_ECC),
+        TborStatus::InvalidArg,
+    );
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
     let info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(2))
+        .tbor(&TborGetCertChainInfoReq::new(2, CERT_BANK_ECC))
         .expect("slot 2 metadata");
     assert_eq!(info.num_certs, 1);
 
-    let first = ctx
-        .tbor(&TborGetCertReq::new(2, 0))
-        .expect("slot 2 index 0");
-    let second = ctx
-        .tbor(&TborGetCertReq::new(2, 0))
-        .expect("regenerated PID");
+    let first = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("slot 2 index 0");
+    let second = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("regenerated PID");
     assert_ne!(
-        first.certificate, second.certificate,
+        first, second,
         "each slot-2 read must regenerate a fresh PID leaf",
     );
 
     let fresh_info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(2))
+        .tbor(&TborGetCertChainInfoReq::new(2, CERT_BANK_ECC))
         .expect("fresh thumbprint");
     assert_eq!(fresh_info.num_certs, 1);
     assert_ne!(
@@ -123,8 +126,17 @@ fn slot2_pid_cert_after_finalization() {
     );
 
     // Only cert index 0 exists at slot 2, and slot 1 is still unused.
-    ctx.expect_fw_reject(&TborGetCertReq::new(2, 1), TborStatus::InvalidArg);
-    ctx.expect_fw_reject(&TborGetCertChainInfoReq::new(1), TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(2, CERT_BANK_ECC, 1, TborStatus::InvalidArg);
+    ctx.expect_fw_reject(
+        &TborGetCertChainInfoReq::new(1, CERT_BANK_ECC),
+        TborStatus::InvalidArg,
+    );
+    // The PTA chain has no ML-DSA bank yet.
+    ctx.expect_get_cert_reject(2, CERT_BANK_MLDSA, 0, TborStatus::InvalidArg);
+    ctx.expect_fw_reject(
+        &TborGetCertChainInfoReq::new(2, CERT_BANK_MLDSA),
+        TborStatus::InvalidArg,
+    );
 
     // The PTA/POTA issuers, leaf-last → root-first for the host validator.
     let issuers: Vec<_> = chain
@@ -134,8 +146,8 @@ fn slot2_pid_cert_after_finalization() {
         .map(|der| X509Certificate::from_der(der).expect("PTA DER"))
         .collect();
     for _ in 0..16 {
-        let fresh = ctx.tbor(&TborGetCertReq::new(2, 0)).expect("fresh PID");
-        let leaf = X509Certificate::from_der(&fresh.certificate).expect("PID DER");
+        let fresh = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("fresh PID");
+        let leaf = X509Certificate::from_der(&fresh).expect("PID DER");
         assert!(
             leaf.validate_chain(&issuers).expect("POTA/PTA/PID chain"),
             "every regenerated PID leaf must chain to the PTA/POTA anchors",
@@ -150,8 +162,6 @@ fn slot2_pid_cert_after_finalization() {
 /// This guards against a degenerate all-zero serial.
 #[test]
 fn slot2_pid_cert_serial_is_not_all_zeros() {
-    use tsra_ddi_tbor_types::TborGetCertReq;
-
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let pota = CaKey::generate();
@@ -163,10 +173,8 @@ fn slot2_pid_cert_serial_is_not_all_zeros() {
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
-    let resp = ctx
-        .tbor(&TborGetCertReq::new(2, 0))
-        .expect("slot 2 PID cert");
-    let serial = cert_serial_number(&resp.certificate);
+    let resp = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("slot 2 PID cert");
+    let serial = cert_serial_number(&resp);
 
     assert_eq!(
         serial.len(),
@@ -199,8 +207,6 @@ fn slot2_pid_cert_serial_is_not_all_zeros() {
 /// combination.
 #[test]
 fn slot2_pid_cert_basic_constraints_has_no_path_len() {
-    use tsra_ddi_tbor_types::TborGetCertReq;
-
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let pota = CaKey::generate();
@@ -212,10 +218,8 @@ fn slot2_pid_cert_basic_constraints_has_no_path_len() {
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
-    let resp = ctx
-        .tbor(&TborGetCertReq::new(2, 0))
-        .expect("slot 2 PID cert");
-    let basic_constraints = cert_basic_constraints(&resp.certificate);
+    let resp = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("slot 2 PID cert");
+    let basic_constraints = cert_basic_constraints(&resp);
 
     assert_eq!(
         basic_constraints,

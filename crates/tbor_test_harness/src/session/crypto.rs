@@ -19,6 +19,7 @@
 
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_test_helpers::helper_get_cert_chain_info;
 use tsra_ddi_mbor_test_helpers::helper_get_certificate;
 use tsra_ddi_tbor_types::*;
@@ -32,15 +33,23 @@ use crate::fixture::TestDev;
 pub fn fetch_leaf_cert_der(dev: &TestDev) -> Result<Vec<u8>, DdiError> {
     if dev.uses_session_transport() {
         let mut cookie = None;
-        let info: TborGetCertChainInfoResp =
-            dev.exec_op_tbor(&TborGetCertChainInfoReq::new(0), &mut [], &mut cookie)?;
+        let info: TborGetCertChainInfoResp = dev.exec_op_tbor(
+            &TborGetCertChainInfoReq::new(0, CERT_BANK_ECC),
+            &mut [],
+            &mut cookie,
+        )?;
         let num_certs = info.num_certs;
         if num_certs == 0 {
             return Err(DdiError::InvalidParameter);
         }
-        let leaf: TborGetCertResp =
-            dev.exec_op_tbor(&TborGetCertReq::new(0, num_certs - 1), &mut [], &mut cookie)?;
-        return Ok(leaf.certificate);
+        let mut cert = vec![0u8; CERT_MAX_LEN];
+        let leaf: TborGetCertResp = dev.exec_op_tbor(
+            &TborGetCertReq::new(0, CERT_BANK_ECC, num_certs - 1),
+            &mut [TborOobItem::Out(&mut cert)],
+            &mut cookie,
+        )?;
+        cert.truncate(usize::from(leaf.cert_len.get()));
+        return Ok(cert);
     }
     let info = helper_get_cert_chain_info(dev)?;
     let num_certs = info.data.num_certs;

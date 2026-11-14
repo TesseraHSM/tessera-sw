@@ -149,6 +149,7 @@ const STD_VM_LAUNCH_GUID: [u8; VM_LAUNCH_GUID_LEN] = [
 /// | `id` | 16 B | Random identity blob |
 /// | `id_key_id` | vault handle | Identity private key; public point derived on demand |
 /// | `leaf_cert` | 2 KB | Cached DER-encoded partition leaf certificate |
+/// | `mldsa_leaf_cert` | ~7.7 KB | Cached DER-encoded ML-DSA-87 partition leaf certificate |
 /// | `session_table` | 2 B | Bitmask session allocator |
 ///
 /// ## Generation counter
@@ -162,7 +163,7 @@ const STD_VM_LAUNCH_GUID: [u8; VM_LAUNCH_GUID_LEN] = [
 ///
 /// When a partition is freed via [`part_free_internal`], all
 /// cryptographic material (`id`, vault keys,
-/// `leaf_cert`) is explicitly zeroed before the state transitions
+/// `leaf_cert`, `mldsa_leaf_cert`) is explicitly zeroed before the state transitions
 /// back to `Disabled`.
 ///
 /// [`part_free_internal`]: StdHsmPal::part_free_internal
@@ -192,6 +193,10 @@ pub(crate) struct PartitionEntry {
 
     /// Length of valid data in `leaf_cert` (0 = not yet generated).
     pub(crate) leaf_cert_len: usize,
+
+    /// Cached DER-encoded ML-DSA-87 partition leaf certificate (lazily
+    /// generated; empty = not yet generated).
+    pub(crate) mldsa_leaf_cert: Vec<u8>,
 
     /// Per-partition session table for tracking allocated sessions.
     pub(crate) session_table: SessionTable,
@@ -336,6 +341,7 @@ impl Default for PartitionEntry {
             id_mldsa_seed_key_id: None,
             leaf_cert: [0u8; MAX_CERT_DER_LEN],
             leaf_cert_len: 0,
+            mldsa_leaf_cert: Vec::new(),
             session_table: SessionTable::new(),
             vault: KeyVault::new(0),
             establish_cred_key_id: None,
@@ -856,9 +862,10 @@ impl StdHsmPal {
             let entry = &mut table.entries[idx];
             entry.id_key_id = Some(id_kid);
             entry.id_mldsa_seed_key_id = Some(seed_kid);
-            // Rebuild the leaf certificate against the fresh identity key.
+            // Rebuild the leaf certificates against the fresh identity keys.
             entry.leaf_cert[..entry.leaf_cert_len].fill(0);
             entry.leaf_cert_len = 0;
+            entry.mldsa_leaf_cert.clear();
         }
 
         // Generate establish-credential encryption ECC-384 key pair.
@@ -988,6 +995,7 @@ impl StdHsmPal {
         }
         entry.leaf_cert[..entry.leaf_cert_len].fill(0);
         entry.leaf_cert_len = 0;
+        entry.mldsa_leaf_cert.clear();
 
         // `Masked_BK_BOOT` is created at allocation and persists across
         // enable/disable; it is cleared only here, on free.

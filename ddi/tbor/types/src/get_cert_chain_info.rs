@@ -4,7 +4,7 @@
 //! Host-side wrapper for the TBOR `GetCertChainInfo` command.
 //!
 //! `GetCertChainInfo` is an **out-of-session** info command — the TBOR
-//! analogue of MBOR `GetCertChainInfo`. The host sends a `slot_id`; the
+//! analogue of MBOR `GetCertChainInfo`. The host sends a `slot_id` and `bank`; the
 //! firmware responds with the number of certificates in that partition
 //! slot's chain and the SHA-256 thumbprint of the leaf certificate,
 //! without first establishing a session.
@@ -32,13 +32,17 @@ pub const CERT_THUMBPRINT_LEN: usize = 32;
 pub struct TborGetCertChainInfoReq {
     /// Certificate chain slot within the caller's partition.
     pub slot_id: u8,
+
+    /// Certificate bank ([`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
+    /// [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA)).
+    pub bank: u8,
 }
 
 impl TborGetCertChainInfoReq {
-    /// Construct a `GetCertChainInfo` request for `slot_id`.
+    /// Construct a `GetCertChainInfo` request for `slot_id` and `bank`.
     #[inline]
-    pub const fn new(slot_id: u8) -> Self {
-        Self { slot_id }
+    pub const fn new(slot_id: u8, bank: u8) -> Self {
+        Self { slot_id, bank }
     }
 }
 
@@ -66,7 +70,7 @@ mod tests {
 
     #[test]
     fn request_encodes_slot_id() {
-        let req = TborGetCertChainInfoReq::new(3);
+        let req = TborGetCertChainInfoReq::new(3, crate::CERT_BANK_ECC);
         let mut buf = [0u8; 64];
         let frame = req.encode_request(&mut buf).expect("encode");
         assert!(frame.contains(&3u8), "encoded frame must carry the slot id",);

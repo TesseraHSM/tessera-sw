@@ -6,7 +6,7 @@
 //! Out-of-session info command — the TBOR analogue of MBOR
 //! `GetCertChainInfo`.  Returns the number of certificates and the
 //! leaf-certificate SHA-256 thumbprint for the caller's partition at the
-//! requested chain slot.  No session is required; the chain is read for
+//! requested chain slot and bank.  No session is required; the chain is read for
 //! the caller's own bound partition, resolved internally by the PAL,
 //! mirroring the MBOR handler.
 //!
@@ -19,6 +19,7 @@ use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_fw_hsm_pal_traits::HsmCertBank;
 use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -34,11 +35,15 @@ pub(crate) async fn handle<P: HsmPal>(
 ) -> HsmResult<usize> {
     let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
     let slot = HsmCertSlot(req.slot_id());
+    let bank = HsmCertBank(req.bank());
 
     let info = if slot == HsmCertSlot::PartOwner {
+        if bank != HsmCertBank::Ecc {
+            return Err(HsmError::InvalidArg);
+        }
         super::pta::chain_info(pal, io).await?
     } else {
-        pal.get_cert_chain_info(io, slot, HsmCertBank::Ecc).await?
+        pal.get_cert_chain_info(io, slot, bank).await?
     };
 
     let resp = cmd_buf.encode_response(|buf| {

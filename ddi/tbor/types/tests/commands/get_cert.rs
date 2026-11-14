@@ -11,6 +11,7 @@
 //! each against the MBOR path (same underlying cert store), and confirm
 //! that an out-of-range index or slot is rejected.
 
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
@@ -18,13 +19,15 @@ use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_ddi_tbor_types::TborGetCertReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_BANK_ECC;
+use tsra_ddi_tbor_types::CERT_BANK_MLDSA;
 use tsra_ddi_tbor_types::CERT_MAX_LEN;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 
 /// Fetch the chain length via TBOR `GetCertChainInfo`.
 fn num_certs(ctx: &TestCtx) -> u8 {
-    ctx.tbor(&TborGetCertChainInfoReq::new(0))
+    ctx.tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
         .expect("GetCertChainInfo")
         .num_certs
 }
@@ -37,22 +40,22 @@ fn all_indices_round_trip() {
 
     for cert_id in 0..count {
         let resp = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("TBOR GetCertificate(idx={cert_id}) failed: {e:?}"));
         assert!(
-            !resp.certificate.is_empty(),
+            !resp.is_empty(),
             "certificate at index {cert_id} must be non-empty DER",
         );
         // DER-encoded X.509 certificates start with a SEQUENCE tag.
         assert_eq!(
-            resp.certificate[0], 0x30,
+            resp[0], 0x30,
             "certificate at index {cert_id} must be a DER SEQUENCE",
         );
         assert!(
-            resp.certificate.len() <= CERT_MAX_LEN,
+            resp.len() <= CERT_MAX_LEN,
             "certificate at index {cert_id} exceeds the wire limit",
         );
-        X509Certificate::from_der(&resp.certificate)
+        X509Certificate::from_der(&resp)
             .unwrap_or_else(|e| panic!("certificate at index {cert_id} is invalid X.509: {e:?}"));
     }
 }
@@ -70,13 +73,13 @@ fn matches_mbor_path() {
 
     for cert_id in 0..count {
         let tbor = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("TBOR GetCertificate(idx={cert_id}): {e:?}"));
         let mbor = ctx
             .get_certificate(cert_id)
             .unwrap_or_else(|e| panic!("MBOR GetCertificate(idx={cert_id}): {e:?}"));
         assert_eq!(
-            tbor.certificate.as_slice(),
+            tbor.as_slice(),
             mbor.data.certificate.as_slice(),
             "TBOR and MBOR certificate bytes must match at index {cert_id}",
         );
@@ -90,10 +93,10 @@ fn repeated_reads_are_stable() {
 
     for cert_id in 0..num_certs(&ctx) {
         let first = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("first read of certificate {cert_id} failed: {e:?}"));
         let second = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("second read of certificate {cert_id} failed: {e:?}"));
 
         assert_eq!(
@@ -112,17 +115,17 @@ fn certificate_indices_do_not_alias() {
 
     for cert_id in 0..num_certs(&ctx) {
         let cert = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("failed to read certificate {cert_id}: {e:?}"));
 
         for (previous_id, previous) in certificates.iter().enumerate() {
             assert_ne!(
-                &cert.certificate, previous,
+                &cert, previous,
                 "certificate {cert_id} aliases certificate {previous_id}",
             );
         }
 
-        certificates.push(cert.certificate);
+        certificates.push(cert);
     }
 }
 
@@ -134,7 +137,7 @@ fn invalid_indices_rejected() {
     let count = num_certs(&ctx);
 
     for cert_id in [count, u8::MAX] {
-        ctx.expect_fw_reject(&TborGetCertReq::new(0, cert_id), TborStatus::InvalidArg);
+        ctx.expect_get_cert_reject(0, CERT_BANK_ECC, cert_id, TborStatus::InvalidArg);
     }
 }
 
@@ -145,7 +148,7 @@ fn invalid_slots_rejected() {
     let ctx = TestCtx::new();
 
     for slot_id in [1, 2, 127, 254, u8::MAX] {
-        ctx.expect_fw_reject(&TborGetCertReq::new(slot_id, 0), TborStatus::InvalidArg);
+        ctx.expect_get_cert_reject(slot_id, CERT_BANK_ECC, 0, TborStatus::InvalidArg);
     }
 }
 
@@ -154,15 +157,16 @@ fn invalid_slots_rejected() {
 #[test]
 fn rejected_requests_do_not_affect_valid_certificate() {
     let ctx = TestCtx::new();
-    let request = TborGetCertReq::new(0, 0);
     let before = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("valid certificate before rejects");
 
-    ctx.expect_fw_reject(&TborGetCertReq::new(u8::MAX, 0), TborStatus::InvalidArg);
-    ctx.expect_fw_reject(&TborGetCertReq::new(0, u8::MAX), TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(u8::MAX, CERT_BANK_ECC, 0, TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(0, CERT_BANK_ECC, u8::MAX, TborStatus::InvalidArg);
 
-    let after = ctx.tbor(&request).expect("valid certificate after rejects");
+    let after = ctx
+        .get_cert(0, CERT_BANK_ECC, 0)
+        .expect("valid certificate after rejects");
     assert_eq!(
         before, after,
         "rejected requests must not mutate the valid certificate chain",
@@ -174,14 +178,15 @@ fn rejected_requests_do_not_affect_valid_certificate() {
 #[test]
 fn callable_while_session_active() {
     let ctx = TestCtx::new();
-    let request = TborGetCertReq::new(0, 0);
-    let before = ctx.tbor(&request).expect("certificate before session");
+    let before = ctx
+        .get_cert(0, CERT_BANK_ECC, 0)
+        .expect("certificate before session");
 
     let session = ctx
         .open_session(CO, SessionType::Authenticated)
         .expect("open CO authenticated session");
     let during = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate while session is active");
 
     assert_eq!(
@@ -201,16 +206,15 @@ fn chain_info_count_matches_get_certificate_boundary() {
     assert!(count > 0, "chain must contain at least one certificate");
 
     for cert_id in 0..count {
-        ctx.tbor(&TborGetCertReq::new(0, cert_id))
-            .unwrap_or_else(|e| {
-                panic!(
-                    "GetCertChainInfo advertised certificate {cert_id}, \
+        ctx.get_cert(0, CERT_BANK_ECC, cert_id).unwrap_or_else(|e| {
+            panic!(
+                "GetCertChainInfo advertised certificate {cert_id}, \
                      but GetCertificate rejected it: {e:?}"
-                )
-            });
+            )
+        });
     }
 
-    ctx.expect_fw_reject(&TborGetCertReq::new(0, count), TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(0, CERT_BANK_ECC, count, TborStatus::InvalidArg);
 }
 
 /// Reading other certificates in the chain must not affect a previously read
@@ -221,16 +225,16 @@ fn interleaved_reads_are_stable() {
     let count = num_certs(&ctx);
 
     let first = ctx
-        .tbor(&TborGetCertReq::new(0, 0))
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("initial certificate 0 read");
 
     for cert_id in 0..count {
-        ctx.tbor(&TborGetCertReq::new(0, cert_id))
+        ctx.get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("interleaved certificate {cert_id} read failed: {e:?}"));
     }
 
     let after = ctx
-        .tbor(&TborGetCertReq::new(0, 0))
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate 0 after interleaved reads");
 
     assert_eq!(
@@ -244,10 +248,9 @@ fn interleaved_reads_are_stable() {
 #[test]
 fn stable_across_session_lifecycle() {
     let ctx = TestCtx::new();
-    let request = TborGetCertReq::new(0, 0);
 
     let before = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate before opening session");
 
     let session = ctx
@@ -255,13 +258,13 @@ fn stable_across_session_lifecycle() {
         .expect("open CO authenticated session");
 
     let during = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate while session is active");
 
     session.close().expect("close CO authenticated session");
 
     let after = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate after closing session");
 
     assert_eq!(
@@ -283,19 +286,16 @@ fn rejected_request_does_not_affect_entire_chain() {
 
     let before: Vec<_> = (0..count)
         .map(|cert_id| {
-            ctx.tbor(&TborGetCertReq::new(0, cert_id))
+            ctx.get_cert(0, CERT_BANK_ECC, cert_id)
                 .unwrap_or_else(|e| panic!("initial certificate {cert_id} read failed: {e:?}"))
         })
         .collect();
 
-    ctx.expect_fw_reject(
-        &TborGetCertReq::new(u8::MAX, u8::MAX),
-        TborStatus::InvalidArg,
-    );
+    ctx.expect_get_cert_reject(u8::MAX, CERT_BANK_ECC, u8::MAX, TborStatus::InvalidArg);
 
     for (cert_id, expected) in before.iter().enumerate() {
         let actual = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id as u8))
+            .get_cert(0, CERT_BANK_ECC, cert_id as u8)
             .unwrap_or_else(|e| {
                 panic!("certificate {cert_id} read after rejected request failed: {e:?}")
             });
@@ -314,16 +314,16 @@ fn certificate_reads_do_not_change_chain_info() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(0))
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
         .expect("chain info before certificate reads");
 
     for cert_id in 0..before.num_certs {
-        ctx.tbor(&TborGetCertReq::new(0, cert_id))
+        ctx.get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("certificate {cert_id} read failed: {e:?}"));
     }
 
     let after = ctx
-        .tbor(&TborGetCertChainInfoReq::new(0))
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
         .expect("chain info after certificate reads");
 
     assert_eq!(
@@ -341,13 +341,10 @@ fn certificates_can_be_read_in_reverse_order() {
 
     for cert_id in (0..count).rev() {
         let cert = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("reverse read of certificate {cert_id} failed: {e:?}"));
 
-        assert!(
-            !cert.certificate.is_empty(),
-            "certificate {cert_id} must be non-empty",
-        );
+        assert!(!cert.is_empty(), "certificate {cert_id} must be non-empty",);
     }
 }
 
@@ -359,10 +356,10 @@ fn first_and_last_valid_indices_succeed() {
 
     assert!(count > 0, "certificate chain must be non-empty");
 
-    ctx.tbor(&TborGetCertReq::new(0, 0))
+    ctx.get_cert(0, CERT_BANK_ECC, 0)
         .expect("first certificate must be readable");
 
-    ctx.tbor(&TborGetCertReq::new(0, count - 1))
+    ctx.get_cert(0, CERT_BANK_ECC, count - 1)
         .expect("last advertised certificate must be readable");
 }
 
@@ -378,7 +375,7 @@ fn mbor_tbor_interleaved_reads_remain_identical() {
 
     for cert_id in 0..num_certs(&ctx) {
         let tbor_before = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("initial TBOR certificate {cert_id}: {e:?}"));
 
         let mbor = ctx
@@ -386,11 +383,11 @@ fn mbor_tbor_interleaved_reads_remain_identical() {
             .unwrap_or_else(|e| panic!("MBOR certificate {cert_id}: {e:?}"));
 
         let tbor_after = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id))
+            .get_cert(0, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|e| panic!("final TBOR certificate {cert_id}: {e:?}"));
 
         assert_eq!(
-            tbor_before.certificate.as_slice(),
+            tbor_before.as_slice(),
             mbor.data.certificate.as_slice(),
             "initial TBOR and MBOR certificate must match at index {cert_id}",
         );
@@ -411,18 +408,18 @@ fn all_reject_classes_preserve_entire_chain() {
 
     let before: Vec<_> = (0..count)
         .map(|cert_id| {
-            ctx.tbor(&TborGetCertReq::new(0, cert_id))
+            ctx.get_cert(0, CERT_BANK_ECC, cert_id)
                 .unwrap_or_else(|e| panic!("initial certificate {cert_id}: {e:?}"))
         })
         .collect();
 
-    ctx.expect_fw_reject(&TborGetCertReq::new(u8::MAX, 0), TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(u8::MAX, CERT_BANK_ECC, 0, TborStatus::InvalidArg);
 
-    ctx.expect_fw_reject(&TborGetCertReq::new(0, u8::MAX), TborStatus::InvalidArg);
+    ctx.expect_get_cert_reject(0, CERT_BANK_ECC, u8::MAX, TborStatus::InvalidArg);
 
     for (cert_id, expected) in before.iter().enumerate() {
         let actual = ctx
-            .tbor(&TborGetCertReq::new(0, cert_id as u8))
+            .get_cert(0, CERT_BANK_ECC, cert_id as u8)
             .unwrap_or_else(|e| panic!("certificate {cert_id} after rejects: {e:?}"));
 
         assert_eq!(
@@ -439,15 +436,16 @@ fn all_reject_classes_preserve_entire_chain() {
 #[test]
 fn callable_while_cu_session_active() {
     let ctx = TestCtx::new();
-    let request = TborGetCertReq::new(0, 0);
-    let before = ctx.tbor(&request).expect("certificate before CU session");
+    let before = ctx
+        .get_cert(0, CERT_BANK_ECC, 0)
+        .expect("certificate before CU session");
 
     let session = ctx
         .open_session(CU, SessionType::PlainText)
         .expect("open CU PlainText session");
 
     let during = ctx
-        .tbor(&request)
+        .get_cert(0, CERT_BANK_ECC, 0)
         .expect("certificate while CU session is active");
 
     assert_eq!(
@@ -465,17 +463,16 @@ fn entire_chain_stable_across_co_and_cu_session_lifecycles() {
     let ctx = TestCtx::new();
 
     let info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(0))
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
         .expect("GetCertChainInfo");
 
     assert!(info.num_certs > 0, "chain must be non-empty");
 
     let before: Vec<_> = (0..info.num_certs)
         .map(|cert_id| {
-            ctx.tbor(&TborGetCertReq::new(0, cert_id))
-                .unwrap_or_else(|e| {
-                    panic!("GetCert before session activity for cert {cert_id}: {e:?}")
-                })
+            ctx.get_cert(0, CERT_BANK_ECC, cert_id).unwrap_or_else(|e| {
+                panic!("GetCert before session activity for cert {cert_id}: {e:?}")
+            })
         })
         .collect();
 
@@ -489,7 +486,7 @@ fn entire_chain_stable_across_co_and_cu_session_lifecycles() {
 
         for (cert_id, expected) in before.iter().enumerate() {
             let during = ctx
-                .tbor(&TborGetCertReq::new(0, cert_id as u8))
+                .get_cert(0, CERT_BANK_ECC, cert_id as u8)
                 .unwrap_or_else(|e| {
                     panic!(
                         "GetCert for cert {cert_id} while role {role} \
@@ -509,7 +506,7 @@ fn entire_chain_stable_across_co_and_cu_session_lifecycles() {
 
         for (cert_id, expected) in before.iter().enumerate() {
             let after = ctx
-                .tbor(&TborGetCertReq::new(0, cert_id as u8))
+                .get_cert(0, CERT_BANK_ECC, cert_id as u8)
                 .unwrap_or_else(|e| {
                     panic!(
                         "GetCert for cert {cert_id} after role {role} \
@@ -523,4 +520,80 @@ fn entire_chain_stable_across_co_and_cu_session_lifecycles() {
             );
         }
     }
+}
+
+/// Read every certificate of `bank` in slot 0, root first.
+fn bank_chain(ctx: &TestCtx, bank: u8) -> Vec<Vec<u8>> {
+    let info = ctx
+        .tbor(&TborGetCertChainInfoReq::new(0, bank))
+        .expect("GetCertChainInfo");
+    (0..info.num_certs)
+        .map(|cert_id| {
+            ctx.get_cert(0, bank, cert_id)
+                .unwrap_or_else(|e| panic!("bank {bank} certificate {cert_id}: {e:?}"))
+        })
+        .collect()
+}
+
+/// The ML-DSA bank serves a full chain that validates leaf → root, and
+/// it does not alias the ECC bank.
+#[test]
+fn mldsa_bank_chain_validates() {
+    let ctx = TestCtx::new();
+    let mut ders = bank_chain(&ctx, CERT_BANK_MLDSA);
+    assert_eq!(ders.len(), 4, "ML-DSA bank must carry a 4-cert chain");
+    for der in &ders {
+        assert!(der.len() <= CERT_MAX_LEN);
+    }
+    let ecc = bank_chain(&ctx, CERT_BANK_ECC);
+    assert_ne!(ders.last(), ecc.last(), "ML-DSA and ECC leaves must differ");
+
+    let leaf = X509Certificate::from_der(&ders.pop().expect("leaf")).expect("leaf DER");
+    let issuers: Vec<_> = ders
+        .iter()
+        .rev()
+        .map(|der| X509Certificate::from_der(der).expect("issuer DER"))
+        .collect();
+    assert!(
+        leaf.validate_chain(&issuers).expect("validate chain"),
+        "ML-DSA certificate chain must validate",
+    );
+}
+
+/// The two banks report distinct chain thumbprints.
+#[test]
+fn bank_thumbprints_differ() {
+    let ctx = TestCtx::new();
+    let ecc = ctx
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
+        .expect("ECC chain info");
+    let mldsa = ctx
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_MLDSA))
+        .expect("ML-DSA chain info");
+    assert_ne!(ecc.thumbprint, mldsa.thumbprint);
+}
+
+/// An unknown bank is rejected.
+#[test]
+fn invalid_bank_rejected() {
+    let ctx = TestCtx::new();
+    for bank in [2, u8::MAX] {
+        ctx.expect_get_cert_reject(0, bank, 0, TborStatus::InvalidArg);
+        ctx.expect_fw_reject(
+            &TborGetCertChainInfoReq::new(0, bank),
+            TborStatus::InvalidArg,
+        );
+    }
+}
+
+/// An out-of-band buffer smaller than the certificate is rejected.
+#[test]
+fn undersized_oob_rejected() {
+    let ctx = TestCtx::new();
+    let mut small = [0u8; 16];
+    ctx.expect_fw_reject_oob_io(
+        &TborGetCertReq::new(0, CERT_BANK_ECC, 0),
+        &mut [TborOobItem::Out(&mut small)],
+        TborStatus::InsufficientBuffer,
+    );
 }

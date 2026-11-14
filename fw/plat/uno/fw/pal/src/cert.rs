@@ -11,12 +11,20 @@
 //! byte-stable across regenerations (cacheable). The GSRAM alias key is a
 //! SEC1 `ECPrivateKey` DER blob; [`AliasSigner`] parses out the scalar and
 //! converts it to the PKA little-endian operand order.
+//!
+//! The [`HsmCertBank::MlDsa`] bank serves the same device-id and alias
+//! certificates, but its PID leaf certifies the partition's ML-DSA-87
+//! identity key (expanded from its vaulted seed) and is still signed by the
+//! P-384 CP alias key.
 
 #![allow(clippy::unused_async)]
 
 use tsra_fw_core_crypto_x509_builder::cert_builder::LeafCertParams;
 use tsra_fw_core_crypto_x509_builder::cert_builder::TbsSigner;
 use tsra_fw_core_crypto_x509_builder::cert_builder::build_leaf_cert_with_signer;
+use tsra_fw_core_crypto_x509_builder::cert_builder::build_mldsa_leaf_cert_ecc_issuer;
+use tsra_fw_core_crypto_x509_builder::cert_builder::mldsa_leaf_cert_ecc_issuer_max_len;
+use tsra_fw_core_crypto_x509_builder::der_helpers::MLDSA87_PUBLIC_KEY_LEN;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCertBank;
 use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
@@ -28,8 +36,13 @@ use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
@@ -128,12 +141,14 @@ impl TbsSigner<UnoHsmIo> for AliasSigner<'_> {
 }
 
 /// Deterministic 20-byte DER serial derived from the 16-byte partition id
-/// (positive INTEGER: leading byte non-zero with bit 7 clear).
-fn pid_serial(part_id: &[u8]) -> [u8; SERIAL_LEN] {
+/// and the chain bank (positive INTEGER: leading byte non-zero with bit 7
+/// clear). Both banks' leaves share an issuer, so the bank keeps their
+/// serials distinct.
+fn pid_serial(part_id: &[u8], bank: HsmCertBank) -> [u8; SERIAL_LEN] {
     let mut serial = [0u8; SERIAL_LEN];
     // Leading byte is a fixed non-zero, top-bit-clear tag; the remaining 16
     // bytes carry the partition id, and the low 3 bytes stay zero.
-    serial[0] = 0x40;
+    serial[0] = 0x40 | (bank.0 & 0x3f);
     let n = part_id.len().min(PART_ID_LEN);
     serial[1..1 + n].copy_from_slice(&part_id[..n]);
     serial
@@ -151,104 +166,170 @@ fn subject_cn_hex(part_id: &[u8]) -> [u8; SUBJECT_CN_LEN] {
 }
 
 impl UnoHsmPal {
-    /// Generate the partition-id (PID) leaf certificate for `part_id`.
+    /// Generate the partition-id (PID) leaf certificate of `bank` for
+    /// `part_id`.
     ///
     /// Query/copy: `out = None` returns the worst-case DER size; `Some(buf)`
     /// writes the cert and returns its length. The subject public key is the
-    /// partition identity key; the leaf is signed by the CP alias key via
-    /// deterministic ECDSA-P384.
+    /// partition identity key of the bank's algorithm; the leaf is signed by
+    /// the CP alias key via deterministic ECDSA-P384.
     async fn generate_pid_cert(
         &self,
         io: &UnoHsmIo,
         part_id: HsmPartId,
+        bank: HsmCertBank,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         let part = PartStore::partition(part_id)?;
-        let key_id = part.id_key_id().ok_or(HsmError::InvalidArg)?;
-        self.alloc_scoped_async(io, async |scope| {
-            // Leave room before the SEC1 tag so the PKA point starts word-aligned.
-            let uncompressed = scope
-                .dma_alloc(P384_UNCOMPRESSED_LEN + 3)?
-                .split_at_mut(3)
-                .1;
-            uncompressed[0] = 0x04;
-            let public = uncompressed.split_at_mut(1).1;
-            if self.ecc_vault_pub_key(io, key_id, public).await? != P384_PUB_XY_LEN {
-                return Err(HsmError::InternalError);
-            }
-            public[..P384_FIELD].reverse();
-            public[P384_FIELD..].reverse();
+        if out.is_none() && bank == HsmCertBank::MlDsa {
+            // The ML-DSA size bound needs no key, so skip the expansion.
+            return mldsa_leaf_cert_ecc_issuer_max_len();
+        }
 
-            // Subject Key Identifier = SHA-1(uncompressed public key).
+        // Partition identifier → subject CN (uppercase hex) and serial number.
+        let id = part.id();
+        if id.len() < PART_ID_LEN {
+            return Err(HsmError::InternalError);
+        }
+        let subject_cn = subject_cn_hex(&id[..PART_ID_LEN]);
+        let serial = pid_serial(&id[..PART_ID_LEN], bank);
+
+        // Issuer DN and Authority Key Identifier come from the alias cert so the
+        // PID leaf chains to the CP alias certificate (subject CN → issuer CN,
+        // alias SKI → leaf AKI).
+        let alias_cert = gsram_alias::alias_cert();
+        // Missing alias material (bring-up / provisioning failure) is a caller-
+        // facing `InvalidArg`, not an internal error — match the HsmCertStore docs
+        // and fail before attempting to parse an empty buffer.
+        if alias_cert.is_empty() {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut issuer_cn = [0u8; ISSUER_CN_LEN];
+        let cn = der::get_subject_cn(alias_cert).ok_or(HsmError::InternalError)?;
+        if cn.len() != ISSUER_CN_LEN {
+            return Err(HsmError::InternalError);
+        }
+        issuer_cn.copy_from_slice(cn);
+
+        let mut authority_key_id = [0u8; SKI_LEN];
+        // The leaf's AKI must be the alias cert's SKI; fail rather than emit a
+        // leaf with an all-zero AKI if the alias cert lacks the extension.
+        let aki = der::get_subject_key_identifier(alias_cert).ok_or(HsmError::InternalError)?;
+        if aki.len() != SKI_LEN {
+            return Err(HsmError::InternalError);
+        }
+        authority_key_id.copy_from_slice(aki);
+
+        // Alias signing key from GSRAM.
+        let alias_key = gsram_alias::alias_key();
+        if alias_key.is_empty() {
+            return Err(HsmError::InvalidArg);
+        }
+        let signer = AliasSigner {
+            pal: self,
+            alias_key,
+        };
+
+        self.alloc_scoped_async(io, async |scope| {
+            let (public_key, ski_len) = match bank {
+                HsmCertBank::Ecc => {
+                    let key_id = part.id_key_id().ok_or(HsmError::InvalidArg)?;
+                    // Leave room before the SEC1 tag so the PKA point starts
+                    // word-aligned.
+                    let uncompressed = scope
+                        .dma_alloc(P384_UNCOMPRESSED_LEN + 3)?
+                        .split_at_mut(3)
+                        .1;
+                    uncompressed[0] = 0x04;
+                    let public = uncompressed.split_at_mut(1).1;
+                    if self.ecc_vault_pub_key(io, key_id, public).await? != P384_PUB_XY_LEN {
+                        return Err(HsmError::InternalError);
+                    }
+                    public[..P384_FIELD].reverse();
+                    public[P384_FIELD..].reverse();
+                    (uncompressed, P384_UNCOMPRESSED_LEN)
+                }
+                HsmCertBank::MlDsa => {
+                    let seed_id = part.id_mldsa_seed_key_id().ok_or(HsmError::InvalidArg)?;
+                    let public = scope.dma_alloc(MLDSA87_PUBLIC_KEY_LEN)?;
+                    self.mldsa_seed_pub_key(io, seed_id, public).await?;
+                    (public, MLDSA87_PUBLIC_KEY_LEN)
+                }
+                _ => return Err(HsmError::InvalidArg),
+            };
+
+            // Subject Key Identifier = SHA-1(public key).
             let ski = scope.dma_alloc(SKI_LEN)?;
             self.hash(
                 io,
                 HsmHashAlgo::Sha1,
-                uncompressed,
+                &public_key[..ski_len],
                 ski,
                 HsmDigestForm::Standard,
             )
             .await?;
-            let uncompressed: &[u8; P384_UNCOMPRESSED_LEN] = (&**uncompressed)
-                .try_into()
-                .map_err(|_| HsmError::InternalError)?;
             let ski: &[u8; SKI_LEN] = (&**ski).try_into().map_err(|_| HsmError::InternalError)?;
-            // Partition identifier → subject CN (uppercase hex) and serial number.
-            let id = part.id();
-            if id.len() < PART_ID_LEN {
-                return Err(HsmError::InternalError);
-            }
-            let subject_cn = subject_cn_hex(&id[..PART_ID_LEN]);
-            let serial = pid_serial(&id[..PART_ID_LEN]);
 
-            // Issuer DN and Authority Key Identifier come from the alias cert so the
-            // PID leaf chains to the CP alias certificate (subject CN → issuer CN,
-            // alias SKI → leaf AKI).
-            let alias_cert = gsram_alias::alias_cert();
-            // Missing alias material (bring-up / provisioning failure) is a caller-
-            // facing `InvalidArg`, not an internal error — match the HsmCertStore docs
-            // and fail before attempting to parse an empty buffer.
-            if alias_cert.is_empty() {
-                return Err(HsmError::InvalidArg);
+            if bank == HsmCertBank::Ecc {
+                let public_key: &[u8; P384_UNCOMPRESSED_LEN] = (&**public_key)
+                    .try_into()
+                    .map_err(|_| HsmError::InternalError)?;
+                let params = LeafCertParams {
+                    public_key,
+                    serial_number: &serial,
+                    not_before: NOT_BEFORE,
+                    not_after: NOT_AFTER,
+                    issuer_cn: &issuer_cn,
+                    subject_cn: &subject_cn,
+                    subject_key_id: ski,
+                    authority_key_id: &authority_key_id,
+                };
+                build_leaf_cert_with_signer(self, io, scope, &params, &signer, out).await
+            } else {
+                let public_key: &[u8; MLDSA87_PUBLIC_KEY_LEN] = (&**public_key)
+                    .try_into()
+                    .map_err(|_| HsmError::InternalError)?;
+                let params = LeafCertParams {
+                    public_key,
+                    serial_number: &serial,
+                    not_before: NOT_BEFORE,
+                    not_after: NOT_AFTER,
+                    issuer_cn: &issuer_cn,
+                    subject_cn: &subject_cn,
+                    subject_key_id: ski,
+                    authority_key_id: &authority_key_id,
+                };
+                build_mldsa_leaf_cert_ecc_issuer(self, io, scope, &params, &signer, out).await
             }
-            let mut issuer_cn = [0u8; ISSUER_CN_LEN];
-            let cn = der::get_subject_cn(alias_cert).ok_or(HsmError::InternalError)?;
-            if cn.len() != ISSUER_CN_LEN {
-                return Err(HsmError::InternalError);
-            }
-            issuer_cn.copy_from_slice(cn);
+        })
+        .await
+    }
 
-            let mut authority_key_id = [0u8; SKI_LEN];
-            // The leaf's AKI must be the alias cert's SKI; fail rather than emit a
-            // leaf with an all-zero AKI if the alias cert lacks the extension.
-            let aki = der::get_subject_key_identifier(alias_cert).ok_or(HsmError::InternalError)?;
-            if aki.len() != SKI_LEN {
-                return Err(HsmError::InternalError);
-            }
-            authority_key_id.copy_from_slice(aki);
-
-            // Alias signing key from GSRAM.
-            let alias_key = gsram_alias::alias_key();
-            if alias_key.is_empty() {
-                return Err(HsmError::InvalidArg);
-            }
-
-            let params = LeafCertParams {
-                public_key: uncompressed,
-                serial_number: &serial,
-                not_before: NOT_BEFORE,
-                not_after: NOT_AFTER,
-                issuer_cn: &issuer_cn,
-                subject_cn: &subject_cn,
-                subject_key_id: ski,
-                authority_key_id: &authority_key_id,
-            };
-
-            let signer = AliasSigner {
-                pal: self,
-                alias_key,
-            };
-            build_leaf_cert_with_signer(self, io, scope, &params, &signer, out).await
+    /// Expand the ML-DSA-87 seed in vault slot `seed_id` and write its
+    /// encoded public key to `public`. The expanded secret key lives only in
+    /// scratch released (and scrubbed with the IO) on return.
+    async fn mldsa_seed_pub_key(
+        &self,
+        io: &UnoHsmIo,
+        seed_id: tsra_fw_hsm_pal_traits::HsmKeyId,
+        public: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.alloc_scoped_async(io, async |scope| {
+            // Snapshot vault storage before the engine operation can yield.
+            let key = self.vault_key(io, seed_id)?;
+            let seed = scope.dma_alloc(key.len())?;
+            seed.copy_from_slice(key);
+            let secret = scope.dma_alloc(HsmMlDsaParamSet::MlDsa87.sk_len())?;
+            self.mldsa_gen_keypair(
+                io,
+                HsmMlDsaParamSet::MlDsa87,
+                HsmMlSeedSrc::Caller,
+                HsmMlDsaPct::None,
+                seed,
+                Some((secret, public)),
+            )
+            .await?;
+            Ok(())
         })
         .await
     }
@@ -258,6 +339,14 @@ impl UnoHsmPal {
         self.alloc_scoped_async(io, async |scope| {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
+            self.sha256_dma(io, inp).await
+        })
+        .await
+    }
+
+    /// SHA-256 over a DMA-resident `data`, returning the 32-byte digest.
+    async fn sha256_dma(&self, io: &UnoHsmIo, inp: &HsmDmaBuf) -> HsmResult<[u8; SHA256_LEN]> {
+        self.alloc_scoped_async(io, async |scope| {
             let outd = scope.dma_alloc(SHA256_LEN)?;
             // `Standard`: emit the standard SHA-256 digest. The host and SP
             // compute cert thumbprints over natural SHA-256; `Operand` here
@@ -440,11 +529,12 @@ impl HsmCertStore for UnoHsmPal {
     /// # Parameters
     /// * `io` — operation-scoped I/O context bound to the target partition.
     /// * `slot` — chain owner; only [`HsmCertSlot::Mfgr`] is supported.
-    /// * `bank` — chain bank; only [`HsmCertBank::Ecc`] is supported.
+    /// * `bank` — [`HsmCertBank::Ecc`] or [`HsmCertBank::MlDsa`]; the banks
+    ///   differ only in the PID leaf.
     ///
     /// # Returns
     /// * `Ok(HsmCertChainInfo)` — chain length + thumbprint.
-    /// * `Err(HsmError::InvalidArg)` — non-zero slot or bank, missing/invalid device-id
+    /// * `Err(HsmError::InvalidArg)` — unsupported slot or bank, missing/invalid device-id
     ///   CBLOB, missing GSRAM alias certificate, or unprovisioned partition.
     async fn get_cert_chain_info(
         &self,
@@ -453,7 +543,7 @@ impl HsmCertStore for UnoHsmPal {
         bank: HsmCertBank,
     ) -> HsmResult<HsmCertChainInfo> {
         let part_id = io.pid();
-        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
+        if slot != HsmCertSlot::Mfgr || !matches!(bank, HsmCertBank::Ecc | HsmCertBank::MlDsa) {
             return Err(HsmError::InvalidArg);
         }
 
@@ -469,12 +559,15 @@ impl HsmCertStore for UnoHsmPal {
             .and_then(|k| k.checked_add(TRAILING_CERTS))
             .ok_or(HsmError::InternalError)?;
 
+        let max_leaf = self.generate_pid_cert(io, part_id, bank, None).await?;
         self.alloc_scoped_async(io, async |scope| {
-            let leaf = scope.dma_alloc(MAX_PID_CERT_DER)?;
-            let leaf_len = self.generate_pid_cert(io, part_id, Some(leaf)).await?;
+            let leaf = scope.dma_alloc(max_leaf)?;
+            let leaf_len = self
+                .generate_pid_cert(io, part_id, bank, Some(leaf))
+                .await?;
 
             let alias_hash = self.sha256_32(io, alias).await?;
-            let leaf_hash = self.sha256_32(io, &leaf[..leaf_len]).await?;
+            let leaf_hash = self.sha256_dma(io, &leaf[..leaf_len]).await?;
 
             // Thumbprint = SHA-256(dev_id_chain_hash ‖ H(alias) ‖ H(leaf)).
             // `dev_id_chain_hash` is taken straight from the HSP-provisioned
@@ -502,7 +595,8 @@ impl HsmCertStore for UnoHsmPal {
     /// # Parameters
     /// * `io` — operation-scoped I/O context bound to the target partition.
     /// * `slot` — chain owner; only [`HsmCertSlot::Mfgr`] is supported.
-    /// * `bank` — chain bank; only [`HsmCertBank::Ecc`] is supported.
+    /// * `bank` — [`HsmCertBank::Ecc`] or [`HsmCertBank::MlDsa`]; the banks
+    ///   differ only in the PID leaf.
     /// * `idx` — zero-based certificate index (`< count`).
     /// * `cert` — `None` to query size, `Some(buf)` to copy.
     ///
@@ -519,7 +613,7 @@ impl HsmCertStore for UnoHsmPal {
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         let part_id = io.pid();
-        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
+        if slot != HsmCertSlot::Mfgr || !matches!(bank, HsmCertBank::Ecc | HsmCertBank::MlDsa) {
             return Err(HsmError::InvalidArg);
         }
 
@@ -546,14 +640,24 @@ impl HsmCertStore for UnoHsmPal {
             return copy_or_size(alias, cert);
         }
 
-        // Last index is the generated PID leaf. Build it deterministically into
-        // a worst-case-sized scratch buffer (the builder requires that), then
-        // copy the exact DER out. Because generation is deterministic, the query
-        // and copy passes produce the same length — satisfying the DDI
-        // query/copy contract without caching.
+        // Last index is the generated PID leaf.
+        if bank == HsmCertBank::MlDsa {
+            // The query returns the builder's upper bound, and the copy
+            // builds straight into `cert`: the ML-DSA leaf is too large for
+            // a second scratch copy, and sizing it exactly would expand the
+            // seed twice.
+            return self.generate_pid_cert(io, part_id, bank, cert).await;
+        }
+        // Build the ECC leaf deterministically into a worst-case-sized scratch
+        // buffer (the builder requires that), then copy the exact DER out.
+        // Because generation is deterministic, the query and copy passes
+        // produce the same length — satisfying the exact ECC query/copy
+        // contract without caching.
         self.alloc_scoped_async(io, async |scope| {
             let scratch = scope.dma_alloc(MAX_PID_CERT_DER)?;
-            let n = self.generate_pid_cert(io, part_id, Some(scratch)).await?;
+            let n = self
+                .generate_pid_cert(io, part_id, bank, Some(scratch))
+                .await?;
             copy_or_size(&scratch[..n], cert)
         })
         .await

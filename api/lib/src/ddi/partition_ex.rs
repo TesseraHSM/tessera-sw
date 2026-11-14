@@ -342,23 +342,38 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 }
 
 /// TBOR `GetCertChainInfo` (opcode `0x1E`, out-of-session): returns the
-/// certificate count and chain thumbprint for `slot_id`.
+/// certificate count and chain thumbprint of the P-384 chain at `slot_id`.
 pub(super) fn get_cert_chain_info_tbor(dev: &HsmDev, slot_id: u8) -> HsmResult<(u8, Vec<u8>)> {
     let mut cookie = None;
     let resp = dev
-        .exec_op_tbor(&TborGetCertChainInfoReq::new(slot_id), &mut [], &mut cookie)
+        .exec_op_tbor(
+            &TborGetCertChainInfoReq::new(slot_id, CERT_BANK_ECC),
+            &mut [],
+            &mut cookie,
+        )
         .map_err(HsmError::from)?;
     Ok((resp.num_certs, resp.thumbprint.to_vec()))
 }
 
 /// TBOR `GetCertificate` (opcode `0x1F`, out-of-session): returns the
-/// DER-encoded certificate at `(slot_id, cert_id)`.
+/// DER-encoded certificate at `(slot_id, cert_id)` of the P-384 chain,
+/// received through an out-of-band buffer.
 pub(super) fn get_cert_tbor(dev: &HsmDev, slot_id: u8, cert_id: u8) -> HsmResult<Vec<u8>> {
     let mut cookie = None;
+    let mut cert = vec![0u8; CERT_MAX_LEN];
     let resp = dev
-        .exec_op_tbor(&TborGetCertReq::new(slot_id, cert_id), &mut [], &mut cookie)
+        .exec_op_tbor(
+            &TborGetCertReq::new(slot_id, CERT_BANK_ECC, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
+            &mut cookie,
+        )
         .map_err(HsmError::from)?;
-    Ok(resp.certificate)
+    let len = usize::from(resp.cert_len.get());
+    if len > cert.len() {
+        return Err(HsmError::InternalError);
+    }
+    cert.truncate(len);
+    Ok(cert)
 }
 
 #[cfg(test)]

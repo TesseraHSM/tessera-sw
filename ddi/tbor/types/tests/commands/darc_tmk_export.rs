@@ -67,13 +67,8 @@ pub(crate) fn sd_initialized_session_with_data() -> ExportReady {
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
-    let leaf = ctx
-        .tbor(&TborGetCertReq {
-            slot_id: 2,
-            cert_id: 0,
-        })
-        .expect("PID certificate");
-    let pid_chain = vec![chain.root_der, chain.pta_der, leaf.certificate];
+    let leaf = ctx.get_cert(2, CERT_BANK_ECC, 0).expect("PID certificate");
+    let pid_chain = vec![chain.root_der, chain.pta_der, leaf];
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     ctx.tbor_oob(

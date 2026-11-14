@@ -4,9 +4,9 @@
 //! TBOR `GetCertChainInfo` wire schema.
 //!
 //! `GetCertChainInfo` is an **out-of-session** info command — the TBOR
-//! analogue of MBOR `GetCertChainInfo`.  The host sends a `slot_id`; the
-//! firmware responds with the number of certificates in that partition
-//! slot's chain and the SHA-256 thumbprint of the leaf certificate.  The
+//! analogue of MBOR `GetCertChainInfo`.  The host sends a `slot_id` and a
+//! `bank`; the firmware responds with the number of certificates in that
+//! partition slot's chain in that bank and the SHA-256 thumbprint of the leaf certificate.  The
 //! thumbprint lets the host detect chain rotation without downloading
 //! every certificate.  No session is required.
 //!
@@ -14,6 +14,9 @@
 //!
 //! * `slot_id` — the certificate chain slot within the caller's
 //!   partition (e.g. slot 0 = identity chain).
+//! * `bank` — the chain's bank:
+//!   [`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
+//!   [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA).
 //!
 //! Outputs:
 //!
@@ -40,6 +43,11 @@ pub struct TborGetCertChainInfoReq {
     /// Certificate chain slot within the caller's partition.
     #[tbor(U8)]
     pub slot_id: u8,
+
+    /// Certificate bank ([`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
+    /// [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA)).
+    #[tbor(U8)]
+    pub bank: u8,
 }
 
 /// `GetCertChainInfo` response schema.
@@ -68,8 +76,11 @@ mod tests {
             .unwrap()
             .slot_id(3)
             .unwrap()
+            .bank(1)
+            .unwrap()
             .finish();
         assert_eq!(frame.slot_id(), 3);
+        assert_eq!(frame.bank(), 1);
     }
 
     #[test]

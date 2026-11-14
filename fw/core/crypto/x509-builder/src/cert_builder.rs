@@ -487,6 +487,14 @@ pub async fn build_mldsa_leaf_cert_ecc_issuer<'a, P: HsmCrypto + HsmAlloc + 'a>(
     .await
 }
 
+/// Worst-case DER size of [`build_mldsa_leaf_cert_ecc_issuer`]'s output,
+/// without needing the subject key.
+pub fn mldsa_leaf_cert_ecc_issuer_max_len() -> HsmResult<usize> {
+    Ok(max_signed_size(mldsa_leaf_tbs_len(
+        SigAlg::EcdsaP384Sha384,
+    )?))
+}
+
 fn mldsa_leaf_tbs_len(issuer: SigAlg) -> HsmResult<usize> {
     retarget::retarget_len(
         &crate::leaf_cert::TBS_TEMPLATE,

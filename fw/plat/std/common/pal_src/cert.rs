@@ -3,7 +3,7 @@
 
 //! Certificate storage and generation for the standard PAL.
 //!
-//! Generates a 4-certificate chain for slot 0:
+//! Generates a 4-certificate chain for slot 0 in each bank:
 //!
 //! | Index | Certificate | Scope |
 //! |-------|-------------|-------|
@@ -12,27 +12,38 @@
 //! | 2 | Alias CA (Intermediate, path_len=0) | Shared |
 //! | 3 | Partition Id Leaf | Per-partition (on-demand) |
 //!
-//! The first 3 certificates are generated during PAL initialization via
-//! [`StdHsmPal::init_cert_store`].  The leaf cert is generated lazily
-//! on first access per partition.
+//! The [`HsmCertBank::Ecc`] chain is all P-384; the [`HsmCertBank::MlDsa`]
+//! chain is all ML-DSA-87, its leaf certifying the partition's ML-DSA-87
+//! identity key.  The first 3 certificates of each bank are generated
+//! during PAL initialization via [`StdHsmPal::init_cert_store`].  The leaf
+//! certs are generated lazily on first access per partition.
 //!
 //! Sideband paths (init / leaf-cert generation / chain hashing) call the
 //! underlying [`StdHash`](crate::drivers::hash::StdHash) and
-//! [`StdEcc`](crate::drivers::ecc::StdEcc) drivers directly — they have
+//! [`StdEcc`](crate::drivers::ecc::StdEcc) and
+//! [`StdPqc`](crate::drivers::pqc::StdPqc) drivers directly — they have
 //! no `HsmIo` context to satisfy the new PAL crypto trait surface, so
 //! they bypass it entirely. The trait impl ([`HsmCertStore`]) at the
 //! bottom of this file is the only path the core uses.
 
 use tsra_crypto::x509_builder::cert_builder;
 use tsra_crypto::x509_builder::cert_builder::*;
+use tsra_crypto::x509_builder::der_helpers::MLDSA87_PUBLIC_KEY_LEN;
+use tsra_crypto::x509_builder::der_helpers::MLDSA87_SIGNATURE_LEN;
+use tsra_crypto::x509_builder::retarget;
+use tsra_crypto::x509_builder::retarget::KeyAlg;
+use tsra_crypto::x509_builder::retarget::SigAlg;
+use tsra_crypto::x509_builder::retarget::SubjectKey;
+use tsra_crypto::x509_builder::retarget::TbsKind;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::HashAlgo;
+use tsra_crypto::MlDsaVariant;
 use tsra_crypto::PrivateKey;
+use zeroize::Zeroizing;
 
 use super::*;
-use crate::part::NUM_PARTITIONS;
 use crate::part::P384_PUB_KEY_LEN;
 use crate::StdHsmPal;
 
@@ -47,6 +58,13 @@ const DEVICEID_SN: &str = "DEVICEIDCA01";
 const ALIAS_CN: &str = "TSRA Alias CA";
 const ALIAS_SN: &str = "ALIASCA01";
 const LEAF_CN: &str = "TSRA Partition";
+const MLDSA_ROOT_CN: &str = "TSRA ML-DSA Root CA";
+const MLDSA_DEVICEID_CN: &str = "TSRA ML-DSA DeviceId CA";
+const MLDSA_ALIAS_CN: &str = "TSRA ML-DSA Alias CA";
+const MLDSA_LEAF_CN: &str = "TSRA ML-DSA Partition";
+
+/// Placeholder P-384 key for the templates; retargeting replaces it.
+const PLACEHOLDER_P384_KEY: [u8; P384_UNCOMPRESSED_LEN] = [0x04; P384_UNCOMPRESSED_LEN];
 
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
@@ -173,6 +191,22 @@ pub(crate) struct SharedCertStore {
     pub(crate) alias_ski: [u8; 20],
     /// Precomputed SHA-256(root_cert || deviceid_cert).
     root_deviceid_hash: [u8; 32],
+    /// The [`HsmCertBank::MlDsa`] chain.
+    mldsa: MlDsaCertBank,
+}
+
+/// Shared ML-DSA-87 certificates (Root, DeviceId, Alias) plus the Alias key
+/// that signs the ML-DSA partition leaves.
+#[derive(Default)]
+struct MlDsaCertBank {
+    /// Root, DeviceId and Alias certificates, in chain order.
+    certs: [Vec<u8>; 3],
+    /// Alias CA expanded ML-DSA-87 private key.
+    alias_sk: Zeroizing<Vec<u8>>,
+    /// Alias CA Subject Key Identifier.
+    alias_ski: [u8; 20],
+    /// Precomputed SHA-256(root_cert || deviceid_cert).
+    root_deviceid_hash: [u8; 32],
 }
 
 impl SharedCertStore {
@@ -188,6 +222,7 @@ impl SharedCertStore {
             alias_priv_key: Vec::new(),
             alias_ski: [0u8; 20],
             root_deviceid_hash: [0u8; 32],
+            mldsa: MlDsaCertBank::default(),
         }
     }
 
@@ -197,6 +232,24 @@ impl SharedCertStore {
             1 => Some(&self.deviceid_cert[..self.deviceid_cert_len]),
             2 => Some(&self.alias_cert[..self.alias_cert_len]),
             _ => None,
+        }
+    }
+
+    /// Shared certificate `idx` of `bank`.
+    fn bank_cert(&self, bank: HsmCertBank, idx: u8) -> Option<&[u8]> {
+        match bank {
+            HsmCertBank::Ecc => self.shared_cert(idx),
+            HsmCertBank::MlDsa => self.mldsa.certs.get(usize::from(idx)).map(Vec::as_slice),
+            _ => None,
+        }
+    }
+
+    /// Precomputed SHA-256(root_cert || deviceid_cert) of `bank`.
+    fn bank_root_deviceid_hash(&self, bank: HsmCertBank) -> &[u8; 32] {
+        if bank == HsmCertBank::MlDsa {
+            &self.mldsa.root_deviceid_hash
+        } else {
+            &self.root_deviceid_hash
         }
     }
 
@@ -213,6 +266,13 @@ impl SharedCertStore {
 struct CertKeyPair {
     priv_key: Vec<u8>,
     uncompressed: [u8; P384_UNCOMPRESSED_LEN],
+    ski: [u8; 20],
+}
+
+/// Temporary ML-DSA-87 key pair: expanded private key, public key, SKI.
+struct MlDsaCertKeyPair {
+    sk: Zeroizing<Vec<u8>>,
+    pk: [u8; MLDSA87_PUBLIC_KEY_LEN],
     ski: [u8; 20],
 }
 
@@ -312,7 +372,139 @@ impl StdHsmPal {
         store.alias_ski = alias_kp.ski;
         store.root_deviceid_hash = root_deviceid_hash;
 
+        let mldsa = self.init_mldsa_bank().await?;
+        self.cert_store_mut().mldsa = mldsa;
+
         Ok(())
+    }
+
+    /// Generate the shared ML-DSA-87 Root, DeviceId and Alias certificates.
+    async fn init_mldsa_bank(&self) -> HsmResult<MlDsaCertBank> {
+        let root_kp = self.gen_mldsa_cert_keypair(None).await?;
+        let deviceid_kp = self.gen_mldsa_cert_keypair(None).await?;
+        let alias_kp = self.gen_mldsa_cert_keypair(None).await?;
+
+        let tbs = cert_builder::root_cert_tbs(&RootCertParams {
+            public_key: &PLACEHOLDER_P384_KEY,
+            serial_number: &make_serial(4),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: MLDSA_ROOT_CN,
+            subject_sn: ROOT_SN,
+            subject_key_id: &root_kp.ski,
+        })
+        .ok_or(HsmError::InternalError)?;
+        let root_cert = self.mldsa_certify(&tbs, &root_kp.pk, &root_kp.sk).await?;
+
+        let tbs = cert_builder::intermediate_cert_tbs(&IntermediateCertParams {
+            public_key: &PLACEHOLDER_P384_KEY,
+            serial_number: &make_serial(5),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: MLDSA_DEVICEID_CN,
+            subject_sn: DEVICEID_SN,
+            issuer_cn: MLDSA_ROOT_CN,
+            issuer_sn: ROOT_SN,
+            subject_key_id: &deviceid_kp.ski,
+            authority_key_id: &root_kp.ski,
+            path_len: 1,
+        })
+        .ok_or(HsmError::InternalError)?;
+        let deviceid_cert = self
+            .mldsa_certify(&tbs, &deviceid_kp.pk, &root_kp.sk)
+            .await?;
+
+        let tbs = cert_builder::intermediate_cert_tbs(&IntermediateCertParams {
+            public_key: &PLACEHOLDER_P384_KEY,
+            serial_number: &make_serial(6),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: MLDSA_ALIAS_CN,
+            subject_sn: ALIAS_SN,
+            issuer_cn: MLDSA_DEVICEID_CN,
+            issuer_sn: DEVICEID_SN,
+            subject_key_id: &alias_kp.ski,
+            authority_key_id: &deviceid_kp.ski,
+            path_len: 0,
+        })
+        .ok_or(HsmError::InternalError)?;
+        let alias_cert = self
+            .mldsa_certify(&tbs, &alias_kp.pk, &deviceid_kp.sk)
+            .await?;
+
+        let mut root_deviceid_hash = [0u8; 32];
+        self.hash
+            .hash(
+                HashAlgo::sha256(),
+                &[root_cert.as_slice(), deviceid_cert.as_slice()].concat(),
+                &mut root_deviceid_hash,
+            )
+            .await?;
+
+        Ok(MlDsaCertBank {
+            certs: [root_cert, deviceid_cert, alias_cert],
+            alias_sk: alias_kp.sk,
+            alias_ski: alias_kp.ski,
+            root_deviceid_hash,
+        })
+    }
+
+    /// Derive an ML-DSA-87 key pair from `seed`, or from a fresh random
+    /// seed, and compute its SKI (SHA-1 of the raw public key).
+    async fn gen_mldsa_cert_keypair(&self, seed: Option<&[u8]>) -> HsmResult<MlDsaCertKeyPair> {
+        let mut random = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
+        let seed = match seed {
+            Some(seed) => seed,
+            None => {
+                tsra_crypto::Rng::rand_bytes(&mut random[..])
+                    .map_err(|_| HsmError::InternalError)?;
+                &random[..]
+            }
+        };
+        let (pk, sk) = self.pqc.mldsa_keygen(MlDsaVariant::MlDsa87, seed).await?;
+        let sk = Zeroizing::new(sk);
+        let pk: [u8; MLDSA87_PUBLIC_KEY_LEN] =
+            pk.try_into().map_err(|_| HsmError::InternalError)?;
+        let mut ski = [0u8; 20];
+        self.hash.hash(HashAlgo::sha1(), &pk, &mut ski).await?;
+        Ok(MlDsaCertKeyPair { sk, pk, ski })
+    }
+
+    /// Retarget the P-384 template `tbs` to an ML-DSA-87 issuer and the
+    /// subject key `pk`, sign it deterministically with `issuer_sk`, and
+    /// assemble the certificate.
+    async fn mldsa_certify(
+        &self,
+        tbs: &[u8],
+        pk: &[u8; MLDSA87_PUBLIC_KEY_LEN],
+        issuer_sk: &[u8],
+    ) -> HsmResult<Vec<u8>> {
+        let len =
+            retarget::retarget_len(tbs, TbsKind::Certificate, SigAlg::MlDsa87, KeyAlg::MlDsa87)
+                .ok_or(HsmError::InternalError)?;
+        let mut ml_tbs = vec![0u8; len];
+        retarget::retarget_tbs(
+            tbs,
+            TbsKind::Certificate,
+            SigAlg::MlDsa87,
+            SubjectKey::MlDsa87(pk),
+            &mut ml_tbs,
+        )
+        .filter(|&n| n == len)
+        .ok_or(HsmError::InternalError)?;
+        let sig = self
+            .pqc
+            .mldsa_sign(MlDsaVariant::MlDsa87, issuer_sk, false, true, &ml_tbs, &[])
+            .await?;
+        let sig: &[u8; MLDSA87_SIGNATURE_LEN] = sig
+            .as_slice()
+            .try_into()
+            .map_err(|_| HsmError::InternalError)?;
+        let mut cert = vec![0u8; cert_builder::mldsa_cert_len(len)];
+        let written = cert_builder::assemble_cert_mldsa(&ml_tbs, sig, &mut cert)
+            .ok_or(HsmError::InternalError)?;
+        cert.truncate(written);
+        Ok(cert)
     }
 
     /// Generate a P-384 key pair and compute SKI for cert construction.
@@ -373,20 +565,87 @@ impl StdHsmPal {
         Ok((r, s))
     }
 
+    /// Check that partition `pid` has a live identity to certify.
+    fn check_leaf_state(&self, pid: u8) -> HsmResult<()> {
+        let table = unsafe { &*self.part_table.get() };
+        let entry = table
+            .entries
+            .get(usize::from(pid))
+            .ok_or(HsmError::InvalidArg)?;
+        // Unallocated and Disabled have no live identity key.
+        if entry.state == HsmPartState::Unallocated || entry.state == HsmPartState::Disabled {
+            return Err(HsmError::InvalidArg);
+        }
+        Ok(())
+    }
+
+    /// Ensure the partition's leaf cert for `bank` is cached and return it.
+    async fn bank_leaf_cert(&self, pid: u8, bank: HsmCertBank) -> HsmResult<&[u8]> {
+        if bank == HsmCertBank::MlDsa {
+            self.ensure_mldsa_leaf_cert(pid).await?;
+        } else {
+            self.ensure_leaf_cert(pid).await?;
+        }
+        let table = unsafe { &*self.part_table.get() };
+        let entry = &table.entries[pid as usize];
+        Ok(if bank == HsmCertBank::MlDsa {
+            &entry.mldsa_leaf_cert
+        } else {
+            &entry.leaf_cert[..entry.leaf_cert_len]
+        })
+    }
+
+    /// Ensure the partition's ML-DSA-87 leaf cert is cached.
+    async fn ensure_mldsa_leaf_cert(&self, pid: u8) -> HsmResult<()> {
+        self.check_leaf_state(pid)?;
+        let seed = {
+            let table = unsafe { &*self.part_table.get() };
+            let entry = &table.entries[pid as usize];
+            if !entry.mldsa_leaf_cert.is_empty() {
+                return Ok(());
+            }
+            let key_id = entry
+                .id_mldsa_seed_key_id
+                .ok_or(HsmError::PartPropNotFound)?;
+            Zeroizing::new(entry.vault.key(key_id)?.to_vec())
+        };
+        let kp = self.gen_mldsa_cert_keypair(Some(&seed)).await?;
+
+        // Serial derived from the SKI as for the P-384 leaf.
+        let mut leaf_serial = kp.ski;
+        leaf_serial[0] = (leaf_serial[0] & 0x3f) | 0x40;
+        let sn_bytes = make_leaf_sn(pid);
+        let leaf_sn = core::str::from_utf8(&sn_bytes).map_err(|_| HsmError::InternalError)?;
+        let store = self.cert_store();
+        let tbs = cert_builder::leaf_cert_tbs(&LeafCertParams {
+            public_key: &PLACEHOLDER_P384_KEY,
+            serial_number: &leaf_serial,
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: MLDSA_LEAF_CN,
+            subject_sn: leaf_sn,
+            issuer_cn: MLDSA_ALIAS_CN,
+            issuer_sn: ALIAS_SN,
+            subject_key_id: &kp.ski,
+            authority_key_id: &store.mldsa.alias_ski,
+            key_usage: KeyUsage::DIGITAL_SIGNATURE,
+        })
+        .ok_or(HsmError::InternalError)?;
+        let cert = self
+            .mldsa_certify(&tbs, &kp.pk, &store.mldsa.alias_sk)
+            .await?;
+
+        let table = unsafe { &mut *self.part_table.get() };
+        table.entries[pid as usize].mldsa_leaf_cert = cert;
+        Ok(())
+    }
+
     /// Ensure the partition's leaf cert is cached.
     async fn ensure_leaf_cert(&self, pid: u8) -> HsmResult<()> {
+        self.check_leaf_state(pid)?;
         {
             let table = unsafe { &*self.part_table.get() };
-            let idx = pid as usize;
-            if idx >= NUM_PARTITIONS {
-                return Err(HsmError::InvalidArg);
-            }
-            // Unallocated and Disabled have no live identity key.
-            let state = table.entries[idx].state;
-            if state == HsmPartState::Unallocated || state == HsmPartState::Disabled {
-                return Err(HsmError::InvalidArg);
-            }
-            if table.entries[idx].leaf_cert_len > 0 {
+            if table.entries[pid as usize].leaf_cert_len > 0 {
                 return Ok(());
             }
         }
@@ -480,36 +739,30 @@ impl HsmCertStore for StdHsmPal {
         bank: HsmCertBank,
     ) -> HsmResult<HsmCertChainInfo> {
         let pid = u8::from(io.pid());
-        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
+        if slot != HsmCertSlot::Mfgr || !matches!(bank, HsmCertBank::Ecc | HsmCertBank::MlDsa) {
             return Err(HsmError::InvalidArg);
         }
 
-        self.ensure_leaf_cert(pid).await?;
-
-        let table = unsafe { &*self.part_table.get() };
-        let entry = &table.entries[pid as usize];
+        let leaf = self.bank_leaf_cert(pid, bank).await?;
+        let store = self.cert_store();
 
         // Thumbprint = SHA-256(SHA-256(root||devid) || SHA-256(alias) || SHA-256(leaf))
         let mut alias_hash = [0u8; 32];
         self.hash
             .hash(
                 HashAlgo::sha256(),
-                self.cert_store().shared_cert(2).unwrap(),
+                store.bank_cert(bank, 2).ok_or(HsmError::InternalError)?,
                 &mut alias_hash,
             )
             .await?;
 
         let mut leaf_hash = [0u8; 32];
         self.hash
-            .hash(
-                HashAlgo::sha256(),
-                &entry.leaf_cert[..entry.leaf_cert_len],
-                &mut leaf_hash,
-            )
+            .hash(HashAlgo::sha256(), leaf, &mut leaf_hash)
             .await?;
 
         let mut combined = [0u8; 96];
-        combined[..32].copy_from_slice(&self.cert_store().root_deviceid_hash);
+        combined[..32].copy_from_slice(store.bank_root_deviceid_hash(bank));
         combined[32..64].copy_from_slice(&alias_hash);
         combined[64..96].copy_from_slice(&leaf_hash);
 
@@ -533,42 +786,27 @@ impl HsmCertStore for StdHsmPal {
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         let pid = u8::from(io.pid());
-        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
+        if slot != HsmCertSlot::Mfgr || !matches!(bank, HsmCertBank::Ecc | HsmCertBank::MlDsa) {
             return Err(HsmError::InvalidArg);
         }
 
-        // Shared certs (idx 0–2).
-        if idx <= 2 {
-            let src = self
+        let src = match idx {
+            // Shared certs (idx 0–2).
+            0..=2 => self
                 .cert_store()
-                .shared_cert(idx)
-                .ok_or(HsmError::InvalidArg)?;
-            if let Some(buf) = cert {
-                if buf.len() < src.len() {
-                    return Err(HsmError::InvalidArg);
-                }
-                buf[..src.len()].copy_from_slice(src);
-            }
-            return Ok(src.len());
-        }
-
-        // Partition leaf cert (idx 3).
-        if idx != 3 {
-            return Err(HsmError::InvalidArg);
-        }
-
-        self.ensure_leaf_cert(pid).await?;
-
-        let table = unsafe { &*self.part_table.get() };
-        let entry = &table.entries[pid as usize];
-        let len = entry.leaf_cert_len;
+                .bank_cert(bank, idx)
+                .ok_or(HsmError::InvalidArg)?,
+            // Partition leaf cert (idx 3).
+            3 => self.bank_leaf_cert(pid, bank).await?,
+            _ => return Err(HsmError::InvalidArg),
+        };
         if let Some(buf) = cert {
-            if buf.len() < len {
+            if buf.len() < src.len() {
                 return Err(HsmError::InvalidArg);
             }
-            buf[..len].copy_from_slice(&entry.leaf_cert[..len]);
+            buf[..src.len()].copy_from_slice(src);
         }
-        Ok(len)
+        Ok(src.len())
     }
 }
 
@@ -587,7 +825,7 @@ mod tests {
             (HsmCertSlot::DevOwner, HsmCertBank::Ecc),
             (HsmCertSlot::PartOwner, HsmCertBank::Ecc),
             (HsmCertSlot(u8::MAX), HsmCertBank::Ecc),
-            (HsmCertSlot::Mfgr, HsmCertBank::MlDsa),
+            (HsmCertSlot::PartOwner, HsmCertBank::MlDsa),
             (HsmCertSlot::Mfgr, HsmCertBank(u8::MAX)),
         ] {
             assert_eq!(
@@ -633,6 +871,60 @@ mod tests {
                 .ok_or(HsmError::InternalError)?
         );
         assert!(out[len..].iter().all(|&byte| byte == 0xA5));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mldsa_bank_returns_its_own_chain() -> HsmResult<()> {
+        let (_, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (tx, _) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, tx);
+        pal.init_cert_store().await?;
+
+        for idx in 0..SLOT0_CERT_COUNT - 1 {
+            let len = pal
+                .get_cert(&io, HsmCertSlot::Mfgr, HsmCertBank::MlDsa, idx, None)
+                .await?;
+            // An ML-DSA-87 signature alone exceeds the P-384 bound.
+            assert!(len > MAX_CERT_DER_LEN);
+            let mut out = vec![0xA5; len + 1];
+            assert_eq!(
+                pal.get_cert(
+                    &io,
+                    HsmCertSlot::Mfgr,
+                    HsmCertBank::MlDsa,
+                    idx,
+                    Some(&mut out)
+                )
+                .await?,
+                len
+            );
+            assert_eq!(out[0], 0x30);
+            assert_eq!(out[len], 0xA5);
+            assert_ne!(
+                Some(&out[..len]),
+                pal.cert_store().shared_cert(idx),
+                "banks must not alias"
+            );
+            assert_eq!(
+                pal.get_cert(
+                    &io,
+                    HsmCertSlot::Mfgr,
+                    HsmCertBank::MlDsa,
+                    idx,
+                    Some(&mut out[..len - 1])
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+        }
+        // Partition 0 is unallocated: no leaf in either bank.
+        assert_eq!(
+            pal.get_cert(&io, HsmCertSlot::Mfgr, HsmCertBank::MlDsa, 3, None)
+                .await,
+            Err(HsmError::InvalidArg)
+        );
         Ok(())
     }
 }
