@@ -118,8 +118,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let psk = load_psk(pal, io, alloc, psk_id)?;
         let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
         let key_id = crate::part_state::part_id_key_id(pal, io)?;
+        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc).await?;
         let sk_hsm = pal.vault_key(io, key_id)?;
-        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
 
         // ── HPKE info = SESSION_HPKE_INFO ‖ psk_id ‖ session_type
         //                                   ‖ suite_id
@@ -233,28 +233,18 @@ fn load_psk<'a, P: HsmPal>(
 /// SEC1-uncompressed encoding (`0x04 ‖ X_be ‖ Y_be`) of the partition
 /// identity public key, in a freshly-allocated scoped buffer.
 ///
-/// The PAL stores the partition identity public key as raw
-/// `X_be ‖ Y_be` (matching OpenSSL's natural EC point representation
-/// and the form used for cert generation); concatenating with the
-/// SEC1 `0x04` prefix yields the RFC 9180 §7.1.1 wire encoding
-/// directly.
-///
-/// Using the PAL's queried coordinate length (rather than a hard-coded
-/// suite-derived constant) future-proofs against PAL impls that return
-/// a different size; an HPKE-suite mismatch would surface at
-/// `send_export` time, not here.
-fn load_pk_hsm_sec1<'a, P: HsmPal>(
+/// The public point is derived from the vault-held identity private key.
+async fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
-    let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
+    let pk_hsm = alloc
+        .dma_alloc(HsmEccCurve::P384.pub_key_len() + 4)?
+        .split_at_mut(3)
+        .1;
     pk_hsm[0] = 0x04;
-    {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        pk_hsm[1..1 + xy_len].copy_from_slice(&pk[..xy_len]);
-    }
+    crate::part_state::part_id_pub_key(pal, io, pk_hsm.split_at_mut(1).1).await?;
     Ok(pk_hsm)
 }
 

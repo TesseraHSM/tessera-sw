@@ -307,12 +307,8 @@ async fn validate_pta_chain<P: HsmPal>(
         }
     }
 
-    // Snapshot the expected PTA identity (partition PTA key) up front so
-    // the property-store borrow is not held across the chain walk.
-    let pta = super::super::part_state::part_pta_pub_key(pal, io)?;
-    if pta.len() != POLICY_MAX_KEY_LEN {
-        return Err(HsmError::InternalError);
-    }
+    let pta = alloc.dma_alloc(POLICY_MAX_KEY_LEN)?;
+    super::super::part_state::part_pta_pub_key(pal, io, pta).await?;
 
     // Policy `POTAPubKey` trust anchor (raw P-384 `X ‖ Y`, big-endian);
     // `from_bytes` has already pinned its length to a full Ecc384 key.

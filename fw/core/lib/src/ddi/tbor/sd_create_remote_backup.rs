@@ -109,7 +109,12 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 /// fields were populated by the caller from `PartInfo` before `PartInit`
 /// (same `part_state` source), so this is a direct byte comparison — no
 /// endianness conversion.
-fn verify_backing_partition<P: HsmPal>(pal: &P, io: &P::Io, policy: &PartPolicy) -> HsmResult<()> {
+async fn verify_backing_partition<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    policy: &PartPolicy,
+) -> HsmResult<()> {
     let pid = part_state::part_id(pal, io)?;
     if pid[..] != policy.backup_part_id[..] {
         return Err(HsmError::InvalidArg);
@@ -119,7 +124,8 @@ fn verify_backing_partition<P: HsmPal>(pal: &P, io: &P::Io, policy: &PartPolicy)
     if key.kind() != PolicyKeyKind::Ecc384 || key.len() != POLICY_MAX_KEY_LEN {
         return Err(HsmError::InvalidArg);
     }
-    let pid_pub = part_state::part_id_pub_key(pal, io)?;
+    let pid_pub = alloc.dma_alloc(POLICY_MAX_KEY_LEN)?;
+    part_state::part_id_pub_key(pal, io, pid_pub).await?;
     if pid_pub[..] != key.data[..] {
         return Err(HsmError::InvalidArg);
     }
@@ -189,7 +195,7 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     // from `PartInfo` (available in `Initializing`, before
     // `PartInit`), so they must equal this partition's PID and PID
     // public key.
-    verify_backing_partition(pal, io, part_policy)?;
+    verify_backing_partition(pal, io, alloc, part_policy).await?;
 
     // Receiver key authorization: validate
     // the receiver certificate chain, anchor it to the policy SATA key,

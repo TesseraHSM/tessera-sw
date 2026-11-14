@@ -20,8 +20,6 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
-use tsra_fw_hsm_pal_traits::HsmPartPropId;
-use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -126,19 +124,23 @@ async fn check_tbor_rollback() {
                 "session {id} remained live before attempt {attempt}"
             );
         }
+        let mut pk_init = [0; 97];
+        pk_init[0] = 4;
+        hsm.pal()
+            .alloc_scoped_async(&io, async |alloc| {
+                let public_key = alloc.dma_alloc(96)?;
+                tsra_fw_hsm_core::part_state::part_id_pub_key(hsm.pal(), &io, public_key).await?;
+                pk_init[1..].copy_from_slice(public_key);
+                Ok::<_, HsmError>(())
+            })
+            .await
+            .unwrap();
         if attempt == 0 {
             hsm.pal()
                 .dma_alloc(&io, 16384 - UNDO_LOG_SIZE - 100)
                 .unwrap()
                 .fill(0xA5);
         }
-        let mut pk_init = [0; 97];
-        pk_init[0] = 4;
-        pk_init[1..].copy_from_slice(
-            hsm.pal()
-                .part_prop_get_bytes(&io, HsmPartPropId::PART_ID_ECC_PUB_KEY)
-                .unwrap(),
-        );
         types::TborSessionOpenInitReq::encode(&mut request.0)
             .unwrap()
             .psk_id(types::PskId::CryptoUser)

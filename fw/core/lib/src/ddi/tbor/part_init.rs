@@ -37,7 +37,7 @@
 //!    bind the PTA public key, the unified partition policy, and the
 //!    POTA / SATA / SAPOTA thumbprints via the `report_data` field.
 //!
-//! 6. **Commit** — write-once persistence of PTA pubkey + key ID,
+//! 6. **Commit** — write-once persistence of the PTA key ID,
 //!    policy hash, and POTA/SATA/SAPOTA thumbprints into partition
 //!    state; vault the PartRoot and PTA private keys.
 //!    `part_mark_initializing` transitions `Enabled → Initializing`
@@ -217,7 +217,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal,
             io,
             CommitInputs {
-                pta_pub_sec1: pta.pub_sec1,
                 policy_hash: policy_hash_dma,
                 pota_thumb: pota_thumb_dma,
                 sata_thumb: sata_thumb_dma,
@@ -611,7 +610,6 @@ async fn build_report_data<'a, P: HsmPal>(
 
 /// Write-once inputs committed by [`commit_partition_state`].
 struct CommitInputs<'a> {
-    pta_pub_sec1: &'a HsmDmaBuf,
     policy_hash: &'a HsmDmaBuf,
     pota_thumb: &'a HsmDmaBuf,
     sata_thumb: &'a HsmDmaBuf,
@@ -684,7 +682,7 @@ fn commit_partition_state<P: HsmPal>(
     // Guards-first: reject a racing PartInit (or a re-init) that already
     // published this partition's write-once provisioning, *before* any field
     // inverse is recorded — otherwise its restore-to-absent undo would clear
-    // the winner's just-set fields.  Mirrors `part_set_pta_key`'s one-shot
+    // the winner's just-set fields.  Mirrors `part_set_pta_key_id`'s one-shot
     // `PtaKeyAlreadySet` guard, hoisted ahead of the undo bookkeeping so the
     // whole commit stays atomic (await-free) and the loser mutates nothing.
     // Only a genuinely absent slot (`PartPropNotFound`) means "not set yet";
@@ -698,7 +696,7 @@ fn commit_partition_state<P: HsmPal>(
     // setter below fails partway (the clear is then a benign no-op).
     record_field_undo(undo, inputs.sapota_thumb.is_some())?;
 
-    crate::part_state::part_set_pta_key(pal, io, pta_key_id, inputs.pta_pub_sec1)?;
+    crate::part_state::part_set_pta_key_id(pal, io, pta_key_id)?;
     crate::part_state::part_set_ups_key_id(pal, io, root_key_id)?;
     crate::part_state::part_set_policy_hash(pal, io, inputs.policy_hash)?;
     crate::part_state::part_set_pota_thumbprint(pal, io, inputs.pota_thumb)?;
@@ -713,11 +711,9 @@ fn commit_partition_state<P: HsmPal>(
 /// Push the write-once / STATE undo actions for [`commit_partition_state`]
 /// in commit order (the dispatcher walks them LIFO).  Each write-once
 /// field restores to **absent** (it was unset before PartInit); STATE
-/// restores to its prior `Enabled`.  The two `part_set_pta_key` fields
-/// (`PTA_KEY_ID` + `PTA_ECC_PUB_KEY`) are recorded together.
+/// restores to its prior `Enabled`.
 fn record_field_undo(undo: &mut UndoLog<'_>, has_sapota: bool) -> HsmResult<()> {
     undo.push_prop_restore_absent(HsmPartPropId::PTA_KEY_ID)?;
-    undo.push_prop_restore_absent(HsmPartPropId::PTA_ECC_PUB_KEY)?;
     undo.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)?;
     undo.push_prop_restore_absent(HsmPartPropId::POLICY_HASH)?;
     undo.push_prop_restore_absent(HsmPartPropId::POTA_THUMBPRINT)?;
