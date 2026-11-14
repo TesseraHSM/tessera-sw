@@ -891,6 +891,7 @@ impl Drop for CmdFuture<'_> {
 
 /// Release the completed command `id`: free its ID and SQE reservation,
 /// wipe its key, and return its completion.
+#[inline]
 fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
     let slot = &mut s.slots[id];
     slot.done = false;

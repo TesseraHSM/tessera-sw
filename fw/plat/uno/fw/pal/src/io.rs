@@ -844,6 +844,7 @@ impl UnoHsmPal {
 
     /// Posts slot `index`'s completion, or leaves it for the next pass if
     /// the OIC has no room.
+    #[inline]
     fn post_detached(&self, index: u16) {
         let queue_id = self.detached[index as usize].get().queue_id as u8;
         publish_cqe(index);
@@ -857,6 +858,7 @@ impl UnoHsmPal {
     /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io)),
     /// and resets a command slot's scratch allocator and copies its SQE, or
     /// marks a bulk slot busy.
+    #[inline]
     pub(crate) fn accept_io(&self, rx: Received, kind: HsmIoKind) -> UnoHsmIo {
         let index = rx.index;
         self.io_in_flight_inc(kind);
