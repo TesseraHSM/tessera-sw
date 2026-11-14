@@ -18,6 +18,9 @@
 #![no_std]
 #![allow(unsafe_code)]
 
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering::Relaxed;
+
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -54,6 +57,17 @@ const TABLE_BASE: u32 = IO_GSRAM_BASE + KEY_VAULT_TABLE_T_BASE;
 /// table is plain GSRAM, accessed without the tock-registers overlay.
 const TABLE_STRIDE: u32 = BLOB_OFFSET + TABLE_BLOB_SIZE;
 
+/// Bumped by every mutable borrow of a vault table's entries, bitmap or
+/// blob, before the borrow is handed out: a key located at one
+/// [`VaultStorage::generation`] is where it was for as long as the
+/// generation stays the same.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Marks the vault changed; see [`GENERATION`].
+fn bump_generation() {
+    GENERATION.store(GENERATION.load(Relaxed).wrapping_add(1), Relaxed);
+}
+
 /// GSRAM-backed [`TableStorage`].
 ///
 /// Tables are addressed directly in GSRAM, so the only state this handle
@@ -85,6 +99,14 @@ impl VaultStorage {
         Self {
             res_mask: core::array::from_fn(|i| (res_mask >> (32 * i)) as u32),
         }
+    }
+
+    /// The vault's generation: it changes whenever a table may have been
+    /// written, so a key located at one generation is still there while the
+    /// generation is unchanged.
+    #[inline]
+    pub fn generation() -> u32 {
+        GENERATION.load(Relaxed)
     }
 
     /// Builds a storage handle for a partition owning, of the tables, only
@@ -233,6 +255,7 @@ impl TableStorage for VaultStorage {
             return Err(HsmError::InvalidArg);
         }
         let ptr = (Self::entry_addr(table) + idx * ENTRY_STRIDE as usize) as *mut Entry;
+        bump_generation();
         // SAFETY: as `entry`, with exclusive access on the single-threaded
         // executor for the duration of the `&mut self` borrow.
         Ok(unsafe { &mut *ptr })
@@ -273,6 +296,7 @@ impl TableStorage for VaultStorage {
             return Err(HsmError::InvalidArg);
         }
         let ptr = Self::bitmap_addr(table) as *mut [u32; BITMAP_WORDS];
+        bump_generation();
         // SAFETY: as `bitmap`, with exclusive access on the single-threaded
         // executor for the duration of the `&mut self` borrow.
         Ok(unsafe { &mut *ptr })
@@ -317,6 +341,7 @@ impl TableStorage for VaultStorage {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
+        bump_generation();
         // SAFETY: as `blob`, with exclusive access for the duration of the
         // `&mut self` borrow on the single-threaded executor.
         Ok(unsafe {
