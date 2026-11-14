@@ -280,10 +280,12 @@ impl UnoHsmPal {
         // they are (most masked keys): one engine command, with no scratch,
         // no hash subkey and no tag correction.
         if !fix && bufs.aligned() {
-            let engine_tag = match dir {
+            // Word-aligned, so the driver reads it into the command with one
+            // burst rather than a byte at a time.
+            let engine_tag = Tag(match dir {
                 Dir::Decrypt(t) => read_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
-            };
+            });
             self.service_pka();
             let done = self
                 .bcp
@@ -296,11 +298,11 @@ impl UnoHsmPal {
                     iv,
                     aad_len: pad,
                     unpadded_aad_len: aad_len,
-                    tag: &engine_tag,
+                    tag: &engine_tag.0,
                     data: bufs.engine_data(len),
                 })
                 .await;
-            let result = verdict(dir, &engine_tag, done);
+            let result = verdict(dir, &engine_tag.0, done);
             if result.is_err() {
                 bufs.dst()[pad..len].fill(0);
             }
@@ -316,7 +318,7 @@ impl UnoHsmPal {
             };
 
             // The tag the engine checks a decrypt against.
-            let engine_tag = match (dir, &h) {
+            let engine_tag = Tag(match (dir, &h) {
                 (Dir::Decrypt(t), Some(h)) => {
                     let mut g = ghash(h)?;
                     g.update(&len_fix);
@@ -324,7 +326,7 @@ impl UnoHsmPal {
                 }
                 (Dir::Decrypt(t), None) => *t,
                 (Dir::Encrypt, _) => [0; AES_BLOCK_SIZE],
-            };
+            });
             let req = |data| GcmRequest {
                 op: match dir {
                     Dir::Encrypt => GcmOp::Encrypt,
@@ -334,7 +336,7 @@ impl UnoHsmPal {
                 iv,
                 aad_len: pad,
                 unpadded_aad_len: aad_len,
-                tag: &engine_tag,
+                tag: &engine_tag.0,
                 data,
             };
 
@@ -344,7 +346,7 @@ impl UnoHsmPal {
             let result = if tail == 0 && bufs.aligned() {
                 // Whole blocks: the engine runs on the caller's buffers.
                 let done = self.bcp.gcm(req(bufs.engine_data(len))).await;
-                let result = verdict(dir, &engine_tag, done);
+                let result = verdict(dir, &engine_tag.0, done);
                 if result.is_err() {
                     bufs.dst()[pad..len].fill(0);
                 }
@@ -356,7 +358,7 @@ impl UnoHsmPal {
                 work[..len].copy_from_slice(bufs.src());
                 work[len..].fill(0);
                 let done = self.bcp.gcm(req(BcpData::InPlace(work))).await;
-                let result = verdict(dir, &engine_tag, done);
+                let result = verdict(dir, &engine_tag.0, done);
                 if result.is_ok() {
                     if tail != 0 {
                         pad_ks[tail..].copy_from_slice(&work[len..]);
