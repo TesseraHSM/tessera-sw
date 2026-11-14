@@ -56,6 +56,7 @@ use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
+use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
@@ -125,6 +126,53 @@ fn copy_sqe(index: usize) {
     // SAFETY: as above.
     unsafe {
         core::ptr::copy_nonoverlapping(src, dst, 16);
+    }
+}
+
+/// Each host IO slot's CQE, built here while its IO runs and written out to
+/// `IO_CQ` whole, with one burst, by [`publish_cqe`] just before the OIC
+/// posts it.
+///
+/// The CQE is filled in field by field (status, lengths, session fields,
+/// queue id), and IO GSRAM is read uncached: in place, each update would
+/// first read its word back over the interconnect.
+struct CqeCopies(UnsafeCell<[CqeEntry; IO_CQ_COUNT as usize]>);
+
+// SAFETY: single-core firmware with cooperative scheduling; a slot's copy
+// is touched only by its IO, or by the platform finishing it once detached.
+unsafe impl Sync for CqeCopies {}
+
+static CQE_COPIES: CqeCopies = CqeCopies(UnsafeCell::new([CqeEntry([0; 4]); IO_CQ_COUNT as usize]));
+
+/// Writes host slot `index`'s CQE out to `IO_CQ`, where the OIC reads it.
+/// The OIC orders its descriptor writes, and so this one, ahead of its
+/// doorbell.
+fn publish_cqe(index: u16) {
+    const { assert!(mem::size_of::<IoCqEntry>() == 16) };
+    // SAFETY: indexing checks `index` is a host slot; only a pointer is
+    // formed, no reference to the copy (see `CqeCopies`).
+    let src = unsafe { (*CQE_COPIES.0.get())[index as usize].0.as_ptr() };
+    let dst = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut u32;
+    #[cfg(target_arch = "arm")]
+    // SAFETY: both are 16-byte, word-aligned CQEs: the DTCM copy and its
+    // IO_CQ entry, which only this slot's completion uses.
+    unsafe {
+        core::arch::asm!(
+            "ldm {s}, {{r2, r3, r4, r5}}",
+            "stm {d}, {{r2, r3, r4, r5}}",
+            s = in(reg) src,
+            d = in(reg) dst,
+            out("r2") _,
+            out("r3") _,
+            out("r4") _,
+            out("r5") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, 4);
     }
 }
 
@@ -288,10 +336,10 @@ impl HsmIo for UnoHsmIo {
         unsafe { &*(io_sq as *const IoSqEntry as *const SqeEntry) }
     }
 
-    /// Returns a mutable reference to the CQE at `IO_CQ[index]`.
-    ///
-    /// The HSM core writes completion status here; the OIC driver
-    /// reads it when sending the completion back to the host.
+    /// Returns a mutable reference to the slot's CQE, its DTCM copy (see
+    /// [`CqeCopies`]): the HSM core writes completion status there, and the
+    /// copy goes out to `IO_CQ[index]`, where the OIC driver reads it, when
+    /// the completion is posted.
     fn cqe(&mut self) -> &mut CqeEntry {
         const _ASSERT_CQE_SIZE: () =
             assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<RawCqe>());
@@ -433,6 +481,7 @@ impl HsmIoController for UnoHsmPal {
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         io.cqe().view().set_sq_id(queue_id);
+        publish_cqe(io.index);
         self.oic.send(io.index, queue_id as u8)?.await
     }
 
@@ -516,13 +565,10 @@ impl DetachedIo {
 
 /// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it.
 fn slot_cqe(index: u16) -> &'static mut CqeEntry {
-    // SAFETY: the queue entry and RawCqe (and so the transparent CqeEntry)
-    // share the asserted layout, and only the slot's owner -- its IO, or
-    // the platform finishing a detached IO -- touches it.
-    unsafe {
-        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut CqeEntry;
-        &mut *ptr
-    }
+    // SAFETY: indexing checks `index` is a host slot, and only the slot's
+    // owner -- its IO, or the platform finishing a detached IO -- touches
+    // its copy (see `CqeCopies`).
+    unsafe { &mut (*CQE_COPIES.0.get())[index as usize] }
 }
 
 impl UnoHsmPal {
@@ -584,6 +630,7 @@ impl UnoHsmPal {
     /// the OIC has no room.
     fn post_detached(&self, index: u16) {
         let queue_id = self.detached[index as usize].get().queue_id as u8;
+        publish_cqe(index);
         if self.oic.send_detached(index, queue_id).is_err() {
             self.detached_post_pending
                 .set(self.detached_post_pending.get() | 1 << index);
