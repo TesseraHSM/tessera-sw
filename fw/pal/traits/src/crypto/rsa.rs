@@ -487,6 +487,9 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
     /// - `Err(HsmError)` — PKA failure.
+    ///
+    /// `pub_key` is `n || e(4)` and `signature` is modulus-sized, both in
+    /// operand order. `message_hash` is a standard digest byte string.
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pkcs1_verify<'a>(
         &self,
@@ -642,6 +645,9 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
     /// - `Err(HsmError)` — SHA / PKA failure.
+    ///
+    /// `pub_key` is `n || e(4)` and `signature` is modulus-sized, both in
+    /// operand order. `message_hash` is a standard digest byte string.
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pss_verify<'a>(
         &self,

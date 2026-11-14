@@ -803,7 +803,8 @@ fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant)
 ///
 /// Every operand is an input, so all four are borrowed straight out of the
 /// slot with no copying -- unlike sign, where the output aliases the same
-/// slot and the inputs have to be staged first.
+/// slot and the inputs have to be staged first. A pure message may instead
+/// be read in place from the HSM's IO DMA buffer, by address.
 ///
 /// A bad signature is reported as `STATUS_CRYPTO_FAILED`, which the HSM
 /// turns into `MlDsaVerifyFailed`. It is an ordinary outcome, not a fault:
@@ -817,8 +818,15 @@ fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVarian
         return;
     }
 
+    let msg = if req.msg_addr == 0 {
+        mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len)
+    } else if req.msg_type == mailbox::MSG_TYPE_PURE {
+        mailbox::io_dma_range(req.msg_addr, req.msg_len)
+    } else {
+        None
+    };
     let (Some(msg), Some(ctx), Some(sig_src), Some(pk_src)) = (
-        mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len),
+        msg,
         mailbox::slot_range(lane, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
         mailbox::slot_range(lane, mailbox::SLOT_SIG_OFFSET, req.sig_len),
         mailbox::slot_range(lane, mailbox::SLOT_PK_OFFSET, req.pub_key_len),

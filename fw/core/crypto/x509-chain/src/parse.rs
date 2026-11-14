@@ -29,11 +29,17 @@ use der::TagNumber;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRsaKey;
 
 use crate::types::BasicConstraints;
 use crate::types::CertInfo;
 use crate::types::EcPubKey;
+use crate::types::PssParams;
+use crate::types::PubKey;
+use crate::types::RsaPubKey;
 use crate::types::SigAlgo;
 
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
@@ -41,6 +47,19 @@ const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840
 const OID_ECDSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const OID_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+const OID_RSA_PSS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
+const OID_MGF1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.8");
+const OID_RSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
+const OID_RSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12");
+const OID_RSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13");
+const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
+const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
+const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
+const OID_MLDSA44: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+const OID_MLDSA65: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
+const OID_MLDSA87: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 
 const OID_P256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_P384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
@@ -127,7 +146,7 @@ impl From<X509ParseError> for HsmError {
 /// * `Ok(CertInfo)` on success.
 /// * `Err(HsmError::X509ParseError)` if the DER is malformed.
 /// * `Err(HsmError::X509UnsupportedAlgorithm)` if the signature or
-///   key algorithm is not a supported ECDSA/EC variant.
+///   key algorithm or its parameters are unsupported.
 /// * `Err(HsmError::X509UnrecognizedCriticalExtension)` if a critical
 ///   extension is present that this parser does not recognize.
 pub fn parse_cert(der: &HsmDmaBuf) -> HsmResult<CertInfo<'_>> {
@@ -136,11 +155,11 @@ pub fn parse_cert(der: &HsmDmaBuf) -> HsmResult<CertInfo<'_>> {
         let tbs_raw = to_dma(der, cert.tlv_bytes()?);
         let sig_algo = parse_sig_algo_id(cert)?;
         let sig_bits = cert.decode::<BitStringRef<'_>>()?;
-        let signature = to_dma(der, sig_bits.raw_bytes());
+        let signature = to_dma(der, sig_bits.as_bytes().ok_or(HsmError::X509ParseError)?);
         cert.clone().finish()?;
 
-        let (issuer_raw, subject_raw, pub_key, akid, skid, basic_constraints, key_usage) =
-            parse_tbs(der, tbs_raw)?;
+        let (issuer_raw, subject_raw, pub_key, spki_raw, akid, skid, basic_constraints, key_usage) =
+            parse_tbs(der, tbs_raw, sig_algo)?;
 
         Ok(CertInfo {
             tbs_raw,
@@ -149,6 +168,7 @@ pub fn parse_cert(der: &HsmDmaBuf) -> HsmResult<CertInfo<'_>> {
             issuer_raw,
             subject_raw,
             pub_key,
+            spki_raw,
             akid,
             skid,
             basic_constraints,
@@ -197,15 +217,17 @@ fn to_dma<'a>(root: &'a HsmDmaBuf, sub: &'a [u8]) -> &'a HsmDmaBuf {
 /// In order:
 /// 1. raw issuer Name (DER SEQUENCE bytes, in DMA memory)
 /// 2. raw subject Name (DER SEQUENCE bytes, in DMA memory)
-/// 3. parsed EC public key
-/// 4. AuthorityKeyIdentifier `keyIdentifier`, if present
-/// 5. SubjectKeyIdentifier value, if present
-/// 6. parsed BasicConstraints, if present
-/// 7. parsed KeyUsage bits, if present
+/// 3. parsed public key
+/// 4. raw SubjectPublicKeyInfo
+/// 5. AuthorityKeyIdentifier `keyIdentifier`, if present
+/// 6. SubjectKeyIdentifier value, if present
+/// 7. parsed BasicConstraints, if present
+/// 8. parsed KeyUsage bits, if present
 type ParsedTbs<'a> = (
     &'a HsmDmaBuf,
     &'a HsmDmaBuf,
-    EcPubKey<'a>,
+    PubKey<'a>,
+    &'a HsmDmaBuf,
     Option<&'a [u8]>,
     Option<&'a [u8]>,
     Option<BasicConstraints>,
@@ -217,7 +239,7 @@ type ParsedTbs<'a> = (
 /// Walks the TBSCertificate SEQUENCE in order, capturing the issuer
 /// Name, subject Name, SubjectPublicKeyInfo, and (optionally) the
 /// extensions block. Fields that are not used by the simplified
-/// validator (version, serial, signature algo restated, validity,
+/// validator (version, serial, validity,
 /// issuer/subject UIDs) are skipped over but still consumed so the
 /// reader stays in sync.
 ///
@@ -233,17 +255,23 @@ type ParsedTbs<'a> = (
 ///   malformed DER, or [`HsmError::X509UnsupportedAlgorithm`] /
 ///   [`HsmError::X509UnrecognizedCriticalExtension`] from the
 ///   nested SPKI / extension parsers.
-fn parse_tbs<'a>(root: &'a HsmDmaBuf, tbs_raw: &'a HsmDmaBuf) -> X509ParseResult<ParsedTbs<'a>> {
+fn parse_tbs<'a>(
+    root: &'a HsmDmaBuf,
+    tbs_raw: &'a HsmDmaBuf,
+    sig_algo: SigAlgo,
+) -> X509ParseResult<ParsedTbs<'a>> {
     let mut reader = SliceReader::new(tbs_raw).map_err(X509ParseError::from)?;
     let parsed = reader.sequence(|tbs| -> X509ParseResult<_> {
         let _version: Option<u8> = tbs.context_specific(TagNumber(0), TagMode::Explicit)?;
         let _serial = tbs.decode::<UintRef<'_>>()?;
-        let _sig_algo = tbs.tlv_bytes()?;
+        if parse_sig_algo_id(tbs)? != sig_algo {
+            return Err(HsmError::X509ParseError.into());
+        }
         let issuer_raw = to_dma(root, tbs.tlv_bytes()?);
         let _validity = tbs.tlv_bytes()?;
         let subject_raw = to_dma(root, tbs.tlv_bytes()?);
-        let spki_raw = tbs.tlv_bytes()?;
-        let pub_key = parse_ec_spki(root, spki_raw)?;
+        let spki_raw = to_dma(root, tbs.tlv_bytes()?);
+        let pub_key = parse_spki(root, spki_raw)?;
         let _issuer_uid: Option<BitStringRef<'_>> =
             tbs.context_specific(TagNumber(1), TagMode::Implicit)?;
         let _subject_uid: Option<BitStringRef<'_>> =
@@ -271,6 +299,7 @@ fn parse_tbs<'a>(root: &'a HsmDmaBuf, tbs_raw: &'a HsmDmaBuf) -> X509ParseResult
             issuer_raw,
             subject_raw,
             pub_key,
+            spki_raw,
             akid,
             skid,
             basic_constraints,
@@ -284,90 +313,251 @@ fn parse_tbs<'a>(root: &'a HsmDmaBuf, tbs_raw: &'a HsmDmaBuf) -> X509ParseResult
 /// Parse the outer signatureAlgorithm `AlgorithmIdentifier` and map
 /// its OID to a [`SigAlgo`] variant.
 ///
-/// Only the three ECDSA OIDs paired with the supported curves
-/// (P-256, P-384, P-521) are accepted. RSA, EdDSA, and any other
-/// algorithm are rejected.
+/// Accepts ECDSA, SHA-2 RSA PKCS#1 v1.5 / PSS, and pure ML-DSA.
 ///
 /// # Parameters
 /// * `reader` — a `SliceReader` positioned at the start of an
 ///   `AlgorithmIdentifier` SEQUENCE.
 ///
 /// # Returns
-/// * `Ok(SigAlgo)` — a recognized ECDSA signature algorithm.
+/// * `Ok(SigAlgo)` — a recognized signature algorithm and parameters.
 /// * `Err` wrapping [`HsmError::X509UnsupportedAlgorithm`] for
 ///   unrecognized OIDs, or [`HsmError::X509ParseError`] on malformed
 ///   DER.
 fn parse_sig_algo_id(reader: &mut SliceReader<'_>) -> X509ParseResult<SigAlgo> {
     reader.sequence(|algo| -> X509ParseResult<_> {
         let oid = algo.decode::<ObjectIdentifier>()?;
+        let signature = match oid {
+            x if x == OID_ECDSA_SHA256 => SigAlgo::EcdsaSha256,
+            x if x == OID_ECDSA_SHA384 => SigAlgo::EcdsaSha384,
+            x if x == OID_ECDSA_SHA512 => SigAlgo::EcdsaSha512,
+            x if x == OID_RSA_SHA256 || x == OID_RSA_SHA384 || x == OID_RSA_SHA512 => {
+                if !algo.is_finished() {
+                    algo.decode::<()>()?;
+                }
+                SigAlgo::RsaPkcs1(if oid == OID_RSA_SHA256 {
+                    HsmHashAlgo::Sha256
+                } else if oid == OID_RSA_SHA384 {
+                    HsmHashAlgo::Sha384
+                } else {
+                    HsmHashAlgo::Sha512
+                })
+            }
+            x if x == OID_RSA_PSS => {
+                SigAlgo::RsaPss(parse_pss_params(algo.decode::<&SequenceRef>()?)?)
+            }
+            _ => SigAlgo::MlDsa(mldsa_param(oid).ok_or(HsmError::X509UnsupportedAlgorithm)?),
+        };
         algo.clone().finish()?;
-        match oid {
-            x if x == OID_ECDSA_SHA256 => Ok(SigAlgo::EcdsaSha256),
-            x if x == OID_ECDSA_SHA384 => Ok(SigAlgo::EcdsaSha384),
-            x if x == OID_ECDSA_SHA512 => Ok(SigAlgo::EcdsaSha512),
-            _ => Err(HsmError::X509UnsupportedAlgorithm.into()),
-        }
+        Ok(signature)
     })
 }
 
-/// Parse a SubjectPublicKeyInfo SEQUENCE for an EC public key.
-///
-/// Verifies that the algorithm OID is `id-ecPublicKey`, decodes the
-/// named-curve OID into an [`HsmEccCurve`], and extracts the
-/// uncompressed EC point (stripping the `0x04` prefix). The point
-/// length is checked against `curve.priv_key_len() * 2`.
-///
-/// # Parameters
-/// * `root` — the original certificate DMA buffer; used to re-borrow
-///   the EC point bytes as `&HsmDmaBuf` via [`to_dma`].
-/// * `spki_raw` — the full SubjectPublicKeyInfo SEQUENCE bytes
-///   (tag + length + value), borrowing from `root`.
-///
-/// # Returns
-/// * `Ok(EcPubKey)` — a parsed EC public key with curve and raw
-///   `X || Y` coordinate bytes.
-/// * `Err` wrapping [`HsmError::X509UnsupportedAlgorithm`] for
-///   non-EC keys or unsupported curves, or
-///   [`HsmError::X509ParseError`] for malformed DER, missing the
-///   `0x04` uncompressed-point marker, or wrong coordinate length.
-fn parse_ec_spki<'a>(root: &'a HsmDmaBuf, spki_raw: &'a [u8]) -> X509ParseResult<EcPubKey<'a>> {
+fn mldsa_param(oid: ObjectIdentifier) -> Option<HsmMlDsaParamSet> {
+    match oid {
+        x if x == OID_MLDSA44 => Some(HsmMlDsaParamSet::MlDsa44),
+        x if x == OID_MLDSA65 => Some(HsmMlDsaParamSet::MlDsa65),
+        x if x == OID_MLDSA87 => Some(HsmMlDsaParamSet::MlDsa87),
+        _ => None,
+    }
+}
+
+/// Split one DER TLV (definite length up to 64 KiB) off the front of `buf`,
+/// returning `(tag, content, rest)`.
+fn read_tlv(buf: &[u8]) -> X509ParseResult<(u8, &[u8], &[u8])> {
+    let err = || X509ParseError::from(HsmError::X509ParseError);
+    let (&tag, buf) = buf.split_first().ok_or_else(err)?;
+    let (&first, buf) = buf.split_first().ok_or_else(err)?;
+    let (len, buf) = match first {
+        0..=0x7f => (usize::from(first), buf),
+        0x81 if buf.first().is_some_and(|&b| b >= 0x80) => (usize::from(buf[0]), &buf[1..]),
+        0x82 if buf.len() >= 2 && buf[0] != 0 => {
+            (usize::from(buf[0]) << 8 | usize::from(buf[1]), &buf[2..])
+        }
+        _ => return Err(err()),
+    };
+    if len > buf.len() {
+        return Err(err());
+    }
+    let (content, rest) = buf.split_at(len);
+    Ok((tag, content, rest))
+}
+
+/// Like [`read_tlv`], but requires `tag` and returns only the content.
+fn read_tlv_tag<'a>(buf: &mut &'a [u8], tag: u8) -> X509ParseResult<&'a [u8]> {
+    let (found, content, rest) = read_tlv(buf)?;
+    if found != tag {
+        return Err(HsmError::X509ParseError.into());
+    }
+    *buf = rest;
+    Ok(content)
+}
+
+/// Read the SEQUENCE content that must fill `content` exactly.
+fn only_sequence(mut content: &[u8]) -> X509ParseResult<&[u8]> {
+    let inner = read_tlv_tag(&mut content, 0x30)?;
+    if !content.is_empty() {
+        return Err(HsmError::X509ParseError.into());
+    }
+    Ok(inner)
+}
+
+/// Parse `AlgorithmIdentifier` content `{ OID, NULL? }` of a hash.
+fn parse_hash_id(mut content: &[u8]) -> X509ParseResult<HsmHashAlgo> {
+    let oid = read_tlv_tag(&mut content, 0x06)?;
+    if !content.is_empty() && content != [0x05, 0x00] {
+        return Err(HsmError::X509ParseError.into());
+    }
+    match oid {
+        x if x == OID_SHA1.as_bytes() => Ok(HsmHashAlgo::Sha1),
+        x if x == OID_SHA256.as_bytes() => Ok(HsmHashAlgo::Sha256),
+        x if x == OID_SHA384.as_bytes() => Ok(HsmHashAlgo::Sha384),
+        x if x == OID_SHA512.as_bytes() => Ok(HsmHashAlgo::Sha512),
+        _ => Err(HsmError::X509UnsupportedAlgorithm.into()),
+    }
+}
+
+/// Parse the content of `[n] EXPLICIT INTEGER` as a small unsigned value.
+fn parse_explicit_u16(mut content: &[u8]) -> X509ParseResult<u16> {
+    let int = read_tlv_tag(&mut content, 0x02)?;
+    let int = match int {
+        [0, rest @ ..] if rest.first().is_some_and(|&b| b & 0x80 != 0) => rest,
+        [b, ..] if b & 0x80 != 0 || (*b == 0 && int.len() > 1) => {
+            return Err(HsmError::X509ParseError.into())
+        }
+        _ => int,
+    };
+    if int.is_empty() || int.len() > 2 || !content.is_empty() {
+        return Err(HsmError::X509ParseError.into());
+    }
+    Ok(int.iter().fold(0, |acc, &b| acc << 8 | u16::from(b)))
+}
+
+fn parse_pss_params(sequence: &SequenceRef) -> X509ParseResult<PssParams> {
+    let mut rest = sequence.as_bytes();
+    // SHA-1 defaults are unsupported, so both hash identifiers are required.
+    let mut field = |tag: u8| -> X509ParseResult<Option<&[u8]>> {
+        match rest.first() {
+            Some(&t) if t == tag => read_tlv_tag(&mut rest, tag).map(Some),
+            _ => Ok(None),
+        }
+    };
+    let hash = field(0xa0)?.ok_or(HsmError::X509UnsupportedAlgorithm)?;
+    let hash = parse_hash_id(only_sequence(hash)?)?;
+    let mgf = field(0xa1)?.ok_or(HsmError::X509UnsupportedAlgorithm)?;
+    let mut mgf = only_sequence(mgf)?;
+    if read_tlv_tag(&mut mgf, 0x06)? != OID_MGF1.as_bytes() {
+        return Err(HsmError::X509UnsupportedAlgorithm.into());
+    }
+    let mgf_hash = parse_hash_id(read_tlv_tag(&mut mgf, 0x30)?)?;
+    if !mgf.is_empty() {
+        return Err(HsmError::X509ParseError.into());
+    }
+    let salt_len = match field(0xa2)? {
+        Some(content) => parse_explicit_u16(content)?,
+        None => 20,
+    };
+    let trailer = match field(0xa3)? {
+        Some(content) => {
+            u8::try_from(parse_explicit_u16(content)?).map_err(|_| HsmError::X509ParseError)?
+        }
+        None => 1,
+    };
+    if !rest.is_empty() {
+        return Err(HsmError::X509ParseError.into());
+    }
+    if !matches!(
+        hash,
+        HsmHashAlgo::Sha256 | HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512
+    ) || hash != mgf_hash
+        || trailer != 1
+    {
+        return Err(HsmError::X509UnsupportedAlgorithm.into());
+    }
+    Ok(PssParams { hash, salt_len })
+}
+
+/// Parse a supported SubjectPublicKeyInfo, retaining only borrowed views.
+pub(crate) fn parse_spki<'a>(root: &'a HsmDmaBuf, spki_raw: &'a [u8]) -> HsmResult<PubKey<'a>> {
     let mut reader = SliceReader::new(spki_raw).map_err(X509ParseError::from)?;
     let pub_key = reader.sequence(|seq| -> X509ParseResult<_> {
-        let curve = seq.sequence(|algo| -> X509ParseResult<_> {
+        let (oid, curve, pss_params) = seq.sequence(|algo| -> X509ParseResult<_> {
             let oid = algo.decode::<ObjectIdentifier>()?;
-            if oid != OID_EC_PUBLIC_KEY {
+            let mut curve = None;
+            let mut pss_params = None;
+            if oid == OID_EC_PUBLIC_KEY {
+                curve = Some(match algo.decode::<ObjectIdentifier>()? {
+                    x if x == OID_P256 => HsmEccCurve::P256,
+                    x if x == OID_P384 => HsmEccCurve::P384,
+                    x if x == OID_P521 => HsmEccCurve::P521,
+                    _ => return Err(HsmError::X509UnsupportedAlgorithm.into()),
+                });
+            } else if oid == OID_RSA {
+                if !algo.is_finished() {
+                    algo.decode::<()>()?;
+                }
+            } else if oid == OID_RSA_PSS {
+                if !algo.is_finished() {
+                    pss_params = Some(parse_pss_params(algo.decode::<&SequenceRef>()?)?);
+                }
+            } else if mldsa_param(oid).is_none() {
                 return Err(HsmError::X509UnsupportedAlgorithm.into());
             }
-
-            let curve_oid = algo.decode::<ObjectIdentifier>()?;
             algo.clone().finish()?;
-
-            match curve_oid {
-                x if x == OID_P256 => Ok(HsmEccCurve::P256),
-                x if x == OID_P384 => Ok(HsmEccCurve::P384),
-                x if x == OID_P521 => Ok(HsmEccCurve::P521),
-                _ => Err(HsmError::X509UnsupportedAlgorithm.into()),
-            }
+            Ok((oid, curve, pss_params))
         })?;
-
         let pk_bits = seq.decode::<BitStringRef<'_>>()?;
-        let pk_bytes = pk_bits.raw_bytes();
-
-        if pk_bytes.is_empty() || pk_bytes[0] != 0x04 {
-            return Err(HsmError::X509ParseError.into());
-        }
-
-        let point = &pk_bytes[1..];
-        let expected_len = curve.priv_key_len() * 2;
-        if point.len() != expected_len {
-            return Err(HsmError::X509ParseError.into());
-        }
-
+        let bytes = to_dma(root, pk_bits.as_bytes().ok_or(HsmError::X509ParseError)?);
         seq.clone().finish()?;
-        Ok(EcPubKey {
-            curve,
-            point: to_dma(root, point),
-        })
+        if let Some(curve) = curve {
+            if bytes.first() != Some(&0x04) || bytes.len() != 1 + curve.priv_key_len() * 2 {
+                return Err(HsmError::X509ParseError.into());
+            }
+            Ok(PubKey::Ec(EcPubKey {
+                curve,
+                point: &bytes[1..],
+            }))
+        } else if oid == OID_RSA || oid == OID_RSA_PSS {
+            let mut reader = SliceReader::new(bytes)?;
+            let key = reader.sequence(|rsa| -> X509ParseResult<_> {
+                let modulus = rsa.decode::<UintRef<'_>>()?;
+                let exponent = rsa.decode::<UintRef<'_>>()?;
+                rsa.clone().finish()?;
+                let modulus = modulus.as_bytes();
+                let exponent = exponent.as_bytes();
+                let key_size = match modulus.len() {
+                    256 => HsmRsaKey::Rsa2048Pub,
+                    384 => HsmRsaKey::Rsa3072Pub,
+                    512 => HsmRsaKey::Rsa4096Pub,
+                    _ => return Err(HsmError::X509UnsupportedAlgorithm.into()),
+                };
+                if modulus[0] & 0x80 == 0
+                    || modulus[modulus.len() - 1] & 1 == 0
+                    || exponent.is_empty()
+                    || exponent.len() > 4
+                    || exponent[exponent.len() - 1] & 1 == 0
+                    || (exponent.len() == 1 && exponent[0] < 3)
+                {
+                    return Err(HsmError::X509ParseError.into());
+                }
+                Ok(RsaPubKey {
+                    key_size,
+                    modulus: to_dma(root, modulus),
+                    exponent: to_dma(root, exponent),
+                    encoded: bytes,
+                    pss_only: oid == OID_RSA_PSS,
+                    pss_params,
+                })
+            })?;
+            reader.finish()?;
+            Ok(PubKey::Rsa(key))
+        } else {
+            let param = mldsa_param(oid).ok_or(HsmError::X509UnsupportedAlgorithm)?;
+            if bytes.len() != param.pk_len() {
+                return Err(HsmError::X509ParseError.into());
+            }
+            Ok(PubKey::MlDsa { param, key: bytes })
+        }
     })?;
     reader.finish().map_err(X509ParseError::from)?;
     Ok(pub_key)
@@ -441,9 +631,10 @@ fn parse_extensions<'a>(
                 }
             }
             x if x == OID_KEY_USAGE => {
-                if let Ok(parsed) = parse_key_usage(value_bytes) {
-                    *key_usage = Some(parsed);
+                if key_usage.is_some() {
+                    return Err(HsmError::X509ParseError.into());
                 }
+                *key_usage = Some(parse_key_usage(value_bytes)?);
             }
             _ if critical && !KNOWN_EXTENSION_OIDS.contains(&oid) => {
                 return Err(HsmError::X509UnrecognizedCriticalExtension.into());
@@ -546,7 +737,7 @@ fn parse_basic_constraints(value: &[u8]) -> X509ParseResult<BasicConstraints> {
 /// KeyUsage is a BIT STRING of up to nine bits. The first two bytes
 /// of the value are loaded into the high and low halves of a `u16`
 /// respectively, matching the layout documented on the [`key_usage`]
-/// constants. Trailing zero-padding bits beyond byte 1 are ignored.
+/// constants. Values longer than the nine defined bits are rejected.
 ///
 /// [`key_usage`]: crate::types::key_usage
 ///
@@ -560,6 +751,9 @@ fn parse_key_usage(value: &[u8]) -> X509ParseResult<u16> {
     let mut reader = SliceReader::new(value).map_err(X509ParseError::from)?;
     let bits = reader.decode::<BitStringRef<'_>>()?;
     reader.finish().map_err(X509ParseError::from)?;
+    if bits.bit_len() > 9 {
+        return Err(HsmError::X509ParseError.into());
+    }
 
     let bytes = bits.raw_bytes();
     let mut bits_value = 0u16;

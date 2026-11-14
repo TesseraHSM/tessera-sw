@@ -7,14 +7,14 @@
 //! Several TBOR SD commands (`SdCreateRemoteBackup`, `SdReseal`,
 //! `SdRestore*`, `SdCreatePeerBackup`) carry an attestation **evidence**
 //! context out of band: required manufacturer and partition-owner
-//! ECDSA-P384 X.509 chains, an optional device-owner chain, and a COSE_Sign1 key-
+//! X.509 chains with P-384 leaf keys, an optional device-owner chain, and a COSE_Sign1 key-
 //! attestation report. [`verify_evidence`] validates one such context and
 //! recovers the attested public key it vouches for.
 //!
 //! It enforces, in order:
 //!
 //! 1. the manufacturer and partition-owner chains are required; all supplied
-//!    chains validate as X.509 ECDSA chains;
+//!    chains validate as X.509 chains (ECDSA, RSA or pure ML-DSA issuers);
 //! 2. the manufacturer and optional owner chains are validated but **not** anchored;
 //! 3. the partition-owner chain is anchored to a **caller-selected**
 //!    key passed in [`TrustAnchors`] (a non-leaf certificate's public key
@@ -47,8 +47,8 @@
 //! nested, per-chain allocator scope that frees on return, so peak DMA use
 //! stays bounded regardless of chain depth.
 //!
-//! Keys and reports are P-384 / ES384 throughout (the SD sealing curve and
-//! the report signature algorithm).
+//! Leaf/attested keys and reports remain P-384 / ES384 (the SD sealing
+//! curve and report signature algorithm). Issuer keys may differ.
 
 #![no_std]
 
@@ -125,7 +125,7 @@ pub struct TrustAnchors<'a> {
 
 /// Validate a receiver key certificate chain and recover its leaf key.
 ///
-/// Validates `chain` as an X.509 ECDSA-P384 chain (root→leaf), requiring a
+/// Validates `chain` as an X.509 chain with a P-384 leaf (root→leaf), requiring a
 /// **non-leaf** certificate's public key to byte-match `sata_anchor` (the
 /// policy SATA key), and writes the leaf public key — the receiver public
 /// key (`RcvrPub`) — into `rcvr_pub` in SEC1 uncompressed big-endian form
@@ -303,8 +303,9 @@ where
 /// sources each certificate's DER from the OOB SGL page (by descriptor
 /// index) and runs the whole walk inside a nested allocator scope that
 /// frees on return, so only the caller's small `leaf_out` survives. The
-/// walker double-buffers, so peak DMA stays bounded regardless of chain
-/// depth. On success the validated leaf public point (`X ‖ Y`, big-endian)
+/// walker borrows adjacent DER views without issuer copies, so peak DMA
+/// stays bounded by the largest adjacent pair regardless of chain depth.
+/// On success the validated leaf public point (`X ‖ Y`, big-endian)
 /// is copied into `leaf_out`.
 ///
 /// When `anchor` is `Some`, at least one **non-leaf** certificate's public
