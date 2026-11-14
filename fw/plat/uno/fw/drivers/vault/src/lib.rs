@@ -29,10 +29,12 @@ use tsra_fw_uno_key_vault::ENTRIES_PER_TABLE;
 use tsra_fw_uno_key_vault::MAX_TABLE_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_SIZE;
+use tsra_fw_uno_reg_soc::io_gsram::HSM_CODE_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BITMAP_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BLOB_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BLOB_SIZE as TABLE_BLOB_SIZE;
+use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_COUNT;
 use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_STRIDE;
 use tsra_fw_uno_reg_soc::key_vault_table_t::KEY_VAULT_TABLE_T_BASE;
@@ -53,6 +55,15 @@ const TABLE_BASE: u32 = IO_GSRAM_BASE + KEY_VAULT_TABLE_T_BASE;
 /// plus its size. Derived from generated RDL constants — the key-vault
 /// table is plain GSRAM, accessed without the tock-registers overlay.
 const TABLE_STRIDE: u32 = BLOB_OFFSET + TABLE_BLOB_SIZE;
+
+// The RDL table geometry and the allocator's constants must agree, and the
+// vault must end before the executable HSM_CODE window that follows it.
+const _: () = {
+    assert!(ENTRY_COUNT as usize == ENTRIES_PER_TABLE);
+    assert!((BLOB_OFFSET - BITMAP_OFFSET) as usize == BITMAP_WORDS * 4);
+    assert!(TABLE_BLOB_SIZE as usize == BLOB_SIZE);
+    assert!(KEY_VAULT_TABLE_T_BASE + TABLE_COUNT as u32 * TABLE_STRIDE <= HSM_CODE_OFFSET);
+};
 
 /// GSRAM-backed [`TableStorage`].
 ///
