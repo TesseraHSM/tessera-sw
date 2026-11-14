@@ -45,12 +45,12 @@ Rust sealing-key generation accepts explicit `HsmKeyScope::Ephemeral`,
 scope is rejected. SecurityDomain scope requires the SD masking key to
 have been provisioned by SD creation or restoration.
 
-Keep a Local- or Ephemeral-scoped key for SD bootstrap. An SD-scoped key
-cannot create or restore its own SD because its masking key must already
-be available. After a reset, restore the SD independently before using an
-SD-scoped sealing key. The caller must retain the masked blob; it is not
-stored on-device. Copies are usable wherever the same SD masking key is
-available, subject to command authorization.
+Keep a Local- or Ephemeral-scoped recipient key for SD recovery. An SD-scoped
+recipient cannot restore its own SD because its masking key must already
+be available. Export needs no sender sealing key. After a reset, restore the
+SD independently before unmasking an SD-scoped recipient. The caller must
+retain the masked blob; it is not stored on-device. Copies are usable wherever
+the same SD masking key is available, subject to command authorization.
 
 Key attestation does not distinguish Local scope from SecurityDomain
 scope; the report alone does not establish partition-local custody.
@@ -66,10 +66,32 @@ still rejected. The partition-owner trust anchor and report/policy checks are
 unchanged; omitting owner evidence does not bypass them.
 
 This applies to reseal and peer backup operations and to remote create/restore
-when `require_trusted_sa_key` is set. With that flag clear, remote create/restore
-continue to ignore the entire evidence group. Existing three-chain callers
-remain supported. The C ABI and TBOR descriptor layout are unchanged; empty
-owner evidence requires firmware supporting this relaxed validation.
+when `require_trusted_sa_key` is set. With that flag clear, remote create
+ignores recipient attestation evidence; remote restore ignores source identity
+chains but **always requires the source operation report**.
+
+### P-384 transfer reports
+
+SD transfer uses HPKE Base with DHKEM(P-384, HKDF-SHA384), HKDF-SHA384,
+and AES-256-GCM. Producers sign an `SdBackup` report with their actual PID.
+The report binds that PID, the actual recipient, the complete 322-byte
+envelope, and the **transferred SD policy hash**. Reseal uses the requested
+SD policy even when its own SA-local policy differs. Consumers verify all
+bindings before decapsulation. Local masking, derivation, and SVN checks
+are unchanged. Legacy Auth transfer envelopes are not supported.
+
+Source evidence carries the producer's `SdBackup` operation report.
+Destination/recipient evidence still carries a `PublicKey` report; it cannot
+substitute for source operation evidence. Peer/reseal sources require POTA
+authorization. Remote restore requires SAPOTA authorization only when
+trusted-SA policy is enabled. Without SAPOTA, the caller supplies a PID key
+and the report still verifies, but **does not authenticate SA identity or
+establish trusted HSM provenance**. SATA remains recipient-only.
+
+Create-remote, create-peer, and reseal add a required `report` output.
+Reserve 896 bytes before issuing the command; success returns its actual
+length. All output buffers must be distinct and adequately sized before any
+one-shot state change. Keep the report with its envelope and SDMK backup.
 
 ## tsra_sess_ex_open
 
@@ -531,13 +553,12 @@ Create a new security domain and its remote backup over a security-domain
 session.
 
 Creates a security domain under the calling session's partition from the
-partition policy, using the sender's masked SD-sealing key (from
-`tsra_key_gen`), the receiver key certificate chain (spec `RcvrCertChain`),
+unified partition policy, the receiver key certificate chain (spec `RcvrCertChain`),
 and — when the policy requires it — the receiver's attestation evidence, and
-returns the three backups the firmware produces: the remote
-partition-owner-key backup (an HPKE-Auth seal of BKS3, 161 bytes), the local
-partition-owner-key backup (276 bytes), and the security-domain masking-key
-backup (260 bytes).
+returns the PID-signed operation report and three backups: the remote
+partition-owner-key backup (an HPKE Base envelope of BKS3, 322 bytes), the local
+partition-owner-key backup (280 bytes), and the security-domain masking-key
+backup (264 bytes).
 
 The `receiver_cert_chain` is always validated and anchored to the policy SATA
 key thumbprint; its leaf is the recipient public key (`RcvrPub`) the remote backup is
@@ -553,7 +574,7 @@ evidence is missing.
 
 The inputs are grouped into an
 [`tsra_sd_create_remote_backup_params`](#tsra_sd_create_remote_backup_params)
-structure. All three output buffers follow the two-call size-probe contract:
+structure. All four distinct output buffers follow the two-call size-probe contract:
 an undersized buffer (or a NULL `ptr` with `len == 0`) is rejected with
 `TSRA_STATUS_BUFFER_TOO_SMALL` and `len` set to the required size, and
 every output buffer is validated **before** the one-shot domain-creation
@@ -568,7 +589,8 @@ tsra_status tsra_sd_create_remote_backup(
     const struct tsra_sd_create_remote_backup_params *params,
     struct tsra_buffer *pok_remote_backup,
     struct tsra_buffer *pok_local_backup,
-    struct tsra_buffer *sd_mk_backup
+    struct tsra_buffer *sd_mk_backup,
+    struct tsra_buffer *report
     );
 ```
 
@@ -578,9 +600,10 @@ tsra_status tsra_sd_create_remote_backup(
  | --------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
  | [in] sess_handle            | [tsra_handle](#tsra_handle)                                                                          | security-domain session handle                    |
  | [in] params                 | [tsra_sd_create_remote_backup_params*](#tsra_sd_create_remote_backup_params)         | create-backup input buffers                       |
- | [in, out] pok_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the remote pok backup (161 B)   |
- | [in, out] pok_local_backup  | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the local pok backup (276 B)    |
- | [in, out] sd_mk_backup      | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the sd masking-key backup (260 B) &nbsp; |
+ | [in, out] pok_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the remote pok backup (322 B)   |
+ | [in, out] pok_local_backup  | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the local pok backup (280 B)    |
+ | [in, out] sd_mk_backup      | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the sd masking-key backup (264 B) &nbsp; |
+ | [in, out] report | [tsra_buffer *](#tsra_buffer) | required PID-signed `SdBackup` report; reserve 896 B |
 
 **Returns**
 
@@ -594,7 +617,6 @@ Input buffers for
 ```cpp
 struct tsra_sd_create_remote_backup_params {
     const struct tsra_buffer *part_policy;
-    const struct tsra_buffer *masked_sealing_key;
     struct tsra_sd_cert_chain receiver_cert_chain;
     const struct tsra_sd_evidence *receiver_evidence;
 };
@@ -602,8 +624,7 @@ struct tsra_sd_create_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)           | partition policy CBOR document (1-384 B)             |
- | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | sender's masked SD-sealing key (276 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (1-384 B)             |
  | receiver_cert_chain | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | receiver key chain (spec `RcvrCertChain`), SATA-anchored; always required |
  | receiver_evidence  | [tsra_sd_evidence*](#tsra_sd_evidence) | receiver attestation evidence; verified only when policy sets `require_trusted_sa_key` |
 
@@ -612,15 +633,17 @@ struct tsra_sd_create_remote_backup_params {
 Reseal an existing remote backup to a new recipient over a security-domain
 session.
 
-HPKE-opens the source remote backup with the receiver's masked SD-sealing
-key (authenticated by the source sender in `src_evidence`) and reseals the
-recovered backup to the destination receiver (`dest_evidence`), returning the
-resealed remote backup (161 bytes). Both evidences' partition-owner chains
-must anchor to the POTA key thumbprint of the client policy in `params`.
+Verifies the source PID's `SdBackup` report and client SD policy before
+Base-opening with the actual recipient key and resealing to the destination
+in `dest_evidence`. Returns the 322-byte envelope and SA-PID-signed report.
+Both evidences' partition-owner chains must anchor to the client policy's
+POTA. Destination `PublicKey` evidence must prove an HSM-generated SD
+sealing key and match the client SD policy. The SA-local policy may differ;
+the outgoing operation report still binds the client SD policy.
 
 The inputs are grouped into an
 [`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
-structure. `dst_remote_backup` follows the same two-call size-probe contract
+structure. `dst_remote_backup` and `report` follow the same two-call size-probe contract
 as the create outputs and is validated **before** the reseal is performed. A
 NULL `params` pointer is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
 
@@ -628,7 +651,8 @@ NULL `params` pointer is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
 tsra_status tsra_sd_reseal_remote_backup(
     tsra_handle sess_handle,
     const struct tsra_sd_reseal_remote_backup_params *params,
-    struct tsra_buffer *dst_remote_backup
+    struct tsra_buffer *dst_remote_backup,
+    struct tsra_buffer *report
     );
 ```
 
@@ -638,7 +662,8 @@ tsra_status tsra_sd_reseal_remote_backup(
  | --------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
  | [in] sess_handle            | [tsra_handle](#tsra_handle)                                                                          | security-domain session handle                    |
  | [in] params                 | [tsra_sd_reseal_remote_backup_params*](#tsra_sd_reseal_remote_backup_params)         | reseal-backup input buffers                       |
- | [in, out] dst_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the resealed remote backup (161 B) &nbsp; |
+ | [in, out] dst_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the resealed remote backup (322 B) &nbsp; |
+ | [in, out] report | [tsra_buffer *](#tsra_buffer) | required SA-PID-signed `SdBackup` report; reserve 896 B |
 
 **Returns**
 
@@ -661,43 +686,34 @@ struct tsra_sd_reseal_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)             |
- | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)           |
- | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (sender) attestation evidence               |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (1-384 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (280 B)           |
+ | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source PID identity chains and mandatory `SdBackup` report |
  | dest_evidence      | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (receiver) attestation evidence        |
- | src_remote_backup  | [tsra_buffer*](#tsra_buffer)               | source remote backup to reseal (161 B)             |
+ | src_remote_backup  | [tsra_buffer*](#tsra_buffer)               | source remote backup to reseal (322 B)             |
 
 ## tsra_sd_restore_remote_backup
 
 Restore a security domain from a remote backup over a security-domain
 session.
 
-HPKE-opens the remote backup with the receiver's masked SD-sealing key
-(authenticated by the sender key recovered from `sender_cert_chain`),
-recovers the security-domain masking key from `prev_sd_mk_backup`, and
+Verifies the mandatory `SdBackup` report, actual recipient, envelope, and
+target SD policy before Base-opening with the receiver's masked key.
+Recovers the security-domain masking key from `prev_sd_mk_backup`, and
 returns the refreshed device-local backups: the local partition-owner-key
-backup (276 bytes) and the security-domain masking-key backup (260 bytes).
+backup (280 bytes) and the security-domain masking-key backup (264 bytes).
 
-The `sender_cert_chain` is always validated and anchored to the policy SATA
-key thumbprint; its leaf is the sender public key (`SndrPub`) that sealed the remote
-backup. The `sender_evidence` attestation is verified only when
-the policy sets `require_trusted_sa_key`: its partition-owner chain is
-anchored to the policy SAPOTA key thumbprint and its v2 report must attest the same
-`SndrPub` recovered from `sender_cert_chain`, otherwise the restore is
-rejected with `TSRA_STATUS_INVALID_ARGUMENT`. When the flag is clear the
-evidence is ignored (pass empty chains and an empty report). As with
-create, the host forwards the evidence whenever any of it is non-empty and
-firmware rejects the restore if the flag is set and the evidence is missing.
+`sender_pid_pub_key` is the report signer's 96-byte big-endian P-384
+`X || Y`. SATA sender authorization is removed. Under `require_trusted_sa_key`,
+the source PID chains in `sender_evidence` must anchor to SAPOTA and match
+this supplied key. Otherwise chains may be empty and are ignored, but
+`sender_evidence.report` remains required. This establishes signature
+integrity and transfer bindings, not authenticated SA identity.
 
 The trusted sealing authority may have a different partition policy from the
-restored SD. Its report's policy hash is **not** required to equal the
-destination policy hash: SATA endorses the sender key and SAPOTA authorizes
-its attesting partition. Applications that pin a particular authority policy
-must verify the sender report against that policy. The destination still
-requires the request policy to match its own bound policy. Reseal separately
-requires both the original sender and new receiver reports to match the
-requested SD policy; that check is unchanged. No C ABI or wire-format change
-is required.
+restored SD. Its operation report's policy hash **must** equal the transferred
+SD policy, not the authority-local policy. The destination still requires
+the request policy to match its own bound policy.
 
 The inputs are grouped into an
 [`tsra_sd_restore_remote_backup_params`](#tsra_sd_restore_remote_backup_params)
@@ -722,8 +738,8 @@ tsra_status tsra_sd_restore_remote_backup(
  | -------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
  | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                           | security-domain session handle                    |
  | [in] params                | [tsra_sd_restore_remote_backup_params*](#tsra_sd_restore_remote_backup_params)        | restore-backup input buffers                      |
- | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the local pok backup (276 B)    |
- | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the sd masking-key backup (260 B) &nbsp; |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the local pok backup (280 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the sd masking-key backup (264 B) &nbsp; |
 
 **Returns**
 
@@ -738,7 +754,7 @@ Input buffers for
 struct tsra_sd_restore_remote_backup_params {
     const struct tsra_buffer *part_policy;
     const struct tsra_buffer *masked_sealing_key;
-    struct tsra_sd_cert_chain sender_cert_chain;
+    const struct tsra_buffer *sender_pid_pub_key;
     const struct tsra_sd_evidence *sender_evidence;
     const struct tsra_buffer *src_remote_backup;
     const struct tsra_buffer *prev_sd_mk_backup;
@@ -747,28 +763,28 @@ struct tsra_sd_restore_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)           | partition policy CBOR document (1-384 B)             |
- | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (276 B)           |
- | sender_cert_chain  | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | sender key chain (spec `SndrCertChain`), SATA-anchored; always required |
- | sender_evidence    | [tsra_sd_evidence*](#tsra_sd_evidence) | sender attestation evidence; verified only when policy sets `require_trusted_sa_key` |
- | src_remote_backup  | [tsra_buffer*](#tsra_buffer)           | remote backup to restore (161 B)                   |
- | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)           | previous security-domain masking-key backup (260 B)|
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (1-384 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (280 B)           |
+ | sender_pid_pub_key | [tsra_buffer*](#tsra_buffer) | report signer PID, 96-byte big-endian P-384 X || Y |
+ | sender_evidence | [tsra_sd_evidence*](#tsra_sd_evidence) | mandatory `SdBackup` report; SAPOTA PID chains required only under trusted-SA policy |
+ | src_remote_backup  | [tsra_buffer*](#tsra_buffer)           | remote backup to restore (322 B)                   |
+ | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)           | previous security-domain masking-key backup (264 B)|
 
 ## tsra_sd_create_peer_backup
 
 Create a peer-transferable backup of a security domain over a
 security-domain session.
 
-Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
-destination peer named by `dst_evidence` (authenticated by the sender's
-masked SD-sealing key), returning the peer backup (161 bytes). Peer
+Recovers BKS3 from `pok_local_backup` and Base-seals it to the
+POTA-authorized same-policy peer in `dst_evidence`, returning the
+322-byte envelope and PID-signed `SdBackup` report. No sender key is supplied. Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
 The `dst_evidence` partition-owner chain must anchor to the policy POTA
 key thumbprint.
 
 The inputs are grouped into an
 [`tsra_sd_create_peer_backup_params`](#tsra_sd_create_peer_backup_params)
-structure. The output buffer follows the two-call size-probe contract and
+structure. Both distinct output buffers follow the two-call size-probe contract and
 is validated **before** the peer backup is created. A NULL `params` pointer
 is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
 
@@ -776,7 +792,8 @@ is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
 tsra_status tsra_sd_create_peer_backup(
     tsra_handle sess_handle,
     const struct tsra_sd_create_peer_backup_params *params,
-    struct tsra_buffer *pok_peer_backup
+    struct tsra_buffer *pok_peer_backup,
+    struct tsra_buffer *report
     );
 ```
 
@@ -786,7 +803,8 @@ tsra_status tsra_sd_create_peer_backup(
  | ------------------------ | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
  | [in] sess_handle         | [tsra_handle](#tsra_handle)                                                                   | security-domain session handle                  |
  | [in] params              | [tsra_sd_create_peer_backup_params*](#tsra_sd_create_peer_backup_params)      | create-peer-backup input buffers                |
- | [in, out] pok_peer_backup | [tsra_buffer *](#tsra_buffer)                                                                | output buffer for the peer backup (161 B) &nbsp; |
+ | [in, out] pok_peer_backup | [tsra_buffer *](#tsra_buffer)                                                                | output buffer for the peer backup (322 B) &nbsp; |
+ | [in, out] report | [tsra_buffer *](#tsra_buffer) | required PID-signed `SdBackup` report; reserve 896 B |
 
 **Returns**
 
@@ -800,7 +818,6 @@ Input buffers for
 ```cpp
 struct tsra_sd_create_peer_backup_params {
     const struct tsra_buffer *part_policy;
-    const struct tsra_buffer *masked_sealing_key;
     const struct tsra_sd_evidence *dst_evidence;
     const struct tsra_buffer *pok_local_backup;
 };
@@ -808,21 +825,20 @@ struct tsra_sd_create_peer_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)             |
- | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | sender's masked SD-sealing key (276 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (1-384 B)             |
  | dst_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (peer) attestation evidence            |
- | pok_local_backup   | [tsra_buffer*](#tsra_buffer)               | device-local partition-owner-key backup (276 B)    |
+ | pok_local_backup   | [tsra_buffer*](#tsra_buffer)               | device-local partition-owner-key backup (280 B)    |
 
 ## tsra_sd_restore_peer_backup
 
 Restore a security domain from a peer backup over a security-domain
 session.
 
-HPKE-opens the peer backup with the receiver's masked SD-sealing key
-(authenticated by the source peer in `src_evidence`), recovers the
+Verifies the POTA-authorized source PID's `SdBackup` operation report,
+actual recipient, envelope, and SD policy before Base-opening with the receiver key. Recovers the
 security-domain masking key from `prev_sd_mk_backup`, and returns the
 refreshed device-local backups: the local partition-owner-key backup
-(276 bytes) and the security-domain masking-key backup (260 bytes). Peer
+(280 bytes) and the security-domain masking-key backup (264 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
 The `src_evidence` partition-owner chain must anchor to the policy POTA
 key thumbprint.
@@ -850,8 +866,8 @@ tsra_status tsra_sd_restore_peer_backup(
  | -------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
  | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                       | security-domain session handle                    |
  | [in] params                | [tsra_sd_restore_peer_backup_params*](#tsra_sd_restore_peer_backup_params)        | restore-backup input buffers                      |
- | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the local pok backup (276 B)    |
- | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the sd masking-key backup (260 B) &nbsp; |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the local pok backup (280 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the sd masking-key backup (264 B) &nbsp; |
 
 **Returns**
 
@@ -874,11 +890,11 @@ struct tsra_sd_restore_peer_backup_params {
 
  | Field              | Name                                       | Description                                         |
  | ------------------ | ------------------------------------------ | --------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)              |
- | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)            |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (1-384 B)              |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (280 B)            |
  | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (peer) attestation evidence                  |
- | pok_peer_backup    | [tsra_buffer*](#tsra_buffer)               | peer backup to restore (161 B)                      |
- | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)               | previous security-domain masking-key backup (260 B) |
+ | pok_peer_backup    | [tsra_buffer*](#tsra_buffer)               | peer backup to restore (322 B)                      |
+ | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)               | previous security-domain masking-key backup (264 B) |
 
 ## tsra_sd_restore_local_backup
 
@@ -887,8 +903,8 @@ security-domain session.
 
 Restores the security domain from the device-local partition-owner-key
 backup and security-domain masking-key backup, returning the refreshed
-device-local backups: the local partition-owner-key backup (276 bytes) and
-the security-domain masking-key backup (260 bytes). Unlike the remote/peer
+device-local backups: the local partition-owner-key backup (280 bytes) and
+the security-domain masking-key backup (264 bytes). Unlike the remote/peer
 restores, this carries no attestation evidence — the backups are masked
 under the device-local key.
 
@@ -915,8 +931,8 @@ tsra_status tsra_sd_restore_local_backup(
  | -------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
  | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                         | security-domain session handle                    |
  | [in] params                | [tsra_sd_restore_local_backup_params*](#tsra_sd_restore_local_backup_params)        | restore-backup input buffers                      |
- | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the local pok backup (276 B)    |
- | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the sd masking-key backup (260 B) &nbsp; |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the local pok backup (280 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the sd masking-key backup (264 B) &nbsp; |
 
 **Returns**
 
@@ -936,8 +952,8 @@ struct tsra_sd_restore_local_backup_params {
 
  | Field             | Name                             | Description                                        |
  | ----------------- | -------------------------------- | -------------------------------------------------- |
- | pok_local_backup  | [tsra_buffer*](#tsra_buffer)     | device-local partition-owner-key backup (276 B)    |
- | sd_mk_backup      | [tsra_buffer*](#tsra_buffer)     | security-domain masking-key backup (260 B)         |
+ | pok_local_backup  | [tsra_buffer*](#tsra_buffer)     | device-local partition-owner-key backup (280 B)    |
+ | sd_mk_backup      | [tsra_buffer*](#tsra_buffer)     | security-domain masking-key backup (264 B)         |
 
 ### tsra_sd_evidence
 

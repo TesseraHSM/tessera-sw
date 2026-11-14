@@ -6,10 +6,10 @@
 //!
 //! Provision a peer-cloning-enabled backing partition, `CreateSD`
 //! ([`HsmSession::sd_create_remote_backup`]) to obtain the device-local
-//! backup, then [`HsmSession::sd_create_peer_backup`] to HPKE-Auth-seal
+//! backup, then [`HsmSession::sd_create_peer_backup`] to HPKE-Base-seal
 //! BKS3 to the destination peer. This is a **self-peer** backup (sender ==
-//! destination): the partition seals to its own attested identity key, so a
-//! successful seal is itself the correctness check.
+//! destination): the partition seals to its own attested recipient key
+//! and returns a PID-signed operation report.
 
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 
@@ -20,7 +20,7 @@ use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 
 /// Happy path: create the security domain, then a peer backup of it; the
-/// peer backup is a non-zero 161-byte HPKE-Auth seal.
+/// peer backup is a non-zero 322-byte HPKE Base envelope.
 #[test]
 fn sd_create_peer_backup_roundtrip() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
@@ -31,28 +31,28 @@ fn sd_create_peer_backup_roundtrip() {
     let pota_key = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata_key, &pota_key, &report);
 
     // Create the security domain first to obtain the device-local backup
     // that CreatePeerBackup recovers BKS3 from.
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
 
     // Self-peer backup: seal to our own attested identity as destination.
     let peer = evidence
         .with_hsm_evidence(|dst| {
-            session.sd_create_peer_backup(&policy, &masked, dst, &created.pok_local_backup)
+            session.sd_create_peer_backup(&policy, dst, &created.pok_local_backup)
         })
         .expect("create peer backup");
 
-    // Peer backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
-    assert_eq!(peer.len(), POK_REMOTE_BACKUP_LEN);
+    // Peer backup: PID-reported HPKE Base envelope of BKS3, 322 B.
+    assert_eq!(peer.backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        peer.iter().any(|&b| b != 0),
+        peer.backup.iter().any(|&b| b != 0),
         "pok_peer_backup must not be all-zero",
     );
 }
@@ -70,29 +70,29 @@ fn sd_create_peer_backup_rerandomizes() {
     let pota_key = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata_key, &pota_key, &report);
 
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
 
     let first = evidence
         .with_hsm_evidence(|dst| {
-            session.sd_create_peer_backup(&policy, &masked, dst, &created.pok_local_backup)
+            session.sd_create_peer_backup(&policy, dst, &created.pok_local_backup)
         })
         .expect("create peer backup");
     let second = evidence
         .with_hsm_evidence(|dst| {
-            session.sd_create_peer_backup(&policy, &masked, dst, &created.pok_local_backup)
+            session.sd_create_peer_backup(&policy, dst, &created.pok_local_backup)
         })
         .expect("create peer backup");
 
-    assert_eq!(first.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(first.backup.len(), POK_REMOTE_BACKUP_LEN);
     assert_ne!(
-        first, second,
+        first.backup, second.backup,
         "each peer backup must re-randomize the HPKE seal",
     );
 }

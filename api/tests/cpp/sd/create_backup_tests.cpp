@@ -7,8 +7,8 @@
 // partition (`provision_sd_backing_co_session`), mints an SD sealing key,
 // attests it via the masked-blob `KeyReport`, builds the receiver's
 // three-chain attestation evidence, then calls
-// `tsra_sd_create_remote_backup` and validates the three returned
-// backups. This is a self-backup (sender == receiver): the partition seals
+// `tsra_sd_create_remote_backup` and validates the returned
+// backups and operation report. This is a self-backup: the partition seals
 // to its own attested identity key.
 #include <array>
 #include <cstdint>
@@ -35,7 +35,7 @@ void assert_sd_initialized(tsra_handle part, tsra_bool expected)
     ASSERT_EQ(initialized, expected);
 }
 
-// Run the create-backup call, sizing the three output buffers via the
+// Run the create-backup call, sizing all four output buffers via the
 // probe/fill convention. The FFI validates each output buffer in sequence
 // and reports the first that is too small, so a single len=0 probe only
 // sizes the first buffer; loop until every buffer is large enough. Buffer
@@ -53,10 +53,19 @@ tsra_status create_backup_fill(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
+    std::vector<uint8_t> report;
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
-    for (int attempt = 0; attempt < 4; ++attempt)
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(session, params, &remote_buf, &local_buf, &mk_buf);
+        err = tsra_sd_create_remote_backup(
+            session,
+            params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -76,12 +85,16 @@ tsra_status create_backup_fill(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err == TSRA_STATUS_SUCCESS)
     {
         remote.resize(remote_buf.len);
         local.resize(local_buf.len);
         mk.resize(mk_buf.len);
+        EXPECT_GT(report_buf.len, 0u);
+        EXPECT_LE(report_buf.len, kSdBackupReportCapacity);
     }
     return err;
 }
@@ -179,12 +192,9 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 
         SdEvidenceHolder evidence = build_receiver_evidence(ctx, sealing.pub, sealing.report);
 
-        tsra_buffer masked_buf{ sealing.masked.data(),
-                                static_cast<uint32_t>(sealing.masked.size()) };
         tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
         tsra_sd_create_remote_backup_params params{
             &policy_buf,
-            &masked_buf,
             evidence.receiver_chain(),
             &evidence.get(),
         };
@@ -197,7 +207,7 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 
         ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(part_handle, TSRA_BOOL_TRUE));
 
-        // Remote backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
+        // Remote backup: PID-reported HPKE Base envelope of BKS3, 322 B.
         ASSERT_EQ(pok_remote.size(), kPokRemoteBackupLen);
         ASSERT_TRUE(any_nonzero(pok_remote)) << "pok_remote_backup must not be all-zero";
 
@@ -259,12 +269,9 @@ TEST_F(tsra_sd_create_backup_test, create_backup_empty_evidence_ffi)
         // the FFI decodes through the allow-empty path.
         tsra_sd_evidence empty_evidence{};
 
-        tsra_buffer masked_buf{ sealing.masked.data(),
-                                static_cast<uint32_t>(sealing.masked.size()) };
         tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
         tsra_sd_create_remote_backup_params params{
             &policy_buf,
-            &masked_buf,
             evidence.receiver_chain(),
             &empty_evidence,
         };
@@ -315,12 +322,9 @@ TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
 
         SdEvidenceHolder evidence = build_receiver_evidence(ctx, sealing.pub, sealing.report);
 
-        tsra_buffer masked_buf{ sealing.masked.data(),
-                                static_cast<uint32_t>(sealing.masked.size()) };
         tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
         tsra_sd_create_remote_backup_params params{
             &policy_buf,
-            &masked_buf,
             evidence.receiver_chain(),
             &evidence.get(),
         };
@@ -340,8 +344,16 @@ TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
         tsra_buffer remote_buf{ pok_remote.data(), static_cast<uint32_t>(pok_remote.size()) };
         tsra_buffer local_buf{ pok_local.data(), static_cast<uint32_t>(pok_local.size()) };
         tsra_buffer mk_buf{ sd_mk.data(), static_cast<uint32_t>(sd_mk.size()) };
-        auto second =
-            tsra_sd_create_remote_backup(ctx.session, &params, &remote_buf, &local_buf, &mk_buf);
+        std::vector<uint8_t> report(kSdBackupReportCapacity);
+        tsra_buffer report_buf{ report.data(), static_cast<uint32_t>(report.size()) };
+        auto second = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         ASSERT_EQ(second, TSRA_STATUS_SD_ALREADY_INITIALIZED);
     });
 }
@@ -372,12 +384,12 @@ TEST_F(tsra_sd_create_backup_test, create_backup_null_params)
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
         tsra_buffer out{ nullptr, 0 };
-        auto err = tsra_sd_create_remote_backup(sess_handle, nullptr, &out, &out, &out);
+        auto err = tsra_sd_create_remote_backup(sess_handle, nullptr, &out, &out, &out, &out);
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
 
-// Aliasing: passing the same `tsra_buffer` for two of the three output
+// Aliasing: passing the same `tsra_buffer` for two of the four output
 // pointers is rejected with `INVALID_ARGUMENT` (it would otherwise form two
 // aliasing `&mut` references at the FFI boundary), before the domain is
 // created.
@@ -409,12 +421,9 @@ TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
 
         SdEvidenceHolder evidence = build_receiver_evidence(ctx, sealing.pub, sealing.report);
 
-        tsra_buffer masked_buf{ sealing.masked.data(),
-                                static_cast<uint32_t>(sealing.masked.size()) };
         tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
         tsra_sd_create_remote_backup_params params{
             &policy_buf,
-            &masked_buf,
             evidence.receiver_chain(),
             &evidence.get(),
         };
@@ -424,8 +433,50 @@ TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
         tsra_buffer shared_buf{ shared.data(), static_cast<uint32_t>(shared.size()) };
         std::vector<uint8_t> mk(kSdMkBackupLen);
         tsra_buffer mk_buf{ mk.data(), static_cast<uint32_t>(mk.size()) };
-        auto err =
-            tsra_sd_create_remote_backup(ctx.session, &params, &shared_buf, &shared_buf, &mk_buf);
+        std::vector<uint8_t> report(kSdBackupReportCapacity);
+        tsra_buffer report_buf{ report.data(), static_cast<uint32_t>(report.size()) };
+        auto err = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &shared_buf,
+            &shared_buf,
+            &mk_buf,
+            &report_buf
+        );
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+        std::vector<uint8_t> remote(kPokRemoteBackupLen);
+        tsra_buffer remote_buf{ remote.data(), static_cast<uint32_t>(remote.size()) };
+        err = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &remote_buf,
+            &shared_buf,
+            &mk_buf,
+            &remote_buf
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT) << "report outputs cannot alias backups";
+
+        report_buf.len = kSdBackupReportCapacity - 1;
+        err = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &remote_buf,
+            &shared_buf,
+            &mk_buf,
+            &report_buf
+        );
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(report_buf.len, kSdBackupReportCapacity);
+        err = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &remote_buf,
+            &shared_buf,
+            &mk_buf,
+            &report_buf
+        );
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS) << "a report-size probe must not consume CreateSD";
+        ASSERT_GT(report_buf.len, 0u);
+        ASSERT_LE(report_buf.len, kSdBackupReportCapacity);
     });
 }

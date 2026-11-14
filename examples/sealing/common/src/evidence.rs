@@ -21,7 +21,9 @@ use tsra_sealing_api::RAW_PUB_LEN;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
 use tsra_sealing_report::verify_certificate_chain;
 use tsra_sealing_report::verify_key_report_bytes;
+use tsra_sealing_report::verify_sd_transfer_report;
 use tsra_sealing_report::Curve;
+use tsra_sealing_report::KeyFlags;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 
@@ -64,7 +66,67 @@ pub fn verify_report(
 /// POTA thumbprint, matching the firmware peer-clone check.
 pub fn verify_peer(evidence: &Evidence, policy: &PartPolicy) -> Result<()> {
     verify_attested_key(evidence, policy, &policy.pota_spki_thumbprint)?;
+    let report = verify_key_report_bytes(
+        &evidence.report,
+        evidence
+            .mfgr_cert_chain
+            .last()
+            .context("missing manufacturer leaf")?,
+    )?;
+    let flags = KeyFlags::from(report.flags);
+    anyhow::ensure!(
+        flags.is_generated() && !flags.is_imported() && flags.is_sd_sealing(),
+        "recipient must attest an HSM-generated SdSealing key"
+    );
     Ok(())
+}
+
+/// Authenticate source PID chains separately from the mandatory operation signature.
+pub fn verify_transfer_source(
+    evidence: &Evidence,
+    policy: &PartPolicy,
+    anchor: &Thumbprint,
+    envelope: &[u8],
+    recipient: Option<&[u8]>,
+) -> Result<[u8; RAW_PUB_LEN]> {
+    let mut pid = None;
+    for (name, chain) in [
+        ("manufacturer", &evidence.mfgr_cert_chain),
+        ("partition-owner", &evidence.part_owner_cert_chain),
+        ("owner", &evidence.owner_cert_chain),
+    ] {
+        if name == "owner" && chain.is_empty() {
+            continue;
+        }
+        verify_certificate_chain(chain)?;
+        let public = cert_public(chain.last().context("missing source PID leaf")?)?;
+        if let Some(pid) = &pid {
+            anyhow::ensure!(*pid == public, "source chains name different PIDs");
+        } else {
+            pid = Some(public);
+        }
+    }
+    let pid: [u8; RAW_PUB_LEN] = pid
+        .context("missing source PID")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("source PID must be P-384"))?;
+    anyhow::ensure!(
+        spki_thumbprint(&cert_public(
+            evidence
+                .part_owner_cert_chain
+                .first()
+                .context("missing source authority")?
+        )?)? == *anchor,
+        "source PID not anchored to required authority"
+    );
+    verify_sd_transfer_report(
+        &evidence.report,
+        &pid,
+        envelope,
+        policy.as_bytes(),
+        recipient,
+    )?;
+    Ok(pid)
 }
 
 /// Check required manufacturer/partition-owner and optional device-owner chains,

@@ -12,7 +12,7 @@
 // security domain is restored from the remote backup via
 // `tsra_sd_restore_remote_backup`. A successful restore is itself
 // the correctness check: the HPKE open only succeeds if the receiver key and
-// the attested sender key match those that sealed the backup.
+// the PID-signed operation report bind the same backup.
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -27,27 +27,25 @@
 
 namespace
 {
-// Create a real remote backup sealed to `receiver`'s attested key by
-// `masked`, capturing both the 161-byte remote backup and the 260-byte
-// masking-key backup needed to drive a later restore. Sizes the three output
-// buffers via the probe/fill convention. Records a gtest failure and returns
+// Create a remote backup sealed to the attested receiver, capturing the
+// 322-byte envelope, PID-signed report, and masking-key backup needed for
+// restore. Sizes all four output buffers via the probe/fill convention.
+// Records a gtest failure and returns
 // false on error.
 bool create_backup_capture(
     tsra_handle session,
-    std::vector<uint8_t> &masked,
     const tsra_sd_cert_chain &receiver_chain,
     const tsra_sd_evidence &receiver,
     const std::vector<uint8_t> &policy,
     std::vector<uint8_t> &out_remote,
-    std::vector<uint8_t> &out_mk
+    std::vector<uint8_t> &out_mk,
+    std::vector<uint8_t> &report
 )
 {
-    tsra_buffer masked_buf{ masked.data(), static_cast<uint32_t>(masked.size()) };
     tsra_buffer policy_buf{ const_cast<uint8_t *>(policy.data()),
                             static_cast<uint32_t>(policy.size()) };
     tsra_sd_create_remote_backup_params params{
         &policy_buf,
-        &masked_buf,
         receiver_chain,
         &receiver,
     };
@@ -58,10 +56,18 @@ bool create_backup_capture(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
-    for (int attempt = 0; attempt < 4; ++attempt)
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(session, &params, &remote_buf, &local_buf, &mk_buf);
+        err = tsra_sd_create_remote_backup(
+            session,
+            &params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -81,6 +87,8 @@ bool create_backup_capture(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {
@@ -88,6 +96,7 @@ bool create_backup_capture(
         return false;
     }
     remote.resize(remote_buf.len);
+    report.resize(report_buf.len);
     mk.resize(mk_buf.len);
     out_remote = std::move(remote);
     out_mk = std::move(mk);
@@ -216,14 +225,15 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
 
         std::vector<uint8_t> remote_backup;
         std::vector<uint8_t> prev_sd_mk;
+        std::vector<uint8_t> source_report;
         ASSERT_TRUE(create_backup_capture(
             dev1.session,
-            key.masked,
             evidence.receiver_chain(),
             evidence.get(),
             dev1.policy,
             remote_backup,
-            prev_sd_mk
+            prev_sd_mk,
+            source_report
         ));
         ASSERT_EQ(remote_backup.size(), kPokRemoteBackupLen);
         ASSERT_EQ(prev_sd_mk.size(), kSdMkBackupLen);
@@ -249,13 +259,32 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
         tsra_buffer policy_buf{ dev2.policy.data(), static_cast<uint32_t>(dev2.policy.size()) };
         tsra_buffer remote_buf{ remote_backup.data(), static_cast<uint32_t>(remote_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
+        tsra_buffer pid_buf{ dev1.pid_pub.data(), static_cast<uint32_t>(dev1.pid_pub.size()) };
         tsra_sd_restore_remote_backup_params params{
-            &policy_buf,     &masked_buf, evidence.receiver_chain(),
-            &evidence.get(), &remote_buf, &prev_mk_buf,
+            &policy_buf, &masked_buf, &pid_buf, &evidence.get(), &remote_buf, &prev_mk_buf,
         };
 
         std::vector<uint8_t> pok_local;
         std::vector<uint8_t> sd_mk;
+        EXPECT_NE(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS)
+            << "a PublicKey report cannot authorize SD restore";
+        auto tampered_report = source_report;
+        tampered_report.back() ^= 1;
+        evidence.set_report(tampered_report);
+        EXPECT_NE(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS)
+            << "optional SAPOTA must still verify the operation signature";
+        evidence.set_report(source_report);
+        auto original_backup = remote_backup;
+        remote_backup.back() ^= 1;
+        EXPECT_NE(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS)
+            << "the operation report must bind the complete envelope";
+        remote_backup.back() ^= 1;
+        ASSERT_EQ(remote_backup, original_backup);
+        tsra_sd_evidence signature_only = evidence.get();
+        signature_only.mfgr_cert_chain = { nullptr, 0 };
+        signature_only.owner_cert_chain = { nullptr, 0 };
+        signature_only.part_owner_cert_chain = { nullptr, 0 };
+        params.sender_evidence = &signature_only;
         ASSERT_EQ(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS);
 
         // Refreshed device-local backups: 276-byte local pok backup and

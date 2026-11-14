@@ -144,6 +144,7 @@ impl LeafEnv {
             "receiver is not endorsed by leaf SATA"
         );
         let attestation = wire::evidence(&receiver["evidence"])?;
+        evidence::verify_peer(&attestation, &self.root_policy)?;
         let (_, public) = evidence::verify_attested_key(
             &attestation,
             &self.root_policy,
@@ -161,6 +162,38 @@ impl LeafEnv {
             "receiver report and SATA certificate attest different keys"
         );
         Ok((chain, attestation))
+    }
+
+    pub fn validate_resealed(
+        &self,
+        backup: &tsra_sealing_api::ResealedBackup,
+        recipient: &Evidence,
+    ) -> Result<()> {
+        evidence::verify_peer(recipient, &self.policy)?;
+        let (_, public) = evidence::verify_attested_key(
+            recipient,
+            &self.policy,
+            &self.policy.pota_spki_thumbprint,
+        )?;
+        let pid = evidence::verify_transfer_source(
+            &backup.sender_evidence,
+            &self.policy,
+            self.policy
+                .sapota_spki_thumbprint
+                .as_ref()
+                .context("policy has no SAPOTA")?,
+            &backup.pok_remote_backup,
+            Some(&public),
+        )?;
+        anyhow::ensure!(
+            pid.as_slice() == backup.sender_pid_pub_key,
+            "reseal raw signer PID mismatch"
+        );
+        anyhow::ensure!(
+            backup.sender_evidence.part_owner_cert_chain.first() == Some(&self.sapota),
+            "reseal signer does not use the saved SAPOTA certificate"
+        );
+        Ok(())
     }
 }
 

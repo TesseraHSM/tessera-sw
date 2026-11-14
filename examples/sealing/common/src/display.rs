@@ -18,8 +18,10 @@ use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
 use tsra_sealing_report::parse_key_report_bytes;
+use tsra_sealing_report::parse_sd_transfer_report;
 use tsra_sealing_report::verify_certificate_chain;
 use tsra_sealing_report::verify_key_report_bytes;
+use tsra_sealing_report::verify_sd_report_signature;
 use tsra_sealing_report::KeyFlags;
 
 pub fn write_leaf_receiver(
@@ -86,7 +88,7 @@ pub fn write_peer_enrollment_response(output: &mut impl Write, pta: &[Vec<u8>]) 
 
 /// The caller validates policy and POTA binding before displaying peer evidence.
 pub fn write_peer_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> Result<()> {
-    writeln!(output, "\nPeer cloning: {role} sealing-key evidence")?;
+    writeln!(output, "\nPeer cloning: {role} evidence")?;
     write_evidence(output, evidence, role)
 }
 
@@ -102,7 +104,7 @@ pub fn write_remote_creation(
     )?;
     writeln!(
         output,
-        "  restore sender:       external SA, SATA-endorsed HPKE key"
+        "  restore sender:       software authority, signature-only P-384 signer"
     )?;
     writeln!(
         output,
@@ -114,12 +116,6 @@ pub fn write_remote_creation(
         state_dir.join("remote-backup.json").display()
     )?;
     write_backup_summary(output, &recovery.backup, state_dir)?;
-    writeln!(
-        output,
-        "\nOriginal TSRA creation sender evidence (before external-SA reseal):"
-    )?;
-    write_sender_evidence(output, &recovery.backup.evidence)
-        .context("print sender certificate chains and attestation report")?;
     write_remote_parties(output, recovery)
 }
 
@@ -164,13 +160,16 @@ fn write_backup_summary(
 
 /// Call only after remote recovery validation, before opening the partition.
 pub fn write_validated_remote(output: &mut impl Write, recovery: &RemoteRecovery) -> Result<()> {
-    if recovery.sender_cert_chain.is_empty() {
-        writeln!(output, "Legacy remote sender evidence verified (required chains, optional device-owner chain, ES384 report and policy binding).")?;
+    if !recovery.backup.evidence.mfgr_cert_chain.is_empty() {
+        writeln!(
+            output,
+            "Source PID chains and mandatory SdBackup operation report verified."
+        )?;
         write_sender_evidence(output, &recovery.backup.evidence)
     } else {
         writeln!(
             output,
-            "External-SA sender and HSM receiver HPKE chains verified against policy SATA."
+            "Software authority operation signature verified; receiver chain verified against SATA. No trusted SA identity or HSM provenance is asserted."
         )?;
         write_remote_parties(output, recovery)
     }
@@ -186,15 +185,17 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
         "\nRemote restore parties (saved certificates, not fresh attestation):"
     )?;
     writeln!(output, "  Sender: external software SA; receiver: TSRA")?;
-    for (role, chain) in [
-        ("Sender", &remote.sender_cert_chain),
-        ("Receiver", &remote.receiver_cert_chain),
-    ] {
-        write_certificate_chain(output, chain, role, "SATA-authorized HPKE")?;
-    }
+    write_certificate_chain(
+        output,
+        &remote.receiver_cert_chain,
+        "Receiver",
+        "SATA-authorized HPKE",
+    )?;
+    verify_sd_report_signature(&remote.backup.evidence.report, &remote.sender_pid_pub_key)?;
+    write_operation_report(output, &remote.backup.evidence.report)?;
     writeln!(
         output,
-        "  SA attestation: omitted; require_trusted_sa_key = false"
+        "  SA hardware identity: not asserted; require_trusted_sa_key = false"
     )?;
     Ok(())
 }
@@ -216,8 +217,50 @@ fn write_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> R
     if evidence.report.is_empty() {
         writeln!(output, "  (empty)")?;
     } else {
-        write_key_report(output, evidence, &context_role)?;
+        if parse_sd_transfer_report(&evidence.report).is_ok() {
+            for chain in [&evidence.mfgr_cert_chain, &evidence.part_owner_cert_chain] {
+                if let Some(leaf) = chain.last() {
+                    verify_sd_report_signature(
+                        &evidence.report,
+                        &crate::evidence::cert_public(leaf)?,
+                    )?;
+                }
+            }
+            write_operation_report(output, &evidence.report)?;
+        } else {
+            write_key_report(output, evidence, &context_role)?;
+        }
     }
+    Ok(())
+}
+
+fn write_operation_report(output: &mut impl Write, bytes: &[u8]) -> Result<()> {
+    let report = parse_sd_transfer_report(bytes)?;
+    writeln!(output, "  Format: COSE_Sign1 v3 / SdBackup / ES384")?;
+    writeln!(
+        output,
+        "  Source PID key ID: {}",
+        hex::encode(report.source_pid_key_id)
+    )?;
+    writeln!(
+        output,
+        "  Recipient key ID:  {}",
+        hex::encode(report.recipient_key_id)
+    )?;
+    writeln!(
+        output,
+        "  Envelope hash:     {}",
+        hex::encode(report.envelope_hash)
+    )?;
+    writeln!(
+        output,
+        "  SD policy hash:    {}",
+        hex::encode(report.policy_hash)
+    )?;
+    writeln!(
+        output,
+        "  Operation report, not a source sealing-key attestation."
+    )?;
     Ok(())
 }
 
@@ -329,7 +372,7 @@ fn write_key_report(output: &mut impl Write, evidence: &Evidence, role: &str) ->
             capabilities.join(", ")
         },
     )?;
-    let unknown_flags = report.flags & !0x3ff;
+    let unknown_flags = report.flags & !0x7ff;
     if unknown_flags != 0 {
         writeln!(output, "  Unknown flags:       0x{unknown_flags:08x}")?;
     }

@@ -5,13 +5,12 @@
 //!
 //! [`SecurityDomain::create`] drives a factory-reset partition through the full
 //! provisioning flow — `part_init_ex`, PTA-chain issuance, `part_final_ex`,
-//! sealing-key minting, and `sd_create_remote_backup` — and returns the
-//! remote backup and sender attestation material. Local recovery records are persisted
+//! `sd_create_remote_backup` — and returns the remote backup and PID-signed
+//! operation report. Local recovery records are persisted
 //! separately through the environment's store.
 //!
 //! The caller supplies the receiver certificate chain (containing
-//! `RcvrPub`) and receiver attestation evidence. The sender sealing key
-//! generated here is distinct from the externally supplied receiver key.
+//! `RcvrPub`) and receiver attestation evidence. Export needs no sender KEX key.
 //! Only POTA signing is a callback: it receives the device PTA CSR and
 //! PID-signed attestation report and returns the POTA-anchored PTA chain.
 
@@ -25,7 +24,6 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 pub use crate::env::SecurityDomainEnv;
 use crate::error::Error;
 pub use crate::evidence::Evidence;
-use crate::hsm;
 use crate::session::SealingSession;
 use crate::store::load_local_recovery;
 use crate::store::load_partition_recovery;
@@ -38,7 +36,7 @@ use crate::store::SecurityDomainStore;
 pub struct RemoteBackup {
     /// Remote partition-owner-key backup sealed to the supplied receiver.
     pub pok_remote_backup: Vec<u8>,
-    /// Sender identity chains and report. No separate public key is needed.
+    /// Source PID chains and mandatory v3 SdBackup operation report.
     pub evidence: Evidence,
 }
 
@@ -55,20 +53,20 @@ impl std::fmt::Debug for RemoteBackup {
 ///
 /// The receiver key is locally masked, so restoring it still requires the
 /// original partition's local MK backup. External-SA recovery carries separate
-/// SATA-endorsed sender and receiver HPKE chains; `backup.evidence` retains the
-/// original TSRA creation sender evidence, not evidence of the external SA.
-/// Legacy recovery instead uses attested sender evidence. The caller validates
-/// all material before device access; firmware authenticates the sender and seal.
+/// SATA-endorsed recipient certificates are retained for external-SA recovery.
+/// `backup.evidence` carries the actual resealing authority's operation report,
+/// never the original producer's report for a different envelope. The caller
+/// validates all material before device access. Legacy Auth backups are rejected.
 #[derive(Clone)]
 pub struct RemoteRecovery {
-    /// Restore-ready HPKE backup and original TSRA creation sender evidence.
+    /// Restore-ready HPKE Base envelope and its source operation evidence.
     pub backup: RemoteBackup,
     /// Original locally masked receiver sealing key.
     pub masked_receiver_key: Vec<u8>,
     /// SDMK backup paired with the original remote backup.
     pub sd_mk_backup: Vec<u8>,
-    /// SATA-endorsed external sender HPKE chain, or empty for legacy attested restore.
-    pub sender_cert_chain: Vec<Vec<u8>>,
+    /// Actual operation signer's P-384 PID key, raw big-endian X||Y (96 bytes).
+    pub sender_pid_pub_key: Vec<u8>,
     /// SATA-endorsed HSM receiver HPKE chain for the external-SA flow.
     pub receiver_cert_chain: Vec<Vec<u8>>,
 }
@@ -76,6 +74,7 @@ pub struct RemoteRecovery {
 impl RemoteRecovery {
     /// Validate backup lengths and mandatory evidence before device operations.
     pub fn validate(&self) -> Result<()> {
+        Self::validate_transfer_envelope(&self.backup.pok_remote_backup)?;
         anyhow::ensure!(
             self.masked_receiver_key.len() == MASKED_SEALING_KEY_LEN,
             "invalid remote receiver key length"
@@ -90,14 +89,22 @@ impl RemoteRecovery {
         );
         let evidence = &self.backup.evidence;
         anyhow::ensure!(
-            !evidence.mfgr_cert_chain.is_empty()
-                && !evidence.part_owner_cert_chain.is_empty()
-                && !evidence.report.is_empty(),
-            "remote recovery requires creation sender evidence"
+            !evidence.report.is_empty(),
+            "remote recovery requires an operation report"
         );
         anyhow::ensure!(
-            self.sender_cert_chain.is_empty() == self.receiver_cert_chain.is_empty(),
-            "external-SA recovery requires both sender and receiver HPKE chains"
+            self.sender_pid_pub_key.len() == 96,
+            "remote recovery requires a raw P-384 signer key"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validate_transfer_envelope(envelope: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            envelope.len() == POK_REMOTE_BACKUP_LEN
+                && envelope.starts_with(b"TSRA-XFER\x01\x02\x00\x11\x00\x02\x00\x02")
+                && envelope.get(161) == Some(&4),
+            "invalid P-384 HPKE Base SD envelope; legacy Auth backups are unsupported"
         );
         Ok(())
     }
@@ -109,7 +116,7 @@ impl std::fmt::Debug for RemoteRecovery {
             .field("backup", &self.backup)
             .field("masked_receiver_key_len", &self.masked_receiver_key.len())
             .field("sd_mk_backup_len", &self.sd_mk_backup.len())
-            .field("sender_cert_chain_len", &self.sender_cert_chain.len())
+            .field("sender_pid_pub_key_len", &self.sender_pid_pub_key.len())
             .field("receiver_cert_chain_len", &self.receiver_cert_chain.len())
             .finish()
     }
@@ -141,7 +148,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     ///
     /// 1. Check that no recovery records exist and manufacturer evidence is present.
     /// 2. Initialize and finalize the partition using the application's PTA signer.
-    /// 3. Refresh the sender chain, mint its sealing key, and create the remote backup.
+    /// 3. Refresh the source PID chains and create the report-bearing remote backup.
     /// 4. Save partition and local SD recovery records together.
     ///
     /// The signer returns the complete root-first certificate chain, including
@@ -149,7 +156,8 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// Firmware obtains `RcvrPub` from the receiver chain's leaf certificate and
     /// validates it against SATA. Attestation evidence is required when
     /// the policy sets `require_trusted_sa_key`; otherwise its chains and
-    /// report may be empty. Receiver and sender attestation both use
+    /// report may be empty. Source operation evidence is always mandatory.
+    /// Receiver and source evidence both use
     /// [`Evidence`]; the SDK's borrowed view is constructed for the device call.
     ///
     /// # Failure recovery
@@ -284,11 +292,6 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         SignPta: FnOnce(&[u8], &[u8]) -> Result<Vec<Vec<u8>>>,
     {
         remote.validate()?;
-        anyhow::ensure!(
-            remote.sender_cert_chain.is_empty()
-                || !self.env.policy().flags.require_trusted_sa_key(),
-            "external-SA certificate-only restore cannot satisfy trusted-SA attestation"
-        );
         let previous = load_partition_recovery(self.env.store())?;
         anyhow::ensure!(
             previous.policy == self.env.policy().as_bytes(),
@@ -296,21 +299,11 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         );
         let partition =
             self.init_partition(session, tee_seed, Some(&previous.local_mk_backup), sign_pta)?;
-        // Unified `SdRestoreRemoteBackup` (0x0C): the sender certificate
-        // chain is always the source of `SndrPub`, and the attestation
-        // evidence is optional — the host packs it only when it is non-empty,
-        // and the firmware requires it when the policy sets
-        // `require_trusted_sa_key`.
-        let certs = remote
-            .sender_cert_chain
-            .iter()
-            .map(|cert| HsmCert { cert })
-            .collect::<Vec<_>>();
         let restored = remote.backup.evidence.with_hsm_evidence(|evidence| {
             session.session.sd_restore_remote_backup(
                 self.env.policy().as_bytes(),
                 &remote.masked_receiver_key,
-                &certs,
+                &remote.sender_pid_pub_key,
                 evidence,
                 &remote.backup.pok_remote_backup,
                 &remote.sd_mk_backup,
@@ -417,16 +410,14 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             "sender partition-owner certificate chain is required",
         );
 
-        let sealing_key = hsm::mint_sealing_key(&session.session)?;
         let sender_evidence = Evidence {
             mfgr_cert_chain: self.env.mfgr_cert_chain().to_vec(),
             owner_cert_chain: self.env.owner_cert_chain().to_vec(),
             part_owner_cert_chain,
-            report: sealing_key.report.clone(),
+            report: Vec::new(),
         };
         self.seal_backup(
             session,
-            &sealing_key,
             receiver_cert_chain,
             receiver_evidence,
             &sender_evidence,
@@ -436,7 +427,6 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     fn seal_backup(
         &self,
         session: &SealingSession,
-        sealing_key: &hsm::SealingKey,
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &Evidence,
         sender_evidence: &Evidence,
@@ -445,7 +435,6 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             .with_hsm_evidence(|evidence| {
                 session.session.sd_create_remote_backup(
                     self.env.policy().as_bytes(),
-                    &sealing_key.masked,
                     receiver_cert_chain,
                     evidence,
                 )
@@ -456,9 +445,11 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             pok_local_backup: backup.pok_local_backup,
             sd_mk_backup: backup.sd_mk_backup,
         };
+        let mut evidence = sender_evidence.clone();
+        evidence.report = backup.report;
         let remote_backup = RemoteBackup {
             pok_remote_backup: backup.pok_remote_backup,
-            evidence: sender_evidence.clone(),
+            evidence,
         };
         Ok((domain_state, remote_backup))
     }

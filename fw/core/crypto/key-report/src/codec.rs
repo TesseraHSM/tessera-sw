@@ -70,10 +70,8 @@ pub(crate) struct CoseSign1<'a> {
     pub signature: &'a [u8],
 }
 
-/// Key-attestation report payload: an integer-keyed CBOR map. v1 reports
-/// carry 7 entries (keys 0–6); v2 reports add an 8th entry (key 7) with the
-/// `policy_hash`. `policy_hash` is `Option`: minicbor omits the entry when
-/// `None`, so a v1 report's map is byte-identical to before.
+/// Public-key payload. v1/v2 retain their original wire format; v3 adds
+/// the signed `PublicKey` discriminator at key 8.
 #[derive(Encode, CborLen)]
 #[cbor(map)]
 pub(crate) struct KeyReportPayload<'a> {
@@ -108,6 +106,31 @@ pub(crate) struct KeyReportPayload<'a> {
     #[n(7)]
     #[cbor(with = "minicbor::bytes")]
     pub policy_hash: Option<&'a [u8]>,
+    /// Signed discriminator (v3 only); absent in legacy key reports.
+    #[n(8)]
+    pub report_kind: Option<u8>,
+}
+
+/// Operation payload. Public-key fields are deliberately absent.
+#[derive(Encode, CborLen)]
+#[cbor(map)]
+pub(crate) struct TransferReportPayload<'a> {
+    #[n(0)]
+    pub version: u16,
+    #[n(7)]
+    #[cbor(with = "minicbor::bytes")]
+    pub policy_hash: Option<&'a [u8]>,
+    #[n(8)]
+    pub report_kind: u8,
+    #[n(9)]
+    #[cbor(with = "minicbor::bytes")]
+    pub source_pid_key_id: &'a [u8],
+    #[n(10)]
+    #[cbor(with = "minicbor::bytes")]
+    pub recipient_key_id: &'a [u8],
+    #[n(11)]
+    #[cbor(with = "minicbor::bytes")]
+    pub envelope_hash: &'a [u8],
 }
 
 /// The `Sig_structure` context literal (`"Signature1"`).

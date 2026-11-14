@@ -4,9 +4,9 @@
 //! Integration tests for the TBOR `SdRestoreRemoteBackup` command.
 //!
 //! `SdRestoreRemoteBackup` restores a security domain from a **remote**
-//! backup: it HPKE-Auth-opens `src_remote_backup` (an HPKE seal of BKS3)
-//! with the receiver's masked SD-sealing key — authenticated by the
-//! sender's attested key — recovers `SDMK` from `prev_sd_mk_backup`, and
+//! backup: it HPKE Base-opens `src_remote_backup` (an HPKE seal of BKS3)
+//! with the receiver's masked SD-sealing key after verifying the mandatory
+//! PID-signed operation report and policy. It recovers `SDMK` from `prev_sd_mk_backup`, and
 //! returns the device-local backups.
 //!
 //! The **round-trip** test uses a self-backup (sender == receiver): a first
@@ -53,10 +53,10 @@ use crate::commands::sd_create_remote_backup::ReceiverEvidence;
 /// A remote backup produced by the first device's `CreateSD`, replayed on
 /// the second (rebooted) device to restore the security domain.
 struct RemoteBackup {
+    pid_pub: [u8; RAW_PUB_LEN],
     /// The receiver's masked SD-sealing key (used to open the backup).
     masked_sealing_key: Vec<u8>,
-    /// Sender attestation evidence (OOB items + descriptors).  In a
-    /// self-backup this is the same evidence `CreateSD` used.
+    /// Source PID identity chains and the create command's operation report.
     evidence: ReceiverEvidence,
     /// The 584-byte `PartPolicy` image.
     policy: Vec<u8>,
@@ -93,14 +93,15 @@ fn create_remote_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> RemoteBackup
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, sata, &report);
-    let req = backup_request(session.session_id, masked.clone(), &evidence, &policy);
+    let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 
     RemoteBackup {
+        pid_pub,
         masked_sealing_key: masked,
-        evidence,
+        evidence: evidence.with_report(&resp.report),
         policy,
         src_remote_backup: resp.pok_remote_backup,
         prev_sd_mk_backup: resp.sd_mk_backup,
@@ -147,14 +148,15 @@ fn create_remote_backup_trusted(sata: &CaKey, sapota: &CaKey, pota: &CaKey) -> R
     let part_owner = make_chain(sapota, &pid_pub);
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
-    let req = backup_request(session.session_id, masked.clone(), &evidence, &policy);
+    let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup trusted-SA");
 
     RemoteBackup {
+        pid_pub,
         masked_sealing_key: masked,
-        evidence,
+        evidence: evidence.with_report(&resp.report),
         policy,
         src_remote_backup: resp.pok_remote_backup,
         prev_sd_mk_backup: resp.sd_mk_backup,
@@ -172,7 +174,7 @@ fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRe
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
         policy: backup.policy.clone(),
-        sender_cert_chain: backup.evidence.receiver.clone(),
+        sender_pid_pub_key: backup.pid_pub,
         sender_mfgr_cert_chain: backup.evidence.mfgr.clone(),
         sender_owner_cert_chain: backup.evidence.owner.clone(),
         sender_part_owner_cert_chain: backup.evidence.part_owner.clone(),
@@ -237,10 +239,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
     // Device 1: finalize + CreateSD under a trusted-SA-key policy.
     let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
 
-    // Device 2 (reboot): restore PartLocalMK, then restore the SD.  Under
-    // `require_trusted_sa_key` the handler validates the sender certificate
-    // chain (SATA) *and* the full attestation evidence (SAPOTA), requiring
-    // the attested key to equal the sender key.
+    // Restore PartLocalMK and require SAPOTA authorization of the operation PID.
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let init = ctx
@@ -299,14 +298,15 @@ fn sd_restore_remote_backup_is_one_shot() {
 
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
-    let create_req = backup_request(session.session_id, masked.clone(), &evidence, &policy);
+    let create_req = backup_request(session.session_id, &evidence, &policy);
     let created = ctx
         .tbor_oob(&create_req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 
     let backup = RemoteBackup {
+        pid_pub,
         masked_sealing_key: masked,
-        evidence,
+        evidence: evidence.with_report(&created.report),
         policy,
         src_remote_backup: created.pok_remote_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
@@ -330,7 +330,7 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
         policy: Vec::new(),
-        sender_cert_chain: Vec::new(),
+        sender_pid_pub_key: [0u8; RAW_PUB_LEN],
         sender_mfgr_cert_chain: Vec::new(),
         sender_owner_cert_chain: Vec::new(),
         sender_part_owner_cert_chain: Vec::new(),
@@ -390,6 +390,10 @@ fn remote_restore_destination(backup: &RemoteBackup, seed: &[u8], pota: &CaKey) 
     assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 
     (ctx, session.session_id)
+}
+
+fn restore_target(seed: &[u8], pota: &CaKey, backup: &RemoteBackup) -> (TestCtx, u16) {
+    remote_restore_destination(backup, seed, pota)
 }
 
 /// A rejected remote restore must return the expected firmware status
@@ -631,4 +635,88 @@ fn sd_restore_remote_backup_rejects_missing_sender_part_owner_chain_trusted() {
     req.sender_part_owner_cert_chain.clear();
 
     assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_signature_only_requires_bound_operation_report_and_allows_retry() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, sid) = restore_target(&seed, &pota, &backup);
+    let mut valid = restore_remote_req(sid, &backup);
+    valid.sender_mfgr_cert_chain.clear();
+    valid.sender_owner_cert_chain.clear();
+    valid.sender_part_owner_cert_chain.clear();
+
+    let original = backup.evidence.oob()[valid.sender_report.index as usize].to_vec();
+    let mut corrupt = original.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    let (_, public_key_report, _) = masked_key_report_and_pub(&ctx, sid);
+    for report in [Vec::new(), corrupt, public_key_report] {
+        let evidence = backup.evidence.clone().with_report(&report);
+        let mut req = valid.clone();
+        req.sender_report = evidence.report;
+        assert!(ctx.tbor_oob(&req, &evidence.oob()).is_err());
+        assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    }
+
+    let mut wrong_signer = valid.clone();
+    wrong_signer.sender_pid_pub_key.fill(0);
+    assert!(ctx.tbor_oob(&wrong_signer, &backup.evidence.oob()).is_err());
+
+    let (other_receiver, _, _) = masked_key_report_and_pub(&ctx, sid);
+    let mut wrong_recipient = valid.clone();
+    wrong_recipient.masked_sealing_key = other_receiver.try_into().expect("masked recipient size");
+    assert!(ctx
+        .tbor_oob(&wrong_recipient, &backup.evidence.oob())
+        .is_err());
+
+    for offset in [17, 65, 113, 161, POK_REMOTE_BACKUP_LEN - 1] {
+        let mut req = valid.clone();
+        req.src_remote_backup[offset] ^= 1;
+        assert!(
+            ctx.tbor_oob(&req, &backup.evidence.oob()).is_err(),
+            "offset {offset}"
+        );
+        assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    }
+
+    ctx.tbor_oob(&valid, &backup.evidence.oob())
+        .expect("signature-only restore with mandatory report and no identity chains");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+}
+
+#[test]
+fn sd_restore_remote_backup_trusted_sa_requires_authorized_pid_and_allows_retry() {
+    let sata = CaKey::generate();
+    let sapota = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
+    let (ctx, sid) = restore_target(&mach_seed(), &pota, &backup);
+    let valid = restore_remote_req(sid, &backup);
+    let wrong_anchor = backup
+        .evidence
+        .with_part_owner_chain(&make_chain(&CaKey::generate(), &backup.pid_pub));
+    let mut req = valid.clone();
+    req.sender_part_owner_cert_chain = wrong_anchor.part_owner.clone();
+    assert!(ctx.tbor_oob(&req, &wrong_anchor.oob()).is_err());
+
+    let mut missing_identity = valid.clone();
+    missing_identity.sender_mfgr_cert_chain.clear();
+    missing_identity.sender_part_owner_cert_chain.clear();
+    assert!(ctx
+        .tbor_oob(&missing_identity, &backup.evidence.oob())
+        .is_err());
+
+    let mut mismatched_pid = valid.clone();
+    mismatched_pid.sender_pid_pub_key[0] ^= 1;
+    assert!(ctx
+        .tbor_oob(&mismatched_pid, &backup.evidence.oob())
+        .is_err());
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    ctx.tbor_oob(&valid, &backup.evidence.oob())
+        .expect("authorized PID restore after failures");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }

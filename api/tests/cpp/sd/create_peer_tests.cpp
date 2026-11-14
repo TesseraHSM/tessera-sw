@@ -6,7 +6,7 @@
 // Self-peer backup on one partition: provision a peer-cloning-enabled
 // backing partition, mint an SD sealing key, `CreateSD`
 // (`tsra_sd_create_remote_backup`) to obtain the device-local
-// backup, then `tsra_sd_create_peer_backup` to HPKE-Auth-seal
+// backup, then `tsra_sd_create_peer_backup` to HPKE-Base-seal
 // BKS3 to the destination peer (our own attested identity). A successful
 // seal is itself the correctness check.
 #include <array>
@@ -24,12 +24,11 @@
 namespace
 {
 // Create the security domain and capture the 276-byte device-local backup
-// that CreatePeerBackup recovers BKS3 from. Sizes the three output buffers
+// that CreatePeerBackup recovers BKS3 from. Sizes all four output buffers
 // via the probe/fill convention. Records a gtest failure and returns false
 // on error.
 bool create_sd_local_backup(
     tsra_handle session,
-    std::vector<uint8_t> &masked,
     const tsra_sd_cert_chain &receiver_chain,
 
     const tsra_sd_evidence &receiver,
@@ -37,12 +36,10 @@ bool create_sd_local_backup(
     std::vector<uint8_t> &out_local
 )
 {
-    tsra_buffer masked_buf{ masked.data(), static_cast<uint32_t>(masked.size()) };
     tsra_buffer policy_buf{ const_cast<uint8_t *>(policy.data()),
                             static_cast<uint32_t>(policy.size()) };
     tsra_sd_create_remote_backup_params params{
         &policy_buf,
-        &masked_buf,
         receiver_chain,
         &receiver,
     };
@@ -53,10 +50,19 @@ bool create_sd_local_backup(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
+    std::vector<uint8_t> report;
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
-    for (int attempt = 0; attempt < 4; ++attempt)
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(session, &params, &remote_buf, &local_buf, &mk_buf);
+        err = tsra_sd_create_remote_backup(
+            session,
+            &params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -76,6 +82,8 @@ bool create_sd_local_backup(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {
@@ -87,7 +95,7 @@ bool create_sd_local_backup(
     return true;
 }
 
-// Run the create-peer-backup call, sizing the single output buffer via the
+// Run the create-peer-backup call, sizing backup and report buffers via the
 // probe/fill convention. The FFI validates the output buffer before
 // sealing, so a too-small buffer never performs the seal. Returns the final
 // status and, on success, sizes `dst` to the bytes written.
@@ -98,10 +106,12 @@ tsra_status create_peer_fill(
 )
 {
     tsra_buffer dst_buf{ nullptr, 0 };
+    std::vector<uint8_t> report;
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 4; ++attempt)
     {
-        err = tsra_sd_create_peer_backup(session, params, &dst_buf);
+        err = tsra_sd_create_peer_backup(session, params, &dst_buf, &report_buf);
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -111,6 +121,8 @@ tsra_status create_peer_fill(
             dst.resize(dst_buf.len);
         }
         dst_buf = { dst.data(), static_cast<uint32_t>(dst.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err == TSRA_STATUS_SUCCESS)
     {
@@ -157,7 +169,7 @@ class tsra_sd_create_peer_backup_test : public ::testing::Test
 };
 
 // Happy path: create the security domain, then a peer backup of it; the
-// peer backup is a fresh 161-byte, non-zero HPKE-Auth seal.
+// peer backup is a fresh 322-byte, non-zero HPKE Base envelope.
 TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
 {
     if (!api_rev_at_least(1, 1))
@@ -184,14 +196,13 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
         ASSERT_EQ(key.masked.size(), kMaskedSealingKeyLen);
         ASSERT_FALSE(key.report.empty());
 
-        // Self-peer backup: the same attested key is sender and destination.
+        // Self-peer backup to the attested destination key.
         SdEvidenceHolder evidence = build_receiver_evidence(ctx, key.pub, key.report);
 
         // Create the security domain to obtain the device-local backup.
         std::vector<uint8_t> local_backup;
         ASSERT_TRUE(create_sd_local_backup(
             ctx.session,
-            key.masked,
             evidence.receiver_chain(),
             evidence.get(),
             ctx.policy,
@@ -200,20 +211,32 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
         ASSERT_EQ(local_backup.size(), kMaskedSdLen);
 
         // Seal a peer backup to our own attested identity as destination.
-        tsra_buffer masked_buf{ key.masked.data(), static_cast<uint32_t>(key.masked.size()) };
         tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
         tsra_buffer local_buf{ local_backup.data(), static_cast<uint32_t>(local_backup.size()) };
         tsra_sd_create_peer_backup_params params{
             &policy_buf,
-            &masked_buf,
             &evidence.get(),
             &local_buf,
         };
 
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
+        std::vector<uint8_t> probe_report(kSdBackupReportCapacity);
+        tsra_buffer probe_backup_buf{ probe_backup.data(),
+                                      static_cast<uint32_t>(probe_backup.size()) };
+        tsra_buffer probe_report_buf{ probe_report.data(), kSdBackupReportCapacity - 1 };
+        EXPECT_EQ(
+            tsra_sd_create_peer_backup(ctx.session, &params, &probe_backup_buf, &probe_backup_buf),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        EXPECT_EQ(
+            tsra_sd_create_peer_backup(ctx.session, &params, &probe_backup_buf, &probe_report_buf),
+            TSRA_STATUS_BUFFER_TOO_SMALL
+        );
+        EXPECT_EQ(probe_report_buf.len, kSdBackupReportCapacity);
         std::vector<uint8_t> peer_backup;
         ASSERT_EQ(create_peer_fill(ctx.session, &params, peer_backup), TSRA_STATUS_SUCCESS);
 
-        // Peer backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
+        // Peer backup: PID-reported HPKE Base envelope of BKS3, 322 B.
         ASSERT_EQ(peer_backup.size(), kPokRemoteBackupLen);
         ASSERT_TRUE(any_nonzero(peer_backup)) << "pok_peer_backup must not be all-zero";
     });
@@ -244,7 +267,7 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_null_params)
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
         tsra_buffer out{ nullptr, 0 };
-        auto err = tsra_sd_create_peer_backup(ctx.session, nullptr, &out);
+        auto err = tsra_sd_create_peer_backup(ctx.session, nullptr, &out, &out);
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }

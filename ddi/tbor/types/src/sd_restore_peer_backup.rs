@@ -5,11 +5,11 @@
 //!
 //! `SdRestorePeerBackup` is an **in-session** command that restores a
 //! security domain from a **peer** backup: it
-//! HPKE-Auth-opens the caller-supplied `pok_peer_backup` (an HPKE seal of
-//! BKS3) with the masked receiver key — authenticated by the sender peer's
-//! attested key — recovers `SDMK` from `prev_sd_mk_backup`, and returns the
+//! verifies the source PID's POTA-authorized `SdBackup` report, recipient
+//! and SD policy before HPKE Base-opening, recovers `SDMK` from
+//! `prev_sd_mk_backup`, and returns the
 //! device-local backups (`pok_local_backup`, `sd_mk_backup`).  It is
-//! `SdRestoreRemoteBackup` plus a peer-cloning policy gate.
+//! gated by peer cloning and always authenticates the source PID.
 //!
 //! Both wire schemas are shared with the firmware handler via
 //! `tsra_fw_ddi_tbor_types::sd_restore_peer_backup`; this module adds the
@@ -45,8 +45,8 @@ pub struct TborSdRestorePeerBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified partition policy describing the security domain being
-    /// restored.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified [`PartPolicy`] describing the security domain being
+    /// restored.  Encoded as its deterministic CBOR document of at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
@@ -67,8 +67,8 @@ pub struct TborSdRestorePeerBackupReq {
     /// Source peer attestation-report (COSE_Sign1) descriptor.
     pub src_report: ReportDescriptor,
 
-    /// Peer backup to restore: an HPKE-Auth seal of BKS3, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (161 B).  The firmware schema is the length
+    /// Peer backup to restore: an HPKE Base seal of BKS3, exactly
+    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  The firmware schema is the length
     /// authority.
     pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
 
@@ -85,12 +85,12 @@ pub struct TborSdRestorePeerBackupResp {
     /// Partition-owner-key backup re-wrapped under the device-local key
     /// (exactly 280 B on the wire; the firmware schema is the length
     /// authority).
-    #[tbor(max_len = 280)]
+    #[tbor(align = 4, max_len = 280)]
     pub pok_local_backup: Vec<u8>,
 
     /// Security-domain masking-key backup envelope (exactly 264 B on the
     /// wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub sd_mk_backup: Vec<u8>,
 }
 
@@ -105,7 +105,7 @@ mod tests {
         let req = TborSdRestorePeerBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
@@ -117,7 +117,7 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The maximum-length policy plus the sealing key and the two backups must
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy plus the sealing key and the two backups must
         // be carried in the data section.
         assert!(
             frame.len()

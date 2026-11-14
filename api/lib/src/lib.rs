@@ -37,6 +37,7 @@ pub use ddi::PolicyFlags;
 pub use ddi::PolicyKey;
 pub use ddi::PolicyKeyFormat;
 pub use ddi::PolicyThumbprint;
+pub use ddi::SD_BACKUP_REPORT_MAX_LEN;
 pub use ddi::SD_MK_BACKUP_LEN;
 pub use ddi::SEALED_TMK_LEN;
 pub use ddi::policy_key_thumbprint;

@@ -6,118 +6,43 @@ Licensed under the MIT License.
 # SdCreatePeerBackup (Opcode 0x0E)
 
 **Handler:** `fw/core/lib/src/ddi/tbor/sd_create_peer_backup.rs`
-**Session:** InSession (Crypto Officer)
+**Session:** Active Crypto Officer
 
-## Description
+Recovers BKS3 from a local backup and transfers it to a same-policy peer.
+The initialized partition's bound policy must match the request and allow
+peer cloning. The destination's POTA-authorized `PublicKey` report must
+prove an HSM-generated SD sealing key and carry that same policy hash.
+Manufacturer and partition-owner chains are required; the owner chain is
+optional, but all supplied chains must identify the same report-signing PID.
 
-Creates a **peer-transferable** backup of a security domain: it recovers BKS3 from the caller's device-local backup
-(`pok_local_backup`) and HPKE-Auth-seals it to a destination peer — named
-by `dst_evidence` and authenticated by the sender's own masked SD-sealing
-key — returning the peer backup (`pok_peer_backup`).
+No sender sealing key is supplied. Firmware emits a fresh P-384 HPKE Base
+envelope and signs the bound `SdBackup` report with its actual PID.
+The command is stateless and does not require an already-provisioned SD
+when the local backup's masking key is available.
 
-It is **[`SdCreateRemoteBackup`](sd_create_remote_backup.md)'s
-HPKE-Auth-seal front-end over a recovered (not freshly minted) BKS3**,
-sharing the BKS3-recovery primitive with
-[`SdRestoreLocalBackup`](sd_restore_local_backup.md)
-(`fw/core/lib/src/ddi/tbor/sd_backup.rs`).
+## Request fields, in wire order
 
-Algorithm:
+| Field | Shape | Meaning |
+|---|---|---|
+| `session_id` | Inline session ID | Active CO session |
+| `policy` | 1-384 B | Bound SD policy permitting peer cloning |
+| `dst_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized destination `PublicKey` evidence |
+| `pok_local_backup` | 280 B, aligned to 4 B | Local BKS3 backup |
 
-1. Gate to a Crypto-Officer, `Active` session on an `Initialized`
-   partition (`PartLocalMK` and the policy hash are bound by `PartFinal`).
-   Unlike the restores this is **not** one-shot and does not touch `SDMK`,
-   so it neither requires nor sets the SD-initialized flag — a rebooted
-   partition can clone to a peer after `PartFinal` without first restoring
-   the SD locally.
-2. Bind the caller-supplied `policy` to the partition's fixed `policy_hash`,
-   then require its `allow_peer_cloning` flag (`SdPeerCloningNotAllowed`).
-3. Verify the **destination** peer evidence against that policy: the
-   manufacturer / partition-owner and any supplied device-owner chains are validated
-   and anchored to the policy `POTA` key, the report's v2 `policy_hash`
-   must equal `SHA-384(policy)`, and its attested COSE_Key is recovered as
-   **`RcvrPub`**.
-4. Unmask `masked_sealing_key` under its scope's masking key → the sender's
-   private HPKE key **`SndrPriv`** (must be an `SdSealing` key), and derive
-   `SndrPub` on-device.
-5. Recover **BKS3** from `pok_local_backup` (unmask under `PartLocalMK`;
-   must be an `SdPartitionOwnerSeed` envelope whose bound SVN is not newer
-   than the current firmware SVN).
-6. HPKE-Auth-seal BKS3 to `RcvrPub` with `SndrPriv` as the
-   sender-authentication key, returning `pok_peer_backup` (161 B).
-   IO teardown scrubs `SndrPriv` and BKS3.
-
-The command is **stateless**: no vault writes, no partition-state
-mutation, no undo log.
-
-Manufacturer and partition-owner evidence chains are required. The device-owner
-chain may be an empty descriptor list; if supplied, it must validate and share
-the other chains' report-signing leaf key. Trust-anchor, report and policy
-checks are unchanged, as is the wire layout.
-
-## Request
-
-Wire layout: 12-byte header, followed by the TOC entries, then the
-variable-length data section.
-
-### TOC entries
-
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 20 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **sender's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover `SndrPriv`. Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
-| 24 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being backed up. Its SHA-384 digest must equal the partition's bound `policy_hash` and the receiver report's v2 `policy_hash`. |
-| 28 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination manufacturer certificate-chain descriptors (from the `dst_evidence` field group). |
-| 32 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination owner certificate-chain descriptors. |
-| 36 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination partition-owner certificate-chain descriptors. |
-| 40 | `evidence` | `buffer` (single `&ReportDescriptor`, 4 B) | Destination attestation-report (COSE_Sign1) descriptor. |
-| 44 | `pok_local_backup` | `buffer` (fixed 276 B) | Device-local partition-owner-key backup (a masked BKS3 wrapped under `PartLocalMK`) from which BKS3 is recovered = `MASKED_SD_LEN` (276 B). |
-
-The four `mfgr_cert_chain` … `evidence` entries are spliced in by the
-shared [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs)
-field group (`dst_evidence`); the certificate-chain DER bytes and the
-COSE_Sign1 report travel **out of band**, referenced by these
-`(offset, length)` descriptors.
-
-### Data section
-
-Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
-the packed destination cert-chain and report descriptors, and the 276-byte
-`pok_local_backup` blob.
+Evidence certificates and reports travel out of band. The evidence group
+expands to four TOC entries.
 
 ## Response
 
-Wire layout: 12-byte header, followed by the TOC entries, then the data
-section.
+| Field | Shape | Meaning |
+|---|---|---|
+| `pok_peer_backup` | 322 B | Canonical Base envelope |
+| `report` | 1..896 B | PID-signed `SdBackup` report |
 
-### TOC entries
+Keep both outputs together. The report binds the source PID, recipient,
+complete envelope, and SD policy. See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+Local backup authentication, ownership, SVN checks, and masking are unchanged.
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 12 | `pok_peer_backup` | `buffer` (fixed 161 B) | Peer backup: an HPKE-Auth seal of BKS3 to the destination peer = `POK_REMOTE_BACKUP_LEN` (161 B). |
-
-### Data section
-
-Carries the 161-byte `pok_peer_backup` seal.
-
-## Errors
-
-| Error | Cause |
-|---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` > 384 B, or `pok_local_backup` ≠ 276 B (rejected at decode before the handler runs) |
-| `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `POTA` key is not P-384; the destination report's `policy_hash` ≠ `SHA-384(policy)`; or the missing OOB evidence page |
-| `SdPeerCloningNotAllowed` | The partition's policy does not set `allow_peer_cloning` |
-| `SdBackupSvnRollback` | `pok_local_backup`'s bound SVN is newer than the current firmware SVN (anti-rollback) |
-| `UnsupportedKeyType` | `masked_sealing_key` is not an `SdSealing` key, or `pok_local_backup` is not an `SdPartitionOwnerSeed` envelope |
-| `AesGcmDecryptTagDoesNotMatch` | `pok_local_backup` is tampered or was masked under a different `PartLocalMK` (unmask tag mismatch) |
-| Evidence errors | The destination certificate chains fail validation or do not anchor to the policy `POTA` key, or the report signature is invalid |
-| `InvalidPermissions` | Not a Crypto-Officer session |
-| `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-
-## See also
-
-- Wire encoding: [TBOR specification](../../../fw/core/ddi/tbor/docs/spec.md)
-- Wire schema: `fw/core/ddi/tbor/types/src/sd_create_peer_backup.rs`
-- Shared SD-backup mechanics: `fw/core/lib/src/ddi/tbor/sd_backup.rs`
-- Consumer of the peer backup: [`SdRestorePeerBackup`](sd_restore_peer_backup.md)
-- Producer of the local backup: [`SdCreateRemoteBackup`](sd_create_remote_backup.md)
+Disabled cloning returns `SdPeerCloningNotAllowed`; malformed sizes fail
+decoding. Invalid policy, destination attestation, provenance, local backup,
+lifecycle, session, and permission errors are propagated.

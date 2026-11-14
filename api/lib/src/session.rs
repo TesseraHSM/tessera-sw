@@ -314,19 +314,17 @@ impl HsmSession {
     /// Issues TBOR `SdCreateRemoteBackup` (opcode `0x0A`) on this CO
     /// session.
     ///
-    /// Creates a new security domain from the caller-supplied
-    /// `part_policy`, using the sender's `masked_sealing_key` (from
-    /// `SdSealingKeyGen`). The receiver public key is always recovered from
+    /// Creates a new security domain from the caller-supplied unified
+    /// `part_policy`. The receiver public key is always recovered from
     /// the authoritative `receiver_cert_chain` (anchored to the policy SATA
     /// key thumbprint); `receiver_evidence` is optional and verified only when the
     /// policy sets `require_trusted_sa_key` (pass an empty evidence
-    /// otherwise). Returns the remote backup together with the device-local
-    /// backups. Only valid on a V2 session; a V1 session returns
+    /// otherwise). Returns a Base envelope and PID-signed `SdBackup` report
+    /// together with the device-local backups. Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_create_remote_backup(
         &self,
         part_policy: &[u8],
-        masked_sealing_key: &[u8],
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &HsmSdEvidence<'_>,
     ) -> HsmResult<HsmSdRemoteBackupResult> {
@@ -336,7 +334,6 @@ impl HsmSession {
                 &inner.partition,
                 inner.rev,
                 inner.id,
-                masked_sealing_key,
                 receiver_cert_chain,
                 receiver_evidence,
                 part_policy,
@@ -412,10 +409,10 @@ impl HsmSession {
     /// Issues TBOR `SdResealRemoteBackup` (opcode `0x0B`) on this CO
     /// session.
     ///
-    /// HPKE-opens `src_remote_backup` with the receiver's
-    /// `masked_sealing_key` (authenticated by the source sender in
-    /// `src_evidence`) and reseals the recovered backup to the destination
-    /// receiver (`dest_evidence`), returning the resealed remote backup.
+    /// Verifies the source PID's POTA-authorized `SdBackup` report before
+    /// Base-opening with `masked_sealing_key`, then reseals to the authorized
+    /// destination. Returns the envelope and local-PID-signed operation report.
+    /// Both reports bind `part_policy`, which may differ from the SA-local policy.
     /// Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_reseal_remote_backup(
@@ -425,7 +422,7 @@ impl HsmSession {
         src_evidence: &HsmSdEvidence<'_>,
         dest_evidence: &HsmSdEvidence<'_>,
         src_remote_backup: &[u8],
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<HsmSdTransferResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_reseal_remote_backup_ex(
@@ -446,17 +443,19 @@ impl HsmSession {
     /// Issues TBOR `SdRestoreRemoteBackup` (opcode `0x0C`) on this CO
     /// session.
     ///
-    /// HPKE-opens `src_remote_backup` with the receiver's
-    /// `masked_sealing_key` (authenticated by the sender key recovered from
-    /// `sender_cert_chain`), recovers the security-domain masking key from
-    /// `prev_sd_mk_backup`, and returns the refreshed device-local backups.
+    /// Verifies the mandatory `SdBackup` report against raw big-endian
+    /// `sender_pid_pub_key` (96-byte X || Y), the actual recipient, envelope,
+    /// and target SD policy before Base-opening with `masked_sealing_key`.
+    /// SAPOTA authenticates the source PID only when trusted-SA policy is set;
+    /// otherwise verification establishes signature integrity, not SA identity.
+    /// Recovers SDMK from `prev_sd_mk_backup` and returns local backups.
     /// Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_restore_remote_backup(
         &self,
         part_policy: &[u8],
         masked_sealing_key: &[u8],
-        sender_cert_chain: &[HsmCert<'_>],
+        sender_pid_pub_key: &[u8],
         sender_evidence: &HsmSdEvidence<'_>,
         src_remote_backup: &[u8],
         prev_sd_mk_backup: &[u8],
@@ -468,7 +467,7 @@ impl HsmSession {
                 inner.rev,
                 inner.id,
                 masked_sealing_key,
-                sender_cert_chain,
+                sender_pid_pub_key,
                 sender_evidence,
                 part_policy,
                 src_remote_backup,
@@ -481,25 +480,23 @@ impl HsmSession {
 
     /// Issues TBOR `SdCreatePeerBackup` (opcode `0x0E`) on this CO session.
     ///
-    /// Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
-    /// destination peer in `dst_evidence` (authenticated by the sender's
-    /// `masked_sealing_key`), returning the peer backup. Gated by the
+    /// Recovers BKS3 from `pok_local_backup` and Base-seals it to the
+    /// POTA-authorized same-policy peer in `dst_evidence`, returning the
+    /// envelope and PID-signed `SdBackup` report. Gated by the
     /// security domain's `allow_peer_cloning` policy flag. Only valid on a
     /// V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn sd_create_peer_backup(
         &self,
         part_policy: &[u8],
-        masked_sealing_key: &[u8],
         dst_evidence: &HsmSdEvidence<'_>,
         pok_local_backup: &[u8],
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<HsmSdTransferResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_peer_backup_ex(
                 &inner.partition,
                 inner.rev,
                 inner.id,
-                masked_sealing_key,
                 dst_evidence,
                 part_policy,
                 pok_local_backup,
@@ -512,8 +509,8 @@ impl HsmSession {
     /// Issues TBOR `SdRestorePeerBackup` (opcode `0x0F`) on this CO
     /// session.
     ///
-    /// HPKE-opens `pok_peer_backup` with the receiver's `masked_sealing_key`
-    /// (authenticated by the source peer in `src_evidence`), recovers the
+    /// Verifies the POTA-authorized source PID's `SdBackup` report and SD
+    /// policy binding before Base-opening with `masked_sealing_key`, recovers the
     /// security-domain masking key from `prev_sd_mk_backup`, and returns the
     /// refreshed device-local backups. Gated by the security domain's
     /// `allow_peer_cloning` policy flag. Only valid on a V2 session; a V1

@@ -77,6 +77,10 @@ impl CaKey {
     /// Generate a fresh P-384 CA key.
     pub(crate) fn generate() -> Self {
         let private_key = EccPrivateKey::from_curve(EccCurve::P384).expect("P-384 key");
+        Self::from_private_key(private_key)
+    }
+
+    pub(crate) fn from_private_key(private_key: EccPrivateKey) -> Self {
         let (x, y) = private_key.coord_vec().expect("coords");
         let mut pub_sec1 = [0u8; SEC1_PUB_LEN];
         pub_sec1[0] = 0x04;
@@ -646,6 +650,11 @@ impl SdEvidence {
         &self.report
     }
 
+    pub(crate) fn with_report(mut self, report: &[u8]) -> Self {
+        self.report = report.to_vec();
+        self
+    }
+
     /// Receiver key certificate chain (spec `RcvrCertChain`) as an ordered
     /// `[root, leaf]` cert list. Rooted at the policy SATA key; its leaf
     /// certifies `RcvrPub` — the key the remote backup is sealed to.
@@ -979,11 +988,11 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
 
     // Provision the security domain (self-backup), marking the partition
     // SD-initialized so the DARC commands (which require an SDMK) proceed.
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
         })
         .expect("sd_create_remote_backup");
 

@@ -3,13 +3,13 @@
 
 // api-level `SdResealRemoteBackup` round trip against the emulator.
 //
-// Self-reseal on one partition: mint receiver / sender / destination SD
+// Self-reseal on one partition: mint receiver / destination SD
 // sealing keys, use `tsra_sd_create_remote_backup` to produce a
-// real source backup (BKS3 sealed to the receiver by the sender), then
+// real source backup with its PID-signed operation report, then
 // reseal it to the destination via
 // `tsra_sd_reseal_remote_backup`. A successful reseal is itself
 // the correctness check: the HPKE open only succeeds if the receiver key
-// and the attested sender key match those that sealed the source.
+// and the operation report bind the source envelope.
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -24,24 +24,21 @@
 
 namespace
 {
-// Create a real source backup: a fresh BKS3 sealed to the receiver's
-// attested public key (`receiver_report`) by `masked_sender`. Returns the
-// 161-byte remote backup, or an empty vector on failure (recording a gtest
-// failure). Sizes the three output buffers via the probe/fill convention.
+// Create a source backup sealed to the attested receiver and capture its
+// producer report. Returns an empty vector on failure (recording a gtest
+// failure). Sizes all four output buffers via the probe/fill convention.
 std::vector<uint8_t> create_source_backup(
     SdBackingContext &ctx,
-    std::vector<uint8_t> &masked_sender,
     const std::vector<uint8_t> &receiver_pub,
-    const std::vector<uint8_t> &receiver_report
+    const std::vector<uint8_t> &receiver_report,
+    std::vector<uint8_t> &report
 )
 {
     SdEvidenceHolder receiver = build_receiver_evidence(ctx, receiver_pub, receiver_report);
 
-    tsra_buffer masked_buf{ masked_sender.data(), static_cast<uint32_t>(masked_sender.size()) };
     tsra_buffer policy_buf{ ctx.policy.data(), static_cast<uint32_t>(ctx.policy.size()) };
     tsra_sd_create_remote_backup_params params{
         &policy_buf,
-        &masked_buf,
         receiver.receiver_chain(),
         &receiver.get(),
     };
@@ -52,10 +49,18 @@ std::vector<uint8_t> create_source_backup(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
-    for (int attempt = 0; attempt < 4; ++attempt)
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(ctx.session, &params, &remote_buf, &local_buf, &mk_buf);
+        err = tsra_sd_create_remote_backup(
+            ctx.session,
+            &params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -75,6 +80,8 @@ std::vector<uint8_t> create_source_backup(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {
@@ -82,10 +89,11 @@ std::vector<uint8_t> create_source_backup(
         return {};
     }
     remote.resize(remote_buf.len);
+    report.resize(report_buf.len);
     return remote;
 }
 
-// Run the reseal call, sizing the single output buffer via the probe/fill
+// Run the reseal call, sizing backup and report buffers via the probe/fill
 // convention. The FFI validates the output buffer before resealing, so a
 // too-small buffer never performs the reseal. Returns the final status and
 // sizes `dst` to the bytes written on success.
@@ -96,10 +104,12 @@ tsra_status reseal_fill(
 )
 {
     tsra_buffer dst_buf{ nullptr, 0 };
+    std::vector<uint8_t> report;
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 4; ++attempt)
     {
-        err = tsra_sd_reseal_remote_backup(session, params, &dst_buf);
+        err = tsra_sd_reseal_remote_backup(session, params, &dst_buf, &report_buf);
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -109,6 +119,8 @@ tsra_status reseal_fill(
             dst.resize(dst_buf.len);
         }
         dst_buf = { dst.data(), static_cast<uint32_t>(dst.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err == TSRA_STATUS_SUCCESS)
     {
@@ -154,7 +166,7 @@ class tsra_sd_reseal_backup_test : public ::testing::Test
     }
 };
 
-// Happy path: resealing a real source backup yields a fresh 161-byte,
+// Happy path: resealing a real source backup yields a fresh 322-byte,
 // non-zero backup distinct from the source ciphertext.
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
 {
@@ -178,23 +190,20 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
         }
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
-        // Receiver (unseals the source), sender (sealed the source), and
-        // destination (the reseal target) SD sealing keys, each attested.
+        // Receiver and destination SD sealing keys, each attested.
         SealingKeyMaterial rcvr = sealing_key_and_report(ctx.session);
-        SealingKeyMaterial sndr = sealing_key_and_report(ctx.session);
         SealingKeyMaterial dst = sealing_key_and_report(ctx.session);
         ASSERT_EQ(rcvr.masked.size(), kMaskedSealingKeyLen);
         ASSERT_FALSE(rcvr.report.empty());
-        ASSERT_FALSE(sndr.report.empty());
         ASSERT_FALSE(dst.report.empty());
 
+        std::vector<uint8_t> source_report;
         std::vector<uint8_t> src_backup =
-            create_source_backup(ctx, sndr.masked, rcvr.pub, rcvr.report);
+            create_source_backup(ctx, rcvr.pub, rcvr.report, source_report);
         ASSERT_EQ(src_backup.size(), kPokRemoteBackupLen);
 
-        // Reseal: open with the receiver key (auth = sender), reseal to the
-        // destination receiver.
-        SdEvidenceHolder src_ev = build_receiver_evidence(ctx, sndr.pub, sndr.report);
+        // Verify the source operation, open with the receiver, and reseal.
+        SdEvidenceHolder src_ev = build_receiver_evidence(ctx, ctx.pid_pub, source_report);
         SdEvidenceHolder dst_ev = build_receiver_evidence(ctx, dst.pub, dst.report);
 
         tsra_buffer masked_buf{ rcvr.masked.data(), static_cast<uint32_t>(rcvr.masked.size()) };
@@ -204,10 +213,38 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
             &policy_buf, &masked_buf, &src_ev.get(), &dst_ev.get(), &src_buf,
         };
 
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
+        std::vector<uint8_t> probe_report(kSdBackupReportCapacity);
+        tsra_buffer probe_backup_buf{ probe_backup.data(),
+                                      static_cast<uint32_t>(probe_backup.size()) };
+        tsra_buffer probe_report_buf{ probe_report.data(), kSdBackupReportCapacity - 1 };
+        EXPECT_EQ(
+            tsra_sd_reseal_remote_backup(
+                ctx.session,
+                &params,
+                &probe_backup_buf,
+                &probe_backup_buf
+            ),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        EXPECT_EQ(
+            tsra_sd_reseal_remote_backup(
+                ctx.session,
+                &params,
+                &probe_backup_buf,
+                &probe_report_buf
+            ),
+            TSRA_STATUS_BUFFER_TOO_SMALL
+        );
+        EXPECT_EQ(probe_report_buf.len, kSdBackupReportCapacity);
         std::vector<uint8_t> dst_backup;
+        src_ev.set_report(rcvr.report);
+        EXPECT_NE(reseal_fill(ctx.session, &params, dst_backup), TSRA_STATUS_SUCCESS)
+            << "a PublicKey report is not a source SD operation report";
+        src_ev.set_report(source_report);
         ASSERT_EQ(reseal_fill(ctx.session, &params, dst_backup), TSRA_STATUS_SUCCESS);
 
-        // A successful HPKE open -> seal yields a 161-byte, non-zero backup.
+        // A successful HPKE open -> seal yields a 322-byte, non-zero backup.
         ASSERT_EQ(dst_backup.size(), kPokRemoteBackupLen);
         ASSERT_TRUE(any_nonzero(dst_backup)) << "dst_remote_backup must not be all-zero";
         // The resealed backup is a fresh HPKE encapsulation, not the source.
@@ -256,17 +293,16 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_rerandomizes)
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
         SealingKeyMaterial rcvr = sealing_key_and_report(ctx.session);
-        SealingKeyMaterial sndr = sealing_key_and_report(ctx.session);
         SealingKeyMaterial dst = sealing_key_and_report(ctx.session);
         ASSERT_FALSE(rcvr.report.empty());
-        ASSERT_FALSE(sndr.report.empty());
         ASSERT_FALSE(dst.report.empty());
 
+        std::vector<uint8_t> source_report;
         std::vector<uint8_t> src_backup =
-            create_source_backup(ctx, sndr.masked, rcvr.pub, rcvr.report);
+            create_source_backup(ctx, rcvr.pub, rcvr.report, source_report);
         ASSERT_EQ(src_backup.size(), kPokRemoteBackupLen);
 
-        SdEvidenceHolder src_ev = build_receiver_evidence(ctx, sndr.pub, sndr.report);
+        SdEvidenceHolder src_ev = build_receiver_evidence(ctx, ctx.pid_pub, source_report);
         SdEvidenceHolder dst_ev = build_receiver_evidence(ctx, dst.pub, dst.report);
 
         tsra_buffer masked_buf{ rcvr.masked.data(), static_cast<uint32_t>(rcvr.masked.size()) };
@@ -309,7 +345,7 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_null_params)
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
         tsra_buffer out{ nullptr, 0 };
-        auto err = tsra_sd_reseal_remote_backup(ctx.session, nullptr, &out);
+        auto err = tsra_sd_reseal_remote_backup(ctx.session, nullptr, &out, &out);
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
