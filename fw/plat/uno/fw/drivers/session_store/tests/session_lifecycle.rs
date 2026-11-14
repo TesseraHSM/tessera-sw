@@ -20,6 +20,7 @@ use part_store::HsmPartId;
 use part_store::PartResetKind;
 pub use part_store::PartStore;
 pub use part_store::Partition;
+pub use part_store::SessionFieldMut;
 use part_store::NUM_PARTITIONS;
 use reply_iv::ReplyIvs;
 use session_store::SessionStore;
@@ -292,4 +293,21 @@ fn reply_iv_counter_carries_and_disarms_after_its_last_value() {
     ivs.set_counter(pid, id, u64::MAX);
     assert_eq!(ivs.next(pid, id), reply_iv([9; 4], u64::MAX));
     assert_eq!(ivs.next(pid, id), None);
+}
+
+#[test]
+fn reads_follow_raw_writes_to_the_session_regions() {
+    let pid = HsmPartId::from(56u8);
+    let mut part = PartStore::partition(pid).unwrap();
+    part.reset();
+    let mut table = SessionStore::partition(pid).unwrap();
+    let id = table.create(HsmKeyId::from(7u16)).unwrap();
+    assert_eq!(table.physical_id(id).unwrap(), HsmKeyId::from(7u16));
+    assert!(matches!(table.state(id), HsmSessionState::Active));
+
+    let slot = u16::from(id) as usize;
+    part.session_table_mut()[2 + 2 * slot..4 + 2 * slot].copy_from_slice(&9u16.to_le_bytes());
+    assert_eq!(table.physical_id(id).unwrap(), HsmKeyId::from(9u16));
+    part.session_meta_mut()[0] = 1 << slot;
+    assert!(matches!(table.state(id), HsmSessionState::Pending));
 }

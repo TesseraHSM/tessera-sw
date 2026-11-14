@@ -212,6 +212,60 @@ impl Shadow {
 /// Per partition, its [`Shadow`].
 static SHADOWS: [Shadow; NUM_PARTITIONS] = [const { Shadow::new() }; NUM_PARTITIONS];
 
+/// A DTCM copy of a partition slot's session table and session metadata,
+/// which every in-session command reads several times (a sealed one on
+/// both the way in and the way out), and the HSM would otherwise read from
+/// GSRAM uncached, a load at a time. Loaded on first use; dropped by every
+/// write to the slot ([`Partition::slot_mut`]) and by every
+/// [`SessionFieldMut`] once its writes are done, so it never outlives one.
+struct SessionCache {
+    valid: AtomicBool,
+    /// Words 0-4: session-table bytes 0-19 (bytes 18-19 belong to the next
+    /// fields and are never read); word 5: the metadata, little-endian.
+    words: [AtomicU32; 6],
+}
+
+impl SessionCache {
+    const fn new() -> Self {
+        Self {
+            valid: AtomicBool::new(false),
+            words: [const { AtomicU32::new(0) }; 6],
+        }
+    }
+}
+
+/// Per partition, its [`SessionCache`].
+static SESSION_CACHES: [SessionCache; NUM_PARTITIONS] =
+    [const { SessionCache::new() }; NUM_PARTITIONS];
+
+/// Exclusive access to a partition's session table or session metadata.
+/// Dropping it drops the partition's [`SessionCache`], which a write made
+/// through it may have left stale.
+pub struct SessionFieldMut<'a, const N: usize> {
+    field: &'a mut [u8; N],
+    part: usize,
+}
+
+impl<const N: usize> core::ops::Deref for SessionFieldMut<'_, N> {
+    type Target = [u8; N];
+
+    fn deref(&self) -> &[u8; N] {
+        self.field
+    }
+}
+
+impl<const N: usize> core::ops::DerefMut for SessionFieldMut<'_, N> {
+    fn deref_mut(&mut self) -> &mut [u8; N] {
+        self.field
+    }
+}
+
+impl<const N: usize> Drop for SessionFieldMut<'_, N> {
+    fn drop(&mut self) {
+        SESSION_CACHES[self.part].valid.store(false, Relaxed);
+    }
+}
+
 /// The [`Shadow`] word holding the [`Storage`] byte at `off`, which a run
 /// covers, and the byte's shift within it.
 const fn shadow_word(off: usize) -> (usize, u32) {
@@ -603,6 +657,7 @@ impl Partition {
         // Any write may change a PSK or a shadowed field: forget them.
         PSK_DEFAULT[self.0].store(0, Relaxed);
         SHADOWS[self.0].valid.store(false, Relaxed);
+        SESSION_CACHES[self.0].valid.store(false, Relaxed);
         UNWRAP_PASSED[self.0].store(false, Relaxed);
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
@@ -1854,8 +1909,12 @@ impl Partition {
 
     /// Mutably borrows the raw session-table region.
     #[inline(never)]
-    pub fn session_table_mut(&mut self) -> &mut [u8; SESSION_TABLE_LEN] {
-        &mut self.slot_mut().session_table
+    pub fn session_table_mut(&mut self) -> SessionFieldMut<'_, SESSION_TABLE_LEN> {
+        let part = self.0;
+        SessionFieldMut {
+            field: &mut self.slot_mut().session_table,
+            part,
+        }
     }
 
     /// Borrows the 2-byte volatile session metadata (`pending_mask`,
@@ -1867,8 +1926,61 @@ impl Partition {
 
     /// Mutably borrows the session metadata region.
     #[inline(never)]
-    pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
-        &mut self.slot_mut().session_meta
+    pub fn session_meta_mut(&mut self) -> SessionFieldMut<'_, 2> {
+        let part = self.0;
+        SessionFieldMut {
+            field: &mut self.slot_mut().session_meta,
+            part,
+        }
+    }
+
+    /// Byte `off` of the session table, from the [`SessionCache`].
+    #[inline]
+    pub fn session_table_byte(self, off: usize) -> u8 {
+        debug_assert!(off < SESSION_TABLE_LEN);
+        (self.session_word(off / 4) >> (8 * (off % 4))) as u8
+    }
+
+    /// The little-endian 16-bit field at even offset `off` of the session
+    /// table (so within one word), from the [`SessionCache`].
+    #[inline]
+    pub fn session_table_u16(self, off: usize) -> u16 {
+        debug_assert!(off.is_multiple_of(2) && off + 2 <= SESSION_TABLE_LEN);
+        (self.session_word(off / 4) >> (8 * (off % 4))) as u16
+    }
+
+    /// Byte `i` of the session metadata, from the [`SessionCache`].
+    #[inline]
+    pub fn session_meta_byte(self, i: usize) -> u8 {
+        debug_assert!(i < 2);
+        (self.session_word(5) >> (8 * i)) as u8
+    }
+
+    /// Word `i` of this slot's [`SessionCache`], loading it first if need be.
+    #[inline]
+    fn session_word(self, i: usize) -> u32 {
+        let cache = &SESSION_CACHES[self.0];
+        if !cache.valid.load(Relaxed) {
+            self.load_session_cache();
+        }
+        cache.words[i].load(Relaxed)
+    }
+
+    /// Load this slot's [`SessionCache`].
+    #[cold]
+    #[inline(never)]
+    fn load_session_cache(self) {
+        let slot = self.slot();
+        let cache = &SESSION_CACHES[self.0];
+        let table = core::ptr::from_ref(&slot.session_table).cast::<u32>();
+        for (i, word) in cache.words[..5].iter().enumerate() {
+            // SAFETY: the table starts word-aligned and its five words lie
+            // within the slot (asserted in `layout_asserts`), which `slot`
+            // borrows for `'static`.
+            word.store(u32::from_le(unsafe { table.add(i).read() }), Relaxed);
+        }
+        cache.words[5].store(u32::from(u16::from_le_bytes(slot.session_meta)), Relaxed);
+        cache.valid.store(true, Relaxed);
     }
 }
 

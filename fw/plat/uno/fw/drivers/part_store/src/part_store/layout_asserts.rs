@@ -40,3 +40,6 @@ const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) + 2 <= SHADOW
 const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) < SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(SHADOW_HEAD + SHADOW_RUN <= SHADOW_TAIL);
 const _: () = assert!(SHADOW_TAIL + SHADOW_RUN <= STORE_SIZE);
+// The session cache loads the session table as five words from its start.
+const _: () = assert!(offset_of!(Storage, session_table).is_multiple_of(4));
+const _: () = assert!(offset_of!(Storage, session_table) + 20 <= size_of::<Storage>());
