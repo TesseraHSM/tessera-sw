@@ -73,8 +73,10 @@ const _: () = {
 /// operation from the partition's `res_mask`.
 #[derive(Debug)]
 pub struct VaultStorage {
-    /// 128-bit table-ownership mask for the calling partition.
-    res_mask: u128,
+    /// 128-bit table-ownership mask for the calling partition, a word at a
+    /// time: word `i` holds bits `32 * i..32 * i + 32`, so testing a bit
+    /// takes no 128-bit shift.
+    res_mask: [u32; 4],
 }
 
 impl VaultStorage {
@@ -91,6 +93,31 @@ impl VaultStorage {
     /// A `VaultStorage` handle scoped to the partition's owned tables.
     #[inline]
     pub fn new(res_mask: u128) -> Self {
+        Self {
+            res_mask: core::array::from_fn(|i| (res_mask >> (32 * i)) as u32),
+        }
+    }
+
+    /// Builds a storage handle for a partition owning, of the tables, only
+    /// those that `bits` selects in word `word` of the resource mask (bit
+    /// `i` of `bits` selects table `32 * word + i`): enough to reach a key
+    /// in one of those tables, from one word of the mask.
+    ///
+    /// # Parameters
+    ///
+    /// - `word`: Index of the resource-mask word; past the mask's four
+    ///   words, no table is owned.
+    /// - `bits`: That word of the partition's resource mask.
+    ///
+    /// # Returns
+    ///
+    /// A `VaultStorage` handle scoped to those tables.
+    #[inline]
+    pub fn with_mask_word(word: usize, bits: u32) -> Self {
+        let mut res_mask = [0; 4];
+        if let Some(w) = res_mask.get_mut(word) {
+            *w = bits;
+        }
         Self { res_mask }
     }
 
@@ -166,7 +193,11 @@ impl TableStorage for VaultStorage {
     fn is_valid_table(&self, table: usize) -> bool {
         // A table is usable only if it is addressable and owned by the
         // calling partition (its bit is set in the resource mask).
-        table < TABLE_COUNT && (self.res_mask >> table) & 1 != 0
+        table < TABLE_COUNT
+            && self
+                .res_mask
+                .get(table / 32)
+                .is_some_and(|w| (w >> (table % 32)) & 1 != 0)
     }
 
     /// Borrows a metadata entry from GSRAM.
