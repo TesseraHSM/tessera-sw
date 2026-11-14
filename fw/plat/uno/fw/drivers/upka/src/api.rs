@@ -13,6 +13,7 @@ use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
 use crate::engine::ecc_sign_cmd;
 use crate::engine::ecc_sign_in_place_cmd;
 use crate::engine::rsa_mod_exp_priv_cmd;
+use crate::engine::rsa_mod_exp_priv_in_place_cmd;
 use crate::engine::rsa_mod_exp_pub_cmd;
 use crate::engine::UpkaEngine;
 use crate::pool::EngineSlot;
@@ -396,18 +397,20 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     }
 
     /// Replace the input block with the private-key result.
+    ///
+    /// Runs as a staged command, as [`rsa_mod_exp_priv`](Self::rsa_mod_exp_priv)
+    /// does: started by whichever completion frees an engine and wiped as
+    /// soon as it completes, so the engine never idles waiting for this task
+    /// to run.
     pub async fn rsa_mod_exp_priv_in_place(
         &self,
         key_type: UpkaRsaKeyType,
         key: &HsmDmaBuf,
         input_output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .rsa_mod_exp_priv_in_place(key_type, key, input_output)
-                .await
-        })
-        .await
+        self.scheduler()
+            .run_staged(rsa_mod_exp_priv_in_place_cmd(key_type, key, input_output)?)
+            .await
     }
 
     /// Run an RSA public-key modular exponentiation.

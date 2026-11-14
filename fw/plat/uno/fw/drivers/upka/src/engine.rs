@@ -1049,6 +1049,30 @@ pub(crate) fn rsa_mod_exp_priv_cmd(
     })
 }
 
+/// The command of [`UpkaEngine::rsa_mod_exp_priv_in_place`], after checking
+/// its operands: the result is written over the input block.
+pub(crate) fn rsa_mod_exp_priv_in_place_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &HsmDmaBuf,
+    input_output: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let (opcode, param2) = rsa_private_args(
+        key_type,
+        key.len(),
+        input_output.len(),
+        input_output.len(),
+        key.as_ptr() as u32,
+    )?;
+    let data = input_output.as_mut_ptr() as u32;
+    Ok(StagedCmd {
+        opcode,
+        result: data,
+        arg1: data,
+        arg2: key.as_ptr() as u32,
+        arg3: param2,
+    })
+}
+
 /// The opcode and second key operand of an RSA private-key operation,
 /// after checking its operands.
 fn rsa_private_args(
