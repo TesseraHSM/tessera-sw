@@ -169,8 +169,9 @@ impl StdHsmIo {
     /// Construct a transient admin IO for internal provisioning crypto
     /// (e.g. masking `BK_BOOT` at partition allocation), backed by a
     /// caller-borrowed buffer-pool `slot`.  `tx` is a throwaway reply
-    /// channel — no host awaits the completion.
-    pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawBulkCqe>) -> Self {
+    /// channel — no host awaits the completion. Also lets tests outside
+    /// this crate drive PAL crypto directly.
+    pub fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawBulkCqe>) -> Self {
         Self::new(HsmIoRequest::cmd(pid, 0, 0, [0; SQE_DWORDS], tx), slot)
     }
 }

@@ -21,12 +21,21 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
+use crate::cert_builder::MlDsaTbsSigner;
+use crate::cert_builder::{self};
 use crate::der_helpers::ECDSA_SHA384_ALG_ID;
 use crate::der_helpers::MAX_ECDSA384_SIG_DER_LEN;
+use crate::der_helpers::MLDSA87_PUBLIC_KEY_LEN;
 use crate::der_helpers::{self};
+use crate::retarget;
+use crate::retarget::KeyAlg;
+use crate::retarget::SigAlg;
+use crate::retarget::SubjectKey;
+use crate::retarget::TbsKind;
 
 /// P-384 attestation private key length in bytes (raw scalar, operand order).
 pub const PRIV_KEY_LEN: usize = 48;
@@ -164,6 +173,56 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
     // 4. Assemble the final DER document into `out`.
     let n = assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)?;
     Ok(n)
+}
+
+/// Build a CSR for an ML-DSA-87 key from the [`csr`](crate::csr) template
+/// retargeted to an ML-DSA-87 subject key, self-signed by `signer` (which
+/// holds the matching private key).
+///
+/// `subject_cn` is the 64-byte `commonName` value patched at
+/// [`csr::SUBJECT_CN_OFFSET`](crate::csr::SUBJECT_CN_OFFSET).
+///
+/// Query/copy: `out = None` returns the exact size; `Some(buf)` builds.
+pub async fn build_mldsa_csr<I: HsmIo>(
+    io: &I,
+    alloc: &impl HsmScopedAlloc,
+    public_key: &[u8; MLDSA87_PUBLIC_KEY_LEN],
+    subject_cn: &[u8; crate::csr::SUBJECT_CN_LEN],
+    signer: &impl MlDsaTbsSigner<I>,
+    out: Option<&mut [u8]>,
+) -> HsmResult<usize> {
+    use crate::csr::*;
+    let tbs_len = retarget::retarget_len(
+        &TBS_TEMPLATE,
+        TbsKind::Csr,
+        SigAlg::MlDsa87,
+        KeyAlg::MlDsa87,
+    )
+    .ok_or(HsmError::InternalError)?;
+    let size = cert_builder::mldsa_signed_len(tbs_len);
+    let Some(out) = out else {
+        return Ok(size);
+    };
+    if out.len() < size {
+        return Err(HsmError::InvalidArg);
+    }
+
+    let scratch = alloc.alloc(TBS_TEMPLATE.len())?;
+    scratch.copy_from_slice(&TBS_TEMPLATE);
+    patch_field(scratch, SUBJECT_CN_OFFSET, subject_cn)?;
+    let tbs = alloc.dma_alloc(tbs_len)?;
+    let len = retarget::retarget_tbs(
+        scratch,
+        TbsKind::Csr,
+        SigAlg::MlDsa87,
+        SubjectKey::MlDsa87(public_key),
+        tbs,
+    )
+    .ok_or(HsmError::InternalError)?;
+    if len != tbs_len {
+        return Err(HsmError::InternalError);
+    }
+    cert_builder::sign_mldsa(io, alloc, tbs, signer, out).await
 }
 
 /// Worst-case PKCS#10 `CertificationRequest ::= SEQUENCE { TBS, AlgId, BIT STRING sig }`

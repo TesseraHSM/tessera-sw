@@ -16,5 +16,11 @@ bitfield-struct.workspace = true
 tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 
+[dev-dependencies]
+async-channel.workspace = true
+openssl.workspace = true
+tokio = { features = ["macros", "rt"], workspace = true }
+tsra_fw_hsm_pal_std_uno.workspace = true
+
 [lints]
 workspace = true

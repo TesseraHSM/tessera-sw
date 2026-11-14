@@ -9,9 +9,10 @@
 //!
 //! Patches variable fields into pre-generated TBS (To-Be-Signed)
 //! templates ([`crate::root_cert`], [`crate::leaf_cert`]), drives
-//! SHA-384 + ECDSA-P384 signing through the PAL, and assembles
-//! complete DER-encoded X.509 certificates in the caller's output
-//! buffer.
+//! SHA-384 + ECDSA-P384 or ML-DSA-87 signing through the PAL, and
+//! assembles complete DER-encoded X.509 certificates in the caller's
+//! output buffer. ML-DSA-87 subject keys and issuers reuse the P-384
+//! templates through [`crate::retarget`].
 //!
 //! CN and SN strings are validated and padded internally — callers
 //! pass plain `&str` values.
@@ -27,6 +28,11 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -34,7 +40,16 @@ use crate::csr_builder::PRIV_KEY_LEN;
 use crate::csr_builder::SIGNATURE_LEN;
 use crate::der_helpers::ECDSA_SHA384_ALG_ID;
 use crate::der_helpers::MAX_ECDSA384_SIG_DER_LEN;
+use crate::der_helpers::MLDSA87_ALG_ID;
+use crate::der_helpers::MLDSA87_PUBLIC_KEY_LEN;
+use crate::der_helpers::MLDSA87_SIGNATURE_LEN;
+use crate::der_helpers::MLDSA87_SIG_BIT_STRING_HEADER;
 use crate::der_helpers::{self};
+use crate::retarget;
+use crate::retarget::KeyAlg;
+use crate::retarget::SigAlg;
+use crate::retarget::SubjectKey;
+use crate::retarget::TbsKind;
 
 /// Length of Common Name field (space-padded ASCII, 32 bytes).
 pub const CN_LEN: usize = 32;
@@ -45,9 +60,9 @@ pub const SN_LEN: usize = 64;
 /// SHA-384 digest length in bytes.
 const SHA384_DIGEST_LEN: usize = 48;
 
-/// Upper bound on the TBS-template scratch buffer used internally.
-/// Sized for any single P-384 cert template in this crate.
-const MAX_TBS_LEN: usize = 1024;
+/// Upper bound on the TBS scratch buffer used internally. Sized for any
+/// template in this crate, including the retargeted ML-DSA-87 subject keys.
+const MAX_TBS_LEN: usize = 4096;
 
 /// X.509 Key Usage extension as a DER BIT STRING value (2 bytes).
 ///
@@ -167,9 +182,14 @@ pub struct RootCertParams<'a> {
 /// DN and the leaf chains to it. Every field is a fixed-size raw byte array
 /// patched verbatim (no CN/SN string validation or padding): in particular
 /// `issuer_cn` is copied byte-for-byte from the alias cert's subject CN.
-pub struct LeafCertParams<'a> {
-    /// Uncompressed P-384 public key (97 bytes: `0x04 || x || y`).
-    pub public_key: &'a [u8; 97],
+///
+/// `K` is the subject public key: the uncompressed P-384 point (default)
+/// or, for [`build_mldsa_leaf_cert`] and
+/// [`build_mldsa_leaf_cert_ecc_issuer`], the raw ML-DSA-87 public key.
+pub struct LeafCertParams<'a, K = [u8; 97]> {
+    /// Subject public key: uncompressed P-384 (97 bytes: `0x04 || x || y`)
+    /// or raw ML-DSA-87 ([`MLDSA87_PUBLIC_KEY_LEN`] bytes).
+    pub public_key: &'a K,
     /// Serial number (20 bytes, first byte must have bit 7 = 0 for positive DER INTEGER).
     pub serial_number: &'a [u8; 20],
     /// NOT_BEFORE as GeneralizedTime ASCII (15 bytes, e.g. `b"20250101000000Z"`).
@@ -364,6 +384,173 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
     assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)
 }
 
+/// ML-DSA-87 counterpart of [`TbsSigner`].
+///
+/// Signs the complete TBS (ML-DSA has no separate digest step) with
+/// ML-DSA-87, pure, empty context. Implementations should sign
+/// deterministically so certificates are byte-stable across regenerations.
+#[allow(async_fn_in_trait)]
+pub trait MlDsaTbsSigner<I: HsmIo> {
+    /// Sign `tbs` into `sig` ([`MLDSA87_SIGNATURE_LEN`] bytes).
+    async fn sign_tbs(&self, io: &I, tbs: &HsmDmaBuf, sig: &mut HsmDmaBuf) -> HsmResult<()>;
+}
+
+/// [`MlDsaTbsSigner`] backed by the PAL's [`HsmMlDsa::mldsa_sign`] with a
+/// seed-form or expanded ML-DSA-87 private key; signs deterministically.
+///
+/// [`HsmMlDsa::mldsa_sign`]: tsra_fw_hsm_pal_traits::HsmMlDsa::mldsa_sign
+pub struct MlDsa87Signer<'a, P> {
+    pal: &'a P,
+    key: HsmMlDsaPrivKey<'a>,
+}
+
+impl<'a, P: HsmCrypto> MlDsa87Signer<'a, P> {
+    /// Signer for the ML-DSA-87 private key `key`.
+    pub fn new(pal: &'a P, key: HsmMlDsaPrivKey<'a>) -> Self {
+        Self { pal, key }
+    }
+}
+
+impl<P: HsmCrypto> MlDsaTbsSigner<P::Io> for MlDsa87Signer<'_, P> {
+    async fn sign_tbs(&self, io: &P::Io, tbs: &HsmDmaBuf, sig: &mut HsmDmaBuf) -> HsmResult<()> {
+        let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 0, tbs)?;
+        let len = self
+            .pal
+            .mldsa_sign(
+                io,
+                HsmMlDsaParamSet::MlDsa87,
+                self.key,
+                HsmMlDsaHedge::Deterministic,
+                msg,
+                Some(sig),
+            )
+            .await?;
+        if len != MLDSA87_SIGNATURE_LEN {
+            return Err(HsmError::InternalError);
+        }
+        Ok(())
+    }
+}
+
+/// Build an ML-DSA-87 Leaf certificate signed by an ML-DSA-87 issuer.
+///
+/// Same single-CN profile as [`build_leaf_cert`]: the
+/// [`leaf_cert`](crate::leaf_cert) template retargeted to an ML-DSA-87
+/// subject key and signature algorithm. `params.authority_key_id` is the
+/// issuer's ML-DSA subject key identifier.
+///
+/// Query/copy: `out = None` returns the exact size; `Some(buf)` builds.
+pub async fn build_mldsa_leaf_cert<I: HsmIo>(
+    io: &I,
+    alloc: &impl HsmScopedAlloc,
+    params: &LeafCertParams<'_, [u8; MLDSA87_PUBLIC_KEY_LEN]>,
+    signer: &impl MlDsaTbsSigner<I>,
+    out: Option<&mut [u8]>,
+) -> HsmResult<usize> {
+    let tbs_len = mldsa_leaf_tbs_len(SigAlg::MlDsa87)?;
+    let size = mldsa_signed_len(tbs_len);
+    let Some(out) = out else {
+        return Ok(size);
+    };
+    if out.len() < size {
+        return Err(HsmError::InvalidArg);
+    }
+    let tbs = alloc.dma_alloc(tbs_len)?;
+    render_mldsa_leaf_tbs(alloc, params, SigAlg::MlDsa87, tbs)?;
+    sign_mldsa(io, alloc, tbs, signer, out).await
+}
+
+/// Build an ML-DSA-87 Leaf certificate signed by an ECDSA-P384 issuer.
+///
+/// Same single-CN profile as [`build_leaf_cert_with_signer`], with the
+/// subject key retargeted to ML-DSA-87; the issuer (for example the CP alias
+/// key) signs with `signer` exactly as for a P-384 leaf.
+///
+/// Query/copy: `out = None` returns the worst-case size; `Some(buf)` builds.
+pub async fn build_mldsa_leaf_cert_ecc_issuer<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    params: &LeafCertParams<'_, [u8; MLDSA87_PUBLIC_KEY_LEN]>,
+    signer: &impl TbsSigner<P::Io>,
+    out: Option<&mut [u8]>,
+) -> HsmResult<usize> {
+    build_signed_from_template(
+        pal,
+        io,
+        alloc,
+        mldsa_leaf_tbs_len(SigAlg::EcdsaP384Sha384)?,
+        |tbs| render_mldsa_leaf_tbs(alloc, params, SigAlg::EcdsaP384Sha384, tbs),
+        signer,
+        out,
+    )
+    .await
+}
+
+fn mldsa_leaf_tbs_len(issuer: SigAlg) -> HsmResult<usize> {
+    retarget::retarget_len(
+        &crate::leaf_cert::TBS_TEMPLATE,
+        TbsKind::Certificate,
+        issuer,
+        KeyAlg::MlDsa87,
+    )
+    .ok_or(HsmError::InternalError)
+}
+
+/// Patch the P-384 leaf template in NonDma scratch, then retarget it into
+/// `out` for an ML-DSA-87 subject key and `issuer`.
+fn render_mldsa_leaf_tbs(
+    alloc: &impl HsmScopedAlloc,
+    params: &LeafCertParams<'_, [u8; MLDSA87_PUBLIC_KEY_LEN]>,
+    issuer: SigAlg,
+    out: &mut [u8],
+) -> HsmResult<()> {
+    let scratch = alloc.alloc(crate::leaf_cert::TBS_TEMPLATE.len())?;
+    patch_leaf_fields(scratch, params)?;
+    let len = retarget::retarget_tbs(
+        scratch,
+        TbsKind::Certificate,
+        issuer,
+        SubjectKey::MlDsa87(params.public_key),
+        out,
+    )
+    .ok_or(HsmError::InternalError)?;
+    if len != out.len() {
+        return Err(HsmError::InternalError);
+    }
+    Ok(())
+}
+
+/// Exact size of an ML-DSA-87-signed certificate or CSR with a TBS of
+/// `tbs_len` bytes.
+pub(crate) fn mldsa_signed_len(tbs_len: usize) -> usize {
+    der_helpers::signed_len(
+        tbs_len,
+        MLDSA87_ALG_ID.len(),
+        MLDSA87_SIG_BIT_STRING_HEADER.len() + MLDSA87_SIGNATURE_LEN,
+    )
+}
+
+/// Sign `tbs` with `signer` and assemble the ML-DSA-87-signed DER document
+/// (certificate or CSR) into `out`.
+pub(crate) async fn sign_mldsa<I: HsmIo>(
+    io: &I,
+    alloc: &impl HsmScopedAlloc,
+    tbs: &HsmDmaBuf,
+    signer: &impl MlDsaTbsSigner<I>,
+    out: &mut [u8],
+) -> HsmResult<usize> {
+    let sig = alloc.dma_alloc(MLDSA87_SIGNATURE_LEN)?;
+    signer.sign_tbs(io, tbs, sig).await?;
+    der_helpers::assemble_signed(
+        out,
+        tbs,
+        &MLDSA87_ALG_ID,
+        &[&MLDSA87_SIG_BIT_STRING_HEADER, sig],
+    )
+    .ok_or(HsmError::InvalidArg)
+}
+
 struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
     pal: &'a P,
     alloc: &'a A,
@@ -460,11 +647,18 @@ fn patch_root_tbs(out: &mut [u8], params: &RootCertParams<'_>) -> HsmResult<()> 
 }
 
 fn patch_leaf_tbs(out: &mut [u8], params: &LeafCertParams<'_>) -> HsmResult<()> {
+    patch_leaf_fields(out, params)?;
+    patch_field(out, crate::leaf_cert::PUBLIC_KEY_OFFSET, params.public_key);
+    Ok(())
+}
+
+/// Copy the leaf template into `out` and patch every field except the
+/// public key.
+fn patch_leaf_fields<K>(out: &mut [u8], params: &LeafCertParams<'_, K>) -> HsmResult<()> {
     use crate::leaf_cert::*;
     validate_serial(params.serial_number)?;
 
     out[..TBS_TEMPLATE.len()].copy_from_slice(&TBS_TEMPLATE);
-    patch_field(out, PUBLIC_KEY_OFFSET, params.public_key);
     patch_field(out, SERIAL_NUMBER_OFFSET, params.serial_number);
     patch_field(out, NOT_BEFORE_OFFSET, params.not_before);
     patch_field(out, NOT_AFTER_OFFSET, params.not_after);
