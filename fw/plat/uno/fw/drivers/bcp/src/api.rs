@@ -73,9 +73,14 @@ const MAX_CHUNKS: usize = 2;
 /// full so it never looks empty (`PI == CI`).
 const SQE_BUDGET: usize = DEPTH - 1;
 
-/// Command IDs: as many as single-chunk commands fit [`SQE_BUDGET`]. Each
-/// command has at most one CQE not yet reaped.
-const IDS: usize = SQE_BUDGET;
+/// Command IDs: one for each task that can run a command, and one to spare,
+/// as long as single-chunk commands fit [`SQE_BUDGET`]. Each command has
+/// at most one CQE not yet reaped. More IDs would only cost driver state.
+const IDS: usize = if ID_WAITERS + 1 < SQE_BUDGET {
+    ID_WAITERS + 1
+} else {
+    SQE_BUDGET
+};
 
 /// Tasks that can wait for a command ID before the oldest waiters are
 /// woken early to make room (they then register again): every task that
