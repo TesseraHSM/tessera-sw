@@ -253,8 +253,36 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_darc_tmk_import"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_tmk_import.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_darc_tmk_gen"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_tmk_gen.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_darc_key_unwrap"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_key_unwrap.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_darc_tmk_export"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_tmk_export.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_darc_key_wrap"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_key_wrap.rs"
 test = false
 
 [[bin]]
@@ -269,6 +297,13 @@ bench = false
 doc = false
 name = "fuzz_tbor_unwrap_key"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_unwrap_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_public_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_public_key.rs"
 test = false
 
 [[bin]]

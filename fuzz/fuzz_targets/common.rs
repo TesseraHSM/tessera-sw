@@ -519,10 +519,96 @@ pub struct SecurityDomainFixture {
     pub policy: PartPolicy,
 }
 
+/// Import a host-known TMK through the POTA-authenticated DARC transfer flow.
+///
+/// The fixture must belong to this initialized security domain. Keeping the
+/// plaintext TMK on the host enables independent KWP output checks.
+pub fn import_darc_tmk(
+    ctx: &TestCtx,
+    session_id: u16,
+    fixture: &SecurityDomainFixture,
+    tmk: &[u8; tsra_ddi_tbor_types::TMK_LEN],
+) -> [u8; tsra_ddi_tbor_types::MASKED_TMK_LEN] {
+    use tsra_crypto::*;
+    use tsra_ddi_tbor_test_harness::x509_fixture::*;
+    use tsra_ddi_tbor_types::*;
+
+    let kex = ctx
+        .tbor(&TborDarcKexKeyGenReq {
+            session_id,
+            scope: KEY_SCOPE_LOCAL,
+        })
+        .expect("DarcKexKeyGen");
+    let mut recipient_be = kex.pub_key;
+    recipient_be[..COORD_LEN].reverse();
+    recipient_be[COORD_LEN..].reverse();
+    let recipient = EccPublicKey::from_hsm_bytes(&recipient_be).expect("recipient public key");
+    let sender = EccPrivateKey::from_curve(tsra_crypto::EccCurve::P384).expect("sender key");
+    let (x, y) = sender.coord_vec().expect("sender public coordinates");
+    let mut sender_pub = [0; RAW_PUB_LEN];
+    sender_pub[..COORD_LEN].copy_from_slice(&x);
+    sender_pub[COORD_LEN..].copy_from_slice(&y);
+    let chain = make_chain(&fixture.pota, &sender_pub);
+    let sealed = seal_vec(
+        &HpkeSealConfig::auth(
+            HpkeSuite::DHKemP384Sha384AesGcm256,
+            &recipient,
+            &[],
+            &[],
+            &sender,
+        ),
+        tmk,
+    )
+    .expect("seal known TMK");
+    let (ex, ey) = sealed
+        .enc
+        .coord_vec()
+        .expect("encapsulated public coordinates");
+    let mut sealed_tmk = [0; SEALED_TMK_LEN];
+    sealed_tmk[0] = 4;
+    sealed_tmk[1..1 + COORD_LEN].copy_from_slice(&ex);
+    sealed_tmk[1 + COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
+    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let mut evidence = Vec::new();
+    let remote_cert_chain = chain
+        .der_items()
+        .iter()
+        .map(|der| add_evidence_item(&mut evidence, der))
+        .collect();
+    let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    ctx.tbor_oob(
+        &TborDarcTmkImportReq {
+            session_id,
+            masked_kex_key: kex.masked_key,
+            policy: fixture.policy.clone(),
+            sealed_tmk,
+            remote_cert_chain,
+        },
+        &oob,
+    )
+    .expect("import known TMK")
+    .masked_tmk
+    .try_into()
+    .expect("TMK envelope length")
+}
+
 /// Initialize the security domain and retain its exact policy and POTA signer.
 pub fn create_test_security_domain_with_policy(
     ctx: &TestCtx,
     session: &SessionHandshake,
+) -> SecurityDomainFixture {
+    create_test_security_domain_with_custom_policy(ctx, session, |_| {})
+}
+
+/// Initialize the security domain with command-specific policy claims bound
+/// before `PartInit`, retaining the exact policy and its POTA signer.
+///
+/// The callback must preserve the required POTA, SATA, and backup identity
+/// claims. Existing callers retain the default policy through the wrapper.
+pub fn create_test_security_domain_with_custom_policy(
+    ctx: &TestCtx,
+    session: &SessionHandshake,
+    configure: impl FnOnce(&mut PartPolicy),
 ) -> SecurityDomainFixture {
     use zerocopy::IntoBytes;
 
@@ -562,6 +648,7 @@ pub fn create_test_security_domain_with_policy(
         POLICY_MAX_KEY_LEN as u16,
         backup_part_pub,
     );
+    configure(&mut policy);
     let mut policy_bytes = [0u8; PART_POLICY_LEN];
     policy_bytes.copy_from_slice(policy.as_bytes());
 
