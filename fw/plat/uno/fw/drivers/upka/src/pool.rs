@@ -468,7 +468,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         slot.ticket = None;
         slot.arm_completion_wait();
         slot.wiping = true;
-        EngineExecutor::submit_engine_command(id, crate::opcode::UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(id);
     }
 
     /// Ticket `t`'s status, freeing the ticket, once its command has
