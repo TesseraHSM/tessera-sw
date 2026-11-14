@@ -467,6 +467,9 @@ struct BcpState {
     /// [`BcpDriver::wake`] passes with commands in flight, counted to space
     /// out the deadline checks.
     passes: u16,
+    /// SQEs were written since the doorbell last rang: the next
+    /// [`BcpDriver::wake`] rings it once for all of them.
+    bell: bool,
     /// Tasks waiting for a free command ID.
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
@@ -505,6 +508,7 @@ impl BcpDriver {
                 free: ALL_FREE,
                 reserved: 0,
                 passes: 0,
+                bell: false,
                 id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
@@ -575,7 +579,8 @@ impl BcpDriver {
         }
     }
 
-    /// Reap completions and wake their awaiters; reset the engine if a
+    /// Ring the doorbell for the commands submitted since the last call,
+    /// reap completions and wake their awaiters; reset the engine if a
     /// command is past its deadline.
     ///
     /// The engine raises no HSM interrupt, so the PAL calls this from its
@@ -586,6 +591,9 @@ impl BcpDriver {
         self.state.with(|s| {
             if !s.up || s.free == ALL_FREE {
                 return;
+            }
+            if s.bell {
+                doorbell(s);
             }
             let pi = (GSRAM.bcp_cq_pi_shadow.get() as u16) & MASK;
             if pi != s.cq_ci {
@@ -898,6 +906,12 @@ fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
 /// ring the doorbell.
 fn ring(s: &mut BcpState) {
     s.sq_pi = (s.sq_pi + 1) & MASK;
+    doorbell(s);
+}
+
+/// Hand the engine every SQE written before `sq_pi`.
+fn doorbell(s: &mut BcpState) {
+    s.bell = false;
     // The descriptors must be visible before the doorbell starts the
     // engine's fetch.
     cortex_m::asm::dmb();
@@ -965,6 +979,9 @@ fn reap(s: &mut BcpState, pi: u16) {
 /// is not, they stay in flight, new commands fail, and the next pass tries
 /// again. The next command brings the engine back up.
 fn recover(s: &mut BcpState) {
+    // SQEs not handed over yet must not start on the engine being reset;
+    // their commands fail with the others once the reset is confirmed.
+    s.bell = false;
     if !reset() {
         if !s.stalled {
             s.stalled = true;
@@ -1414,6 +1431,9 @@ fn submit(s: &mut BcpState, id: usize, cmd: &Cmd<'_>) {
             .with_key2_idx(key_slot(id, 1) as u16);
 
         write_sqe(s.sq_pi as usize, [dw0.into(), dw1.into(), dw2.into(), dw3]);
-        ring(s);
+        s.sq_pi = (s.sq_pi + 1) & MASK;
     }
+    // Rung by the next `wake`, at the end of this executor pass, once for
+    // every command submitted in it rather than with a barrier each.
+    s.bell = true;
 }
