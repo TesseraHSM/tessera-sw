@@ -139,13 +139,16 @@ pub(super) fn xor(a: &Block, b: &Block) -> Block {
     core::array::from_fn(|i| a[i] ^ b[i])
 }
 
-/// Constant-time comparison of two blocks.
+/// Constant-time comparison of two blocks, a word at a time.
 pub(super) fn constant_time_eq(a: &Block, b: &Block) -> bool {
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    let (a, _) = a.as_chunks::<4>();
+    let (b, _) = b.as_chunks::<4>();
+    let diff = a.iter().zip(b).fold(0u32, |diff, (x, y)| {
+        diff | (u32::from_ne_bytes(*x) ^ u32::from_ne_bytes(*y))
+    });
+    // Opaque to the optimizer, which would otherwise turn the fold into
+    // compares that stop at the first differing word.
+    core::hint::black_box(diff) == 0
 }
 
 fn ghash(h: &Block) -> HsmResult<Ghash> {
@@ -516,6 +519,7 @@ impl UnoHsmPal {
 
 /// Interpret an engine completion: the engine's tag for an encrypt, or the
 /// verdict on a decrypt.
+#[inline]
 fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Block> {
     let done = done?;
     match dir {
