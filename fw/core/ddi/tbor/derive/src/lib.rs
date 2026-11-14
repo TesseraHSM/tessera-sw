@@ -73,6 +73,7 @@ fn on_struct(
     let s0 = format_ident!("{}S0", schema.name);
 
     let validation = codegen_view::gen_validation_standalone(&schema);
+    let is_request = matches!(schema.kind, schema::MessageKind::Request { .. });
 
     let decode_fn = quote! {
         pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
@@ -81,12 +82,29 @@ fn on_struct(
         }
     };
 
+    // A request also decodes from the head of an earlier `RequestView`
+    // parse of the same message, which spares reading and validating its
+    // frame a second time.
+    let decode_from_fn = if is_request {
+        let validation = codegen_view::gen_validation_from_head(&schema);
+        quote! {
+            pub fn decode_from(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf, head: tsra_fw_ddi_tbor::RequestHead) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                #validation
+                Ok(#view_name::from_validated(buf))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // `decode_mut` is emitted only when the schema opts in via
     // `#[tbor(mutable)]` on at least one field. The body is built by
     // `codegen_view_mut`: a full validation pass via a shared
     // reborrow, then a pipelined `split_at_mut` that hands out
     // per-field borrows at the parent buffer's lifetime.
-    let decode_mut_fn = if let Some(body) = codegen_view_mut::gen_decode_mut_body(&schema) {
+    let decode_mut_fn = if let Some(body) =
+        codegen_view_mut::gen_decode_mut_body(&schema, validation.clone())
+    {
         quote! {
             pub fn decode_mut(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
                 #body
@@ -94,6 +112,22 @@ fn on_struct(
         }
     } else {
         quote! {}
+    };
+    let decode_mut_from_fn = match is_request
+        .then(|| {
+            codegen_view_mut::gen_decode_mut_body(
+                &schema,
+                codegen_view::gen_validation_from_head(&schema),
+            )
+        })
+        .flatten()
+    {
+        Some(body) => quote! {
+            pub fn decode_mut_from(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf, head: tsra_fw_ddi_tbor::RequestHead) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                #body
+            }
+        },
+        None => quote! {},
     };
 
     let encode_fn = match schema.kind {
@@ -151,7 +185,9 @@ fn on_struct(
             /// Maximum possible encoded message size for this type.
             pub const MAX_ENCODED_SIZE: usize = #max_encoded_size;
             #decode_fn
+            #decode_from_fn
             #decode_mut_fn
+            #decode_mut_from_fn
             #encode_fn
         }
 

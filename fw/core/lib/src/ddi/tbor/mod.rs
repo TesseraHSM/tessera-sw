@@ -70,6 +70,7 @@ pub(crate) mod session_open_init;
 pub(crate) mod unwrap_key;
 pub(crate) mod verify_key;
 
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
@@ -637,9 +638,13 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
 }
 
 /// Dispatch takes the full request context (PAL, IO, buffers, opcode,
-/// session ids and undo log) because every handler is
+/// session ids, the caller's parse and undo log) because every handler is
 /// invoked from here; bundling them into a struct would only move the
 /// same fields behind one more indirection.
+///
+/// `req_head` is the head of the caller's `RequestView::parse` of the
+/// request, which the hottest handlers decode from rather than reading and
+/// validating the frame again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
@@ -648,6 +653,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     opcode: u8,
     sqe_session_id: u16,
     body_sess_id: Option<HsmSessId>,
+    req_head: &RequestHead,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<DispatchResult> {
     // Reject unknown opcodes with the canonical error *before*
@@ -713,10 +719,12 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     let mut session_id: Option<u16> = None;
 
     let resp = match opcode {
-        opcode::API_REV => api_rev::handle::<P>(cmd_buf),
+        opcode::API_REV => api_rev::handle::<P>(cmd_buf, req_head),
         opcode::HASH => hash::handle(pal, io, cmd_buf).await,
-        opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, cmd_buf).await,
-        opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf).await,
+        opcode::AES_ENCRYPT_DECRYPT => {
+            aes_encrypt_decrypt::handle(pal, io, cmd_buf, req_head).await
+        }
+        opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf, req_head).await,
         opcode::SESSION_OPEN_INIT => {
             session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
@@ -749,7 +757,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::AES_GENERATE_KEY => aes_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
-        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
+        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf, req_head).await,
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
         opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,
@@ -1088,7 +1096,8 @@ mod tests {
             .finish()
             .len();
         let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), len, 32).unwrap();
-        let len = api_rev::handle::<UnoRevs>(&mut cmd_buf).unwrap();
+        let head = RequestView::parse(cmd_buf.request()).unwrap().head();
+        let len = api_rev::handle::<UnoRevs>(&mut cmd_buf, &head).unwrap();
         let bytes = cmd_buf.response(len).unwrap();
         assert_eq!(bytes.as_ptr(), address);
         let response = tsra_fw_ddi_tbor_types::TborApiRevResp::decode(bytes).unwrap();

@@ -375,8 +375,9 @@ impl<P: HsmPal> Hsm<P> {
         let sqe_ctrl = io.sqe().session_ctrl();
         let sqe_session_id = io.sqe().session_id();
 
-        // Parse once before growing or reborrowing the request storage.
-        let (opcode, body_sess_id) = {
+        // Parse once before growing or reborrowing the request storage;
+        // dispatch decodes the hot commands from this parse's head.
+        let (opcode, body_sess_id, req_head) = {
             let req_view = TborRequestView::parse(&allocation.buffer_mut()[..src_len])
                 .log_as("core", HsmError::DdiDecodeFailed)?;
             let op = req_view.opcode();
@@ -385,7 +386,7 @@ impl<P: HsmPal> Hsm<P> {
             } else {
                 None
             };
-            (op, sid)
+            (op, sid, req_view.head())
         };
 
         if matches!(
@@ -437,6 +438,7 @@ impl<P: HsmPal> Hsm<P> {
                     opcode,
                     sqe_session_id.unwrap_or(0),
                     body_sess_id,
+                    &req_head,
                     undo,
                 )
                 .await

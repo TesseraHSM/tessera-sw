@@ -27,6 +27,16 @@ pub struct RequestView<'a> {
     head: [u32; HEAD_WORDS],
 }
 
+/// What a successful [`RequestView::parse`] read and validated, kept so a
+/// later decode of the same message can skip both: see
+/// [`RequestView::from_head`].
+#[derive(Clone, Copy, Debug)]
+pub struct RequestHead {
+    head: [u32; HEAD_WORDS],
+    addr: usize,
+    len: usize,
+}
+
 /// Words of a request's start a [`RequestView`] keeps.
 const HEAD_WORDS: usize = 8;
 
@@ -71,6 +81,32 @@ impl<'a> RequestView<'a> {
         validate_toc_entries(|i| view.toc_word(i), toc_count, data_size)?;
 
         Ok(view)
+    }
+
+    /// What this parse read and validated, for [`from_head`](Self::from_head).
+    #[inline]
+    pub fn head(&self) -> RequestHead {
+        RequestHead {
+            head: self.head,
+            addr: self.buf.as_ptr() as usize,
+            len: self.buf.len(),
+        }
+    }
+
+    /// A view of `buf` from an earlier parse's `head`, without reading or
+    /// validating the message again; when `buf` is not the storage that
+    /// parse saw, a full [`parse()`](Self::parse).
+    ///
+    /// The message must be unchanged since that parse.
+    #[inline]
+    pub fn from_head(buf: &'a HsmDmaBuf, head: RequestHead) -> Result<Self, HsmError> {
+        if buf.as_ptr() as usize != head.addr || buf.len() != head.len {
+            return Self::parse(buf);
+        }
+        Ok(Self {
+            buf,
+            head: head.head,
+        })
     }
 
     /// Header byte `i` (of the first header word).

@@ -19,6 +19,7 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::RsaOp;
 use tsra_fw_ddi_tbor_types::TborRsaModExpReq;
 use tsra_fw_ddi_tbor_types::TborRsaModExpResp;
@@ -32,7 +33,8 @@ use super::from_pal::rsa_key;
 use super::resolve_masking_key;
 use super::validate_active_session;
 
-/// Handle a TBOR `RsaModExp` request.
+/// Handle a TBOR `RsaModExp` request, decoding it from `head`, the
+/// caller's parse of it.
 ///
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and **persists nothing** — it unmasks the caller's key,
@@ -41,10 +43,11 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
+    head: &RequestHead,
 ) -> HsmResult<usize> {
     let base = cmd_buf.request().as_ptr() as usize;
     let output_len = {
-        let req = TborRsaModExpReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborRsaModExpReq::decode_mut_from(cmd_buf.request_mut(), *head)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
         let require_sign = match RsaOp(req.op_type) {

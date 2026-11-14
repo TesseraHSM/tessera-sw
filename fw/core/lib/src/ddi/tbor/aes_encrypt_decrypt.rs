@@ -23,6 +23,7 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::AesMode;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
@@ -72,7 +73,8 @@ fn assert_aes_kind(kind: HsmVaultKeyKind) -> HsmResult<()> {
     }
 }
 
-/// Handle a TBOR `AesEncryptDecrypt` request.
+/// Handle a TBOR `AesEncryptDecrypt` request, decoding it from `head`, the
+/// caller's parse of it.
 ///
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and **persists nothing** — it unmasks the caller's key
@@ -81,9 +83,10 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
+    head: &RequestHead,
 ) -> HsmResult<usize> {
     async {
-        let req = TborAesEncryptDecryptReq::decode(cmd_buf.request())?;
+        let req = TborAesEncryptDecryptReq::decode_from(cmd_buf.request(), *head)?;
         let base = cmd_buf.request().as_ptr() as usize;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_active_session(pal, io, sess_id)?;

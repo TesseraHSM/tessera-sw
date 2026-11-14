@@ -14,6 +14,7 @@
 //! unifies the `uno` and `duo` core features still reports each
 //! platform's own range.
 
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::TborApiRevReq;
 use tsra_fw_ddi_tbor_types::TborApiRevResp;
@@ -24,11 +25,14 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// Handle a TBOR `ApiRev` request.
 ///
 /// The caller (`dispatch`) has already structurally validated the
-/// buffer via `RequestView::parse` and confirmed the opcode is
-/// `API_REV`. This handler validates the typed request and encodes the
-/// platform's API revision range.
-pub(crate) fn handle<P: HsmPalFeatures>(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
-    TborApiRevReq::decode(cmd_buf.request())?;
+/// buffer via `RequestView::parse`, whose `head` it passes on, and
+/// confirmed the opcode is `API_REV`. This handler validates the typed
+/// request and encodes the platform's API revision range.
+pub(crate) fn handle<P: HsmPalFeatures>(
+    cmd_buf: &mut HsmCmdBuf<'_>,
+    head: &RequestHead,
+) -> HsmResult<usize> {
+    TborApiRevReq::decode_from(cmd_buf.request(), *head)?;
     let frame = TborApiRevResp::encode(cmd_buf.buffer_mut(), 0, false)?
         .min_major(U16::new(P::API_REV_MIN.major))?
         .min_minor(U16::new(P::API_REV_MIN.minor))?

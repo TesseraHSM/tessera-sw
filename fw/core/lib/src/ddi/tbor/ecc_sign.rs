@@ -17,6 +17,7 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::TborEccSignReq;
 use tsra_fw_ddi_tbor_types::TborEccSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
@@ -31,7 +32,8 @@ use super::from_pal::ecc_private_curve;
 use super::resolve_masking_key;
 use super::validate_active_session;
 
-/// Handle a TBOR `EccSign` request.
+/// Handle a TBOR `EccSign` request, decoding it from `head`, the
+/// caller's parse of it.
 ///
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and **persists nothing** — it unmasks the caller's key,
@@ -40,11 +42,12 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
+    head: &RequestHead,
 ) -> HsmResult<usize> {
     async {
         let base = cmd_buf.request().as_ptr() as usize;
         let (curve, key_at, key_len, digest_at, digest_len) = {
-            let req = TborEccSignReq::decode_mut(cmd_buf.request_mut())?;
+            let req = TborEccSignReq::decode_mut_from(cmd_buf.request_mut(), *head)?;
             let sess_id = HsmSessId::from(u16::from(req.session_id));
             validate_active_session(pal, io, sess_id)?;
             if ![

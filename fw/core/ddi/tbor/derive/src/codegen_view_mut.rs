@@ -81,12 +81,12 @@ pub fn gen_view_mut(schema: &Schema) -> TokenStream {
 /// Generate the body of the `decode_mut` function for the given
 /// schema, or `None` when the schema has no `#[tbor(mutable)]` field.
 ///
-/// The body validates the wire message via the standard validation
-/// pass (using a shared reborrow of the input `&mut HsmDmaBuf`), then
+/// The body validates the wire message via `validation` (using a shared
+/// reborrow of the input `&mut HsmDmaBuf`), then
 /// drops that borrow, performs a pipelined `split_at_mut` of the
 /// data section, and constructs the `ViewMut` struct with all
 /// per-field borrows pre-split.
-pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
+pub fn gen_decode_mut_body(schema: &Schema, validation: TokenStream) -> Option<TokenStream> {
     if !schema.has_mutable_fields() {
         return None;
     }
@@ -265,8 +265,6 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
             quote! { #fname: #value, }
         })
         .collect();
-
-    let validation = crate::codegen_view::gen_validation_standalone(schema);
 
     // Every value Phase 1 captures, in one tuple out of its block.
     let captured: Vec<syn::Ident> = schema
