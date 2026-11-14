@@ -94,22 +94,43 @@ pub(super) fn len_block(aad_len: usize, text_len: usize) -> Block {
     b
 }
 
-/// Copy a block a word at a time when it is word-aligned: a tag inside a
-/// masked blob sits in DMA memory, which the CPU reads uncached, a load per
-/// word rather than per byte.
+/// Copy a block with one burst when it is word-aligned: a tag inside a
+/// masked blob or a frame's trailer sits in DMA memory, which the CPU reads
+/// uncached, where a burst costs about one load's latency and a load per
+/// word four.
 fn read_block(b: &Block) -> Block {
     if b.as_ptr().align_offset(4) != 0 {
         return *b;
     }
-    let mut out = [0u8; AES_BLOCK_SIZE];
-    for (o, w) in out
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(b.as_chunks::<4>().0)
+    let words: [u32; 4];
+    #[cfg(target_arch = "arm")]
     {
-        // SAFETY: `w` is four readable bytes at a 4-aligned address.
-        *o = unsafe { w.as_ptr().cast::<u32>().read() }.to_ne_bytes();
+        let (w0, w1, w2, w3): (u32, u32, u32, u32);
+        // SAFETY: `b` is sixteen readable bytes at a 4-aligned address; the
+        // registers ascend, so they take its words in memory order.
+        unsafe {
+            core::arch::asm!(
+                "ldm {s}, {{r2, r3, r4, r5}}",
+                s = in(reg) b.as_ptr(),
+                out("r2") w0,
+                out("r3") w1,
+                out("r4") w2,
+                out("r5") w3,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+        words = [w0, w1, w2, w3];
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        words = core::array::from_fn(|i| {
+            // SAFETY: word `i < 4` of `b`, at a 4-aligned address.
+            unsafe { b.as_ptr().cast::<u32>().add(i).read() }
+        });
+    }
+    let mut out = [0u8; AES_BLOCK_SIZE];
+    for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *o = w.to_ne_bytes();
     }
     out
 }
