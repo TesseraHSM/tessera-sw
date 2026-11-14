@@ -147,6 +147,7 @@ pub(super) fn xor(a: &Block, b: &Block) -> Block {
 }
 
 /// Constant-time comparison of two blocks, a word at a time.
+#[inline]
 pub(super) fn constant_time_eq(a: &Block, b: &Block) -> bool {
     let (a, _) = a.as_chunks::<4>();
     let (b, _) = b.as_chunks::<4>();
@@ -214,6 +215,7 @@ impl Bufs<'_> {
     }
 
     /// Hand the first `n` bytes to the engine as they are.
+    #[inline(always)]
     fn engine_data(&mut self, n: usize) -> BcpData<'_> {
         match self {
             Self::Copy { src, dst } => BcpData::Copy {
