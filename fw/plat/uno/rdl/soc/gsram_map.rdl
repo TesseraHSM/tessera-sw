@@ -756,6 +756,11 @@ addrmap io_gsram {
     bcp_cqe_t        BCP_CQ[64]          @ 0x16400 += 0x08;   // 0x16400 - 0x16600
     queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16600;
     queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16604;
+
+    // The one PKA wipe descriptor, {MEM_WIPE, 0, 0, 0, 0}: written once,
+    // then only read, by every engine's post-command wipe. HSM-owned like
+    // the rings around it.
+    upka_cmd_entry_t UPKA_WIPE_CMD       @ 0x16610;
     bcp_dfl_entry_t  BCP_DFL[64]         @ 0x16800 += 0x80;   // 0x16800 - 0x18800
 
     // ─── Heap (per-IO buffers) — 34 SRAM slots: 0..31 host (IIC), 32 admin,

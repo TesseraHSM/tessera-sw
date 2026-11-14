@@ -16,6 +16,7 @@ use crate::engine::rsa_mod_exp_priv_cmd;
 use crate::engine::rsa_mod_exp_priv_in_place_cmd;
 use crate::engine::rsa_mod_exp_pub_cmd;
 use crate::engine::UpkaEngine;
+use crate::executor::EngineExecutor;
 use crate::pool::EngineSlot;
 use crate::pool::QueueSlot;
 use crate::pool::SpecificWaiter;
@@ -69,8 +70,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Initialize the PKA engine pool.
     ///
-    /// No MMIO setup is required. Engines are always present and command status
-    /// is reported through the per-engine status registers.
+    /// Engines are always present and command status is reported through the
+    /// per-engine status registers; the only setup is writing the shared
+    /// `MEM_WIPE` descriptor in GSRAM.
     ///
     /// # Returns
     ///
@@ -90,6 +92,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
             Self::_ASSERT_ENGINES_MAX,
             Self::_ASSERT_ENGINE_COUNT,
         );
+
+        EngineExecutor::init_wipe_descriptor();
 
         Self {
             state: SingleCell::new(UpkaState {
