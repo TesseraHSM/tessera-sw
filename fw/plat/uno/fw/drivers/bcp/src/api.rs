@@ -87,7 +87,9 @@ const ALL_FREE: u64 = (1 << IDS) - 1;
 
 /// Command deadline. One chunk takes microseconds; past this the engine is
 /// presumed stuck, reset, and the commands in flight fail. Well inside the
-/// host's 6 s command timeout.
+/// host's 6 s command timeout. Counted from the first deadline check that
+/// finds the command in flight, at most [`DEADLINE_CHECK_PASSES`] passes
+/// after its submission.
 const CMD_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Bound on the wait for a soft reset to complete and the engine to stop.
@@ -443,6 +445,9 @@ struct Slot {
     status: u8,
     tag: [u8; BCP_TAG_LEN],
     err: [u32; 2],
+    /// Stamped by the first deadline check that finds the command in
+    /// flight, [`Instant::MAX`] until then: submitting a command reads no
+    /// timer.
     deadline: Instant,
     /// SQEs reserved against [`SQE_BUDGET`] until the command completes.
     chunks: u8,
@@ -609,11 +614,18 @@ impl BcpDriver {
                 return;
             }
             let now = Instant::now();
-            let late = s
-                .slots
-                .iter()
-                .enumerate()
-                .any(|(i, slot)| s.free & (1 << i) == 0 && !slot.done && now > slot.deadline);
+            let free = s.free;
+            let mut late = false;
+            for (i, slot) in s.slots.iter_mut().enumerate() {
+                if free & (1 << i) != 0 || slot.done {
+                    continue;
+                }
+                if slot.deadline == Instant::MAX {
+                    slot.deadline = now + CMD_TIMEOUT;
+                } else if now > slot.deadline {
+                    late = true;
+                }
+            }
             if late {
                 recover(s);
             }
@@ -829,7 +841,7 @@ impl Future for CmdFuture<'_> {
                     s.free &= !(1 << id);
                     s.slots[id].done = false;
                     s.slots[id].aborting = false;
-                    s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
+                    s.slots[id].deadline = Instant::MAX;
                     s.slots[id].chunks = chunks as u8;
                     s.reserved += chunks;
                     this.id = Some(id);
