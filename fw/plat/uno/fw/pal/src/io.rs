@@ -52,9 +52,15 @@ use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmRequest;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSessionManager;
+use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
 use tsra_fw_hsm_pal_traits::HsmSqe;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_TAG_LEN;
 use tsra_fw_static_ref::StaticRef;
+use tsra_fw_uno_drivers_bcp::GcmCompletion;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
@@ -589,6 +595,7 @@ impl HsmIoController for UnoHsmPal {
         }
         self.detached[index as usize].set(DetachedIo {
             queue_id: io.queue_id(),
+            ..DetachedIo::NONE
         });
         Ok(())
     }
@@ -612,6 +619,79 @@ impl HsmIoController for UnoHsmPal {
         self.io_in_flight_dec();
         Ok(())
     }
+
+    /// Seals the in-session reply in the first `len` bytes of `buf` in
+    /// place, as [`seal_response`](HsmIoController::seal_response) would,
+    /// with a detached BCP command, whose completion
+    /// [`finish_detached`](UnoHsmPal::finish_detached) turns into the
+    /// detached reply copy of [`finish_io`](HsmIoController::finish_io). So
+    /// the IO's task neither waits for the seal nor wakes when it is done.
+    /// Declines what `finish_io` declines, and replies the frame of which
+    /// does not fit `buf`, or that the engine cannot take now.
+    ///
+    /// Out of line, to keep it out of the task that serves every IO.
+    #[inline(never)]
+    fn finish_io_sealed(
+        &self,
+        mut io: Self::Io,
+        buf: &mut HsmDmaBuf,
+        len: usize,
+    ) -> Result<(), Self::Io> {
+        let index = io.index;
+        let Ok(Some(id)) = sealed::sealed_session(io.sqe()) else {
+            return Err(io);
+        };
+        let frame_len = sealed::sealed_frame_len(len);
+        let sqe = io.sqe().view();
+        let Ok(frame_len16) = u16::try_from(frame_len) else {
+            return Err(io);
+        };
+        if io.reply_sealed
+            || index as u32 >= IO_SQ_COUNT
+            || frame_len > buf.len()
+            || frame_len > sqe.dst_len() as usize
+            || !buf.as_ptr().addr().is_multiple_of(4)
+            || crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX
+        {
+            return Err(io);
+        }
+        if crate::gdma::host_interface(io.pid()).is_err() {
+            return Err(io);
+        }
+        let Ok(key) = self.session_transport_key(&io, id, HsmSessionTransportDir::M2h) else {
+            return Err(io);
+        };
+        // As `seal_frame`: pad, then encrypt in place under a fresh IV.
+        let iv = match self.session_reply_iv(&io, id) {
+            Some(next) => next,
+            None => {
+                let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+                if self.rng_fill_bytes(&io, &mut iv).is_err() {
+                    return Err(io);
+                }
+                iv
+            }
+        };
+        let frame = &mut buf[..frame_len];
+        let frame_addr = frame.as_ptr() as u32;
+        let pt_len = frame_len - sealed::SEALED_TRAILER_LEN;
+        let (pt, trailer) = frame.split_at_mut(pt_len);
+        pt[len..pt_len - 1].fill(0);
+        pt[pt_len - 1] = (pt_len - 1 - len) as u8;
+        trailer[..SESSION_TRANSPORT_IV_LEN].copy_from_slice(&iv);
+        if self.gcm_encrypt_detached(key, &iv, pt, index).is_err() {
+            return Err(io);
+        }
+        // As `record_sealed`.
+        io.cqe().view().set_dst_len(frame_len16);
+        self.detached[index as usize].set(DetachedIo {
+            queue_id: io.queue_id(),
+            frame: frame_addr,
+            frame_len: frame_len16,
+            pfn: u8::from(io.pid()),
+        });
+        Ok(())
+    }
 }
 
 /// What finishing a detached host IO still needs (see
@@ -619,10 +699,21 @@ impl HsmIoController for UnoHsmPal {
 #[derive(Clone, Copy)]
 pub(crate) struct DetachedIo {
     queue_id: u16,
+    /// A reply that [`finish_io_sealed`](HsmIoController::finish_io_sealed)
+    /// is sealing: its frame's GSRAM address and length, and the host
+    /// function of the partition it is copied out to once sealed.
+    frame: u32,
+    frame_len: u16,
+    pfn: u8,
 }
 
 impl DetachedIo {
-    pub(crate) const NONE: Self = Self { queue_id: 0 };
+    pub(crate) const NONE: Self = Self {
+        queue_id: 0,
+        frame: 0,
+        frame_len: 0,
+        pfn: 0,
+    };
 }
 
 /// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it.
@@ -667,9 +758,17 @@ impl UnoHsmPal {
     /// completion of each finished reply copy (marked failed first if the
     /// copy failed), retries posts the OIC had no room for, and scrubs and
     /// frees the slot of each posted completion. Called on every run-loop
-    /// pass.
-    pub(crate) fn finish_detached(&self) {
+    /// pass, `seals` saying whether a detached seal is done.
+    pub(crate) fn finish_detached(&self, seals: bool) {
+        if seals {
+            self.finish_detached_seals();
+        }
         while let Some((cookie, ok)) = self.gdma.take_detached() {
+            // The GDMA has room again for a sealed reply's copy it had none
+            // for.
+            if self.detached_copy_pending.get() != 0 {
+                self.retry_sealed_copies();
+            }
             if cookie & PREFETCH_COOKIE != 0 {
                 self.finish_prefetch(cookie & !PREFETCH_COOKIE, ok);
                 continue;
@@ -699,6 +798,87 @@ impl UnoHsmPal {
             self.iic
                 .free_io(index, self.detached[index as usize].get().queue_id);
             self.io_in_flight_dec();
+        }
+    }
+
+    /// Finishes every detached seal that is done (see
+    /// [`finish_seal`](Self::finish_seal)). Out of line, to keep it out of
+    /// the run loop's pass.
+    #[inline(never)]
+    fn finish_detached_seals(&self) {
+        while let Some((index, done)) = self.bcp.take_detached() {
+            self.finish_seal(index, done);
+        }
+    }
+
+    /// Retries the sealed reply copies the GDMA had no room for.
+    #[inline(never)]
+    fn retry_sealed_copies(&self) {
+        let mut pending = self.detached_copy_pending.get();
+        if pending != 0 {
+            self.detached_copy_pending.set(0);
+            while pending != 0 {
+                let index = pending.trailing_zeros() as u16;
+                pending &= !(1 << index);
+                self.copy_sealed_reply(index);
+            }
+        }
+    }
+
+    /// Finishes the seal that [`finish_io_sealed`](HsmIoController::finish_io_sealed)
+    /// started for slot `index`: puts the tag in the frame's trailer and
+    /// starts the reply copy, or, if the seal failed, posts the completion
+    /// failed, as the core does when `seal_response` fails.
+    fn finish_seal(&self, index: u16, done: HsmResult<GcmCompletion>) {
+        let d = self.detached[index as usize].get();
+        match done {
+            Ok(done) if done.ok() => {
+                let tag = (d.frame + u32::from(d.frame_len) - SESSION_TRANSPORT_TAG_LEN as u32)
+                    as *mut u32;
+                for (i, word) in done.tag.as_chunks::<4>().0.iter().enumerate() {
+                    // SAFETY: the frame's last 16 bytes, word-aligned (see
+                    // `finish_io_sealed`), in the slot's DMA heap, which the
+                    // slot keeps until its IO is dropped.
+                    unsafe { tag.add(i).write(u32::from_ne_bytes(*word)) };
+                }
+                self.copy_sealed_reply(index);
+            }
+            _ => {
+                slot_cqe(index).set_err(HsmError::SessionTransportError);
+                self.post_detached(index);
+            }
+        }
+    }
+
+    /// Starts the reply copy of slot `index`'s sealed frame, as
+    /// [`finish_io`](HsmIoController::finish_io) does, or leaves it for the
+    /// next pass if the GDMA has no room.
+    fn copy_sealed_reply(&self, index: u16) {
+        let d = self.detached[index as usize].get();
+        // SAFETY: as in `HsmIo::sqe`; the slot's IO has not been dropped.
+        let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] }.view();
+        let len = u32::from(d.frame_len);
+        // `finish_io_sealed` found the partition's host interface.
+        let Ok(ifc) = crate::gdma::host_interface(HsmPartId::from(d.pfn)) else {
+            slot_cqe(index).set_err(HsmError::FailedToStartDmaTransaction);
+            self.post_detached(index);
+            return;
+        };
+        if self
+            .gdma
+            .copy_mem_detached(
+                crate::gdma::device_dma_buf(d.frame as *const u8, len),
+                MemInterface::Device,
+                len,
+                crate::gdma::host_dma_buf(sqe.dst_prp1(), sqe.dst_prp2(), true),
+                ifc,
+                len,
+                index,
+            )
+            .is_err()
+        {
+            self.detached_copy_pending
+                .set(self.detached_copy_pending.get() | 1 << index);
         }
     }
 

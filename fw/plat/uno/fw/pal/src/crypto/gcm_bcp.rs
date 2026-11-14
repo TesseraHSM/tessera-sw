@@ -506,6 +506,49 @@ impl UnoHsmPal {
         Ok(())
     }
 
+    /// Starts encrypting `data` in place under `key` and `iv`, AES-256-GCM
+    /// with no AAD, as a detached BCP command, whose completion
+    /// [`BcpDriver::take_detached`](tsra_fw_uno_drivers_bcp::BcpDriver::take_detached)
+    /// collects with `cookie`; the engine's tag is the GCM tag. Only the
+    /// case [`gcm_run`](Self::gcm_run) runs as one command: whole blocks in
+    /// an aligned buffer.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArg` if `data` is not that case; as
+    /// [`BcpDriver::gcm_detached`](tsra_fw_uno_drivers_bcp::BcpDriver::gcm_detached)
+    /// fails, having started nothing.
+    pub(crate) fn gcm_encrypt_detached(
+        &self,
+        key: &HsmDmaBuf,
+        iv: &[u8; GCM_IV_LEN],
+        data: &mut HsmDmaBuf,
+        cookie: u16,
+    ) -> HsmResult<()> {
+        if key.len() != BCP_KEY_LEN
+            || data.is_empty()
+            || !data.len().is_multiple_of(AES_BLOCK_SIZE)
+            || data.len() > BCP_MAX_SRC_LEN
+            || !is_aligned(data)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let iv = AlignedIv(*iv);
+        self.service_pka();
+        self.bcp.gcm_detached(
+            GcmRequest {
+                op: GcmOp::Encrypt,
+                key,
+                iv: &iv.0,
+                aad_len: 0,
+                unpadded_aad_len: 0,
+                tag: &[0; AES_BLOCK_SIZE],
+                data: GcmData::InPlace(data),
+            },
+            cookie,
+        )
+    }
+
     /// AES-256-GCM decrypt from `ciphertext` into `plaintext`, both
     /// `[padded_AAD | text]`. On a tag mismatch the plaintext text is
     /// wiped.

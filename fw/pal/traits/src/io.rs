@@ -386,4 +386,27 @@ pub trait HsmIoController: HsmIoTypes {
     /// over now; the caller then sends, completes and drops it itself.
     /// Platforms without a detached transfer engine always return `Err(io)`.
     fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io>;
+
+    /// [`finish_io`](Self::finish_io) for a response that
+    /// [`seal_response`](Self::seal_response) has yet to protect (see
+    /// [`reply_needs_seal`](Self::reply_needs_seal)): protects the first
+    /// `len` bytes of `buf` in place, as `seal_response` would, and then
+    /// sends, completes and drops `io` as `finish_io` does, recording a
+    /// failure to protect it in the CQE, as the core would.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io` if the platform cannot take it over now; the caller then
+    /// protects, sends, completes and drops it itself, as if this had not
+    /// been called. Platforms that protect no response, or that cannot do it
+    /// detached, always return `Err(io)`.
+    fn finish_io_sealed(
+        &self,
+        io: Self::Io,
+        buf: &mut HsmDmaBuf,
+        len: usize,
+    ) -> Result<(), Self::Io> {
+        let _ = (buf, len);
+        Err(io)
+    }
 }

@@ -103,6 +103,16 @@ impl<P: HsmPal> Hsm<P> {
                     Some(resp) => {
                         let sealed = match resp {
                             UnoResp::Exchange(buf, len) if self.pal().reply_needs_seal(&io) => {
+                                // With nothing to walk, the platform can seal
+                                // the reply as well as send it on its own.
+                                if credential_guard.is_none()
+                                    && undo.as_ref().is_none_or(UndoLog::is_empty)
+                                {
+                                    match self.pal().finish_io_sealed(io, buf, len) {
+                                        Ok(()) => return,
+                                        Err(back) => io = back,
+                                    }
+                                }
                                 self.pal().seal_response(&mut io, buf, len).await
                             }
                             resp => Ok(resp.into_plain()),

@@ -389,6 +389,10 @@ pub struct UnoHsmPal {
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
 
+    /// Host IO slots whose sealed reply's detached copy found the GDMA
+    /// full.
+    pub(crate) detached_copy_pending: Cell<u32>,
+
     /// Per host IO slot: the IO whose request the run loop is copying in,
     /// until the copy is done (see `prefetch_request` in [`crate::io`]).
     pub(crate) prefetch_io: [Cell<Option<crate::io::UnoHsmIo>>; IO_SQ_COUNT as usize],
@@ -553,6 +557,7 @@ impl Default for UnoHsmPal {
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
             io_session_key: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
+            detached_copy_pending: Cell::new(0),
             prefetch_io: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
@@ -834,9 +839,11 @@ impl UnoHsmPal {
 
         // The BCP raises no HSM interrupt; reap its completions every pass.
         #[cfg(not(feature = "bulk_crypto"))]
-        self.bcp.wake();
+        let seals = self.bcp.wake();
+        #[cfg(feature = "bulk_crypto")]
+        let seals = false;
 
-        self.finish_detached();
+        self.finish_detached(seals);
     }
 
     /// Handle an incoming IPC message.
