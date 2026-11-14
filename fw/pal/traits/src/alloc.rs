@@ -315,6 +315,36 @@ impl HsmDmaBuf {
         Some(out)
     }
 
+    /// The buffer's first `N` words, `N` at most ten, read with one burst
+    /// (see [`copy_to_slice`](Self::copy_to_slice)), so fields spread over a
+    /// message's first 40 bytes cost one load's latency out of DMA memory;
+    /// or `None` if the buffer is not word-aligned or holds fewer bytes. The
+    /// words are native-endian loads of the bytes, in memory order.
+    #[inline]
+    pub fn read_words<const N: usize>(&self) -> Option<[u32; N]> {
+        const { assert!(N <= 10) };
+        if self.inner.len() < N * 4 || self.inner.as_ptr().align_offset(4) != 0 {
+            return None;
+        }
+        #[cfg(target_arch = "arm")]
+        {
+            let mut out = core::mem::MaybeUninit::<[u32; N]>::uninit();
+            // SAFETY: the buffer is word-aligned and holds `N` whole words,
+            // and `out` is a distinct, word-aligned array of `N`.
+            unsafe { burst_copy_words(out.as_mut_ptr().cast(), self.inner.as_ptr(), N) };
+            // SAFETY: the burst wrote all `N` words.
+            Some(unsafe { out.assume_init() })
+        }
+        #[cfg(not(target_arch = "arm"))]
+        {
+            let mut out = [0u32; N];
+            for (word, bytes) in out.iter_mut().zip(self.inner.as_chunks::<4>().0) {
+                *word = u32::from_ne_bytes(*bytes);
+            }
+            Some(out)
+        }
+    }
+
     /// The buffer's first words, as many as it holds whole up to eight, and
     /// their count: read with one burst when the buffer is word-aligned (see
     /// [`copy_to_slice`](Self::copy_to_slice)), so a message's header and
@@ -374,7 +404,7 @@ unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
     }
 }
 
-/// Copies `words` words, at most eight, from `src` to `dst` with one burst
+/// Copies `words` words, at most ten, from `src` to `dst` with one burst
 /// load and store.
 ///
 /// # Safety
@@ -406,6 +436,30 @@ unsafe fn burst_copy_words(dst: *mut u8, src: *const u8, words: usize) {
             }
         };
     }
+    macro_rules! burst10 {
+        ($regs:literal) => {
+            // SAFETY: per the function contract, for the listed words.
+            unsafe {
+                core::arch::asm!(
+                    concat!("ldm {s}, {{", $regs, "}}"),
+                    concat!("stm {d}, {{", $regs, "}}"),
+                    s = in(reg) src,
+                    d = in(reg) dst,
+                    out("r2") _,
+                    out("r3") _,
+                    out("r4") _,
+                    out("r5") _,
+                    out("r8") _,
+                    out("r9") _,
+                    out("r10") _,
+                    out("r11") _,
+                    out("r12") _,
+                    out("lr") _,
+                    options(nostack, preserves_flags),
+                )
+            }
+        };
+    }
     match words {
         0 => {}
         // SAFETY: per the function contract, for one word.
@@ -416,7 +470,9 @@ unsafe fn burst_copy_words(dst: *mut u8, src: *const u8, words: usize) {
         5 => burst!("r2, r3, r4, r5, r8"),
         6 => burst!("r2, r3, r4, r5, r8, r9"),
         7 => burst!("r2, r3, r4, r5, r8, r9, r10"),
-        _ => burst!("r2, r3, r4, r5, r8, r9, r10, r11"),
+        8 => burst!("r2, r3, r4, r5, r8, r9, r10, r11"),
+        9 => burst10!("r2, r3, r4, r5, r8, r9, r10, r11, r12"),
+        _ => burst10!("r2, r3, r4, r5, r8, r9, r10, r11, r12, lr"),
     }
 }
 
