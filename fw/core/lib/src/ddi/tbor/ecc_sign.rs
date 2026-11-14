@@ -15,8 +15,8 @@
 //!
 //! Available to both Crypto-Officer and Crypto-User sessions.
 
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_frame;
+use tsra_fw_core_crypto_key_masking::aead::unmask_framed;
 use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::TborEccSignReq;
 use tsra_fw_ddi_tbor_types::TborEccSignResp;
@@ -60,9 +60,9 @@ pub(crate) async fn handle<P: HsmPal>(
             {
                 return Err(HsmError::InvalidArg);
             }
-            let scope = peek_scope(req.masked_key)?;
+            let (scope, frame) = peek_frame(req.masked_key)?;
             let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-            let view = unmask(pal, io, masking_key, req.masked_key).await?;
+            let view = unmask_framed(pal, io, masking_key, req.masked_key, frame).await?;
             let curve = ecc_private_curve(view.key_kind)?;
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
