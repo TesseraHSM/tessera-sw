@@ -8,6 +8,8 @@ use core::future::poll_fn;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
@@ -163,10 +165,10 @@ impl PqcDriver {
     pub async fn mldsa_sign(
         &self,
         kind: HsmVaultKeyKind,
-        sk: &[u8],
+        sk: HsmMlDsaPrivKey<'_>,
         rnd: &[u8; crate::MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
-        msg: &[u8],
+        msg: &HsmDmaBuf,
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
@@ -220,7 +222,7 @@ impl PqcDriver {
     pub async fn mldsa_verify(
         &self,
         kind: HsmVaultKeyKind,
-        pk: &[u8],
+        pk: HsmMlDsaPubKey<'_>,
         msg_type: HsmMlDsaMsgType,
         msg: &HsmDmaBuf,
         ctx: &[u8],

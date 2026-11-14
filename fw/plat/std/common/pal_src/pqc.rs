@@ -113,15 +113,61 @@ fn deterministic(hedge: HsmMlDsaHedge) -> bool {
     }
 }
 
+/// Message the ML-DSA sign/verify pairwise consistency test signs.
+const MLDSA_PCT_MSG: [u8; 32] = [0x64; 32];
+
+impl StdHsmPal {
+    /// Derive the encoded public key and expanded secret key from the seed `ξ`.
+    async fn mldsa_expand(
+        &self,
+        variant: MlDsaVariant,
+        seed: &[u8],
+    ) -> HsmResult<(Vec<u8>, Zeroizing<Vec<u8>>)> {
+        if seed.len() != MLDSA_SEED_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let (pk, sk) = self.pqc.mldsa_keygen(variant, seed).await?;
+        Ok((pk, Zeroizing::new(sk)))
+    }
+
+    /// Run the pairwise consistency test `pct` selects on a key pair.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::PctValidationMlDsaGenKeyFailed`] — the signature did not
+    ///   verify.
+    async fn mldsa_pct(
+        &self,
+        variant: MlDsaVariant,
+        pct: HsmMlDsaPct,
+        pk: &[u8],
+        sk: &[u8],
+    ) -> HsmResult<()> {
+        if pct == HsmMlDsaPct::None {
+            return Ok(());
+        }
+        let sig = self
+            .pqc
+            .mldsa_sign(variant, sk, false, true, &MLDSA_PCT_MSG, &[])
+            .await?;
+        if !self
+            .pqc
+            .mldsa_verify(variant, pk, false, &MLDSA_PCT_MSG, &[], &sig)
+            .await?
+        {
+            return Err(HsmError::PctValidationMlDsaGenKeyFailed);
+        }
+        Ok(())
+    }
+}
+
 impl HsmMlDsa for StdHsmPal {
-    /// PCTs are deferred: `pct` is accepted but not run; see
-    /// <https://github.com/TesseraHSM/tessera-sw/issues/117>.
     async fn mldsa_gen_keypair(
         &self,
         io: &StdHsmIo,
         param_set: HsmMlDsaParamSet,
         seed_src: HsmMlSeedSrc,
-        _pct: HsmMlDsaPct,
+        pct: HsmMlDsaPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
@@ -144,21 +190,34 @@ impl HsmMlDsa for StdHsmPal {
             self.rng_fill_bytes(io, seed)?;
         }
 
-        let (pk_bytes, sk_bytes) = self.pqc.mldsa_keygen(variant, seed).await?;
+        let (pk_bytes, sk_bytes) = self.mldsa_expand(variant, seed).await?;
+        self.mldsa_pct(variant, pct, &pk_bytes, &sk_bytes).await?;
         write_exact(&mut pk[..pk_len], &pk_bytes)?;
         write_exact(&mut sk[..sk_len], &sk_bytes)?;
         Ok((sk_len, pk_len))
     }
 
-    /// Not supported: the std PAL always derives the key pair with the seed.
     async fn mldsa_gen_seed(
         &self,
-        _io: &StdHsmIo,
-        _param_set: HsmMlDsaParamSet,
-        _pct: HsmMlDsaPct,
-        _seed: Option<&mut HsmDmaBuf>,
+        io: &StdHsmIo,
+        param_set: HsmMlDsaParamSet,
+        pct: HsmMlDsaPct,
+        seed: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        let Some(seed) = seed else {
+            return Ok(MLDSA_SEED_LEN);
+        };
+        if seed.len() < MLDSA_SEED_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let seed = &mut seed[..MLDSA_SEED_LEN];
+        self.rng_fill_bytes(io, seed)?;
+        if pct != HsmMlDsaPct::None {
+            let variant = mldsa_variant(param_set);
+            let (pk, sk) = self.mldsa_expand(variant, seed).await?;
+            self.mldsa_pct(variant, pct, &pk, &sk).await?;
+        }
+        Ok(MLDSA_SEED_LEN)
     }
 
     async fn mldsa_sign(
@@ -170,13 +229,14 @@ impl HsmMlDsa for StdHsmPal {
         msg: HsmMlDsaMsg<'_>,
         sig: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let HsmMlDsaPrivKey::Expanded(sk) = sk else {
-            return Err(HsmError::UnsupportedCmd);
-        };
         let variant = mldsa_variant(param_set);
         let external_mu = external_mu(&msg)?;
         let sig_len = variant.sig_len();
-        if sk.len() != variant.sec_key_len() {
+        let key_ok = match sk {
+            HsmMlDsaPrivKey::Seed(seed) => seed.len() == MLDSA_SEED_LEN,
+            HsmMlDsaPrivKey::Expanded(sk) => sk.len() == variant.sec_key_len(),
+        };
+        if !key_ok {
             return Err(HsmError::InvalidArg);
         }
         let Some(sig) = sig else {
@@ -186,6 +246,14 @@ impl HsmMlDsa for StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
+        let expanded;
+        let sk: &[u8] = match sk {
+            HsmMlDsaPrivKey::Expanded(sk) => sk,
+            HsmMlDsaPrivKey::Seed(seed) => {
+                expanded = self.mldsa_expand(variant, seed).await?.1;
+                &expanded
+            }
+        };
         // Unlike the seed, the per-signature randomness is not drawn here:
         // it never leaves the crypto layer, so that layer draws it, exactly
         // as it does the ECDSA nonce.
@@ -212,24 +280,33 @@ impl HsmMlDsa for StdHsmPal {
         hedge: HsmMlDsaHedge,
         msg: HsmMlDsaMsg<'_>,
     ) -> HsmResult<usize> {
-        let HsmMlDsaPrivKeyMut::Expanded(sk_sig) = sk_sig else {
-            return Err(HsmError::UnsupportedCmd);
-        };
         let variant = mldsa_variant(param_set);
         let external_mu = external_mu(&msg)?;
         let sig_len = variant.sig_len();
+        let key_len = sk_sig.key_len(param_set);
+        let (sk_sig, seed_form) = match sk_sig {
+            HsmMlDsaPrivKeyMut::Seed(buf) => (buf, true),
+            HsmMlDsaPrivKeyMut::Expanded(buf) => (buf, false),
+        };
         let key_at = sk_sig
             .len()
-            .checked_sub(variant.sec_key_len())
+            .checked_sub(key_len)
             .ok_or(HsmError::InvalidArg)?;
         if sk_sig.len() < sig_len {
             return Err(HsmError::InvalidArg);
         }
+        let expanded;
+        let sk: &[u8] = if seed_form {
+            expanded = self.mldsa_expand(variant, &sk_sig[key_at..]).await?.1;
+            &expanded
+        } else {
+            &sk_sig[key_at..]
+        };
         let result = self
             .pqc
             .mldsa_sign(
                 variant,
-                &sk_sig[key_at..],
+                sk,
                 external_mu,
                 deterministic(hedge),
                 msg.message(),
@@ -248,11 +325,16 @@ impl HsmMlDsa for StdHsmPal {
         msg: HsmMlDsaMsg<'_>,
         sig: &HsmDmaBuf,
     ) -> HsmResult<bool> {
-        let HsmMlDsaPubKey::Encoded(pk) = pk else {
-            return Err(HsmError::UnsupportedCmd);
-        };
         let variant = mldsa_variant(param_set);
         let external_mu = external_mu(&msg)?;
+        let derived;
+        let pk: &[u8] = match pk {
+            HsmMlDsaPubKey::Encoded(pk) => pk,
+            HsmMlDsaPubKey::Seed(seed) => {
+                derived = self.mldsa_expand(variant, seed).await?.0;
+                &derived
+            }
+        };
         self.pqc
             .mldsa_verify(variant, pk, external_mu, msg.message(), msg.ctx(), sig)
             .await
@@ -881,19 +963,13 @@ mod tests {
         assert_eq!(&long[SS_LEN..], &[0x5a; 3]);
     }
 
-    /// Seed-only key generation is refused, in query mode too, and the seed
-    /// is not written.
+    /// ML-KEM seed-only key generation is refused, in query mode too, and
+    /// the seed is not written.
     #[tokio::test]
-    async fn gen_seed_unsupported() {
+    async fn mlkem_gen_seed_unsupported() {
         let (pal, io) = pal_and_io();
         let mut seed = [0x5a; MLKEM_SEED_LEN];
         for query in [true, false] {
-            let out = (!query).then(|| dma_mut(&mut seed[..MLDSA_SEED_LEN]));
-            assert_eq!(
-                pal.mldsa_gen_seed(&io, MLDSA_SETS[0].0, HsmMlDsaPct::SignVerify, out)
-                    .await,
-                Err(HsmError::UnsupportedCmd)
-            );
             let out = (!query).then(|| dma_mut(&mut seed));
             assert_eq!(
                 pal.mlkem_gen_seed(&io, MLKEM_SETS[0].0, HsmMlKemPct::EncapsDecaps, out)
@@ -1365,17 +1441,58 @@ mod tests {
         }
     }
 
-    /// Seed-form keys are refused with `UnsupportedCmd`, in query mode too,
-    /// and nothing is written.
+    /// Seed-only generation draws a fresh seed into the buffer's prefix,
+    /// with and without a PCT; the query draws nothing.
     #[tokio::test]
-    async fn mldsa_seed_keys_unsupported() {
+    async fn mldsa_gen_seed() {
         let (pal, io) = pal_and_io();
-        let (param_set, _, sk_len, sig_len) = MLDSA_SETS[0];
-        let seed = [0x11u8; MLDSA_SEED_LEN];
+        for (param_set, ..) in MLDSA_SETS {
+            assert_eq!(
+                pal.mldsa_gen_seed(&io, param_set, HsmMlDsaPct::SignVerify, None)
+                    .await,
+                Ok(MLDSA_SEED_LEN)
+            );
+            for pct in [HsmMlDsaPct::None, HsmMlDsaPct::SignVerify] {
+                let mut seed = [0x5au8; MLDSA_SEED_LEN + 2];
+                assert_eq!(
+                    pal.mldsa_gen_seed(&io, param_set, pct, Some(dma_mut(&mut seed)))
+                        .await,
+                    Ok(MLDSA_SEED_LEN)
+                );
+                assert_ne!(seed[..MLDSA_SEED_LEN], [0x5a; MLDSA_SEED_LEN]);
+                assert_eq!(seed[MLDSA_SEED_LEN..], [0x5a; 2]);
+            }
+            let mut short = [0u8; MLDSA_SEED_LEN - 1];
+            assert_eq!(
+                pal.mldsa_gen_seed(&io, param_set, HsmMlDsaPct::None, Some(dma_mut(&mut short)))
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+        }
+    }
+
+    /// Seed-form keys sign and verify as their expanded / encoded forms do:
+    /// deterministic signatures match byte for byte, and each form verifies
+    /// the other's signatures.
+    #[tokio::test]
+    async fn mldsa_seed_keys_match_expanded() {
+        let (pal, io) = pal_and_io();
         let input = msg(HsmMlDsaMsgType::Pure, b"message", b"ctx");
-        let hedge = HsmMlDsaHedge::Preferred;
-        let mut sig = vec![0x5a; sig_len];
-        for out in [None, Some(dma_mut(&mut sig))] {
+        let hedge = HsmMlDsaHedge::Deterministic;
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
+            let mut seed = [0x11u8; MLDSA_SEED_LEN];
+            let (mut pk, mut sk) = (vec![0u8; pk_len], vec![0u8; sk_len]);
+            pal.mldsa_gen_keypair(
+                &io,
+                param_set,
+                HsmMlSeedSrc::Caller,
+                HsmMlDsaPct::SignVerify,
+                dma_mut(&mut seed),
+                Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+            )
+            .await
+            .expect("keygen");
+
             assert_eq!(
                 pal.mldsa_sign(
                     &io,
@@ -1383,43 +1500,74 @@ mod tests {
                     HsmMlDsaPrivKey::Seed(dma(&seed)),
                     hedge,
                     input,
-                    out
+                    None
                 )
                 .await,
-                Err(HsmError::UnsupportedCmd)
+                Ok(sig_len)
+            );
+            let mut from_seed = vec![0u8; sig_len];
+            let mut from_sk = vec![0u8; sig_len];
+            for (key, sig) in [
+                (HsmMlDsaPrivKey::Seed(dma(&seed)), &mut from_seed),
+                (HsmMlDsaPrivKey::Expanded(dma(&sk)), &mut from_sk),
+            ] {
+                pal.mldsa_sign(&io, param_set, key, hedge, input, Some(dma_mut(sig)))
+                    .await
+                    .expect("sign");
+            }
+            assert_eq!(from_seed, from_sk);
+
+            let buffer = pal.dma_alloc(&io, sig_len).expect("dma_alloc");
+            buffer[sig_len - MLDSA_SEED_LEN..].copy_from_slice(&seed);
+            assert_eq!(
+                pal.mldsa_sign_in_place(
+                    &io,
+                    param_set,
+                    HsmMlDsaPrivKeyMut::Seed(buffer),
+                    hedge,
+                    input
+                )
+                .await,
+                Ok(sig_len)
+            );
+            assert_eq!(&buffer[..], &from_sk[..]);
+
+            for key in [
+                HsmMlDsaPubKey::Seed(dma(&seed)),
+                HsmMlDsaPubKey::Encoded(dma(&pk)),
+            ] {
+                assert_eq!(
+                    pal.mldsa_verify(&io, param_set, key, input, dma(&from_seed))
+                        .await,
+                    Ok(true)
+                );
+            }
+
+            let short = [0x11u8; MLDSA_SEED_LEN - 1];
+            assert_eq!(
+                pal.mldsa_sign(
+                    &io,
+                    param_set,
+                    HsmMlDsaPrivKey::Seed(dma(&short)),
+                    hedge,
+                    input,
+                    None
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.mldsa_verify(
+                    &io,
+                    param_set,
+                    HsmMlDsaPubKey::Seed(dma(&short)),
+                    input,
+                    dma(&from_seed)
+                )
+                .await,
+                Err(HsmError::InvalidArg)
             );
         }
-        assert!(sig.iter().all(|&b| b == 0x5a), "sign wrote the signature");
-        assert_eq!(
-            pal.mldsa_verify(
-                &io,
-                param_set,
-                HsmMlDsaPubKey::Seed(dma(&seed)),
-                input,
-                dma(&sig)
-            )
-            .await,
-            Err(HsmError::UnsupportedCmd)
-        );
-        let buffer = pal.dma_alloc(&io, sk_len).expect("dma_alloc");
-        buffer.fill(0x5a);
-        let at = sk_len - MLDSA_SEED_LEN;
-        buffer[at..].copy_from_slice(&seed);
-        assert_eq!(
-            pal.mldsa_sign_in_place(
-                &io,
-                param_set,
-                HsmMlDsaPrivKeyMut::Seed(buffer),
-                hedge,
-                input
-            )
-            .await,
-            Err(HsmError::UnsupportedCmd)
-        );
-        assert!(
-            buffer[..at].iter().all(|&b| b == 0x5a),
-            "sign in place wrote"
-        );
     }
 
     /// The sign query returns the signature length without signing; a

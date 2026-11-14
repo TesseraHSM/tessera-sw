@@ -470,6 +470,11 @@ pub enum HsmError {
     /// or its session has no transport keys.
     SessionTransportError = 0x08700113,
 
+    /// A newly generated ML-DSA key pair failed its sign/verify pairwise
+    /// consistency test.  Mirrors
+    /// [`PctValidationEccGenKeyFailed`](Self::PctValidationEccGenKeyFailed).
+    PctValidationMlDsaGenKeyFailed = 0x08700114,
+
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol
     // statuses: they use the PAL diagnostic facility (`0x08F`) to stay clear of

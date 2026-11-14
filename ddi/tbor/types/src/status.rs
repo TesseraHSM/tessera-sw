@@ -374,6 +374,10 @@ pub enum TborStatus {
     /// an empty response on success, so this status is how an invalid
     /// signature is surfaced.
     MlDsaVerifyFailed = 0x0870010D,
+
+    /// A newly generated ML-DSA key pair failed its sign/verify pairwise
+    /// consistency test.
+    PctValidationMlDsaGenKeyFailed = 0x08700114,
 }
 
 impl core::fmt::Debug for TborStatus {

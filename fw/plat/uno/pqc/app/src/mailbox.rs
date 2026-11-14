@@ -279,7 +279,7 @@ pub const SHARED_SECRET_LEN: usize = 32;
 /// Operation selector, mirroring `PqcOp` on the HSM side.
 pub const OP_MLDSA_GENERATE_KEY: u32 = 1;
 
-/// Operation selector: sign a message with a caller-supplied seed.
+/// Operation selector: sign a message with a staged expanded key.
 pub const OP_MLDSA_SIGN: u32 = 2;
 
 /// Operation selector: verify a signature under a supplied public key.
@@ -299,6 +299,14 @@ pub const OP_SHAKE128: u32 = 7;
 
 /// Operation selector: hash the staged message with SHAKE256.
 pub const OP_SHAKE256: u32 = 8;
+
+/// Operation selector: sign as [`OP_MLDSA_SIGN`], with the key given as its
+/// seed in `xi` rather than staged expanded.
+pub const OP_MLDSA_SIGN_SEED: u32 = 9;
+
+/// Operation selector: verify as [`OP_MLDSA_VERIFY`], with the key given as
+/// its seed in `xi` rather than a staged public key.
+pub const OP_MLDSA_VERIFY_SEED: u32 = 10;
 
 /// Status: request serviced.
 pub const STATUS_OK: u32 = 0;
