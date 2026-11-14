@@ -20,6 +20,7 @@
 //! * `key_length` — for the variable-length HMAC types, the requested
 //!   output length in bytes; `0` means absent (required for `VarHmac*`,
 //!   ignored otherwise).
+//! * `key_usage` - requested output permissions, independent of key type.
 //! * `masked_secret` — the masked ECDH shared secret IKM (unmasked in
 //!   place; its kind confirms it is an ECDH secret).
 //! * `salt` — optional HKDF-Extract salt; an **empty** buffer selects the
@@ -37,6 +38,7 @@ use tsra_fw_ddi_tbor_api::tbor;
 use crate::key_props::HashAlgo;
 use crate::key_props::KdfKeyType;
 use crate::key_props::KeyScope;
+use crate::key_props::KeyUsage;
 
 /// TBOR opcode for `HkdfDerive`.
 pub const TBOR_OP_HKDF_DERIVE: u8 = 0x1C;
@@ -100,6 +102,11 @@ pub struct TborHkdfDeriveReq<'a> {
     #[tbor(U8)]
     pub key_length: u8,
 
+    /// Requested output permissions: AES encrypt/decrypt or HMAC
+    /// sign/verify or derive-only. Empty and mixed usages are invalid.
+    #[tbor(U64)]
+    pub key_usage: KeyUsage,
+
     /// The masked ECDH shared secret IKM (from `EcdhDerive`), an
     /// AEAD-GCM-256 envelope of 264..=312 B; unmasked in place.
     #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
@@ -161,6 +168,8 @@ mod tests {
             .unwrap()
             .key_length(0)
             .unwrap()
+            .key_usage(KeyUsage::from_bits(KeyUsage::ENCRYPT | KeyUsage::DECRYPT))
+            .unwrap()
             .masked_secret(&secret)
             .unwrap()
             .salt(&salt)
@@ -188,6 +197,38 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_key(), &masked[..]);
+    }
+
+    #[test]
+    fn request_round_trips_explicit_usage() {
+        let mut buf = [0u8; 1024];
+        let secret = [0x11u8; HKDF_MASKED_SECRET_MIN_LEN];
+        let usage = KeyUsage::from_bits(KeyUsage::DERIVE);
+        let frame = TborHkdfDeriveReq::encode(&mut buf)
+            .unwrap()
+            .session_id(SessionId(7))
+            .unwrap()
+            .scope(KeyScope::Local)
+            .unwrap()
+            .hash_algo(HashAlgo::Sha256)
+            .unwrap()
+            .key_type(KdfKeyType::HmacSha256)
+            .unwrap()
+            .key_length(0)
+            .unwrap()
+            .key_usage(usage)
+            .unwrap()
+            .masked_secret(&secret)
+            .unwrap()
+            .salt(&[])
+            .unwrap()
+            .info(&[])
+            .unwrap()
+            .key_label(&[])
+            .unwrap()
+            .finish();
+        assert_eq!(frame.key_type(), KdfKeyType::HmacSha256);
+        assert_eq!(frame.key_usage(), usage);
     }
 
     #[test]

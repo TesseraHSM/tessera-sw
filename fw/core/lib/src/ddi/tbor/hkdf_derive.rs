@@ -22,6 +22,7 @@ use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::KdfKeyType;
+use tsra_fw_ddi_tbor_types::KeyUsage;
 use tsra_fw_ddi_tbor_types::TborHkdfDeriveReq;
 use tsra_fw_ddi_tbor_types::TborHkdfDeriveResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
@@ -40,37 +41,41 @@ use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
 
-/// Which attribute family the derived key is created with — AES keys carry
-/// `encrypt`/`decrypt`, HMAC keys carry `sign`/`verify`.
+/// Algorithm family of the derived key, independent of its usage permissions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KdfClass {
-    /// AES key — `encrypt` / `decrypt` usage.
+    /// AES key.
     Aes,
-    /// (Variable-length) HMAC key — `sign` / `verify` usage.
+    /// (Variable-length) HMAC key.
     Hmac,
 }
 
 /// Resolved derivation target: the vault kind the derived bytes are
-/// masked under, how many OKM bytes to derive, and the attribute family.
+/// masked under, how many OKM bytes to derive, and the algorithm family.
 struct KdfTarget {
     /// Vault kind recorded in the masked blob's metadata.
     kind: HsmVaultKeyKind,
     /// Number of OKM bytes to derive (and mask).
     out_len: usize,
-    /// Attribute family for the derived key.
+    /// Algorithm family for the derived key.
     class: KdfClass,
 }
 
 impl KdfTarget {
-    /// Attributes recorded in the derived-key masked blob's metadata
-    /// (re-applied on unmask).  A KDF output is derived on-device (so
-    /// `local`); AES keys `encrypt`/`decrypt`, HMAC keys `sign`/`verify`.
-    /// `scope` records the lifecycle / visibility domain.
-    fn attrs(&self, scope: HsmKeyScope) -> HsmVaultKeyAttrs {
+    /// Validate requested permissions independently of the key type and
+    /// construct the masked-key attributes. Empty, mixed, and unsupported
+    /// usages are rejected. Derived keys are always `local`.
+    fn attrs(&self, scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAttrs> {
         let base = HsmVaultKeyAttrs::new().with_local(true).with_scope(scope);
         match self.class {
-            KdfClass::Aes => base.with_encrypt(true).with_decrypt(true),
-            KdfClass::Hmac => base.with_sign(true).with_verify(true),
+            KdfClass::Aes if usage.bits() == (KeyUsage::ENCRYPT | KeyUsage::DECRYPT) => {
+                Ok(base.with_encrypt(true).with_decrypt(true))
+            }
+            KdfClass::Hmac if usage.bits() == (KeyUsage::SIGN | KeyUsage::VERIFY) => {
+                Ok(base.with_sign(true).with_verify(true))
+            }
+            KdfClass::Hmac if usage.bits() == KeyUsage::DERIVE => Ok(base.with_derive(true)),
+            _ => Err(HsmError::InvalidPermissions),
         }
     }
 }
@@ -106,7 +111,7 @@ fn validate_input_secret(kind: HsmVaultKeyKind) -> HsmResult<()> {
 ///
 /// AES / fixed-HMAC outputs derive their natural length; the `VarHmac*`
 /// outputs require an explicit non-zero `key_length` within the
-/// per-variant range.  Mirrors MBOR's
+/// per-variant range. Mirrors MBOR's
 /// [`resolve_target`](crate::ddi::mbor::kdf::resolve_target); unsupported
 /// output types are [`HsmError::InvalidKeyType`].
 fn resolve_target(key_type: KdfKeyType, key_length: u8) -> HsmResult<KdfTarget> {
@@ -205,7 +210,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let svn = part_state::part_mfgr_svn(pal);
         let owner =
             u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-        let attrs = target.attrs(target_scope);
+        let attrs = target.attrs(target_scope, KeyUsage::from_bits(req.key_usage))?;
 
         // Optional HKDF inputs: an empty buffer selects the RFC 5869 default
         // (all-zero) salt / omits the info.  These borrow disjoint request
@@ -285,4 +290,126 @@ pub(crate) async fn handle<P: HsmPal>(
         derive_and_mask
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_usage_modes() {
+        let cases = [
+            (
+                KdfKeyType::HmacSha256,
+                HsmVaultKeyKind::VarLenHmacSha256,
+                0,
+                32,
+            ),
+            (
+                KdfKeyType::HmacSha384,
+                HsmVaultKeyKind::VarLenHmacSha384,
+                0,
+                48,
+            ),
+            (
+                KdfKeyType::HmacSha512,
+                HsmVaultKeyKind::VarLenHmacSha512,
+                0,
+                64,
+            ),
+            (
+                KdfKeyType::VarHmac256,
+                HsmVaultKeyKind::VarLenHmacSha256,
+                64,
+                64,
+            ),
+            (
+                KdfKeyType::VarHmac384,
+                HsmVaultKeyKind::VarLenHmacSha384,
+                128,
+                128,
+            ),
+            (
+                KdfKeyType::VarHmac512,
+                HsmVaultKeyKind::VarLenHmacSha512,
+                128,
+                128,
+            ),
+        ];
+
+        for (key_type, kind, key_length, out_len) in cases {
+            for scope in [
+                HsmKeyScope::Session,
+                HsmKeyScope::Ephemeral,
+                HsmKeyScope::Local,
+                HsmKeyScope::SecurityDomain,
+            ] {
+                for usage in [
+                    KeyUsage::from_bits(KeyUsage::SIGN | KeyUsage::VERIFY),
+                    KeyUsage::from_bits(KeyUsage::DERIVE),
+                ] {
+                    let target = resolve_target(key_type, key_length).expect("valid HMAC target");
+                    assert_eq!(target.kind, kind);
+                    assert_eq!(target.out_len, out_len);
+                    let attrs = target.attrs(scope, usage).expect("valid HMAC usage");
+                    let derive = usage.derive();
+                    assert!(attrs.local());
+                    assert_eq!(attrs.scope(), scope);
+                    assert_eq!(attrs.derive(), derive);
+                    assert_eq!(attrs.sign(), !derive);
+                    assert_eq!(attrs.verify(), !derive);
+                    assert!(!attrs.encrypt());
+                    assert!(!attrs.decrypt());
+                    assert!(!attrs.wrap());
+                    assert!(!attrs.unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aes_usage_unchanged() {
+        for key_type in [KdfKeyType::Aes128, KdfKeyType::Aes192, KdfKeyType::Aes256] {
+            let target = resolve_target(key_type, 0).expect("valid AES target");
+            let attrs = target
+                .attrs(
+                    HsmKeyScope::Local,
+                    KeyUsage::from_bits(KeyUsage::ENCRYPT | KeyUsage::DECRYPT),
+                )
+                .expect("valid AES usage");
+            assert!(attrs.local());
+            assert_eq!(attrs.scope(), HsmKeyScope::Local);
+            assert!(attrs.encrypt());
+            assert!(attrs.decrypt());
+            assert!(!attrs.sign());
+            assert!(!attrs.verify());
+            assert!(!attrs.derive());
+            assert!(!attrs.wrap());
+            assert!(!attrs.unwrap());
+        }
+    }
+
+    #[test]
+    fn invalid_usages_rejected() {
+        for key_type in [KdfKeyType::Aes256, KdfKeyType::HmacSha256] {
+            let target = resolve_target(key_type, 0).expect("valid target");
+            for bits in [
+                0,
+                KeyUsage::SIGN,
+                KeyUsage::VERIFY,
+                KeyUsage::ENCRYPT,
+                KeyUsage::DECRYPT,
+                KeyUsage::SIGN | KeyUsage::VERIFY | KeyUsage::DERIVE,
+                KeyUsage::ENCRYPT | KeyUsage::DECRYPT | KeyUsage::DERIVE,
+                KeyUsage::WRAP,
+                KeyUsage::UNWRAP,
+                u64::MAX,
+            ] {
+                assert!(matches!(
+                    target.attrs(HsmKeyScope::Local, KeyUsage::from_bits(bits)),
+                    Err(HsmError::InvalidPermissions)
+                ));
+            }
+        }
+    }
 }
