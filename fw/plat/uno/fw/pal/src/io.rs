@@ -371,10 +371,13 @@ impl HsmIoController for UnoHsmPal {
     /// (see [`sealed`]) that [`seal_response`](HsmIoController::seal_response)
     /// has not, and setting the CQE length to the frame's.
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
-        let resp = if self.reply_needs_seal(io) {
-            self.seal_response(io, resp).await?
-        } else {
-            resp
+        let resp = match sealed::sealed_session(io.sqe())? {
+            Some(id) if !io.reply_sealed => {
+                let frame = sealed::sealed_seal(self, io, id, resp).await?;
+                Self::record_sealed(io, frame)?;
+                frame
+            }
+            _ => resp,
         };
         let sqe = io.sqe().view();
         if resp.len() > sqe.dst_len() as usize {
@@ -390,25 +393,38 @@ impl HsmIoController for UnoHsmPal {
         !io.reply_sealed && sealed::sqe_is_sealed(io.sqe())
     }
 
-    /// Seals an in-session TBOR response (see [`sealed`]) into a new frame
-    /// and sets the CQE length to the frame's; returns any other response,
-    /// or one already sealed, as it is.
+    /// An in-session TBOR reply's padding and trailer.
+    fn reply_room(&self, io: &UnoHsmIo) -> usize {
+        if sealed::sqe_is_sealed(io.sqe()) {
+            sealed::SEALED_ROOM
+        } else {
+            0
+        }
+    }
+
+    /// Seals an in-session TBOR response (see [`sealed`]) in place, or into
+    /// a new frame if `buf` lacks the room, and sets the CQE length to the
+    /// frame's; returns any other response, or one already sealed, as it is.
     async fn seal_response<'a>(
         &'a self,
         io: &mut UnoHsmIo,
-        resp: &'a HsmDmaBuf,
+        buf: &'a mut HsmDmaBuf,
+        len: usize,
     ) -> HsmResult<&'a HsmDmaBuf> {
-        if io.reply_sealed {
-            return Ok(resp);
+        match sealed::sealed_session(io.sqe())? {
+            Some(id) if !io.reply_sealed => {
+                let frame = sealed::sealed_seal_in_place(self, io, id, buf, len).await?;
+                Self::record_sealed(io, frame)?;
+                Ok(frame)
+            }
+            _ => {
+                let buf: &'a HsmDmaBuf = buf;
+                if len > buf.len() {
+                    return Err(HsmError::InvalidArg);
+                }
+                Ok(&buf[..len])
+            }
         }
-        let Some(id) = sealed::sealed_session(io.sqe())? else {
-            return Ok(resp);
-        };
-        let frame = sealed::sealed_seal(self, io, id, resp).await?;
-        let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
-        io.cqe().view().set_dst_len(frame_len);
-        io.reply_sealed = true;
-        Ok(frame)
     }
 
     async fn recv_oob(&self, io: &UnoHsmIo, index: usize, dst: &mut HsmDmaBuf) -> HsmResult<()> {
@@ -533,6 +549,15 @@ fn slot_cqe(index: u16) -> &'static mut CqeEntry {
 }
 
 impl UnoHsmPal {
+    /// Records that `io`'s reply went out in the sealed `frame`: the CQE
+    /// carries the frame's length.
+    fn record_sealed(io: &mut UnoHsmIo, frame: &HsmDmaBuf) -> HsmResult<()> {
+        let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
+        io.cqe().view().set_dst_len(frame_len);
+        io.reply_sealed = true;
+        Ok(())
+    }
+
     /// Reads OOB descriptor `index` of `io` from host memory.
     pub(crate) async fn oob_desc(
         &self,

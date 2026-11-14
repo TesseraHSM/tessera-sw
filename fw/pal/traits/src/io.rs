@@ -275,23 +275,39 @@ pub trait HsmIoController: HsmIoTypes {
         false
     }
 
-    /// Protects the response `resp` for `io` ahead of
+    /// Bytes [`seal_response`](Self::seal_response) needs past `io`'s
+    /// response in its exchange buffer to protect it there, in place; 0 for
+    /// a response that goes out as it is.
+    fn reply_room(&self, io: &Self::Io) -> usize {
+        let _ = io;
+        0
+    }
+
+    /// Protects `io`'s response, the first `len` bytes of `buf`, ahead of
     /// [`finish_io`](Self::finish_io) or
     /// [`send_response`](Self::send_response), returning what to send, if
     /// the IO protocol protects it; the platform then updates the CQE length
-    /// to match. Platforms that send responses as they are return `resp`.
+    /// to match. It may do so in place, in the
+    /// [`reply_room`](Self::reply_room) bytes of `buf` past the response.
+    /// Platforms that send responses as they are return them as they are.
     ///
     /// # Errors
     ///
     /// As for [`send_response`](Self::send_response): `NotEnoughSpace` or
-    /// `SessionTransportError`. The core then records the error in the CQE.
+    /// `SessionTransportError`; `InvalidArg` if `len` exceeds `buf`. The
+    /// core then records the error in the CQE.
     async fn seal_response<'a>(
         &'a self,
         io: &mut Self::Io,
-        resp: &'a HsmDmaBuf,
+        buf: &'a mut HsmDmaBuf,
+        len: usize,
     ) -> HsmResult<&'a HsmDmaBuf> {
         let _ = io;
-        Ok(resp)
+        let buf: &'a HsmDmaBuf = buf;
+        if len > buf.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        Ok(&buf[..len])
     }
 
     /// Copies out-of-band item `index` of `io` from the host into `dst`;

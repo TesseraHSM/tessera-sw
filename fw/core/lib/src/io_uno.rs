@@ -97,14 +97,15 @@ impl<P: HsmPal> Hsm<P> {
         // in-session reply is sealed first, so that it can go that way too.
         let op_result = match op_result {
             Ok(reply) => {
-                let len = reply.resp.map_or(0, |r| r.len());
+                let len = reply.resp.as_ref().map_or(0, UnoResp::len);
                 io.cqe().set_ok_ex(len as u32, reply.sess);
                 match reply.resp {
                     Some(resp) => {
-                        let sealed = if self.pal().reply_needs_seal(&io) {
-                            self.pal().seal_response(&mut io, resp).await
-                        } else {
-                            Ok(resp)
+                        let sealed = match resp {
+                            UnoResp::Exchange(buf, len) if self.pal().reply_needs_seal(&io) => {
+                                self.pal().seal_response(&mut io, buf, len).await
+                            }
+                            resp => Ok(resp.into_plain()),
                         };
                         match sealed {
                             Ok(resp) => {
@@ -340,7 +341,7 @@ impl<P: HsmPal> Hsm<P> {
         };
 
         Ok(UnoReply {
-            resp: Some(resp),
+            resp: Some(UnoResp::Plain(resp)),
             sess,
             ddi_failed: false,
         })
@@ -401,7 +402,10 @@ impl<P: HsmPal> Hsm<P> {
             );
         }
 
-        let capacity = ddi::tbor::exchange_capacity(opcode, src_len, dst_len);
+        // Room past the response, too, for the platform to protect it in
+        // place (an in-session reply's padding and trailer on Uno).
+        let capacity =
+            ddi::tbor::exchange_capacity(opcode, src_len, dst_len) + self.pal().reply_room(io);
         if capacity > allocation.len() {
             self.pal()
                 .dma_grow(io, &mut allocation, capacity)
@@ -467,10 +471,10 @@ impl<P: HsmPal> Hsm<P> {
                     .len()
             }
         };
-        let resp = &allocation.into_buffer()[..resp_len];
+        let resp = allocation.into_buffer();
 
         Ok(UnoReply {
-            resp: Some(resp),
+            resp: Some(UnoResp::Exchange(resp, resp_len)),
             sess: HsmCqeSession {
                 ctrl: session_ctrl,
                 id,
@@ -608,12 +612,41 @@ fn flush_session_id<S: HsmSqe + ?Sized>(sqe: &S) -> HsmResult<u16> {
 /// A handler's successful outcome, ready to send to the host.
 struct UnoReply<'s> {
     /// Response to send; `None` for a command without one (flush).
-    resp: Option<&'s HsmDmaBuf>,
+    resp: Option<UnoResp<'s>>,
     /// CQE session fields.
     sess: HsmCqeSession,
     /// A valid transport response carried a failed DDI command; undo, not
     /// commit.
     ddi_failed: bool,
+}
+
+/// The bytes of a reply.
+enum UnoResp<'s> {
+    /// Sent as they are.
+    Plain(&'s HsmDmaBuf),
+    /// The first `len` bytes of the exchange buffer, which the platform can
+    /// protect there in place (see [`HsmIoController::reply_room`]).
+    Exchange(&'s mut HsmDmaBuf, usize),
+}
+
+impl<'s> UnoResp<'s> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Plain(resp) => resp.len(),
+            Self::Exchange(_, len) => *len,
+        }
+    }
+
+    /// The reply as it is.
+    fn into_plain(self) -> &'s HsmDmaBuf {
+        match self {
+            Self::Plain(resp) => resp,
+            Self::Exchange(buf, len) => {
+                let buf: &'s HsmDmaBuf = buf;
+                &buf[..len]
+            }
+        }
+    }
 }
 
 /// Whether an MBOR command referenced by `session_ctrl` / `op` requires

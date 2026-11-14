@@ -17,7 +17,8 @@
 //! a partial-block path; the padding count is its last byte, encrypted
 //! and authenticated with the message, so the frame needs no AAD. The
 //! ciphertext starts the frame, so it is opened in place and the message
-//! is left at offset 0 of the exchange buffer.
+//! is left at offset 0 of the exchange buffer; a response encoded there is
+//! sealed there too, in place, given [`SEALED_ROOM`] bytes past it.
 //!
 //! Requests are opened with the session's VM→HSM transport key, responses
 //! sealed with the HSM→VM key under a fresh IV: the platform's
@@ -46,6 +47,9 @@ pub const SEALED_BLOCK_LEN: usize = 16;
 
 /// Length of the `iv ‖ tag` frame trailer.
 pub const SEALED_TRAILER_LEN: usize = SESSION_TRANSPORT_IV_LEN + SESSION_TRANSPORT_TAG_LEN;
+
+/// Most bytes sealing adds past a message: its padding, then the trailer.
+pub const SEALED_ROOM: usize = SEALED_BLOCK_LEN + SEALED_TRAILER_LEN;
 
 /// Whether `sqe`'s request and response travel in a sealed frame: a TBOR
 /// command that runs within (or closes) a session.
@@ -139,15 +143,61 @@ pub async fn sealed_seal<'a, P>(
 where
     P: HsmAesGcm + HsmSessionManager + HsmAlloc + HsmRng,
 {
-    let frame_len = sealed_frame_len(msg.len());
-    let pt_len = frame_len - SEALED_TRAILER_LEN;
-    let frame = pal.dma_alloc(io, frame_len)?;
-    let (pt, trailer) = frame.split_at_mut(pt_len);
+    let frame = pal.dma_alloc(io, sealed_frame_len(msg.len()))?;
     // Both buffers are DMA memory, which the CPU reads uncached: burst
     // copy rather than a load per word.
-    msg.copy_to_slice(&mut pt[..msg.len()]);
-    pt[msg.len()..pt_len - 1].fill(0);
-    pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
+    msg.copy_to_slice(&mut frame[..msg.len()]);
+    seal_frame(pal, io, id, frame, msg.len()).await?;
+    Ok(frame)
+}
+
+/// Seals the response held in the first `msg_len` bytes of `buf` as
+/// [`sealed_seal`] does, but in place, in the up to [`SEALED_ROOM`] bytes
+/// of `buf` past it, if it has them; returns the frame.
+///
+/// # Errors
+///
+/// As for [`sealed_seal`]; `InvalidArg` if `msg_len` exceeds `buf`.
+pub async fn sealed_seal_in_place<'a, P>(
+    pal: &'a P,
+    io: &P::Io,
+    id: HsmSessId,
+    buf: &'a mut HsmDmaBuf,
+    msg_len: usize,
+) -> HsmResult<&'a HsmDmaBuf>
+where
+    P: HsmAesGcm + HsmSessionManager + HsmAlloc + HsmRng,
+{
+    let frame_len = sealed_frame_len(msg_len);
+    if buf.len() < frame_len {
+        let buf: &'a HsmDmaBuf = buf;
+        if msg_len > buf.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        return sealed_seal(pal, io, id, &buf[..msg_len]).await;
+    }
+    let frame = &mut buf[..frame_len];
+    seal_frame(pal, io, id, frame, msg_len).await?;
+    Ok(frame)
+}
+
+/// Seals the message in the first `msg_len` bytes of `frame`, which is
+/// [`sealed_frame_len`]`(msg_len)` long: pads it, then encrypts it in place
+/// under a fresh IV, writing the trailer.
+async fn seal_frame<P>(
+    pal: &P,
+    io: &P::Io,
+    id: HsmSessId,
+    frame: &mut HsmDmaBuf,
+    msg_len: usize,
+) -> HsmResult<()>
+where
+    P: HsmAesGcm + HsmSessionManager + HsmRng,
+{
+    let pt_len = frame.len() - SEALED_TRAILER_LEN;
+    let (pt, trailer) = frame.split_at_mut(pt_len);
+    pt[msg_len..pt_len - 1].fill(0);
+    pt[pt_len - 1] = (pt_len - 1 - msg_len) as u8;
     let key = pal
         .session_transport_key(io, id, HsmSessionTransportDir::M2h)
         .map_err(|_| HsmError::SessionTransportError)?;
@@ -158,8 +208,7 @@ where
     }
     pal.gcm_encrypt_in_place(io, key, iv, 0, pt, tag)
         .await
-        .map_err(|_| HsmError::SessionTransportError)?;
-    Ok(frame)
+        .map_err(|_| HsmError::SessionTransportError)
 }
 
 /// Message length of the padded plaintext `pt`, whole blocks, or `None` if
