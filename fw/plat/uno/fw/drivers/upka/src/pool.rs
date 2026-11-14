@@ -217,6 +217,27 @@ pub(crate) struct StagedCmd {
     pub(crate) arg3: u32,
 }
 
+impl StagedCmd {
+    /// Stores this command at `slot` a field at a time. A whole-struct
+    /// store compiles to a `memmove` call, as the compiler cannot rule out
+    /// `slot` overlapping the source, and every PKA command takes one.
+    #[inline(always)]
+    fn store_to(self, slot: &mut StagedCmd) {
+        let StagedCmd {
+            opcode,
+            result,
+            arg1,
+            arg2,
+            arg3,
+        } = self;
+        slot.opcode = opcode;
+        slot.result = result;
+        slot.arg1 = arg1;
+        slot.arg2 = arg2;
+        slot.arg3 = arg3;
+    }
+}
+
 /// Where a staged command is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TicketState {
@@ -405,13 +426,13 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         match engine {
             Some(id) => {
                 self.ticket_free &= !(1u64 << t);
-                self.tickets[t as usize].cmd = cmd;
+                cmd.store_to(&mut self.tickets[t as usize].cmd);
                 self.start_ticket(id, t);
             }
             None => {
                 let q = self.reserve_queue_slot(true)?;
                 self.ticket_free &= !(1u64 << t);
-                self.tickets[t as usize].cmd = cmd;
+                cmd.store_to(&mut self.tickets[t as usize].cmd);
                 self.tickets[t as usize].state = TicketState::Queued(q);
                 self.queue_slots[q as usize].ticket = t;
             }
