@@ -190,6 +190,7 @@ mod round_trips {
     use openssl::hash::MessageDigest;
     use openssl::nid::Nid;
     use openssl::pkey::PKey;
+    use openssl::pkey::Private;
     use openssl::pkey::Public;
     use openssl::sign::Verifier;
     use tsra_api::HsmAesCbcAlgo;
@@ -1842,8 +1843,8 @@ mod round_trips {
             ed.with_session(|session| {
                 ed.with_unwrapping_key(session, |_unwrap_priv, unwrap_pub| {
                     let mut wrap = HsmRsaAesWrapAlgo::new(
-                        crate::rsaimport::WRAP_HASH,
-                        crate::rsaimport::WRAP_KEK_BYTES,
+                        crate::import::WRAP_HASH,
+                        crate::import::WRAP_KEK_BYTES,
                     );
                     HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, &pkcs8)
                         .map_err(|e| EngineError::wrap("external RSA-AES wrap", e))
@@ -2715,6 +2716,385 @@ mod round_trips {
         let _ = std::fs::remove_file(&blob_path);
         Ok(())
     }
+
+    /// A software key on `curve` (an OpenSSL curve name) with its digests:
+    /// the `EVP_MD` for engine signing and the `MessageDigest` for software
+    /// verification.
+    #[allow(unsafe_code)]
+    fn software_ec_key(
+        curve: &str,
+    ) -> EngineResult<(PKey<Private>, *const ffi::EVP_MD, MessageDigest)> {
+        // SAFETY: the EVP_sha* accessors return process-lifetime constants.
+        let (nid, evp_md, md) = unsafe {
+            match curve {
+                "P-256" => (
+                    Nid::X9_62_PRIME256V1,
+                    ffi::EVP_sha256(),
+                    MessageDigest::sha256(),
+                ),
+                "P-384" => (Nid::SECP384R1, ffi::EVP_sha384(), MessageDigest::sha384()),
+                "P-521" => (Nid::SECP521R1, ffi::EVP_sha512(), MessageDigest::sha512()),
+                other => return Err(EngineError::Other(format!("no test curve {other}"))),
+            }
+        };
+        let group = EcGroup::from_curve_name(nid).map_err(|e| EngineError::wrap("ec group", e))?;
+        let ec = EcKey::generate(&group).map_err(|e| EngineError::wrap("gen sw ec", e))?;
+        let key = PKey::from_ec_key(ec).map_err(|e| EngineError::wrap("wrap sw ec", e))?;
+        Ok((key, evp_md, md))
+    }
+
+    /// Wrap `pkcs8` against the HSM's unwrapping public key, as an external
+    /// party holding that key would for `tsra.wrapped_key`.
+    fn wrap_for_import(engine: &Engine, pkcs8: &[u8]) -> EngineResult<Vec<u8>> {
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let data = slot
+            .get(engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        data.with_session(|session| {
+            data.with_unwrapping_key(session, |_unwrap_priv, unwrap_pub| {
+                let mut wrap = tsra_api::HsmRsaAesWrapAlgo::new(
+                    crate::import::WRAP_HASH,
+                    crate::import::WRAP_KEK_BYTES,
+                );
+                HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, pkcs8)
+                    .map_err(|e| EngineError::wrap("external RSA-AES wrap", e))
+            })
+        })
+    }
+
+    /// The DER public key of the live `raw`.
+    #[allow(unsafe_code)]
+    fn public_der(raw: *mut ffi::EVP_PKEY) -> EngineResult<Vec<u8>> {
+        // SAFETY: raw is a live EVP_PKEY; up-ref it so the wrapper owns its own
+        // reference.
+        let key: PKey<Public> = unsafe {
+            ffi::EVP_PKEY_up_ref(raw);
+            PKey::from_ptr(raw.cast())
+        };
+        key.public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode public key", e))
+    }
+
+    /// Sign through the engine key `raw` with `evp_md` and assert the signature
+    /// verifies under the software key `sw` with `md`.
+    fn assert_signs_as(
+        raw: *mut ffi::EVP_PKEY,
+        sw: &PKey<Private>,
+        evp_md: *const ffi::EVP_MD,
+        md: MessageDigest,
+    ) -> EngineResult<()> {
+        let msg = b"engine ecdsa signing with an imported key";
+        let sig = evp_digest_sign(raw, msg, evp_md);
+        let mut verifier =
+            Verifier::new(md, sw).map_err(|e| EngineError::wrap("init verifier", e))?;
+        verifier
+            .update(msg)
+            .map_err(|e| EngineError::wrap("verifier update", e))?;
+        assert!(
+            verifier
+                .verify(&sig)
+                .map_err(|e| EngineError::wrap("verify", e))?,
+            "the engine key's signature must verify under the software key"
+        );
+        Ok(())
+    }
+
+    /// Import a software EC key on `curve` through `EVP_PKEY_keygen` from each
+    /// source — `tsra.input_key` as PKCS#8 and as SEC1 DER, `tsra.wrapped_key`
+    /// — and check the result is that key: same public key, its signatures
+    /// verify in software, and the masked blob reloads with the same public
+    /// key. Also imports it as a `keyAgreement` key (derives) and as a session
+    /// key without a blob (signs). Backend-agnostic.
+    #[allow(unsafe_code)]
+    pub(super) fn run_ec_import(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(
+            &engine,
+        )?;
+
+        let (sw, evp_md, md) = software_ec_key(curve)?;
+        let sw_pub = sw
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode sw pub", e))?;
+        let pkcs8 = sw
+            .private_key_to_pkcs8()
+            .map_err(|e| EngineError::wrap("encode pkcs8", e))?;
+        let sec1 = sw
+            .ec_key()
+            .and_then(|ec| ec.private_key_to_der())
+            .map_err(|e| EngineError::wrap("encode sec1", e))?;
+        let wrapped = wrap_for_import(&engine, &pkcs8)?;
+
+        let tag = format!("{curve}-{}", std::process::id());
+        let pkcs8_path = dir.join(format!("ec-import-pkcs8-{tag}.der"));
+        let sec1_path = dir.join(format!("ec-import-sec1-{tag}.der"));
+        let wrapped_path = dir.join(format!("ec-import-wrapped-{tag}.bin"));
+        let blob_path = dir.join(format!("ec-import-masked-{tag}.bin"));
+        for (path, bytes) in [
+            (&pkcs8_path, &pkcs8),
+            (&sec1_path, &sec1),
+            (&wrapped_path, &wrapped),
+        ] {
+            let _ = std::fs::remove_file(path);
+            write_key_material(path, bytes).map_err(|e| EngineError::wrap("write source", e))?;
+        }
+        let path_str = |p: &Path| {
+            p.to_str()
+                .map(str::to_owned)
+                .ok_or(EngineError::Other("path".into()))
+        };
+
+        for (option, source) in [
+            ("tsra.input_key", &pkcs8_path),
+            ("tsra.input_key", &sec1_path),
+            ("tsra.wrapped_key", &wrapped_path),
+        ] {
+            let _ = std::fs::remove_file(&blob_path);
+            let raw = try_armed_keygen(
+                engine_raw,
+                curve,
+                Some(&blob_path),
+                &[(option, &path_str(source)?)],
+            )
+            .map_err(|e| {
+                EngineError::Other(format!("{option} {} import: {e}", source.display()))
+            })?;
+            assert_eq!(public_der(raw)?, sw_pub, "imported public key ({option})");
+            assert_signs_as(raw, &sw, evp_md, md)?;
+
+            let uri = format!("tsra://{};type=ec", blob_path.display());
+            let reloaded = crate::keyload::load_key(
+                &engine,
+                slot.get(&engine)
+                    .ok_or(EngineError::NullParam("engine_data"))?,
+                &uri,
+            )?;
+            assert_eq!(
+                public_der(reloaded)?,
+                sw_pub,
+                "reloaded public key ({option})"
+            );
+            assert_signs_as(reloaded, &sw, evp_md, md)?;
+            // SAFETY: raw and reloaded are the owning keys from keygen/load.
+            unsafe {
+                ffi::EVP_PKEY_free(raw);
+                ffi::EVP_PKEY_free(reloaded);
+            }
+        }
+
+        // keyAgreement: derives against a software peer.
+        let (peer, _, _) = software_ec_key(curve)?;
+        let raw = try_armed_keygen(
+            engine_raw,
+            curve,
+            Some(&blob_path),
+            &[
+                ("tsra.input_key", &path_str(&pkcs8_path)?),
+                ("tsra.key_usage", "keyAgreement"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("keyAgreement import: {e}")))?;
+        assert_eq!(public_der(raw)?, sw_pub, "imported keyAgreement public key");
+        let secret = derive_masked(engine_raw, raw, peer.as_ptr().cast(), None);
+        assert!(
+            !secret.is_empty(),
+            "the imported keyAgreement key must derive"
+        );
+        // SAFETY: raw is the owning key from keygen.
+        unsafe { ffi::EVP_PKEY_free(raw) };
+
+        // Session key: no blob needed.
+        let raw = try_armed_keygen(
+            engine_raw,
+            curve,
+            None,
+            &[
+                ("tsra.input_key", &path_str(&pkcs8_path)?),
+                ("tsra.session", "true"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("session import: {e}")))?;
+        assert_eq!(public_der(raw)?, sw_pub, "imported session public key");
+        assert_signs_as(raw, &sw, evp_md, md)?;
+        // SAFETY: raw is the owning key from keygen.
+        unsafe { ffi::EVP_PKEY_free(raw) };
+
+        // Teardown (see run_keygen for the release ordering contract).
+        let _ = slot.take(&mut engine)?;
+        tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        for p in [&pkcs8_path, &sec1_path, &wrapped_path, &blob_path] {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+
+    /// EC imports that must fail with nothing written: both sources, no
+    /// `tsra.masked_key`/`tsra.session`, a key on another curve (either
+    /// source), an RSA key or RSA wrapped blob, a corrupted or truncated blob,
+    /// a missing or symlinked source file. Backend-agnostic.
+    #[allow(unsafe_code)]
+    pub(super) fn run_ec_import_rejects(data: EngineData, dir: &Path) -> EngineResult<()> {
+        use openssl::rsa::Rsa;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        let (p384, _, _) = software_ec_key("P-384")?;
+        let pkcs8 = p384
+            .private_key_to_pkcs8()
+            .map_err(|e| EngineError::wrap("encode pkcs8", e))?;
+        let wrapped = wrap_for_import(&engine, &pkcs8)?;
+        let rsa = PKey::from_rsa(Rsa::generate(2048).map_err(|e| EngineError::wrap("gen rsa", e))?)
+            .map_err(|e| EngineError::wrap("wrap rsa", e))?;
+        let rsa_pkcs8 = rsa
+            .private_key_to_pkcs8()
+            .map_err(|e| EngineError::wrap("encode rsa pkcs8", e))?;
+        let rsa_wrapped = wrap_for_import(&engine, &rsa_pkcs8)?;
+        let mut corrupted = wrapped.clone();
+        if let Some(last) = corrupted.last_mut() {
+            *last ^= 1;
+        }
+        let truncated = wrapped[..wrapped.len() / 2].to_vec();
+
+        let tag = std::process::id();
+        let file = |name: &str| dir.join(format!("ec-import-reject-{name}-{tag}"));
+        let sources = [
+            ("pkcs8", &pkcs8),
+            ("wrapped", &wrapped),
+            ("rsa", &rsa_pkcs8),
+            ("rsa-wrapped", &rsa_wrapped),
+            ("corrupted", &corrupted),
+            ("truncated", &truncated),
+        ];
+        for (name, bytes) in sources {
+            let _ = std::fs::remove_file(file(name));
+            write_key_material(&file(name), bytes)
+                .map_err(|e| EngineError::wrap("write source", e))?;
+        }
+        let symlink = file("symlink");
+        let _ = std::fs::remove_file(&symlink);
+        std::os::unix::fs::symlink(file("pkcs8"), &symlink)
+            .map_err(|e| EngineError::wrap("symlink source", e))?;
+        let missing = file("missing");
+        let _ = std::fs::remove_file(&missing);
+        let blob = file("masked");
+        let s = |p: &Path| p.to_str().unwrap_or_default().to_owned();
+
+        let cases: [(&str, &str, Option<&Path>, Vec<(&str, String)>, &str); 10] = [
+            (
+                "both sources",
+                "P-384",
+                Some(blob.as_path()),
+                vec![
+                    ("tsra.input_key", s(&file("pkcs8"))),
+                    ("tsra.wrapped_key", s(&file("wrapped"))),
+                ],
+                "mutually exclusive",
+            ),
+            (
+                "no masked_key or session",
+                "P-384",
+                None,
+                vec![("tsra.input_key", s(&file("pkcs8")))],
+                "need tsra.masked_key",
+            ),
+            (
+                "input_key on another curve",
+                "P-256",
+                Some(blob.as_path()),
+                vec![("tsra.input_key", s(&file("pkcs8")))],
+                "is on curve secp384r1",
+            ),
+            (
+                "wrapped_key on another curve",
+                "P-256",
+                Some(blob.as_path()),
+                vec![("tsra.wrapped_key", s(&file("wrapped")))],
+                "unwrap EC key",
+            ),
+            (
+                "RSA input_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.input_key", s(&file("rsa")))],
+                "not an EC key",
+            ),
+            (
+                "RSA wrapped_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.wrapped_key", s(&file("rsa-wrapped")))],
+                "unwrap EC key",
+            ),
+            (
+                "corrupted wrapped_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.wrapped_key", s(&file("corrupted")))],
+                "unwrap EC key",
+            ),
+            (
+                "truncated wrapped_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.wrapped_key", s(&file("truncated")))],
+                "unwrap EC key",
+            ),
+            (
+                "missing input_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.input_key", s(&missing))],
+                "masked key",
+            ),
+            (
+                "symlinked input_key",
+                "P-384",
+                Some(blob.as_path()),
+                vec![("tsra.input_key", s(&symlink))],
+                "masked key",
+            ),
+        ];
+        for (name, curve, masked, opts, expected) in cases {
+            let _ = std::fs::remove_file(&blob);
+            let opts: Vec<(&str, &str)> = opts.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let result = try_armed_keygen(engine_raw, curve, masked, &opts);
+            if let Ok(raw) = result {
+                // SAFETY: raw is the owning key from keygen.
+                unsafe { ffi::EVP_PKEY_free(raw) };
+                return Err(EngineError::Other(format!("{name}: the import must fail")));
+            }
+            let err = result.err().unwrap_or_default();
+            assert!(
+                err.contains(expected),
+                "{name}: expected {expected:?} in {err}"
+            );
+            assert!(!blob.exists(), "{name}: no masked blob may be written");
+        }
+
+        // Teardown (see run_keygen for the release ordering contract).
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        for name in [
+            "pkcs8",
+            "wrapped",
+            "rsa",
+            "rsa-wrapped",
+            "corrupted",
+            "truncated",
+            "symlink",
+            "masked",
+        ] {
+            let _ = std::fs::remove_file(file(name));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3117,6 +3497,41 @@ mod sim {
             .unwrap();
             round_trips::run_keygen(data, &scratch.0, curve).unwrap();
         }
+    }
+
+    // Import a software key into the HSM through the real EVP_PKEY_keygen path
+    // — the ABI equivalent of `openssl genpkey -engine tsra -algorithm EC
+    // -pkeyopt ec_paramgen_curve:<curve> -pkeyopt tsra.input_key:<der>
+    // -pkeyopt tsra.masked_key:<path>` — from every source, per supported
+    // curve (see round_trips::run_ec_import).
+    #[test]
+    #[serial]
+    fn ec_import_via_pkey_method_matches_software_key() {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let scratch = Scratch::new("ec-import");
+            let data = EngineData::new();
+            data.open_hsm_with(
+                caller_settings(&scratch),
+                HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+            )
+            .unwrap();
+            round_trips::run_ec_import(data, &scratch.0, curve).unwrap();
+        }
+    }
+
+    // Bad EC imports fail with nothing written (see
+    // round_trips::run_ec_import_rejects).
+    #[test]
+    #[serial]
+    fn ec_import_rejects_bad_input() {
+        let scratch = Scratch::new("ec-import-reject");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_ec_import_rejects(data, &scratch.0).unwrap();
     }
 
     // Import an external RSA key into the HSM through the real EVP_PKEY_keygen
@@ -3596,6 +4011,26 @@ mod hw_tests {
             round_trips::run_keygen(data, &std::env::temp_dir(), curve)?;
         }
         Ok(())
+    }
+
+    /// Hardware EC import from every source and the rejected inputs, same flow
+    /// as the simulator tests (see [`super::round_trips::run_ec_import`] and
+    /// [`super::round_trips::run_ec_import_rejects`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine ec_import_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn ec_import_from_env_smoke() -> EngineResult<()> {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let data = EngineData::new();
+            data.open_hsm_from_env()?;
+            round_trips::run_ec_import(data, &std::env::temp_dir(), curve)?;
+        }
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_ec_import_rejects(data, &std::env::temp_dir())
     }
 
     /// Hardware ECDH round trips, same flow as the simulator test (see

@@ -28,6 +28,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use ddi_sock_server as _;
+use openssl::cipher_ctx::CipherCtx;
+use openssl::cipher_ctx::CipherCtxFlags;
 use openssl::ec::EcGroup;
 use openssl::ec::EcKey;
 use openssl::encrypt::Encrypter;
@@ -35,6 +37,7 @@ use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::PKey;
 use openssl::pkey::Private;
+use openssl::pkey::Public;
 use openssl::rsa::Padding;
 use openssl::rsa::Rsa;
 use openssl::sign::RsaPssSaltlen;
@@ -443,6 +446,134 @@ fn keygen_ec_key_via_engine_capi() {
     // SAFETY: raw is the owning EVP_PKEY from EVP_PKEY_keygen.
     unsafe { ffi::EVP_PKEY_free(raw) };
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The DER SubjectPublicKeyInfo of `pkey`.
+#[allow(unsafe_code)]
+fn pub_der(pkey: *mut ffi::EVP_PKEY) -> Vec<u8> {
+    // SAFETY: two-pass i2d on a live key: the size query, then the encoding
+    // into a buffer of that size.
+    unsafe {
+        let len = ffi::i2d_PUBKEY(pkey, std::ptr::null_mut());
+        assert!(len > 0, "i2d_PUBKEY size");
+        let mut der = vec![0u8; usize::try_from(len).unwrap()];
+        let mut p = der.as_mut_ptr();
+        assert_eq!(ffi::i2d_PUBKEY(pkey, &mut p), len, "i2d_PUBKEY");
+        der
+    }
+}
+
+/// Wrap `pkcs8` for `tsra.wrapped_key` the way an external party does with
+/// OpenSSL 1.1.1 against the exported unwrapping key `unwrap_pub`: RSA-OAEP
+/// (SHA-256, MGF1 SHA-256, no label) of a random 32-byte KEK, followed by the
+/// AES-256 key wrap with padding (RFC 5649) of the key under that KEK.
+fn external_rsa_aes_wrap(unwrap_pub: &PKey<Public>, pkcs8: &[u8]) -> Vec<u8> {
+    let mut kek = [0u8; 32];
+    openssl::rand::rand_bytes(&mut kek).unwrap();
+    let mut rsa = Encrypter::new(unwrap_pub).unwrap();
+    rsa.set_rsa_padding(Padding::PKCS1_OAEP).unwrap();
+    rsa.set_rsa_oaep_md(MessageDigest::sha256()).unwrap();
+    rsa.set_rsa_mgf1_md(MessageDigest::sha256()).unwrap();
+    let mut wrapped = vec![0u8; rsa.encrypt_len(&kek).unwrap()];
+    let len = rsa.encrypt(&kek, &mut wrapped).unwrap();
+    wrapped.truncate(len);
+
+    // `openssl enc` refuses wrap ciphers in 1.1.1; EVP needs WRAP_ALLOW.
+    let mut kwp = CipherCtx::new().unwrap();
+    kwp.set_flags(CipherCtxFlags::FLAG_WRAP_ALLOW);
+    kwp.encrypt_init(
+        Some(openssl::cipher::Cipher::aes_256_wrap_pad()),
+        Some(&kek),
+        None,
+    )
+    .unwrap();
+    kwp.cipher_update_vec(pkcs8, &mut wrapped).unwrap();
+    kwp.cipher_final_vec(&mut wrapped).unwrap();
+    wrapped
+}
+
+/// EC import over the real C ABI from both sources: a software P-384 key as
+/// `tsra.input_key`, and as `tsra.wrapped_key` wrapped with plain OpenSSL
+/// against the unwrapping key the engine exports. Each import carries the
+/// software key's public key, signs verifiably under it, and writes a masked
+/// blob that loads through `ENGINE_load_private_key`.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn import_ec_key_via_engine_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+
+    let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
+    let sw = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+    let sw_pub = sw.public_key_to_der().unwrap();
+    let pkcs8 = sw.private_key_to_pkcs8().unwrap();
+    let input = dir.join("ec_import_input.der");
+    write_secret(&input, &pkcs8);
+
+    let unwrap_key = capi_keygen(
+        e,
+        ffi::EVP_PKEY_RSA as std::ffi::c_int,
+        &[
+            ("rsa_keygen_bits", "2048"),
+            ("tsra.key_usage", "keyWrapping"),
+        ],
+    );
+    let unwrap_pub = PKey::public_key_from_der(&pub_der(unwrap_key)).unwrap();
+    // SAFETY: unwrap_key is the owning EVP_PKEY from capi_keygen.
+    unsafe { ffi::EVP_PKEY_free(unwrap_key) };
+    let wrapped = dir.join("ec_import_wrapped.bin");
+    write_secret(&wrapped, &external_rsa_aes_wrap(&unwrap_pub, &pkcs8));
+
+    let blob = dir.join("ec_import_masked.bin");
+    for (option, source) in [("tsra.input_key", &input), ("tsra.wrapped_key", &wrapped)] {
+        let _ = std::fs::remove_file(&blob);
+        let imported = capi_keygen(
+            e,
+            ffi::EVP_PKEY_EC as std::ffi::c_int,
+            &[
+                ("ec_paramgen_curve", "P-384"),
+                (option, source.to_str().unwrap()),
+                ("tsra.masked_key", blob.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(pub_der(imported), sw_pub, "{option}: imported public key");
+
+        let msg = b"engine ecdsa signing with a capi-imported key";
+        let sig = evp_digest_sign_sha384(imported, msg);
+        let mut verifier = Verifier::new(MessageDigest::sha384(), &sw).unwrap();
+        verifier.update(msg).unwrap();
+        assert!(
+            verifier.verify(&sig).unwrap(),
+            "{option}: the signature must verify under the software key"
+        );
+
+        let uri = CString::new(format!("tsra://{};type=ec", blob.display())).unwrap();
+        // SAFETY: e is a live, initialised engine handle; uri is NUL-terminated.
+        let loaded = unsafe {
+            ffi::ENGINE_load_private_key(
+                e,
+                uri.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!loaded.is_null(), "{option}: the masked blob must load");
+        assert_eq!(pub_der(loaded), sw_pub, "{option}: loaded public key");
+        // SAFETY: both are owning EVP_PKEYs (keygen, ENGINE_load_private_key).
+        unsafe {
+            ffi::EVP_PKEY_free(imported);
+            ffi::EVP_PKEY_free(loaded);
+        }
+    }
+
+    // SAFETY: e is ours.
+    unsafe {
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

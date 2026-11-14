@@ -14,7 +14,9 @@
 //! HSM generation is **opt-in per context**: it runs only when the caller armed
 //! the `EVP_PKEY_CTX` with the `tsra.masked_key:<path>` or
 //! `tsra.session:true` control string (the same parameter names the OpenSSL
-//! 3.x provider uses). An unarmed context —
+//! 3.x provider uses). `tsra.input_key` or `tsra.wrapped_key` imports an
+//! external key instead of generating one; it needs the same arming and is
+//! refused without it, never handed to the software keygen. An unarmed context —
 //! e.g. a software keygen that reached this method because an application made
 //! the engine the process default — is delegated wholesale to the built-in
 //! keygen. This mirrors the ownership rule of
@@ -88,13 +90,20 @@ pub struct KeygenParams {
     pub session: bool,
     /// Key usage (`tsra.key_usage`, default digitalSignature).
     pub key_usage: EcKeyUsage,
+    /// `tsra.input_key`: plaintext DER private key to import instead of
+    /// generating one.
+    pub input_key: Option<PathBuf>,
+    /// `tsra.wrapped_key`: pre-wrapped key blob to import instead of
+    /// generating one.
+    pub wrapped_key: Option<PathBuf>,
 }
 
 /// Caller-supplied HSM EC key generation, invoked through the `EVP_PKEY_METHOD`
 /// `keygen` hook when the context was armed. Implement on a marker type and
 /// pass it to [`new_ec_pkey_method`].
 pub trait EcKeygenHandler {
-    /// Generate an EC key pair on the HSM for `params` and fill `pkey` (assign
+    /// Generate an EC key pair on the HSM for `params`, or import the one
+    /// `params.input_key` / `params.wrapped_key` names, and fill `pkey` (assign
     /// an `EC_KEY` carrying the public half and whatever state later operations
     /// need). `engine` is the ENGINE the context was created with; bind the key
     /// to it so the engine outlives the key. Write the masked blob to
@@ -137,6 +146,20 @@ struct CtxState {
     session: Option<bool>,
     key_usage: Option<EcKeyUsage>,
     output_file: Option<PathBuf>,
+    input_key: Option<PathBuf>,
+    wrapped_key: Option<PathBuf>,
+}
+
+impl CtxState {
+    /// Armed for the HSM: a masked blob path or a session key was requested.
+    fn armed(&self) -> bool {
+        self.masked_key_path.is_some() || self.session == Some(true)
+    }
+
+    /// An external key is to be imported instead of generated.
+    fn importing(&self) -> bool {
+        self.input_key.is_some() || self.wrapped_key.is_some()
+    }
 }
 
 /// Side table: `EVP_PKEY_CTX` address → state. See the module docs for the
@@ -350,6 +373,14 @@ fn ctrl_str_inner(
                 state.masked_key_path = Some(PathBuf::from(value_str));
                 Ok(())
             }
+            "input_key" => {
+                state.input_key = Some(PathBuf::from(value_str));
+                Ok(())
+            }
+            "wrapped_key" => {
+                state.wrapped_key = Some(PathBuf::from(value_str));
+                Ok(())
+            }
             "session" => {
                 state.session = Some(match value_str {
                     "true" => true,
@@ -422,13 +453,17 @@ fn keygen_inner<H: EcKeygenHandler>(
         return Err(EngineError::NullParam("pkey"));
     }
 
-    let armed = ctx_state()
-        .lock()
-        .get(&(ctx as usize))
-        .filter(|state| state.masked_key_path.is_some() || state.session == Some(true))
-        .cloned();
+    let state = ctx_state().lock().get(&(ctx as usize)).cloned();
+    if let Some(s) = &state
+        && s.importing()
+        && !s.armed()
+    {
+        return Err(EngineError::Other(
+            "tsra.input_key and tsra.wrapped_key need tsra.masked_key or tsra.session:true".into(),
+        ));
+    }
 
-    let Some(state) = armed else {
+    let Some(state) = state.filter(CtxState::armed) else {
         // Unarmed: a software keygen that merely resolved to our method.
         // Delegate wholesale to the built-in.
         let d = defaults()?;
@@ -454,6 +489,8 @@ fn keygen_inner<H: EcKeygenHandler>(
         masked_key_path: state.masked_key_path,
         session: state.session.unwrap_or(false),
         key_usage: state.key_usage.unwrap_or(EcKeyUsage::DigitalSignature),
+        input_key: state.input_key,
+        wrapped_key: state.wrapped_key,
     };
     H::keygen(&engine, &params, pkey)
 }
@@ -842,6 +879,79 @@ mod tests {
         unsafe { ffi::EVP_PKEY_CTX_free(ctx) };
     }
 
+    /// An import source without `tsra.masked_key` or `tsra.session:true` is
+    /// refused: it must not fall through to the software keygen and hand back
+    /// a fresh software key.
+    #[test]
+    #[allow(unsafe_code)]
+    fn keygen_inner_refuses_unarmed_import() {
+        let source = Some(PathBuf::from("/dev/null"));
+        let states = [
+            CtxState {
+                input_key: source.clone(),
+                ..CtxState::default()
+            },
+            CtxState {
+                wrapped_key: source.clone(),
+                ..CtxState::default()
+            },
+            CtxState {
+                input_key: source,
+                session: Some(false),
+                ..CtxState::default()
+            },
+        ];
+        for state in states {
+            let ctx = software_keygen_ctx();
+            ctx_state().lock().insert(ctx as usize, state);
+            // SAFETY: ctx is live; EVP_PKEY_new allocates the out-key.
+            unsafe {
+                let pkey = ffi::EVP_PKEY_new();
+                let r = keygen_inner::<PanicKeygen>(ctx, pkey);
+                assert!(
+                    r.is_err_and(|e| e.to_string().contains("need tsra.masked_key")),
+                    "an unarmed import must be refused"
+                );
+                assert_eq!(
+                    ffi::EVP_PKEY_base_id(pkey),
+                    ffi::NID_undef as c_int,
+                    "no key may be generated"
+                );
+                ffi::EVP_PKEY_free(pkey);
+            }
+            ctx_state().lock().remove(&(ctx as usize));
+            // SAFETY: ctx is ours.
+            unsafe { ffi::EVP_PKEY_CTX_free(ctx) };
+        }
+    }
+
+    /// An import with `tsra.masked_key` takes the armed path (here it stops at
+    /// the curve the side table did not record).
+    #[test]
+    #[allow(unsafe_code)]
+    fn keygen_inner_armed_import_takes_armed_path() {
+        let ctx = software_keygen_ctx();
+        ctx_state().lock().insert(
+            ctx as usize,
+            CtxState {
+                engine: 1, // non-zero placeholder; never dereferenced
+                masked_key_path: Some(PathBuf::from("/dev/null")),
+                wrapped_key: Some(PathBuf::from("/dev/null")),
+                ..CtxState::default()
+            },
+        );
+        // SAFETY: ctx is live; EVP_PKEY_new allocates the out-key.
+        unsafe {
+            let pkey = ffi::EVP_PKEY_new();
+            let r = keygen_inner::<PanicKeygen>(ctx, pkey);
+            assert!(r.is_err_and(|e| e.to_string().contains("requires a curve")));
+            ffi::EVP_PKEY_free(pkey);
+        }
+        ctx_state().lock().remove(&(ctx as usize));
+        // SAFETY: ctx is ours.
+        unsafe { ffi::EVP_PKEY_CTX_free(ctx) };
+    }
+
     #[test]
     fn keygen_inner_rejects_null_pkey() {
         let r = keygen_inner::<PanicKeygen>(std::ptr::null_mut(), null_mut());
@@ -937,6 +1047,27 @@ mod tests {
             ffi::EVP_PKEY_CTX_free(dctx);
             ffi::EVP_PKEY_free(pkey);
         }
+    }
+
+    /// `tsra.input_key` and `tsra.wrapped_key` are recorded on the context.
+    #[test]
+    #[allow(unsafe_code)]
+    fn ctrl_str_records_import_sources() {
+        let ctx = software_keygen_ctx();
+        ctx_state().lock().insert(ctx as usize, CtxState::default());
+        for (key, value) in [
+            ("tsra.input_key", "/in/ec.der"),
+            ("tsra.wrapped_key", "/in/ec.wrapped"),
+        ] {
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            ctrl_str_inner(ctx, key.as_ptr(), value.as_ptr()).unwrap();
+        }
+        let state = ctx_state().lock().remove(&(ctx as usize)).unwrap();
+        assert_eq!(state.input_key, Some(PathBuf::from("/in/ec.der")));
+        assert_eq!(state.wrapped_key, Some(PathBuf::from("/in/ec.wrapped")));
+        // SAFETY: ctx is ours.
+        unsafe { ffi::EVP_PKEY_CTX_free(ctx) };
     }
 
     // Unknown tsra.* options must be rejected, not silently ignored or
