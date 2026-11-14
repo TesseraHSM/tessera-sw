@@ -112,12 +112,12 @@ pub fn serve(
             ("POST", "/v1/sd/clone") => {
                 let receiver = wire::evidence(request)?;
                 evidence::verify_peer(&receiver, env.policy())?;
-                let backup = domain.create_peer_backup(&session, &receiver, |key| {
+                let backup = domain.create_peer_backup(&session, &receiver, |report| {
                     Ok(Evidence {
                         mfgr_cert_chain: manufacturer.clone(),
                         owner_cert_chain: Vec::new(),
                         part_owner_cert_chain: pid_chain.clone(),
-                        report: key.report.clone(),
+                        report: report.to_vec(),
                     })
                 })?;
                 Ok(wire::encode_backup(&backup))
@@ -173,7 +173,15 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
     evidence::verify_peer(&receiver, env.policy())?;
     display::write_peer_evidence(&mut std::io::stdout().lock(), &receiver, "Receiver")?;
     let backup = wire::backup(&client.post("/v1/sd/clone", &wire::encode_evidence(&receiver))?)?;
-    evidence::verify_peer(&backup.sender_evidence, env.policy())?;
+    let (_, public) =
+        evidence::verify_attested_key(&receiver, env.policy(), &env.policy().pota_spki_thumbprint)?;
+    evidence::verify_transfer_source(
+        &backup.sender_evidence,
+        env.policy(),
+        &env.policy().pota_spki_thumbprint,
+        &backup.pok_peer_backup,
+        Some(&public),
+    )?;
     display::write_peer_evidence(
         &mut std::io::stdout().lock(),
         &backup.sender_evidence,

@@ -312,10 +312,14 @@ impl FileStore {
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
         let record = jzon::parse(&text).with_context(|| format!("parse {}", path.display()))?;
+        let transfer_record = name == "leaf-backup.json"
+            || name == "leaf-resealed.json"
+            || (name.starts_with("leaf-remote-") && name.ends_with(".json"));
         anyhow::ensure!(
             record["version"].as_u32() == Some(VERSION)
-                || ((name == RECOVERY_FILE || name == REMOTE_FILE)
-                    && record["version"].as_u32() == Some(RECOVERY_VERSION)),
+                || (name == RECOVERY_FILE && record["version"].as_u32() == Some(RECOVERY_VERSION))
+                || (name == REMOTE_FILE && record["version"].as_u32() == Some(3))
+                || (transfer_record && record["version"].as_u32() == Some(2)),
             "unsupported or missing recovery record version in {}",
             path.display(),
         );

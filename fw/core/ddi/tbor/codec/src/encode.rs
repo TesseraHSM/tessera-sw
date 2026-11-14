@@ -15,6 +15,80 @@ use tsra_fw_hsm_pal_traits::HsmError;
 
 use crate::toc::*;
 
+/// Write alignment padding for a derive-generated encoder.
+#[doc(hidden)]
+#[inline(never)]
+pub fn write_padding(
+    buf: &mut [u8],
+    data_start: usize,
+    data_offset: &mut usize,
+    toc_offset: usize,
+    alignment: usize,
+) -> Result<(), HsmError> {
+    if alignment == 0 {
+        return Err(HsmError::InvalidArg);
+    }
+    let start = data_start
+        .checked_add(*data_offset)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let len = (alignment - start % alignment) % alignment;
+    let end = start
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let toc_end = toc_offset
+        .checked_add(4)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let word = build_toc_offset_len(TocType::Padding as u8, len, *data_offset);
+    buf.get_mut(toc_offset..toc_end)
+        .ok_or(HsmError::TborBufferTooSmall)?
+        .copy_from_slice(&word.to_be_bytes());
+    buf[start..end].fill(0);
+    *data_offset = end - data_start;
+    Ok(())
+}
+
+/// Write a bounded byte field for a derive-generated encoder.
+#[doc(hidden)]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn write_buffer(
+    buf: &mut [u8],
+    data_start: usize,
+    data_offset: &mut usize,
+    toc_offset: usize,
+    entry_type: u8,
+    data: &[u8],
+    min_len: usize,
+    max_len: usize,
+) -> Result<(), HsmError> {
+    let len = data.len();
+    if !(min_len..=max_len).contains(&len) {
+        return Err(HsmError::TborDataTooLarge);
+    }
+    let start = data_start
+        .checked_add(*data_offset)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let end = start
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let next_offset = end - data_start;
+    if next_offset > MAX_DATA_SIZE {
+        return Err(HsmError::TborDataTooLarge);
+    }
+    let toc_end = toc_offset
+        .checked_add(4)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let word = build_toc_offset_len(entry_type, len, *data_offset);
+    buf.get_mut(toc_offset..toc_end)
+        .ok_or(HsmError::TborBufferTooSmall)?
+        .copy_from_slice(&word.to_be_bytes());
+    buf[start..end].copy_from_slice(data);
+    *data_offset = next_offset;
+    Ok(())
+}
+
 // ── RequestEncoder ─────────────────────────────────────────────────────
 
 /// Fluent builder for encoding a TBOR request message.

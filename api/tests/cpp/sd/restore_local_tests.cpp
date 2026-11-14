@@ -28,11 +28,10 @@ namespace
 {
 // Create the security domain, capturing the 276-byte device-local backup and
 // the 260-byte masking-key backup that RestoreLocalBackup consumes. Sizes the
-// three output buffers via the probe/fill convention. Records a gtest failure
+// four output buffers via the probe/fill convention. Records a gtest failure
 // and returns false on error.
 bool create_sd_capture(
     tsra_handle session,
-    std::vector<uint8_t> &masked,
     const tsra_sd_cert_chain &receiver_chain,
 
     const tsra_sd_evidence &receiver,
@@ -41,12 +40,10 @@ bool create_sd_capture(
     std::vector<uint8_t> &out_mk
 )
 {
-    tsra_buffer masked_buf{ masked.data(), static_cast<uint32_t>(masked.size()) };
     tsra_buffer policy_buf{ const_cast<uint8_t *>(policy.data()),
                             static_cast<uint32_t>(policy.size()) };
     tsra_sd_create_remote_backup_params params{
         &policy_buf,
-        &masked_buf,
         receiver_chain,
         &receiver,
     };
@@ -57,10 +54,19 @@ bool create_sd_capture(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
+    std::vector<uint8_t> report;
+    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
-    for (int attempt = 0; attempt < 4; ++attempt)
+    for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(session, &params, &remote_buf, &local_buf, &mk_buf);
+        err = tsra_sd_create_remote_backup(
+            session,
+            &params,
+            &remote_buf,
+            &local_buf,
+            &mk_buf,
+            &report_buf
+        );
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -80,6 +86,8 @@ bool create_sd_capture(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+        report.resize(report_buf.len);
+        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {
@@ -216,7 +224,6 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_roundtrip)
         std::vector<uint8_t> sd_mk_backup;
         ASSERT_TRUE(create_sd_capture(
             dev1.session,
-            key.masked,
             evidence.receiver_chain(),
             evidence.get(),
             dev1.policy,
@@ -330,7 +337,6 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_is_one_shot)
         std::vector<uint8_t> sd_mk_backup;
         ASSERT_TRUE(create_sd_capture(
             ctx.session,
-            key.masked,
             evidence.receiver_chain(),
             evidence.get(),
             ctx.policy,

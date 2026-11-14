@@ -4,10 +4,9 @@
 //! `SdRestoreRemoteBackup` (opcode `0x0C`) over the TBOR transport at the
 //! DDI layer.
 //!
-//! Restores a security domain from a **remote** backup: HPKE-Auth-opens the
-//! caller-supplied `src_remote_backup` (an HPKE seal of BKS3) with the
-//! receiver's masked sealing key — authenticated by the sender's attested
-//! key — recovers `SDMK` from `prev_sd_mk_backup`, and returns the
+//! Restores a security domain from a **remote** backup: verifies the mandatory
+//! SdBackup report and target policy before Base-opening with the actual
+//! recipient key, recovers `SDMK` from `prev_sd_mk_backup`, and returns the
 //! device-local backups so the domain can later be restored locally without
 //! the sender. Runs **inside an already-open session**; the request carries
 //! the active session id, which the firmware dispatcher cross-checks against
@@ -31,8 +30,8 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 
 /// Issue `SdRestoreRemoteBackup` (opcode `0x0C`) on the active session.
 ///
-/// HPKE-opens `src_remote_backup` with the receiver's `masked_sealing_key`
-/// (authenticated by the sender key recovered from `sender_cert_chain`),
+/// Verifies the operation report and bindings before Base-opening
+/// `src_remote_backup` with the receiver's `masked_sealing_key`,
 /// recovers `SDMK` from `prev_sd_mk_backup`, and returns the refreshed
 /// device-local backups.
 ///
@@ -43,12 +42,10 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the backup, exactly
 ///   [`MASKED_SEALING_KEY_LEN`] bytes.
-/// * `sender_cert_chain` - The sender key certificate chain (spec
-///   `SndrCertChain`): always required, anchored to the policy SATA key,
-///   its leaf is the sender public key. Transmitted out of band.
-/// * `sender_evidence` - Sender attestation evidence (cert chains and
-///   report), transmitted out of band. Verified only when the policy sets
-///   `require_trusted_sa_key`; otherwise ignored.
+/// * `sender_pid_pub_key` - Raw 96-byte big-endian P-384 X || Y of the report signer.
+/// * `sender_evidence` - Required SdBackup report and optional identity chains.
+///   Trusted-SA policy requires SAPOTA-authorized PID chains; otherwise
+///   verification checks integrity, not authenticated SA identity.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `src_remote_backup` - The remote backup to restore, exactly
 ///   [`POK_REMOTE_BACKUP_LEN`] bytes.
@@ -64,7 +61,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
     partition: &HsmPartition,
     session_id: u16,
     masked_sealing_key: &[u8],
-    sender_cert_chain: &[HsmCert<'_>],
+    sender_pid_pub_key: &[u8],
     sender_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     src_remote_backup: &[u8],
@@ -81,23 +78,24 @@ pub(crate) fn sd_restore_remote_backup_ex(
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
+    let sender_pid_pub_key = sender_pid_pub_key
+        .try_into()
+        .map_err(|_| HsmError::InvalidArgument)?;
 
     // Flatten the sender cert chain and evidence into descriptors + shared
     // OOB items.  The sender chain is pushed first so its descriptor
     // indices precede the evidence items.
     let mut oob: Vec<&[u8]> = Vec::new();
-    let sender_chain = push_cert_chain(sender_cert_chain, &mut oob, EVIDENCE_CHAIN_MAX_CERTS)?;
 
-    // The attestation evidence is verified by the firmware only when the
-    // policy sets `require_trusted_sa_key`; empty evidence ships no DER
-    // bytes.
-    let sender = push_evidence_if_present(sender_evidence, &mut oob)?;
+    // The report is mandatory; the device decides whether supplied identity
+    // chains must establish trusted-SA authorization.
+    let sender = super::sd_evidence::push_transfer_evidence(sender_evidence, &mut oob)?;
 
     let req = TborSdRestoreRemoteBackupReq {
         session_id,
         masked_sealing_key,
         policy,
-        sender_cert_chain: sender_chain,
+        sender_pid_pub_key,
         sender_mfgr_cert_chain: sender.mfgr,
         sender_owner_cert_chain: sender.owner,
         sender_part_owner_cert_chain: sender.part_owner,

@@ -4,10 +4,9 @@
 //! `SdRestorePeerBackup` (opcode `0x0F`) over the TBOR transport at the DDI
 //! layer.
 //!
-//! Restores a security domain from a **peer** backup: HPKE-Auth-opens the
-//! caller-supplied `pok_peer_backup` (an HPKE seal of BKS3) with the
-//! receiver's masked sealing key — authenticated by the source peer's
-//! attested key — recovers `SDMK` from `prev_sd_mk_backup`, and returns the
+//! Restores a security domain from a **peer** backup: verifies the source PID's
+//! POTA-authorized SdBackup report and policy before Base-opening with the
+//! actual recipient key, recovers `SDMK` from `prev_sd_mk_backup`, and returns the
 //! device-local backups. Peer cloning is gated by the security domain's
 //! `allow_peer_cloning` policy flag. Runs **inside an already-open
 //! session**; the request carries the active session id, which the firmware
@@ -81,7 +80,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
 
     // Flatten the source evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
-    let src = push_evidence(src_evidence, &mut oob)?;
+    let src = super::sd_evidence::push_transfer_evidence(src_evidence, &mut oob)?;
 
     let req = TborSdRestorePeerBackupReq {
         session_id,

@@ -1,326 +1,118 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! TBOR `SdResealRemoteBackup` handler.
-//!
-//! Reseals a security-domain **remote backup** from a source recipient to
-//! a destination recipient, run by a Sealing
-//! Authority.  The caller-supplied `src_remote_backup` is HPKE-Auth-opened
-//! with the masked receiver key (recovering the 48-byte BKS3), then
-//! HPKE-Auth-sealed to the destination receiver, returning
-//! `dst_remote_backup`.  The same receiver private key is used both to
-//! open the source and to authenticate the reseal ("for simplicity, the
-//! same HPKE private key").
-//!
-//! Flow:
-//!
-//! 1. Decode the request; gate to a Crypto-Officer, `Active` session on an
-//!    `Initialized` partition (parity with the other SD commands).
-//! 2. Verify **both** attestation evidences against the **request** policy
-//!    (not the local one): each of the source-sender and destination-
-//!    receiver evidence requires manufacturer and partition-owner chains,
-//!    with device-owner evidence optional. Supplied chains are validated;
-//!    the partition-owner chain is anchored to the request policy's POTA key (the
-//!    client partitions' owner), and each report's v2
-//!    `policy_hash` must equal `SHA-384(policy)`.  This binds both sides to
-//!    the same policy (whose digest covers the POTA key).  The attested
-//!    COSE_Keys are recovered as `SndrPub` (source sender) and `DstRcvrPub`
-//!    (destination receiver).
-//! 3. Unmask the `masked_sealing_key` to recover the receiver private key
-//!    `RcvrPriv` (must be an [`SdSealing`](HsmVaultKeyKind::SdSealing) key)
-//!    and derive `RcvrPub` on-device.
-//! 4. HPKE-Auth-open `src_remote_backup` (`sk_r = RcvrPriv`, sender
-//!    auth-key `SndrPub`) to recover the BKS3.
-//! 5. HPKE-Auth-seal the recovered BKS3 to `DstRcvrPub` with `RcvrPriv` as
-//!    the sender-authentication key, returning `dst_remote_backup`
-//!    (161 B). IO teardown scrubs BKS3 and the recovered `RcvrPriv`.
-//!
-//! **Stateless:** nothing is persisted, no vault writes, no undo log.
-//!
-//! This command is **Crypto-Officer-only**.
+//! Verify the client's signed SD operation before opening and PID-signing a reseal.
 
-use tsra_fw_core_crypto_hpke::open;
-use tsra_fw_core_crypto_hpke::seal;
-use tsra_fw_core_crypto_hpke::AuthParams;
-use tsra_fw_core_crypto_hpke::HpkeOpenConfig;
-use tsra_fw_core_crypto_hpke::HpkeSealConfig;
-use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
-use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
-use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
-use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupReq;
-use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupResp;
-use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_fw_hsm_byte_order as byte_order;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
-use tsra_fw_hsm_pal_traits::HsmDigestForm;
-use tsra_fw_hsm_pal_traits::HsmDmaBuf;
-use tsra_fw_hsm_pal_traits::HsmEccCurve;
-use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPartState;
-use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_ddi_tbor_types::*;
+use tsra_fw_hsm_pal_traits::*;
 
 use super::masking_key_id_for_scope;
+use super::sd_backup;
+use super::sd_transfer;
 use super::validate_crypto_officer_active_session;
 use crate::part_state;
 
-/// NIST curve for the SD sealing keys and the remote-backup HPKE seal.
-const SD_CURVE: HsmEccCurve = HsmEccCurve::P384;
-
-/// HPKE ciphersuite for the remote-backup seal.
-const HPKE_SUITE: HpkeSuite = HpkeSuite::DHKemP384Sha384AesGcm256;
-
-/// Length of the BKS3 carried inside the remote backup.
-const BKS3_LEN: usize = 48;
-
-/// SEC1 uncompressed point tag (`0x04 ‖ X ‖ Y`).
-const SEC1_UNCOMPRESSED: u8 = 0x04;
-
-/// Length of the HPKE encapsulated key `enc` (P-384 SEC1 uncompressed).
-const SD_ENC_LEN: usize = 1 + 2 * 48;
-
-// A remote backup is `enc(97) ‖ ct(BKS3 48 + GCM tag 16 = 64)` = 161 B.
-const _: () = assert!(SD_ENC_LEN + (BKS3_LEN + 16) == POK_REMOTE_BACKUP_LEN);
-
-/// Handle a TBOR `SdResealRemoteBackup` request.
-///
-/// No partition lock or undo log is required: the command **persists
-/// nothing** — it validates evidence, unmasks the caller-supplied receiver
-/// key, HPKE-opens the source backup, and returns a freshly resealed
-/// backup.  It makes no observable state change.
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    // Session/state gating + masking-key routing use only the shared
-    // `decode` view.  `mk_key_id` is `Copy`, so it outlives the view.
-    let mk_key_id = {
-        let req = TborSdResealRemoteBackupReq::decode(&*cmd_buf.request_mut())?;
-        let sess_id = HsmSessId::from(u16::from(req.session_id()));
-        validate_crypto_officer_active_session(pal, io, sess_id)?;
-
-        // The SD masking keys are provisioned by `PartFinal`, so the
-        // partition must be finalized (`Initialized`).
+    let mk_id = {
+        let req = TborSdResealRemoteBackupReq::decode(cmd.request())?;
+        validate_crypto_officer_active_session(
+            pal,
+            io,
+            HsmSessId::from(u16::from(req.session_id())),
+        )?;
         if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
-
-        // Route the masked receiver key to its masking key via the
-        // cleartext, tag-bound metadata (before unmasking).
-        let scope = peek_metadata(req.masked_sealing_key())?
-            .usage_flags()
-            .scope();
-        masking_key_id_for_scope(pal, io, scope)?
+        masking_key_id_for_scope(
+            pal,
+            io,
+            peek_metadata(req.masked_sealing_key())?
+                .usage_flags()
+                .scope(),
+        )?
     };
-
-    // Both attestation evidences are mandatory side-band data carried in
-    // the out-of-band SGL page.
-
-    // Allocate the fixed-size resealed backup in the IO scope so it
-    // survives the crypto scratch allocator's reset.
-    let pok = pal.dma_alloc(io, POK_REMOTE_BACKUP_LEN)?;
-
-    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-        let coord = SD_CURVE.priv_key_len();
-
-        // Attested keys recovered in phase 1 and consumed by the crypto in
-        // phase 2: `pk_sndr` is the source sender's key (the unseal's
-        // sender-auth key); `pk_dst` is the destination receiver's key (the
-        // reseal's recipient).
-        let pk_sndr = alloc.dma_alloc(ATTESTED_KEY_LEN)?;
-        let pk_dst = alloc.dma_alloc(ATTESTED_KEY_LEN)?;
-
-        // ── Phase 1: bind both evidences to the request policy ──────────
-        {
-            let req = TborSdResealRemoteBackupReq::decode(&*cmd_buf.request_mut())?;
-            let policy = req.policy();
-
-            // The source and destination must share this policy: each v2
-            // report's `policy_hash` must equal its SHA-384 digest.
-            let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            pal.hash(
+    let envelope = pal.dma_alloc(io, POK_REMOTE_BACKUP_LEN)?;
+    let report = pal.dma_alloc(io, SD_BACKUP_REPORT_MAX_LEN)?;
+    let report_len = pal
+        .alloc_scoped_async(io, async |alloc| {
+            let req = TborSdResealRemoteBackupReq::decode(cmd.request())?;
+            let policy = super::policy::from_bytes(req.policy())?;
+            let pota = policy.pota_spki_thumbprint;
+            let hash = sd_transfer::policy_hash(pal, io, alloc, req.policy()).await?;
+            let ev = req.src_evidence();
+            let (signer, source_report) = sd_transfer::source(
+                pal,
                 io,
-                HsmHashAlgo::Sha384,
-                policy,
-                expected,
-                HsmDigestForm::Standard,
+                alloc,
+                &EvidenceRefs {
+                    mfgr_chain: ev.mfgr_cert_chain(),
+                    owner_chain: ev.owner_cert_chain(),
+                    part_owner_chain: ev.part_owner_cert_chain(),
+                    report: ev.evidence(),
+                },
+                Some(pota),
+                None,
             )
             .await?;
-
-            let part_policy = super::policy::from_bytes(policy)?;
-            let pota = part_policy.pota_spki_thumbprint;
-
-            // Source **sender** evidence → `SndrPub`; its report's policy
-            // digest must match the request policy.
-            let src_hash = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            {
-                let ev = req.src_evidence();
-                verify_evidence(
-                    pal,
-                    io,
-                    &EvidenceRefs {
-                        mfgr_chain: ev.mfgr_cert_chain(),
-                        owner_chain: ev.owner_cert_chain(),
-                        part_owner_chain: ev.part_owner_cert_chain(),
-                        report: ev.evidence(),
-                    },
-                    &TrustAnchors {
-                        part_owner_anchor: pota,
-                        require_sd_sealing: true,
-                    },
-                    pk_sndr,
-                    Some(src_hash),
-                )
-                .await?;
-            }
-            if src_hash[..POLICY_HASH_LEN] != expected[..POLICY_HASH_LEN] {
+            let ev = req.dest_evidence();
+            let recipient = alloc.dma_alloc(97)?;
+            let dst_hash = alloc.dma_alloc(48)?;
+            verify_evidence(
+                pal,
+                io,
+                &EvidenceRefs {
+                    mfgr_chain: ev.mfgr_cert_chain(),
+                    owner_chain: ev.owner_cert_chain(),
+                    part_owner_chain: ev.part_owner_cert_chain(),
+                    report: ev.evidence(),
+                },
+                &TrustAnchors {
+                    part_owner_anchor: pota,
+                    require_sd_sealing: true,
+                },
+                recipient,
+                Some(dst_hash),
+            )
+            .await?;
+            if hash[..] != dst_hash[..] {
                 return Err(HsmError::InvalidArg);
             }
-
-            // Destination **receiver** evidence → `DstRcvrPub`; its report's
-            // policy digest must match the request policy too (so source and
-            // destination provably share it, including the POTA key it
-            // embeds).
-            let dst_hash = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            {
-                let ev = req.dest_evidence();
-                verify_evidence(
-                    pal,
-                    io,
-                    &EvidenceRefs {
-                        mfgr_chain: ev.mfgr_cert_chain(),
-                        owner_chain: ev.owner_cert_chain(),
-                        part_owner_chain: ev.part_owner_cert_chain(),
-                        report: ev.evidence(),
-                    },
-                    &TrustAnchors {
-                        part_owner_anchor: pota,
-                        require_sd_sealing: true,
-                    },
-                    pk_dst,
-                    Some(dst_hash),
-                )
-                .await?;
-            }
-            if dst_hash[..POLICY_HASH_LEN] != expected[..POLICY_HASH_LEN] {
-                return Err(HsmError::InvalidArg);
-            }
-        }
-
-        // ── Phase 2: recover RcvrPriv, then HPKE open (source) → seal
-        // (destination).  The masked key and source backup are copied into
-        // crypto scratch so the request-buffer borrow is confined.
-        let masking_key = pal.vault_key(io, mk_key_id)?;
-
-        let blob = alloc.dma_alloc(MASKED_SEALING_KEY_LEN)?;
-        let src_backup = alloc.dma_alloc(POK_REMOTE_BACKUP_LEN)?;
-        {
-            let req = TborSdResealRemoteBackupReq::decode(&*cmd_buf.request_mut())?;
-            let msk = req.masked_sealing_key();
-            if msk.len() != blob.len() {
-                return Err(HsmError::InvalidArg);
-            }
-            blob.copy_from_slice(msk);
-            src_backup.copy_from_slice(req.src_remote_backup());
-        }
-
-        // Unmask into `blob`, copy the recovered private key out into its
-        // own scratch.
-        let unmask_res = async {
-            let view = unmask(pal, io, masking_key, blob).await?;
-            let rcvr_priv = alloc.dma_alloc(view.target_key.len())?;
-            rcvr_priv.copy_from_slice(view.target_key);
-            Ok::<_, HsmError>((view.key_kind, rcvr_priv))
-        }
-        .await;
-        let (key_kind, rcvr_priv) = unmask_res?;
-
-        let crypto_res = async {
-            if !matches!(key_kind, HsmVaultKeyKind::SdSealing) {
+            let blob = alloc.dma_alloc(MASKED_SEALING_KEY_LEN)?;
+            blob.copy_from_slice(req.masked_sealing_key());
+            let key = unmask(pal, io, pal.vault_key(io, mk_id)?, blob).await?;
+            if key.key_kind != HsmVaultKeyKind::SdSealing {
                 return Err(HsmError::UnsupportedKeyType);
             }
-
-            // Receiver public key (`RcvrPub`) in SEC1 BE, derived on-device
-            // from the recovered private key.  The PAL emits
-            // operand-order `X ‖ Y` into the coordinate region; converting
-            // in place yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
-            let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
-                .await?;
-            pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
-
-            // HPKE `open` requires a plaintext buffer at least the
-            // ciphertext length (`ct` = BKS3 + GCM tag = 64 B); the recovered
-            // BKS3 occupies its first `BKS3_LEN` bytes.
-            let pt_buf = alloc.dma_alloc(POK_REMOTE_BACKUP_LEN - SD_ENC_LEN)?;
-            let bks3 = alloc.dma_alloc(BKS3_LEN)?;
-            let inner = async {
-                // ── Open the source backup with RcvrPriv, authenticated by
-                // the source sender key (`SndrPub`).
-                let (enc, ct) = src_backup.split_at(SD_ENC_LEN);
-                let open_cfg = HpkeOpenConfig::auth(HPKE_SUITE, rcvr_priv, pk_r, &[], &[], pk_sndr);
-                let pt_len =
-                    open(pal, io, &open_cfg, enc, ct, Some(&mut pt_buf[..]), alloc).await?;
-                if pt_len != BKS3_LEN {
-                    return Err(HsmError::InvalidArg);
-                }
-                bks3.copy_from_slice(&pt_buf[..BKS3_LEN]);
-
-                // ── Reseal the BKS3 to the destination receiver
-                // (`DstRcvrPub`) with RcvrPriv as the sender-auth key.
-                let seal_cfg = HpkeSealConfig::auth(
-                    HPKE_SUITE,
-                    pk_dst,
-                    &[],
-                    &[],
-                    AuthParams {
-                        sk_s: rcvr_priv,
-                        pk_s: pk_r,
-                    },
-                );
-                let sizes = seal(pal, io, &seal_cfg, bks3, None, None, alloc).await?;
-                if sizes.enc_len + sizes.ct_len != POK_REMOTE_BACKUP_LEN {
-                    return Err(HsmError::InternalError);
-                }
-                let (enc_o, ct_o) = pok.split_at_mut(sizes.enc_len);
-                seal(pal, io, &seal_cfg, bks3, Some(enc_o), Some(ct_o), alloc).await?;
-                Ok::<(), HsmError>(())
-            }
-            .await;
-
-            inner
-        }
-        .await;
-
-        // Scrub the recovered receiver private key on every path.
-        crypto_res?;
-
-        Ok(())
-    })
-    .await?;
-
-    encode_response(cmd_buf, pok)
-}
-
-/// Encode the `SdResealRemoteBackup` response around the resealed backup.
-fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, pok: &HsmDmaBuf) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
+            let bks3 = alloc.dma_alloc(sd_backup::BKS3_LEN)?;
+            sd_transfer::open_backup(
+                pal,
+                io,
+                alloc,
+                key.target_key,
+                signer,
+                source_report,
+                req.src_remote_backup(),
+                hash,
+                bks3,
+            )
+            .await?;
+            sd_transfer::seal_backup(pal, io, alloc, hash, recipient, bks3, envelope, report).await
+        })
+        .await?;
+    cmd.encode_response(|buf| {
         let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
-            .dst_remote_backup(pok)?
+            .dst_remote_backup(envelope)?
+            .report(&report[..report_len])?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }

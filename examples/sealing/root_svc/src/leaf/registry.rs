@@ -179,7 +179,7 @@ impl Registration {
             .load(&filename("remote", &self.name)?)?
             .context("root has no saved remote backup for this leaf")?;
         anyhow::ensure!(
-            wire::blob(&record, "policy")? == bound,
+            record["version"].as_u32() == Some(2) && wire::blob(&record, "policy")? == bound,
             "saved backup policy mismatch"
         );
         anyhow::ensure!(
@@ -190,6 +190,27 @@ impl Registration {
         anyhow::ensure!(
             wire::chain(&record["receiver"], "chain")? == self.receiver_chain,
             "saved backup receiver does not match registration"
+        );
+        let source = wire::evidence(&record["sender"])?;
+        let recipient = evidence::cert_public(
+            self.receiver_chain
+                .last()
+                .context("missing saved receiver")?,
+        )?;
+        let pid = evidence::verify_transfer_source(
+            &source,
+            &policy,
+            &policy.pota_spki_thumbprint,
+            &wire::blob(&record, "pok_remote_backup")?,
+            Some(&recipient),
+        )?;
+        anyhow::ensure!(
+            spki_thumbprint(&pid)?
+                == policy
+                    .backup_part
+                    .context("policy has no backing partition")?
+                    .1,
+            "saved backup source PID mismatch"
         );
         Ok((policy, record))
     }
@@ -203,8 +224,27 @@ impl Registration {
         evidence: &Evidence,
         policy: &PartPolicy,
         binding: &JsonValue,
+        envelope: Option<&[u8]>,
     ) -> Result<()> {
-        evidence::verify_attested_key(evidence, policy, &policy.pota_spki_thumbprint)?;
+        if let Some(envelope) = envelope {
+            let pid = evidence::verify_transfer_source(
+                evidence,
+                policy,
+                &policy.pota_spki_thumbprint,
+                envelope,
+                None,
+            )?;
+            anyhow::ensure!(
+                spki_thumbprint(&pid)?
+                    == policy
+                        .backup_part
+                        .context("policy has no backing partition")?
+                        .1,
+                "creation source PID mismatch"
+            );
+        } else {
+            evidence::verify_peer(evidence, policy)?;
+        }
         self.check_binding(store, policy.as_bytes())?;
         let pta = evidence
             .part_owner_cert_chain
@@ -240,14 +280,19 @@ impl Registration {
         let original_binding = store
             .load(&filename("binding", &self.name)?)?
             .context("missing original creation binding")?;
-        self.verify_for_reseal(store, &original, &policy, &original_binding)?;
+        self.verify_for_reseal(
+            store,
+            &original,
+            &policy,
+            &original_binding,
+            Some(&wire::blob(&saved, "pok_remote_backup")?),
+        )?;
         let source = RemoteBackup {
             pok_remote_backup: wire::blob(&saved, "pok_remote_backup")?,
             evidence: original,
         };
         let destination = wire::evidence(&request["receiver"])?;
-        self.verify_for_reseal(store, &destination, &policy, &target_binding)?;
-        let sender = self.receiver(domain, session)?;
+        self.verify_for_reseal(store, &destination, &policy, &target_binding, None)?;
         let resealed = reseal_remote_backup(
             session,
             &policy,
@@ -255,11 +300,35 @@ impl Registration {
             &source,
             &destination,
         )?;
+        let (partition, _) = load_local_recovery(domain.env().store())?;
+        let sender_evidence = Evidence {
+            mfgr_cert_chain: device_cert_chain(&session.partition, 0)?,
+            owner_cert_chain: Vec::new(),
+            part_owner_cert_chain: domain
+                .env()
+                .part_owner_cert_chain(&session.partition, &partition.pta_cert_chain)?,
+            report: resealed.report,
+        };
+        let (_, recipient) =
+            evidence::verify_attested_key(&destination, &policy, &policy.pota_spki_thumbprint)?;
+        let pid = evidence::verify_transfer_source(
+            &sender_evidence,
+            &policy,
+            policy
+                .sapota_spki_thumbprint
+                .as_ref()
+                .context("policy has no SAPOTA")?,
+            &resealed.backup,
+            Some(&recipient),
+        )?;
         Ok(jzon::object! {
-            version: 1, policy: hex::encode(policy.as_bytes()),
-            pok_remote_backup: hex::encode(resealed),
+            version: 2, policy: hex::encode(policy.as_bytes()),
+            pok_remote_backup: hex::encode(resealed.backup),
             sd_mk_backup: saved["sd_mk_backup"].clone(),
-            sender: sender,
+            sender: jzon::object! {
+                pid_pub_key: hex::encode(pid),
+                evidence: wire::encode_evidence(&sender_evidence),
+            },
         })
     }
 
@@ -489,14 +558,26 @@ pub(crate) fn handle(
             let original_binding = registration
                 .instance_binding(store, "primary")?
                 .context("missing original creation binding")?;
-            registration.verify_for_reseal(store, &sender, policy, &original_binding)?;
-            let (pid, _) =
-                evidence::verify_attested_key(&sender, policy, &policy.pota_spki_thumbprint)?;
-            let pid = spki_thumbprint(&pid)?;
+            let envelope = wire::blob(request, "pok_remote_backup")?;
+            registration.verify_for_reseal(
+                store,
+                &sender,
+                policy,
+                &original_binding,
+                Some(&envelope),
+            )?;
+            let pid = evidence::verify_transfer_source(
+                &sender,
+                policy,
+                &policy.pota_spki_thumbprint,
+                &envelope,
+                None,
+            )?;
+            let pid_thumbprint = spki_thumbprint(&pid)?;
             anyhow::ensure!(
                 policy
                     .backup_part
-                    .is_some_and(|(_, thumbprint)| thumbprint == pid),
+                    .is_some_and(|(_, thumbprint)| thumbprint == pid_thumbprint),
                 "backup belongs to another partition"
             );
             anyhow::ensure!(
@@ -514,6 +595,14 @@ pub(crate) fn handle(
                 domain.env().policy(),
                 &domain.env().policy().pota_spki_thumbprint,
             )?;
+            evidence::verify_peer(&receiver, domain.env().policy())?;
+            evidence::verify_transfer_source(
+                &sender,
+                policy,
+                &policy.pota_spki_thumbprint,
+                &envelope,
+                Some(&public),
+            )?;
             anyhow::ensure!(
                 evidence::cert_public(
                     registration
@@ -524,7 +613,7 @@ pub(crate) fn handle(
                 "backup receiver evidence mismatch"
             );
             anyhow::ensure!(
-                request["version"].as_u32() == Some(1),
+                request["version"].as_u32() == Some(2),
                 "invalid backup version"
             );
             store.write_immutable(&filename("remote", name)?, request)?;

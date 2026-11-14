@@ -102,3 +102,25 @@ pub(crate) fn push_evidence<'a>(
         report: push_report(evidence.report, oob)?,
     })
 }
+
+/// Operation reports are always sent; SA identity chains remain optional.
+pub(crate) fn push_transfer_evidence<'a>(
+    evidence: &HsmSdEvidence<'a>,
+    oob: &mut Vec<&'a [u8]>,
+) -> HsmResult<EvidenceDescriptors> {
+    if evidence.report.is_empty() || evidence.report.len() > SD_BACKUP_REPORT_MAX_LEN {
+        return Err(HsmError::InvalidArgument);
+    }
+    let mut result = EvidenceDescriptors::empty();
+    for (chain, descriptors) in [
+        (evidence.mfgr_cert_chain, &mut result.mfgr),
+        (evidence.owner_cert_chain, &mut result.owner),
+        (evidence.part_owner_cert_chain, &mut result.part_owner),
+    ] {
+        if !chain.is_empty() {
+            *descriptors = push_cert_chain(chain, oob, EVIDENCE_CHAIN_MAX_CERTS)?;
+        }
+    }
+    result.report = push_report(evidence.report, oob)?;
+    Ok(result)
+}

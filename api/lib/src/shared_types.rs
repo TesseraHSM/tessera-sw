@@ -66,13 +66,24 @@ pub struct HsmSdEvidence<'a> {
 /// layer, so the wire type never surfaces to public callers.
 #[derive(Debug, Clone, Default)]
 pub struct HsmSdRemoteBackupResult {
-    /// Remote partition-owner-key backup (HPKE-Auth seal of BKS3).
+    /// Remote partition-owner-key backup (P-384 HPKE Base envelope of BKS3).
     pub pok_remote_backup: Vec<u8>,
+    /// PID-signed SdBackup operation report accompanying the remote envelope.
+    pub report: Vec<u8>,
     /// Local partition-owner-key backup (BKS3 masked under the
     /// partition-local masking key).
     pub pok_local_backup: Vec<u8>,
     /// Security-domain masking-key backup envelope.
     pub sd_mk_backup: Vec<u8>,
+}
+
+/// An SD peer export or reseal. Both artifacts must travel together.
+#[derive(Debug, Clone, Default)]
+pub struct HsmSdTransferResult {
+    /// Canonical P-384 HPKE Base backup envelope.
+    pub backup: Vec<u8>,
+    /// PID-signed SdBackup report with the transferred SD policy hash.
+    pub report: Vec<u8>,
 }
 
 /// Result of `sd_restore_remote_backup`: the refreshed device-local backups

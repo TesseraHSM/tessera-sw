@@ -55,15 +55,23 @@ pub fn encode_evidence(evidence: &Evidence) -> JsonValue {
 }
 
 pub fn backup(value: &JsonValue) -> Result<PeerBackup> {
-    Ok(PeerBackup {
+    anyhow::ensure!(
+        value["version"].as_u32() == Some(2),
+        "unsupported peer backup version"
+    );
+    let backup = PeerBackup {
         pok_peer_backup: blob(value, "peer_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
         sender_evidence: evidence(&value["sender"])?,
-    })
+    };
+    tsra_sealing_report::validate_sd_envelope(&backup.pok_peer_backup)?;
+    tsra_sealing_report::parse_sd_transfer_report(&backup.sender_evidence.report)?;
+    Ok(backup)
 }
 
 pub fn encode_backup(backup: &PeerBackup) -> JsonValue {
     jzon::object! {
+        version: 2,
         peer_backup: hex::encode(&backup.pok_peer_backup),
         sd_mk_backup: hex::encode(&backup.sd_mk_backup),
         sender: encode_evidence(&backup.sender_evidence),
@@ -72,13 +80,13 @@ pub fn encode_backup(backup: &PeerBackup) -> JsonValue {
 
 pub fn resealed_backup(value: &JsonValue) -> Result<ResealedBackup> {
     anyhow::ensure!(
-        value["version"].as_u32() == Some(1),
+        value["version"].as_u32() == Some(2),
         "invalid resealed backup version"
     );
     let backup = ResealedBackup {
         pok_remote_backup: blob(value, "pok_remote_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
-        sender_cert_chain: chain(&value["sender"], "chain")?,
+        sender_pid_pub_key: blob(&value["sender"], "pid_pub_key")?,
         sender_evidence: evidence(&value["sender"]["evidence"])?,
     };
     backup.validate()?;

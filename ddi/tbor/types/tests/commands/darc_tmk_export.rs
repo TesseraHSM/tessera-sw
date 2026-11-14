@@ -125,9 +125,9 @@ pub(crate) fn sd_initialized_session_with_data() -> ExportReady {
         .expect("PartFinal");
 
     // CreateSD provisions the SDMK and marks the partition SD-initialized.
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let (_masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
-    let create_req = backup_request(session.session_id, masked, &evidence, &policy);
+    let create_req = backup_request(session.session_id, &evidence, &policy);
     ctx.tbor_oob(&create_req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 

@@ -20,7 +20,6 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -30,15 +29,18 @@ pub const TBOR_OP_SD_CREATE_REMOTE_BACKUP: u8 = 0x0A;
 /// Exact on-the-wire length of a **masked** security-domain blob (a
 /// masked BKS3).  Retained as the shared length authority for the rest
 /// of the Security-Domain backup family (`SdReseal`, `SdRestore*`), which
-/// re-export it; **this** command's response is an HPKE-Auth seal sized
+/// re-export it; **this** command's response is an HPKE Base seal sized
 /// by [`POK_REMOTE_BACKUP_LEN`].
 pub const MASKED_SD_LEN: usize = 280;
 
 /// Exact on-the-wire length of the remote partition-owner-key backup (an
-/// HPKE-Auth seal of BKS3: `enc(97) ‖ ct(64)`).  Mirrors
+/// HPKE Base seal of BKS3: `header(161) || enc(97) || ct(48) || tag(16)`). Mirrors
 /// `tsra_fw_ddi_tbor_types::sd_create_remote_backup::
 /// POK_REMOTE_BACKUP_LEN`; the firmware schema is the length authority.
-pub const POK_REMOTE_BACKUP_LEN: usize = 161;
+pub const POK_REMOTE_BACKUP_LEN: usize = 322;
+
+/// Maximum PID-signed SD operation report length.
+pub const SD_BACKUP_REPORT_MAX_LEN: usize = 896;
 
 /// Exact on-the-wire length of the security-domain masking-key backup
 /// envelope (`SDMK` masked under `SDBMK`).  Mirrors the firmware
@@ -53,14 +55,6 @@ pub struct TborSdCreateRemoteBackupReq {
     /// SQE-carried session id by the dispatcher.
     #[tbor(session_id)]
     pub session_id: u16,
-
-    /// The sender's masked SD-sealing key (from `SdSealingKeyGen`),
-    /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
-    /// recover the sender's private ECDH key.  A fixed-length `[u8; N]`
-    /// field (a `min_len == max_len` buffer): the array type is the host
-    /// derive's exact-length form, mirroring the firmware `len = 280`.
-    #[tbor(align = 4)]
-    pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Receiver key certificate-chain descriptors (spec `RcvrCertChain`).
     /// Always present; validated and anchored to the policy **SATA** key,
@@ -86,18 +80,18 @@ pub struct TborSdCreateRemoteBackupReq {
     /// Receiver attestation-report (COSE_Sign1) descriptor.
     pub receiver_report: ReportDescriptor,
 
-    /// Unified partition policy describing the security domain to create.
-    /// Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified [`PartPolicy`] describing the security domain to create.
+    /// Encoded as its deterministic CBOR document of at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 }
 
 /// Host-facing TBOR `SdCreateRemoteBackup` response.
 #[tbor(response)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreateRemoteBackupResp {
-    /// Remote partition-owner-key backup: an HPKE-Auth seal of BKS3
-    /// (exactly [`POK_REMOTE_BACKUP_LEN`] = 161 B on the wire; the
+    /// Remote partition-owner-key backup: an HPKE Base seal of BKS3
+    /// (exactly [`POK_REMOTE_BACKUP_LEN`] = 322 B on the wire; the
     /// firmware schema is the length authority).  A fixed-length `[u8; N]`
     /// field so host decode enforces the exact length — rejecting any
     /// malformed frame — instead of allocating from the encoded length.
@@ -107,12 +101,18 @@ pub struct TborSdCreateRemoteBackupResp {
     /// partition-local masking key (exactly [`MASKED_SD_LEN`] = 280 B on
     /// the wire).  Persisted by the host and replayed to recover the
     /// security domain locally.
+    #[tbor(align = 4)]
     pub pok_local_backup: [u8; MASKED_SD_LEN],
 
     /// Security-domain masking-key backup: the freshly minted `SDMK`
     /// masked under the derived `SDBMK` (exactly [`SD_MK_BACKUP_LEN`] =
     /// 264 B on the wire).  Persisted by the host and replayed on restore.
+    #[tbor(align = 4)]
     pub sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
+
+    /// Required PID-signed SdBackup report accompanying the Base envelope.
+    #[tbor(min_len = 1, max_len = 896)]
+    pub report: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -125,19 +125,18 @@ mod tests {
     fn request_encodes_session_and_policy() {
         let req = TborSdCreateRemoteBackupReq {
             session_id: 9,
-            masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
             receiver_cert_chain: Vec::new(),
             receiver_mfgr_cert_chain: Vec::new(),
             receiver_owner_cert_chain: Vec::new(),
             receiver_part_owner_cert_chain: Vec::new(),
             receiver_report: ReportDescriptor::default(),
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
         };
 
         let mut buf = [0u8; 1024];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The maximum-length policy image must be carried in the data section.
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy image must be carried in the data section.
         assert!(
             frame.len() > crate::policy::PART_POLICY_MAX_LEN,
             "encoded frame must carry the policy"

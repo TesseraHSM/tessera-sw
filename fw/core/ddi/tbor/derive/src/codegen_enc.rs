@@ -348,17 +348,13 @@ fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream
 
     let pad_write = if has_padding {
         quote! {
-            let pad_len = (#align - ((DATA_START + self.data_offset) % #align)) % #align;
-            let pad_end = DATA_START + self.data_offset + pad_len;
-            if pad_end > self.buf.len() {
-                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
-            }
-            for j in 0..pad_len {
-                self.buf[DATA_START + self.data_offset + j] = 0;
-            }
-            let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, pad_len, self.data_offset);
-            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx, pad_word);
-            self.data_offset += pad_len;
+            tsra_fw_ddi_tbor::encode::write_padding(
+                self.buf,
+                DATA_START,
+                &mut self.data_offset,
+                HEADER_LEN + #pad_toc_idx * 4,
+                #align,
+            )?;
         }
     } else {
         quote! {}
@@ -400,33 +396,25 @@ fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream
         WireType::Buffer | WireType::SealedKey => {
             let min_l = f.min_len;
             let max_l = f.max_len;
-            let len_check = if f.fixed_len.is_some() || min_l > 0 || max_l < 8191 {
-                let effective_min = f.fixed_len.unwrap_or(min_l);
-                let effective_max = f.fixed_len.unwrap_or(max_l);
-                quote! {
-                    if !(#effective_min..=#effective_max).contains(&len) {
-                        return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
-                    }
-                }
-            } else {
-                quote! {}
-            };
+            let (effective_min, effective_max) =
+                if f.fixed_len.is_some() || min_l > 0 || max_l < 8191 {
+                    (f.fixed_len.unwrap_or(min_l), quote! { #max_l })
+                } else {
+                    (0, quote! { usize::MAX })
+                };
+            let effective_max = f.fixed_len.map_or(effective_max, |len| quote! { #len });
             quote! {
                 #pad_write
-                let off = self.data_offset;
-                let len = v.len();
-                #len_check
-                let end = DATA_START + off + len;
-                if end > self.buf.len() {
-                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
-                }
-                if self.data_offset + len > tsra_fw_ddi_tbor::MAX_DATA_SIZE {
-                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
-                }
-                self.buf[DATA_START + off..end].copy_from_slice(v);
-                self.data_offset += len;
-                let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, len, off);
-                tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+                tsra_fw_ddi_tbor::encode::write_buffer(
+                    self.buf,
+                    DATA_START,
+                    &mut self.data_offset,
+                    HEADER_LEN + #field_toc_idx * 4,
+                    #toc_type_id,
+                    v,
+                    #effective_min,
+                    #effective_max,
+                )?;
             }
         }
     }
@@ -473,17 +461,13 @@ fn gen_field_reserve(
 
     let pad_write = if has_padding {
         quote! {
-            let pad_len = (#align - ((DATA_START + self.data_offset) % #align)) % #align;
-            let pad_end = DATA_START + self.data_offset + pad_len;
-            if pad_end > self.buf.len() {
-                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
-            }
-            for j in 0..pad_len {
-                self.buf[DATA_START + self.data_offset + j] = 0;
-            }
-            let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, pad_len, self.data_offset);
-            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx, pad_word);
-            self.data_offset += pad_len;
+            tsra_fw_ddi_tbor::encode::write_padding(
+                self.buf,
+                DATA_START,
+                &mut self.data_offset,
+                HEADER_LEN + #pad_toc_idx * 4,
+                #align,
+            )?;
         }
     } else {
         quote! {}

@@ -18,8 +18,9 @@ inline constexpr uint32_t kMaskedSealingKeyLen = 280; ///< sealing priv scalar (
 inline constexpr uint32_t kMaskedSdLen = 280;         ///< masked BKS3 (48 B)
 inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 backup (48 B)
 inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
-/// Remote partition-owner-key backup: an HPKE-Auth seal (`enc(97) + ct(64)`).
-inline constexpr uint32_t kPokRemoteBackupLen = 161;
+/// SdBackup envelope: header(161) + enc(97) + ciphertext(48) + tag(16).
+inline constexpr uint32_t kPokRemoteBackupLen = 322;
+inline constexpr uint32_t kSdBackupReportCapacity = 896;
 
 // Security-domain provisioning helper for the sealing round-trip test.
 //
@@ -147,6 +148,12 @@ class SdEvidenceHolder
     const tsra_sd_evidence &get() const
     {
         return ev_;
+    }
+
+    void set_report(const std::vector<uint8_t> &report)
+    {
+        report_ = report;
+        wire();
     }
 
     /// The receiver key certificate chain (spec `RcvrCertChain`); anchored

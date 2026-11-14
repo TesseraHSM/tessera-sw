@@ -1,14 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Owned security-domain attestation evidence.
+//! Owned security-domain recipient attestation or source operation evidence.
 
 use tsra_api::HsmCert;
 use tsra_api::HsmSdEvidence;
 
-/// Owned attestation for a sender or receiver. Certificate chains are
-/// DER-encoded, root-first. The PID-signed report embeds that party's sealing
-/// public key.
+/// Certificate chains are DER-encoded, root-first. Recipient PublicKey reports
+/// attest sealing keys; source SdBackup reports bind an encrypted transfer.
+/// A signature-only software authority supplies an operation report and no
+/// hardware identity chains.
 #[derive(Clone)]
 pub struct Evidence {
     /// Manufacturer chain authenticating the PID.
@@ -17,7 +18,7 @@ pub struct Evidence {
     pub owner_cert_chain: Vec<Vec<u8>>,
     /// POTA/PTA/PID chain authenticating the same PID.
     pub part_owner_cert_chain: Vec<Vec<u8>>,
-    /// PID-signed COSE_Sign1 key report.
+    /// COSE_Sign1 PublicKey (recipient) or SdBackup (source) report.
     pub report: Vec<u8>,
 }
 

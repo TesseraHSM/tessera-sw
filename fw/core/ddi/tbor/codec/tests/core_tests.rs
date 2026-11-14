@@ -21,6 +21,63 @@ fn brand(b: &[u8]) -> &HsmDmaBuf {
     unsafe { HsmDmaBuf::from_raw(b) }
 }
 
+#[test]
+fn generated_encoder_helpers_preserve_aligned_wire_fields() {
+    let mut buf = [0xa5; 48];
+    let mut offset = 1;
+    encode::write_padding(&mut buf, 24, &mut offset, 8, 8).expect("padding");
+    encode::write_buffer(&mut buf, 24, &mut offset, 12, 7, b"abc", 1, 3).expect("buffer");
+    assert_eq!(
+        &buf[8..16],
+        &[0x24, 0x00, 0xe0, 0x01, 0x1c, 0x00, 0x60, 0x08]
+    );
+    assert_eq!(&buf[25..32], &[0; 7]);
+    assert_eq!(&buf[32..35], b"abc");
+    assert_eq!(offset, 11);
+    assert_eq!(buf[24], 0xa5);
+    assert!(buf[35..].iter().all(|byte| *byte == 0xa5));
+}
+
+#[test]
+fn generated_encoder_helpers_reject_invalid_bounds_without_panicking() {
+    let mut buf = [0xa5; 32];
+    for (data_start, offset, toc_offset, alignment) in [
+        (24, 0, 8, 0),
+        (usize::MAX, 1, 8, 8),
+        (24, usize::MAX, 8, 8),
+        (24, 1, usize::MAX, 8),
+        (24, 9, 8, 8),
+    ] {
+        let mut actual = offset;
+        assert!(
+            encode::write_padding(&mut buf, data_start, &mut actual, toc_offset, alignment)
+                .is_err()
+        );
+        assert_eq!(actual, offset);
+        assert_eq!(buf, [0xa5; 32]);
+    }
+    for (data_start, offset, toc_offset) in [
+        (usize::MAX, 1, 8),
+        (24, usize::MAX, 8),
+        (24, 0, usize::MAX),
+        (24, 9, 8),
+    ] {
+        let mut actual = offset;
+        assert_eq!(
+            encode::write_buffer(&mut buf, data_start, &mut actual, toc_offset, 7, b"x", 1, 1),
+            Err(HsmError::TborBufferTooSmall)
+        );
+        assert_eq!(actual, offset);
+        assert_eq!(buf, [0xa5; 32]);
+    }
+    let mut offset = 0;
+    assert_eq!(
+        encode::write_buffer(&mut buf, 32, &mut offset, 8, 7, b"xx", 1, 1),
+        Err(HsmError::TborDataTooLarge)
+    );
+    assert_eq!(buf, [0xa5; 32]);
+}
+
 // ── Spec Worked Example 1: Simple Request ──────────────────────────────
 
 #[test]

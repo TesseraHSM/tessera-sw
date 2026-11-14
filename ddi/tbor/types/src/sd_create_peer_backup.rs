@@ -6,9 +6,9 @@
 //! `SdCreatePeerBackup` is an **in-session** command that creates a
 //! peer-transferable backup of a security domain: it
 //! recovers BKS3 from the caller's device-local backup (`pok_local_backup`)
-//! and HPKE-Auth-seals it to the destination peer named by `dst_evidence` —
-//! authenticated by the sender's own masked SD-sealing key — returning the
-//! peer backup (`pok_peer_backup`).  Peer cloning is gated by the security
+//! and HPKE Base-seals it to the destination peer named by `dst_evidence`,
+//! returning the envelope and PID-signed `SdBackup` report.
+//! Peer cloning is gated by the security
 //! domain's `allow_peer_cloning` policy flag.
 //!
 //! Both wire schemas are shared with the firmware handler via
@@ -26,7 +26,6 @@ use alloc::vec::Vec;
 use crate::evidence::ReportDescriptor;
 use crate::sd_create_remote_backup::MASKED_SD_LEN;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
-use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -42,16 +41,8 @@ pub struct TborSdCreatePeerBackupReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The sender's masked SD-sealing key (from `SdSealingKeyGen`), exactly
-    /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
-    /// the sender's private HPKE key (`SndrPriv`) that authenticates the
-    /// seal.  A fixed-length `[u8; N]` field; the firmware schema is the
-    /// length authority.
-    #[tbor(align = 4)]
-    pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
-
-    /// Unified partition policy describing the security domain being backed
-    /// up.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified [`PartPolicy`] describing the security domain being backed
+    /// up.  Encoded as its deterministic CBOR document of at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
@@ -76,17 +67,21 @@ pub struct TborSdCreatePeerBackupReq {
     /// `PartLocalMK`) from which BKS3 is recovered.  Exactly
     /// [`MASKED_SD_LEN`] (280 B); the firmware schema is the length
     /// authority.
+    #[tbor(align = 4)]
     pub pok_local_backup: [u8; MASKED_SD_LEN],
 }
 
 /// Host-facing TBOR `SdCreatePeerBackup` response.
 #[tbor(response)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreatePeerBackupResp {
-    /// Peer backup: an HPKE-Auth seal of BKS3 (exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] = 161 B on the wire; the firmware schema is
+    /// Peer backup: an HPKE Base seal of BKS3 (exactly
+    /// [`POK_REMOTE_BACKUP_LEN`] = 322 B on the wire; the firmware schema is
     /// the length authority).  A fixed-length `[u8; N]` field.
     pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Required PID-signed SdBackup report.
+    #[tbor(min_len = 1, max_len = 896)]
+    pub report: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -99,8 +94,7 @@ mod tests {
     fn request_encodes_fields() {
         let req = TborSdCreatePeerBackupReq {
             session_id: 9,
-            masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             dst_mfgr_cert_chain: Vec::new(),
             dst_owner_cert_chain: Vec::new(),
             dst_part_owner_cert_chain: Vec::new(),
@@ -111,11 +105,10 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The maximum-length policy plus the sealing key and the backup must be
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy plus the sealing key and the backup must be
         // carried in the data section.
         assert!(
-            frame.len()
-                > crate::policy::PART_POLICY_MAX_LEN + MASKED_SEALING_KEY_LEN + MASKED_SD_LEN,
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN + MASKED_SD_LEN,
             "encoded frame must carry the policy, key, and backup"
         );
     }

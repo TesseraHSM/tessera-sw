@@ -16,6 +16,8 @@
 //! * [`key_report`] — build a signed report (query/copy convention).
 //! * [`parse_key_report`] — zero-copy decode into a [`KeyReportView`].
 //! * [`verify_key_report`] — check a report's ES384 signature.
+//! * [`report`] / [`parse_report`] / [`verify_report`] — versioned reports
+//!   with signed `PublicKey`, `Darc`, and `SdBackup` discriminators.
 
 #![no_std]
 
@@ -24,7 +26,9 @@ mod consts;
 mod cose_key;
 mod decode;
 mod encode;
+mod report;
 mod sig;
+pub mod transfer;
 
 pub use consts::KeyFlags;
 pub use consts::APP_UUID_LEN;
@@ -35,13 +39,22 @@ pub use consts::PUBLIC_KEY_MAX_SIZE;
 pub use consts::REPORT_DATA_LEN;
 pub use consts::REPORT_VERSION;
 pub use consts::REPORT_VERSION_V2;
+pub use consts::REPORT_VERSION_V3;
 pub use consts::SIGNATURE_LEN;
 pub use consts::VM_LAUNCH_ID_LEN;
 pub use cose_key::parse_ec2_cose_key;
 pub use cose_key::AttestedPubKey;
 pub use cose_key::Ec2CoseKey;
 pub use decode::parse_key_report;
+pub use decode::parse_report;
 pub use decode::verify_key_report;
+pub use decode::verify_report;
 pub use decode::KeyReportView;
 pub use encode::key_report;
+pub use encode::report;
 pub use encode::KeyReportParams;
+pub use report::ReportKind;
+pub use report::ReportParams;
+pub use report::ReportView;
+pub use report::TransferReportParams;
+pub use report::TransferReportView;

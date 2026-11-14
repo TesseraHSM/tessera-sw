@@ -36,11 +36,15 @@
 //! POTA endorses at `PartFinal`, so evidence chains terminate at the
 //! attested partition's POTA. For the reseal and peer commands,
 //! [`verify_evidence`] is the sole source of the peer key (recovered from
-//! the attested COSE_Key). For `SdCreateRemoteBackup` /
-//! `SdRestoreRemoteBackup`, the authoritative peer key instead comes from a
-//! separate, always-required SATA key certificate chain (see
+//! the attested COSE_Key). For `SdCreateRemoteBackup`, the authoritative
+//! recipient key instead comes from a separate, always-required SATA chain (see
 //! [`verify_receiver_cert_chain`]); the attestation evidence is optional
 //! and, when present, SAPOTA-anchored.
+//!
+//! Transfer consumers use [`verify_evidence_signer`] to authorize PID
+//! identity chains and verify their `SdBackup` operation report separately.
+//! Remote restore has no SATA sender chain; SAPOTA is required only under
+//! trusted-SA policy. Without it, report integrity does not authenticate SA identity.
 //!
 //! The bulk DER/COSE items travel out of band; the caller passes the
 //! per-item descriptors (see [`EvidenceRefs`]) and each item is fetched
@@ -208,42 +212,12 @@ where
     }
     let coord = COORD_LEN;
 
-    // Reqs 1–2: the manufacturer chain (no anchor) fixes the canonical leaf
-    // key; an optional owner chain (no anchor) must share it (req 4).
     let mut canonical = [0u8; POINT_LEN];
-    validate_chain(pal, io, refs.mfgr_chain, None, &mut canonical).await?;
-
-    let mut leaf = [0u8; POINT_LEN];
-    if !refs.owner_chain.is_empty() {
-        validate_chain(pal, io, refs.owner_chain, None, &mut leaf).await?;
-        if leaf != canonical {
-            return Err(HsmError::InvalidArg);
-        }
-    }
-
-    // Reqs 1, 3, 4: the partition-owner chain must validate, be anchored to
-    // the caller-selected `anchors.part_owner_anchor` (the policy POTA
-    // thumbprint for reseal/peer, SAPOTA for remote create/restore),
-    // and share the canonical leaf key.
-    validate_chain(
-        pal,
-        io,
-        refs.part_owner_chain,
-        Some(anchors.part_owner_anchor),
-        &mut leaf,
-    )
-    .await?;
-    if leaf != canonical {
-        return Err(HsmError::InvalidArg);
-    }
+    verify_identity_chains(pal, io, refs, anchors.part_owner_anchor, &mut canonical).await?;
 
     // Req 5: the shared leaf key must endorse the attestation report.
     let report_index = refs.report.index as usize;
     let report_len = refs.report.length.get() as usize;
-    // `report_len` is attacker-controlled and sizes the DMA allocation and
-    // OOB copy below. A report larger than `KEY_REPORT_MAX_LEN` cannot be a
-    // valid COSE_Sign1 key report (`parse_key_report` would reject it), so
-    // cap it here to keep a hostile length from forcing an oversized copy.
     if report_len == 0 || report_len > KEY_REPORT_MAX_LEN {
         return Err(HsmError::InvalidArg);
     }
@@ -251,21 +225,13 @@ where
     pal.alloc_scoped_async(io, async |ra| -> HsmResult<()> {
         let report = ra.dma_alloc(report_len)?;
         pal.recv_oob(io, report_index, report).await?;
-
-        // The leaf point is big-endian (X.509); `verify_key_report`'s
-        // `signer_pub` is the `ecc_verify` wire form (operand order per
-        // coordinate).
         let leaf = ra.dma_alloc(POINT_LEN)?;
         let (leaf_x, leaf_y) = leaf.split_at_mut(coord);
         byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_x, &canonical[..coord])?;
         byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_y, &canonical[coord..2 * coord])?;
-
         if !verify_key_report(pal, io, ra, report, leaf).await? {
             return Err(HsmError::InvalidArg);
         }
-
-        // The report is now authenticated: recover the attested public key
-        // (SEC1 uncompressed big-endian) from its COSE_Key.
         let view = parse_key_report(report)?;
         let flags = KeyFlags::from(view.flags);
         if anchors.require_sd_sealing
@@ -278,14 +244,9 @@ where
         if rcvr.curve != CURVE {
             return Err(HsmError::InvalidArg);
         }
-
         attested_key[0] = SEC1_UNCOMPRESSED;
         attested_key[1..1 + coord].copy_from_slice(rcvr.x);
         attested_key[1 + coord..1 + 2 * coord].copy_from_slice(rcvr.y);
-
-        // When requested, surface the report's v2 PartPolicy digest so the
-        // caller can bind the attested key to a policy (used by the
-        // security-domain reseal flow). The report must be v2.
         if let Some(out) = policy_hash_out {
             let ph = view.policy_hash.ok_or(HsmError::InvalidArg)?;
             if out.len() < POLICY_HASH_LEN || ph.len() != POLICY_HASH_LEN {
@@ -296,6 +257,69 @@ where
         Ok(())
     })
     .await
+}
+
+/// Validate the identity chains shared by a report signer, without interpreting
+/// the report payload. Callers must verify the operation report separately.
+pub async fn verify_evidence_signer<P>(
+    pal: &P,
+    io: &P::Io,
+    refs: &EvidenceRefs<'_>,
+    part_owner_anchor: &[u8; SPKI_THUMBPRINT_LEN],
+    signer: &mut [u8],
+) -> HsmResult<()>
+where
+    P: HsmIoController + HsmAlloc + HsmCrypto,
+{
+    if signer.len() != ATTESTED_KEY_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let mut canonical = [0u8; POINT_LEN];
+    verify_identity_chains(pal, io, refs, part_owner_anchor, &mut canonical).await?;
+    signer[0] = SEC1_UNCOMPRESSED;
+    signer[1..].copy_from_slice(&canonical);
+    Ok(())
+}
+
+async fn verify_identity_chains<P>(
+    pal: &P,
+    io: &P::Io,
+    refs: &EvidenceRefs<'_>,
+    part_owner_anchor: &[u8; SPKI_THUMBPRINT_LEN],
+    canonical: &mut [u8; POINT_LEN],
+) -> HsmResult<()>
+where
+    P: HsmIoController + HsmAlloc + HsmCrypto,
+{
+    // Reqs 1–2: the manufacturer chain (no anchor) fixes the canonical leaf
+    // key; an optional owner chain (no anchor) must share it (req 4).
+    validate_chain(pal, io, refs.mfgr_chain, None, canonical).await?;
+
+    let mut leaf = [0u8; POINT_LEN];
+    if !refs.owner_chain.is_empty() {
+        validate_chain(pal, io, refs.owner_chain, None, &mut leaf).await?;
+        if leaf != *canonical {
+            return Err(HsmError::InvalidArg);
+        }
+    }
+
+    // Reqs 1, 3, 4: the partition-owner chain must validate, be anchored to
+    // the caller-selected `anchors.part_owner_anchor` (the policy POTA key
+    // for reseal/peer, the policy SAPOTA key for remote create/restore),
+    // and share the canonical leaf key.
+    validate_chain(
+        pal,
+        io,
+        refs.part_owner_chain,
+        Some(part_owner_anchor),
+        &mut leaf,
+    )
+    .await?;
+    if leaf != *canonical {
+        return Err(HsmError::InvalidArg);
+    }
+
+    Ok(())
 }
 
 /// Validate one DER certificate chain and recover its leaf public key.

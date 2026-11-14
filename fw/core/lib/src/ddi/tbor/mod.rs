@@ -64,6 +64,7 @@ pub(crate) mod sd_restore_local_backup;
 pub(crate) mod sd_restore_peer_backup;
 pub(crate) mod sd_restore_remote_backup;
 pub(crate) mod sd_sealing_key_gen;
+pub(crate) mod sd_transfer;
 pub(crate) mod session_close;
 pub(crate) mod session_open_finish;
 pub(crate) mod session_open_init;

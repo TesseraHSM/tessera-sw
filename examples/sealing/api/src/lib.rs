@@ -28,8 +28,8 @@
 //!   opening or resetting a device.
 //! * [`SecurityDomain::restore_remote`] — restores the partition's local MK,
 //!   then restores the SD using its remote backup and original receiver key.
-//!   Supports separate SATA-endorsed external-SA HPKE certificates, or the
-//!   existing attested sender path for legacy recovery. Does not consume or
+//!   Requires the actual raw PID signer and mandatory SdBackup report;
+//!   SATA authorizes recipients only. Legacy HPKE Auth is rejected. Does not consume or
 //!   fall back to a local SD backup.
 //! * [`load_partition_recovery`] — validates partition-only recovery material
 //!   for remote SD recovery.
@@ -39,13 +39,14 @@
 //!   authority HSM, binding source and destination evidence to the SD policy.
 //! * [`SecurityDomain::restore_resealed`] — consumes the authority's
 //!   [`ResealedBackup`] and saves refreshed local recovery. The authority's
-//!   report attests its own policy; the application verifies that policy,
-//!   while firmware enforces the domain's SATA/SAPOTA authorization.
+//!   local PID signs the requested SD policy and outgoing envelope, not its
+//!   local policy. Trusted-SA restore authenticates source chains under SAPOTA.
 //! * [`SecurityDomain::prepare_peer`] — finalizes a new peer using the full
 //!   existing policy and a fresh partition-local masking key, without creating
 //!   another SD. Its POTA signing callback may contact an external authority.
 //! * [`SecurityDomain::create_peer_backup`] — exports the live SD to an
-//!   attested receiver, with application-supplied sender evidence.
+//!   attested receiver, with application-supplied PID chains retaining the
+//!   firmware-produced operation report. No sender KEX key is generated.
 //! * [`SecurityDomain::restore_peer`] — imports the receiver-bound peer backup
 //!   and atomically saves destination-local recovery records.
 //!

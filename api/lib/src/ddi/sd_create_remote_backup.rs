@@ -22,6 +22,7 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
     fn from(resp: TborSdCreateRemoteBackupResp) -> Self {
         Self {
             pok_remote_backup: resp.pok_remote_backup.to_vec(),
+            report: resp.report,
             pok_local_backup: resp.pok_local_backup.to_vec(),
             sd_mk_backup: resp.sd_mk_backup.to_vec(),
         }
@@ -30,17 +31,14 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 
 /// Issue `SdCreateRemoteBackup` (opcode `0x0A`) on the active session.
 ///
-/// Creates a new security domain from the caller-supplied
-/// `policy`, using the sender's masked sealing key and the receiver's
-/// attestation evidence, and returns the remote backup together with the
-/// device-local backups.
+/// Creates a new security domain from the caller-supplied unified
+/// `policy` and authorized recipient evidence. Returns a Base envelope,
+/// PID-signed SdBackup report, and unchanged local backups.
 ///
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
 /// * `session_id` - The active session id this request binds to.
-/// * `masked_sealing_key` - The sender's masked SD-sealing key (from
-///   `SdSealingKeyGen`), exactly [`MASKED_SEALING_KEY_LEN`] bytes.
 /// * `receiver_cert_chain` - The receiver key certificate chain (spec
 ///   `RcvrCertChain`), transmitted out of band; validated and anchored to
 ///   the policy SATA key, its leaf is the recipient public key.
@@ -52,22 +50,16 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 ///
 /// # Errors
 ///
-/// Returns [`HsmError::InvalidArgument`] for a wrong-length
-/// `masked_sealing_key` or a malformed `policy`, and surfaces DDI/device
+/// Returns [`HsmError::InvalidArgument`] for a malformed `policy`, and surfaces DDI/device
 /// failures from the round-trip.
 pub(crate) fn sd_create_remote_backup_ex(
     partition: &HsmPartition,
     session_id: u16,
-    masked_sealing_key: &[u8],
     receiver_cert_chain: &[HsmCert<'_>],
     receiver_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmSdRemoteBackupResult> {
-    // Exact-length array conversion enforces MASKED_SEALING_KEY_LEN.
-    let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
 
     // Flatten the receiver cert chain and evidence into descriptors +
@@ -83,7 +75,6 @@ pub(crate) fn sd_create_remote_backup_ex(
 
     let req = TborSdCreateRemoteBackupReq {
         session_id,
-        masked_sealing_key,
         receiver_cert_chain: receiver_chain,
         receiver_mfgr_cert_chain: receiver.mfgr,
         receiver_owner_cert_chain: receiver.owner,

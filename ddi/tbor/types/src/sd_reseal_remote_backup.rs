@@ -8,14 +8,15 @@
 //! recipient to a destination recipient: it HPKE-unseals the caller-supplied
 //! `src_remote_backup` with the masked receiver key (recovering the BKS3)
 //! and HPKE-reseals that BKS3 to the destination receiver, returning
-//! `dst_remote_backup`.
+//! `dst_remote_backup` and the local PID's `SdBackup` operation report.
+//! The source report and destination PublicKey report bind the client SD
+//! policy, which may differ from the SA-local policy.
 //!
 //! Both wire schemas are shared with the firmware handler via
 //! `tsra_fw_ddi_tbor_types::sd_reseal_remote_backup`; this module adds
 //! the host-facing value types so [`exec_op_tbor`] returns owned
-//! response values.  The source / destination attestation `Evidence`
-//! TOC entries are carried by the firmware schema and are not modelled
-//! by this host value wrapper.
+//! response values. Source identity/operation evidence and destination
+//! PublicKey evidence are flattened into descriptor fields below.
 //!
 //! [`exec_op_tbor`]: ../../tsra_ddi_interface/trait.DdiDev.html#method.exec_op_tbor
 
@@ -46,8 +47,8 @@ pub struct TborSdResealRemoteBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified partition policy the source and destination must share.
-    /// Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified [`PartPolicy`] the source and destination must share.
+    /// Encoded as its deterministic CBOR document of at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
@@ -85,8 +86,8 @@ pub struct TborSdResealRemoteBackupReq {
     /// Destination attestation-report (COSE_Sign1) descriptor.
     pub dest_report: ReportDescriptor,
 
-    /// Source remote backup to reseal: an HPKE-Auth seal, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (161 B).  A fixed-length `[u8; N]` field
+    /// Source remote backup to reseal: an HPKE Base seal, exactly
+    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  A fixed-length `[u8; N]` field
     /// (the host derive's exact-length form; the firmware schema is the
     /// length authority).
     pub src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
@@ -94,13 +95,16 @@ pub struct TborSdResealRemoteBackupReq {
 
 /// Host-facing TBOR `SdResealRemoteBackup` response.
 #[tbor(response)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdResealRemoteBackupResp {
-    /// Resealed remote backup: an HPKE-Auth seal of the same BKS3 to the
-    /// destination receiver, exactly [`POK_REMOTE_BACKUP_LEN`] (161 B).  A
+    /// Resealed remote backup: an HPKE Base seal of the same BKS3 to the
+    /// destination receiver, exactly [`POK_REMOTE_BACKUP_LEN`] (322 B).  A
     /// fixed-length `[u8; N]` field so host decode enforces the exact
     /// length — the firmware schema is the length authority.
     pub dst_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Required SA PID-signed SdBackup report.
+    #[tbor(min_len = 1, max_len = 896)]
+    pub report: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -114,7 +118,7 @@ mod tests {
         let req = TborSdResealRemoteBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
@@ -129,7 +133,7 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The maximum-length policy image plus the 161-byte src_remote_backup must
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy image plus the 322-byte src_remote_backup must
         // be carried in the data section.
         assert!(
             frame.len() > crate::policy::PART_POLICY_MAX_LEN + POK_REMOTE_BACKUP_LEN,

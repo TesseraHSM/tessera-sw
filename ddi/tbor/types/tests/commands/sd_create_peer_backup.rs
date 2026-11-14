@@ -4,9 +4,9 @@
 //! Integration tests for the TBOR `SdCreatePeerBackup` command.
 //!
 //! `SdCreatePeerBackup` recovers BKS3 from the caller's device-local
-//! backup (`pok_local_backup`) and HPKE-Auth-seals it to a destination
-//! peer named by `dst_evidence` — authenticated by the sender's own masked
-//! SD-sealing key — returning the peer backup (`pok_peer_backup`, a 161-byte
+//! backup (`pok_local_backup`) and HPKE Base-seals it to a destination
+//! peer named by `dst_evidence`, returning a PID-signed operation report and
+//! peer backup (`pok_peer_backup`, a 322-byte
 //! HPKE seal).  It is **stateless** and gated by the security domain's
 //! `allow_peer_cloning` policy flag.
 //!
@@ -16,7 +16,7 @@
 //! attested public key.
 //!
 //! Coverage:
-//! * Round-trip — non-zero 161-byte `pok_peer_backup`.
+//! * Round-trip — non-zero 322-byte `pok_peer_backup`.
 //! * Policy without `allow_peer_cloning` → `SdPeerCloningNotAllowed`.
 //! * Not finalized → `InvalidArg`.
 
@@ -35,7 +35,6 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreatePeerBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
-use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
@@ -107,16 +106,12 @@ pub(crate) fn finalize_peer_partition(
 /// destination evidence, policy, and the local backup to re-seal.
 pub(crate) fn create_peer_req(
     session_id: u16,
-    masked_sealing_key: &[u8],
     evidence: &ReceiverEvidence,
     policy: &[u8],
     pok_local_backup: &[u8; MASKED_SD_LEN],
 ) -> TborSdCreatePeerBackupReq {
     TborSdCreatePeerBackupReq {
         session_id,
-        masked_sealing_key: masked_sealing_key
-            .try_into()
-            .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
         policy: policy.to_vec(),
         dst_mfgr_cert_chain: evidence.mfgr.clone(),
         dst_owner_cert_chain: evidence.owner.clone(),
@@ -137,18 +132,17 @@ fn sd_create_peer_backup_roundtrip() {
 
     // Mint + attest a sealing key, then create the security domain to
     // obtain the device-local backup this command re-seals.
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
 
     let req = create_peer_req(
         session_id,
-        &masked,
         &evidence,
         &part.policy,
         &created.pok_local_backup,
@@ -174,11 +168,11 @@ fn sd_create_peer_backup_rejects_sata_anchored_evidence() {
     let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
     let session_id = part.session.session_id;
 
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &genuine, &part.policy),
+            &backup_request(session_id, &genuine, &part.policy),
             &genuine.oob(),
         )
         .expect("SdCreateRemoteBackup");
@@ -186,7 +180,6 @@ fn sd_create_peer_backup_rejects_sata_anchored_evidence() {
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &sata, &report);
     let req = create_peer_req(
         session_id,
-        &masked,
         &evidence,
         &part.policy,
         &created.pok_local_backup,
@@ -213,13 +206,10 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     let pota = CaKey::generate();
     let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
     let sid = part.session.session_id;
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
-        .tbor_oob(
-            &backup_request(sid, masked.clone(), &genuine, &part.policy),
-            &genuine.oob(),
-        )
+        .tbor_oob(&backup_request(sid, &genuine, &part.policy), &genuine.oob())
         .expect("create a genuine local backup");
 
     let cu_ctx = TestCtx::new_with_path(ctx.path());
@@ -255,13 +245,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     dev_rev_in_place(&mut imported_pub[..48]);
     dev_rev_in_place(&mut imported_pub[48..]);
     let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
-    let req = create_peer_req(
-        sid,
-        &masked,
-        &evidence,
-        &part.policy,
-        &created.pok_local_backup,
-    );
+    let req = create_peer_req(sid, &evidence, &part.policy, &created.pok_local_backup);
     ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
     cu_ctx.session_close(cu.session_id).expect("close CU");
     ctx.session_close(sid).expect("close CO");
@@ -280,15 +264,9 @@ fn sd_create_peer_backup_rejects_without_peer_cloning() {
     // A real sealing key + evidence so the request reaches the policy gate;
     // the peer-cloning check fires before any local backup is unmasked, so
     // a zero `pok_local_backup` is sufficient.
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
-    let req = create_peer_req(
-        session_id,
-        &masked,
-        &evidence,
-        &part.policy,
-        &[0u8; MASKED_SD_LEN],
-    );
+    let req = create_peer_req(session_id, &evidence, &part.policy, &[0u8; MASKED_SD_LEN]);
     ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::SdPeerCloningNotAllowed);
 }
 
@@ -300,7 +278,6 @@ fn sd_create_peer_backup_rejects_before_finalize() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let req = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
         policy: Vec::new(),
         dst_mfgr_cert_chain: Vec::new(),
         dst_owner_cert_chain: Vec::new(),
@@ -320,20 +297,19 @@ fn valid_peer_backup_fixture() -> (TestCtx, TborSdCreatePeerBackupReq, ReceiverE
     let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
     let session_id = part.session.session_id;
 
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
 
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
 
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup setup");
 
     let req = create_peer_req(
         session_id,
-        &masked,
         &evidence,
         &part.policy,
         &created.pok_local_backup,
@@ -407,16 +383,16 @@ fn sd_create_peer_backup_rejects_modified_policy() {
     );
 }
 
-/// Reject a request containing an all-zero masked sealing key.
+/// Reject an empty destination PublicKey report.
 #[test]
-fn sd_create_peer_backup_rejects_zero_masked_sealing_key() {
+fn sd_create_peer_backup_rejects_empty_destination_report() {
     let (ctx, mut req, evidence) = valid_peer_backup_fixture();
 
-    req.masked_sealing_key = [0u8; MASKED_SEALING_KEY_LEN];
+    req.dst_report.length = Default::default();
 
     assert!(
         ctx.tbor_oob(&req, &evidence.oob()).is_err(),
-        "SdCreatePeerBackup must reject an invalid sealing key",
+        "SdCreatePeerBackup must reject an empty destination report",
     );
 }
 
@@ -526,29 +502,29 @@ fn sd_create_peer_backup_rejects_local_backup_corruption_at_offsets() {
     }
 }
 
-/// Reject corruption in the first byte of the masked sealing key.
+/// Reject a malformed destination PublicKey report.
 #[test]
-fn sd_create_peer_backup_rejects_corrupted_masked_sealing_key_header() {
+fn sd_create_peer_backup_rejects_corrupted_destination_report_header() {
     let (ctx, mut req, evidence) = valid_peer_backup_fixture();
 
-    req.masked_sealing_key[0] ^= 0x01;
+    req.dst_report.length = tsra_ddi_tbor_types::tbor_int::U16::new(1);
 
     assert!(
         ctx.tbor_oob(&req, &evidence.oob()).is_err(),
-        "SdCreatePeerBackup must reject a corrupted masked key header",
+        "SdCreatePeerBackup must reject a truncated destination report",
     );
 }
 
-/// Reject corruption near the end of the masked sealing key.
+/// Reject a destination report descriptor that exceeds its OOB item.
 #[test]
-fn sd_create_peer_backup_rejects_corrupted_masked_sealing_key_tail() {
+fn sd_create_peer_backup_rejects_oversized_destination_report() {
     let (ctx, mut req, evidence) = valid_peer_backup_fixture();
 
-    req.masked_sealing_key[MASKED_SEALING_KEY_LEN - 1] ^= 0x01;
+    req.dst_report.length = tsra_ddi_tbor_types::tbor_int::U16::new(u16::MAX);
 
     assert!(
         ctx.tbor_oob(&req, &evidence.oob()).is_err(),
-        "SdCreatePeerBackup must reject a corrupted masked key tail",
+        "SdCreatePeerBackup must reject an oversized destination report",
     );
 }
 
@@ -640,7 +616,7 @@ fn sd_create_peer_backup_recovers_after_multiple_failures() {
     let (ctx, mut req, evidence) = valid_peer_backup_fixture();
 
     let original_backup = req.pok_local_backup;
-    let original_key = req.masked_sealing_key;
+    let original_report = req.dst_report;
 
     req.pok_local_backup = [0u8; MASKED_SD_LEN];
 
@@ -650,14 +626,14 @@ fn sd_create_peer_backup_recovers_after_multiple_failures() {
     );
 
     req.pok_local_backup = original_backup;
-    req.masked_sealing_key = [0u8; MASKED_SEALING_KEY_LEN];
+    req.dst_report.length = Default::default();
 
     assert!(
         ctx.tbor_oob(&req, &evidence.oob()).is_err(),
-        "Zero masked sealing key must be rejected",
+        "Empty destination report must be rejected",
     );
 
-    req.masked_sealing_key = original_key;
+    req.dst_report = original_report;
 
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())

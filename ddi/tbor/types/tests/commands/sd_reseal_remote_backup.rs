@@ -4,23 +4,20 @@
 //! Integration tests for the TBOR `SdResealRemoteBackup` command.
 //!
 //! `SdResealRemoteBackup` reseals a remote backup from a source recipient
-//! to a destination recipient: it HPKE-Auth-opens the caller-supplied
+//! to a destination recipient: it HPKE Base-opens the caller-supplied
 //! `src_remote_backup` with the masked **receiver** key (recovering the
-//! BKS3, authenticated by the source **sender** public key from
-//! `src_evidence`) and HPKE-Auth-seals that BKS3 to the destination
+//! BKS3, after validating the source PID operation report in
+//! `src_evidence`) and HPKE Base-seals that BKS3 to the destination
 //! **receiver** public key (from `dest_evidence`), returning
-//! `dst_remote_backup`.  Nothing is persisted.
+//! `dst_remote_backup` and its PID-signed report. Nothing is persisted.
 //!
-//! These tests run a **self-reseal** on one partition: it mints receiver /
-//! sender / destination SD sealing keys, uses `SdCreateRemoteBackup` to
-//! produce a real source backup (BKS3 sealed to the receiver by the
-//! sender), then reseals it.  A successful reseal is itself the correctness
-//! check: the HPKE-Auth **open** only succeeds if the receiver key and the
-//! attested sender key match those that sealed the source, so a non-error
-//! result proves the BKS3 was recovered and resealed.
+//! These tests run a **self-reseal** on one partition with distinct receiver
+//! and destination keys, using the real create command's operation report.
+//! A successful reseal checks source signature, envelope, policy, and recipient
+//! bindings before recovering BKS3.
 //!
 //! Coverage:
-//! * Happy path — a 161-byte, non-zero `dst_remote_backup`.
+//! * Happy path — a 322-byte, non-zero `dst_remote_backup`.
 //! * Re-randomization — two reseals of the same source differ (fresh HPKE
 //!   ephemeral each call).
 //! * Tampered `src_remote_backup` → the open's AEAD auth fails → reject.
@@ -185,22 +182,22 @@ fn reseal_request(
 
 /// Create a real source backup: a fresh BKS3 sealed to the receiver's
 /// attested public key (`receiver_pub`, certified by the receiver key
-/// chain and attested by `receiver_report`) by the sender's masked key.
+/// chain and attested by `receiver_report`), signed by the partition PID.
 fn create_source_backup(
     ctx: &TestCtx,
     session_id: u16,
     pid_pub: &[u8; RAW_PUB_LEN],
     receiver_pub: &[u8; RAW_PUB_LEN],
     sata_key: &CaKey,
-    masked_sender_key: Vec<u8>,
     receiver_report: &[u8],
     policy: &[u8],
-) -> [u8; POK_REMOTE_BACKUP_LEN] {
+) -> ([u8; POK_REMOTE_BACKUP_LEN], Vec<u8>) {
     let rcvr_ev = build_receiver_evidence(pid_pub, receiver_pub, sata_key, receiver_report);
-    let req = backup_request(session_id, masked_sender_key, &rcvr_ev, policy);
-    ctx.tbor_oob(&req, &rcvr_ev.oob())
-        .expect("SdCreateRemoteBackup source backup")
-        .pok_remote_backup
+    let req = backup_request(session_id, &rcvr_ev, policy);
+    let response = ctx
+        .tbor_oob(&req, &rcvr_ev.oob())
+        .expect("SdCreateRemoteBackup source backup");
+    (response.pok_remote_backup, response.report)
 }
 
 /// Build a valid reseal request with source and destination evidence.
@@ -214,17 +211,14 @@ fn valid_reseal_fixture() -> (TestCtx, TborSdResealRemoteBackupReq, ResealEviden
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
 
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
-
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let src_backup = create_source_backup(
+    let (src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
@@ -249,17 +243,15 @@ fn sd_reseal_remote_backup_roundtrip() {
     // Receiver (unseals the source), sender (sealed the source), and
     // destination (the reseal target) SD sealing keys, each attested.
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
     // Source backup: BKS3 sealed to the receiver by the sender.
-    let src_backup = create_source_backup(
+    let (src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
@@ -272,7 +264,7 @@ fn sd_reseal_remote_backup_roundtrip() {
         .tbor_oob(&req, &evidence.oob())
         .expect("SdResealRemoteBackup roundtrip");
 
-    // A successful HPKE open→seal yields a 161-byte, non-zero backup.
+    // A successful HPKE open→seal yields a 322-byte, non-zero backup.
     assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
         resp.dst_remote_backup.iter().any(|&b| b != 0),
@@ -297,16 +289,14 @@ fn sd_reseal_remote_backup_rerandomizes() {
     let sid = session.session_id;
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let src_backup = create_source_backup(
+    let (src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
@@ -335,20 +325,18 @@ fn sd_reseal_remote_backup_rejects_tampered_src() {
     let sid = session.session_id;
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let mut src_backup = create_source_backup(
+    let (mut src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
-    // Flip a byte in the ciphertext region so the HPKE-Auth open fails.
+    // Flip a byte in the ciphertext region so the HPKE Base open fails.
     src_backup[POK_REMOTE_BACKUP_LEN - 1] ^= 0xFF;
 
     let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
@@ -370,16 +358,14 @@ fn sd_reseal_remote_backup_rejects_missing_oob() {
     let sid = session.session_id;
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let src_backup = create_source_backup(
+    let (src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
@@ -504,15 +490,13 @@ fn expect_reseal_rejects_sata_anchor(src_sata: bool, dest_sata: bool) {
     let sid = session.session_id;
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
-    let (masked_sndr, report_sndr) = masked_key_and_report(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
-    let src_backup = create_source_backup(
+    let (src_backup, report_sndr) = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
         &rcvr_pub,
         &sata_key,
-        masked_sndr,
         &report_rcvr,
         &policy,
     );
