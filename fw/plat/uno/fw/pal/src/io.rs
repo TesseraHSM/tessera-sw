@@ -24,6 +24,7 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 
+use core::cell::Cell;
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
@@ -32,6 +33,7 @@ use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_io::CqeEntry;
 use tsra_fw_hsm_io::OOB_ENTRY_LEN;
+use tsra_fw_hsm_io::OP_TBOR;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SqeEntry;
@@ -47,13 +49,16 @@ use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmRequest;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
+use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
@@ -195,7 +200,25 @@ pub struct UnoHsmIo {
     /// Whether [`seal_response`](HsmIoController::seal_response) sealed
     /// this in-session IO's reply, which is then sent as it is.
     reply_sealed: bool,
+    /// Whether the run loop copied the request in before handing the IO on.
+    prefetch: Prefetch,
 }
+
+/// Whether the run loop copied an IO's request in before handing the IO to
+/// its task (see [`UnoHsmPal::prefetch_request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefetch {
+    /// Not copied: [`recv_request`](HsmIoController::recv_request) copies it.
+    None,
+    /// Copied into the exchange buffer at the start of the slot's DMA heap.
+    Done,
+    /// The copy failed.
+    Failed,
+}
+
+/// Marks the cookie of a detached GDMA copy as a request prefetch, rather
+/// than a reply copy, of the slot in the low bits.
+const PREFETCH_COOKIE: u16 = 0x8000;
 
 /// Takes a host IO the run loop received (see
 /// [`UnoHsmPal::set_io_dispatch`]) to the task that serves its slot. It runs
@@ -222,6 +245,7 @@ impl UnoHsmIo {
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
                 reply_sealed: false,
+                prefetch: Prefetch::None,
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
@@ -247,6 +271,7 @@ impl UnoHsmIo {
             ),
             queue_id,
             reply_sealed: false,
+            prefetch: Prefetch::None,
         }
     }
 
@@ -394,16 +419,25 @@ impl HsmIoController for UnoHsmPal {
             sqe.oob_prp(),
         )?;
         let len = sqe.src_len() as usize;
-        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
-        self.copy_mem_from_host(
-            io,
-            sqe.src_prp1(),
-            sqe.src_prp2(),
-            &mut buf.buffer_mut()[..len],
-            true,
-        )
-        .await
-        .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+        let mut buf = match io.prefetch {
+            Prefetch::None => {
+                let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+                self.copy_mem_from_host(
+                    io,
+                    sqe.src_prp1(),
+                    sqe.src_prp2(),
+                    &mut buf.buffer_mut()[..len],
+                    true,
+                )
+                .await
+                .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+                buf
+            }
+            Prefetch::Done => {
+                crate::alloc::prefetched_exchange(self, io.index, len.next_multiple_of(4))?
+            }
+            Prefetch::Failed => return Err(HsmError::FailedToStartDmaTransaction),
+        };
         let resp_capacity = sqe.dst_len() as usize;
         let Some(id) = sealed_id else {
             return Ok(HsmRequest {
@@ -635,7 +669,12 @@ impl UnoHsmPal {
     /// frees the slot of each posted completion. Called on every run-loop
     /// pass.
     pub(crate) fn finish_detached(&self) {
-        while let Some((index, ok)) = self.gdma.take_detached() {
+        while let Some((cookie, ok)) = self.gdma.take_detached() {
+            if cookie & PREFETCH_COOKIE != 0 {
+                self.finish_prefetch(cookie & !PREFETCH_COOKIE, ok);
+                continue;
+            }
+            let index = cookie;
             let d = self.detached[index as usize].get();
             let cqe = slot_cqe(index);
             if !ok {
@@ -714,10 +753,95 @@ impl UnoHsmPal {
             Some(dispatch) if !self.io_paused() => {
                 tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
                 while let Some(rx) = self.iic.try_recv() {
-                    dispatch(self.accept_io(rx));
+                    if let Some(io) = self.prefetch_request(self.accept_io(rx)) {
+                        dispatch(io);
+                    }
                 }
             }
             _ => self.iic.wake(irq),
+        }
+    }
+
+    /// Starts copying a TBOR IO's request in from the host as the run loop
+    /// receives the IO, and parks the IO until the copy is done (see
+    /// [`finish_prefetch`](Self::finish_prefetch)): its task then wakes once,
+    /// to the request, rather than once to start the copy and again when the
+    /// copy lands. The request goes where
+    /// [`recv_request`](HsmIoController::recv_request) would put it, at the
+    /// start of the slot's DMA heap.
+    ///
+    /// Returns the IO, to hand on now, if `recv_request` would not copy its
+    /// request (not TBOR, or its SQE fails the checks `recv_request` makes
+    /// first), its partition takes no host traffic (the core drops such IO
+    /// before touching its request), or the copy cannot start.
+    fn prefetch_request(&self, io: UnoHsmIo) -> Option<UnoHsmIo> {
+        let index = io.index;
+        if index as u32 >= IO_SQ_COUNT
+            || io.sqe().opcode() != OP_TBOR
+            || sealed::sealed_session(io.sqe()).is_err()
+            || !PartStore::partition(io.pid).is_ok_and(|p| {
+                matches!(
+                    p.state(),
+                    Ok(HsmPartState::Enabled
+                        | HsmPartState::Initializing
+                        | HsmPartState::Initialized)
+                )
+            })
+        {
+            return Some(io);
+        }
+        let sqe = io.sqe().view();
+        if sqe.cmd().psdt() != 0
+            || validate_io_fields(
+                sqe.src_len(),
+                sqe.dst_len(),
+                sqe.src_prp1(),
+                sqe.dst_prp1(),
+                sqe.oob_len(),
+                sqe.oob_prp(),
+            )
+            .is_err()
+        {
+            return Some(io);
+        }
+        let Ok(ifc) = crate::gdma::host_interface(io.pid) else {
+            return Some(io);
+        };
+        let len = sqe.src_len();
+        let Ok(dst) = crate::alloc::reserve_prefetch(self, index, (len as usize).next_multiple_of(4))
+        else {
+            return Some(io);
+        };
+        if self
+            .gdma
+            .copy_mem_detached(
+                crate::gdma::host_dma_buf(sqe.src_prp1(), sqe.src_prp2(), true),
+                ifc,
+                len,
+                crate::gdma::device_dma_buf(dst, len),
+                MemInterface::Device,
+                len,
+                index | PREFETCH_COOKIE,
+            )
+            .is_err()
+        {
+            reset_io_alloc(self, index);
+            return Some(io);
+        }
+        self.prefetch_io[index as usize].set(Some(io));
+        None
+    }
+
+    /// Hands on the IO that [`prefetch_request`](Self::prefetch_request)
+    /// parked, now that its request copy is done, marked with how it went.
+    fn finish_prefetch(&self, index: u16, ok: bool) {
+        let Some(mut io) = self.prefetch_io.get(index as usize).and_then(Cell::take) else {
+            return;
+        };
+        io.prefetch = if ok { Prefetch::Done } else { Prefetch::Failed };
+        // Set before the first prefetch, and never cleared.
+        if let Some(dispatch) = self.io_dispatch.get() {
+            dispatch(io);
         }
     }
 

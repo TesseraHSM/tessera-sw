@@ -389,6 +389,10 @@ pub struct UnoHsmPal {
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
 
+    /// Per host IO slot: the IO whose request the run loop is copying in,
+    /// until the copy is done (see `prefetch_request` in [`crate::io`]).
+    pub(crate) prefetch_io: [Cell<Option<crate::io::UnoHsmIo>>; IO_SQ_COUNT as usize],
+
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
     /// IO starts while partition keys are being deleted and no pre-reset IO
@@ -549,6 +553,7 @@ impl Default for UnoHsmPal {
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
             io_session_key: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
+            prefetch_io: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],

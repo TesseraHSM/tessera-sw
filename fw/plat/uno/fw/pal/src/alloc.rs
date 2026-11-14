@@ -249,6 +249,39 @@ pub(crate) fn clear_io_peak(pal: &UnoHsmPal, io_index: u16) {
     }
 }
 
+/// Reserves the exchange buffer of slot `io_index`'s request, `size` bytes
+/// at the start of its fresh DMA heap, where
+/// [`dma_alloc_exchange`](HsmAlloc::dma_alloc_exchange) would put it, for
+/// the run loop to copy the request into before the IO reaches its task.
+/// Raises the slot's peak like any allocation, so teardown scrubs it.
+pub(crate) fn reserve_prefetch(pal: &UnoHsmPal, io_index: u16, size: usize) -> HsmResult<*mut u8> {
+    match bump(pal, io_index, DMA, size, 4)? {
+        (0, buf) => Ok(buf.as_mut_ptr()),
+        _ => {
+            reset_io_alloc(pal, io_index);
+            Err(HsmError::InvalidArg)
+        }
+    }
+}
+
+/// The exchange buffer [`reserve_prefetch`] reserved and the run loop
+/// filled, as [`dma_alloc_exchange`](HsmAlloc::dma_alloc_exchange) would
+/// have returned it: it must still be the slot's only live DMA allocation.
+pub(crate) fn prefetched_exchange(
+    pal: &UnoHsmPal,
+    io_index: u16,
+    size: usize,
+) -> HsmResult<HsmDmaAllocation<'_>> {
+    if wm(pal, io_index, DMA).with(|v| *v) != size {
+        return Err(HsmError::InternalError);
+    }
+    let (base, _) = heap_base_cap(io_index, DMA);
+    // SAFETY: `reserve_prefetch` reserved `base..base + size` with `bump`,
+    // and the watermark shows nothing has been allocated past it since; the
+    // pointer keeps the heap's provenance, as in `dma_alloc_exchange`.
+    Ok(unsafe { HsmDmaAllocation::from_raw_parts(base, size) })
+}
+
 /// Bump-allocate `size` bytes with given alignment, return (start_offset, slice).
 ///
 /// # Parameters
