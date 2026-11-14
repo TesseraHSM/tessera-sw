@@ -67,6 +67,7 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_BANK_ECC;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
@@ -250,14 +251,14 @@ pub(crate) fn masked_key_report_and_pub(
     dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id,
+            bank: CERT_BANK_ECC,
             auth_envelope: Vec::new(),
             masked_key: masked.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
         })
-        .expect("KeyReport")
-        .report;
+        .expect("KeyReport");
 
     (masked, report, rcvr_pub)
 }

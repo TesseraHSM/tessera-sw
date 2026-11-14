@@ -7,7 +7,8 @@
 //! locate field boundaries, then returns a [`KeyReportView`] whose byte
 //! fields are `&HsmDmaBuf` sub-views of the input report buffer — no copies
 //! and no owned arrays. [`verify_key_report`] rebuilds the COSE
-//! `Sig_structure` and checks the ES384 signature.
+//! `Sig_structure` and checks the ES384 or ML-DSA-87 signature, after
+//! matching the report's protected-header algorithm to the verifier's.
 
 use minicbor::Decoder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
@@ -16,6 +17,10 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -23,7 +28,9 @@ use crate::codec::SigStructure;
 use crate::codec::SIG_STRUCTURE_CONTEXT;
 use crate::consts::*;
 use crate::sig::sig_halves_swap;
+use crate::ReportAlg;
 use crate::ReportKind;
+use crate::ReportVerifier;
 use crate::ReportView;
 use crate::TransferReportView;
 
@@ -38,8 +45,9 @@ pub struct KeyReportView<'a> {
     pub public_key_size: u16,
     /// Capability flags for the attested key.
     pub flags: u32,
-    /// The `public_key` field (fixed [`PUBLIC_KEY_MAX_SIZE`] bytes; the
-    /// COSE_Key occupies the first `public_key_size`, rest zero-padded).
+    /// The `public_key` field: [`PUBLIC_KEY_MAX_SIZE`] bytes with the
+    /// COSE_Key in the first `public_key_size` and the rest zero-padded,
+    /// or exactly an ML-DSA-87 COSE_Key.
     pub public_key: &'a HsmDmaBuf,
     /// Owning application UUID.
     pub app_uuid: &'a HsmDmaBuf,
@@ -53,8 +61,11 @@ pub struct KeyReportView<'a> {
     pub protected_header: &'a HsmDmaBuf,
     /// Encoded payload bytes (the Sig_structure input).
     pub payload: &'a HsmDmaBuf,
-    /// COSE_Sign1 signature (`r || s`, big-endian per half).
+    /// COSE_Sign1 signature: ES384 `r || s` big-endian per half, or
+    /// ML-DSA-87.
     pub signature: &'a HsmDmaBuf,
+    /// Signature algorithm named by the protected header.
+    pub alg: ReportAlg,
 }
 
 /// Map a minicbor decode error to [`HsmError::InvalidArg`].
@@ -75,6 +86,7 @@ pub(crate) struct CoseReportView<'a> {
     pub(crate) protected_header: &'a HsmDmaBuf,
     pub(crate) payload: &'a HsmDmaBuf,
     pub(crate) signature: &'a HsmDmaBuf,
+    pub(crate) alg: ReportAlg,
 }
 
 /// Parse a tagged COSE_Sign1 key-attestation report, returning a
@@ -116,11 +128,13 @@ fn parse_cose_report(report: &HsmDmaBuf) -> HsmResult<CoseReportView<'_>> {
         (prot, payload_span, sig)
     };
 
-    // Enforce the fixed COSE-envelope field lengths.
-    if prot.1 - prot.0 != PROTECTED_HEADER.len() || sig.1 - sig.0 != SIGNATURE_LEN {
+    // The protected header must be one of the canonical headers, and the
+    // signature exactly its algorithm's length.
+    let protected_header = &rest[prot.0..prot.1];
+    let alg = ReportAlg::from_protected_header(protected_header)?;
+    if sig.1 - sig.0 != alg.signature_len() {
         return Err(HsmError::InvalidArg);
     }
-    let protected_header = &rest[prot.0..prot.1];
     let payload = &rest[payload_span.0..payload_span.1];
     let signature = &rest[sig.0..sig.1];
 
@@ -128,6 +142,7 @@ fn parse_cose_report(report: &HsmDmaBuf) -> HsmResult<CoseReportView<'_>> {
         protected_header,
         payload,
         signature,
+        alg,
     })
 }
 
@@ -137,7 +152,7 @@ fn parse_cose_report(report: &HsmDmaBuf) -> HsmResult<CoseReportView<'_>> {
 /// fields, version mismatches, and invalid SHA-384 field lengths are errors.
 /// Parsing does not verify signatures or operation authorization.
 pub fn parse_report(report: &HsmDmaBuf) -> HsmResult<ReportView<'_>> {
-    if report.len() > KEY_REPORT_MAX_LEN {
+    if report.len() > REPORT_MAX_LEN {
         return Err(HsmError::InvalidArg);
     }
     parse_payload(parse_cose_report(report)?)
@@ -194,11 +209,13 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
             if seen & 0x7f != 0x7f
                 || seen & !0x1ff != 0
                 || version != expected_version
-                || pk.1 - pk.0 != PUBLIC_KEY_MAX_SIZE
+                || !(pk.1 - pk.0 == PUBLIC_KEY_MAX_SIZE
+                    || (pk.1 - pk.0 == MLDSA87_COSE_KEY_LEN
+                        && usize::from(public_key_size) == MLDSA87_COSE_KEY_LEN))
                 || uuid.1 - uuid.0 != APP_UUID_LEN
                 || rd.1 - rd.0 != REPORT_DATA_LEN
                 || vm.1 - vm.0 != VM_LAUNCH_ID_LEN
-                || public_key_size as usize > PUBLIC_KEY_MAX_SIZE
+                || usize::from(public_key_size) > pk.1 - pk.0
             {
                 return Err(HsmError::InvalidArg);
             }
@@ -214,6 +231,7 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
                 protected_header: view.protected_header,
                 payload,
                 signature: view.signature,
+                alg: view.alg,
             }));
         }
         Some(1) => ReportKind::Darc,
@@ -245,6 +263,7 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
         protected_header: view.protected_header,
         payload,
         signature: view.signature,
+        alg: view.alg,
     };
     match kind {
         ReportKind::Darc => Ok(ReportView::Darc(transfer)),
@@ -282,6 +301,25 @@ pub async fn verify_key_report<'a, P>(
 where
     P: HsmCrypto + 'a,
 {
+    verify_key_report_with(pal, io, alloc, report, ReportVerifier::Es384(signer_pub)).await
+}
+
+/// [`verify_key_report`] under `verifier`.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — malformed report, or its algorithm is not
+///   the verifier's.
+/// * Other [`HsmError`] values propagated from the PAL.
+pub async fn verify_key_report_with<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    report: &HsmDmaBuf,
+    verifier: ReportVerifier<'_>,
+) -> HsmResult<bool>
+where
+    P: HsmCrypto + 'a,
+{
     let view = parse_key_report(report)?;
 
     verify_signature(
@@ -292,8 +330,9 @@ where
             protected_header: view.protected_header,
             payload: view.payload,
             signature: view.signature,
+            alg: view.alg,
         },
-        signer_pub,
+        verifier,
     )
     .await
 }
@@ -313,6 +352,30 @@ pub async fn verify_report<'a, P>(
 where
     P: HsmCrypto + 'a,
 {
+    verify_report_with(
+        pal,
+        io,
+        alloc,
+        report,
+        ReportVerifier::Es384(signer_pub),
+        expected_kind,
+    )
+    .await
+}
+
+/// [`verify_report`] under `verifier`; the report's algorithm must be the
+/// verifier's.
+pub async fn verify_report_with<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    report: &HsmDmaBuf,
+    verifier: ReportVerifier<'_>,
+    expected_kind: ReportKind,
+) -> HsmResult<bool>
+where
+    P: HsmCrypto + 'a,
+{
     let view = parse_report(report)?;
     if view.kind() != expected_kind {
         return Err(HsmError::InvalidArg);
@@ -322,14 +385,16 @@ where
             protected_header: view.protected_header,
             payload: view.payload,
             signature: view.signature,
+            alg: view.alg,
         },
         ReportView::Darc(transfer) | ReportView::SdBackup { transfer, .. } => CoseReportView {
             protected_header: transfer.protected_header,
             payload: transfer.payload,
             signature: transfer.signature,
+            alg: transfer.alg,
         },
     };
-    verify_signature(pal, io, alloc, cose, signer_pub).await
+    verify_signature(pal, io, alloc, cose, verifier).await
 }
 
 pub(crate) async fn verify_signature<'a, P>(
@@ -337,64 +402,77 @@ pub(crate) async fn verify_signature<'a, P>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     view: CoseReportView<'_>,
-    signer_pub: &HsmDmaBuf,
+    verifier: ReportVerifier<'_>,
 ) -> HsmResult<bool>
 where
     P: HsmCrypto + 'a,
 {
-    // The protected header is signed input. Our fixed wire format mandates
-    // the canonical ES384 header, and the Sig_structure below is rebuilt
-    // from that constant — so bind it by rejecting any report whose
-    // protected header differs (otherwise a tampered header would not be
-    // covered by the signature check below).
-    let protected: &[u8] = view.protected_header;
-    if protected != &PROTECTED_HEADER[..] {
+    // The protected header is signed input, and the parser accepted it only
+    // as one of the canonical headers. Bind it to the expected signer: a
+    // report naming another algorithm is not this signer's report.
+    if view.alg != verifier.alg() || view.signature.len() != view.alg.signature_len() {
         return Err(HsmError::InvalidArg);
     }
+    let protected_header = view.alg.protected_header();
 
     // Rebuild the Sig_structure over (protected_header, payload) and
     // measure/encode it with `minicbor::len` — no hand byte-counting.
     let sig_struct_val = SigStructure {
         context: SIG_STRUCTURE_CONTEXT,
-        body_protected: &PROTECTED_HEADER,
+        body_protected: protected_header,
         external_aad: &[],
         payload: view.payload,
     };
     // Zeroed so any `len`/`encode` divergence can't feed stale DMA bytes
-    // into the verified digest.
+    // into the verified input.
     let sig_struct = alloc.dma_alloc_zeroed(minicbor::len(&sig_struct_val))?;
     minicbor::encode(&sig_struct_val, crate::codec::as_mut_slice(sig_struct))
         .map_err(|_| HsmError::InternalError)?;
 
-    // SHA-384 in the operand order `ecc_verify` consumes.
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        sig_struct,
-        digest,
-        HsmDigestForm::Operand,
-    )
-    .await?;
+    match verifier {
+        ReportVerifier::Es384(signer_pub) => {
+            // SHA-384 in the operand order `ecc_verify` consumes.
+            let digest = alloc.dma_alloc(SHA384_LEN)?;
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                sig_struct,
+                digest,
+                HsmDigestForm::Operand,
+            )
+            .await?;
 
-    // The COSE signature stores `r || s` big-endian per half; a
-    // big-endian PAL verifies it in place, otherwise convert a copy.
-    if view.signature.len() != SIGNATURE_LEN {
-        return Err(HsmError::InvalidArg);
+            // The COSE signature stores `r || s` big-endian per half; a
+            // big-endian PAL verifies it in place, otherwise convert a copy.
+            let sig: &HsmDmaBuf = if P::BYTE_ORDER.is_be() {
+                view.signature
+            } else {
+                let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
+                sig.copy_from_slice(view.signature);
+                sig_halves_swap(P::BYTE_ORDER, sig)?;
+                sig
+            };
+
+            let result = alloc.dma_alloc(4)?;
+            pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig, result)
+                .await?;
+
+            // Per the trait contract, bit 0 clear indicates a valid signature.
+            Ok(result[0] & 1 == 0)
+        }
+        ReportVerifier::MlDsa87(pk) => {
+            if pk.len() != MLDSA87_PUB_KEY_LEN {
+                return Err(HsmError::InvalidArg);
+            }
+            let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 0, sig_struct)?;
+            pal.mldsa_verify(
+                io,
+                HsmMlDsaParamSet::MlDsa87,
+                HsmMlDsaPubKey::Encoded(pk),
+                msg,
+                view.signature,
+            )
+            .await
+        }
     }
-    let sig: &HsmDmaBuf = if P::BYTE_ORDER.is_be() {
-        view.signature
-    } else {
-        let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
-        sig.copy_from_slice(view.signature);
-        sig_halves_swap(P::BYTE_ORDER, sig)?;
-        sig
-    };
-
-    let result = alloc.dma_alloc(4)?;
-    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig, result)
-        .await?;
-
-    // Per the trait contract, bit 0 clear indicates a valid signature.
-    Ok(result[0] & 1 == 0)
 }

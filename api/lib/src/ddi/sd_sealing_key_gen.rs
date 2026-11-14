@@ -189,6 +189,7 @@ pub(crate) fn masked_key_report(
 
     let mut req = TborKeyReportReq {
         session_id: session.ex_session_id()?,
+        bank: CERT_BANK_ECC,
         masked_key: masked_key.to_vec(),
         report_data: report_data_arr,
         auth_envelope: Vec::new(),
@@ -196,16 +197,21 @@ pub(crate) fn masked_key_report(
     req.auth_envelope = session.key_report_auth(&req)?;
 
     let mut cookie = None;
+    let mut out = vec![0u8; KEY_REPORT_MAX_LEN];
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, &mut [], &mut cookie)
+        dev.exec_op_tbor(&req, &mut [TborOobItem::Out(&mut out)], &mut cookie)
             .map_err(HsmError::from)
     })?;
 
-    if report.len() < resp.report.len() {
+    let len = usize::from(resp.report_len.get());
+    if len > out.len() {
+        return Err(HsmError::InternalError);
+    }
+    if report.len() < len {
         return Err(HsmError::BufferTooSmall);
     }
-    report[..resp.report.len()].copy_from_slice(&resp.report);
-    Ok(resp.report.len())
+    report[..len].copy_from_slice(&out[..len]);
+    Ok(len)
 }
 
 #[cfg(test)]

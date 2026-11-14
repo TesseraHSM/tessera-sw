@@ -76,6 +76,8 @@ async fn check_credential_guard() {
         .expect("encode")
         .session_id(0u16.into())
         .expect("session id")
+        .bank(0)
+        .expect("bank")
         .masked_key(&[])
         .expect("masked key")
         .report_data(&[0; KEY_REPORT_DATA_LEN])

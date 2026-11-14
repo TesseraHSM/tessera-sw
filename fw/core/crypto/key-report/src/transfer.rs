@@ -27,6 +27,7 @@ use crate::decode::CoseReportView;
 use crate::parse_report;
 use crate::ReportKind;
 use crate::ReportParams;
+use crate::ReportVerifier;
 use crate::ReportView;
 use crate::TransferReportParams;
 
@@ -413,12 +414,13 @@ pub async fn verify_transfer<'a, P: HsmCrypto>(
             protected_header: transfer.protected_header,
             payload: transfer.payload,
             signature: transfer.signature,
+            alg: transfer.alg,
         }
     };
     let signer = alloc.dma_alloc(P384_PUBLIC_LEN - 1)?;
     signer.copy_from_slice(&cfg.signer_public_key[1..]);
     pair_from_be(P::BYTE_ORDER, HsmEccCurve::P384, signer)?;
-    if !verify_signature(pal, io, alloc, cose, signer).await? {
+    if !verify_signature(pal, io, alloc, cose, ReportVerifier::Es384(signer)).await? {
         return Err(HsmError::InvalidArg);
     }
     parse_transfer_envelope(envelope)

@@ -731,3 +731,150 @@ fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
         assert!(parse_transfer_envelope(&bytes).is_err());
     }
 }
+
+const PROTECTED_HEADER_MLDSA87: [u8; 22] = [
+    0xa2, 0x01, 0x38, 0x31, 0x03, 0x70, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2f, 0x63, 0x62, 0x6f, 0x72,
+];
+
+/// Tagged COSE_Sign1 under an explicit protected header.
+fn cose_sign1_with(header: &[u8], payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    let mut buf = vec![COSE_SIGN1_TAG];
+    let mut e = Encoder::new(&mut buf);
+    e.array(4)
+        .unwrap()
+        .bytes(header)
+        .unwrap()
+        .map(0)
+        .unwrap()
+        .bytes(payload)
+        .unwrap()
+        .bytes(signature)
+        .unwrap();
+    buf
+}
+
+/// AKP ML-DSA-87 COSE_Key `{1: 7, 3: -50, -1: pk}`.
+fn mldsa_cose_key(pk: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut e = Encoder::new(&mut buf);
+    e.map(3)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .u8(7)
+        .unwrap()
+        .u8(3)
+        .unwrap()
+        .i8(-50)
+        .unwrap()
+        .i8(-1)
+        .unwrap()
+        .bytes(pk)
+        .unwrap();
+    buf
+}
+
+/// v2 public-key payload with an arbitrary `public_key` field.
+fn payload_v2_vec(public_key: &[u8], public_key_size: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut e = Encoder::new(&mut buf);
+    e.map(8)
+        .unwrap()
+        .u8(0)
+        .unwrap()
+        .u16(2)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .bytes(public_key)
+        .unwrap()
+        .u8(2)
+        .unwrap()
+        .u16(public_key_size)
+        .unwrap()
+        .u8(3)
+        .unwrap()
+        .u32(0)
+        .unwrap()
+        .u8(4)
+        .unwrap()
+        .bytes(&[0xA1; APP_UUID_LEN])
+        .unwrap()
+        .u8(5)
+        .unwrap()
+        .bytes(&[0xB2; REPORT_DATA_LEN])
+        .unwrap()
+        .u8(6)
+        .unwrap()
+        .bytes(&[0xC3; VM_LAUNCH_ID_LEN])
+        .unwrap()
+        .u8(7)
+        .unwrap()
+        .bytes(&[0xD4; POLICY_HASH_LEN])
+        .unwrap();
+    buf
+}
+
+#[test]
+fn parse_decodes_mldsa_signed_report_attesting_mldsa_key() {
+    use tsra_fw_core_crypto_key_report::ReportAlg;
+    use tsra_fw_core_crypto_key_report::MLDSA87_COSE_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLDSA87_PUB_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLDSA87_SIGNATURE_LEN;
+    use tsra_fw_core_crypto_key_report::REPORT_MAX_LEN;
+
+    let ck = mldsa_cose_key(&[0x5A; MLDSA87_PUB_KEY_LEN]);
+    assert_eq!(ck.len(), MLDSA87_COSE_KEY_LEN);
+    let pl = payload_v2_vec(&ck, ck.len() as u16);
+    let sig = vec![0x77; MLDSA87_SIGNATURE_LEN];
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(report.len() <= REPORT_MAX_LEN);
+
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::MlDsa87);
+    assert_eq!(view.public_key, &ck[..]);
+    assert_eq!(view.signature, &sig[..]);
+
+    // A short AKP field size or padding is not a valid ML-DSA field.
+    let pl = payload_v2_vec(&ck, ck.len() as u16 - 1);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
+    let mut padded = ck.clone();
+    padded.push(0);
+    let pl = payload_v2_vec(&padded, ck.len() as u16);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
+}
+
+#[test]
+fn parse_binds_signature_length_to_protected_header_alg() {
+    use tsra_fw_core_crypto_key_report::ReportAlg;
+    use tsra_fw_core_crypto_key_report::MLDSA87_SIGNATURE_LEN;
+
+    let pk = vec![0u8; PUBLIC_KEY_MAX_SIZE];
+    let pl = payload_v2_vec(&pk, 0);
+    let es_sig = [0x11; SIGNATURE_LEN];
+    let ml_sig = vec![0x22; MLDSA87_SIGNATURE_LEN];
+
+    let report = cose_sign1_with(&PROTECTED_HEADER, &pl, &es_sig);
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::Es384);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &ml_sig);
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::MlDsa87);
+
+    for (header, sig) in [
+        (&PROTECTED_HEADER, &ml_sig[..]),
+        (&PROTECTED_HEADER_MLDSA87, &es_sig[..]),
+    ] {
+        let report = cose_sign1_with(header, &pl, sig);
+        assert!(parse_key_report(dma_view(&report)).is_err());
+    }
+
+    // Any other algorithm (here ML-DSA-65, -49) is rejected.
+    let mut header = PROTECTED_HEADER_MLDSA87;
+    header[3] = 0x30;
+    let report = cose_sign1_with(&header, &pl, &ml_sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
+}

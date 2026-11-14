@@ -8,14 +8,18 @@
 //! [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), unmasks it, derives
 //! the attested key's public component on-device, and returns a signed
 //! COSE_Sign1 key-attestation report over it. The report is signed by the
-//! partition-identity (PID) key — the same signer as the `PartInit` PTA
-//! report.
+//! partition-identity (PID) key of the requested bank: the P-384 PID key
+//! (ES384) or the ML-DSA-87 PID key (ML-DSA-87).
 //!
 //! Inputs:
 //!
 //! * `session_id` — TOC-carried session id; cross-checked against the
 //!   SQE-carried session id by the dispatcher (parity with the other
 //!   in-session commands).
+//! * `bank` — the PID signer: [`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
+//!   [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA), matching the `GetCert`
+//!   bank whose leaf verifies the report. A bank without a provisioned PID
+//!   key is an error; there is no fallback.
 //! * `masked_key` — the masked-key envelope to attest, as produced by a
 //!   masking command. Variable length (the plaintext size depends on the
 //!   key kind) up to [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
@@ -23,14 +27,20 @@
 //!   bound into the report payload (typically a freshness nonce or a
 //!   challenge digest).
 //! * `auth_envelope` — session-parameter-key authentication of the original
-//!   masked key and report data; mandatory for CU requests.
+//!   masked key and report data, its AAD binding the session and `bank`;
+//!   mandatory for CU requests.
 //!
 //! Outputs:
 //!
-//! * `report` — the tagged COSE_Sign1 key-attestation report. Variable
-//!   length up to [`KEY_REPORT_MAX_LEN`].
+//! * Out-of-band item [`KEY_REPORT_OOB_INDEX`] — the tagged COSE_Sign1
+//!   key-attestation report, at most [`KEY_REPORT_MAX_LEN`] bytes. Its
+//!   protected header names the signing algorithm, which verifiers must
+//!   match against the requested bank.
+//! * `report_len` — the number of report bytes written.
 
 use tsra_fw_ddi_tbor_api::tbor;
+
+use crate::tbor_int::U16;
 
 /// TBOR opcode for `KeyReport`.
 ///
@@ -57,18 +67,21 @@ pub const KEY_REPORT_DATA_LEN: usize = 128;
 /// AEAD authentication envelope: 32 B AAD and a 48 B request digest.
 pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
 
-/// Bind request authentication to this command and session.
-pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
+/// Bind request authentication to this command, session and signing bank.
+pub fn build_key_report_auth_aad(session_id: u16, bank: u8) -> [u8; 32] {
     let mut aad = [0u8; 32];
-    aad[..13].copy_from_slice(b"key-report-v1");
+    aad[..13].copy_from_slice(b"key-report-v2");
     aad[13..15].copy_from_slice(&session_id.to_le_bytes());
+    aad[15] = bank;
     aad
 }
 
-/// Maximum wire length of the returned COSE_Sign1 `report`, including the
-/// largest supported public key (a 4096-bit RSA COSE_Key). Pinned into the
-/// `#[tbor(buffer, max_len = 1024)]` literal on [`TborKeyReportResp::report`].
-pub const KEY_REPORT_MAX_LEN: usize = 1024;
+/// Maximum length of the returned COSE_Sign1 report: an ML-DSA-87
+/// signature over the largest supported public key.
+pub const KEY_REPORT_MAX_LEN: usize = 8192;
+
+/// Out-of-band item that receives the report.
+pub const KEY_REPORT_OOB_INDEX: usize = 0;
 
 /// `KeyReport` request schema.
 ///
@@ -80,6 +93,11 @@ pub struct TborKeyReportReq<'a> {
     /// cross-checks it against the SQE-carried session id.
     #[tbor(session_id)]
     pub session_id: SessionId,
+
+    /// PID signer bank ([`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
+    /// [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA)).
+    #[tbor(U8)]
+    pub bank: u8,
 
     /// The masked-key envelope to attest. Variable length up to
     /// [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
@@ -98,11 +116,10 @@ pub struct TborKeyReportReq<'a> {
 
 /// `KeyReport` response schema.
 #[tbor(response, pair = TborKeyReportReq)]
-pub struct TborKeyReportResp<'a> {
-    /// The tagged COSE_Sign1 key-attestation report, signed by the PID
-    /// key. Variable length up to [`KEY_REPORT_MAX_LEN`].
-    #[tbor(buffer, max_len = 1024)]
-    pub report: &'a [u8],
+pub struct TborKeyReportResp {
+    /// Number of report bytes written to out-of-band item
+    /// [`KEY_REPORT_OOB_INDEX`].
+    pub report_len: U16,
 }
 
 #[cfg(test)]
@@ -122,6 +139,8 @@ mod tests {
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
+            .bank(crate::CERT_BANK_MLDSA)
+            .unwrap()
             .masked_key(&masked)
             .unwrap()
             .report_data(&report_data)
@@ -129,20 +148,20 @@ mod tests {
             .auth_envelope(&[])
             .unwrap()
             .finish();
+        assert_eq!(frame.bank(), crate::CERT_BANK_MLDSA);
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.report_data(), &report_data[..]);
     }
 
     #[test]
-    fn response_round_trips_report() {
-        let mut buf = [0u8; 1024];
-        let report = [0x5Au8; 300];
+    fn response_round_trips_report_len() {
+        let mut buf = [0u8; 64];
         let frame = TborKeyReportResp::encode(&mut buf, 0, false)
             .unwrap()
-            .report(&report)
+            .report_len(U16::new(7600))
             .unwrap()
             .finish();
-        assert_eq!(frame.report(), &report[..]);
+        assert_eq!(frame.report_len().get(), 7600);
     }
 
     #[test]
@@ -151,7 +170,6 @@ mod tests {
         // pin them against the exported consts.
         const _: () = assert!(3168 == KEY_REPORT_MASKED_KEY_MAX_LEN);
         const _: () = assert!(128 == KEY_REPORT_DATA_LEN);
-        const _: () = assert!(1024 == KEY_REPORT_MAX_LEN);
         assert_eq!(TBOR_OP_KEY_REPORT, 0x10);
     }
 }

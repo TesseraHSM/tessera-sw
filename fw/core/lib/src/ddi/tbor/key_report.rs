@@ -7,8 +7,9 @@
 //! [`SdSealingKeyGen`](super::sd_sealing_key_gen)), unmasks it, derives
 //! the attested key's public component on-device, and returns a signed
 //! COSE_Sign1 key-attestation report over it. The report is signed by the
-//! partition-identity (PID) key — the same signer as the `PartInit` PTA
-//! report.
+//! partition-identity (PID) key of the requested bank: ES384 by the P-384
+//! PID key, or ML-DSA-87 by the ML-DSA-87 PID seed. An unprovisioned bank
+//! fails; there is no fallback to the other bank.
 //!
 //! Flow:
 //!
@@ -25,7 +26,8 @@
 //!    keys (no public component) and other non-attestable kinds are rejected with
 //!    [`HsmError::UnsupportedKeyType`].
 //! 5. Build and PID-sign the COSE_Sign1 report over the derived key,
-//!    caller-supplied `report_data`, session app id, and VM launch id.
+//!    caller-supplied `report_data`, session app id, and VM launch id, and
+//!    return it through out-of-band item `KEY_REPORT_OOB_INDEX`.
 //!
 //! The blob's `svn` / `owner_seed_id` are **not** enforced against the
 //! current partition lineage: the report reflects the key as-masked (the
@@ -39,15 +41,20 @@
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
-use tsra_fw_core_crypto_key_report::key_report;
+use tsra_fw_core_crypto_key_report::key_report_with;
 use tsra_fw_core_crypto_key_report::AttestedPubKey;
 use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KeyReportParams;
+use tsra_fw_core_crypto_key_report::ReportSigner;
 use tsra_fw_ddi_tbor_types::build_key_report_auth_aad;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::TborKeyReportResp;
+use tsra_fw_ddi_tbor_types::CERT_BANK_ECC;
+use tsra_fw_ddi_tbor_types::CERT_BANK_MLDSA;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_AUTH_ENVELOPE_LEN;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
+use tsra_fw_ddi_tbor_types::KEY_REPORT_OOB_INDEX;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
@@ -174,6 +181,10 @@ pub(crate) async fn handle<P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| {
         let req = TborKeyReportReq::decode_mut(cmd_buf.request_mut())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
+        let bank = req.bank;
+        if bank != CERT_BANK_ECC && bank != CERT_BANK_MLDSA {
+            return Err(HsmError::InvalidArg);
+        }
 
         validate_active_session(pal, io, sess_id)?;
 
@@ -196,6 +207,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 alloc,
                 sess_id,
+                bank,
                 param_key,
                 req.masked_key,
                 req.report_data,
@@ -213,17 +225,21 @@ pub(crate) async fn handle<P: HsmPal>(
             resolve_masking_key(pal, io, scope, sess_id)?
         };
 
-        let (report, report_len) = build_key_report(
+        let report = build_key_report(
             pal,
             io,
             alloc,
+            bank,
             masked_key,
             masking_key,
             app_uuid,
             report_data,
         )
         .await?;
-        encode_response(cmd_buf, &report[..report_len])
+        let report_len = u16::try_from(report.len()).map_err(|_| HsmError::InternalError)?;
+        pal.send_oob_bounded(io, KEY_REPORT_OOB_INDEX, report)
+            .await?;
+        encode_response(cmd_buf, report_len)
     })
     .await
 }
@@ -235,6 +251,7 @@ async fn authenticate_request<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     sess_id: HsmSessId,
+    bank: u8,
     param_key: &HsmDmaBuf,
     masked_key: &HsmDmaBuf,
     report_data: &HsmDmaBuf,
@@ -258,7 +275,7 @@ async fn authenticate_request<P: HsmPal>(
     let view = aead_open(pal, io, param_key, envelope)
         .await
         .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;
-    let aad = build_key_report_auth_aad(u16::from(sess_id));
+    let aad = build_key_report_auth_aad(u16::from(sess_id), bank);
     if view.aad[..] != aad || view.payload[..] != digest[..] {
         return Err(HsmError::AeadEnvelopeAuthFailed);
     }
@@ -268,17 +285,18 @@ async fn authenticate_request<P: HsmPal>(
 /// Unmask the key, derive its public component, and build the PID-signed
 /// COSE_Sign1 report over it.
 ///
-/// Returns the report bytes in `alloc`-scoped scratch (`&mut HsmDmaBuf`) plus
-/// its exact length; the caller copies them into the IO-scoped response.
+/// Returns the exact-length report in `alloc`-scoped scratch.
+#[allow(clippy::too_many_arguments)]
 async fn build_key_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
+    bank: u8,
     masked_key: &mut HsmDmaBuf,
     masking_key: &HsmDmaBuf,
     app_uuid: &HsmDmaBuf,
     report_data: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
+) -> HsmResult<&'a HsmDmaBuf> {
     // Derive the public component directly from the IO-scoped request.
     let (key, key_attrs, key_kind) = async {
         let view = unmask(pal, io, masking_key, masked_key).await?;
@@ -288,32 +306,39 @@ async fn build_key_report<'a, P: HsmPal>(
     .await?;
     let flags: u32 = key_flags_from_attrs(key_attrs, key_kind).into();
 
-    build_signed_report(pal, io, alloc, app_uuid, key, flags, report_data).await
+    build_signed_report(pal, io, alloc, bank, app_uuid, key, flags, report_data).await
 }
 
-/// Encode the `KeyReport` response frame around the finished report.
-fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_bytes: &[u8]) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
+/// Encode the `KeyReport` response frame carrying the report length.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_len: u16) -> HsmResult<usize> {
+    cmd_buf.encode_response(|buf| {
         let frame = TborKeyReportResp::encode(buf, 0, false)?
-            .report(report_bytes)?
+            .report_len(U16::new(report_len))?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }
 
 /// Assemble the report inputs and build the PID-signed COSE_Sign1 report
-/// via the key-report crate's two-pass builder.
+/// via the key-report crate's two-pass builder, signed by `bank`'s PID key.
+#[allow(clippy::too_many_arguments)]
 async fn build_signed_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
+    bank: u8,
     app_uuid: &HsmDmaBuf,
     key: AttestedPubKey<'_>,
     flags: u32,
     report_data_src: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
-    let pid_priv = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
+) -> HsmResult<&'a HsmDmaBuf> {
+    let signer = if bank == CERT_BANK_MLDSA {
+        ReportSigner::MlDsa87Seed(
+            pal.vault_key(io, part_state::part_id_mldsa_seed_key_id(pal, io)?)?,
+        )
+    } else {
+        ReportSigner::Es384(pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?)
+    };
 
     let vm_launch_id = part_state::part_vm_launch_guid(pal, io)?;
 
@@ -334,11 +359,13 @@ async fn build_signed_report<'a, P: HsmPal>(
     };
 
     // Two-pass: query the exact size, then build into an exact buffer.
-    let report_len = key_report(pal, io, alloc, &params, pid_priv, None).await?;
+    let report_len = key_report_with(pal, io, alloc, &params, signer, None).await?;
     if report_len > KEY_REPORT_MAX_LEN {
         return Err(HsmError::InternalError);
     }
     let report = alloc.dma_alloc(report_len)?;
-    key_report(pal, io, alloc, &params, pid_priv, Some(report)).await?;
-    Ok((report, report_len))
+    if key_report_with(pal, io, alloc, &params, signer, Some(&mut *report)).await? != report_len {
+        return Err(HsmError::InternalError);
+    }
+    Ok(report)
 }

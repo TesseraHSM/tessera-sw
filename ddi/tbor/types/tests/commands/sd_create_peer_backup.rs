@@ -195,6 +195,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
     use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
     use tsra_ddi_tbor_types::TborKeyReportReq;
+    use tsra_ddi_tbor_types::CERT_BANK_ECC;
     use tsra_ddi_tbor_types::KEY_CLASS_ECC;
     use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 
@@ -223,6 +224,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     );
     let mut request = TborKeyReportReq {
         session_id: cu.session_id,
+        bank: CERT_BANK_ECC,
         masked_key: imported.masked_key,
         report_data: [0u8; KEY_REPORT_DATA_LEN],
         auth_envelope: Vec::new(),
@@ -230,21 +232,16 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     request.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &request)
         .expect("authenticate CU attestation");
     let report = cu_ctx
-        .tbor(&request)
+        .key_report(&request)
         .expect("ordinary imported key remains attestable");
-    let decoded = verify_key_report(
-        &ctx,
-        &report.report,
-        &imported.pub_key,
-        &request.report_data,
-    );
+    let decoded = verify_key_report(&ctx, &report, &imported.pub_key, &request.report_data);
     assert_eq!(decoded.flags & (1 << 10), 0);
 
     let mut imported_pub = [0u8; RAW_PUB_LEN];
     imported_pub.copy_from_slice(&imported.pub_key);
     dev_rev_in_place(&mut imported_pub[..48]);
     dev_rev_in_place(&mut imported_pub[48..]);
-    let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
+    let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report);
     let req = create_peer_req(sid, &evidence, &part.policy, &created.pok_local_backup);
     ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
     cu_ctx.session_close(cu.session_id).expect("close CU");

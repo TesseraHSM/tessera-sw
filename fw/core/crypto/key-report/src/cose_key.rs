@@ -6,6 +6,8 @@
 //! Dispatches on the attested key type:
 //! * ECC  → EC2 `COSE_Key` map `{ 1: 2, -1: crv, -2: x, -3: y }`.
 //! * RSA  → RSA `COSE_Key` map `{ 1: 3, -1: n, -2: e }`.
+//! * ML-DSA-87 → AKP `COSE_Key` map `{ 1: 7, 3: -50, -1: pub }`
+//!   (draft-ietf-cose-dilithium).
 //! * Symmetric → no public component (empty; `public_key_size == 0`).
 //!
 //! Coordinates / modulus / exponent are big-endian raw bytes, matching
@@ -18,6 +20,9 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
+use crate::consts::MLDSA87_COSE_KEY_LEN;
+use crate::consts::MLDSA87_PUB_KEY_LEN;
+use crate::consts::PUBLIC_KEY_MAX_SIZE;
 use crate::consts::RSA_EXPONENT_MAX_LEN;
 use crate::consts::RSA_MODULUS_MAX_LEN;
 use crate::decode::bytes_span;
@@ -32,6 +37,10 @@ const COSE_EC2_X: i8 = -2;
 const COSE_EC2_Y: i8 = -3;
 const COSE_RSA_N: i8 = -1;
 const COSE_RSA_E: i8 = -2;
+const COSE_KTY_AKP: u8 = 7;
+const COSE_KEY_ALG: u8 = 3;
+const COSE_AKP_PUB: i8 = -1;
+const COSE_ALG_MLDSA87: i8 = -50;
 
 // COSE elliptic-curve identifiers (RFC 9053 Table 18).
 const COSE_CRV_P256: i8 = 1;
@@ -59,6 +68,11 @@ pub enum AttestedPubKey<'a> {
         /// Big-endian public exponent.
         e: &'a HsmDmaBuf,
     },
+    /// ML-DSA-87 public key, [`MLDSA87_PUB_KEY_LEN`] bytes.
+    MlDsa87 {
+        /// Encoded public key.
+        pk: &'a HsmDmaBuf,
+    },
     /// Symmetric key — no public component (empty COSE_Key).
     Symmetric,
 }
@@ -85,9 +99,24 @@ impl AttestedPubKey<'_> {
                     return Err(HsmError::InvalidArg);
                 }
             }
+            AttestedPubKey::MlDsa87 { pk } => {
+                if pk.len() != MLDSA87_PUB_KEY_LEN {
+                    return Err(HsmError::InvalidArg);
+                }
+            }
             AttestedPubKey::Symmetric => {}
         }
         Ok(())
+    }
+
+    /// Length of the report's `public_key` field for this key: the fixed
+    /// zero-padded [`PUBLIC_KEY_MAX_SIZE`], or the exact COSE_Key length
+    /// for keys too large to fit it.
+    pub(crate) fn field_len(&self) -> usize {
+        match self {
+            AttestedPubKey::MlDsa87 { .. } => MLDSA87_COSE_KEY_LEN,
+            _ => PUBLIC_KEY_MAX_SIZE,
+        }
     }
 }
 
@@ -132,6 +161,17 @@ fn encode_rsa_key(enc: &mut Encoder<&mut [u8]>, n: &[u8], e: &[u8]) -> HsmResult
     Ok(())
 }
 
+fn encode_mldsa87_key(enc: &mut Encoder<&mut [u8]>, pk: &[u8]) -> HsmResult<()> {
+    map_encode_err(enc.map(3))?;
+    map_encode_err(enc.u8(COSE_KTY))?;
+    map_encode_err(enc.u8(COSE_KTY_AKP))?;
+    map_encode_err(enc.u8(COSE_KEY_ALG))?;
+    map_encode_err(enc.i8(COSE_ALG_MLDSA87))?;
+    map_encode_err(enc.i8(COSE_AKP_PUB))?;
+    map_encode_err(enc.bytes(pk))?;
+    Ok(())
+}
+
 /// Encode `key` as a COSE_Key map into `out`, returning the number of
 /// bytes written. A symmetric key writes nothing and returns `0`.
 ///
@@ -149,6 +189,9 @@ pub(crate) fn to_cose_key(key: &AttestedPubKey<'_>, out: &mut [u8]) -> HsmResult
         }
         AttestedPubKey::Rsa { n, e } => {
             encode_rsa_key(&mut enc, n, e)?;
+        }
+        AttestedPubKey::MlDsa87 { pk } => {
+            encode_mldsa87_key(&mut enc, pk)?;
         }
     }
 

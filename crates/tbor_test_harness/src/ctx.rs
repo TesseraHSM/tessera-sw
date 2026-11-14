@@ -39,11 +39,13 @@ use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborGetCertReq;
+use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::CERT_MAX_LEN;
+use tsra_ddi_tbor_types::KEY_REPORT_MAX_LEN;
 
 use crate::api_rev::helper_api_rev_tbor;
 use crate::assertions::assert_fw_rejects;
@@ -198,6 +200,17 @@ impl TestCtx {
         )?;
         cert.truncate(usize::from(resp.cert_len.get()));
         Ok(cert)
+    }
+
+    /// Issue `KeyReport` and return the COSE_Sign1 report, which rides
+    /// out-of-band item
+    /// [`KEY_REPORT_OOB_INDEX`](tsra_ddi_tbor_types::KEY_REPORT_OOB_INDEX)
+    /// into a [`KEY_REPORT_MAX_LEN`] buffer.
+    pub fn key_report(&self, req: &TborKeyReportReq) -> DdiResult<Vec<u8>> {
+        let mut report = vec![0u8; KEY_REPORT_MAX_LEN];
+        let resp = self.tbor_oob_io(req, &mut [TborOobItem::Out(&mut report)])?;
+        report.truncate(usize::from(resp.report_len.get()));
+        Ok(report)
     }
 
     /// [`Self::expect_fw_reject`] for [`Self::get_cert`].

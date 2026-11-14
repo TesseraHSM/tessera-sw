@@ -17,8 +17,7 @@
 //!
 //! * Inline scalar fields in `TborApiRevResp`.
 //! * Typed inline fields (`SessionId` and `KeyId`).
-//! * Single variable-length buffers in `TborEccSignResp` and
-//!   `TborKeyReportResp`.
+//! * Single variable-length buffer in `TborEccSignResp`.
 //! * Variable-length buffer plus fixed-size array in
 //!   `TborAesEncryptDecryptResp`.
 //! * Two variable-length buffers in `TborEccGenerateKeyResp`.
@@ -40,7 +39,6 @@ use tsra_ddi_tbor_types::TborAesEncryptDecryptResp;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborEccGenerateKeyResp;
 use tsra_ddi_tbor_types::TborEccSignResp;
-use tsra_ddi_tbor_types::TborKeyReportResp;
 use tsra_ddi_tbor_types::TborPartInfoResp;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborSessionOpenInitResp;
@@ -524,70 +522,6 @@ fn ecc_sign_maximum_signature_with_trailing_entry_is_preserved() {
 
     assert_eq!(resp.signature, signature);
 }
-/// Verifies exact-count decoding of a variable-length key report.
-#[test]
-fn key_report_exact_toc_count_decodes_report() {
-    let report: Vec<u8> = (0..512).map(|index| (index & 0xFF) as u8).collect();
-
-    let mut buf = [0u8; 2048];
-
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
-        .buffer(&report)
-        .expect("encode report")
-        .finish()
-        .expect("finish response");
-
-    let resp = TborKeyReportResp::decode_response(bytes).expect("decode key report response");
-
-    assert_eq!(resp.report, report);
-}
-
-/// Verifies that an appended field is ignored for a variable-length key report.
-#[test]
-fn key_report_extra_trailing_toc_entry_is_ignored() {
-    let report: Vec<u8> = (0..512).map(|index| (index & 0xFF) as u8).collect();
-
-    let mut buf = [0u8; 2048];
-
-    let bytes = encode_buffer_with_trailing(&mut buf, &report, &[0xFF]);
-
-    let resp = TborKeyReportResp::decode_response(bytes)
-        .expect("forward compatibility: trailing entry must not disturb report");
-
-    assert_eq!(resp.report, report);
-}
-
-/// Verifies that multiple appended fields are ignored for a variable-length key report.
-#[test]
-fn key_report_multiple_trailing_toc_entries_are_ignored() {
-    let report: Vec<u8> = (0..512).map(|index| (index & 0xFF) as u8).collect();
-
-    let trailing = [0x10, 0x20, 0x30, 0x40];
-    let mut buf = [0u8; 2048];
-
-    let bytes = encode_buffer_with_trailing(&mut buf, &report, &trailing);
-
-    let resp = TborKeyReportResp::decode_response(bytes)
-        .expect("forward compatibility: trailing entries must not disturb report");
-
-    assert_eq!(resp.report, report);
-}
-
-/// Verifies forward-compatible decoding of the maximum-size key report buffer.
-#[test]
-fn key_report_maximum_report_with_trailing_entry_is_preserved() {
-    let report: Vec<u8> = (0..1024).map(|index| (index & 0xFF) as u8).collect();
-
-    let mut buf = [0u8; 2048];
-
-    let bytes = encode_buffer_with_trailing(&mut buf, &report, &[0xA5]);
-
-    let resp = TborKeyReportResp::decode_response(bytes)
-        .expect("maximum-size report with trailing entry must decode");
-
-    assert_eq!(resp.report, report);
-}
-
 /// Verifies that an appended field is ignored for a variable-length
 /// message followed by a variable-length IV.
 #[test]

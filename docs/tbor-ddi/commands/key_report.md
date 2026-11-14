@@ -13,10 +13,17 @@ Licensed under the MIT License.
 Attests a **masked key** (as produced by
 [`SdSealingKeyGen`](./sd_sealing_key_gen.md)).  The handler unmasks the
 key, derives its public component **on-device**, and returns a
-PID-signed COSE_Sign1 key-attestation report over it.  The report is
-signed by the partition-identity (PID) key — the same signer as the
-`PartInit` PTA report — so a relying party can verify it against the
-partition's slot-0 certificate chain.
+PID-signed COSE_Sign1 key-attestation report over it.  The request's
+`bank` selects the partition-identity (PID) signer:
+
+| `bank` | Signer | COSE `alg` | Verify against |
+|---|---|---|---|
+| 0 (`CERT_BANK_ECC`) | P-384 PID key | ES384 (-35) | slot-0 ECC-bank leaf |
+| 1 (`CERT_BANK_MLDSA`) | ML-DSA-87 PID key | ML-DSA-87 (-50) | slot-0 ML-DSA-bank leaf |
+
+The payload is identical for both banks. A bank whose PID key is not
+provisioned fails; there is no fallback to the other bank. Verifiers
+must check that the protected-header `alg` matches the expected bank.
 
 Report building:
 
@@ -35,9 +42,11 @@ Report building:
    RSA-private and RSA-CRT kinds extract the public modulus and exponent.
    Symmetric and non-attestable internal kinds are rejected with
    `UnsupportedKeyType`.
-4. **Sign** the COSE_Sign1 report (ES384 / ECDSA-P384) with the PID key
-   over the derived key, the caller-supplied `report_data`, the session
-   app id, and the partition VM launch id.
+4. **Sign** the COSE_Sign1 report with the bank's PID key (ES384, or
+   pure deterministic ML-DSA-87 with an empty context over the
+   Sig_structure) over the derived key, the caller-supplied
+   `report_data`, the session app id, and the partition VM launch id.
+5. **Return** the report through out-of-band item 0.
 
 Because nothing is persisted, the command records no rollback on the undo
 log.  The masked blob's `svn` / `owner_seed_id` are **not** enforced
@@ -73,10 +82,11 @@ section carrying the masked key and report data.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | `session_id` | `session_id` (inline) | CO or CU session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (≤ 3168 B) | The masked-key envelope to attest: `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(N) ‖ tag(16)`. |
-| 20 | `report_data` | `buffer` (128 B) | Caller-supplied data bound into the report payload (typically a freshness nonce or a challenge digest). |
-| 24 | `auth_envelope` | `buffer` (≤ 160 B) | 120-byte AES-GCM envelope under the session `param_key`; required for CU. CO may send an empty buffer. |
+| 12 | `bank` | `U8` (inline) | PID signer bank: 0 = P-384 (ES384), 1 = ML-DSA-87. Other values → `InvalidArg`. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (≤ 3168 B) | The masked-key envelope to attest: `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(N) ‖ tag(16)`. |
+| 24 | `report_data` | `buffer` (128 B) | Caller-supplied data bound into the report payload (typically a freshness nonce or a challenge digest). |
+| 28 | `auth_envelope` | `buffer` (≤ 160 B) | 120-byte AES-GCM envelope under the session `param_key`; required for CU. CO may send an empty buffer. |
 
 ### Data section
 
@@ -85,25 +95,27 @@ Carries the variable-length `masked_key` followed by the 128-byte
 
 The authentication envelope uses the existing AEAD framing:
 `header(8) ‖ iv(16) ‖ aad(32) ‖ ciphertext(48) ‖ tag(16)`.
-Its AAD is `"key-report-v1" ‖ session_id_le(2) ‖ zero(17)`.
+Its AAD is `"key-report-v2" ‖ session_id_le(2) ‖ bank(1) ‖ zero(16)`.
 Its plaintext is `SHA-384(masked_key ‖ report_data)`. This binds the exact
-key, report data, command and session without exposing the session key.
+key, report data, command, session and signing bank without exposing the
+session key.
 The new authentication TOC entry must be encoded even for an empty CO buffer.
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
-section carrying the report.
-
-### TOC entries
+Wire layout: 8-byte header followed by one inline TOC entry.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `report` | `buffer` (≤ 1024 B) | The tagged COSE_Sign1 key-attestation report (CBOR tag 18, opening byte `0xD2`), signed by the PID key. The embedded COSE_Key holds the derived public key (big-endian coordinates for ECC). |
+| 8 | `report_len` | `U16` (inline) | Number of report bytes written to out-of-band item 0. |
 
-### Data section
+### Out-of-band output
 
-Carries the variable-length COSE_Sign1 `report`.
+| Index | Direction | Size | Contents |
+|---|---|---|---|
+| 0 | Out | ≥ report length (8192 B always suffices) | The tagged COSE_Sign1 key-attestation report (CBOR tag 18, opening byte `0xD2`), signed by the `bank` PID key. The embedded COSE_Key holds the derived public key (big-endian coordinates for ECC). |
+
+An ES384 report is at most 896 bytes; an ML-DSA-87 report is about 5.6 KB.
 
 ## Errors
 
@@ -114,7 +126,8 @@ Carries the variable-length COSE_Sign1 `report`.
 | `InvalidPermissions` | The session was not established under the TBOR role's credential |
 | `SessionAuthFailure` | The session's authenticated PSK is no longer current |
 | `AeadEnvelopeAuthFailed` | Missing, malformed, tampered or wrong-session CU request authentication |
-| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), or `report_data` is the wrong length |
+| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), `report_data` is the wrong length, or `bank` is unknown |
+| `InsufficientBuffer` | Out-of-band item 0 is missing or shorter than the report |
 | `UnsupportedKeyScope` | The masked key's scope (`Session`, `SecurityDomain`, or other) has no masking key yet |
 | `AesGcmDecryptTagDoesNotMatch` | The masked key failed authentication (tampered or wrong masking key) |
 | `UnsupportedKeyType` | The attested key kind cannot be attested (symmetric or a non-attestable internal kind) |
