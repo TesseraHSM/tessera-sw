@@ -33,6 +33,8 @@ use core::cell::Cell;
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+#[cfg(feature = "tsra_test_hooks")]
+use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Duration;
 use embassy_time::Instant;
@@ -384,6 +386,14 @@ pub struct UnoHsmPal {
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
 
+    /// One negative self-test request for the periodic task.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) negative_cast: Channel<NoopRawMutex, crate::self_test::SelfTest, 1>,
+
+    /// Reservation across the HSM and Admin negative-test paths.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) negative_cast_pending: Cell<bool>,
+
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
     /// IO starts while partition keys are being deleted and no pre-reset IO
@@ -540,6 +550,10 @@ impl Default for UnoHsmPal {
             io_in_flight: Cell::new(0),
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
+            #[cfg(feature = "tsra_test_hooks")]
+            negative_cast: Channel::new(),
+            #[cfg(feature = "tsra_test_hooks")]
+            negative_cast_pending: Cell::new(false),
             io_paused: Cell::new(false),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
         }

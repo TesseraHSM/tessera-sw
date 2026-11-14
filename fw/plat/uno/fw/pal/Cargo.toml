@@ -84,6 +84,7 @@ fips_validation_hooks = [
   "dep:tsra_fw_ddi_mbor",
   "dep:tsra_fw_ddi_mbor_derive",
   "dep:tsra_fw_ddi_mbor_types",
+  "tsra_fw_uno_drivers_rng/fips_validation_hooks",
 ]
 tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]
 

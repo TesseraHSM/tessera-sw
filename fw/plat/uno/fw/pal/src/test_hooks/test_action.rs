@@ -31,6 +31,8 @@ use super::common::success_hdr;
 use super::get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_rng;
+#[cfg(feature = "tsra_test_hooks")]
+use super::negative_self_test;
 #[cfg(feature = "fips_validation_hooks")]
 use super::raw_key_import;
 #[cfg(feature = "tsra_test_hooks")]
@@ -61,6 +63,9 @@ struct DdiTestActionResp {
 #[derive(Debug, Copy, Clone)]
 #[repr(u32)]
 enum SupportedTestAction {
+    /// Run a periodic CAST now; it fails only with `fips_validation_hooks`.
+    #[cfg(feature = "tsra_test_hooks")]
+    ExecuteNegativeSelfTest = 9,
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
@@ -91,6 +96,10 @@ impl TryFrom<u32> for SupportedTestAction {
     type Error = HsmError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
+        #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::ExecuteNegativeSelfTest as u32 {
+            return Ok(Self::ExecuteNegativeSelfTest);
+        }
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::TriggerCrash as u32 {
             return Ok(Self::TriggerCrash);
@@ -126,6 +135,18 @@ pub(super) async fn dispatch<'p>(
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::ExecuteNegativeSelfTest => {
+            negative_self_test::dispatch(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
         #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(

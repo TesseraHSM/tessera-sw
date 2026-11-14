@@ -30,13 +30,20 @@ mod aes_cbc;
 mod aes_ecb;
 mod aes_kwp;
 mod kdf;
+#[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+pub(crate) mod negative;
 mod pka;
 mod vectors;
 
+#[cfg(feature = "tsra_test_hooks")]
+use embassy_futures::select::Either;
+#[cfg(feature = "tsra_test_hooks")]
+use embassy_futures::select::select;
 use embassy_time::Duration;
 use embassy_time::Instant;
 use embassy_time::Timer;
 use embassy_time::with_timeout;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_drivers_aes::AesError;
@@ -94,7 +101,7 @@ enum RngAttempt {
 /// mismatch (an SQ set changed during the drain) as "not now". `Done` resumes
 /// host IO. A KAT failure stops the HSM without `Done`, leaving host IO
 /// paused.
-async fn run_rng_periodic(pal: &UnoHsmPal) -> HsmResult<RngAttempt> {
+async fn run_rng_periodic(pal: &UnoHsmPal, negative: bool) -> HsmResult<RngAttempt> {
     match admin_rng_request(pal, IpcMessageOpCode::RngSelfTestPrepare).await? {
         IpcMessageStatusCode::Success => {}
         IpcMessageStatusCode::Deferred => return Ok(RngAttempt::Deferred),
@@ -103,6 +110,26 @@ async fn run_rng_periodic(pal: &UnoHsmPal) -> HsmResult<RngAttempt> {
 
     let drained = pal.host_io_drained();
     if drained {
+        #[cfg(feature = "fips_validation_hooks")]
+        let inject = {
+            if negative {
+                negative::stage(SelfTest::Rng)?;
+            }
+            let inject = negative::take_negative_self_test(SelfTest::Rng)?;
+            if inject != negative {
+                return Err(HsmError::InternalError);
+            }
+            inject
+        };
+        #[cfg(not(feature = "fips_validation_hooks"))]
+        let _ = negative;
+        #[cfg(feature = "fips_validation_hooks")]
+        if inject {
+            pal.rng.self_test_negative()?;
+        } else {
+            pal.rng.self_test()?;
+        }
+        #[cfg(not(feature = "fips_validation_hooks"))]
         pal.rng.self_test()?;
     }
 
@@ -123,8 +150,8 @@ async fn run_rng_periodic(pal: &UnoHsmPal) -> HsmResult<RngAttempt> {
 /// Every PKA engine instance is its own test, as in the reference firmware's
 /// `SelfTest` list (`EcdhEngineInstanceN`, `Rsa2KModExpEngineInstanceN`, ...).
 /// Pre-operational and periodic execution share [`SelfTest::run`].
-#[derive(Clone, Copy)]
-enum SelfTest {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelfTest {
     AesCbc,
     AesEcb,
     AesKwp,
@@ -192,22 +219,55 @@ impl SelfTest {
     }
 
     /// Executes the known-answer test on the self-test IO slot.
-    async fn run(self, pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+    async fn run(self, pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
+        #[cfg(feature = "fips_validation_hooks")]
+        let inject = {
+            let inject = negative::take_negative_self_test(self)?;
+            if inject != negative {
+                return Err(HsmError::InternalError);
+            }
+            inject
+        };
+        #[cfg(not(feature = "fips_validation_hooks"))]
+        let inject = {
+            let _ = negative;
+            false
+        };
         match self {
-            Self::AesCbc => aes_cbc::run_aes_cbc(pal, io).await,
-            Self::AesEcb => aes_ecb::run_aes_ecb(pal, io).await,
-            Self::AesKwp => aes_kwp::run_aes_kwp(pal, io).await,
-            Self::Hkdf => kdf::run_hkdf(pal, io).await,
-            Self::Kbkdf => kdf::run_kbkdf(pal, io).await,
-            Self::RsaModExp(e) => pka::run_rsa_mod_exp_on_engine(pal, io, e).await,
-            Self::RsaModExpCrt(e) => pka::run_rsa_mod_exp_crt_on_engine(pal, io, e).await,
-            Self::Ecdh(e) => pka::run_ecdh_on_engine(pal, io, e).await,
-            Self::Ecdsa(e) => pka::run_ecdsa_on_engine(pal, io, e).await,
-            Self::Rng => pal.rng.self_test(),
+            Self::AesCbc => aes_cbc::run_aes_cbc(pal, io, inject).await,
+            Self::AesEcb => aes_ecb::run_aes_ecb(pal, io, inject).await,
+            Self::AesKwp => aes_kwp::run_aes_kwp(pal, io, inject).await,
+            Self::Hkdf => kdf::run_hkdf(pal, io, inject).await,
+            Self::Kbkdf => kdf::run_kbkdf(pal, io, inject).await,
+            Self::RsaModExp(e) => pka::run_rsa_mod_exp_on_engine(pal, io, e, inject).await,
+            Self::RsaModExpCrt(e) => pka::run_rsa_mod_exp_crt_on_engine(pal, io, e, inject).await,
+            Self::Ecdh(e) => pka::run_ecdh_on_engine(pal, io, e, inject).await,
+            Self::Ecdsa(e) => pka::run_ecdsa_on_engine(pal, io, e, inject).await,
+            Self::Rng => {
+                #[cfg(feature = "fips_validation_hooks")]
+                if inject {
+                    return pal.rng.self_test_negative();
+                }
+                pal.rng.self_test()
+            }
         }
     }
 }
 
+/// Corrupt one public KAT result only when explicitly selected for validation.
+fn corrupt_kat_output(out: &mut HsmDmaBuf, negative: bool) -> HsmResult<()> {
+    #[cfg(not(feature = "fips_validation_hooks"))]
+    let _ = out;
+    if negative {
+        #[cfg(feature = "fips_validation_hooks")]
+        {
+            *out.first_mut().ok_or(HsmError::InternalError)? ^= 1;
+        }
+        #[cfg(not(feature = "fips_validation_hooks"))]
+        return Err(HsmError::UnsupportedCmd);
+    }
+    Ok(())
+}
 /// Returns the `index`-th test of the periodic cycle.
 ///
 /// Fixed tests come first, then each engine in turn runs ECDH, ECDSA,
@@ -248,37 +308,61 @@ fn notify_self_test_failure(test: SelfTest, err: HsmError) -> ! {
 /// as the reference firmware does when `preops_cast` fails. Mirrors
 /// the reference firmware's `preops_cast` — positive known-answer tests only.
 pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+    #[cfg(feature = "fips_validation_hooks")]
+    let selected = negative::selected_hsm_test()?;
+    #[cfg(not(feature = "fips_validation_hooks"))]
+    let selected: Option<SelfTest> = None;
     for test in FIXED_TESTS {
-        test.run(pal, io).await?;
+        run_pre_op_test(pal, io, test, selected == Some(test)).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        SelfTest::RsaModExp(engine).run(pal, io).await?;
+        let test = SelfTest::RsaModExp(engine);
+        run_pre_op_test(pal, io, test, selected == Some(test)).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        SelfTest::RsaModExpCrt(engine).run(pal, io).await?;
+        let test = SelfTest::RsaModExpCrt(engine);
+        run_pre_op_test(pal, io, test, selected == Some(test)).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        SelfTest::Ecdh(engine).run(pal, io).await?;
+        let test = SelfTest::Ecdh(engine);
+        run_pre_op_test(pal, io, test, selected == Some(test)).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        SelfTest::Ecdsa(engine).run(pal, io).await?;
+        let test = SelfTest::Ecdsa(engine);
+        run_pre_op_test(pal, io, test, selected == Some(test)).await?;
     }
     // The DRBG FW-mode KAT is state-destructive; it saves and restores the
     // production DRBG registers internally. Run it last (matching the reference
     // `preops_cast` ordering) and before any live RNG consumer exists.
-    SelfTest::Rng.run(pal, io).await?;
+    run_pre_op_test(pal, io, SelfTest::Rng, selected == Some(SelfTest::Rng)).await?;
+    if selected.is_some() {
+        return Err(HsmError::InternalError);
+    }
     Ok(())
+}
+
+async fn run_pre_op_test(
+    pal: &UnoHsmPal,
+    io: &UnoHsmIo,
+    test: SelfTest,
+    negative: bool,
+) -> HsmResult<()> {
+    let result = test.run(pal, io, negative).await;
+    if negative && result.is_ok() {
+        return Err(HsmError::InternalError);
+    }
+    result
 }
 
 /// Runs one scheduled non-RNG test on the self-test slot.
 ///
 /// A full crypto queue is retried for at most one interval; a test that does
 /// not finish within one second, or any other failure, stops the HSM.
-async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
+async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest, negative: bool) {
     let admission_deadline = Instant::now() + Duration::from_secs(PERIODIC_INTERVAL_SECS);
     loop {
         let result = {
-            let future = test.run(pal, io);
+            let future = test.run(pal, io, negative);
             let mut future = core::pin::pin!(future);
             match with_timeout(Duration::from_secs(1), future.as_mut()).await {
                 Ok(result) => result,
@@ -286,6 +370,9 @@ async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
             }
         };
         match result {
+            Ok(()) if negative && cfg!(feature = "fips_validation_hooks") => {
+                notify_self_test_failure(test, HsmError::InternalError)
+            }
             Ok(()) => return,
             Err(e)
                 if e == AesError::QUEUE_FULL
@@ -297,6 +384,10 @@ async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
                 Timer::at(retry_at).await;
                 if Instant::now() >= admission_deadline {
                     notify_self_test_failure(test, e);
+                }
+                #[cfg(feature = "fips_validation_hooks")]
+                if negative && let Err(stage_err) = negative::stage(test) {
+                    notify_self_test_failure(test, stage_err);
                 }
             }
             Err(e) => notify_self_test_failure(test, e),
@@ -310,7 +401,7 @@ async fn attempt_rng(
     retry_at: &mut Option<Instant>,
     deferred_count: &mut u8,
 ) -> bool {
-    match run_rng_periodic(pal).await {
+    match run_rng_periodic(pal, false).await {
         Ok(RngAttempt::Passed) => {
             *retry_at = None;
             *deferred_count = 0;
@@ -328,6 +419,45 @@ async fn attempt_rng(
     }
 }
 
+/// Runs the requested periodic self-test after a 2-second delay.
+///
+/// With `fips_validation_hooks` the test is made to fail and the HSM stops.
+/// Otherwise the test runs normally and another request is accepted.
+#[cfg(feature = "tsra_test_hooks")]
+async fn run_negative_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
+    Timer::after(Duration::from_secs(2)).await;
+    if test == SelfTest::Rng {
+        let mut ran = false;
+        for attempt in 0..=RNG_MAX_RETRIES {
+            if attempt != 0 {
+                Timer::after(Duration::from_secs(RNG_RETRY_INTERVAL_SECS)).await;
+            }
+            match run_rng_periodic(pal, true).await {
+                Ok(RngAttempt::Deferred) => {}
+                Ok(RngAttempt::Passed) => {
+                    ran = true;
+                    break;
+                }
+                Err(e) => notify_self_test_failure(test, e),
+            }
+        }
+        if !ran {
+            notify_self_test_failure(test, HsmError::RngSelfTestRetriesExhausted);
+        }
+    } else {
+        #[cfg(feature = "fips_validation_hooks")]
+        if let Err(e) = negative::stage(test) {
+            notify_self_test_failure(test, e);
+        }
+        run_scheduled_test(pal, io, test, true).await;
+    }
+    // With fault injection, a selected test that passes is a failure.
+    #[cfg(feature = "fips_validation_hooks")]
+    notify_self_test_failure(test, HsmError::InternalError);
+    #[cfg(not(feature = "fips_validation_hooks"))]
+    pal.negative_cast_pending.set(false);
+}
+
 /// Runs one scheduled test per interval and retries a deferred RNG test.
 ///
 /// Tests run one at a time on the dedicated self-test slot, so two periodic
@@ -342,6 +472,17 @@ pub(crate) async fn run_periodic(pal: &UnoHsmPal) -> ! {
     let mut rng_deferred_count = 0;
 
     loop {
+        #[cfg(feature = "tsra_test_hooks")]
+        match select(
+            Timer::at(rng_retry_at.map_or(next_test_at, |retry| retry.min(next_test_at))),
+            pal.negative_cast.receive(),
+        )
+        .await
+        {
+            Either::First(()) => {}
+            Either::Second(test) => run_negative_test(pal, &io, test).await,
+        }
+        #[cfg(not(feature = "tsra_test_hooks"))]
         Timer::at(rng_retry_at.map_or(next_test_at, |retry| retry.min(next_test_at))).await;
 
         let rng_ran_this_turn = if rng_retry_at.is_some_and(|retry| Instant::now() >= retry) {
@@ -360,7 +501,7 @@ pub(crate) async fn run_periodic(pal: &UnoHsmPal) -> ! {
                     attempt_rng(pal, &mut rng_retry_at, &mut rng_deferred_count).await;
                 }
             }
-            _ => run_scheduled_test(pal, &io, test).await,
+            _ => run_scheduled_test(pal, &io, test, false).await,
         }
 
         index += 1;

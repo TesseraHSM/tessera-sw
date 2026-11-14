@@ -11,6 +11,7 @@
 //   0x2003_B400  DEV_ID_CERT_BLOB   (16 KB, HSP-pushed device-id cert CBLOB)
 //   0x2003_F400  CRASHDUMP_BASE     (1024 B)
 //   0x2003_F800  CORE_RUN_STATUS    (4 B)
+//   0x2003_F834  NEGATIVE_SELF_TEST_ID (4 B, shared with Admin at 0x6063_F834)
 //
 // memory.x should set RAM LENGTH = 187K to prevent the linker from
 // placing .bss/stack into the reserved upper region.
@@ -63,6 +64,14 @@ reg core_run_status_t {
     field { sw = rw; hw = na; } ALIVE[31:0] = 0x0;
 };
 
+reg negative_self_test_id_t {
+    name = "Negative Self Test Identifier";
+    desc = "Validation-only self-test ID to fail once; 0xFFFFFFFF means none.
+            Admin clears it at boot and writes it at global 0x6063_F834; each
+            core clears only the IDs of the self-tests it runs.";
+    field { sw = rw; hw = na; } ID[31:0] = 0xFFFFFFFF;
+};
+
 
 // ══════════════════════════════════════════════════════════════
 // Address Map
@@ -90,4 +99,5 @@ addrmap hsm_dtcm {
     // Crashdump + heartbeat
     crashdump_base_t  CRASHDUMP_BASE    @ 0x3F400;
     core_run_status_t CORE_RUN_STATUS   @ 0x3F800;
+    negative_self_test_id_t NEGATIVE_SELF_TEST_ID @ 0x3F834;
 };

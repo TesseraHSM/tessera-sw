@@ -18,5 +18,8 @@ tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
 
+[features]
+fips_validation_hooks = []
+
 [lints]
 workspace = true

@@ -28,7 +28,7 @@ use crate::UnoHsmPal;
 /// ciphertext and verifies the plaintext (round trip), matching the reference
 /// firmware. Returns [`HsmError::SelfTestKatMismatch`] on any mismatch (or any
 /// error surfaced by the AES engine / allocator).
-pub(super) async fn run_aes_cbc(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+pub(super) async fn run_aes_cbc(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &AES_CBC_256_KAT;
 
     pal.alloc_scoped_async(io, async |scope| {
@@ -46,6 +46,7 @@ pub(super) async fn run_aes_cbc(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
         let ct_out = scope.dma_alloc_zeroed(v.ciphertext.len())?;
         pal.aes_cbc_enc_dec(io, HsmAesOp::Encrypt, &*key, &*pt, &*iv, &mut *ct_out, None)
             .await?;
+        super::corrupt_kat_output(ct_out, negative)?;
         // KAT vectors are public, fixed test data — a plain slice comparison is
         // correct; no constant-time compare is needed.
         if &ct_out[..] != v.ciphertext {
