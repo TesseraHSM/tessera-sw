@@ -18,4 +18,4 @@ MEMORY
 
 /* Include before link.x consumes the .text/.rodata self-test inputs. */
 INCLUDE gsram.x
-ASSERT(SIZEOF(.gsram_text) <= LENGTH(GSRAM_CODE), "Self-tests exceed GSRAM_CODE");
+ASSERT(__gsram_rodata_end <= ORIGIN(GSRAM_CODE) + LENGTH(GSRAM_CODE), "Self-tests exceed GSRAM_CODE");

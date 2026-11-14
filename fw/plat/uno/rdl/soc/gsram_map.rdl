@@ -20,10 +20,12 @@
 //   0x12840 - 0x15064  GDMA queues
 //   0x15064 - 0x1BA38  Crypto command buffers (AES, UPKA, SHA)
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
-//   0xA9000 - 0xB8000  HSM self-test/test-hook code and known-answer vectors
+//   0xA9000 - 0xB8000  Unused (former HSM code window)
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
 //   0xBB000 - 0xEBC00  Partition store
-//   0xEBC00 - 0x200000 Key vault
+//   0xEBC00 - 0x16DC00 Key vault (65 × 8 KB tables)
+//   0x16E000 - 0x1D0000 HSM executable code (self-tests, test hooks, KAT vectors)
+//   0x1D0000 - 0x200000 Fastpath ML-DSA matrix cache
 //
 // Hardware alignment: UCD and GDMA hardware expect queue base
 // addresses to be 32-byte (0x20) aligned.
@@ -505,12 +507,6 @@ mem sram_io_buf_t {
     memwidth = 32;
 };
 
-mem hsm_code_t {
-    desc = "Executable HSM self-test/test-hook code and known-answer vectors, loaded by 1SP.";
-    mementries = 61440; // 0xA9000..0xB8000; FP slot map begins at 0xB8000.
-    memwidth = 8;
-};
-
 
 // ══════════════════════════════════════════════════════════════
 // Partition Store + Key Vault
@@ -578,12 +574,12 @@ addrmap part_store_t {
 //
 // Typed mirror of the reference firmware's per-partition key store, so
 // key IDs, sizes, and on-storage layout are interchangeable. One table
-// is TOTAL_TABLE_LEN = 14336 B and holds 256 metadata entries, a
+// is TOTAL_TABLE_LEN = 8192 B and holds 128 metadata entries, a
 // block-allocator bitmap, and a key-data blob region:
 //
-//   0x0000 - 0x0800  ENTRY[256]  (256 × 8-byte PhysicalEntry metadata)
-//   0x0800 - 0x0900  BITMAP[64]  (used-block tracker, 64 × u32)
-//   0x0900 - 0x3800  BLOB        (12032-byte key-data region)
+//   0x0000 - 0x0400  ENTRY[128]  (128 × 8-byte PhysicalEntry metadata)
+//   0x0400 - 0x0480  BITMAP[32]  (used-block tracker, 32 × u32)
+//   0x0480 - 0x2000  BLOB        (7040-byte key-data region)
 //
 // Within BLOB, each key occupies an 8-byte-aligned block laid out as
 // [32-byte attributes][key bytes]; PhysicalEntry.OFFSET is the block
@@ -621,36 +617,55 @@ reg used_block_t {
     field { sw = rw; hw = na; } BITS[31:0] = 0x0;
 };
 
-// Key-data blob region (12032 B = TOTAL_TABLE_LEN - 2304).
+// Key-data blob region (7040 B = TOTAL_TABLE_LEN - 1152).
 mem key_blob_t {
     desc = "Per-table key-data blob region.";
-    mementries = 3008;  // 12032 / 4
+    mementries = 1760;  // 7040 / 4
     memwidth = 32;
 };
 
+// ── HSM executable code ─────────────────────────────────────────
+//
+// The only executable GSRAM region. 1SP loads the HSM image's
+// `.gsram_text` (self-test/test-hook code) and `.gsram_rodata` (their
+// known-answer vectors, kept in a separate, 32 B-aligned output section)
+// here before releasing CP1, and the SP preserves it across warm resets, so
+// its bounds must match HSM_CODE_GSRAM_ADDRESS / HSM_CODE_GSRAM_SIZE in
+// manticore sp/src/dc_scm/rot_memory_map.h.
+//
+// It is the GSRAM freed when TOTAL_TABLE_LEN dropped from 14336 B to
+// 8192 B (65 × 6 KB), taken as one contiguous window from the first 4 KB
+// boundary after the vault up to FP_DSA_CACHE, so both sections can keep
+// growing in place. The previous 60 KB code window at 0xA9000 is unused.
+mem hsm_code_t {
+    desc = "Executable HSM code (self-tests, test hooks, known-answer vectors), loaded by 1SP.";
+    mementries = 401408; // 0x16E000..0x1D0000
+    memwidth = 8;
+};
+
 // Fastpath ML-DSA matrix cache (192 KB).  Carved off the tail of the key
-// vault when TOTAL_TABLE_LEN dropped to 14336 B: the vault now ends at
-// 0x1CF400 and this window runs 0x1D0000 - 0x200000, with a 0xC00 pad in
-// between for 64 KB alignment.  Declared here so the vault cannot grow
-// back over it and so the FP firmware has a generated base to reference
-// instead of a hard-coded address.  Mirrors cp/hsm's `rsvd_fp_dsa_cache`.
+// vault when TOTAL_TABLE_LEN dropped to 14336 B; it runs 0x1D0000 -
+// 0x200000 (64 KB-aligned), directly above HSM_CODE.  Declared here so
+// neither the vault nor HSM_CODE can grow over it and so the FP firmware
+// has a generated base to reference instead of a hard-coded address.
+// Mirrors cp/hsm's `rsvd_fp_dsa_cache`.
 mem fp_dsa_cache_t {
     desc = "Fastpath ML-DSA matrix spill cache (3 cores x 64 KB).";
     mementries = 49152;  // 196608 / 4
     memwidth = 32;
 };
 
-// One 14336-byte vault table.
+// One 8192-byte vault table.
 addrmap key_vault_table_t {
     name = "Key Vault Table";
-    desc = "One 14336-byte vault table: metadata + bitmap + blob.";
+    desc = "One 8192-byte vault table: metadata + bitmap + blob.";
 
     default hw = na;
     default sw = rw;
 
-    physical_entry_t ENTRY[256]  @ 0x0000 += 0x08;  // 0x0000 - 0x0800
-    used_block_t     BITMAP[64]  @ 0x0800 += 0x04;  // 0x0800 - 0x0900
-    key_blob_t       BLOB        @ 0x0900;          // 0x0900 - 0x3800
+    physical_entry_t ENTRY[128]  @ 0x0000 += 0x08;  // 0x0000 - 0x0400
+    used_block_t     BITMAP[32]  @ 0x0400 += 0x04;  // 0x0400 - 0x0480
+    key_blob_t       BLOB        @ 0x0480;          // 0x0480 - 0x2000
 };
 
 
@@ -751,8 +766,7 @@ addrmap io_gsram {
     io_meta_entry_t  IO_META[33]         @ 0x20C58 += 0x08;
     sram_io_buf_t    SRAM_IO_BUF[34]     @ 0x20D60 += 0x4000;
 
-    // Executable code must end before the persistent FP slot map.
-    hsm_code_t       HSM_CODE            @ 0xA9000;
+    // 0xA9000 - 0xB8000 is unused: HSM_CODE moved above the key vault.
 
     // ─── FP bulk-key slot map: 65 × 1-byte table bitmaps ───
     fp_slot_map_t    FP_SLOT_MAP         @ 0xB8000;   // 0xB8000 - 0xB8041
@@ -760,8 +774,11 @@ addrmap io_gsram {
     // ─── Partition persistent store (65 entries, 3072 B each) ───
     part_store_t     PART_STORE[65]      @ 0xBB000 += 0xC00;
 
-    // ─── Key vault (65 typed tables, 14336 B each) ───
-    key_vault_table_t KEY_VAULT[65]   @ 0xEBC00 += 0x3800;   // 65 × 14336 = 0xE3800
+    // ─── Key vault (65 typed tables, 8192 B each) ───
+    key_vault_table_t KEY_VAULT[65]   @ 0xEBC00 += 0x2000;   // 65 × 8192 = 0x82000 → 0x16DC00
+
+    // ─── HSM executable code (392 KB, 4 KB-aligned, up to FP_DSA_CACHE) ───
+    hsm_code_t       HSM_CODE           @ 0x16E000;          // 0x16E000 - 0x1D0000
 
     // ─── Fastpath ML-DSA matrix cache (192 KB, ends GSRAM) ───
     fp_dsa_cache_t   FP_DSA_CACHE       @ 0x1D0000;          // 0x1D0000 - 0x200000

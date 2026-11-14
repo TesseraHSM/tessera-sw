@@ -8,10 +8,10 @@
 //! `PhysicalTable` (and the `key_vault_table_t` RDL):
 //!
 //! ```text
-//! table (14336 B):
-//!   ENTRY[256]   8-byte metadata entries  (0x0000..0x0800)
-//!   BITMAP[64]   block-allocator words    (0x0800..0x0900)
-//!   BLOB         12032-byte key data      (0x0900..0x3800)
+//! table (8192 B):
+//!   ENTRY[128]   8-byte metadata entries  (0x0000..0x0400)
+//!   BITMAP[32]   block-allocator words    (0x0400..0x0480)
+//!   BLOB         7040-byte key data       (0x0480..0x2000)
 //! ```
 //!
 //! Firmware backs this with the GSRAM `KeyVaultTableTRegs` via a
@@ -34,13 +34,13 @@ use crate::entry::Entry;
 pub const MAX_TABLE_COUNT: usize = 65;
 
 /// Metadata entry slots per table.
-pub const ENTRIES_PER_TABLE: usize = 256;
+pub const ENTRIES_PER_TABLE: usize = 128;
 
-/// Block-allocator bitmap words per table (`64 × u32 = 2048` block bits).
-pub const BITMAP_WORDS: usize = 64;
+/// Block-allocator bitmap words per table (`32 × u32 = 1024` block bits).
+pub const BITMAP_WORDS: usize = 32;
 
-/// Key-data blob region size per table, in bytes (`14336 - 2304`).
-pub const BLOB_SIZE: usize = 12032;
+/// Key-data blob region size per table, in bytes (`8192 - 1152`).
+pub const BLOB_SIZE: usize = 7040;
 
 /// Attribute blob prepended to every key in the blob region.
 pub const ATTRIBUTES_BLOB_SIZE: usize = 32;
@@ -51,6 +51,8 @@ pub const BLOCK_ALIGNMENT: usize = 8;
 
 /// Number of allocatable blocks in a table's blob region.
 pub const BLOB_BLOCKS: usize = BLOB_SIZE / BLOCK_ALIGNMENT;
+
+const _: () = assert!(BLOB_BLOCKS <= BITMAP_WORDS * u32::BITS as usize);
 
 /// Key attribute blob (32 bytes, prepended to every stored key).
 ///
@@ -124,7 +126,7 @@ pub trait TableStorage {
     /// # Parameters
     ///
     /// - `table`: The table index (0-indexed, must be valid per [`is_valid_table`](Self::is_valid_table)).
-    /// - `idx`: The entry slot index within the table (0..256).
+    /// - `idx`: The entry slot index within the table (`0..ENTRIES_PER_TABLE`).
     ///
     /// # Returns
     ///
@@ -144,7 +146,7 @@ pub trait TableStorage {
     /// # Parameters
     ///
     /// - `table`: The table index (0-indexed, must be valid).
-    /// - `idx`: The entry slot index within the table (0..256).
+    /// - `idx`: The entry slot index within the table (`0..ENTRIES_PER_TABLE`).
     ///
     /// # Returns
     ///
@@ -159,7 +161,7 @@ pub trait TableStorage {
     /// Borrows the block-allocator bitmap for a table (immutably).
     ///
     /// The bitmap tracks which [`BLOB_BLOCKS`] are in use (1 = used, 0 = free).
-    /// Contains 64 × 32-bit words = 2048 bits = 2048 blocks.
+    /// Contains [`BITMAP_WORDS`] 32-bit words; bits past [`BLOB_BLOCKS`] are unused.
     ///
     /// # Parameters
     ///
@@ -167,7 +169,7 @@ pub trait TableStorage {
     ///
     /// # Returns
     ///
-    /// Reference to the 64-word bitmap array. The allocator reads through this borrow.
+    /// Reference to the [`BITMAP_WORDS`]-word bitmap array. The allocator reads through this borrow.
     ///
     /// # Errors
     ///
@@ -187,7 +189,7 @@ pub trait TableStorage {
     ///
     /// # Returns
     ///
-    /// Mutable reference to the 64-word bitmap array for allocation and deallocation.
+    /// Mutable reference to the [`BITMAP_WORDS`]-word bitmap array for allocation and deallocation.
     ///
     /// # Errors
     ///
@@ -207,7 +209,7 @@ pub trait TableStorage {
     ///
     /// # Returns
     ///
-    /// Reference to the 12032-byte blob region as a `HsmDmaBuf` (DMA-aligned memory).
+    /// Reference to the [`BLOB_SIZE`]-byte blob region as a `HsmDmaBuf` (DMA-aligned memory).
     ///
     /// # Errors
     ///
@@ -228,7 +230,7 @@ pub trait TableStorage {
     ///
     /// # Returns
     ///
-    /// Mutable reference to the 12032-byte blob region for key operations.
+    /// Mutable reference to the [`BLOB_SIZE`]-byte blob region for key operations.
     ///
     /// # Errors
     ///

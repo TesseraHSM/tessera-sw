@@ -4,17 +4,17 @@
 
 //! Register definitions for key_vault_table_t.
 //!
-//! 'One 14336-byte vault table: metadata + bitmap + blob.'
+//! 'One 8192-byte vault table: metadata + bitmap + blob.'
 
 pub const KEY_VAULT_TABLE_T_BASE: u32 = 0x000EBC00;
-pub const BITMAP_OFFSET: u32 = 0x800;
+pub const BITMAP_OFFSET: u32 = 0x400;
 pub const ENTRY_OFFSET: u32 = 0x00;
-pub const ENTRY_COUNT: u32 = 256;
+pub const ENTRY_COUNT: u32 = 128;
 pub const ENTRY_STRIDE: u32 = 0x08;
-pub const BLOB_OFFSET: u32 = 0x900;
+pub const BLOB_OFFSET: u32 = 0x480;
 pub const BLOB_COUNT: u32 = 1;
-pub const BLOB_STRIDE: u32 = 0x2F00;
-pub const BLOB_SIZE: u32 = 0x2F00;
+pub const BLOB_STRIDE: u32 = 0x1B80;
+pub const BLOB_SIZE: u32 = 0x1B80;
 
 tock_registers::register_bitfields! [u32,
     /// '32 blob-block occupancy bits.'
@@ -47,10 +47,10 @@ pub mod regs {
     //! MMIO register struct for firmware use.
     tock_registers::register_structs! {
         pub KeyVaultTableTRegs {
-            (0x0 => pub entry: [super::PhysicalEntry; 256]),
-            (0x800 => pub bitmap: [crate::RW<u32, super::BITMAP::Register>; 64]),
-            (0x900 => pub blob: [u8; 12032]),
-            (0x3800 => @END),
+            (0x0 => pub entry: [super::PhysicalEntry; 128]),
+            (0x400 => pub bitmap: [crate::RW<u32, super::BITMAP::Register>; 32]),
+            (0x480 => pub blob: [u8; 7040]),
+            (0x2000 => @END),
         }
     }
 }
