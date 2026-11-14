@@ -869,6 +869,11 @@ addrmap io_gsram {
     bcp_cqe_t        BCP_CQ[64]          @ 0xAB400 += 0x08;   // 0xAB400 - 0xAB600
     queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0xAB600;
     queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0xAB604;
+
+    // The one PKA wipe descriptor, {MEM_WIPE, 0, 0, 0, 0}: written once,
+    // then only read, by every engine's post-command wipe. HSM-owned like
+    // the rings around it.
+    upka_cmd_entry_t UPKA_WIPE_CMD       @ 0xAB610;
     bcp_dfl_entry_t  BCP_DFL[64]         @ 0xAB800 += 0x80;   // 0xAB800 - 0xAD800
 
     // ─── FP bulk-key slot map: 65 × 1-byte table bitmaps ───

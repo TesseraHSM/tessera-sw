@@ -11,12 +11,18 @@ use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_STRIDE;
+use tsra_fw_uno_reg_soc::io_gsram::UPKA_WIPE_CMD_OFFSET;
 use tsra_fw_uno_reg_soc::upka::UpkaEngine;
 use tsra_fw_uno_reg_soc::upka::ENGINE_STRIDE;
 use tsra_fw_uno_reg_soc::upka::UPKA_BASE;
 use tsra_fw_uno_reg_soc::upka::UPKA_ENGINE_STATUS;
 
+use crate::opcode::UPKA_MEM_WIPE;
+
 const STATUS_FLAGS_MASK: u32 = 0x1E;
+
+/// GSRAM address of the shared `MEM_WIPE` descriptor.
+const WIPE_CMD_ADDR: u32 = IO_GSRAM_BASE + UPKA_WIPE_CMD_OFFSET;
 
 /// DTCM overlay for PKA command descriptors.
 // SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped command storage.
@@ -61,6 +67,27 @@ impl EngineExecutor {
         // load the engine can read stale operand addresses and raise BUS_ERROR.
         dmb();
         Self::submit_cmd(engine_id);
+    }
+
+    /// Write the shared `MEM_WIPE` descriptor that
+    /// [`submit_wipe`](Self::submit_wipe) points engines at. Called once,
+    /// before any engine is used; nothing writes it afterwards.
+    pub(crate) fn init_wipe_descriptor() {
+        let entry = &UPKA_Q.upka_wipe_cmd[0];
+        entry.command_code.set(UPKA_MEM_WIPE);
+        entry.result_addr.set(0);
+        entry.arg1_addr.set(0);
+        entry.arg2_addr.set(0);
+        entry.arg3_addr.set(0);
+        dmb();
+    }
+
+    /// Start a `MEM_WIPE` on an engine from the shared descriptor: one
+    /// command-register write. The descriptor never changes after
+    /// [`init_wipe_descriptor`](Self::init_wipe_descriptor), so there are no
+    /// descriptor stores to order ahead of the submit.
+    pub(crate) fn submit_wipe(engine_id: u8) {
+        Self::submit_cmd_at(engine_id, WIPE_CMD_ADDR);
     }
 
     /// Read completion and error status flags for an engine.

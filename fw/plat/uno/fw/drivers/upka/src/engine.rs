@@ -864,7 +864,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// - `Ok(())`: Wipe completed successfully.
     /// - `Err(HsmError)`: Wipe command failed.
     pub async fn memory_wipe(&mut self) -> HsmResult<()> {
-        self.execute_cmd(UPKA_MEM_WIPE, 0, 0, 0, 0).await
+        self.prepare_for_command();
+        EngineExecutor::submit_wipe(self.id);
+        poll_fn(|cx| self.poll_completion(cx)).await
     }
 
     /// Wipe and release the engine back to the pool.
@@ -897,13 +899,13 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
             slot.arm_completion_wait();
             slot.wiping = true;
         });
-        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(self.id);
         self.released = true;
     }
 
     fn sync_wipe_and_release(&mut self) {
         EngineExecutor::wait_until_idle(self.id);
-        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(self.id);
         EngineExecutor::wait_until_idle(self.id);
         self.driver.release_engine(self.id);
     }
