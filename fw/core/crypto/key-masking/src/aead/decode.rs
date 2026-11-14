@@ -6,6 +6,8 @@
 //! [`MaskedKeyMetadata`], and hand the caller a borrowed
 //! [`UnmaskedView`] covering the recovered plaintext.
 
+use core::mem::MaybeUninit;
+
 use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_core_crypto_aead_envelope::HEADER_LEN;
@@ -63,7 +65,7 @@ pub struct UnmaskedView<'a> {
 
 /// A word-aligned buffer for a metadata copy (burst copies need alignment).
 #[repr(C, align(4))]
-struct MetaCopy([u8; META_LEN]);
+struct MetaCopy([MaybeUninit<u8>; META_LEN]);
 
 /// In-place unmask: parse, authenticate, decrypt, and validate a
 /// masked-key blob.
@@ -113,15 +115,16 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
 
     // Parse and validate a copy of the 192 B AAD region: it sits in DMA
     // memory, which may be uncached, so one burst read fetches it far
-    // faster than validation would read it field by field in place.
+    // faster than validation would read it field by field in place. The
+    // copy overwrites the whole buffer, which is therefore not zeroed first.
     // `ref_from_bytes` never panics; the length check above guarantees a
     // 192 B slice.
-    let mut copy = MetaCopy([0; META_LEN]);
-    if !aad.copy_to_slice(&mut copy.0) {
+    let mut copy = MetaCopy([const { MaybeUninit::uninit() }; META_LEN]);
+    let Some(meta) = aad.copy_to_uninit(&mut copy.0) else {
         return Err(HsmError::MaskedKeyDecodeFailed);
-    }
+    };
     let metadata =
-        MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
+        MaskedKeyMetadata::ref_from_bytes(meta).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
 
     metadata.validate_v1()?;
     let data_end = tag_at

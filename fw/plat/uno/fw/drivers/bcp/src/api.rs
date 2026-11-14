@@ -471,6 +471,9 @@ struct BcpState {
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; IDS],
+    /// The DFL element [`write_dfl`] builds before writing it out: words it
+    /// does not set stay zero, so a command need not clear it first.
+    dfl: [u32; DFL_DWORDS],
 }
 
 /// Async BCP driver.
@@ -513,6 +516,7 @@ impl BcpDriver {
                     deadline: Instant::from_ticks(0),
                     chunks: 0,
                 }),
+                dfl: [0; DFL_DWORDS],
             }),
         }
     }
@@ -826,7 +830,7 @@ impl Future for CmdFuture<'_> {
                     if let Some(key2) = cmd.key2 {
                         load_key(key_slot(id, 1), key2);
                     }
-                    write_dfl(id, cmd);
+                    write_dfl(&mut s.dfl, id, cmd);
                     submit(s, id, cmd);
                     id
                 }
@@ -1260,17 +1264,19 @@ fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
 /// input: for GCM the key slot, unpadded AAD length, expected tag, IV and
 /// padded AAD length; for XTS the tweak.
 ///
+/// The element is built in `dw`, whose other words are zero, and then
+/// written out: every word set here is set on every command.
+///
 /// The destination is as long as the source: for GCM the engine writes
 /// the padded AAD through ahead of the text, as the host fast path
 /// expected.
-fn write_dfl(id: usize, cmd: &Cmd<'_>) {
-    let mut dw = [0u32; DFL_DWORDS];
+fn write_dfl(dw: &mut [u32; DFL_DWORDS], id: usize, cmd: &Cmd<'_>) {
     let len = cmd.len as u32;
 
     dw[6] = len;
-    put_bytes(&mut dw, 7, &cmd.src);
+    put_bytes(dw, 7, &cmd.src);
     dw[11] = len;
-    put_bytes(&mut dw, 12, &cmd.dst);
+    put_bytes(dw, 12, &cmd.dst);
 
     match cmd.aux {
         Aux::Gcm {
@@ -1281,13 +1287,18 @@ fn write_dfl(id: usize, cmd: &Cmd<'_>) {
         } => {
             dw[17] = key_slot(id, 0) as u32;
             dw[18] = unpadded_aad_len as u32;
-            if let Some(tag) = tag {
-                put_bytes(&mut dw, 19, tag);
+            match tag {
+                Some(tag) => put_bytes(dw, 19, tag),
+                None => dw[19..23].fill(0),
             }
-            put_bytes(&mut dw, 23, iv);
+            put_bytes(dw, 23, iv);
             dw[26] = aad_len as u32;
         }
-        Aux::Xts { tweak } => put_bytes(&mut dw, DFL_CRYPTO_IN_DW as usize, tweak),
+        Aux::Xts { tweak } => {
+            dw[17..19].fill(0);
+            put_bytes(dw, DFL_CRYPTO_IN_DW as usize, tweak);
+            dw[23..27].fill(0);
+        }
     }
 
     // Burst-write the element: the ring sits in memory the CPU writes
@@ -1296,8 +1307,8 @@ fn write_dfl(id: usize, cmd: &Cmd<'_>) {
     // SAFETY: `dfl_ptr(id)` is DFL element `id` of the GSRAM ring
     // (`id < DEPTH`), `DFL_DWORDS` words long and word-aligned, and only
     // this command uses it.
-    let dst = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
-    tsra_fw_bulk_copy::copy_slice(dst, &dw);
+    let out = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
+    tsra_fw_bulk_copy::copy_slice(out, dw);
 }
 
 /// Read the completion-ring entry at `ci`, with one burst.
