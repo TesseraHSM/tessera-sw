@@ -197,6 +197,11 @@ pub struct UnoHsmIo {
     reply_sealed: bool,
 }
 
+/// Takes a host IO the run loop received (see
+/// [`UnoHsmPal::set_io_dispatch`]) to the task that serves its slot. It runs
+/// inside the run loop's pass, so it must hand the IO on without waiting.
+pub type IoDispatch = fn(UnoHsmIo);
+
 impl UnoHsmIo {
     /// Returns the platform-private resource slot for this IO.
     pub fn index(&self) -> u16 {
@@ -687,6 +692,30 @@ impl UnoHsmPal {
         // The routing comes with the IO, as the IIC driver read it from the
         // ICQ entry, rather than back out of IO_META.
         UnoHsmIo::from_routing(index, rx.axi_id, u16::from(rx.queue_id))
+    }
+
+    /// Has the run loop hand each host IO it receives to `dispatch`, rather
+    /// than wake [`poll_io`](HsmIoController::poll_io) to receive it, so an
+    /// IO reaches the task that serves it without a pass through a receive
+    /// task. `poll_io` still receives the IO that comes while host IO is
+    /// paused for a PCIe reset.
+    pub fn set_io_dispatch(&self, dispatch: IoDispatch) {
+        self.io_dispatch.set(Some(dispatch));
+    }
+
+    /// Run-loop wake for the IIC's ICQ interrupt: takes every IO waiting in
+    /// the ICQ and hands it to the [`IoDispatch`] set, or, with none set or
+    /// while host IO is paused, wakes `poll_io`'s receive.
+    pub(crate) fn wake_iic(&self, irq: u16) {
+        match self.io_dispatch.get() {
+            Some(dispatch) if !self.io_paused() => {
+                tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+                while let Some(rx) = self.iic.try_recv() {
+                    dispatch(self.accept_io(rx));
+                }
+            }
+            _ => self.iic.wake(irq),
+        }
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:

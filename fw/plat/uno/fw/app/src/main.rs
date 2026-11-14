@@ -9,9 +9,9 @@
 //! # Task architecture
 //!
 //! ```text
-//!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
-//!                            │
-//!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
+//!  main ──► init PAL ──► spawn poll_ipc ──► run (NVIC polling loop)
+//!                                               │
+//!                          ICQ IRQ ──► accept IO ──► signal io_worker[slot]
 //!                                                       │
 //!                                                   HSM core pipeline:
 //!                                                   SQE parse → in-DMA
@@ -21,9 +21,10 @@
 //! ```
 //!
 //! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
-//!   spawns the IO receive loop, then enters the NVIC polling loop.
-//! - **`poll_io`** (single instance): Awaits IOs from the IIC driver
-//!   and hands each one to the `io_worker` of its IO slot.
+//!   spawns the IPC loop, then enters the NVIC polling loop, which hands
+//!   each inbound IO to the `io_worker` of its IO slot once boot completes.
+//! - **`poll_io`** (single instance): Receives the IOs the run loop leaves,
+//!   those that come while host IO is paused for a PCIe reset.
 //! - **`io_worker`** (one per host IO slot, 32): Owns its slot's IO for
 //!   the IO's lifetime, delegating to the HSM core for SQE parsing, DMA,
 //!   and CQE delivery, then waits for the slot's next IO.
@@ -94,19 +95,29 @@ unsafe impl Sync for IoHandoff {}
 
 static IO_HANDOFF: IoHandoff = IoHandoff([const { Signal::new() }; IO_WORKERS]);
 
+/// Hands `io` to the [`io_worker`] that owns its slot.
+///
+/// A slot is not handed out again until its IO is dropped, by which time
+/// the slot's worker is waiting for the next one. An IO from a slot with no
+/// worker is dropped.
+fn dispatch_io(io: UnoHsmIo) {
+    if let Some(slot) = IO_HANDOFF.0.get(usize::from(io.index())) {
+        slot.signal(io);
+    }
+}
+
 /// IO receive loop — runs forever as a single Embassy task.
 ///
-/// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC driver and hands it to the [`io_worker`] that owns its slot.
-/// A slot is not handed out again until its IO is dropped, by which time
-/// the slot's worker is waiting for the next one. An IO from a slot with
-/// no worker is dropped and the loop retries on the next iteration.
+/// Once boot completes the PAL's run loop hands each inbound IO to its
+/// worker itself (see [`UnoHsmPal::set_io_dispatch`]); this task receives
+/// the IO that comes while host IO is paused for a PCIe reset, which
+/// [`HsmIoController::poll_io`] recycles, and hands on any it returns.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent receive-and-dispatch loop.
 ///
 /// # Side Effects
-/// - Continuously drains inbound IO work from PAL.
+/// - Drains inbound IO work from PAL that the run loop leaves.
 /// - Wakes the worker of each received IO's slot.
 #[embassy_executor::task]
 async fn poll_io() -> ! {
@@ -115,16 +126,14 @@ async fn poll_io() -> ! {
         let Ok(io) = hsm.pal().poll_io().await else {
             continue;
         };
-
-        if let Some(slot) = IO_HANDOFF.0.get(usize::from(io.index())) {
-            slot.signal(io);
-        }
+        dispatch_io(io);
     }
 }
 
 /// Processes the IOs of one slot, one at a time, each to completion.
 ///
-/// Waits for [`poll_io`] to hand over the slot's next [`UnoHsmIo`], keeping
+/// Waits for the run loop or [`poll_io`] to hand over the slot's next
+/// [`UnoHsmIo`], keeping
 /// the underlying IO_SQ slot reserved until the completion DMA finishes.
 /// First lets the PAL certify the partition's SP-published unwrapping key
 /// (a FIPS 140-3 pairwise consistency test that runs once per published
@@ -215,6 +224,7 @@ async fn poll_ipc(spawner: Spawner) -> ! {
             if let Ok(token) = poll_io() {
                 spawner.spawn(token);
             }
+            hsm.pal().set_io_dispatch(dispatch_io);
             if let Ok(token) = periodic_self_tests() {
                 spawner.spawn(token);
             }
