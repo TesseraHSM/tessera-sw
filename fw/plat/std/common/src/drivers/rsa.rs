@@ -56,6 +56,8 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
+use tsra_crypto::RsaSignAlgo;
+use tsra_crypto::Verifier;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
 
@@ -270,6 +272,50 @@ impl StdRsa {
         byte_order::int_copy_from_be(self.order, y, &result)
     }
 
+    /// Verify a digest using an operand-order `n || e(4)` key and signature.
+    /// The digest is a standard byte string. `salt_len` selects PSS when
+    /// present, and PKCS#1 v1.5 otherwise.
+    pub async fn verify(
+        &self,
+        key_size: HsmRsaKey,
+        hash: HashAlgo,
+        pub_key: &[u8],
+        digest: &[u8],
+        signature: &[u8],
+        salt_len: Option<usize>,
+    ) -> HsmResult<bool> {
+        let k = key_size.modulus_len();
+        let max_salt = k
+            .checked_sub(hash.size())
+            .and_then(|len| len.checked_sub(2))
+            .ok_or(HsmError::InvalidArg)?;
+        if pub_key.len() != k + RSA_PUB_EXP_WIRE_LEN
+            || signature.len() != k
+            || digest.len() != hash.size()
+            || salt_len.is_some_and(|len| len > max_salt)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut public = pub_key.to_vec();
+        byte_order::int_to_be(self.order, &mut public[..k]);
+        byte_order::int_to_be(self.order, &mut public[k..]);
+        let mut signature = signature.to_vec();
+        byte_order::int_to_be(self.order, &mut signature);
+        let digest = digest.to_vec();
+        self.pool
+            .submit_with_result(async move {
+                let key = <RsaPublicKey as tsra_crypto::ImportableHsmKey>::from_hsm_bytes(&public)
+                    .map_err(|_| HsmError::InvalidArg)?;
+                let mut algorithm = match salt_len {
+                    Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
+                    None => RsaSignAlgo::with_pkcs1_padding(hash),
+                };
+                Verifier::verify(&mut algorithm, &key, &digest, &signature)
+                    .map_err(|_| HsmError::RsaEncryptFailed)
+            })
+            .await
+    }
+
     /// RSA-OAEP decrypt (EME-OAEP, RFC 8017 §7.1.2).
     ///
     /// `ciphertext` is the operand-order RSA block; OpenSSL expects the
@@ -433,6 +479,24 @@ mod tests {
     }
 
     // ── Key generation ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn verify_rejects_oversized_pss_hash() {
+        let driver = make_driver();
+        assert_eq!(
+            driver
+                .verify(
+                    HsmRsaKey::Rsa2048Pub,
+                    HashAlgo::shake256(std::num::NonZeroUsize::new(300).expect("nonzero length")),
+                    &[0; 260],
+                    &[0; 300],
+                    &[0; 256],
+                    Some(0)
+                )
+                .await,
+            Err(HsmError::InvalidArg)
+        );
+    }
 
     #[tokio::test]
     async fn gen_keypair_2048() {

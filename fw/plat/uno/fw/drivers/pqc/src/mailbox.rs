@@ -80,6 +80,11 @@ use core::ptr::read_volatile;
 use core::ptr::write_volatile;
 
 use tsra_fw_bulk_copy::copy_slice;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
+use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_COUNT;
+use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_STRIDE;
 
 use crate::types::EngineId;
 use crate::types::ENGINES;
@@ -153,6 +158,7 @@ mod word {
     pub const SIG_LEN: usize = 24;
     pub const PUB_KEY_LEN: usize = 25;
     pub const MSG_TYPE: usize = 26;
+    pub const MSG_ADDR: usize = 27;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -282,6 +288,37 @@ pub struct RequestParams<'a> {
     /// How the staged message is read, ML-DSA sign and verify only:
     /// [`MSG_TYPE_PURE`] or [`MSG_TYPE_EXTERNAL_MU`].
     pub msg_type: u32,
+    /// Global address of the pure ML-DSA verify message when it is read in
+    /// place from an IO DMA buffer instead of the operand slot; zero when
+    /// the message is staged. `msg_len` still carries its length.
+    pub msg_addr: u32,
+}
+
+/// The IO DMA heap: one `SRAM_IO_BUF` per IO slot in shared GSRAM. Mirrors
+/// the FP side, which accepts message addresses only inside one slot of it.
+const IO_DMA_BASE: usize = (IO_GSRAM_BASE + SRAM_IO_BUF_OFFSET) as usize;
+const IO_DMA_SLOT_SIZE: usize = SRAM_IO_BUF_STRIDE as usize;
+const IO_DMA_SIZE: usize = IO_DMA_SLOT_SIZE * SRAM_IO_BUF_COUNT as usize;
+
+const _: () = assert!(IO_DMA_BASE == 0x6102_0D60 && IO_DMA_SLOT_SIZE == 0x4000);
+const _: () = assert!(SRAM_IO_BUF_COUNT == 34);
+
+/// The address FP reads `msg` at, if it lies wholly inside one slot of the
+/// IO DMA heap. FP applies the same check before it forms a slice.
+pub fn io_dma_addr(msg: &HsmDmaBuf) -> Option<u32> {
+    io_dma_range(msg.as_ptr() as usize, msg.len())
+}
+
+fn io_dma_range(addr: usize, len: usize) -> Option<u32> {
+    let end = addr.checked_add(len)?;
+    let first = addr.checked_sub(IO_DMA_BASE)?;
+    if len == 0 || end > IO_DMA_BASE + IO_DMA_SIZE {
+        return None;
+    }
+    if first / IO_DMA_SLOT_SIZE != (first + len - 1) / IO_DMA_SLOT_SIZE {
+        return None;
+    }
+    u32::try_from(addr).ok()
 }
 
 /// Stage `data` into `engine`'s operand slot at `offset`.
@@ -415,24 +452,40 @@ fn mailbox(engine: EngineId) -> *mut u32 {
 /// Written out rather than pulled from `cortex-m` so this driver keeps its
 /// current dependency set. No `nomem`, so the compiler also may not move
 /// memory accesses across it.
+/// Host fences permit operand-only tests; the MMIO transport remains ARM-only.
 #[inline(always)]
 pub(crate) fn dmb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: a barrier instruction; no operands, no memory of its own.
-    unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("dmb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Data synchronisation barrier.
 #[inline(always)]
 pub(crate) fn dsb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: as `dmb`.
-    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Instruction synchronisation barrier.
 #[inline(always)]
 fn isb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: as `dmb`.
-    unsafe { core::arch::asm!("isb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("isb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Base and size of the window covering the PSRAM mailboxes and slots.
@@ -509,6 +562,7 @@ pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u
         write_volatile(mb.add(word::SIG_LEN), params.sig_len);
         write_volatile(mb.add(word::PUB_KEY_LEN), params.pub_key_len);
         write_volatile(mb.add(word::MSG_TYPE), params.msg_type);
+        write_volatile(mb.add(word::MSG_ADDR), params.msg_addr);
         for i in 0..SEED_LEN / 4 {
             let xi = u32::from_le_bytes([
                 params.xi[i * 4],
@@ -562,6 +616,13 @@ pub fn has_answered(engine: EngineId, seq: u32) -> bool {
     response_seq(engine) == seq
 }
 
+/// True while `engine`'s lane holds a request its core has not answered.
+pub fn has_unanswered(engine: EngineId) -> bool {
+    // SAFETY: as `take_response`.
+    let requested = unsafe { read_volatile(mailbox(engine).add(word::REQUEST_SEQ)) };
+    requested != response_seq(engine)
+}
+
 /// Sequence number of the request `engine`'s core answered last.
 pub fn response_seq(engine: EngineId) -> u32 {
     // SAFETY: as `take_response`.
@@ -603,6 +664,7 @@ pub fn scrub(engine: EngineId) {
             write_volatile(mb.add(word::XI + i), 0);
             write_volatile(mb.add(word::RND + i), 0);
         }
+        write_volatile(mb.add(word::MSG_ADDR), 0);
     }
 }
 
@@ -667,5 +729,35 @@ pub fn crash_record(engine: EngineId) -> Option<CrashRecord> {
             bfar: read_volatile(p.add(8)),
             stack_free: read_volatile(p.add(9)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SLOT: usize = IO_DMA_SLOT_SIZE;
+
+    #[test]
+    fn io_dma_range_accepts_only_whole_slot_ranges() {
+        assert_eq!(io_dma_range(IO_DMA_BASE, 1), Some(IO_DMA_BASE as u32));
+        assert_eq!(io_dma_range(IO_DMA_BASE, SLOT), Some(IO_DMA_BASE as u32));
+        let last = IO_DMA_BASE + IO_DMA_SIZE - 1;
+        assert_eq!(io_dma_range(last, 1), Some(last as u32));
+
+        assert_eq!(io_dma_range(IO_DMA_BASE, 0), None);
+        assert_eq!(io_dma_range(IO_DMA_BASE, SLOT + 1), None);
+        assert_eq!(io_dma_range(IO_DMA_BASE + SLOT - 1, 2), None);
+        assert_eq!(io_dma_range(IO_DMA_BASE - 1, 1), None);
+        assert_eq!(io_dma_range(IO_DMA_BASE + IO_DMA_SIZE, 1), None);
+        assert_eq!(io_dma_range(last, 2), None);
+        assert_eq!(io_dma_range(usize::MAX, 2), None);
+        assert_eq!(io_dma_range(IO_DMA_BASE, usize::MAX), None);
+    }
+
+    #[test]
+    fn host_buffers_are_not_io_dma() {
+        let buf = [0u8; 8];
+        assert_eq!(io_dma_range(buf.as_ptr() as usize, buf.len()), None);
     }
 }

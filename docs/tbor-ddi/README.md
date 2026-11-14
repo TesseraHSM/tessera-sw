@@ -65,6 +65,47 @@ the order from the negotiated API revision and converts at the DDI
 boundary. `PartInfo.pid_pub_key` is the exception: it is big-endian on
 every device.
 
+## Certificate-chain algorithms
+
+Firmware verifies ECDSA (any combination of P-256/P-384/P-521 and SHA-256/384/512),
+RSA-2048/3072/4096 (PKCS#1 v1.5 or PSS with SHA-256/384/512), and pure
+ML-DSA-44/65/87 certificate signatures. PSS requires MGF1 with the same
+digest, trailer field 1, and the declared salt length; RSA public exponents
+must fit the PAL's four-byte field. ML-DSA uses an empty context and absent
+AlgorithmIdentifier parameters. Composite and HashML-DSA signatures are
+not accepted.
+
+On physical Uno, the FP core reads a pure ML-DSA verification message in
+place from its IO DMA buffer, by address, and computes the message
+representative itself; nothing is copied to the mailbox and the 586-byte
+signing limit does not apply. The driver does not return, even when
+cancelled or timed out, until the core has answered or recorded a crash, so
+the buffer is never reclaimed while the core may still read it.
+
+When present, ML-DSA KeyUsage must contain at least one of digitalSignature,
+nonRepudiation/contentCommitment, keyCertSign, or cRLSign, and no other bits
+(RFC 9881 section 5). CA certificates still require keyCertSign when
+KeyUsage is present. Malformed or duplicate KeyUsage extensions are rejected.
+
+EC KeyUsage forbids keyEncipherment and dataEncipherment; encipherOnly and
+decipherOnly require keyAgreement (RFC 5480 and RFC 8813). EC and RSA-PSS-only
+end-entity keys cannot assert CA-only usages. RSA-PSS-only KeyUsage permits
+signature uses only (RFC 4055); ordinary rsaEncryption keys retain their
+encryption capabilities.
+
+Chains may mix issuer algorithms. Existing policy trust anchors and
+PTA/PID, attestation-report, and sealing-key profiles remain P-384; allowing
+other issuer algorithms does not change those leaf-key requirements.
+Signature, issuer/subject, AKID/SKID, CA, KeyUsage, path-length, and critical
+extension checks still apply.
+
+Each certificate is limited to 8,192 DER bytes. The walker receives adjacent
+certificates into disjoint views of one DMA allocation, sized to the largest
+adjacent pair. Parsing and verification borrow the DER without copying
+issuer bytes. Metadata uses scoped CPU scratch, and crypto scratch is
+reclaimed after each certificate. The IO DMA heap is not enlarged; chains
+whose adjacent pair and scratch exceed its available space are rejected.
+
 ## Paired TOC footprint
 
 Each command reserves the larger of its request and response schema TOC

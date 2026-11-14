@@ -4,10 +4,10 @@
 //! X.509 certificate chain validation state machine.
 //!
 //! [`ChainValidator`] processes certificates one at a time, from root
-//! (index 0) to leaf (index `chain_len - 1`). It uses double-buffering:
-//! the caller keeps the previous certificate's DER buffer alive while
-//! processing the current one, so the validator can borrow fields from
-//! both without copying.
+//! (index 0) to leaf (index `chain_len - 1`). The streaming walker retains
+//! adjacent DER certificates in disjoint views of one DMA allocation.
+//! Parsing borrows those views without copying issuer bytes, and scoped
+//! metadata and crypto scratch are reclaimed after every step.
 //!
 //! ## Validation checks per certificate (RFC 5280 §6.1.3, simplified)
 //!
@@ -15,7 +15,8 @@
 //! 2. **Name chain** — `curr.issuer == prev.subject` (byte compare).
 //! 3. **AKID↔SKID** — if both present.
 //! 4. **BasicConstraints** — `cA=true` required for non-leaf certs.
-//! 5. **KeyUsage** — `keyCertSign` required for CA certs.
+//! 5. **KeyUsage** — `keyCertSign` required for CA certs, with
+//!    algorithm-specific restrictions on EC, RSA-PSS and ML-DSA keys.
 //! 6. **Critical extensions** — reject unrecognized (checked in parser).
 //!
 //! No time validation, no CRL, no policy processing.
@@ -24,12 +25,19 @@ use core::ops::AsyncFnMut;
 
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
 use tsra_fw_hsm_byte_order as byte_order;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use crate::ecdsa;
@@ -37,11 +45,30 @@ use crate::parse::parse_cert;
 use crate::types::key_usage;
 use crate::types::CertInfo;
 use crate::types::EcPubKey;
+use crate::types::PubKey;
+use crate::types::RsaPubKey;
+use crate::types::SigAlgo;
 use crate::types::StepResult;
+
+struct IssuerInfo<'a> {
+    pub_key: PubKey<'a>,
+    subject_raw: &'a HsmDmaBuf,
+    skid: Option<&'a [u8]>,
+}
+
+impl<'a> From<&CertInfo<'a>> for IssuerInfo<'a> {
+    fn from(cert: &CertInfo<'a>) -> Self {
+        Self {
+            pub_key: cert.pub_key,
+            subject_raw: cert.subject_raw,
+            skid: cert.skid,
+        }
+    }
+}
 
 /// X.509 certificate chain validator.
 ///
-/// Processes one certificate at a time using double-buffering.
+/// Processes one certificate at a time.
 /// The caller must keep the previous certificate's DER buffer alive
 /// when calling [`step`](Self::step), so the validator can borrow
 /// the previous certificate's parsed fields for comparison.
@@ -122,8 +149,7 @@ impl ChainValidator {
     /// (index 0) to leaf (index `chain_len - 1`).
     ///
     /// # Parameters
-    /// * `pal` — PAL providing hash and ECC verify (implements
-    ///   [`HsmHash`] + [`HsmEcc`]).
+    /// * `pal` — PAL providing hashing, ECC, RSA and ML-DSA verification.
     /// * `io` — I/O context for the current operation.
     /// * `alloc` — scoped allocator for temporary DMA buffers
     ///   (digest and decoded signature). The caller's DER buffers
@@ -149,7 +175,23 @@ impl ChainValidator {
         curr: &'a CertInfo<'a>,
     ) -> StepResult<'a>
     where
-        P: HsmHash + HsmEcc,
+        P: HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
+    {
+        let prev = prev.map(IssuerInfo::from);
+        self.step_with_issuer(pal, io, alloc, prev.as_ref(), curr)
+            .await
+    }
+
+    async fn step_with_issuer<'a, P>(
+        &mut self,
+        pal: &P,
+        io: &P::Io,
+        alloc: &impl HsmScopedAlloc,
+        prev: Option<&IssuerInfo<'_>>,
+        curr: &'a CertInfo<'a>,
+    ) -> StepResult<'a>
+    where
+        P: HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     {
         if self.index >= self.chain_len {
             return StepResult::Invalid(HsmError::X509AlreadyComplete);
@@ -157,6 +199,10 @@ impl ChainValidator {
 
         let is_root = self.index == 0;
         let is_leaf = self.index == self.chain_len - 1;
+
+        if let Err(error) = Self::check_key_usage(curr) {
+            return StepResult::Invalid(error);
+        }
 
         let verify_key = match self.select_verify_key(is_root, prev, curr) {
             Ok(key) => key,
@@ -211,7 +257,7 @@ impl ChainValidator {
     /// * `curr` — the certificate currently being validated.
     ///
     /// # Returns
-    /// * `Ok(&EcPubKey)` — the public key to verify `curr`'s
+    /// * `Ok(&PubKey)` — the public key to verify `curr`'s
     ///   signature with (either `curr.pub_key` for the root or
     ///   `prev.pub_key` for non-roots).
     /// * `Err(HsmError::X509NotSelfSigned)` if `is_root` and the
@@ -220,12 +266,13 @@ impl ChainValidator {
     ///   a non-root, or the issuer/subject names disagree.
     /// * `Err(HsmError::X509AkidSkidMismatch)` if both AKID and SKID
     ///   are present but do not match.
+    #[inline(never)]
     fn select_verify_key<'a>(
         &self,
         is_root: bool,
-        prev: Option<&'a CertInfo<'a>>,
+        prev: Option<&'a IssuerInfo<'a>>,
         curr: &'a CertInfo<'a>,
-    ) -> HsmResult<&'a EcPubKey<'a>> {
+    ) -> HsmResult<&'a PubKey<'a>> {
         if is_root {
             if **curr.issuer_raw != **curr.subject_raw {
                 return Err(HsmError::X509NotSelfSigned);
@@ -246,6 +293,43 @@ impl ChainValidator {
         }
 
         Ok(&prev.pub_key)
+    }
+
+    #[inline(never)]
+    fn check_key_usage(curr: &CertInfo<'_>) -> HsmResult<()> {
+        let Some(usage) = curr.key_usage else {
+            return Ok(());
+        };
+        let signatures = key_usage::DIGITAL_SIGNATURE | key_usage::NON_REPUDIATION;
+        let ca_signatures = if curr
+            .basic_constraints
+            .is_some_and(|constraints| constraints.ca)
+        {
+            key_usage::KEY_CERT_SIGN | key_usage::CRL_SIGN
+        } else {
+            0
+        };
+        let allowed = match curr.pub_key {
+            PubKey::MlDsa { .. } => signatures | key_usage::KEY_CERT_SIGN | key_usage::CRL_SIGN,
+            PubKey::Rsa(key) if key.pss_only => signatures | ca_signatures,
+            PubKey::Ec(_) => {
+                if usage & (key_usage::ENCIPHER_ONLY | key_usage::DECIPHER_ONLY) != 0
+                    && usage & key_usage::KEY_AGREEMENT == 0
+                {
+                    return Err(HsmError::X509KeyUsageInvalid);
+                }
+                signatures
+                    | ca_signatures
+                    | key_usage::KEY_AGREEMENT
+                    | key_usage::ENCIPHER_ONLY
+                    | key_usage::DECIPHER_ONLY
+            }
+            PubKey::Rsa(_) => return Ok(()),
+        };
+        if usage == 0 || usage & !allowed != 0 {
+            return Err(HsmError::X509KeyUsageInvalid);
+        }
+        Ok(())
     }
 
     /// Apply the CA-only constraints to a non-leaf certificate.
@@ -271,6 +355,7 @@ impl ChainValidator {
     ///   budget is zero before this certificate is consumed.
     /// * `Err(HsmError::X509KeyUsageInvalid)` if KeyUsage is present
     ///   but lacks `keyCertSign`.
+    #[inline(never)]
     fn apply_ca_constraints(&mut self, curr: &CertInfo<'_>) -> HsmResult<()> {
         let basic_constraints = match curr.basic_constraints {
             Some(constraints) if constraints.ca => constraints,
@@ -295,6 +380,130 @@ impl ChainValidator {
         }
 
         Ok(())
+    }
+
+    async fn verify_signature<P>(
+        &self,
+        pal: &P,
+        io: &P::Io,
+        alloc: &impl HsmScopedAlloc,
+        verify_key: &PubKey<'_>,
+        curr: &CertInfo<'_>,
+    ) -> HsmResult<()>
+    where
+        P: HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
+    {
+        match (curr.sig_algo, verify_key) {
+            (
+                SigAlgo::EcdsaSha256 | SigAlgo::EcdsaSha384 | SigAlgo::EcdsaSha512,
+                PubKey::Ec(key),
+            ) => self.verify_ecdsa(pal, io, alloc, key, curr).await,
+            (SigAlgo::RsaPkcs1(_) | SigAlgo::RsaPss(_), PubKey::Rsa(key)) => {
+                self.verify_rsa(pal, io, alloc, key, curr).await
+            }
+            (
+                SigAlgo::MlDsa(param),
+                PubKey::MlDsa {
+                    param: key_param,
+                    key,
+                },
+            ) if param == *key_param => {
+                if curr.signature.len() != param.sig_len() {
+                    return Err(HsmError::X509SignatureInvalid);
+                }
+                let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 0, curr.tbs_raw)?;
+                if pal
+                    .mldsa_verify(io, param, HsmMlDsaPubKey::Encoded(key), msg, curr.signature)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(HsmError::X509SignatureInvalid)
+                }
+            }
+            _ => Err(HsmError::X509UnsupportedAlgorithm),
+        }
+    }
+
+    async fn verify_rsa<P>(
+        &self,
+        pal: &P,
+        io: &P::Io,
+        alloc: &impl HsmScopedAlloc,
+        key: &RsaPubKey<'_>,
+        curr: &CertInfo<'_>,
+    ) -> HsmResult<()>
+    where
+        P: HsmHash + HsmRsa,
+    {
+        let hash = curr
+            .sig_algo
+            .hash_algo()
+            .ok_or(HsmError::X509UnsupportedAlgorithm)?;
+        let k = key.key_size.modulus_len();
+        if key.modulus.len() != k || key.exponent.is_empty() || key.exponent.len() > 4 {
+            return Err(HsmError::X509ParseError);
+        }
+        if !matches!(
+            hash,
+            HsmHashAlgo::Sha256 | HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512
+        ) {
+            return Err(HsmError::X509UnsupportedAlgorithm);
+        }
+        match curr.sig_algo {
+            SigAlgo::RsaPkcs1(_) if !key.pss_only => {}
+            SigAlgo::RsaPss(params) => {
+                if usize::from(params.salt_len) > k - hash.digest_len() - 2 {
+                    return Err(HsmError::X509UnsupportedAlgorithm);
+                }
+                if let Some(restrictions) = key.pss_params {
+                    if params.hash != restrictions.hash || params.salt_len < restrictions.salt_len {
+                        return Err(HsmError::X509UnsupportedAlgorithm);
+                    }
+                }
+            }
+            _ => return Err(HsmError::X509UnsupportedAlgorithm),
+        }
+        if curr.signature.len() != k || **curr.signature >= **key.modulus {
+            return Err(HsmError::X509SignatureInvalid);
+        }
+
+        let digest = alloc.dma_alloc(hash.digest_len())?;
+        pal.hash(io, hash, curr.tbs_raw, digest, HsmDigestForm::Standard)
+            .await?;
+        let public = alloc.dma_alloc_zeroed(k + 4)?;
+        public[..k].copy_from_slice(key.modulus);
+        public[k + 4 - key.exponent.len()..].copy_from_slice(key.exponent);
+        byte_order::int_from_be(P::BYTE_ORDER, &mut public[..k]);
+        byte_order::int_from_be(P::BYTE_ORDER, &mut public[k..]);
+        let signature = alloc.dma_alloc(k)?;
+        signature.copy_from_slice(curr.signature);
+        byte_order::int_from_be(P::BYTE_ORDER, signature);
+        let valid = match curr.sig_algo {
+            SigAlgo::RsaPkcs1(_) => {
+                pal.rsa_pkcs1_verify(io, key.key_size, hash, public, digest, signature, alloc)
+                    .await?
+            }
+            SigAlgo::RsaPss(params) => {
+                pal.rsa_pss_verify(
+                    io,
+                    key.key_size,
+                    hash,
+                    public,
+                    digest,
+                    usize::from(params.salt_len),
+                    signature,
+                    alloc,
+                )
+                .await?
+            }
+            _ => return Err(HsmError::X509UnsupportedAlgorithm),
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(HsmError::X509SignatureInvalid)
+        }
     }
 
     /// Verify the ECDSA signature on the current certificate.
@@ -322,15 +531,12 @@ impl ChainValidator {
     /// # Returns
     /// * `Ok(())` — the signature is valid for `curr.tbs_raw`
     ///   under `verify_key`.
-    /// * `Err(HsmError::X509UnsupportedAlgorithm)` if the signature
-    ///   algorithm's expected curve does not match the verifier's
-    ///   curve.
     /// * `Err(HsmError::X509SignatureInvalid)` if the PAL reports
     ///   the signature is cryptographically invalid.
     /// * Any other [`HsmError`] propagated from `dma_alloc`,
     ///   `pal.hash`, `pal.ecc_verify`, or DER decoding of the raw
     ///   signature.
-    async fn verify_signature<P>(
+    async fn verify_ecdsa<P>(
         &self,
         pal: &P,
         io: &P::Io,
@@ -341,28 +547,33 @@ impl ChainValidator {
     where
         P: HsmHash + HsmEcc,
     {
-        // Verify the signature algorithm matches the signer's curve
-        // (RFC 5480 §3 standard pairings).
-        if curr.sig_algo.expected_curve() != verify_key.curve {
-            return Err(HsmError::X509UnsupportedAlgorithm);
-        }
-
-        let hash_algo = curr.sig_algo.hash_algo();
+        let hash_algo = curr
+            .sig_algo
+            .hash_algo()
+            .ok_or(HsmError::X509UnsupportedAlgorithm)?;
         let digest_len = hash_algo.digest_len();
         let curve = verify_key.curve;
         let coord_len = curve.priv_key_len();
 
-        // Hash the TBSCertificate (already in DMA memory) straight into the
-        // operand form `ecc_verify` expects.
-        let digest_dma = alloc.dma_alloc(digest_len)?;
+        let operand_len = curve.ecdsa_digest_len();
+        let digest_dma = alloc.dma_alloc(digest_len.max(operand_len))?;
         pal.hash(
             io,
             hash_algo,
             curr.tbs_raw,
-            digest_dma,
-            HsmDigestForm::Operand,
+            &mut digest_dma[..digest_len],
+            HsmDigestForm::Standard,
         )
         .await?;
+        // Truncate the big-endian hash or left-pad it to the PAL's fixed
+        // digest field before converting to operand order.
+        if digest_len < operand_len {
+            let padding = operand_len - digest_len;
+            digest_dma.copy_within(..digest_len, padding);
+            digest_dma[..padding].fill(0);
+        }
+        let digest_dma = &mut digest_dma[..operand_len];
+        byte_order::int_from_be(P::BYTE_ORDER, digest_dma);
 
         // X.509 carries the public key and signature as big-endian
         // `x ‖ y` / `r ‖ s`; convert each pair in place to the operand
@@ -392,14 +603,72 @@ impl ChainValidator {
     }
 }
 
+struct ChainWalker<'a> {
+    validator: ChainValidator,
+    anchor: Option<&'a [u8]>,
+    anchored: bool,
+    leaf_out: &'a mut [u8],
+}
+
+impl ChainWalker<'_> {
+    async fn step<P>(
+        &mut self,
+        pal: &P,
+        io: &P::Io,
+        alloc: &impl HsmScopedAlloc,
+        current: &HsmDmaBuf,
+        previous: &HsmDmaBuf,
+    ) -> HsmResult<bool>
+    where
+        P: HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
+    {
+        let current = alloc.alloc_val(parse_cert(current)?)?;
+        let previous = if previous.is_empty() {
+            None
+        } else {
+            Some(&*alloc.alloc_val(IssuerInfo::from(&parse_cert(previous)?))?)
+        };
+
+        if let Some(anchor) = self.anchor {
+            if self.validator.index + 1 < self.validator.chain_len {
+                if let PubKey::Ec(key) = &current.pub_key {
+                    if &**key.point == anchor {
+                        self.anchored = true;
+                    }
+                }
+            }
+        }
+
+        match self
+            .validator
+            .step_with_issuer(pal, io, alloc, previous, current)
+            .await
+        {
+            StepResult::Valid { leaf_pub_key, .. } => {
+                if !self.anchored {
+                    return Err(HsmError::InvalidArg);
+                }
+                let point = leaf_pub_key.as_bytes();
+                if point.len() != self.leaf_out.len() {
+                    return Err(HsmError::InvalidArg);
+                }
+                self.leaf_out.copy_from_slice(point);
+                Ok(true)
+            }
+            StepResult::NeedNext => Ok(false),
+            StepResult::Invalid(error) => Err(error),
+        }
+    }
+}
+
 /// Maximum accepted DER length of a single certificate in a chain.
 ///
 /// Certificate lengths in `descriptors` come from an untrusted request and
 /// size the reused DMA buffers, so they are bounded here: a hostile
-/// descriptor cannot force an oversized allocation (a rejection ceiling —
-/// real ECDSA certs are well under this, so it does not affect the actual
-/// per-chain allocation, which tracks the largest real cert).
-pub const MAX_CERT_DER_LEN: usize = 2048;
+/// descriptor cannot force an oversized allocation.
+/// ML-DSA-87 certificates need roughly 7.5 KiB. The actual DER allocation
+/// tracks the largest adjacent pair of descriptors, not this ceiling.
+pub const MAX_CERT_DER_LEN: usize = 8192;
 
 /// Walk and validate a certificate chain, root → leaf, returning the
 /// leaf public key.
@@ -411,11 +680,14 @@ pub const MAX_CERT_DER_LEN: usize = 2048;
 /// out of band. The `fetch` callback is invoked with that `index` (widened
 /// to `usize`) and must copy the certificate's DER into the provided DMA
 /// buffer; the *source* of the bytes (an OOB SGL block, a side-band buffer,
-/// …) is left entirely to the caller. Two max-sized DER buffers are reused
-/// across the walk (double-buffering), so the certificate buffers consume
-/// ≈2× the widest descriptor `length` of DMA regardless of chain length.
+/// …) is left entirely to the caller. Adjacent certificates remain in
+/// disjoint views at opposite ends of one DMA allocation, sized to the
+/// largest adjacent pair. Parsing and verification borrow these views
+/// without copying DER or issuer bytes. Per-step metadata and crypto
+/// scratch are reclaimed before the next fetch, bounding memory use
+/// independently of chain depth. The supplied allocator must belong to `io`.
 ///
-/// Per certificate the validator checks the ECDSA signature, issuer↔
+/// Per certificate the validator checks the signature, issuer↔
 /// subject name chaining, AKID↔SKID, and CA `BasicConstraints`/`KeyUsage`
 /// (see [`ChainValidator`]).
 ///
@@ -424,11 +696,12 @@ pub const MAX_CERT_DER_LEN: usize = 2048;
 /// * `anchor == None` — the chain is trusted by its self-signed root
 ///   alone (no external anchor).
 /// * `anchor == Some(pubkey)` — some **non-leaf** (issuing) certificate's
-///   public key MUST equal `pubkey` (raw big-endian `X‖Y`), binding the
+///   EC public key MUST equal `pubkey` (raw big-endian `X‖Y`), binding the
 ///   chain to an external trust anchor (e.g. a policy POTA / SATA key).
 ///
-/// On success `leaf_out` is filled with the leaf public key (raw
-/// big-endian `X‖Y`); its length must equal the leaf key length.
+/// On success `leaf_out` is filled with [`PubKey::as_bytes`]: raw
+/// big-endian `X‖Y`, DER RSAPublicKey, or raw ML-DSA bytes. Its length
+/// must exactly match. Existing 96-byte leaf consumers remain P-384-only.
 ///
 /// # Errors
 ///
@@ -449,7 +722,7 @@ pub async fn validate_chain<P, F>(
     fetch: F,
 ) -> HsmResult<()>
 where
-    P: HsmHash + HsmEcc,
+    P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, false).await
@@ -477,7 +750,7 @@ pub async fn validate_issuing_chain<P, F>(
     fetch: F,
 ) -> HsmResult<()>
 where
-    P: HsmHash + HsmEcc,
+    P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, true).await
@@ -495,16 +768,16 @@ async fn validate_chain_inner<P, F>(
     terminal_is_issuing_ca: bool,
 ) -> HsmResult<()>
 where
-    P: HsmHash + HsmEcc,
+    P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     if descriptors.is_empty() || descriptors.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArg);
     }
 
-    // Reject zero-length certificates up front and size the reused
-    // buffers to the widest cert in the chain.
-    let mut max_len = 0usize;
+    // Bound and align adjacent DER views before any fetch or allocation.
+    let mut capacity = 0usize;
+    let mut previous_size = 0usize;
     for d in descriptors {
         let len = usize::from(d.length.get());
         // Lengths come from an untrusted request; reject empty or
@@ -512,89 +785,49 @@ where
         if len == 0 || len > MAX_CERT_DER_LEN {
             return Err(HsmError::InvalidArg);
         }
-        if len > max_len {
-            max_len = len;
-        }
+        let size = len.next_multiple_of(4);
+        capacity = capacity.max(previous_size + size);
+        previous_size = size;
     }
 
-    let mut validator = if terminal_is_issuing_ca {
-        ChainValidator::new_issuing(descriptors.len() as u16)
-    } else {
-        ChainValidator::new(descriptors.len() as u16)
-    };
-    // A chain with no anchor requirement is trivially "anchored".
-    let mut anchored = anchor.is_none();
+    let walker = alloc.alloc_val(ChainWalker {
+        validator: if terminal_is_issuing_ca {
+            ChainValidator::new_issuing(descriptors.len() as u16)
+        } else {
+            ChainValidator::new(descriptors.len() as u16)
+        },
+        anchor,
+        anchored: anchor.is_none(),
+        leaf_out,
+    })?;
 
-    // Double-buffering: [`ChainValidator`] only needs the *previous*
-    // certificate alive while it checks the current one, so two
-    // max-sized DER buffers are reused for the whole walk instead of
-    // allocating one per certificate. `curr` receives the cert being
-    // processed; `prev` retains the one before it. The two handles are
-    // swapped at the end of each iteration.
-    let mut curr = alloc.dma_alloc(max_len)?;
-    let mut prev = alloc.dma_alloc(max_len)?;
-    let mut prev_len = 0usize;
+    let der = alloc.dma_alloc(capacity)?;
+    let mut previous_len = 0usize;
 
     for (i, d) in descriptors.iter().enumerate() {
         let len = usize::from(d.length.get());
-        // The caller fills the leading `len` bytes of the current buffer
-        // with this cert's DER, sourced by the descriptor's out-of-band
-        // `index` (only that prefix of the reused buffer is meaningful for
-        // this iteration).
-        fetch(usize::from(d.index), &mut curr[..len]).await?;
+        let (curr, previous) = if i % 2 == 0 {
+            let (left, right) = der.split_at_mut(len.next_multiple_of(4));
+            let previous_start = right.len() - previous_len.next_multiple_of(4);
+            (
+                &mut left[..len],
+                &right[previous_start..previous_start + previous_len],
+            )
+        } else {
+            let (left, right) = der.split_at_mut(capacity - len.next_multiple_of(4));
+            (&mut right[..len], &left[..previous_len])
+        };
+        fetch(usize::from(d.index), curr).await?;
 
-        // Inner scope: `curr_cert`/`prev_cert` borrow the buffers, so
-        // they must be dropped before the `swap` below can take the
-        // buffers by mutable reference again.
-        {
-            let curr_cert = parse_cert(&curr[..len])?;
-
-            // Trust-anchor binding: some non-leaf (issuing) certificate's
-            // public key must equal the anchor. Both the cert key and the
-            // anchor are big-endian, so this is a direct byte compare.
-            if let Some(anchor) = anchor {
-                if i + 1 < descriptors.len() {
-                    let point: &[u8] = curr_cert.pub_key.point;
-                    if point == anchor {
-                        anchored = true;
-                    }
-                }
-            }
-
-            // Re-parse the retained previous cert from its buffer.
-            // `parse_cert` only borrows (no crypto), so this is cheap and
-            // keeps `prev_cert` scoped to this iteration.
-            let prev_cert = if i > 0 {
-                Some(parse_cert(&prev[..prev_len])?)
-            } else {
-                None
-            };
-
-            match validator
-                .step(pal, io, alloc, prev_cert.as_ref(), &curr_cert)
-                .await
-            {
-                StepResult::Valid { leaf_pub_key, .. } => {
-                    if !anchored {
-                        return Err(HsmError::InvalidArg);
-                    }
-                    let point: &[u8] = leaf_pub_key.point;
-                    if point.len() != leaf_out.len() {
-                        return Err(HsmError::InvalidArg);
-                    }
-                    leaf_out.copy_from_slice(point);
-                    return Ok(());
-                }
-                StepResult::NeedNext => {}
-                StepResult::Invalid(error) => return Err(error),
-            }
+        let complete = pal
+            .alloc_scoped_async(io, async |scratch| {
+                walker.step(pal, io, scratch, curr, previous).await
+            })
+            .await?;
+        if complete {
+            return Ok(());
         }
-
-        // The current cert becomes the next iteration's `prev`: swap the
-        // buffer handles so the just-filled bytes are retained while the
-        // stale `prev` buffer is recycled as the next `curr`.
-        core::mem::swap(&mut curr, &mut prev);
-        prev_len = len;
+        previous_len = len;
     }
 
     // `ChainValidator::new(descriptors.len())` yields `Valid` on the final
