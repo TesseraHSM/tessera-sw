@@ -15,11 +15,13 @@
 //! the tag and records the GHASH state after every chunk, then a decrypt
 //! pass that re-reads each chunk and compares its GHASH state against the
 //! recorded checkpoint *before* writing that chunk to `dst`. GHASH is
-//! keyed by the secret `H`, so a host that changes already-verified input
-//! cannot reproduce a checkpoint except with the GCM forgery probability:
-//! every byte written to `dst` was covered by the verified tag. On any
-//! decrypt-pass failure the output is scrubbed (best effort) and the error
-//! returned.
+//! keyed by the secret `H`, so a host that changes already-verified AAD or
+//! ciphertext cannot reproduce a checkpoint except with the GCM forgery
+//! probability: every AAD and plaintext byte written to `dst` was covered
+//! by the verified tag. The AAD alignment padding is not part of GCM; it is
+//! copied through unauthenticated (host-supplied input echoed back, not
+//! secret). On any decrypt-pass failure the output is scrubbed (best
+//! effort) and the error returned.
 
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
