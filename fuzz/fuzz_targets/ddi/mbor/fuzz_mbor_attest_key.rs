@@ -1,0 +1,211 @@
+// Copyright (C) Microsoft Corporation. All rights reserved.
+
+#![no_main]
+
+#[path = "../../common.rs"]
+mod common;
+
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+use libfuzzer_sys::arbitrary::Arbitrary;
+use tsra_ddi::*;
+use tsra_ddi_mbor_test_helpers::helper_aes_generate;
+use tsra_ddi_mbor_test_helpers::helper_attest_key_cmd;
+use tsra_ddi_mbor_test_helpers::helper_delete_key;
+use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
+use tsra_ddi_mbor_test_helpers::helper_get_unwrapping_key;
+use tsra_ddi_mbor_test_helpers::helper_key_properties;
+use tsra_ddi_mbor_types::*;
+use common::*;
+use libfuzzer_sys::fuzz_target;
+
+#[derive(Arbitrary, Debug)]
+pub enum KeySource {
+    EccGenerated,
+    BuiltInUnwrappingKey,
+    ImportedRsaKey,
+    GeneratedAesKey,
+    HmacKey,
+    GeneratedSecretKey,
+}
+
+#[derive(Arbitrary, Debug)]
+pub struct FuzzInput {
+    /// If `true`, the fuzz test will generate a valid key ID based on the specified `key_source`
+    pub use_valid_key_id: bool,
+    /// Specifies the source/type of key to be used for the AttestKey operation when `use_valid_key_id` is `true`
+    pub key_source: KeySource,
+    /// Specifies the availability property of keys created during the test
+    pub key_availability: DdiKeyAvailability,
+    /// Selects the elliptic curve to be used for ECC key generation
+    pub key_curve: DdiEccCurve,
+    /// Specifies the type of HMAC key to create
+    pub hmac_key_type: HmacKeyType,
+    /// Specifies the hash algorithm to use for HMAC operations
+    pub hash_algorithm: DdiHashAlgorithm,
+    /// Specifies the RSA key size to be used when importing an RSA key
+    pub key_size: RsaKeySize,
+    /// A fuzzed `DdiAttestKeyReq` structure that provides the base for request parameters for the Attest Key operation
+    pub cmdreq_data: DdiAttestKeyReq,
+    /// Specifies the AES key size to be used when generating an AES key for testing (used only if `key_source` is `GeneratedAesKey`)
+    pub aes_key_size: DdiAesKeySize,
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz_ddi_attest_key(input);
+});
+
+pub fn fuzz_ddi_attest_key(input: FuzzInput) {
+    #[cfg(feature = "mock")]
+    if matches!(
+        input.hmac_key_type,
+        HmacKeyType::VarHmac256(_) | HmacKeyType::VarHmac384(_) | HmacKeyType::VarHmac512(_)
+    ) {
+        // Mock device doesnot support variable length HMAC key.
+        return;
+    }
+    let ddi = DdiTest::default();
+    let dev_infos = ddi.dev_info_list();
+    if dev_infos.is_empty() {
+        panic!("No devices found");
+    }
+
+    let mut dev = ddi
+        .open_dev(&dev_infos[0].path)
+        .expect("failed to open device");
+
+    cleanup(&ddi, &dev_infos[0].path, None);
+    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
+
+    let sess_id = match helper_common_open_session(&mut dev) {
+        Ok(id) => id,
+        Err(err) => {
+            panic!("Could not open session: {}", err);
+        }
+    };
+    let cmdreq_data = input.cmdreq_data;
+    let rev = Some(DdiApiRev { major: 1, minor: 0 });
+    let mut key_id = cmdreq_data.key_id;
+
+    if input.use_valid_key_id {
+        key_id = match input.key_source {
+            KeySource::EccGenerated => {
+                let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
+                let key_resp = helper_ecc_generate_key_pair(
+                    &dev,
+                    Some(sess_id),
+                    rev,
+                    input.key_curve,
+                    None,
+                    key_props,
+                );
+                match key_resp {
+                    Ok(resp) => resp.data.private_key_id,
+                    Err(err) => {
+                        panic!("Could not generate ECC key pair: {}", err);
+                    }
+                }
+            }
+            KeySource::BuiltInUnwrappingKey => {
+                let resp = helper_get_unwrapping_key(&dev, Some(sess_id), rev);
+                match resp {
+                    Ok(resp) => resp.data.key_id,
+                    Err(err) => {
+                        panic!("Could not get unwrapping key: {}", err);
+                    }
+                }
+            }
+            KeySource::ImportedRsaKey => {
+                match import_rsa_key(
+                    &dev,
+                    sess_id,
+                    input.key_availability,
+                    rev,
+                    input.key_size as u16,
+                ) {
+                    Some(id) => id,
+                    None => {
+                        panic!("Could not get rsa key ID");
+                    }
+                }
+            }
+            KeySource::GeneratedAesKey => {
+                let key_props =
+                    helper_key_properties(DdiKeyUsage::EncryptDecrypt, input.key_availability);
+                let resp = helper_aes_generate(
+                    &dev,
+                    Some(sess_id),
+                    rev,
+                    input.aes_key_size,
+                    None,
+                    key_props,
+                );
+                match resp {
+                    Ok(resp) => resp.data.key_id,
+                    Err(err) => {
+                        panic!("Could not generate AES key: {}", err);
+                    }
+                }
+            }
+            KeySource::HmacKey => {
+                match helper_create_hmac_key(
+                    &dev,
+                    sess_id,
+                    rev,
+                    input.key_availability,
+                    input.key_curve,
+                    input.hmac_key_type,
+                    input.hash_algorithm,
+                ) {
+                    Ok(id) => id,
+                    Err(err) => {
+                        panic!("Could not create HMAC key: {}", err);
+                    }
+                }
+            }
+            KeySource::GeneratedSecretKey => {
+                match create_secret_key(&dev, sess_id, rev, input.key_curve, input.key_availability)
+                {
+                    Ok(id) => id,
+                    Err(err) => {
+                        panic!("Could not generate secret key: {}", err);
+                    }
+                }
+            }
+        };
+    }
+
+    debug_print_control_flags(&format!(
+        "Input use_valid_key_id: {}, key_source: {:?}",
+        input.use_valid_key_id, input.key_source
+    ));
+    let report_data = cmdreq_data.report_data.data_take();
+
+    static FUZZ_DDI_ATTEST_KEY_INVOCATION: AtomicUsize = AtomicUsize::new(0);
+    let invocation = FUZZ_DDI_ATTEST_KEY_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let effective_key_id = format!("Effective key_id: {:?}", key_id);
+    debug_print_request_with_meta(
+        "fuzz_ddi_attest_key",
+        invocation,
+        invocation,
+        &cmdreq_data,
+        Some(&effective_key_id),
+    );
+
+    let resp = helper_attest_key_cmd(&dev, Some(sess_id), rev, report_data, key_id);
+
+    if let Err(err) = &resp {
+        if matches!(err, DdiError::DriverError(_)) {
+            panic!("Crash Detected: {}", err);
+        } else {
+            debug_print_control_flags(&format!("Other error detected: {}", err));
+        }
+    }
+
+    if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {
+        helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");
+    }
+
+    cleanup_with_session(&dev, Some(sess_id));
+}

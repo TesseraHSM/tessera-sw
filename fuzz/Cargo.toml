@@ -13,10 +13,12 @@ cargo-fuzz = true
 ddi_sock_server = { features = [
   "autostart-isolated",
 ], path = "../ddi/sock/server" }
+rand.workspace = true
 tsra_crypto = { path = "../crates/crypto" }
 tsra_ddi = { path = "../ddi/lib" }
 tsra_ddi_interface = { path = "../ddi/interface" }
 tsra_ddi_mbor_test_helpers = { path = "../ddi/mbor/test_helpers" }
+tsra_ddi_mbor_types = {path = "../ddi/mbor/types" }
 tsra_ddi_tbor_codec = { path = "../ddi/tbor/codec" }
 tsra_ddi_tbor_test_harness = { path = "../crates/tbor_test_harness" }
 tsra_ddi_tbor_types = { path = "../ddi/tbor/types" }
@@ -325,4 +327,109 @@ bench = false
 doc = false
 name = "fuzz_tbor_get_cert_chain_info"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert_chain_info.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_app_ops"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_app_ops.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_cmd_reqs"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_cmd_reqs.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_decoder"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_decoder.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_dispatcher"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_dispatcher_aes_fp"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher_aes_fp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_aes_encrypt_decrypt"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_aes_encrypt_decrypt.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_attest_key"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_attest_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_ecdh_key_exchange"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecdh_key_exchange.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_ecc_sign"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecc_sign.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_hmac"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_hmac.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_hkdf"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_hkdf.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_kbkdf"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_kbkdf.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_rsa_mod_exp"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_mod_exp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_rsa_unwrap"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_unwrap.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_establish_credential"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_establish_credential.rs"
 test = false
