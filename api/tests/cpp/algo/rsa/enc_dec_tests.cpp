@@ -555,6 +555,77 @@ TEST_F(tsra_rsa_encrypt_decrypt, decrypt_rejects_oaep_hash_mismatch)
     });
 }
 
+// Verifies RSA OAEP decryption rejects a label other than the one used to encrypt.
+TEST_F(tsra_rsa_encrypt_decrypt, decrypt_rejects_oaep_label_mismatch)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto_key priv_key;
+        auto_key pub_key;
+
+        auto props = rsa_import_props(true, true);
+        auto import_err =
+            import_unwrapped_rsa_keypair_for_enc_dec(session, props, priv_key, pub_key);
+        ASSERT_EQ(import_err, TSRA_STATUS_SUCCESS);
+        ASSERT_NE(priv_key.get(), 0);
+        ASSERT_NE(pub_key.get(), 0);
+        const char *plaintext = "Hello, RSA encryption!";
+        std::vector<uint8_t> plaintext_data(plaintext, plaintext + strlen(plaintext));
+
+        std::vector<uint8_t> label_data = { 'a', 0, 'b' };
+        tsra_buffer label_buf = {};
+        label_buf.ptr = label_data.data();
+        label_buf.len = static_cast<uint32_t>(label_data.size());
+
+        std::vector<uint8_t> other_label_data = { 'a', 0, 'c' };
+        tsra_buffer other_label_buf = {};
+        other_label_buf.ptr = other_label_data.data();
+        other_label_buf.len = static_cast<uint32_t>(other_label_data.size());
+
+        auto encrypt_params = make_oaep_sha256_params();
+        encrypt_params.label = &label_buf;
+        auto encrypt_algo = make_oaep_algo(encrypt_params);
+
+        tsra_buffer plaintext_buf = {};
+        plaintext_buf.ptr = plaintext_data.data();
+        plaintext_buf.len = static_cast<uint32_t>(plaintext_data.size());
+
+        std::vector<uint8_t> ciphertext_data(256);
+        tsra_buffer ciphertext_buf = {};
+        ciphertext_buf.ptr = ciphertext_data.data();
+        ciphertext_buf.len = static_cast<uint32_t>(ciphertext_data.size());
+
+        auto encrypt_err =
+            tsra_crypt_encrypt(&encrypt_algo, pub_key, &plaintext_buf, &ciphertext_buf);
+        ASSERT_EQ(encrypt_err, TSRA_STATUS_SUCCESS);
+
+        const tsra_buffer *decrypt_labels[] = { &label_buf, &other_label_buf, nullptr };
+        for (const tsra_buffer *decrypt_label : decrypt_labels)
+        {
+            auto decrypt_params = make_oaep_sha256_params();
+            decrypt_params.label = decrypt_label;
+            auto decrypt_algo = make_oaep_algo(decrypt_params);
+
+            std::vector<uint8_t> decrypted_data(256);
+            tsra_buffer decrypted_buf = {};
+            decrypted_buf.ptr = decrypted_data.data();
+            decrypted_buf.len = static_cast<uint32_t>(decrypted_data.size());
+
+            auto decrypt_err =
+                tsra_crypt_decrypt(&decrypt_algo, priv_key, &ciphertext_buf, &decrypted_buf);
+            if (decrypt_label == &label_buf)
+            {
+                ASSERT_EQ(decrypt_err, TSRA_STATUS_SUCCESS);
+                ASSERT_EQ(decrypted_buf.len, plaintext_buf.len);
+                ASSERT_EQ(0, memcmp(decrypted_buf.ptr, plaintext_buf.ptr, decrypted_buf.len));
+            }
+            else
+            {
+                ASSERT_EQ(decrypt_err, TSRA_STATUS_INTERNAL_ERROR);
+            }
+        }
+    });
+}
+
 // Verifies RSA decryption rejects using the public key instead of the private key.
 TEST_F(tsra_rsa_encrypt_decrypt, decrypt_with_public_key_rejected)
 {

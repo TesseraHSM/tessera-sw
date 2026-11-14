@@ -233,7 +233,8 @@ pub(crate) fn rsa_encrypt(
         TsraAlgoId::RsaPkcsOaep => {
             let params = <&TsraAlgoRsaPkcsOaepParams>::try_from(algo)?;
             let hash_algo = HsmHashAlgo::try_from(params.hash_algo_id)?;
-            let mut encrypt_algo = HsmRsaEncryptAlgo::with_oaep_padding(hash_algo, None);
+            let label = buffer_to_optional_slice(params.label)?;
+            let mut encrypt_algo = HsmRsaEncryptAlgo::with_oaep_padding(hash_algo, label);
             perform_crypto(
                 &mut encrypt_algo,
                 &key,
@@ -286,7 +287,8 @@ pub(crate) fn rsa_decrypt(
         TsraAlgoId::RsaPkcsOaep => {
             let params = <&TsraAlgoRsaPkcsOaepParams>::try_from(algo)?;
             let hash_algo = HsmHashAlgo::try_from(params.hash_algo_id)?;
-            let mut decrypt_algo = HsmRsaEncryptAlgo::with_oaep_padding(hash_algo, None);
+            let label = buffer_to_optional_slice(params.label)?;
+            let mut decrypt_algo = HsmRsaEncryptAlgo::with_oaep_padding(hash_algo, label);
             perform_crypto(
                 &mut decrypt_algo,
                 &key,

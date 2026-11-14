@@ -243,3 +243,76 @@ TEST_F(rsa_enc_dec, decrypt_fails_with_wrong_key)
     // rc != 1 means the decrypt call failed, which is the expected outcome
 }
 
+/// An RSA-OAEP ciphertext decrypts only under the label it was encrypted with;
+/// an empty label is the same as none.
+TEST_P(rsa_enc_dec_kind, oaep_labels_bind_ciphertext)
+{
+    struct Label
+    {
+        const char *name;
+        unsigned char *data;
+        size_t len;
+    };
+    unsigned char label[] = { 'a', 0, 'b' };
+    unsigned char other_label[] = { 'a', 0, 'c' };
+    const Label none = { "none", label, 0 };
+    const Label same = { "label", label, sizeof(label) };
+    const Label other = { "other label", other_label, sizeof(other_label) };
+    const unsigned char message[] = "label-bound ciphertext";
+
+    auto key = generate_rsa_session_key(prov_.libctx(), 2048, "keyEncipherment", GetParam());
+    ASSERT_NE(key, nullptr);
+    const size_t key_bytes = static_cast<size_t>(EVP_PKEY_get_size(key.get()));
+
+    for (const Label &enc_label : { none, same })
+    {
+        SCOPED_TRACE(enc_label.name);
+        EvpPkeyCtxPtr enc(EVP_PKEY_CTX_new_from_pkey(prov_.libctx(), key.get(), "provider=tsra"));
+        ASSERT_NE(enc, nullptr);
+        ASSERT_EQ(EVP_PKEY_encrypt_init(enc.get()), 1);
+        OSSL_PARAM enc_params[] = { OSSL_PARAM_octet_string(
+                                        OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL,
+                                        enc_label.data,
+                                        enc_label.len
+                                    ),
+                                    OSSL_PARAM_END };
+        ASSERT_EQ(EVP_PKEY_CTX_set_params(enc.get(), enc_params), 1);
+        std::vector<unsigned char> ciphertext(key_bytes);
+        size_t len = ciphertext.size();
+        ASSERT_EQ(
+            EVP_PKEY_encrypt(enc.get(), ciphertext.data(), &len, message, sizeof(message)),
+            1
+        );
+
+        for (const Label &dec_label : { none, same, other })
+        {
+            SCOPED_TRACE(dec_label.name);
+            const bool match = dec_label.len == enc_label.len &&
+                               std::memcmp(dec_label.data, enc_label.data, enc_label.len) == 0;
+            EvpPkeyCtxPtr dec(EVP_PKEY_CTX_new_from_pkey(prov_.libctx(), key.get(), "provider=tsra")
+            );
+            ASSERT_NE(dec, nullptr);
+            ASSERT_EQ(EVP_PKEY_decrypt_init(dec.get()), 1);
+            OSSL_PARAM dec_params[] = { OSSL_PARAM_octet_string(
+                                            OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL,
+                                            dec_label.data,
+                                            dec_label.len
+                                        ),
+                                        OSSL_PARAM_END };
+            ASSERT_EQ(EVP_PKEY_CTX_set_params(dec.get(), dec_params), 1);
+            std::vector<unsigned char> output(key_bytes);
+            size_t out_len = output.size();
+            int ret = EVP_PKEY_decrypt(dec.get(), output.data(), &out_len, ciphertext.data(), len);
+            if (match)
+            {
+                ASSERT_EQ(ret, 1);
+                output.resize(out_len);
+                EXPECT_EQ(output, std::vector<unsigned char>(message, message + sizeof(message)));
+            }
+            else
+            {
+                EXPECT_LE(ret, 0);
+            }
+        }
+    }
+}
