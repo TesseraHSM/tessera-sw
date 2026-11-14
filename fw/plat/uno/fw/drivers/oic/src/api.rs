@@ -50,6 +50,9 @@ struct OicState<const DEPTH: usize> {
     tag_free: u32,
     /// Completed detached posts, one bit per tag.
     detached_done: u32,
+    /// OSQ entries were written since the doorbell last rang: the next
+    /// [`OicDriver::ring`] rings it.
+    bell: bool,
     tags: [TagSlot; DEPTH],
 }
 
@@ -164,6 +167,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 osq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
+                bell: false,
                 tags,
             }),
             regs,
@@ -296,8 +300,8 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         regs.osq_ch[ch].ctrl.modify(OSQ_CHANNEL_CTRL::EN::SET);
     }
 
-    /// Allocate a tag, post an OSQ entry for the given IO index,
-    /// and ring the doorbell.
+    /// Allocate a tag and write an OSQ entry for the given IO index, for
+    /// the next [`ring`](Self::ring) to hand to the engine.
     fn submit(&self, index: u16, queue_id: u8, detached: bool) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let data_addr = unsafe {
@@ -343,15 +347,30 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 .tag
                 .write(OSQ_TAG::TAG.val(tag.into()) + OSQ_TAG::CONTROL.val(0));
 
-            cortex_m::asm::dmb();
-
             s.osq_tail = (s.osq_tail + 1) & Self::MASK;
-            self.regs.osq_ch[self.channel as usize]
-                .tail
-                .write(OSQ_CHANNEL_TAIL::TAIL.val(s.osq_tail.into()));
+            s.bell = true;
 
             Ok(tag)
         })
+    }
+
+    /// Ring the doorbell for the OSQ entries written since the last call,
+    /// if any. The PAL calls this on every pass of its poll loop, so the
+    /// posts made in a pass share one barrier, by which time their entries,
+    /// and the CQEs they post, have mostly drained.
+    #[inline(always)]
+    pub fn ring(&self) {
+        self.state.with(|s| {
+            if s.bell {
+                s.bell = false;
+                // The OSQ entries, and the CQEs they point at, must be
+                // visible to the engine before the doorbell.
+                cortex_m::asm::dmb();
+                self.regs.osq_ch[self.channel as usize]
+                    .tail
+                    .write(OSQ_CHANNEL_TAIL::TAIL.val(s.osq_tail.into()));
+            }
+        });
     }
 
     /// Poll until the OCQ completion arrives for `tag`.
