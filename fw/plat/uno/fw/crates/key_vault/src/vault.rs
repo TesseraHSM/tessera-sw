@@ -552,7 +552,7 @@ impl<S: TableStorage> KeyVault<S> {
         if !self.storage.is_valid_table(table) || slot >= ENTRIES_PER_TABLE {
             return Err(HsmError::KeyNotFound);
         }
-        let entry = *self.storage.entry(table, slot)?;
+        let entry = Entry::load(self.storage.entry(table, slot)?);
         if entry.is_free() {
             return Err(HsmError::KeyNotFound);
         }
