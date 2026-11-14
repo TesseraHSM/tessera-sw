@@ -1046,10 +1046,10 @@ impl UnoHsmPal {
     /// # Side Effects
     /// Invokes zero or more driver wake functions from [`WAKE_TABLE`].
     ///
-    /// This is also the entry point used by the synchronous firmware test
-    /// harness, which drives test futures to completion outside the Embassy
-    /// executor and must wake NVIC-gated drivers between polls. Production
-    /// code uses [`HsmPal::run`] instead.
+    /// The firmware's executor loop calls this after each executor pass.
+    /// So does the synchronous firmware test harness, which drives test
+    /// futures to completion outside the Embassy executor and must wake
+    /// NVIC-gated drivers between polls.
     pub fn poll_once(&self) {
         for (reg, &mask) in ISPR_MASKS.iter().enumerate() {
             let pend = Nvic::pending_bits(reg) & mask;
