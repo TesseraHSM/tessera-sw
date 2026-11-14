@@ -10,6 +10,8 @@ extern crate self as tsra_fw_uno_drivers_part_store;
 #[allow(dead_code, unsafe_code)]
 #[path = "../../part_store/src/part_store.rs"]
 mod part_store;
+#[path = "../src/reply_iv.rs"]
+mod reply_iv;
 #[allow(dead_code, unsafe_code)]
 #[path = "../src/session_store.rs"]
 mod session_store;
@@ -18,7 +20,10 @@ use part_store::HsmPartId;
 use part_store::PartResetKind;
 pub use part_store::PartStore;
 pub use part_store::Partition;
+use part_store::NUM_PARTITIONS;
+use reply_iv::ReplyIvs;
 use session_store::SessionStore;
+use session_store::MAX_SESSIONS;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -229,4 +234,62 @@ fn clear_all_releases_active_pending_and_renegotiating_slots() {
     }
     assert!(table.occupied_physical_ids().iter().all(Option::is_none));
     assert_eq!(table.create(HsmKeyId::from(4u16)).unwrap(), renegotiating);
+}
+
+fn reply_iv(salt: [u8; 4], counter: u64) -> Option<[u8; 12]> {
+    let mut iv = [0u8; 12];
+    iv[..4].copy_from_slice(&salt);
+    iv[4..].copy_from_slice(&counter.to_be_bytes());
+    Some(iv)
+}
+
+#[test]
+fn reply_ivs_count_under_the_salt_from_arming() {
+    let ivs = ReplyIvs::new();
+    let (pid, id) = (HsmPartId::from(3u8), HsmSessId::from(5u16));
+    assert_eq!(ivs.next(pid, id), None);
+
+    ivs.arm(pid, id, [1, 2, 3, 4]);
+    assert_eq!(ivs.next(pid, id), reply_iv([1, 2, 3, 4], 1));
+    assert_eq!(ivs.next(pid, id), reply_iv([1, 2, 3, 4], 2));
+    assert_eq!(ivs.next(HsmPartId::from(4u8), id), None);
+    assert_eq!(ivs.next(pid, HsmSessId::from(4u16)), None);
+
+    // New transport keys: a new salt, and the count from 1 again.
+    ivs.arm(pid, id, [5, 6, 7, 8]);
+    assert_eq!(ivs.next(pid, id), reply_iv([5, 6, 7, 8], 1));
+
+    ivs.disarm(pid, id);
+    assert_eq!(ivs.next(pid, id), None);
+}
+
+#[test]
+fn reply_ivs_ignore_slots_out_of_range() {
+    let ivs = ReplyIvs::new();
+    // Slot MAX_SESSIONS of one partition must not reach slot 0 of the next.
+    ivs.arm(
+        HsmPartId::from(3u8),
+        HsmSessId::from(MAX_SESSIONS as u16),
+        [1; 4],
+    );
+    assert_eq!(ivs.next(HsmPartId::from(4u8), HsmSessId::from(0u16)), None);
+
+    let beyond = HsmPartId::from(NUM_PARTITIONS as u8);
+    ivs.arm(beyond, HsmSessId::from(0u16), [1; 4]);
+    assert_eq!(ivs.next(beyond, HsmSessId::from(0u16)), None);
+}
+
+#[test]
+fn reply_iv_counter_carries_and_disarms_after_its_last_value() {
+    let ivs = ReplyIvs::new();
+    let (pid, id) = (HsmPartId::from(0u8), HsmSessId::from(0u16));
+    ivs.arm(pid, id, [9; 4]);
+
+    ivs.set_counter(pid, id, u64::from(u32::MAX));
+    assert_eq!(ivs.next(pid, id), reply_iv([9; 4], u64::from(u32::MAX)));
+    assert_eq!(ivs.next(pid, id), reply_iv([9; 4], 1 << 32));
+
+    ivs.set_counter(pid, id, u64::MAX);
+    assert_eq!(ivs.next(pid, id), reply_iv([9; 4], u64::MAX));
+    assert_eq!(ivs.next(pid, id), None);
 }

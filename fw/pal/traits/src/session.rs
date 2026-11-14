@@ -504,6 +504,20 @@ pub trait HsmSessionManager: HsmIoTypes {
         dir: HsmSessionTransportDir,
     ) -> HsmResult<&HsmDmaBuf>;
 
+    /// Returns the IV for the next response sealed under session `id`'s
+    /// HSM→VM transport key, for a platform that builds them
+    /// deterministically (NIST SP 800-38D §8.2.1: a fixed field, then an
+    /// invocation counter that never repeats under the key); `None`, the
+    /// default, has the caller draw a random one.
+    fn session_reply_iv(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+    ) -> Option<[u8; crate::SESSION_TRANSPORT_IV_LEN]> {
+        let _ = (io, id);
+        None
+    }
+
     /// Returns a borrowed view of the active session's `param_key`
     /// (a 32-byte AES-256 key used by
     /// [`tsra_fw_core_crypto_aead_envelope`]).

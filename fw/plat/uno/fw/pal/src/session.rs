@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
@@ -36,11 +37,17 @@ use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+use tsra_fw_uno_drivers_session_store::ReplyIvs;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+
+/// The IVs of the TBOR sessions' replies, in DTCM, so every slot starts
+/// each boot unarmed.
+static REPLY_IVS: ReplyIvs = ReplyIvs::new();
 
 /// API-revision portion of the session blob (bytes).
 const SESSION_API_REV_SIZE: usize = 8;
@@ -252,6 +259,14 @@ impl HsmSessionManager for UnoHsmPal {
         let mut store = SessionStore::partition(io.pid())?;
         match store.create_pending(role, physical_id) {
             Ok((sess_id, evicted)) => {
+                // The slot now holds new transport keys, which nothing has
+                // used yet: count their reply IVs afresh, before any await
+                // lets a reply be sealed under them.
+                let mut salt = [0u8; 4];
+                match self.rng_fill_bytes(io, &mut salt) {
+                    Ok(()) => REPLY_IVS.arm(io.pid(), sess_id, salt),
+                    Err(_) => REPLY_IVS.disarm(io.pid(), sess_id),
+                }
                 if let Some(old) = evicted {
                     let mut v = crate::vault::vault(io);
                     let _ = v.delete(self, io, old).await;
@@ -446,5 +461,13 @@ impl HsmSessionManager for UnoHsmPal {
             .1
             .split_at(SESSION_TRANSPORT_KEY_LEN)
             .0)
+    }
+
+    fn session_reply_iv(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+    ) -> Option<[u8; SESSION_TRANSPORT_IV_LEN]> {
+        REPLY_IVS.next(io.pid(), id)
     }
 }

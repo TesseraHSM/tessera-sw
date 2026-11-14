@@ -25,8 +25,10 @@
 
 #![no_std]
 
+mod reply_iv;
 mod session_store;
 
+pub use reply_iv::ReplyIvs;
 pub use session_store::SessionStore;
 pub use session_store::SessionTable;
 pub use session_store::MAX_SESSIONS;

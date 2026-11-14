@@ -20,7 +20,9 @@
 //! is left at offset 0 of the exchange buffer.
 //!
 //! Requests are opened with the session's VM→HSM transport key, responses
-//! sealed with the HSM→VM key under a fresh random IV.
+//! sealed with the HSM→VM key under a fresh IV: the platform's
+//! deterministic one where it keeps them (see
+//! [`HsmSessionManager::session_reply_iv`]), else a random one.
 
 use tsra_fw_hsm_pal_traits::HsmAesGcm;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
@@ -120,7 +122,8 @@ where
 }
 
 /// Seals the response `msg` with session `id`'s HSM→VM key under a fresh
-/// IV, returning the frame in a new DMA buffer.
+/// IV, the platform's deterministic one or else a random one, returning
+/// the frame in a new DMA buffer.
 ///
 /// # Errors
 ///
@@ -145,11 +148,14 @@ where
     msg.copy_to_slice(&mut pt[..msg.len()]);
     pt[msg.len()..pt_len - 1].fill(0);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
-    let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
-    pal.rng_fill_bytes(io, iv)?;
     let key = pal
         .session_transport_key(io, id, HsmSessionTransportDir::M2h)
         .map_err(|_| HsmError::SessionTransportError)?;
+    let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
+    match pal.session_reply_iv(io, id) {
+        Some(next) => iv.copy_from_slice(&next),
+        None => pal.rng_fill_bytes(io, iv)?,
+    }
     pal.gcm_encrypt_in_place(io, key, iv, 0, pt, tag)
         .await
         .map_err(|_| HsmError::SessionTransportError)?;
@@ -174,10 +180,7 @@ fn unpad(pt: &HsmDmaBuf) -> Option<usize> {
         return None;
     }
     let tail = body.len() - pad;
-    body[tail..]
-        .iter()
-        .all(|&b| b == 0)
-        .then_some(start + tail)
+    body[tail..].iter().all(|&b| b == 0).then_some(start + tail)
 }
 
 #[cfg(test)]
