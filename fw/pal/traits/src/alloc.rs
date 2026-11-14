@@ -221,11 +221,12 @@ impl HsmDmaBuf {
     /// must not be longer than it.
     ///
     /// DMA memory can be uncached (it is on Uno): every CPU load waits out
-    /// the interconnect's latency whatever its width, while an eight-word
+    /// the interconnect's latency whatever its width, while a ten-word
     /// burst costs little more than one load. When both buffers are
-    /// word-aligned this moves whole 32-byte blocks with burst loads on Arm,
-    /// so a structure read once out of DMA memory and worked on as a copy
-    /// beats reading it field by field in place.
+    /// word-aligned this moves whole 40-byte blocks, then the remaining
+    /// whole words, with burst loads on Arm, so a structure read once out
+    /// of DMA memory and worked on as a copy beats reading it field by
+    /// field in place.
     ///
     /// Returns `false`, copying nothing, if `dst` is longer than this buffer.
     #[inline]
@@ -235,11 +236,9 @@ impl HsmDmaBuf {
         };
         #[cfg(target_arch = "arm")]
         if (src.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
-            let blocks = src.len() / 32;
-            // SAFETY: both buffers are word-aligned and hold at least
-            // `blocks * 32` bytes, and `dst` is exclusively borrowed.
-            unsafe { burst_copy(dst.as_mut_ptr(), src.as_ptr(), blocks) };
-            let done = blocks * 32;
+            // SAFETY: both buffers are word-aligned and hold `src.len()`
+            // bytes, and `dst` is exclusively borrowed.
+            let done = unsafe { burst_copy(dst.as_mut_ptr(), src.as_ptr(), src.len()) };
             dst[done..].copy_from_slice(&src[done..]);
             return true;
         }
@@ -263,11 +262,9 @@ impl HsmDmaBuf {
         let d = dst.as_mut_ptr().cast::<u8>();
         #[cfg(target_arch = "arm")]
         let done = if (src.as_ptr() as usize | d as usize) % 4 == 0 {
-            let blocks = len / 32;
-            // SAFETY: both are word-aligned and hold at least `blocks * 32`
-            // bytes, and are disjoint, `dst` being exclusively borrowed.
-            unsafe { burst_copy(d, src.as_ptr(), blocks) };
-            blocks * 32
+            // SAFETY: both are word-aligned and hold `len` bytes, and are
+            // disjoint, `dst` being exclusively borrowed.
+            unsafe { burst_copy(d, src.as_ptr(), len) }
         } else {
             0
         };
@@ -354,25 +351,26 @@ impl HsmDmaBuf {
     }
 }
 
-/// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word
-/// LDM/STM bursts.
+/// Copies the whole words of the first `len` bytes from `src` to `dst`:
+/// 40-byte blocks with ten-word LDM/STM bursts, then the words left in one
+/// more burst. Returns the bytes copied, `len` rounded down to a word.
 ///
 /// # Safety
 ///
-/// `src` and `dst` must be word-aligned, valid for `blocks * 32` bytes, and
-/// must not overlap.
+/// `src` and `dst` must be word-aligned, valid for `len` bytes, and must
+/// not overlap.
 #[cfg(target_arch = "arm")]
 #[inline(always)]
-unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
+unsafe fn burst_copy(dst: *mut u8, src: *const u8, len: usize) -> usize {
     let mut s = src;
     let mut d = dst;
-    for _ in 0..blocks {
-        // SAFETY: the caller guarantees both 32-byte blocks are in bounds,
+    for _ in 0..len / 40 {
+        // SAFETY: the caller guarantees both 40-byte blocks are in bounds,
         // word-aligned and disjoint.
         unsafe {
             core::arch::asm!(
-                "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
-                "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11, r12, lr}}",
+                "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11, r12, lr}}",
                 s = inout(reg) s,
                 d = inout(reg) d,
                 out("r2") _,
@@ -383,10 +381,15 @@ unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
                 out("r9") _,
                 out("r10") _,
                 out("r11") _,
+                out("r12") _,
+                out("lr") _,
                 options(nostack, preserves_flags),
             );
         }
     }
+    // SAFETY: the words after the blocks are in bounds of both, as above.
+    unsafe { burst_copy_words(d, s, len % 40 / 4) };
+    len & !3
 }
 
 /// Copies `words` words, at most ten, from `src` to `dst` with one burst
