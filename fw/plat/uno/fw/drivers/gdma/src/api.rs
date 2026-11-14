@@ -51,6 +51,9 @@ struct GdmaState<const TAGS: usize> {
     tag_free: u64,
     /// Completed detached transfers, one bit per tag.
     detached_done: u64,
+    /// SQ entries were written since the doorbell last rang: the next
+    /// [`GdmaDriver::ring`] rings it.
+    bell: bool,
     tags: [TagSlot; TAGS],
 }
 
@@ -191,6 +194,7 @@ impl<const DEPTH: usize, const TAGS: usize> GdmaDriver<DEPTH, TAGS> {
                 sq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
+                bell: false,
                 tags,
             }),
         }
@@ -232,8 +236,9 @@ impl<const DEPTH: usize, const TAGS: usize> GdmaDriver<DEPTH, TAGS> {
         }
     }
 
-    /// Allocate a tag, write an SQ entry, and ring the doorbell. A
-    /// `detached` transfer carries the given cookie and completes into
+    /// Allocate a tag and write an SQ entry, for the next
+    /// [`ring`](Self::ring) to hand to the engine. A `detached` transfer
+    /// carries the given cookie and completes into
     /// [`take_detached`](Self::take_detached) rather than a waker.
     #[allow(clippy::too_many_arguments)]
     fn submit(
@@ -317,16 +322,30 @@ impl<const DEPTH: usize, const TAGS: usize> GdmaDriver<DEPTH, TAGS> {
             let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
             tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
 
-            // Ensure SQ entry write is visible to HW before doorbell
-            cortex_m::asm::dmb();
-
             s.sq_tail = next_tail;
-            self.regs.sq[self.channel as usize]
-                .tail
-                .write(SQ_CHANNEL_TAIL::TAIL.val(s.sq_tail.into()));
+            s.bell = true;
 
             Ok(tag)
         })
+    }
+
+    /// Ring the doorbell for the SQ entries written since the last call,
+    /// if any. The PAL calls this on every pass of its poll loop, so the
+    /// transfers submitted in a pass share one barrier, by which time
+    /// their entries, and the data they copy, have mostly drained.
+    #[inline(always)]
+    pub fn ring(&self) {
+        self.state.with(|s| {
+            if s.bell {
+                s.bell = false;
+                // The SQ entries, and the data the transfers read, must be
+                // visible to the engine before the doorbell.
+                cortex_m::asm::dmb();
+                self.regs.sq[self.channel as usize]
+                    .tail
+                    .write(SQ_CHANNEL_TAIL::TAIL.val(s.sq_tail.into()));
+            }
+        });
     }
 
     /// Submit a DMA copy from `src` to `dst` and await completion.
