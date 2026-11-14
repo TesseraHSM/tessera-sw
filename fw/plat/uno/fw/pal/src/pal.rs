@@ -291,6 +291,23 @@ const _: () = assert!(
         && Interrupt::UPKA_15_ERROR as usize == PKA_ERROR_IRQ + 15
 );
 
+/// Runs `fut`, polling it from the GSRAM code region (see `gsram.x`): for
+/// work that never runs on a request path, such as the admin IPC, so that
+/// its code leaves ITCM to the request path. The caller pins `fut`, so that
+/// its state is stored once.
+async fn poll_cold<F: core::future::Future>(mut fut: core::pin::Pin<&mut F>) -> F::Output {
+    core::future::poll_fn(|cx| poll_cold_once(fut.as_mut(), cx)).await
+}
+
+#[inline(never)]
+#[unsafe(link_section = ".gsram_text.cold")]
+fn poll_cold_once<F: core::future::Future>(
+    fut: core::pin::Pin<&mut F>,
+    cx: &mut core::task::Context<'_>,
+) -> core::task::Poll<F::Output> {
+    fut.poll(cx)
+}
+
 /// `(IRQ number, wake function)` pairs registered for NVIC dispatch.
 ///
 /// Adding a new peripheral interrupt requires one entry here. The
@@ -542,6 +559,9 @@ pub struct UnoHsmPal {
 unsafe impl Sync for UnoHsmPal {}
 
 impl Default for UnoHsmPal {
+    // Boot only: runs from the GSRAM code region (see `gsram.x`).
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn default() -> Self {
         let iic_config = IicChannelConfig {
             controller: 0,
@@ -888,11 +908,16 @@ impl UnoHsmPal {
         .await;
         match result {
             Either::First(_) => {
-                self.handle_ipc_message(IpcChannel::AdminMessage, &mut recv_msg)
-                    .await;
+                let msg = core::pin::pin!(
+                    self.handle_ipc_message(IpcChannel::AdminMessage, &mut recv_msg)
+                );
+                poll_cold(msg).await;
             }
             Either::Second(value) => {
-                self.handle_ipc_event(IpcChannel::AdminEvent, value).await;
+                poll_cold(core::pin::pin!(
+                    self.handle_ipc_event(IpcChannel::AdminEvent, value)
+                ))
+                .await;
             }
         }
     }
@@ -966,6 +991,8 @@ impl UnoHsmPal {
     /// - Moves boot phase to [`BootPhase::Running`].
     /// - Publishes `Run` to shared boot-status memory.
     /// - Optionally emits semihosting `SYS_READY` when feature-enabled.
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn on_boot_complete(&self) {
         // On an impactless (fw-update) warm reset the IIC/OIC queues were
         // programmed and enabled by the previous firmware and must survive the
@@ -1521,6 +1548,8 @@ impl HsmPal for UnoHsmPal {
     /// - Initializes SysTick timing and RNG.
     /// - Initializes IPC and enables message/event channels.
     /// - Publishes boot status `Done` for host-side polling.
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn init(&self) {
         systick_driver::init();
         // The PQC operand slots are read back with an engine reserved, so how
