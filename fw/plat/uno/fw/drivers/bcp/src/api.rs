@@ -1340,11 +1340,38 @@ fn write_abort(sq_idx: usize, id: usize) {
         .with_opcode(OPCODE_ABORT)
         .with_dfl_idx(id as u16)
         .with_dfl_num(0);
-    let e = &GSRAM.bcp_sq[sq_idx];
-    e.dw0.set(dw0.into());
-    e.dw1.set(0);
-    e.dw2.set(0);
-    e.dw3.set(0);
+    write_sqe(sq_idx, [dw0.into(), 0, 0, 0]);
+}
+
+/// Write the submission-ring entry at `idx` with one store-multiple: the
+/// ring sits in memory the CPU writes uncached, one bus transaction per
+/// store, and the doorbell's barrier waits for all of them.
+fn write_sqe(idx: usize, dw: [u32; 4]) {
+    let e = &GSRAM.bcp_sq[idx];
+    #[cfg(target_arch = "arm")]
+    {
+        let dst: *const _ = e;
+        // SAFETY: `dst` is the four word-aligned words of ring entry `idx`,
+        // which is the driver's until the doorbell hands it to the engine.
+        unsafe {
+            core::arch::asm!(
+                "stm {dst}, {{r2, r3, r4, r5}}",
+                dst = in(reg) dst,
+                in("r2") dw[0],
+                in("r3") dw[1],
+                in("r4") dw[2],
+                in("r5") dw[3],
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        e.dw0.set(dw[0]);
+        e.dw1.set(dw[1]);
+        e.dw2.set(dw[2]);
+        e.dw3.set(dw[3]);
+    }
 }
 
 /// Queue command `id`: one SQE per [`BCP_CHUNK_LEN`] chunk of its
@@ -1386,11 +1413,7 @@ fn submit(s: &mut BcpState, id: usize, cmd: &Cmd<'_>) {
             .with_key1_idx(key_slot(id, 0) as u16)
             .with_key2_idx(key_slot(id, 1) as u16);
 
-        let e = &GSRAM.bcp_sq[s.sq_pi as usize];
-        e.dw0.set(dw0.into());
-        e.dw1.set(dw1.into());
-        e.dw2.set(dw2.into());
-        e.dw3.set(dw3);
+        write_sqe(s.sq_pi as usize, [dw0.into(), dw1.into(), dw2.into(), dw3]);
         ring(s);
     }
 }
