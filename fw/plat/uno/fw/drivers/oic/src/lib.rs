@@ -13,6 +13,9 @@
 //! are placed at addresses in upper DTCM defined by `io_bufs.rdl`
 //! and passed to the driver at init time.
 //!
+//! A post goes out at the next [`OicDriver::ring`], which the owner's poll
+//! loop calls on every pass, as it calls [`OicDriver::wake`].
+//!
 //! # Example
 //!
 //! ```ignore
