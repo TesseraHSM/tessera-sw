@@ -843,8 +843,10 @@ impl UnoHsmPal {
     /// futures to completion outside the Embassy executor and must wake
     /// NVIC-gated drivers between polls.
     pub fn poll_once(&self) {
-        // Start the copies the tasks submitted in the executor pass.
+        // Start the copies and posts the tasks submitted in the executor
+        // pass.
         self.gdma.ring();
+        self.oic.ring();
 
         for (reg, &mask) in ISPR_MASKS.iter().enumerate() {
             let pend = Nvic::pending_bits(reg) & mask;
@@ -863,8 +865,9 @@ impl UnoHsmPal {
 
         self.finish_detached();
 
-        // Start the copies this pass submitted.
+        // Start the copies and posts this pass submitted.
         self.gdma.ring();
+        self.oic.ring();
     }
 
     /// Handle an incoming IPC message.
