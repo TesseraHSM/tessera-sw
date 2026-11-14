@@ -276,7 +276,8 @@ fn main() -> ! {
 
     // Thread mode only: the pender then just raises the event a sleeping
     // `wfe` waits for.
-    let executor: &'static raw::Executor = EXECUTOR.write(raw::Executor::new(usize::MAX as *mut ()));
+    let executor: &'static raw::Executor =
+        EXECUTOR.write(raw::Executor::new(usize::MAX as *mut ()));
     let spawner = executor.spawner();
 
     let mut started = false;

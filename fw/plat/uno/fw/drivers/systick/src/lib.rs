@@ -160,7 +160,10 @@ fn SysTick() {
     critical_section::with(|cs| {
         let lo = TICK_LO.load(Ordering::Relaxed).wrapping_add(1);
         if lo == 0 {
-            TICK_HI.store(TICK_HI.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+            TICK_HI.store(
+                TICK_HI.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
         }
         TICK_LO.store(lo, Ordering::Relaxed);
         let mut queue = DRIVER.queue.borrow(cs).borrow_mut();
