@@ -267,19 +267,13 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
         })
         .expect("DarcKeyWrap");
 
-    // (4) Ship the TMK to the target: source + target key-exchange keys,
+    // (4) Ship the TMK to the target: a target recipient key,
     // export (DATA-anchored target chain), then import (POTA-anchored
-    // sender chain).  Import re-masks the *same* 32-byte TMK under the
+    // source PID chain). Import re-masks the *same* 32-byte TMK under the
     // SDMK, so a key wrapped under the generated TMK unwraps under it.
-    let source_kex = mint_kex(&ready);
     let target_kex = mint_kex(&ready);
-    let (export_req, export_chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target_kex.pub_raw,
-        source_kex.masked,
-        masked_tmk,
-    );
+    let (export_req, export_chain) =
+        build_valid_export(&ready, &ready.data, &target_kex.pub_raw, masked_tmk);
     let export = ready
         .ctx
         .tbor_oob(&export_req, &export_chain.der_items())
@@ -287,8 +281,8 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
     let imported_tmk = reimport(
         &ready,
         target_kex.masked,
-        &source_kex.pub_raw,
         export.sealed_tmk.as_slice().try_into().expect("sealed TMK"),
+        export.report,
     );
     let imported_tmk = tmk_array(&imported_tmk);
 

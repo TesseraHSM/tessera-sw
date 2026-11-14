@@ -6,9 +6,9 @@
 //!
 //! `DarcTmkImport` opens a `sealed_tmk` on the **target**. The handler
 //! re-hashes the supplied `policy`, validates the **source** certificate
-//! chain against the policy POTA key thumbprint to recover the source's HPKE
-//! sender public key (`SndrPub`), unmasks the target's own KEX key
-//! (`RcvrPriv`), HPKE-Auth-opens `sealed_tmk` to recover the TMK, and
+//! chain against the policy `pota_spki_thumbprint` to authorize the reporting PID,
+//! unmasks the target's KEX key, verifies the report and envelope binding,
+//! HPKE Base opens `sealed_tmk` to recover the TMK, and
 //! re-masks it under the partition SDMK as a `DarcTmk` masked-key blob.
 //!
 //! The source certificate-chain DER travels **out of band**; the request
@@ -33,8 +33,9 @@ use super::*;
 /// * `sealed_tmk` - The sealed TMK from
 ///   [`darc_tmk_export`](super::darc_tmk_export), exactly
 ///   [`SEALED_TMK_LEN`] bytes.
-/// * `remote_cert_chain` - POTA-anchored source certificate chain
-///   (1..=2 certs); DER carried out of band.
+/// * `report` - The PID-signed `Darc` report returned with `sealed_tmk`.
+/// * `remote_cert_chain` - POTA-anchored source PID certificate chain
+///   (1..=3 certs, normally POTA -> PTA -> PID); DER carried out of band.
 ///
 /// # Errors
 ///
@@ -46,6 +47,7 @@ pub(crate) fn darc_tmk_import(
     masked_kex_key: &[u8],
     policy: &[u8],
     sealed_tmk: &[u8],
+    report: &[u8],
     remote_cert_chain: &[HsmCert<'_>],
 ) -> HsmResult<Vec<u8>> {
     let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = masked_kex_key
@@ -55,16 +57,23 @@ pub(crate) fn darc_tmk_import(
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
+    if report.is_empty() || report.len() > DARC_REPORT_MAX_LEN {
+        return Err(HsmError::InvalidArgument);
+    }
 
     let mut oob: Vec<&[u8]> = Vec::new();
-    let remote_cert_chain =
-        push_cert_chain(remote_cert_chain, &mut oob, DARC_CERT_CHAIN_MAX_CERTS)?;
+    let remote_cert_chain = push_cert_chain(
+        remote_cert_chain,
+        &mut oob,
+        DARC_SOURCE_CERT_CHAIN_MAX_CERTS,
+    )?;
 
     let req = TborDarcTmkImportReq {
         session_id: session.ex_session_id()?,
         masked_kex_key,
         policy,
         sealed_tmk,
+        report: report.to_vec(),
         remote_cert_chain,
     };
 

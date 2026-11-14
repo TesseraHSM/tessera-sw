@@ -225,6 +225,8 @@ struct DarcReadyContext
     std::shared_ptr<CaKey> data_key;
     /// Policy POTA CA — anchors the `tsra_darc_tmk_import` sender chain.
     std::shared_ptr<CaKey> pota_key;
+    /// Actual partition PID public key signing DARC export reports.
+    std::vector<uint8_t> pid_pub;
 };
 
 /// Provision a freshly-reset partition for the DARC key-transfer commands:

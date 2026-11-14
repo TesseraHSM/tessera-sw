@@ -70,6 +70,8 @@ pub(crate) use tpm::*;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::*;
 use tsra_ddi_mbor_types::*;
+/// Maximum PID-signed DARC export-report size.
+pub use tsra_ddi_tbor_types::DARC_REPORT_MAX_LEN;
 /// Max masked recovered-key envelope length returned by `DarcKeyUnwrap`.
 pub use tsra_ddi_tbor_types::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 /// Max recovered public-key length returned by `DarcKeyUnwrap`.

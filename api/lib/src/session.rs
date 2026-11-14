@@ -299,8 +299,8 @@ impl HsmSession {
     ///
     /// Generates a new DARC key-exchange key (ECC-P384) and returns the
     /// masked private key plus its raw P-384 public key (`x ‖ y`, 96
-    /// bytes, big-endian per coordinate). Run on the target it yields the HPKE receiver identity; run
-    /// on the source it yields the HPKE sender-auth identity. Only valid on
+    /// bytes, big-endian per coordinate). This is the HPKE recipient key;
+    /// the source authenticates exports using its PID instead. Only valid on
     /// a V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn darc_kex_key_gen(
         &self,
@@ -321,30 +321,26 @@ impl HsmSession {
     /// Issues TBOR `DarcTmkExport` (opcode `0x24`) on this CO session.
     ///
     /// Seals the TMK to an authenticated target: validates
-    /// `target_cert_chain` against the policy DATA key thumbprint, then HPKE-Auth
-    /// seals the TMK to the target's KEX key. Returns the sealed TMK. Only
+    /// `target_cert_chain` against the policy `data_spki_thumbprint`, then HPKE Base
+    /// seals the TMK to the target's KEX key and PID-signs a `Darc` report.
+    /// Returns both artifacts; no sender KEX key is required. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn darc_tmk_export(
         &self,
-        masked_sender_key: &[u8],
         masked_tmk: &[u8],
         policy: &[u8],
         target_cert_chain: &[HsmCert<'_>],
-    ) -> HsmResult<[u8; SEALED_TMK_LEN]> {
-        ddi::darc_tmk_export(
-            self,
-            masked_sender_key,
-            masked_tmk,
-            policy,
-            target_cert_chain,
-        )
+    ) -> HsmResult<HsmDarcTmkExportResult> {
+        ddi::darc_tmk_export(self, masked_tmk, policy, target_cert_chain)
     }
 
     /// Issues TBOR `DarcTmkImport` (opcode `0x21`) on this CO session.
     ///
     /// Opens a `sealed_tmk` on the target: validates `remote_cert_chain`
-    /// against the policy POTA key thumbprint, HPKE-Auth opens the sealed TMK, and
+    /// against the policy `pota_spki_thumbprint` to authorize the reporting PID,
+    /// verifies `report` and its recipient/envelope binding, HPKE Base
+    /// opens the sealed TMK, and
     /// re-masks it under the partition SDMK. Returns the masked TMK. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
@@ -353,9 +349,17 @@ impl HsmSession {
         masked_kex_key: &[u8],
         policy: &[u8],
         sealed_tmk: &[u8],
+        report: &[u8],
         remote_cert_chain: &[HsmCert<'_>],
     ) -> HsmResult<Vec<u8>> {
-        ddi::darc_tmk_import(self, masked_kex_key, policy, sealed_tmk, remote_cert_chain)
+        ddi::darc_tmk_import(
+            self,
+            masked_kex_key,
+            policy,
+            sealed_tmk,
+            report,
+            remote_cert_chain,
+        )
     }
 
     /// Issues TBOR `SdResealRemoteBackup` (opcode `0x0B`) on this CO

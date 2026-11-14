@@ -11,6 +11,8 @@
 //! the host with [`tsra_crypto`], mirroring the wire-level
 //! `ddi/tbor/types/tests/harness/x509_fixture.rs`.
 
+use std::sync::Arc;
+
 use tsra_api::*;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
@@ -977,25 +979,40 @@ pub(crate) fn masked_key_and_report(session: &HsmSession) -> (Vec<u8>, [u8; RAW_
 /// the CA keys backing those anchors. The api-level mirror of the emu
 /// harness `sd_initialized_session_with_data`.
 pub(crate) struct DarcReady {
+    /// Partition retained for cross-partition transfer tests.
+    pub(crate) partition: HsmPartition,
     /// Live Crypto-Officer security-domain (V2) session.
     pub(crate) session: HsmSession,
     /// The exact CBOR policy bound at `part_init_ex`.
     pub(crate) policy: Vec<u8>,
     /// Policy DATA CA — anchors the `darc_tmk_export` target chain.
-    pub(crate) data: CaKey,
+    pub(crate) data: Arc<CaKey>,
     /// Policy POTA CA — anchors the `darc_tmk_import` sender chain.
-    pub(crate) pota: CaKey,
+    /// POTA -> PTA -> freshly generated slot-2 PID certificate.
+    pub(crate) pid_chain: Vec<Vec<u8>>,
 }
 
 /// Provision a fresh partition with a DATA+POTA-anchored policy, finalize
 /// it, and initialize its security domain (via a self `sd_create_remote_backup`),
 /// returning a live CO V2 session ready for the DARC key-transfer commands.
 pub(crate) fn darc_sd_initialized_session() -> DarcReady {
-    let sata = CaKey::generate();
-    let pota = CaKey::generate();
-    let data = CaKey::generate();
-
     let (part, rev) = new_partition();
+    darc_sd_initialized_partition(
+        part,
+        rev,
+        Arc::new(CaKey::generate()),
+        Arc::new(CaKey::generate()),
+    )
+}
+
+/// Provision a selected partition under shared DARC authorities.
+pub(crate) fn darc_sd_initialized_partition(
+    part: HsmPartition,
+    rev: HsmApiRev,
+    pota: Arc<CaKey>,
+    data: Arc<CaKey>,
+) -> DarcReady {
+    let sata = CaKey::generate();
 
     // Bootstrap the CO session under the default PSK and rotate it off the
     // default so the DARC commands clear the default-PSK gate.
@@ -1048,6 +1065,9 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
     session
         .part_final_ex(&policy, &certs, None)
         .expect("part_final_ex");
+    let pid_cert = tsra_crypto::pem_to_der(part.cert_chain(2).expect("PID chain").as_bytes())
+        .expect("PID DER");
+    let pid_chain = vec![chain.root_der, chain.pta_der, pid_cert];
 
     // Provision the security domain (self-backup), marking the partition
     // SD-initialized so the DARC commands (which require an SDMK) proceed.
@@ -1060,9 +1080,10 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
         .expect("sd_create_remote_backup");
 
     DarcReady {
+        partition: part,
         session,
         policy,
         data,
-        pota,
+        pid_chain,
     }
 }

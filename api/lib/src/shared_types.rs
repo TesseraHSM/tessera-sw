@@ -39,6 +39,16 @@ pub struct HsmPartFinalExResult {
     pub local_mk_backup: Vec<u8>,
 }
 
+/// Result of `darc_tmk_export`: an encrypted TMK and its PID-signed report.
+/// Both artifacts must be retained and supplied together to the recipient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HsmDarcTmkExportResult {
+    /// Canonical P-384 HPKE Base envelope, excluding its report.
+    pub sealed_tmk: Vec<u8>,
+    /// Version-3 `Darc` report binding the exporter, recipient, and envelope.
+    pub report: Vec<u8>,
+}
+
 /// Borrowed attestation evidence for one party in a security-domain
 /// backup: required manufacturer and partition-owner DER chains, an optional
 /// device-owner chain, and the COSE_Sign1 report.
