@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include <limits.h>
 #include <openssl/core_dispatch.h>
 #include <openssl/core_names.h>
 #include <openssl/ec.h>
@@ -145,16 +146,26 @@ static int ecdsa_der_to_raw(
     ECDSA_SIG *esig = NULL;
     const BIGNUM *r = NULL, *s = NULL;
     unsigned char *raw = NULL;
+    unsigned char *canonical = NULL;
+    const unsigned char *p = der;
     size_t raw_len = coord_size * 2;
-    int r_len, s_len;
+    int r_len, s_len, canonical_len;
 
-    if (der == NULL || der_len == 0 || coord_size == 0)
+    if (der == NULL || der_len == 0 || der_len > LONG_MAX || coord_size == 0)
     {
         return OSSL_FAILURE;
     }
 
-    esig = d2i_ECDSA_SIG(NULL, &der, (long)der_len);
+    esig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
     if (esig == NULL)
+    {
+        goto cleanup;
+    }
+
+    /* d2i accepts BER and ignores trailing bytes: require the input to be the DER encoding. */
+    canonical_len = i2d_ECDSA_SIG(esig, &canonical);
+    if (canonical_len <= 0 || (size_t)canonical_len != der_len ||
+        memcmp(der, canonical, der_len) != 0)
     {
         goto cleanup;
     }
@@ -191,6 +202,7 @@ static int ecdsa_der_to_raw(
 cleanup:
     /* OpenSSL free functions are NULL-safe — call unconditionally */
     OPENSSL_free(raw);
+    OPENSSL_free(canonical);
     ECDSA_SIG_free(esig);
     return ret;
 }
