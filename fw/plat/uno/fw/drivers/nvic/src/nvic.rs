@@ -59,6 +59,20 @@ impl Nvic {
         NVIC.icpr[(n / 32) as usize].set(1 << (n % 32));
     }
 
+    /// Enable every interrupt whose bit is set in `bits` of enable register
+    /// `reg` (IRQs `reg*32 .. reg*32+31`).
+    #[inline(always)]
+    pub fn enable_bits(reg: usize, bits: u32) {
+        NVIC.iser[reg].set(bits);
+    }
+
+    /// Clear every pending interrupt whose bit is set in `bits` of register
+    /// `reg` (IRQs `reg*32 .. reg*32+31`).
+    #[inline(always)]
+    pub fn unpend_bits(reg: usize, bits: u32) {
+        NVIC.icpr[reg].set(bits);
+    }
+
     /// Read a raw ISPR register (32 pending bits per register).
     ///
     /// `reg` is the register index (0–7). Returns the full 32-bit

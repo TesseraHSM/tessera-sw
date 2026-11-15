@@ -297,7 +297,6 @@ impl UnoHsmPal {
                 Dir::Decrypt(t) => read_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
             });
-            self.service_pka();
             let done = self
                 .bcp
                 .gcm(GcmRequest {
@@ -534,7 +533,6 @@ impl UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let iv = AlignedIv(*iv);
-        self.service_pka();
         self.bcp.gcm_detached(
             GcmRequest {
                 op: GcmOp::Encrypt,
@@ -574,7 +572,6 @@ impl UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let iv = AlignedIv(*iv);
-        self.service_pka();
         self.bcp.gcm_detached(
             GcmRequest {
                 op: GcmOp::Decrypt,

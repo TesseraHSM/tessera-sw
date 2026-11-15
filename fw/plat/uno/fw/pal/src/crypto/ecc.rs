@@ -601,15 +601,9 @@ impl HsmEcc for UnoHsmPal {
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
-        self.service_pka();
-        let signed = self
-            .pka
+        self.pka
             .ecc_sign(pka_curve, priv_key, hash, signature)
-            .await;
-        // Other engines may have finished while this one signed; see to
-        // them before the reply goes out.
-        self.service_pka();
-        signed
+            .await
     }
 
     /// Raw EC verify of a signature over a pre-computed hash digest.

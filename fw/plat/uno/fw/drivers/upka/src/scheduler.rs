@@ -4,9 +4,7 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
-use tsra_fw_uno_drivers_nvic::Nvic;
 use tsra_fw_uno_error::HsmResult;
-use tsra_fw_uno_pac::Interrupt;
 
 use crate::api::UpkaDriver;
 use crate::engine::UpkaEngine;
@@ -26,11 +24,14 @@ struct TicketGuard<'a, const DEPTH: usize, const ENGINES: usize> {
 impl<const DEPTH: usize, const ENGINES: usize> Drop for TicketGuard<'_, DEPTH, ENGINES> {
     fn drop(&mut self) {
         if let Some(t) = self.ticket {
-            let running = self.driver.state.with(|s| s.abandon_staged(t));
-            if let Some(id) = running {
-                // The command still uses the caller's buffers: wait for the
-                // engine to finish with them, as dropping a held engine does.
-                EngineExecutor::wait_until_idle(id);
+            if self.driver.with_state(|s| s.abandon_staged(t)) {
+                // The command still uses the caller's buffers: wait for it
+                // to complete, which the engine's interrupt handles, freeing
+                // the ticket. Waiting for the engine to idle could take as
+                // long as the commands the handler starts on it after this.
+                while self.driver.with_state(|s| s.is_abandoned(t)) {
+                    core::hint::spin_loop();
+                }
             }
         }
     }
@@ -70,7 +71,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         let mut queue_idx: Option<u8> = None;
 
         poll_fn(move |cx| {
-            self.driver.state.with(|s| {
+            self.driver.with_state(|s| {
                 if let Some(idx) = queue_idx {
                     let assigned = {
                         if let Some(id) = s.wait_for_assigned_engine(idx, cx) {
@@ -121,7 +122,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         let mut registered = false;
 
         poll_fn(move |cx| {
-            self.driver.state.with(|s| {
+            self.driver.with_state(|s| {
                 let waiter = &mut s.specific_waiters[target as usize];
                 if waiter.assigned {
                     waiter.assigned = false;
@@ -152,7 +153,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
 
     /// Poll one engine and wake waiters if completed.
     pub(crate) fn wake_engine(&self, id: u8) {
-        self.driver.state.with(|s| {
+        self.driver.with_state(|s| {
             Self::wake_engine_inner(s, id as usize);
         });
     }
@@ -162,10 +163,10 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         if !slot.is_in_use() || !slot.is_completion_armed() || slot.has_completion_status() {
             return;
         }
+        // The engine posts its status before it raises its done or its error
+        // interrupt (one per command), and entering the handler cleared it.
         let flags = EngineExecutor::completion_flags(id as u8);
         if flags != 0 {
-            Nvic::unpend_raw(Interrupt::UPKA_0_DONE as u16 + id as u16);
-            Nvic::unpend_raw(Interrupt::UPKA_0_ERROR as u16 + id as u16);
             if slot.wiping {
                 Self::finish_wipe(s, id, flags as u8);
             } else if let Some(t) = slot.ticket {
@@ -194,7 +195,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
             ticket: None,
         };
         poll_fn(|cx| {
-            self.driver.state.with(|s| match ticket.ticket {
+            self.driver.with_state(|s| match ticket.ticket {
                 None => match s.submit_staged(cmd) {
                     Some(t) => {
                         ticket.ticket = Some(t);
@@ -231,7 +232,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
 
     /// Release an engine and dispatch next queued waiter if available.
     pub(crate) fn release_engine(&self, id: u8) {
-        self.driver.state.with(|s| {
+        self.driver.with_state(|s| {
             let _ = s.release_engine_and_dispatch(id);
         });
     }

@@ -36,8 +36,10 @@
 //! (`irq_enable` register) so the hardware asserts the NVIC pending bit.
 //! No ISR handlers are installed for these — `main`'s loop scans the
 //! pending bits with the PAL's `poll_once()` and wakes the appropriate
-//! driver. The SysTick exception is handled internally by the systick
-//! driver crate.
+//! driver. The PKA engines' done and error interrupts do have a handler,
+//! the PAL's `UPKA_IRQ`, so that a finished engine is handed its wipe or
+//! its next command at once. The SysTick exception is handled internally
+//! by the systick driver crate.
 
 #![no_std]
 #![no_main]

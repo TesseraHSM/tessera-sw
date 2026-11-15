@@ -134,10 +134,21 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         Scheduler::new(self)
     }
 
-    /// Wake a specific engine by ID.
+    /// Run `f` on the driver state with interrupts masked, since the
+    /// engines' interrupt handler ([`wake_engine`](Self::wake_engine))
+    /// updates the same state.
+    #[inline(always)]
+    pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut UpkaState<DEPTH, ENGINES>) -> R) -> R {
+        cortex_m::interrupt::free(|_| self.state.with(f))
+    }
+
+    /// Handle engine `id`'s completion, if it has one: wake the command's
+    /// waiter, start the wipe that follows it, or return the wiped engine
+    /// to the pool, starting the next queued command on it.
     ///
-    /// Called from the per-engine Done/Error IRQ handler via the PAL
-    /// WAKE_ENTRIES dispatch.
+    /// Called from the engines' done and error interrupt handler, as soon
+    /// as an engine finishes, so that it never sits idle waiting for the
+    /// run loop.
     ///
     /// # Parameters
     ///
@@ -156,8 +167,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// the request that started it, so IDFU shutdown waits for this to clear.
     #[inline]
     pub fn any_engine_busy(&self) -> bool {
-        self.state
-            .with(|s| s.free_mask != ((1u32 << ENGINES) - 1) as u16)
+        self.with_state(|s| s.free_mask != ((1u32 << ENGINES) - 1) as u16)
     }
 
     pub(crate) fn release_engine(&self, id: u8) {
