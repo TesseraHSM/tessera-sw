@@ -293,7 +293,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     }
 
     /// Allocate a tag and write an OSQ entry for the given IO index, for
-    /// the next [`ring`](Self::ring) to hand to the engine.
+    /// the next [`ring`](Self::ring) to hand to the engine. A `detached`
+    /// post also returns the IO's inbound-queue credit (see
+    /// [`send_detached`](Self::send_detached)).
     fn submit(&self, index: u16, queue_id: u8, detached: bool) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
@@ -329,7 +331,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             entry.addr_hi.set(0);
             entry.desc.write(
                 OSQ_DESC::RX_QUEUE_ID.val(queue_id.into())
-                    + OSQ_DESC::RX_CREDIT.val(0)
+                    + OSQ_DESC::RX_CREDIT.val(u32::from(detached))
                     + OSQ_DESC::TX_QUEUE_ID.val(queue_id.into())
                     + OSQ_DESC::AXI_ID.val(0),
             );
@@ -406,6 +408,14 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Post the IO CQE for `index` with no task awaiting it: its completion
     /// is collected by [`take_detached`](Self::take_detached).
+    ///
+    /// The post also grants the IO's credit back to inbound queue
+    /// `queue_id`: the OSQ entry's `RX_CREDIT` is 1, which the hardware adds
+    /// to that queue's credit count (as the fast path's completion posts
+    /// do), so the caller frees the IO without granting it again (the IIC's
+    /// `release_io`). Only an IO with nothing left to do once its completion
+    /// is posted may be sent so: Admin takes a restored credit as the IO
+    /// being done.
     ///
     /// # Errors
     ///
