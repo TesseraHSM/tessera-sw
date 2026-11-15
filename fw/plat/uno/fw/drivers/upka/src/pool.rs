@@ -452,10 +452,16 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         );
     }
 
-    /// Engine `id` finished ticket `t`'s command with `status`: hand the
-    /// status to the ticket, waking its caller, and start wiping the
-    /// engine, whose completion releases it.
+    /// Engine `id` finished ticket `t`'s command with `status`: start wiping
+    /// the engine, whose completion releases it, then hand the status to the
+    /// ticket, waking its caller. The wipe goes first: the engine idles until
+    /// it starts, and the wake is not free.
     pub(crate) fn finish_staged(&mut self, id: u8, t: u8, status: u8) {
+        let slot = &mut self.engine_slots[id as usize];
+        slot.ticket = None;
+        slot.arm_completion_wait();
+        slot.wiping = true;
+        EngineExecutor::submit_wipe(id);
         let ticket = &mut self.tickets[t as usize];
         if ticket.state == TicketState::Abandoned {
             ticket.state = TicketState::Free;
@@ -464,11 +470,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
             ticket.state = TicketState::Done(status);
             ticket.waker.wake();
         }
-        let slot = &mut self.engine_slots[id as usize];
-        slot.ticket = None;
-        slot.arm_completion_wait();
-        slot.wiping = true;
-        EngineExecutor::submit_wipe(id);
     }
 
     /// Ticket `t`'s status, freeing the ticket, once its command has
