@@ -139,9 +139,6 @@ impl UnoHsmPal {
         Self::check_key_session(io, vault(io).key_session(key_id)?)
     }
 
-    /// The isolation check of
-    /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
-    /// on a key's already-read session binding.
     /// [`vault_key`](HsmVault::vault_key), as a `'static` view.
     ///
     /// The key's entry sits in GSRAM, read uncached, and a sealed IO looks
@@ -151,22 +148,35 @@ impl UnoHsmPal {
     /// a later lookup of the key takes it from there while the vault is
     /// unwritten since, checking again that the IO's partition owns the
     /// key's table and may use a key bound to a session, as reading the
-    /// entry would.
+    /// entry would. That check is inlined; the lookup that reads the entry
+    /// is not.
+    #[inline(always)]
     pub(crate) fn vault_key_static(
         io: &UnoHsmIo,
         key_id: HsmKeyId,
     ) -> HsmResult<&'static HsmDmaBuf> {
-        let generation = VaultStorage::generation();
         let id = usize::from(u16::from(key_id));
         let cell = &KEY_LOCATIONS.0[(id ^ id >> 4) % KEY_LOCATION_COUNT];
         if let Some(found) = cell.get()
             && found.key_id == key_id
-            && found.generation == generation
+            && found.generation == VaultStorage::generation()
             && owns_key_table(io, key_id)
         {
             Self::check_key_session(io, found.session)?;
             return Ok(found.blob);
         }
+        Self::locate_key(io, key_id, cell)
+    }
+
+    /// The lookup of [`vault_key_static`](Self::vault_key_static) that reads
+    /// the key's entry, keeping where it found the key in `cell`.
+    #[inline(never)]
+    fn locate_key(
+        io: &UnoHsmIo,
+        key_id: HsmKeyId,
+        cell: &Cell<Option<KeyLocation>>,
+    ) -> HsmResult<&'static HsmDmaBuf> {
+        let generation = VaultStorage::generation();
         // One vault view and one entry read serve both the isolation check
         // and the location.
         let ((table, off, len), session) =
@@ -182,6 +192,10 @@ impl UnoHsmPal {
         Ok(blob)
     }
 
+    /// The isolation check of
+    /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
+    /// on a key's already-read session binding.
+    #[inline(always)]
     fn check_key_session(io: &UnoHsmIo, bound: Option<u16>) -> HsmResult<()> {
         let Some(bound) = bound else {
             return Ok(());
