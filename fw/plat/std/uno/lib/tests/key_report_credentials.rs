@@ -210,18 +210,17 @@ async fn check_typed_reports() {
                     policy_hash: &fields[144..192],
                 },
             };
-            let size = report(&pal, &io, alloc, &params, private, None)
+            let size = report(&pal, &io, &params, private, None)
                 .await
                 .expect("query report size");
-            let mut short = [0xA5; 1];
-            assert!(pal
-                .alloc_scoped_async(&io, async |scratch| {
-                    report(&pal, &io, scratch, &params, private, Some(&mut short)).await
-                })
+            let short =
+                tsra_fw_hsm_pal_traits::HsmScopedAlloc::dma_alloc(alloc, 1).expect("short buffer");
+            short[0] = 0xA5;
+            assert!(report(&pal, &io, &params, private, Some(short))
                 .await
                 .is_err());
-            assert_eq!(short, [0xA5]);
-            let written = report(&pal, &io, alloc, &params, private, Some(encoded))
+            assert_eq!(short[0], 0xA5);
+            let written = report(&pal, &io, &params, private, Some(encoded))
                 .await
                 .expect("sign report");
             assert_eq!(written, size);
@@ -279,22 +278,15 @@ async fn check_typed_reports() {
         .expect("report scope");
     }
 
-    pal.alloc_scoped_async(&io, async |alloc| {
-        let params = ReportParams::SdBackup {
-            transfer: TransferReportParams {
-                source_pid_key_id: &fields[..48],
-                recipient_key_id: &fields[48..96],
-                envelope_hash: &fields[96..144],
-            },
-            policy_hash: &fields[144..191],
-        };
-        assert!(report(&pal, &io, alloc, &params, private, None)
-            .await
-            .is_err());
-        Ok::<_, tsra_fw_hsm_pal_traits::HsmError>(())
-    })
-    .await
-    .expect("invalid report scope");
+    let params = ReportParams::SdBackup {
+        transfer: TransferReportParams {
+            source_pid_key_id: &fields[..48],
+            recipient_key_id: &fields[48..96],
+            envelope_hash: &fields[96..144],
+        },
+        policy_hash: &fields[144..191],
+    };
+    assert!(report(&pal, &io, &params, private, None).await.is_err());
     pal.drop_io(io).await.expect("drop IO");
 }
 
@@ -415,7 +407,7 @@ async fn check_transfer_bindings() {
             hash.finish(Some(&mut expected)).expect("envelope hash");
             assert_eq!(&**digest, expected);
             let params = transfer_report_params(envelope, digest)?;
-            report(&pal, &io, alloc, &params, source_private, Some(output)).await
+            report(&pal, &io, &params, source_private, Some(output)).await
         })
         .await
     };
@@ -592,15 +584,7 @@ async fn check_transfer_bindings() {
                         2 => transfer.envelope_hash = &ids[..48],
                         _ => {}
                     }
-                    report(
-                        &pal,
-                        &io,
-                        alloc,
-                        &params,
-                        source_private,
-                        Some(encoded_report),
-                    )
-                    .await
+                    report(&pal, &io, &params, source_private, Some(encoded_report)).await
                 })
                 .await
                 .expect("sign mismatched claim");

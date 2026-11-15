@@ -52,6 +52,7 @@ pub(crate) use key::*;
 pub(crate) use masked_key::*;
 pub use part_policy::PartPolicyBuilder;
 pub use part_policy::PolicyKeyFormat;
+pub use part_policy::PolicyPtaAlg;
 pub use part_policy::policy_key_thumbprint;
 pub(crate) use partition::*;
 pub(crate) use partition_ex::*;
@@ -104,9 +105,11 @@ pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 pub use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 /// Partition policy (CBOR) schema: maximum `info` length.
 pub use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+/// Partition policy (CBOR) schema: supported `version`.
+pub use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
+pub use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 /// Partition policy (CBOR) schema: public-key thumbprint length.
 pub use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
-/// Partition policy (CBOR) schema: supported `version`.
 pub use tsra_ddi_tbor_types::POLICY_VERSION;
 /// Maximum size, in bytes, of the `part_init` `pta_csr` buffer.
 pub use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;

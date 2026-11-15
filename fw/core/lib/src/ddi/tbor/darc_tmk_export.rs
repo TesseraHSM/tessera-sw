@@ -136,7 +136,7 @@ pub(crate) async fn handle<P: HsmPal>(
             let digest = alloc.dma_alloc(48)?;
             transfer_envelope_hash(pal, io, sealed, digest, alloc).await?;
             let params = transfer_report_params(sealed, digest)?;
-            report(pal, io, alloc, &params, pid_private, Some(signed_report)).await
+            report(pal, io, &params, pid_private, Some(signed_report)).await
         })
         .await?;
 

@@ -504,15 +504,16 @@ mod tests {
                 let pota = PotaFixture::generate();
                 let policy =
                     TestPolicy::new(pota.spki_thumbprint(), pota.spki_thumbprint()).encode();
-                let init = tbor(
-                    &device,
-                    &TborPartInitReq {
-                        session_id: session.session_id,
-                        mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
-                            .expect("machine seed envelope"),
-                        part_policy: policy.clone(),
-                    },
-                );
+                let init_req = TborPartInitReq {
+                    session_id: session.session_id,
+                    mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
+                        .expect("machine seed envelope"),
+                    part_policy: policy.clone(),
+                };
+                let init = tsra_ddi_tbor_test_harness::exec_part_init(|oob| {
+                    device.exec_op_tbor(&init_req, oob, &mut None)
+                })
+                .expect("PartInit");
                 let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
                 let certs = chain.der_items();
                 let final_request = TborPartFinalReq {

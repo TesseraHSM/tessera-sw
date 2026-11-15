@@ -49,6 +49,8 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::POLICY_VERSION;
 use tsra_ddi_tbor_types::PolicyFlags;
@@ -539,6 +541,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
     let mut flags = None;
     let mut info = None;
     let mut data = None;
+    let mut pta_alg = None;
     for _ in 0..entries {
         match d.u64().ok()? {
             k if k == PolicyKey::Version as u64 => version = Some(d.u64().ok()?),
@@ -552,6 +555,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
             k if k == PolicyKey::Flags as u64 => flags = Some(d.u64().ok()?),
             k if k == PolicyKey::Info as u64 => info = Some(d.bytes().ok()?.to_vec()),
             k if k == PolicyKey::DataSpkiThumbprint as u64 => data = Some(array(&mut d)?),
+            k if k == PolicyKey::PtaAlg as u64 => pta_alg = Some(d.i64().ok()?),
             _ => return None,
         }
     }
@@ -581,6 +585,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
         flags,
         info,
         data_spki_thumbprint: data,
+        pta_alg: pta_alg.filter(|a| [POLICY_PTA_ALG_ES384, POLICY_PTA_ALG_MLDSA87].contains(a))?,
     })
 }
 

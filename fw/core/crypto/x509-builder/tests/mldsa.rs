@@ -144,9 +144,14 @@ async fn mldsa_issuer_leaf_verifies() {
             let len =
                 cert_builder::build_mldsa_leaf_cert(&io, alloc, &params, &signer, None).await?;
             let mut out = vec![0u8; len];
-            let written =
-                cert_builder::build_mldsa_leaf_cert(&io, alloc, &params, &signer, Some(&mut out))
-                    .await?;
+            let written = cert_builder::build_mldsa_leaf_cert(
+                &io,
+                alloc,
+                &params,
+                &signer,
+                Some(dma_mut(&mut out)),
+            )
+            .await?;
             assert_eq!(written, len, "query size is exact");
             HsmResult::Ok(out)
         })
@@ -206,7 +211,15 @@ async fn mldsa_csr_verifies() {
             let len = csr_builder::build_mldsa_csr(&io, alloc, &pk, &cn, &signer, None).await?;
             let mut out = vec![0u8; len];
             assert_eq!(
-                csr_builder::build_mldsa_csr(&io, alloc, &pk, &cn, &signer, Some(&mut out)).await?,
+                csr_builder::build_mldsa_csr(
+                    &io,
+                    alloc,
+                    &pk,
+                    &cn,
+                    &signer,
+                    Some(dma_mut(&mut out))
+                )
+                .await?,
                 len
             );
             HsmResult::Ok(out)

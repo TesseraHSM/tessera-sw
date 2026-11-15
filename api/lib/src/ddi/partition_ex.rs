@@ -33,19 +33,6 @@ use tsra_ddi_tbor_types::*;
 
 use super::*;
 
-/// Converts the DDI/wire `PartInit` response into the API-layer
-/// [`HsmPartInitExResult`] with owned bytes, so the wire response type
-/// stays confined to the DDI layer and never reaches `HsmSession`
-/// callers.
-impl From<TborPartInitResp> for HsmPartInitExResult {
-    fn from(resp: TborPartInitResp) -> Self {
-        Self {
-            pta_csr: resp.pta_csr,
-            pta_report: resp.pta_report,
-        }
-    }
-}
-
 /// Converts the DDI/wire `PartFinal` response into the API-layer
 /// [`HsmPartFinalExResult`] with owned bytes, so the wire response type
 /// stays confined to the DDI layer and never reaches `HsmSession`
@@ -172,10 +159,28 @@ pub(crate) fn part_init_ex(
     // this session across calls (per the `exec_op_tbor` contract in
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
-    with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, &mut [], cookie)
-            .map(HsmPartInitExResult::from)
+    // The CSR and report return out of band; size each buffer for its
+    // maximum and truncate to the lengths in the response.
+    let mut pta_csr = vec![0u8; PTA_CSR_MAX_LEN];
+    let mut pta_report = vec![0u8; PTA_REPORT_MAX_LEN];
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        let mut oob = [
+            TborOobItem::Out(&mut pta_csr),
+            TborOobItem::Out(&mut pta_report),
+        ];
+        dev.exec_op_tbor(&req, &mut oob, cookie)
             .map_err(HsmError::from)
+    })?;
+    let csr_len = usize::from(resp.pta_csr_len.get());
+    let report_len = usize::from(resp.pta_report_len.get());
+    if csr_len == 0 || csr_len > pta_csr.len() || report_len == 0 || report_len > pta_report.len() {
+        return Err(HsmError::InternalError);
+    }
+    pta_csr.truncate(csr_len);
+    pta_report.truncate(report_len);
+    Ok(HsmPartInitExResult {
+        pta_csr,
+        pta_report,
     })
 }
 

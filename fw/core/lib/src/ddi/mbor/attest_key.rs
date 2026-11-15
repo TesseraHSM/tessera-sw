@@ -165,11 +165,7 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
     // Two-pass build: query the exact report size, reserve the response
     // frame, then build the report straight into the reserved slot
     // (zero-copy — no intermediate buffer).
-    let report_len = pal
-        .alloc_scoped_async(io, async |a| {
-            key_report(pal, io, a, &params, pid_priv, None).await
-        })
-        .await?;
+    let report_len = key_report(pal, io, &params, pid_priv, None).await?;
     if report_len > DdiAttestKeyResp::MAX_REPORT_SIZE {
         return Err(HsmError::InternalError);
     }
@@ -187,11 +183,7 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
     let frame = DdiAttestKeyResp::from_layout(resp, &layout);
 
     // Build the report directly into the reserved `report` slot.
-    let written = pal
-        .alloc_scoped_async(io, async |a| {
-            key_report(pal, io, a, &params, pid_priv, Some(&mut *frame.report)).await
-        })
-        .await?;
+    let written = key_report(pal, io, &params, pid_priv, Some(&mut *frame.report)).await?;
     // The slot was reserved for exactly `report_len`; refuse to return a
     // short write — stale DMA bytes would otherwise leak to the host.
     if written != report_len {

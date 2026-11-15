@@ -33,7 +33,13 @@ pub const POLICY_INFO_MAX_LEN: usize = 64;
 pub const POLICY_BACKUP_PART_ID_LEN: usize = 16;
 
 /// The only supported policy format version.
-pub const POLICY_VERSION: u8 = 1;
+pub const POLICY_VERSION: u8 = 2;
+
+/// `pta_alg` value selecting ECDSA P-384 trust anchors (COSE `ES384`).
+pub const POLICY_PTA_ALG_ES384: i64 = -35;
+
+/// `pta_alg` value selecting ML-DSA-87 trust anchors (COSE `ML-DSA-87`).
+pub const POLICY_PTA_ALG_MLDSA87: i64 = -50;
 
 /// CBOR map keys of the policy document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +63,8 @@ pub enum PolicyKey {
     Info = 8,
     /// `data_spki_thumbprint` (bstr 48, optional).
     DataSpkiThumbprint = 9,
+    /// `pta_alg` (COSE algorithm, nint).
+    PtaAlg = 10,
 }
 
 /// Boolean policy flags (CBOR key [`PolicyKey::Flags`]).
@@ -124,6 +132,9 @@ pub struct PartPolicyFields<'a> {
     pub info: Option<&'a [u8]>,
     /// `data_spki_thumbprint` (key 9).
     pub data_spki_thumbprint: Option<&'a PolicyThumbprint>,
+    /// `pta_alg` (key 10); see [`POLICY_PTA_ALG_ES384`] and
+    /// [`POLICY_PTA_ALG_MLDSA87`].
+    pub pta_alg: i64,
 }
 
 impl PartPolicyFields<'_> {
@@ -133,6 +144,7 @@ impl PartPolicyFields<'_> {
     pub fn encode(&self) -> Vec<u8> {
         enum Val<'v> {
             Uint(u64),
+            Int(i64),
             Bstr(&'v [u8]),
         }
         let entries = [
@@ -163,6 +175,7 @@ impl PartPolicyFields<'_> {
                 PolicyKey::DataSpkiThumbprint,
                 self.data_spki_thumbprint.map(|t| Val::Bstr(t)),
             ),
+            (PolicyKey::PtaAlg, Some(Val::Int(self.pta_alg))),
         ];
 
         let count = entries.iter().filter(|(_, v)| v.is_some()).count();
@@ -177,6 +190,7 @@ impl PartPolicyFields<'_> {
                 enc.u8(key as u8)?;
                 match val {
                     Val::Uint(v) => enc.u64(v)?,
+                    Val::Int(v) => enc.i64(v)?,
                     Val::Bstr(b) => enc.bytes(b)?,
                 };
             }

@@ -4,9 +4,11 @@
 //! X.509 certificate chain validation state machine.
 //!
 //! [`ChainValidator`] processes certificates one at a time, from root
-//! (index 0) to leaf (index `chain_len - 1`). The streaming walker retains
-//! adjacent DER certificates in disjoint views of one DMA allocation.
-//! Parsing borrows those views without copying issuer bytes, and scoped
+//! (index 0) to leaf (index `chain_len - 1`). The streaming walker holds
+//! one certificate's DER at a time. After a certificate verifies, only the
+//! fields its successor needs (subject, SubjectPublicKeyInfo and SKID) are
+//! carried forward in a small bounded buffer, so peak memory is one
+//! certificate plus one issuer key rather than two certificates. Scoped
 //! metadata and crypto scratch are reclaimed after every step.
 //!
 //! ## Validation checks per certificate (RFC 5280 §6.1.3, simplified)
@@ -36,6 +38,7 @@ use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
 use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRsa;
@@ -43,6 +46,8 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use crate::ecdsa;
 use crate::parse::parse_cert;
+use crate::parse::parse_spki;
+use crate::spki::mldsa87_spki_thumbprint_in_place;
 use crate::spki::p384_spki_thumbprint;
 use crate::spki::P384_SPKI_LEN;
 use crate::spki::SPKI_THUMBPRINT_LEN;
@@ -614,7 +619,7 @@ struct ChainWalker<'a> {
     validator: ChainValidator,
     anchor: Option<&'a [u8; SPKI_THUMBPRINT_LEN]>,
     anchored: bool,
-    leaf_out: &'a mut [u8],
+    leaf_out: Option<&'a mut [u8]>,
 }
 
 impl ChainWalker<'_> {
@@ -624,30 +629,37 @@ impl ChainWalker<'_> {
         io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         current: &HsmDmaBuf,
-        previous: &HsmDmaBuf,
+        previous: Option<&IssuerInfo<'_>>,
     ) -> HsmResult<bool>
     where
         P: HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     {
         let current = alloc.alloc_val(parse_cert(current)?)?;
-        let previous = if previous.is_empty() {
-            None
-        } else {
-            Some(&*alloc.alloc_val(IssuerInfo::from(&parse_cert(previous)?))?)
-        };
 
-        // Trust-anchor binding: some non-leaf (issuing) P-384
-        // certificate's public-key thumbprint must equal the anchor.
+        // Trust-anchor binding: some non-leaf (issuing) P-384 or
+        // ML-DSA-87 certificate's public-key thumbprint must equal the
+        // anchor.
         if let Some(anchor) = self.anchor {
             if !self.anchored && self.validator.index + 1 < self.validator.chain_len {
-                if let PubKey::Ec(key) = &current.pub_key {
-                    if key.curve == HsmEccCurve::P384 {
+                self.anchored = match &current.pub_key {
+                    PubKey::Ec(key) if key.curve == HsmEccCurve::P384 => {
                         let spki = alloc.dma_alloc(P384_SPKI_LEN)?;
                         let thumb = alloc.dma_alloc(SPKI_THUMBPRINT_LEN)?;
                         p384_spki_thumbprint(pal, io, spki, key.point, thumb).await?;
-                        self.anchored = &thumb[..] == anchor.as_slice();
+                        &thumb[..] == anchor.as_slice()
                     }
-                }
+                    // Hash the SPKI in place: copying a 2.6 KiB ML-DSA
+                    // SPKI would not fit beside the DER and issuer carry.
+                    PubKey::MlDsa {
+                        param: HsmMlDsaParamSet::MlDsa87,
+                        ..
+                    } => {
+                        let thumb = alloc.dma_alloc(SPKI_THUMBPRINT_LEN)?;
+                        mldsa87_spki_thumbprint_in_place(pal, io, current.spki_raw, thumb).await?;
+                        &thumb[..] == anchor.as_slice()
+                    }
+                    _ => false,
+                };
             }
         }
 
@@ -660,11 +672,13 @@ impl ChainWalker<'_> {
                 if !self.anchored {
                     return Err(HsmError::InvalidArg);
                 }
-                let point = leaf_pub_key.as_bytes();
-                if point.len() != self.leaf_out.len() {
-                    return Err(HsmError::InvalidArg);
+                if let Some(leaf_out) = self.leaf_out.as_deref_mut() {
+                    let point = leaf_pub_key.as_bytes();
+                    if point.len() != leaf_out.len() {
+                        return Err(HsmError::InvalidArg);
+                    }
+                    leaf_out.copy_from_slice(point);
                 }
-                self.leaf_out.copy_from_slice(point);
                 Ok(true)
             }
             StepResult::NeedNext => Ok(false),
@@ -676,11 +690,63 @@ impl ChainWalker<'_> {
 /// Maximum accepted DER length of a single certificate in a chain.
 ///
 /// Certificate lengths in `descriptors` come from an untrusted request and
-/// size the reused DMA buffers, so they are bounded here: a hostile
+/// size the reused DMA buffer, so they are bounded here: a hostile
 /// descriptor cannot force an oversized allocation.
 /// ML-DSA-87 certificates need roughly 7.5 KiB. The actual DER allocation
-/// tracks the largest adjacent pair of descriptors, not this ceiling.
+/// tracks the largest descriptor, not this ceiling.
 pub const MAX_CERT_DER_LEN: usize = 8192;
+
+/// Maximum bytes carried forward from a verified issuer to its successor:
+/// raw subject Name, SubjectPublicKeyInfo and SKID.  Covers an ML-DSA-87
+/// SPKI (2614 bytes) with room for a generous subject; an issuer exceeding
+/// it is rejected.
+pub const MAX_ISSUER_CARRY_LEN: usize = 3584;
+
+/// Lengths of the issuer fields held in the carry buffer, laid out as
+/// `subject ‖ spki ‖ skid`.
+#[derive(Clone, Copy)]
+struct IssuerCarry {
+    subject_len: usize,
+    spki_len: usize,
+    skid_len: Option<usize>,
+}
+
+impl IssuerCarry {
+    /// Copy `cert`'s issuer-side fields into `carry`.
+    fn store(cert: &CertInfo<'_>, carry: &mut HsmDmaBuf) -> HsmResult<Self> {
+        let subject: &[u8] = cert.subject_raw;
+        let spki: &[u8] = cert.spki_raw;
+        let skid = cert.skid.unwrap_or(&[]);
+        let total = subject.len() + spki.len() + skid.len();
+        if total > carry.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let (dst_subject, rest) = carry.split_at_mut(subject.len());
+        let (dst_spki, rest) = rest.split_at_mut(spki.len());
+        dst_subject.copy_from_slice(subject);
+        dst_spki.copy_from_slice(spki);
+        rest[..skid.len()].copy_from_slice(skid);
+        Ok(Self {
+            subject_len: subject.len(),
+            spki_len: spki.len(),
+            skid_len: cert.skid.map(<[u8]>::len),
+        })
+    }
+
+    /// Rebuild the issuer view over `carry`.
+    fn view(self, carry: &HsmDmaBuf) -> HsmResult<IssuerInfo<'_>> {
+        let spki_end = self.subject_len + self.spki_len;
+        let spki: &[u8] = &carry[self.subject_len..spki_end];
+        Ok(IssuerInfo {
+            pub_key: parse_spki(carry, spki)?,
+            subject_raw: &carry[..self.subject_len],
+            skid: self.skid_len.map(|len| {
+                let skid: &[u8] = &carry[spki_end..spki_end + len];
+                skid
+            }),
+        })
+    }
+}
 
 /// Walk and validate a certificate chain, root → leaf, returning the
 /// leaf public key.
@@ -692,12 +758,13 @@ pub const MAX_CERT_DER_LEN: usize = 8192;
 /// out of band. The `fetch` callback is invoked with that `index` (widened
 /// to `usize`) and must copy the certificate's DER into the provided DMA
 /// buffer; the *source* of the bytes (an OOB SGL block, a side-band buffer,
-/// …) is left entirely to the caller. Adjacent certificates remain in
-/// disjoint views at opposite ends of one DMA allocation, sized to the
-/// largest adjacent pair. Parsing and verification borrow these views
-/// without copying DER or issuer bytes. Per-step metadata and crypto
-/// scratch are reclaimed before the next fetch, bounding memory use
-/// independently of chain depth. The supplied allocator must belong to `io`.
+/// …) is left entirely to the caller. One DMA buffer, sized to the largest
+/// descriptor, is reused for every certificate; after a certificate
+/// verifies, only its subject, SubjectPublicKeyInfo and SKID (at most
+/// [`MAX_ISSUER_CARRY_LEN`] bytes) are carried forward to verify the next.
+/// Per-step metadata and crypto scratch are reclaimed before the next
+/// fetch, bounding memory use independently of chain depth. The supplied
+/// allocator must belong to `io`.
 ///
 /// Per certificate the validator checks the signature, issuer↔
 /// subject name chaining, AKID↔SKID, and CA `BasicConstraints`/`KeyUsage`
@@ -708,9 +775,10 @@ pub const MAX_CERT_DER_LEN: usize = 8192;
 /// * `anchor == None` — the chain is trusted by its self-signed root
 ///   alone (no external anchor).
 /// * `anchor == Some(thumbprint)` — some **non-leaf** (issuing)
-///   certificate's P-384 public-key thumbprint (see
-///   [`p384_spki_thumbprint`]) MUST equal `thumbprint`, binding the chain
-///   to an external trust anchor (e.g. a policy POTA / SATA key).
+///   certificate's P-384 or ML-DSA-87 SubjectPublicKeyInfo thumbprint (see
+///   [`p384_spki_thumbprint`] and [`mldsa87_spki_thumbprint`]) MUST equal
+///   `thumbprint`, binding the chain to an external trust anchor (e.g. a
+///   policy POTA / SATA key).
 ///
 /// On success `leaf_out` is filled with [`PubKey::as_bytes`]: raw
 /// big-endian `X‖Y`, DER RSAPublicKey, or raw ML-DSA bytes. Its length
@@ -718,9 +786,10 @@ pub const MAX_CERT_DER_LEN: usize = 8192;
 ///
 /// # Errors
 ///
-/// * [`HsmError::InvalidArg`] — empty `descriptors`, a zero-length
-///   certificate, `leaf_out`'s length does not match the leaf public-key
-///   length, or the `anchor` requirement was not satisfied.
+/// * [`HsmError::InvalidArg`] — empty `descriptors`, a zero-length or
+///   oversized certificate, an issuer whose carried fields exceed
+///   [`MAX_ISSUER_CARRY_LEN`], `leaf_out`'s length does not match the leaf
+///   public-key length, or the `anchor` requirement was not satisfied.
 /// * [`HsmError::InternalError`] — the validator did not reach the leaf
 ///   after every certificate was consumed (internal invariant).
 /// * Any [`HsmError`] surfaced by `fetch`, [`parse_cert`], or signature
@@ -738,11 +807,23 @@ where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
-    validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, false).await
+    validate_chain_inner(
+        pal,
+        io,
+        alloc,
+        descriptors,
+        anchor,
+        Some(leaf_out),
+        fetch,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Like [`validate_chain`], but validates the terminal certificate as an
-/// issuing CA rather than an end-entity leaf.
+/// issuing CA rather than an end-entity leaf, and returns the terminal
+/// certificate's verified DER.
 ///
 /// The terminal certificate must then satisfy the CA constraints —
 /// `cA == true`, `keyCertSign` (when KeyUsage is present), and the
@@ -751,57 +832,64 @@ where
 /// example a PTA certificate that later signs an on-demand PID leaf). A
 /// chain whose ancestors leave no path-length budget for that extra leaf
 /// is therefore rejected here rather than silently producing evidence that
-/// can never validate. `leaf_out` still receives the terminal
-/// certificate's public key.
-pub async fn validate_issuing_chain<P, F>(
+/// can never validate.
+///
+/// The returned DER lives in `alloc` and is exactly the bytes whose
+/// signature was verified, so callers can parse it for further profile
+/// checks without re-reading host-controlled memory.
+pub async fn validate_issuing_chain<'a, P, F>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+    alloc: &'a impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
-    leaf_out: &mut [u8],
     fetch: F,
-) -> HsmResult<()>
+) -> HsmResult<&'a HsmDmaBuf>
 where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
-    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
+    F: for<'b> AsyncFnMut(usize, &'b mut HsmDmaBuf) -> HsmResult<()>,
 {
-    validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, true).await
+    validate_chain_inner(pal, io, alloc, descriptors, anchor, None, fetch, true).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn validate_chain_inner<P, F>(
+async fn validate_chain_inner<'a, P, F>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+    alloc: &'a impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
-    leaf_out: &mut [u8],
+    leaf_out: Option<&mut [u8]>,
     mut fetch: F,
     terminal_is_issuing_ca: bool,
-) -> HsmResult<()>
+) -> HsmResult<&'a HsmDmaBuf>
 where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
-    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
+    F: for<'b> AsyncFnMut(usize, &'b mut HsmDmaBuf) -> HsmResult<()>,
 {
-    if descriptors.is_empty() || descriptors.len() > u16::MAX as usize {
+    let (terminal, issuers) = descriptors.split_last().ok_or(HsmError::InvalidArg)?;
+    if descriptors.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArg);
     }
 
-    // Bound and align adjacent DER views before any fetch or allocation.
-    let mut capacity = 0usize;
-    let mut previous_size = 0usize;
+    // Bound every length before any fetch or allocation.  Lengths come
+    // from an untrusted request; reject empty or oversized certificates
+    // before they can size a DMA allocation.
+    let mut der_capacity = 0usize;
     for d in descriptors {
         let len = usize::from(d.length.get());
-        // Lengths come from an untrusted request; reject empty or
-        // oversized certificates before they can size a DMA allocation.
         if len == 0 || len > MAX_CERT_DER_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let size = len.next_multiple_of(4);
-        capacity = capacity.max(previous_size + size);
-        previous_size = size;
+        der_capacity = der_capacity.max(len);
     }
+    // An issuer's carried fields are a strict subset of its DER.
+    let carry_capacity = issuers
+        .iter()
+        .map(|d| usize::from(d.length.get()))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_ISSUER_CARRY_LEN);
 
     let walker = alloc.alloc_val(ChainWalker {
         validator: if terminal_is_issuing_ca {
@@ -814,36 +902,55 @@ where
         leaf_out,
     })?;
 
-    let der = alloc.dma_alloc(capacity)?;
-    let mut previous_len = 0usize;
+    let der = alloc.dma_alloc(der_capacity)?;
+    let carry = alloc.dma_alloc(carry_capacity.max(1))?;
+    let mut issuer: Option<IssuerCarry> = None;
 
-    for (i, d) in descriptors.iter().enumerate() {
-        let len = usize::from(d.length.get());
-        let (curr, previous) = if i % 2 == 0 {
-            let (left, right) = der.split_at_mut(len.next_multiple_of(4));
-            let previous_start = right.len() - previous_len.next_multiple_of(4);
-            (
-                &mut left[..len],
-                &right[previous_start..previous_start + previous_len],
-            )
-        } else {
-            let (left, right) = der.split_at_mut(capacity - len.next_multiple_of(4));
-            (&mut right[..len], &left[..previous_len])
-        };
+    for d in issuers {
+        let curr = &mut der[..usize::from(d.length.get())];
         fetch(usize::from(d.index), curr).await?;
-
-        let complete = pal
-            .alloc_scoped_async(io, async |scratch| {
-                walker.step(pal, io, scratch, curr, previous).await
-            })
-            .await?;
-        if complete {
-            return Ok(());
-        }
-        previous_len = len;
+        walk_one(pal, io, walker, curr, carry, &mut issuer, false).await?;
     }
 
-    // `ChainValidator::new(descriptors.len())` yields `Valid` on the final
-    // (leaf) step, so reaching here means the counts disagreed.
-    Err(HsmError::InternalError)
+    let len = usize::from(terminal.length.get());
+    let curr = &mut der[..len];
+    fetch(usize::from(terminal.index), curr).await?;
+    walk_one(pal, io, walker, curr, carry, &mut issuer, true).await?;
+    let der: &'a HsmDmaBuf = der;
+    Ok(&der[..len])
+}
+
+/// Validate the fetched certificate `cert` against the carried `issuer`;
+/// unless it is the `terminal` certificate, carry its issuer fields
+/// forward.
+///
+/// Kept separate from (and not generic over the fetch callback of)
+/// [`validate_chain_inner`], so every caller shares one copy.
+async fn walk_one<P>(
+    pal: &P,
+    io: &P::Io,
+    walker: &mut ChainWalker<'_>,
+    cert: &HsmDmaBuf,
+    carry: &mut HsmDmaBuf,
+    issuer: &mut Option<IssuerCarry>,
+    terminal: bool,
+) -> HsmResult<()>
+where
+    P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
+{
+    let carried: &HsmDmaBuf = carry;
+    let complete = pal
+        .alloc_scoped_async(io, async |scratch| {
+            let previous = issuer.map(|i| i.view(carried)).transpose()?;
+            walker.step(pal, io, scratch, cert, previous.as_ref()).await
+        })
+        .await?;
+    // The validator yields `Valid` exactly on the final step.
+    if complete != terminal {
+        return Err(HsmError::InternalError);
+    }
+    if !terminal {
+        *issuer = Some(IssuerCarry::store(&parse_cert(cert)?, carry)?);
+    }
+    Ok(())
 }

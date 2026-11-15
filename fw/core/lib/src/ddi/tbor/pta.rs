@@ -7,20 +7,30 @@
 
 use tsra_fw_core_crypto_x509_builder::cert_builder;
 use tsra_fw_core_crypto_x509_builder::cert_builder::LeafCertParams;
+use tsra_fw_core_crypto_x509_builder::cert_builder::MlDsa87Signer;
 use tsra_fw_core_crypto_x509_builder::csr;
 use tsra_fw_core_crypto_x509_chain::key_usage;
 use tsra_fw_core_crypto_x509_chain::CertInfo;
+use tsra_fw_core_crypto_x509_chain::PubKey;
+use tsra_fw_core_crypto_x509_chain::MLDSA87_PUB_KEY_LEN;
+use tsra_fw_hsm_pal_traits::HsmCertBank;
 use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
+use super::mldsa_generate_key::MLDSA_SEED_LEN;
 use crate::part_state;
 
 const P384_PRIVATE_KEY_LEN: usize = 48;
@@ -90,18 +100,151 @@ async fn hash<'a, P: HsmPal>(
     Ok(digest)
 }
 
-async fn issuer_cn<P: HsmPal>(
+/// The partition's PTA vault key, by algorithm.
+#[derive(Clone, Copy)]
+pub(crate) enum PtaKey {
+    /// P-384 private scalar (`PTA_KEY_ID`).
+    Ecc(HsmKeyId),
+    /// ML-DSA-87 seed (`PTA_MLDSA_SEED_KEY_ID`).
+    MlDsa87(HsmKeyId),
+}
+
+impl PtaKey {
+    /// Certificate bank of the slot-2 PID leaf this PTA issues.
+    pub(crate) fn bank(self) -> HsmCertBank {
+        match self {
+            Self::Ecc(_) => HsmCertBank::Ecc,
+            Self::MlDsa87(_) => HsmCertBank::MlDsa,
+        }
+    }
+}
+
+/// The partition's provisioned PTA key.
+pub(crate) fn pta_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<PtaKey> {
+    match part_state::part_pta_key_id(pal, io) {
+        Ok(id) => return Ok(PtaKey::Ecc(id)),
+        Err(HsmError::PartPropNotFound) => {}
+        Err(e) => return Err(e),
+    }
+    part_state::part_pta_mldsa_seed_key_id(pal, io).map(PtaKey::MlDsa87)
+}
+
+/// Re-derive the ML-DSA-87 public key of the vaulted seed `seed_key_id`.
+///
+/// The expanded private key is scratch in a nested scope, so only the
+/// public key remains allocated from `alloc`.
+async fn mldsa87_public_key<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
-    pta_public_key: &HsmDmaBuf,
-) -> HsmResult<[u8; csr::SUBJECT_CN_LEN]> {
-    let input = alloc.dma_alloc(PTAID_LABEL.len() + pta_public_key.len())?;
-    input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
-    input[PTAID_LABEL.len()..].copy_from_slice(pta_public_key);
+    alloc: &'a impl HsmScopedAlloc,
+    seed_key_id: HsmKeyId,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let vaulted = pal.vault_key(io, seed_key_id)?;
+    if vaulted.len() != MLDSA_SEED_LEN {
+        return Err(HsmError::InternalError);
+    }
+    let public_key = alloc.dma_alloc(HsmMlDsaParamSet::MlDsa87.pk_len())?;
+    pal.alloc_scoped_async(io, async |scope| -> HsmResult<()> {
+        let seed = scope.dma_alloc(MLDSA_SEED_LEN)?;
+        seed.copy_from_slice(vaulted);
+        let private_key = scope.dma_alloc(HsmMlDsaParamSet::MlDsa87.sk_len())?;
+        pal.mldsa_gen_keypair(
+            io,
+            HsmMlDsaParamSet::MlDsa87,
+            HsmMlSeedSrc::Caller,
+            HsmMlDsaPct::None,
+            seed,
+            Some((private_key, &mut *public_key)),
+        )
+        .await?;
+        Ok(())
+    })
+    .await?;
+    Ok(public_key)
+}
 
-    let digest = hash(pal, io, alloc, HsmHashAlgo::Sha384, input).await?;
-    Ok(subject_cn(fixed_size::<SHA384_DIGEST_LEN>(digest)?))
+/// PTA public key in its PTAID/SKID form: the SEC1 uncompressed point for
+/// P-384 or the raw encoded key for ML-DSA-87.
+async fn pta_public_key<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    key: PtaKey,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    match key {
+        PtaKey::Ecc(id) => sec1_public_key(pal, io, alloc, id).await,
+        PtaKey::MlDsa87(id) => mldsa87_public_key(pal, io, alloc, id).await,
+    }
+}
+
+/// Subject `commonName` and SKID (SHA-1 of the PTAID-form key) for PTA
+/// public key `public_key`, hashed in a nested scope.
+async fn pta_names<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    public_key: &HsmDmaBuf,
+) -> HsmResult<([u8; csr::SUBJECT_CN_LEN], [u8; SHA1_DIGEST_LEN])> {
+    pal.alloc_scoped_async(io, async |scope| {
+        let cn = subject_cn_for_key(pal, io, scope, public_key).await?;
+        let skid = *fixed_size::<SHA1_DIGEST_LEN>(
+            hash(pal, io, scope, HsmHashAlgo::Sha1, public_key).await?,
+        )?;
+        Ok((cn, skid))
+    })
+    .await
+}
+
+/// The identity a partition's PTA certificate must carry.
+pub(crate) struct PtaIdentity<'a> {
+    key: PtaKey,
+    public_key: &'a HsmDmaBuf,
+    subject_cn: [u8; csr::SUBJECT_CN_LEN],
+    skid: [u8; SHA1_DIGEST_LEN],
+}
+
+impl PtaIdentity<'_> {
+    /// Algorithm of the provisioned PTA key.
+    pub(crate) fn key(&self) -> PtaKey {
+        self.key
+    }
+
+    /// Whether certificate key `cert_key` is this PTA's public key.
+    pub(crate) fn matches(&self, cert_key: &PubKey<'_>) -> bool {
+        let expected: &[u8] = self.public_key;
+        match (self.key, cert_key) {
+            (PtaKey::Ecc(_), PubKey::Ec(ec)) if ec.curve == HsmEccCurve::P384 => {
+                expected.get(1..) == Some(&**ec.point)
+            }
+            (
+                PtaKey::MlDsa87(_),
+                PubKey::MlDsa {
+                    param: HsmMlDsaParamSet::MlDsa87,
+                    key,
+                },
+            ) => expected == &***key,
+            _ => false,
+        }
+    }
+}
+
+/// Compute the partition PTA identity (key, subject CN and SKID).
+///
+/// Only the public key stays allocated from `alloc`; ML-DSA-87 expansion
+/// and hashing scratch are released before returning.
+pub(crate) async fn pta_identity<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<PtaIdentity<'a>> {
+    let key = pta_key(pal, io)?;
+    let public_key: &HsmDmaBuf = pta_public_key(pal, io, alloc, key).await?;
+    let (subject_cn, skid) = pta_names(pal, io, public_key).await?;
+    Ok(PtaIdentity {
+        key,
+        public_key,
+        subject_cn,
+        skid,
+    })
 }
 
 /// Enforce the PTA certificate profile that the on-demand slot-2 PID leaf
@@ -111,39 +254,30 @@ async fn issuer_cn<P: HsmPal>(
 /// identifier from the partition PTA public key (see
 /// [`build_pid_certificate`]). A PTA certificate can therefore anchor
 /// future PID leaves only when it carries that exact subject DN (the
-/// single-`commonName(64)` CSR profile), a SHA-1(SEC1 PTA public key)
-/// subject key identifier, and CA / `keyCertSign` constraints. Rejecting a
-/// non-conformant PTA at finalization fails fast instead of silently
-/// finalizing a partition whose slot-2 PID leaf could never chain to the
-/// accepted PTA certificate.
+/// single-`commonName(64)` CSR profile), a SHA-1 subject key identifier of
+/// the PTAID-form public key (SEC1 for P-384, raw for ML-DSA-87), and CA /
+/// `keyCertSign` constraints. Rejecting a non-conformant PTA at
+/// finalization fails fast instead of silently finalizing a partition
+/// whose slot-2 PID leaf could never chain to the accepted PTA certificate.
 ///
-/// The partition's PTA public key must already have been matched against
-/// the chain's terminal certificate (`validate_pta_chain`) before this
-/// check; here it is used to recompute the expected subject DN and SKID.
-pub(crate) async fn validate_pta_profile<P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+/// The caller must already have matched the certificate key against
+/// `identity` ([`PtaIdentity::matches`]).
+pub(crate) fn validate_pta_profile(
+    identity: &PtaIdentity<'_>,
     pta_cert: &CertInfo<'_>,
 ) -> HsmResult<()> {
-    let pta_public_key =
-        sec1_public_key(pal, io, alloc, part_state::part_pta_key_id(pal, io)?).await?;
-
     // Subject DN must byte-match the deterministic single-CN(64) profile
     // the PID leaf stamps as its issuer.
-    let issuer_cn = issuer_cn(pal, io, alloc, pta_public_key).await?;
     let mut expected_subject = [0u8; PTA_SUBJECT_DER_LEN];
     expected_subject[..PTA_SUBJECT_DER_PREFIX.len()].copy_from_slice(&PTA_SUBJECT_DER_PREFIX);
-    expected_subject[PTA_SUBJECT_DER_PREFIX.len()..].copy_from_slice(&issuer_cn);
+    expected_subject[PTA_SUBJECT_DER_PREFIX.len()..].copy_from_slice(&identity.subject_cn);
     if **pta_cert.subject_raw != expected_subject[..] {
         return Err(HsmError::PartFinalPtaMismatch);
     }
 
-    // Subject Key Identifier must be SHA-1 of the SEC1 PTA public key — the
-    // value the PID leaf stamps as its authority key identifier.
-    let expected_skid = hash(pal, io, alloc, HsmHashAlgo::Sha1, pta_public_key).await?;
-    let skid = pta_cert.skid.ok_or(HsmError::PartFinalPtaMismatch)?;
-    if skid != &**expected_skid {
+    // The SKID is the value the PID leaf stamps as its authority key
+    // identifier.
+    if pta_cert.skid != Some(&identity.skid[..]) {
         return Err(HsmError::PartFinalPtaMismatch);
     }
 
@@ -160,41 +294,132 @@ pub(crate) async fn validate_pta_profile<P: HsmPal>(
     Ok(())
 }
 
-async fn build_pid_certificate<P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
-    private_key: &HsmDmaBuf,
-    output: &mut HsmDmaBuf,
-) -> HsmResult<usize> {
-    let public_key = sec1_public_key(pal, io, alloc, part_state::part_id_key_id(pal, io)?).await?;
-    let pta_public_key =
-        sec1_public_key(pal, io, alloc, part_state::part_pta_key_id(pal, io)?).await?;
-    let issuer_cn = issuer_cn(pal, io, alloc, pta_public_key).await?;
-    let subject_key_id = hash(pal, io, alloc, HsmHashAlgo::Sha1, public_key).await?;
-    let authority_key_id = hash(pal, io, alloc, HsmHashAlgo::Sha1, pta_public_key).await?;
-
-    // Bind the serial to the PID public key (via its SHA-1 subject key
-    // identifier) so distinct PID keys never share an issuer-and-serial
-    // identity across partition resets, while keeping a positive leading
-    // byte (bit 7 clear, bit 6 set) for a conformant DER INTEGER.
-    let mut serial_number = *fixed_size::<CERT_SERIAL_LEN>(subject_key_id)?;
+/// Leaf serial bound to the PID key via its SKID, with a positive leading
+/// byte (bit 7 clear, bit 6 set) for a conformant DER INTEGER, so distinct
+/// PID keys never share an issuer-and-serial identity across partition
+/// resets.
+fn pid_serial(subject_key_id: &[u8; SHA1_DIGEST_LEN]) -> [u8; CERT_SERIAL_LEN] {
+    let mut serial_number = *subject_key_id;
     serial_number[0] = (serial_number[0] & 0x3f) | 0x40;
+    serial_number
+}
 
+fn pid_subject_cn() -> [u8; CERT_SUBJECT_CN_LEN] {
     let mut subject_cn = [b' '; CERT_SUBJECT_CN_LEN];
     subject_cn[..PID_SUBJECT_CN.len()].copy_from_slice(PID_SUBJECT_CN);
+    subject_cn
+}
 
-    let params = LeafCertParams {
-        public_key: fixed_size::<P384_SEC1_PUBLIC_KEY_LEN>(public_key)?,
-        serial_number: &serial_number,
-        not_before: CERT_NOT_BEFORE,
-        not_after: CERT_NOT_AFTER,
-        issuer_cn: &issuer_cn,
-        subject_cn: &subject_cn,
-        subject_key_id: fixed_size::<SHA1_DIGEST_LEN>(subject_key_id)?,
-        authority_key_id: fixed_size::<SHA1_DIGEST_LEN>(authority_key_id)?,
+/// Build the PID leaf of the PTA's algorithm, signed by PTA `pta`.
+///
+/// Ordered for the per-IO DMA budget: the PTA names are computed (and their
+/// key-expansion scratch released) first, the PID public key is derived
+/// next, and only then is the output allocated.
+async fn build_pid_certificate<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    pta: PtaKey,
+) -> HsmResult<&'p HsmDmaBuf> {
+    let (issuer_cn, authority_key_id) = pal
+        .alloc_scoped_async(io, async |alloc| {
+            let pta_public_key = pta_public_key(pal, io, alloc, pta).await?;
+            pta_names(pal, io, pta_public_key).await
+        })
+        .await?;
+
+    let (pid, public_key_len) = match pta {
+        PtaKey::Ecc(_) => (
+            PtaKey::Ecc(part_state::part_id_key_id(pal, io)?),
+            P384_SEC1_PUBLIC_KEY_LEN,
+        ),
+        PtaKey::MlDsa87(_) => (
+            PtaKey::MlDsa87(part_state::part_id_mldsa_seed_key_id(pal, io)?),
+            HsmMlDsaParamSet::MlDsa87.pk_len(),
+        ),
     };
-    cert_builder::build_leaf_cert(pal, io, alloc, &params, private_key, Some(output)).await
+    let public_key = pal.dma_alloc(io, public_key_len)?;
+    let subject_key_id = pal
+        .alloc_scoped_async(io, async |alloc| -> HsmResult<[u8; SHA1_DIGEST_LEN]> {
+            let derived = pta_public_key(pal, io, alloc, pid).await?;
+            if derived.len() != public_key.len() {
+                return Err(HsmError::InternalError);
+            }
+            public_key.copy_from_slice(derived);
+            let skid = hash(pal, io, alloc, HsmHashAlgo::Sha1, derived).await?;
+            Ok(*fixed_size::<SHA1_DIGEST_LEN>(skid)?)
+        })
+        .await?;
+    let serial_number = pid_serial(&subject_key_id);
+    let subject_cn = pid_subject_cn();
+
+    match pta {
+        PtaKey::Ecc(pta_key_id) => {
+            let params = LeafCertParams {
+                public_key: fixed_size::<P384_SEC1_PUBLIC_KEY_LEN>(public_key)?,
+                serial_number: &serial_number,
+                not_before: CERT_NOT_BEFORE,
+                not_after: CERT_NOT_AFTER,
+                issuer_cn: &issuer_cn,
+                subject_cn: &subject_cn,
+                subject_key_id: &subject_key_id,
+                authority_key_id: &authority_key_id,
+            };
+            let output = pal.dma_alloc(io, ECC_PID_CERT_MAX_LEN)?;
+            let len = pal
+                .alloc_scoped_async(io, async |alloc| {
+                    let key = pal.vault_key(io, pta_key_id)?;
+                    if key.len() != P384_PRIVATE_KEY_LEN {
+                        return Err(HsmError::InternalError);
+                    }
+                    let private_key = alloc.dma_alloc(P384_PRIVATE_KEY_LEN)?;
+                    private_key.copy_from_slice(key);
+                    cert_builder::build_leaf_cert(
+                        pal,
+                        io,
+                        alloc,
+                        &params,
+                        private_key,
+                        Some(output),
+                    )
+                    .await
+                })
+                .await?;
+            Ok(output.split_at(len).0)
+        }
+        PtaKey::MlDsa87(pta_seed_key_id) => {
+            let params = LeafCertParams {
+                public_key: fixed_size::<MLDSA87_PUB_KEY_LEN>(public_key)?,
+                serial_number: &serial_number,
+                not_before: CERT_NOT_BEFORE,
+                not_after: CERT_NOT_AFTER,
+                issuer_cn: &issuer_cn,
+                subject_cn: &subject_cn,
+                subject_key_id: &subject_key_id,
+                authority_key_id: &authority_key_id,
+            };
+            let pta_seed = pal.vault_key(io, pta_seed_key_id)?;
+            if pta_seed.len() != MLDSA_SEED_LEN {
+                return Err(HsmError::InternalError);
+            }
+            let signer = MlDsa87Signer::new(pal, HsmMlDsaPrivKey::Seed(pta_seed));
+            let len = pal
+                .alloc_scoped_async(io, async |alloc| {
+                    cert_builder::build_mldsa_leaf_cert(io, alloc, &params, &signer, None).await
+                })
+                .await?;
+            let output = pal.dma_alloc(io, len)?;
+            let written = pal
+                .alloc_scoped_async(io, async |alloc| {
+                    cert_builder::build_mldsa_leaf_cert(io, alloc, &params, &signer, Some(output))
+                        .await
+                })
+                .await?;
+            if written != len {
+                return Err(HsmError::InternalError);
+            }
+            Ok(output)
+        }
+    }
 }
 
 /// Derive the PTA subject `commonName`: the fixed PTA name, a separating
@@ -216,37 +441,60 @@ pub fn subject_cn(digest: &[u8; 48]) -> [u8; csr::SUBJECT_CN_LEN] {
     cn
 }
 
-/// Scratch bound for a PTA-signed P-384 PID leaf.
-const PID_CERT_MAX_LEN: usize = 2048;
+/// Derive the PTA subject `commonName` for public key `pub_key`: PTAID =
+/// SHA-384(`PTAID_LABEL` || `pub_key`)[..`PTAID_LEN`], where `pub_key` is
+/// the SEC1 uncompressed point (P-384) or the raw encoded key (ML-DSA-87).
+pub(crate) async fn subject_cn_for_key<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    pub_key: &[u8],
+) -> HsmResult<[u8; csr::SUBJECT_CN_LEN]> {
+    let input = alloc.dma_alloc(PTAID_LABEL.len() + pub_key.len())?;
+    input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
+    input[PTAID_LABEL.len()..].copy_from_slice(pub_key);
+    let digest = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        input,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
+    let digest_bytes: &[u8] = digest;
+    Ok(subject_cn(fixed_size::<SHA384_DIGEST_LEN>(digest_bytes)?))
+}
 
-/// Generate one PTA-signed PID leaf for this request, without caching it.
+/// Scratch bound for a PTA-signed P-384 PID leaf.
+const ECC_PID_CERT_MAX_LEN: usize = 2048;
+
+/// Generate one PTA-signed PID leaf in `bank` for this request, without
+/// caching it. The bank must match the PTA algorithm: a P-384 PTA issues
+/// the ECC-bank P-384 PID leaf, an ML-DSA-87 PTA the ML-DSA-bank
+/// ML-DSA-87 PID leaf.
 pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
+    bank: HsmCertBank,
 ) -> HsmResult<&'p HsmDmaBuf> {
     if part_state::part_state(pal, io)? != HsmPartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
-    let out = pal.dma_alloc(io, PID_CERT_MAX_LEN)?;
-    let len = pal
-        .alloc_scoped_async(io, async |alloc| {
-            let key_id = part_state::part_pta_key_id(pal, io)?;
-            let key = pal.vault_key(io, key_id)?;
-            if key.len() != P384_PRIVATE_KEY_LEN {
-                return Err(HsmError::InternalError);
-            }
-            let private = alloc.dma_alloc(P384_PRIVATE_KEY_LEN)?;
-            private.copy_from_slice(key);
-            let result = build_pid_certificate(pal, io, alloc, private, out).await;
-            result
-        })
-        .await?;
-    Ok(out.split_at(len).0)
+    let key = pta_key(pal, io)?;
+    if key.bank() != bank {
+        return Err(HsmError::InvalidArg);
+    }
+    build_pid_certificate(pal, io, key).await
 }
 
 /// Fingerprint of a newly generated leaf; later reads generate different DER.
-pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<HsmCertChainInfo> {
-    let cert = pid_certificate(pal, io).await?;
+pub(crate) async fn chain_info<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    bank: HsmCertBank,
+) -> HsmResult<HsmCertChainInfo> {
+    let cert = pid_certificate(pal, io, bank).await?;
     let digest = pal.dma_alloc(io, SHA256_DIGEST_LEN)?;
     pal.hash(
         io,

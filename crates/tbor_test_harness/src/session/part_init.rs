@@ -15,15 +15,52 @@ use tsra_crypto::aead_envelope;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::Rng;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::TborPartInitReq;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
 use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
+use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
+use tsra_ddi_tbor_types::PTA_REPORT_MAX_LEN;
 
 use super::finish::SessionHandshake;
 use crate::fixture::TestDev;
+
+/// PTA CSR and report returned out of band by `PartInit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartInitOut {
+    /// DER-encoded PKCS#10 CSR for the PTA public key.
+    pub pta_csr: Vec<u8>,
+    /// COSE_Sign1 PTA key-attestation report.
+    pub pta_report: Vec<u8>,
+}
+
+/// Run a `PartInit` exchange through `exec`, supplying the two output
+/// OOB items, and return the CSR and report truncated to the lengths in
+/// the response.
+pub fn exec_part_init(
+    exec: impl FnOnce(&mut [TborOobItem<'_>]) -> Result<TborPartInitResp, DdiError>,
+) -> Result<PartInitOut, DdiError> {
+    let mut pta_csr = vec![0u8; PTA_CSR_MAX_LEN];
+    let mut pta_report = vec![0u8; PTA_REPORT_MAX_LEN];
+    let resp = exec(&mut [
+        TborOobItem::Out(&mut pta_csr),
+        TborOobItem::Out(&mut pta_report),
+    ])?;
+    let csr_len = usize::from(resp.pta_csr_len.get());
+    let report_len = usize::from(resp.pta_report_len.get());
+    if csr_len > pta_csr.len() || report_len > pta_report.len() {
+        return Err(DdiError::InvalidParameter);
+    }
+    pta_csr.truncate(csr_len);
+    pta_report.truncate(report_len);
+    Ok(PartInitOut {
+        pta_csr,
+        pta_report,
+    })
+}
 
 /// Issue `PartInit` on the CO session represented by `session`.
 ///
@@ -39,7 +76,7 @@ pub fn part_init(
     session: &SessionHandshake,
     mach_seed: &[u8],
     part_policy: &[u8],
-) -> Result<TborPartInitResp, DdiError> {
+) -> Result<PartInitOut, DdiError> {
     if mach_seed.len() != MACH_SEED_LEN || part_policy.len() > PART_POLICY_MAX_LEN {
         return Err(DdiError::InvalidParameter);
     }
@@ -51,7 +88,7 @@ pub fn part_init(
         part_policy: part_policy.to_vec(),
     };
 
-    dev.exec_op_tbor(&req, &mut [], &mut None)
+    exec_part_init(|oob| dev.exec_op_tbor(&req, oob, &mut None))
 }
 
 /// Build the wire-ready AEAD-GCM envelope for a `PartInit` `mach_seed`

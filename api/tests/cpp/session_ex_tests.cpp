@@ -460,8 +460,8 @@ TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
         // `PartInitInputs` carries a deliberately oversized (385-byte)
         // policy; `PART_POLICY_MAX_LEN` is 384.
         PartInitInputs in;
-        std::vector<uint8_t> csr(512, 0);
-        std::vector<uint8_t> report(1024, 0);
+        std::vector<uint8_t> csr(8192, 0);
+        std::vector<uint8_t> report(8192, 0);
         tsra_buffer pta_csr{ csr.data(), static_cast<uint32_t>(csr.size()) };
         tsra_buffer pta_report{ report.data(), static_cast<uint32_t>(report.size()) };
 
@@ -981,11 +981,11 @@ TEST(tsra_part_policy_builder, build_round_trips_via_size_probe)
     tsra_buffer probe{ nullptr, 0 };
     ASSERT_EQ(tsra_part_policy_build(b, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
 
-    std::vector<uint8_t> expected{ 0xA4, 0x01, 0x01, 0x02, 0x58, 0x30 };
+    std::vector<uint8_t> expected{ 0xA5, 0x01, 0x02, 0x02, 0x58, 0x30 };
     expected.insert(expected.end(), 48, 0x11);
     expected.insert(expected.end(), { 0x03, 0x58, 0x30 });
     expected.insert(expected.end(), 48, 0x22);
-    expected.insert(expected.end(), { 0x07, 0x00 });
+    expected.insert(expected.end(), { 0x07, 0x00, 0x0A, 0x38, 0x22 });
     ASSERT_EQ(probe.len, expected.size());
 
     std::vector<uint8_t> image(probe.len, 0);

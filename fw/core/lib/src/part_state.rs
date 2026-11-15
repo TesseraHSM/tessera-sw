@@ -156,6 +156,14 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
     }
 }
 
+/// Whether either PTA slot (P-384 `PTA_KEY_ID` or ML-DSA-87
+/// `PTA_MLDSA_SEED_KEY_ID`) is set.  Read errors other than
+/// [`HsmError::PartPropNotFound`] are propagated.
+pub fn part_pta_provisioned<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
+    Ok(prop_present(part_pta_key_id(pal, io))?
+        || prop_present(part_pta_mldsa_seed_key_id(pal, io))?)
+}
+
 /// Set the partition lifecycle state.
 ///
 /// Wraps [`HsmPartPropId::PART_STATE`].  **Transition policy lives here, in the
@@ -175,7 +183,7 @@ pub fn part_set_state<P: HsmPartitionManager>(
     let current = part_state(pal, io)?;
     match (current, s) {
         (HsmPartState::Enabled, HsmPartState::Initializing) => {
-            let provisioned = prop_present(part_pta_key_id(pal, io))?
+            let provisioned = part_pta_provisioned(pal, io)?
                 && prop_present(part_ups_key_id(pal, io))?
                 && prop_present(part_policy_hash(pal, io))?;
             if !provisioned {

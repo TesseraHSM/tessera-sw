@@ -359,12 +359,12 @@ async fn build_signed_report<'a, P: HsmPal>(
     };
 
     // Two-pass: query the exact size, then build into an exact buffer.
-    let report_len = key_report_with(pal, io, alloc, &params, signer, None).await?;
+    let report_len = key_report_with(pal, io, &params, signer, None).await?;
     if report_len > KEY_REPORT_MAX_LEN {
         return Err(HsmError::InternalError);
     }
     let report = alloc.dma_alloc(report_len)?;
-    if key_report_with(pal, io, alloc, &params, signer, Some(&mut *report)).await? != report_len {
+    if key_report_with(pal, io, &params, signer, Some(&mut *report)).await? != report_len {
         return Err(HsmError::InternalError);
     }
     Ok(report)

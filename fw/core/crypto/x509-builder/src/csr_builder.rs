@@ -182,14 +182,15 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
 /// `subject_cn` is the 64-byte `commonName` value patched at
 /// [`csr::SUBJECT_CN_OFFSET`](crate::csr::SUBJECT_CN_OFFSET).
 ///
-/// Query/copy: `out = None` returns the exact size; `Some(buf)` builds.
+/// Query/copy: `out = None` returns the exact size; `Some(buf)` builds in
+/// place, with no scratch beyond the template copy.
 pub async fn build_mldsa_csr<I: HsmIo>(
     io: &I,
     alloc: &impl HsmScopedAlloc,
     public_key: &[u8; MLDSA87_PUBLIC_KEY_LEN],
     subject_cn: &[u8; crate::csr::SUBJECT_CN_LEN],
     signer: &impl MlDsaTbsSigner<I>,
-    out: Option<&mut [u8]>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
     use crate::csr::*;
     let tbs_len = retarget::retarget_len(
@@ -199,30 +200,28 @@ pub async fn build_mldsa_csr<I: HsmIo>(
         KeyAlg::MlDsa87,
     )
     .ok_or(HsmError::InternalError)?;
-    let size = cert_builder::mldsa_signed_len(tbs_len);
     let Some(out) = out else {
-        return Ok(size);
+        return Ok(cert_builder::mldsa_signed_len(tbs_len));
     };
-    if out.len() < size {
-        return Err(HsmError::InvalidArg);
-    }
 
     let scratch = alloc.alloc(TBS_TEMPLATE.len())?;
     scratch.copy_from_slice(&TBS_TEMPLATE);
     patch_field(scratch, SUBJECT_CN_OFFSET, subject_cn)?;
-    let tbs = alloc.dma_alloc(tbs_len)?;
-    let len = retarget::retarget_tbs(
-        scratch,
-        TbsKind::Csr,
-        SigAlg::MlDsa87,
-        SubjectKey::MlDsa87(public_key),
-        tbs,
-    )
-    .ok_or(HsmError::InternalError)?;
-    if len != tbs_len {
-        return Err(HsmError::InternalError);
-    }
-    cert_builder::sign_mldsa(io, alloc, tbs, signer, out).await
+    let render = |tbs: &mut HsmDmaBuf| {
+        let len = retarget::retarget_tbs(
+            scratch,
+            TbsKind::Csr,
+            SigAlg::MlDsa87,
+            SubjectKey::MlDsa87(public_key),
+            tbs,
+        )
+        .ok_or(HsmError::InternalError)?;
+        if len != tbs.len() {
+            return Err(HsmError::InternalError);
+        }
+        Ok(())
+    };
+    cert_builder::sign_mldsa(io, tbs_len, &render, signer, out).await
 }
 
 /// Worst-case PKCS#10 `CertificationRequest ::= SEQUENCE { TBS, AlgId, BIT STRING sig }`

@@ -38,6 +38,7 @@
 // duplicates a test in this file.
 mod chain_path;
 mod fw_rejects;
+mod mldsa;
 
 use std::sync::Barrier;
 
@@ -131,7 +132,7 @@ fn slot2_pid_cert_after_finalization() {
         &TborGetCertChainInfoReq::new(1, CERT_BANK_ECC),
         TborStatus::InvalidArg,
     );
-    // The PTA chain has no ML-DSA bank yet.
+    // The PartOwner slot serves only the PTA's bank (ECC here).
     ctx.expect_get_cert_reject(2, CERT_BANK_MLDSA, 0, TborStatus::InvalidArg);
     ctx.expect_fw_reject(
         &TborGetCertChainInfoReq::new(2, CERT_BANK_MLDSA),

@@ -18,6 +18,8 @@ use tsra_crypto as crypto;
 use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 use tsra_ddi_tbor_types::POLICY_VERSION;
 use tsra_ddi_tbor_types::PartPolicyFields;
 use tsra_ddi_tbor_types::PolicyFlags;
@@ -53,6 +55,31 @@ pub enum PolicyKeyFormat {
     SpkiDer,
     /// A raw uncompressed ECC P-384 public key, `X || Y` (96 bytes).
     EccP384,
+}
+
+/// Signature algorithm of the partition's trust anchors (PTA and POTA).
+///
+/// Selects the PTA key type `PartInit` derives and the identity bank whose
+/// PID signs the PTA report; `PartFinal` requires the POTA certificate
+/// chain to use the same algorithm.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PolicyPtaAlg {
+    /// ECDSA P-384 with SHA-384.
+    #[default]
+    EccP384,
+    /// ML-DSA-87.
+    MlDsa87,
+}
+
+impl PolicyPtaAlg {
+    /// COSE algorithm identifier carried in the policy.
+    fn cose(self) -> i64 {
+        match self {
+            Self::EccP384 => POLICY_PTA_ALG_ES384,
+            Self::MlDsa87 => POLICY_PTA_ALG_MLDSA87,
+        }
+    }
 }
 
 /// Compute the SPKI thumbprint of `key` given in `format`.
@@ -128,11 +155,13 @@ pub struct PartPolicyBuilder {
     data: Option<PolicyThumbprint>,
     info: Option<Vec<u8>>,
     flags: PolicyFlags,
+    pta_alg: PolicyPtaAlg,
     error: Option<HsmError>,
 }
 
 impl PartPolicyBuilder {
-    /// Start an empty builder (no keys, no flags, no optional fields).
+    /// Start an empty builder (no keys, no flags, no optional fields,
+    /// [`PolicyPtaAlg::EccP384`] trust anchors).
     pub fn new() -> Self {
         Self::default()
     }
@@ -200,6 +229,13 @@ impl PartPolicyBuilder {
         self
     }
 
+    /// Set the trust-anchor signature algorithm (default
+    /// [`PolicyPtaAlg::EccP384`]).
+    pub fn pta_alg(mut self, alg: PolicyPtaAlg) -> Self {
+        self.pta_alg = alg;
+        self
+    }
+
     /// Replace the policy flags wholesale. Reserved bits are rejected by
     /// [`build`](Self::build).
     pub fn flags(mut self, flags: PolicyFlags) -> Self {
@@ -258,6 +294,7 @@ impl PartPolicyBuilder {
             flags: flags.into(),
             info: self.info.as_deref(),
             data_spki_thumbprint: self.data.as_ref(),
+            pta_alg: self.pta_alg.cose(),
         }
         .encode();
         if doc.len() > PART_POLICY_MAX_LEN {
@@ -303,11 +340,11 @@ mod tests {
 
     #[test]
     fn minimal_policy_matches_vector() {
-        let mut expected = vec![0xA4, 0x01, 0x01, 0x02];
+        let mut expected = vec![0xA5, 0x01, 0x02, 0x02];
         expected.extend(bstr48(0x11));
         expected.push(0x03);
         expected.extend(bstr48(0x22));
-        expected.extend([0x07, 0x00]);
+        expected.extend([0x07, 0x00, 0x0A, 0x38, 0x22]);
 
         assert_eq!(minimal().build().expect("valid"), expected);
     }
@@ -323,10 +360,11 @@ mod tests {
             .include_fmc_cdi(true)
             .require_trusted_sa_key(true)
             .allow_peer_cloning(true)
+            .pta_alg(PolicyPtaAlg::MlDsa87)
             .build()
             .expect("valid");
 
-        let mut expected = vec![0xA9, 0x01, 0x01, 0x02];
+        let mut expected = vec![0xAA, 0x01, 0x02, 0x02];
         expected.extend(bstr48(0x11));
         expected.push(0x03);
         expected.extend(bstr48(0x22));
@@ -340,9 +378,10 @@ mod tests {
         expected.extend([0x77; 64]);
         expected.push(0x09);
         expected.extend(bstr48(0x66));
+        expected.extend([0x0A, 0x38, 0x31]);
 
         assert_eq!(policy, expected);
-        assert_eq!(policy.len(), 345);
+        assert_eq!(policy.len(), 348);
     }
 
     #[test]

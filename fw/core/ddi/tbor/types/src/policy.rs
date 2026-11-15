@@ -22,7 +22,7 @@
 //!
 //! The policy carries no public keys: each trust anchor is identified by
 //! its public-key thumbprint, `SHA-384(DER(SubjectPublicKeyInfo))` of the
-//! canonical P-384 key (see [`POLICY_THUMBPRINT_LEN`]).
+//! canonical key encoding (see [`POLICY_THUMBPRINT_LEN`]).
 
 use bitfield_struct::bitfield;
 
@@ -40,7 +40,7 @@ pub const POLICY_INFO_MAX_LEN: usize = 64;
 pub const POLICY_BACKUP_PART_ID_LEN: usize = 16;
 
 /// The only supported policy format version.
-pub const POLICY_VERSION: u8 = 1;
+pub const POLICY_VERSION: u8 = 2;
 
 /// A public-key thumbprint (see [`POLICY_THUMBPRINT_LEN`]).
 pub type PolicyThumbprint = [u8; POLICY_THUMBPRINT_LEN];
@@ -67,6 +67,47 @@ pub enum PolicyKey {
     Info = 8,
     /// `data_spki_thumbprint` (bstr 48, optional).
     DataSpkiThumbprint = 9,
+    /// `pta_alg` (COSE algorithm, nint).
+    PtaAlg = 10,
+}
+
+/// Signature algorithm of the partition's trust anchors (CBOR key
+/// [`PolicyKey::PtaAlg`]), as a COSE algorithm identifier.
+///
+/// Selects the PTA key type `PartInit` derives and the identity bank whose
+/// PID signs the PTA report; `PartFinal` requires the PTA chain's root
+/// (POTA) to use the same algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyPtaAlg {
+    /// ECDSA P-384 with SHA-384 (COSE `ES384`, -35).
+    Es384,
+    /// ML-DSA-87 (COSE `ML-DSA-87`, -50).
+    MlDsa87,
+}
+
+impl PolicyPtaAlg {
+    /// COSE algorithm identifier of [`PolicyPtaAlg::Es384`].
+    pub const COSE_ES384: i64 = -35;
+
+    /// COSE algorithm identifier of [`PolicyPtaAlg::MlDsa87`].
+    pub const COSE_MLDSA87: i64 = -50;
+
+    /// Map a COSE algorithm identifier; `None` if unsupported.
+    pub const fn from_cose(alg: i64) -> Option<Self> {
+        match alg {
+            Self::COSE_ES384 => Some(Self::Es384),
+            Self::COSE_MLDSA87 => Some(Self::MlDsa87),
+            _ => None,
+        }
+    }
+
+    /// COSE algorithm identifier.
+    pub const fn cose(self) -> i64 {
+        match self {
+            Self::Es384 => Self::COSE_ES384,
+            Self::MlDsa87 => Self::COSE_MLDSA87,
+        }
+    }
 }
 
 /// Boolean policy flags (CBOR key [`PolicyKey::Flags`]).
@@ -147,6 +188,9 @@ pub struct PartPolicy<'a> {
     /// DATA (DARC Trust Anchor) key thumbprint, if provisioned.  Anchors
     /// the target chain verified by `DarcTmkExport`.
     pub data_spki_thumbprint: Option<&'a PolicyThumbprint>,
+
+    /// Partition trust-anchor (PTA and POTA) signature algorithm.
+    pub pta_alg: PolicyPtaAlg,
 }
 
 /// Why a policy document was rejected.
@@ -180,6 +224,7 @@ pub type PolicyResult<T> = Result<T, PolicyError>;
 #[repr(u8)]
 enum Major {
     Uint = 0,
+    Nint = 1,
     Bstr = 2,
     Map = 5,
 }
@@ -250,6 +295,9 @@ enum FieldKind {
     Uint { min: u64, max: u64 },
     /// Byte string whose length is in `min..=max`.
     Bstr { min: usize, max: usize },
+    /// Negative-integer COSE algorithm accepted by
+    /// [`PolicyPtaAlg::from_cose`].
+    PtaAlg,
 }
 
 impl FieldKind {
@@ -269,7 +317,7 @@ struct FieldSpec {
 }
 
 /// The policy schema, in ascending key order.
-const FIELDS: [FieldSpec; 9] = [
+const FIELDS: [FieldSpec; 10] = [
     FieldSpec {
         key: PolicyKey::Version,
         kind: FieldKind::Uint {
@@ -327,6 +375,11 @@ const FIELDS: [FieldSpec; 9] = [
         kind: FieldKind::thumbprint(),
         required: false,
     },
+    FieldSpec {
+        key: PolicyKey::PtaAlg,
+        kind: FieldKind::PtaAlg,
+        required: true,
+    },
 ];
 
 /// Index of `key` in [`FIELDS`] (keys are dense, starting at 1).
@@ -348,6 +401,7 @@ const _: () = {
 enum FieldValue<'a> {
     Uint(u64),
     Bstr(&'a [u8]),
+    PtaAlg(PolicyPtaAlg),
 }
 
 impl FieldSpec {
@@ -366,6 +420,15 @@ impl FieldSpec {
                     return Err(PolicyError::InvalidValue);
                 }
                 Ok(FieldValue::Bstr(v))
+            }
+            FieldKind::PtaAlg => {
+                // A CBOR negative integer encodes `-1 - arg`.
+                let arg = r.head(Major::Nint)?;
+                i64::try_from(arg)
+                    .ok()
+                    .and_then(|arg| PolicyPtaAlg::from_cose(-1 - arg))
+                    .map(FieldValue::PtaAlg)
+                    .ok_or(PolicyError::InvalidValue)
             }
         }
     }
@@ -386,6 +449,13 @@ impl<'a> Fields<'a> {
         match self.0[field_index(key)] {
             Some(FieldValue::Bstr(v)) => Some(v),
             _ => None,
+        }
+    }
+
+    fn pta_alg(&self) -> PolicyResult<PolicyPtaAlg> {
+        match self.0[field_index(PolicyKey::PtaAlg)] {
+            Some(FieldValue::PtaAlg(v)) => Ok(v),
+            _ => Err(PolicyError::MissingField),
         }
     }
 
@@ -470,6 +540,7 @@ impl<'a> PartPolicy<'a> {
             flags,
             info: fields.bstr(PolicyKey::Info).unwrap_or(&[]),
             data_spki_thumbprint: fields.array(PolicyKey::DataSpkiThumbprint)?,
+            pta_alg: fields.pta_alg()?,
         })
     }
 }
@@ -501,6 +572,7 @@ mod tests {
 
     enum V<'a> {
         U(u64),
+        N(i64),
         B(&'a [u8]),
     }
 
@@ -511,6 +583,7 @@ mod tests {
             head(&mut out, 0, *k);
             match v {
                 V::U(u) => head(&mut out, 0, *u),
+                V::N(n) => head(&mut out, 1, (-1 - *n) as u64),
                 V::B(b) => {
                     head(&mut out, 2, b.len() as u64);
                     out.extend_from_slice(b);
@@ -525,16 +598,17 @@ mod tests {
 
     fn minimal() -> Vec<u8> {
         encode(&[
-            (1, V::U(1)),
+            (1, V::U(2)),
             (2, V::B(&POTA)),
             (3, V::B(&SATA)),
             (7, V::U(0)),
+            (10, V::N(-35)),
         ])
     }
 
     fn full() -> Vec<u8> {
         encode(&[
-            (1, V::U(1)),
+            (1, V::U(2)),
             (2, V::B(&POTA)),
             (3, V::B(&SATA)),
             (4, V::B(&[0x33; 48])),
@@ -543,6 +617,7 @@ mod tests {
             (7, V::U(u64::from(PolicyFlags::KNOWN_MASK))),
             (8, V::B(&[0xAB; 64])),
             (9, V::B(&[0x55; 48])),
+            (10, V::N(-50)),
         ])
     }
 
@@ -557,6 +632,7 @@ mod tests {
         assert_eq!(p.flags, PolicyFlags::new());
         assert!(p.info.is_empty());
         assert_eq!(p.data_spki_thumbprint, None);
+        assert_eq!(p.pta_alg, PolicyPtaAlg::Es384);
     }
 
     #[test]
@@ -573,6 +649,7 @@ mod tests {
         assert!(p.flags.allow_peer_cloning());
         assert_eq!(p.info, &[0xAB; 64]);
         assert_eq!(p.data_spki_thumbprint, Some(&[0x55; 48]));
+        assert_eq!(p.pta_alg, PolicyPtaAlg::MlDsa87);
     }
 
     #[test]
@@ -582,12 +659,11 @@ mod tests {
             b.push(0);
             b
         };
-        let non_shortest_flags = {
-            // flags 0 encoded as 0x18 0x00 instead of 0x00.
+        let non_shortest_alg = {
+            // pta_alg -35 encoded as 0x39 0x00 0x22 instead of 0x38 0x22.
             let mut b = minimal();
-            let last = b.len() - 1;
-            b[last] = 0x18;
-            b.push(0x00);
+            b.truncate(b.len() - 2);
+            b.extend_from_slice(&[0x39, 0x00, 0x22]);
             b
         };
         let indefinite_map = {
@@ -596,7 +672,16 @@ mod tests {
             b.push(0xff);
             b
         };
-        let cases: [(&str, Vec<u8>, PolicyError); 16] = [
+        let with_alg = |alg: V<'static>| {
+            encode(&[
+                (1, V::U(2)),
+                (2, V::B(&POTA)),
+                (3, V::B(&SATA)),
+                (7, V::U(0)),
+                (10, alg),
+            ])
+        };
+        let cases: [(&str, Vec<u8>, PolicyError); 20] = [
             ("empty", Vec::new(), PolicyError::InvalidSize),
             (
                 "oversize",
@@ -610,17 +695,13 @@ mod tests {
                 PolicyError::Truncated,
             ),
             ("trailing bytes", with_trailing, PolicyError::TrailingBytes),
-            (
-                "non-shortest",
-                non_shortest_flags,
-                PolicyError::NonCanonical,
-            ),
+            ("non-shortest", non_shortest_alg, PolicyError::NonCanonical),
             ("indefinite map", indefinite_map, PolicyError::NonCanonical),
             (
                 "unsorted keys",
                 encode(&[
                     (2, V::B(&POTA)),
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (3, V::B(&SATA)),
                     (7, V::U(0)),
                 ]),
@@ -629,7 +710,7 @@ mod tests {
             (
                 "duplicate key",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
@@ -640,33 +721,35 @@ mod tests {
             (
                 "unknown key",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
                     (7, V::U(0)),
-                    (10, V::U(0)),
+                    (10, V::N(-35)),
+                    (11, V::U(0)),
                 ]),
                 PolicyError::UnknownKey,
             ),
             (
                 "missing sata",
-                encode(&[(1, V::U(1)), (2, V::B(&POTA)), (7, V::U(0))]),
+                encode(&[(1, V::U(2)), (2, V::B(&POTA)), (7, V::U(0))]),
                 PolicyError::MissingField,
             ),
             (
                 "bad version",
                 encode(&[
-                    (1, V::U(2)),
+                    (1, V::U(1)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
                     (7, V::U(0)),
+                    (10, V::N(-35)),
                 ]),
                 PolicyError::InvalidValue,
             ),
             (
                 "short thumbprint",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA[..47])),
                     (3, V::B(&SATA)),
                     (7, V::U(0)),
@@ -676,7 +759,7 @@ mod tests {
             (
                 "reserved flag bit",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
                     (7, V::U(1 << 3)),
@@ -686,7 +769,7 @@ mod tests {
             (
                 "empty info",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
                     (7, V::U(0)),
@@ -697,13 +780,39 @@ mod tests {
             (
                 "backup id without thumbprint",
                 encode(&[
-                    (1, V::U(1)),
+                    (1, V::U(2)),
                     (2, V::B(&POTA)),
                     (3, V::B(&SATA)),
                     (5, V::B(&[0; 16])),
                     (7, V::U(0)),
+                    (10, V::N(-35)),
                 ]),
                 PolicyError::MissingField,
+            ),
+            (
+                "missing pta_alg",
+                encode(&[
+                    (1, V::U(2)),
+                    (2, V::B(&POTA)),
+                    (3, V::B(&SATA)),
+                    (7, V::U(0)),
+                ]),
+                PolicyError::MissingField,
+            ),
+            (
+                "unsupported pta_alg",
+                with_alg(V::N(-7)),
+                PolicyError::InvalidValue,
+            ),
+            (
+                "huge pta_alg",
+                with_alg(V::N(i64::MIN)),
+                PolicyError::InvalidValue,
+            ),
+            (
+                "uint pta_alg",
+                with_alg(V::U(35)),
+                PolicyError::UnexpectedType,
             ),
         ];
         for (name, bytes, want) in cases {

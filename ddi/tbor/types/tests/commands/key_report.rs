@@ -224,7 +224,7 @@ const COSE_ALG_ES384: i64 = -35;
 const COSE_ALG_MLDSA87: i64 = -50;
 
 /// ML-DSA-87 encoded public-key length.
-const MLDSA87_PUB_KEY_LEN: usize = 2592;
+pub(crate) const MLDSA87_PUB_KEY_LEN: usize = 2592;
 
 /// Splits a tagged COSE_Sign1 into `(protected, payload, signature)` and
 /// returns the protected header's `alg`.
@@ -264,7 +264,14 @@ fn split_cose_sign1(report: &[u8]) -> (i64, &[u8], &[u8], &[u8]) {
 
 /// Verifies an ML-DSA-87 COSE_Sign1 report under the encoded public key
 /// `pk` and returns the decoded attestation payload.
-fn verify_mldsa_cose_sign1(report: &[u8], pk: &[u8]) -> KeyAttestationReport {
+pub(crate) fn verify_mldsa_cose_sign1(report: &[u8], pk: &[u8]) -> KeyAttestationReport {
+    minicbor::decode(verify_mldsa_cose_sign1_payload(report, pk))
+        .expect("report payload decodes as KeyAttestationReport")
+}
+
+/// Verifies an ML-DSA-87 COSE_Sign1 report under the encoded public key
+/// `pk` and returns the raw payload bytes.
+pub(crate) fn verify_mldsa_cose_sign1_payload<'a>(report: &'a [u8], pk: &[u8]) -> &'a [u8] {
     use tsra_crypto::ImportableKey;
     use tsra_crypto::MlDsaAlgo;
     use tsra_crypto::MlDsaPublicKey;
@@ -284,12 +291,12 @@ fn verify_mldsa_cose_sign1(report: &[u8], pk: &[u8]) -> KeyAttestationReport {
             .expect("ML-DSA verify"),
         "COSE_Sign1 must verify under the ML-DSA PID public key",
     );
-    minicbor::decode(payload).expect("report payload decodes as KeyAttestationReport")
+    payload
 }
 
 /// The encoded ML-DSA-87 public key of slot 0's ML-DSA bank leaf: the
 /// trailing bytes of its SubjectPublicKeyInfo.
-fn mldsa_pid_pub_key(ctx: &TestCtx) -> Vec<u8> {
+pub(crate) fn mldsa_pid_pub_key(ctx: &TestCtx) -> Vec<u8> {
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 

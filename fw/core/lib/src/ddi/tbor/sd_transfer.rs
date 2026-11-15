@@ -68,7 +68,7 @@ pub(super) async fn seal_backup<P: HsmPal>(
     let digest = alloc.dma_alloc(48)?;
     transfer_envelope_hash(pal, io, envelope, digest, alloc).await?;
     let params = transfer_report_params(envelope, digest)?;
-    report(pal, io, alloc, &params, private, Some(signed_report)).await
+    report(pal, io, &params, private, Some(signed_report)).await
 }
 
 /// An absent anchor is intentional signature-only SA operation verification.

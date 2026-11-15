@@ -19,7 +19,6 @@ use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_fw_hsm_pal_traits::HsmCertBank;
 use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
-use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -38,10 +37,7 @@ pub(crate) async fn handle<P: HsmPal>(
     let bank = HsmCertBank(req.bank());
 
     let info = if slot == HsmCertSlot::PartOwner {
-        if bank != HsmCertBank::Ecc {
-            return Err(HsmError::InvalidArg);
-        }
-        super::pta::chain_info(pal, io).await?
+        super::pta::chain_info(pal, io, bank).await?
     } else {
         pal.get_cert_chain_info(io, slot, bank).await?
     };

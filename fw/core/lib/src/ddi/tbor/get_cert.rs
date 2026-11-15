@@ -33,7 +33,8 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// Handle a TBOR `GetCertificate` request.
 ///
 /// Slot 2 generates one fresh PTA-issued PID certificate from the
-/// partition's PTA/PID keys; only the ECC bank is available there. No undo
+/// partition's PTA/PID keys; only the bank matching the PTA algorithm
+/// (ECC for a P-384 PTA, ML-DSA for an ML-DSA-87 PTA) is available. No undo
 /// log is needed.
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
@@ -46,10 +47,10 @@ pub(crate) async fn handle<P: HsmPal>(
     let cert_id = req.cert_id();
 
     let cert: &HsmDmaBuf = if slot == HsmCertSlot::PartOwner {
-        if cert_id != 0 || bank != HsmCertBank::Ecc {
+        if cert_id != 0 {
             return Err(HsmError::InvalidArg);
         }
-        super::pta::pid_certificate(pal, io).await?
+        super::pta::pid_certificate(pal, io, bank).await?
     } else {
         // Query the certificate size (no copy).
         let len = pal.get_cert(io, slot, bank, cert_id, None).await?;

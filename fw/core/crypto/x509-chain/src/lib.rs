@@ -56,7 +56,10 @@ mod types;
 mod validate;
 
 pub use parse::parse_cert;
+pub use spki::mldsa87_spki_thumbprint;
 pub use spki::p384_spki_thumbprint;
+pub use spki::MLDSA87_PUB_KEY_LEN;
+pub use spki::MLDSA87_SPKI_LEN;
 pub use spki::P384_POINT_LEN;
 pub use spki::P384_SPKI_LEN;
 pub use spki::SPKI_THUMBPRINT_LEN;
@@ -73,3 +76,4 @@ pub use validate::validate_chain;
 pub use validate::validate_issuing_chain;
 pub use validate::ChainValidator;
 pub use validate::MAX_CERT_DER_LEN;
+pub use validate::MAX_ISSUER_CARRY_LEN;

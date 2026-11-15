@@ -445,19 +445,14 @@ pub async fn build_mldsa_leaf_cert<I: HsmIo>(
     alloc: &impl HsmScopedAlloc,
     params: &LeafCertParams<'_, [u8; MLDSA87_PUBLIC_KEY_LEN]>,
     signer: &impl MlDsaTbsSigner<I>,
-    out: Option<&mut [u8]>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
     let tbs_len = mldsa_leaf_tbs_len(SigAlg::MlDsa87)?;
-    let size = mldsa_signed_len(tbs_len);
     let Some(out) = out else {
-        return Ok(size);
+        return Ok(mldsa_signed_len(tbs_len));
     };
-    if out.len() < size {
-        return Err(HsmError::InvalidArg);
-    }
-    let tbs = alloc.dma_alloc(tbs_len)?;
-    render_mldsa_leaf_tbs(alloc, params, SigAlg::MlDsa87, tbs)?;
-    sign_mldsa(io, alloc, tbs, signer, out).await
+    let render = |tbs: &mut HsmDmaBuf| render_mldsa_leaf_tbs(alloc, params, SigAlg::MlDsa87, tbs);
+    sign_mldsa(io, tbs_len, &render, signer, out).await
 }
 
 /// Build an ML-DSA-87 Leaf certificate signed by an ECDSA-P384 issuer.
@@ -539,24 +534,42 @@ pub(crate) fn mldsa_signed_len(tbs_len: usize) -> usize {
     )
 }
 
-/// Sign `tbs` with `signer` and assemble the ML-DSA-87-signed DER document
-/// (certificate or CSR) into `out`.
+/// Assemble an ML-DSA-87-signed DER document (certificate or CSR) in
+/// place: `render` writes the TBS straight into its final position in
+/// `out`, which `signer` then signs into the trailing signature field.
+///
+/// Needs no TBS or signature scratch, so the whole document costs one
+/// buffer of [`mldsa_signed_len`]`(tbs_len)` bytes. `render` is a trait
+/// object so certificates and CSRs share one copy of this function.
 pub(crate) async fn sign_mldsa<I: HsmIo>(
     io: &I,
-    alloc: &impl HsmScopedAlloc,
-    tbs: &HsmDmaBuf,
+    tbs_len: usize,
+    render: &dyn Fn(&mut HsmDmaBuf) -> HsmResult<()>,
     signer: &impl MlDsaTbsSigner<I>,
-    out: &mut [u8],
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
-    let sig = alloc.dma_alloc(MLDSA87_SIGNATURE_LEN)?;
-    signer.sign_tbs(io, tbs, sig).await?;
-    der_helpers::assemble_signed(
-        out,
-        tbs,
-        &MLDSA87_ALG_ID,
-        &[&MLDSA87_SIG_BIT_STRING_HEADER, sig],
-    )
-    .ok_or(HsmError::InvalidArg)
+    let size = mldsa_signed_len(tbs_len);
+    if out.len() < size {
+        return Err(HsmError::InvalidArg);
+    }
+    let content_len = tbs_len
+        + MLDSA87_ALG_ID.len()
+        + MLDSA87_SIG_BIT_STRING_HEADER.len()
+        + MLDSA87_SIGNATURE_LEN;
+    out[0] = 0x30;
+    let tbs_at = 1 + der_helpers::encode_der_length(&mut out[1..], content_len)
+        .ok_or(HsmError::InternalError)?;
+    let alg_at = tbs_at + tbs_len;
+    let sig_at = alg_at + MLDSA87_ALG_ID.len() + MLDSA87_SIG_BIT_STRING_HEADER.len();
+    if sig_at + MLDSA87_SIGNATURE_LEN != size {
+        return Err(HsmError::InternalError);
+    }
+    render(&mut out[tbs_at..alg_at])?;
+    out[alg_at..alg_at + MLDSA87_ALG_ID.len()].copy_from_slice(&MLDSA87_ALG_ID);
+    out[alg_at + MLDSA87_ALG_ID.len()..sig_at].copy_from_slice(&MLDSA87_SIG_BIT_STRING_HEADER);
+    let (head, sig) = out[..size].split_at_mut(sig_at);
+    signer.sign_tbs(io, &head[tbs_at..alg_at], sig).await?;
+    Ok(size)
 }
 
 struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
