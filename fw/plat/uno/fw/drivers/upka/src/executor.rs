@@ -11,6 +11,8 @@ use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_STRIDE;
+use tsra_fw_uno_reg_soc::io_gsram::UPKA_TICKET_CMD_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::UPKA_TICKET_CMD_STRIDE;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_WIPE_CMD_OFFSET;
 use tsra_fw_uno_reg_soc::upka::UpkaEngine;
 use tsra_fw_uno_reg_soc::upka::ENGINE_STRIDE;
@@ -67,6 +69,39 @@ impl EngineExecutor {
         // load the engine can read stale operand addresses and raise BUS_ERROR.
         dmb();
         Self::submit_cmd(engine_id);
+    }
+
+    /// Write staged-command ticket `ticket`'s descriptor, which
+    /// [`submit_ticket_command`](Self::submit_ticket_command) later starts
+    /// on an engine. The barrier, as in
+    /// [`submit_engine_command`](Self::submit_engine_command), makes the
+    /// stores visible before every later access, that doorbell included,
+    /// so the doorbell needs no barrier of its own.
+    pub(crate) fn write_ticket_command(
+        ticket: u8,
+        opcode: u32,
+        result: u32,
+        arg1: u32,
+        arg2: u32,
+        arg3: u32,
+    ) {
+        let entry = &UPKA_Q.upka_ticket_cmd[ticket as usize];
+        entry.command_code.set(opcode);
+        entry.result_addr.set(result);
+        entry.arg1_addr.set(arg1);
+        entry.arg2_addr.set(arg2);
+        entry.arg3_addr.set(arg3);
+        dmb();
+    }
+
+    /// Start ticket `ticket`'s command, which
+    /// [`write_ticket_command`](Self::write_ticket_command) wrote, on an
+    /// engine: one command-register write.
+    pub(crate) fn submit_ticket_command(engine_id: u8, ticket: u8) {
+        Self::submit_cmd_at(
+            engine_id,
+            IO_GSRAM_BASE + UPKA_TICKET_CMD_OFFSET + u32::from(ticket) * UPKA_TICKET_CMD_STRIDE,
+        );
     }
 
     /// Write the shared `MEM_WIPE` descriptor that
