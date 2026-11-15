@@ -127,6 +127,8 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         HsmVaultKeyKind::MlKem768Public => 1184,
         HsmVaultKeyKind::MlKem1024Public => 1568,
         HsmVaultKeyKind::AesXts512 => 64,
+        HsmVaultKeyKind::SdSealingMlKem1024 => 64,
+        HsmVaultKeyKind::SdSealingMlKem1024P384 => 32,
         // `SessionEx` is length-discriminated by session type
         // (PlainText=140, Authenticated=236 — see [`session_ex_len_valid`]);
         // reported as variable length, same handling as VarLenHmac*.
@@ -805,6 +807,8 @@ mod tests {
             (HsmVaultKeyKind::MlKem768Public, 1184),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
             (HsmVaultKeyKind::AesXts512, 64),
+            (HsmVaultKeyKind::SdSealingMlKem1024, 64),
+            (HsmVaultKeyKind::SdSealingMlKem1024P384, 32),
         ];
         for &(kind, expected) in cases {
             assert_eq!(

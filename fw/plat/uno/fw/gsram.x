@@ -19,6 +19,10 @@ SECTIONS
         *(.text.*tsra_fw_core_crypto_x509_chain*)
         /* HPKE (classic and PQ suites) is not on the bulk crypto hot path. */
         *(.text.*tsra_fw_core_crypto_hpke*)
+        /* Cold path: key reports, SD transfer envelopes and evidence
+           verification (attestation, SD, DARC and provisioning only). */
+        *(.text.*tsra_fw_core_crypto_key_report*)
+        *(.text.*tsra_fw_core_evidence*)
         /* Cold path: partition init / final run once per provisioning. */
         *(.text.*part_init*)
         *(.text.*part_final*)
@@ -39,6 +43,8 @@ SECTIONS
         *(.rodata.*self_test*)
         *(.rodata.*tsra_fw_core_crypto_x509_chain*)
         *(.rodata.*tsra_fw_core_crypto_hpke*)
+        *(.rodata.*tsra_fw_core_crypto_key_report*)
+        *(.rodata.*tsra_fw_core_evidence*)
         *(.rodata.*part_init*)
         *(.rodata.*part_final*)
         *(.rodata.*tbor*[0-9]sd_* .rodata.*tbor*[0-9][0-9]sd_*)

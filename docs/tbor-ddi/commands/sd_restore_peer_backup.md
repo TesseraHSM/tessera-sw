@@ -27,10 +27,10 @@ published on validation failure.
 | Field | Shape | Meaning |
 |---|---|---|
 | `session_id` | Inline session ID | Active CO session |
-| `masked_sealing_key` | 280 B, aligned to 4 B | Actual recipient key |
+| `masked_sealing_key` | 264 / 280 / 296 B, aligned to 4 B | Actual recipient key |
 | `policy` | 1-384 B | Bound SD policy permitting peer cloning |
 | `src_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized source PID and `SdBackup` report |
-| `pok_peer_backup` | 322 B | Canonical Base envelope |
+| `pok_peer_backup` | 322 / 1793 / 1890 B | Canonical Base envelope |
 | `prev_sd_mk_backup` | 264 B | Previous SDMK backup |
 
 The evidence group expands to four TOC entries. Referenced DER certificates
@@ -43,7 +43,7 @@ and operation reports travel out of band.
 | `pok_local_backup` | 280 B, aligned to 4 B | Refreshed local BKS3 backup |
 | `sd_mk_backup` | 264 B, aligned to 4 B | Refreshed SDMK backup |
 
-See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+See [transfer format](key_report.md#transfer-envelope-binding).
 Local derivation, masking, ownership, SVN checks, and provisioning undo are
 unchanged. Restore is one-shot: `SdAlreadyInitialized` rejects an existing
 SD. Disabled cloning returns `SdPeerCloningNotAllowed`. Malformed sizes

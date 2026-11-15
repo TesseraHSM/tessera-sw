@@ -101,6 +101,8 @@ pub use tsra_ddi_tbor_types::MAX_CERTS;
 pub use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 /// Exact length of the remote partition-owner-key backup (`SdCreate`/`SdReseal`).
 pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
+/// Maximum remote/peer backup length (MLKEM1024-P384 sealing key).
+pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_MAX_LEN;
 /// Partition policy (CBOR) schema: `backup_part_id` length.
 pub use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 /// Partition policy (CBOR) schema: maximum `info` length.

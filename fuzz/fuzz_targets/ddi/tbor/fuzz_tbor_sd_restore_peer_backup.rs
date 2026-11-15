@@ -7,6 +7,7 @@
 mod common;
 
 use common::COORD_LEN;
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -165,7 +166,7 @@ fn build_evidence(
     let owner = make_chain(&CaKey::generate(), pid_pub);
     let partition_owner = make_chain(pota, pid_pub);
 
-    let mut items = Vec::new();
+    let mut items = common::sd_oob_items();
     let receiver_descriptors = receiver
         .der_items()
         .iter()
@@ -202,10 +203,10 @@ fn build_evidence(
 }
 
 struct PeerBackup {
-    masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
+    masked_sealing_key: Vec<u8>,
     policy: Vec<u8>,
     evidence: Evidence,
-    peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    peer_backup: Vec<u8>,
     previous_sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
     session_id: u16,
 }
@@ -250,6 +251,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     let sealing_key = match ctx.tbor(&TborSdSealingKeyGenReq {
         session_id: session.session_id,
         scope: bootstrap_scope.to_tbor(),
+        kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
     }) {
         Ok(key) => key,
         Err(DdiError::TborStatus(status)) if status == TborStatus::UnsupportedKeyScope => {
@@ -274,20 +276,20 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     }
 
     let key_report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id: session.session_id,
+            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
         })
-        .expect("KeyReport should succeed")
-        .report;
+        .expect("KeyReport should succeed");
     let evidence = build_evidence(&pid_pub, &sealing_pub, &sata, &pota, &key_report);
 
     let create_remote = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain: evidence.receiver.clone(),
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: evidence.manufacturer.clone(),
         receiver_owner_cert_chain: evidence.owner.clone(),
         receiver_part_owner_cert_chain: evidence.partition_owner.clone(),
@@ -295,7 +297,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         policy: policy.clone(),
     };
     let create_remote_response = ctx
-        .tbor_oob(&create_remote, &evidence.oob())
+        .sd_oob(&create_remote, &evidence.oob())
         .expect("SdCreateRemoteBackup should succeed");
 
     let (peer_sealing_key, peer_evidence) = if key_scope == common::KeyScope::SecurityDomain {
@@ -303,17 +305,18 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
             .tbor(&TborSdSealingKeyGenReq {
                 session_id: session.session_id,
                 scope: key_scope.to_tbor(),
+                kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
             })
             .expect("SecurityDomain-scope key generation should succeed after SD creation");
         let report = ctx
-            .tbor(&TborKeyReportReq {
+            .key_report(&TborKeyReportReq {
                 session_id: session.session_id,
+                bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
                 masked_key: sealing_key.masked_key.to_vec(),
                 report_data: [0u8; KEY_REPORT_DATA_LEN],
                 auth_envelope: Vec::new(),
             })
-            .expect("SecurityDomain-scope KeyReport should succeed")
-            .report;
+            .expect("SecurityDomain-scope KeyReport should succeed");
         let mut public_key = [0u8; RAW_PUB_LEN];
         for (dst, src) in public_key[..COORD_LEN]
             .iter_mut()
@@ -337,7 +340,6 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
 
     let create_peer = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: peer_sealing_key.masked_key,
         policy: policy.clone(),
         dst_mfgr_cert_chain: peer_evidence.manufacturer.clone(),
         dst_owner_cert_chain: peer_evidence.owner.clone(),
@@ -345,9 +347,16 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         dst_report: peer_evidence.report,
         pok_local_backup: create_remote_response.pok_local_backup,
     };
-    let create_peer_response = ctx
-        .tbor_oob(&create_peer, &peer_evidence.oob())
+    let (create_peer_response, op_report) = ctx
+        .sd_oob_report(&create_peer, &peer_evidence.oob())
         .expect("SdCreatePeerBackup should succeed");
+
+    // Restore authenticates the source with the create-peer operation report.
+    let op_report = &op_report[..usize::from(create_peer_response.report_len.get())];
+    let mut restore_evidence = peer_evidence;
+    restore_evidence.items[usize::from(restore_evidence.report.index)] = op_report.to_vec();
+    restore_evidence.report.length =
+        U16::new(op_report.len().try_into().expect("report fits descriptor"));
 
     ctx.session_close(session.session_id)
         .expect("source session close should succeed");
@@ -369,7 +378,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     Some(PeerBackup {
         masked_sealing_key: peer_sealing_key.masked_key,
         policy,
-        evidence: peer_evidence,
+        evidence: restore_evidence,
         peer_backup: create_peer_response.pok_peer_backup,
         previous_sd_mk_backup: create_remote_response.sd_mk_backup,
         session_id: restore_session.session_id,
@@ -434,18 +443,18 @@ fuzz_target!(|input: FuzzInput| {
         let mut evidence = backup.evidence.clone();
         let mut req = TborSdRestorePeerBackupReq {
             session_id: backup.session_id,
-            masked_sealing_key: backup.masked_sealing_key,
+            masked_sealing_key: backup.masked_sealing_key.clone(),
             policy: backup.policy.clone(),
             src_mfgr_cert_chain: evidence.manufacturer.clone(),
             src_owner_cert_chain: evidence.owner.clone(),
             src_part_owner_cert_chain: evidence.partition_owner.clone(),
             src_report: evidence.report,
-            pok_peer_backup: backup.peer_backup,
+            pok_peer_backup: backup.peer_backup.clone(),
             prev_sd_mk_backup: backup.previous_sd_mk_backup,
         };
         let changed = mutate_request(&input, backup.session_id, &backup, &mut req, &mut evidence);
         let oob = evidence.oob();
-        let result = ctx.tbor_oob(&req, &oob);
+        let result = ctx.sd_oob(&req, &oob);
 
         // Arbitrary evidence byte changes need not invalidate the parsed or
         // authenticated data. Descriptor corruptions must fail.

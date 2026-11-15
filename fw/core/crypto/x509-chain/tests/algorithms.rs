@@ -321,7 +321,10 @@ async fn walk<P: HsmPal>(
                 leaf.copy_from_slice(parse_cert(der)?.pub_key.as_bytes());
                 Ok(())
             } else {
-                validate_chain(pal, io, scope, &descriptors, anchor, &mut leaf, fetch).await
+                let len =
+                    validate_chain(pal, io, scope, &descriptors, anchor, &mut leaf, fetch).await?;
+                assert_eq!(len, leaf.len());
+                Ok(())
             }
         })
         .await;

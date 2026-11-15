@@ -112,6 +112,16 @@ impl CaKey {
         sha1_ski(&self.pub_sec1)
     }
 
+    /// ECDSA-P384 / SHA-384 sign `msg`, returning the raw `r ‖ s`
+    /// (COSE ES384) signature.
+    pub fn sign_es384(&self, msg: &[u8]) -> [u8; 96] {
+        let (r, s) = self.sign(msg);
+        let mut sig = [0u8; 96];
+        sig[..48].copy_from_slice(&r);
+        sig[48..].copy_from_slice(&s);
+        sig
+    }
+
     /// ECDSA-P384 / SHA-384 sign `tbs`, returning `(r, s)` (48 bytes each).
     fn sign(&self, tbs: &[u8]) -> ([u8; 48], [u8; 48]) {
         let mut algo = EcdsaAlgo::new(HashAlgo::sha384());

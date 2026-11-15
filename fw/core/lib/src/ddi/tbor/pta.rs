@@ -133,7 +133,7 @@ pub(crate) fn pta_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<PtaKey> {
 ///
 /// The expanded private key is scratch in a nested scope, so only the
 /// public key remains allocated from `alloc`.
-async fn mldsa87_public_key<'a, P: HsmPal>(
+pub(crate) async fn mldsa87_public_key<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,

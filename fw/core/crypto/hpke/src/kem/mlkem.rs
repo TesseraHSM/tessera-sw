@@ -139,6 +139,40 @@ where
     Ok(())
 }
 
+/// Runs `ML-KEM.KeyGen` (or `KeyGen_internal` for [`HsmMlSeedSrc::Caller`])
+/// on `seed` and writes the encapsulation key to `ek`.
+///
+/// # Parameters
+///
+/// * `seed` — the 64-byte `d ‖ z` seed; filled for [`HsmMlSeedSrc::Random`].
+/// * `ek` — output encapsulation key ([`EK_LEN`] bytes).
+pub(super) async fn keypair<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    seed_src: HsmMlSeedSrc,
+    pct: HsmMlKemPct,
+    seed: &mut HsmDmaBuf,
+    ek: &mut [u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<()>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    if seed.len() != MLKEM_SEED_LEN || ek.len() != EK_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let keys = alloc_bytes(PARAM_SET.sk_len() + PARAM_SET.pk_len(), alloc)?;
+    let (dk, pk) = keys.split_at_mut(PARAM_SET.sk_len());
+    let (_, pk_len) = pal
+        .mlkem_gen_keypair(io, PARAM_SET, seed_src, pct, seed, Some((dk, &mut *pk)))
+        .await?;
+    if pk_len != EK_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    ek.copy_from_slice(&pk[..EK_LEN]);
+    Ok(())
+}
+
 /// ML-KEM-1024 HPKE Encap: `enc` is the ciphertext.
 pub(super) async fn encap<'a, P>(
     pal: &P,

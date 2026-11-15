@@ -230,6 +230,88 @@ fn tmk_bytes(input: &FuzzInput<'_>) -> [u8; TMK_LEN] {
     })
 }
 
+/// SHA-384 of `bytes`.
+fn sha384(bytes: &[u8]) -> [u8; 48] {
+    let mut digest = [0; 48];
+    HashAlgo::sha384()
+        .hash(bytes, Some(&mut digest))
+        .expect("SHA-384");
+    digest
+}
+
+/// Transfer key identifier: SHA-384 over the tagged SEC1 public point.
+fn key_id(key: &impl EccKeyOp) -> [u8; 48] {
+    let (x, y) = key.coord_vec().expect("public coordinates");
+    let mut input = b"TSRA-P384-KEY-v1".to_vec();
+    input.push(4);
+    input.extend_from_slice(&x);
+    input.extend_from_slice(&y);
+    sha384(&input)
+}
+
+/// HPKE Base seal `tmk` to `recipient` and sign the matching v3 `Darc`
+/// operation report with `sender` (the certified PID key).
+fn seal_tmk(
+    recipient: &EccPublicKey,
+    sender: &EccPrivateKey,
+    tmk: &[u8],
+) -> ([u8; SEALED_TMK_LEN], Vec<u8>) {
+    let source_id = key_id(sender);
+    let recipient_id = key_id(recipient);
+    let mut header = b"TSRA-XFER".to_vec();
+    header.extend_from_slice(&[1, 1, 0, 0x11, 0, 2, 0, 2]);
+    header.extend_from_slice(&source_id);
+    header.extend_from_slice(&recipient_id);
+    let cfg = HpkeSealConfig::base(
+        HpkeSuite::DHKemP384Sha384AesGcm256,
+        recipient,
+        &header,
+        &header,
+    );
+    let sealed = seal_vec(&cfg, tmk).expect("HPKE Base seal");
+    let mut out = [0; SEALED_TMK_LEN];
+    out[..header.len()].copy_from_slice(&header);
+    out[header.len()..header.len() + sealed.enc.len()].copy_from_slice(&sealed.enc);
+    out[header.len() + sealed.enc.len()..].copy_from_slice(&sealed.ct);
+
+    let mut digest_input = b"TSRA-XFER-HASH-v1".to_vec();
+    digest_input.extend_from_slice(&out);
+    let digest = sha384(&digest_input);
+    let mut payload = minicbor::Encoder::new(Vec::new());
+    payload
+        .map(5)
+        .and_then(|e| e.u8(0)?.u8(3)?.u8(8)?.u8(1)?.u8(9)?.bytes(&source_id))
+        .and_then(|e| e.u8(10)?.bytes(&recipient_id)?.u8(11)?.bytes(&digest))
+        .expect("encode Darc report payload");
+    let payload = payload.into_writer();
+    let protected = b"\xa2\x01\x38\x22\x03\x70application/cbor";
+    let mut sig_structure = minicbor::Encoder::new(Vec::new());
+    sig_structure
+        .array(4)
+        .and_then(|e| {
+            e.str("Signature1")?
+                .bytes(protected)?
+                .bytes(&[])?
+                .bytes(&payload)
+        })
+        .expect("encode Sig_structure");
+    let mut signature = [0; 96];
+    EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(sender, &sig_structure.into_writer(), Some(&mut signature))
+        .expect("sign Darc report");
+    let mut report = minicbor::Encoder::new(vec![0xD2]);
+    report
+        .array(4)
+        .and_then(|e| {
+            e.bytes(protected)?
+                .map(0)?
+                .bytes(&payload)?
+                .bytes(&signature)
+        })
+        .expect("encode COSE_Sign1");
+    (out, report.into_writer())
+}
+
 /// Recover a host-known TMK through the real POTA-authenticated import flow.
 fn import_tmk(
     ctx: &TestCtx,
@@ -253,20 +335,7 @@ fn import_tmk(
     sender_pub[..common::COORD_LEN].copy_from_slice(&x);
     sender_pub[common::COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let sealed = seal_vec(
-        &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            &recipient,
-            &[],
-            &[],
-            &sender,
-        ),
-        tmk,
-    )
-    .expect("seal known TMK");
-    let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[..SEC1_PUB_LEN].copy_from_slice(&sealed.enc);
-    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let (sealed_tmk, report) = seal_tmk(&recipient, &sender, tmk);
     let mut evidence = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -280,6 +349,7 @@ fn import_tmk(
             masked_kex_key: kex.masked_key,
             policy: fixture.policy,
             sealed_tmk,
+            report,
             remote_cert_chain,
         },
         &oob,

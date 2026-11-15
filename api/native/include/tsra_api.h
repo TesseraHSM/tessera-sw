@@ -1343,6 +1343,13 @@ struct tsra_sd_create_remote_backup_params
      otherwise.
      */
     const struct tsra_sd_evidence *receiver_evidence;
+    /*
+     Optional receiver key report (COSE_Sign1, ES384) signed by the
+     receiver chain leaf over a PQ sealing key (ML-KEM-1024 or
+     MLKEM1024-P384). The backup is sealed to that key instead of the
+     leaf's P-384 key. Pass null to seal to the leaf key.
+     */
+    const struct tsra_buffer *receiver_key_report;
 };
 
 /*
@@ -1356,7 +1363,8 @@ struct tsra_sd_reseal_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the source backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the source backup: 280 B (P-384), 296 B (ML-KEM-1024) or
+     264 B (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
@@ -1368,8 +1376,8 @@ struct tsra_sd_reseal_remote_backup_params
      */
     const struct tsra_sd_evidence *dest_evidence;
     /*
-     Source remote backup to reseal, exactly `POK_REMOTE_BACKUP_LEN`
-     (322 B).
+     Source remote backup to reseal: 322 B (P-384), 1793 B (ML-KEM-1024)
+     or 1890 B (MLKEM1024-P384), matching the masked sealing key's KEM.
      */
     const struct tsra_buffer *src_remote_backup;
 };
@@ -1385,7 +1393,8 @@ struct tsra_sd_restore_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the backup: 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+     (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
@@ -1399,7 +1408,8 @@ struct tsra_sd_restore_remote_backup_params
      */
     const struct tsra_sd_evidence *sender_evidence;
     /*
-     Remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (322 B).
+     Remote backup to restore: 322 B (P-384), 1793 B (ML-KEM-1024) or
+     1890 B (MLKEM1024-P384), matching the masked sealing key's KEM.
      */
     const struct tsra_buffer *src_remote_backup;
     /*
@@ -1440,7 +1450,8 @@ struct tsra_sd_restore_peer_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the backup: 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+     (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
@@ -1448,7 +1459,8 @@ struct tsra_sd_restore_peer_backup_params
      */
     const struct tsra_sd_evidence *src_evidence;
     /*
-     Peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (322 B).
+     Peer backup to restore: 322 B (P-384), 1793 B (ML-KEM-1024) or
+     1890 B (MLKEM1024-P384), matching the masked sealing key's KEM.
      */
     const struct tsra_buffer *pok_peer_backup;
     /*
@@ -3101,12 +3113,15 @@ tsra_status tsra_part_get_prop(tsra_handle handle, struct tsra_part_prop *part_p
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-backup input buffers
  @param[in,out] pok_remote_backup Output buffer for the remote
-                partition-owner-key backup (322 B).
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (1890 B). The written length follows the recipient KEM:
+                322 B (P-384), 1793 B (ML-KEM-1024) or 1890 B
+                (MLKEM1024-P384).
  @param[in,out] pok_local_backup Output buffer for the local
                 partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the security-domain
                 masking-key backup (264 B).
- @param[in,out] report Required PID-signed operation report; reserve 896 B.
+ @param[in,out] report Required PID-signed operation report; reserve 5120 B.
 
  All four distinct output buffers follow the probe/fill convention and are
  validated **before** the domain is created, so the one-shot command is
@@ -3142,8 +3157,11 @@ tsra_status tsra_sd_create_remote_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Reseal-backup input buffers
  @param[in,out] dst_remote_backup Output buffer for the resealed remote
-                partition-owner-key backup (322 B).
- @param[in,out] report Required SA-PID-signed operation report; reserve 896 B.
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (1890 B). The written length follows the recipient KEM:
+                322 B (P-384), 1793 B (ML-KEM-1024) or 1890 B
+                (MLKEM1024-P384).
+ @param[in,out] report Required SA-PID-signed operation report; reserve 5120 B.
 
  Both distinct output buffers follow the probe/fill convention and are validated
  **before** the reseal is performed.
@@ -3213,8 +3231,11 @@ tsra_status tsra_sd_restore_remote_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-peer-backup input buffers
  @param[in,out] pok_peer_backup Output buffer for the peer
-                partition-owner-key backup (322 B).
- @param[in,out] report Required PID-signed operation report; reserve 896 B.
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (1890 B). The written length follows the recipient KEM:
+                322 B (P-384), 1793 B (ML-KEM-1024) or 1890 B
+                (MLKEM1024-P384).
+ @param[in,out] report Required PID-signed operation report; reserve 5120 B.
 
  Both distinct output buffers follow the probe/fill convention and are validated
  **before** the peer backup is created.

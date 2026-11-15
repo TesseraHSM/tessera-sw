@@ -7,6 +7,7 @@
 mod common;
 
 use common::COORD_LEN;
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -30,7 +31,6 @@ enum Mutation {
     WrongBackingPartition,
     PolicyHashMismatch,
     TamperReceiverCertificate { offset: u16, mask: u8 },
-    CorruptMaskedSealingKey { offset: u16, mask: u8 },
     TamperTrustedReport { mask: u8 },
     TrustedReceiverKeyMismatch,
     TrustedEvidenceLeafMismatch,
@@ -146,19 +146,20 @@ fn build_fixture(
         .tbor(&TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope: key_scope.to_tbor(),
+            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     let masked_sealing_key = sealing_key.masked_key.to_vec();
     let receiver_pub = raw_pub_from_wire(&sealing_key.pub_key);
     let report = trusted_sa.then(|| {
-        ctx.tbor(&TborKeyReportReq {
+        ctx.key_report(&TborKeyReportReq {
             session_id: session.session_id,
+            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: masked_sealing_key.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
         })
         .expect("KeyReport")
-        .report
     });
 
     let receiver_pub = if matches!(mutation, Mutation::TrustedReceiverKeyMismatch) {
@@ -173,7 +174,7 @@ fn build_fixture(
         make_chain(&sata, &receiver_pub)
     };
 
-    let mut oob_items = Vec::new();
+    let mut oob_items = common::sd_oob_items();
     let receiver_desc = push_chain(&mut oob_items, receiver_chain);
     let receiver_leaf_index = usize::from(receiver_desc[CHAIN_LEAF_INDEX].index);
     let mut mfgr_desc = Vec::new();
@@ -216,11 +217,8 @@ fn build_fixture(
 
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: masked_sealing_key
-            .as_slice()
-            .try_into()
-            .expect("SdSealingKeyGen returns a fixed-length key"),
         receiver_cert_chain: receiver_desc,
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: mfgr_desc,
         receiver_owner_cert_chain: owner_desc,
         receiver_part_owner_cert_chain: part_owner_desc,
@@ -243,7 +241,7 @@ fn build_fixture(
 fn assert_success(ctx: &TestCtx, fixture: &Fixture) {
     let oob: Vec<&[u8]> = fixture.oob_items.iter().map(Vec::as_slice).collect();
     let response = ctx
-        .tbor_oob(&fixture.request, &oob)
+        .sd_oob(&fixture.request, &oob)
         .expect("valid SdCreateRemoteBackup request should succeed");
 
     assert_eq!(response.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
@@ -258,7 +256,7 @@ fn assert_success(ctx: &TestCtx, fixture: &Fixture) {
 /// with the expected firmware status.
 fn assert_rejected(ctx: &TestCtx, fixture: &Fixture, expected: TborStatus) {
     let oob: Vec<&[u8]> = fixture.oob_items.iter().map(Vec::as_slice).collect();
-    ctx.expect_fw_reject_oob(&fixture.request, &oob, expected);
+    ctx.expect_sd_reject(&fixture.request, &oob, expected);
 }
 
 /// XOR a byte at the offset modulo the buffer length. Return whether a
@@ -336,28 +334,13 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             );
             if changed {
                 let oob: Vec<&[u8]> = fixture.oob_items.iter().map(Vec::as_slice).collect();
-                let result = ctx.tbor_oob(&fixture.request, &oob);
+                let result = ctx.sd_oob(&fixture.request, &oob);
                 assert!(
                     matches!(&result, Err(tsra_ddi_interface::DdiError::TborStatus(_))),
                     "tampered receiver certificate must be rejected by firmware",
                 );
             } else {
                 assert_success(ctx, &fixture);
-            }
-        }
-        Mutation::CorruptMaskedSealingKey { offset, mask } => {
-            let byte = &mut fixture.request.masked_sealing_key
-                [usize::from(offset) % MASKED_SEALING_KEY_LEN];
-            *byte ^= mask;
-            if mask == 0 {
-                assert_success(ctx, &fixture);
-            } else {
-                let oob: Vec<&[u8]> = fixture.oob_items.iter().map(Vec::as_slice).collect();
-                let result = ctx.tbor_oob(&fixture.request, &oob);
-                assert!(
-                    matches!(&result, Err(tsra_ddi_interface::DdiError::TborStatus(_))),
-                    "corrupted masked sealing key must be rejected by firmware",
-                );
             }
         }
         Mutation::TamperTrustedReport { mask } => {
@@ -380,7 +363,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
         Mutation::OneShot => {
             assert_success(ctx, &fixture);
             let oob: Vec<&[u8]> = fixture.oob_items.iter().map(Vec::as_slice).collect();
-            ctx.expect_fw_reject_oob(&fixture.request, &oob, TborStatus::SdAlreadyInitialized);
+            ctx.expect_sd_reject(&fixture.request, &oob, TborStatus::SdAlreadyInitialized);
         }
     }
 

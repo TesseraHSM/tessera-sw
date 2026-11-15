@@ -34,6 +34,8 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlKemPct;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
@@ -108,6 +110,106 @@ fn check_curve_layout<P: HsmCrypto>() -> HsmResult<()> {
         return Err(HsmError::InvalidArg);
     }
     Ok(())
+}
+
+/// Bound on `RandomScalar` rejections during key generation; each occurs
+/// with probability below 2^-190.
+const KEYGEN_ATTEMPTS: usize = 4;
+
+/// `expandDecapsKey` prefix: `SHAKE256(seed, 112)`, or `None` when
+/// `seed_T` is not a valid P-384 scalar.
+async fn expand_seed<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    sk: &[u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<Option<&'a mut HsmDmaBuf>>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    if sk.len() != SEED_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let seed = dma_copy_in(alloc, sk)?;
+    let seed_full = alloc_bytes(SEED_FULL_LEN, alloc)?;
+    pal.hash(io, SEED_FULL_ALGO, seed, seed_full, HsmDigestForm::Standard)
+        .await?;
+    Ok(scalar_in_range(&seed_full[MLKEM_SEED_LEN..]).then_some(seed_full))
+}
+
+/// Writes `ek_PQ ‖ SEC1(ek_T)` for an expanded seed.
+async fn derive_public<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    seed_full: &mut HsmDmaBuf,
+    pct: HsmMlKemPct,
+    pk: &mut [u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<()>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    let (ek_pq, ek_t) = pk.split_at_mut(mlkem::EK_LEN);
+    let (seed_pq, seed_t) = seed_full.split_at_mut(MLKEM_SEED_LEN);
+    mlkem::keypair(pal, io, HsmMlSeedSrc::Caller, pct, seed_pq, ek_pq, alloc).await?;
+    let dk_t = alloc_bytes(COORD, alloc)?;
+    byte_order::int_copy_from_be(P::BYTE_ORDER, dk_t, seed_t)?;
+    let ek_t_op = alloc_bytes(2 * COORD, alloc)?;
+    pal.ecc_pub_from_priv(io, CURVE, dk_t, ek_t_op).await?;
+    operand_to_sec1(P::BYTE_ORDER, ek_t_op, ek_t, COORD)
+}
+
+/// Derives the hybrid public key `ek_PQ ‖ SEC1(ek_T)` from the 32-byte
+/// seed `sk`.
+///
+/// # Returns
+///
+/// * `Err(HsmError::InvalidArg)` — wrong lengths or a seed whose P-384
+///   scalar is out of range.
+pub(super) async fn public_key<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    sk: &[u8],
+    pk: &mut [u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<()>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    check_curve_layout::<P>()?;
+    if pk.len() != NENC {
+        return Err(HsmError::InvalidArg);
+    }
+    let seed_full = expand_seed(pal, io, sk, alloc)
+        .await?
+        .ok_or(HsmError::InvalidArg)?;
+    derive_public(pal, io, seed_full, HsmMlKemPct::None, pk, alloc).await
+}
+
+/// Hybrid `GenerateKeyPair`: draws a random 32-byte seed into `sk`,
+/// resampling while the derived P-384 scalar is out of range, and writes
+/// the public key to `pk`. The ML-KEM component runs its PCT.
+pub(super) async fn generate<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    sk: &mut HsmDmaBuf,
+    pk: &mut [u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<()>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    check_curve_layout::<P>()?;
+    if sk.len() != SEED_LEN || pk.len() != NENC {
+        return Err(HsmError::InvalidArg);
+    }
+    for _ in 0..KEYGEN_ATTEMPTS {
+        pal.rng_fill_bytes(io, sk)?;
+        if let Some(seed_full) = expand_seed(pal, io, sk, alloc).await? {
+            return derive_public(pal, io, seed_full, HsmMlKemPct::EncapsDecaps, pk, alloc).await;
+        }
+    }
+    Err(HsmError::InternalError)
 }
 
 /// Hybrid Encap.
@@ -217,15 +319,10 @@ where
     }
     let (ct_pq, ct_t_in) = enc.split_at(mlkem::CT_LEN);
 
-    // expandDecapsKey: seed_full = SHAKE256(seed, 112).
-    let seed = dma_copy_in(alloc, sk_r)?;
-    let seed_full = alloc_bytes(SEED_FULL_LEN, alloc)?;
-    pal.hash(io, SEED_FULL_ALGO, seed, seed_full, HsmDigestForm::Standard)
-        .await?;
+    let seed_full = expand_seed(pal, io, sk_r, alloc)
+        .await?
+        .ok_or(HsmError::InvalidArg)?;
     let (seed_pq, seed_t) = seed_full.split_at_mut(MLKEM_SEED_LEN);
-    if !scalar_in_range(seed_t) {
-        return Err(HsmError::InvalidArg);
-    }
     let dk_t = alloc_bytes(COORD, alloc)?;
     byte_order::int_copy_from_be(P::BYTE_ORDER, dk_t, seed_t)?;
 

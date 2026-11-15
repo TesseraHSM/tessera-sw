@@ -304,7 +304,11 @@ fn make_key(ctx: &TestCtx, session_id: u16, scope: u8, input: &FuzzInput) -> Key
     match source {
         1 if scope != common::KEY_SCOPE_SESSION => {
             let key = ctx
-                .tbor(&TborSdSealingKeyGenReq { session_id, scope })
+                .tbor(&TborSdSealingKeyGenReq {
+                    session_id,
+                    scope,
+                    kem: SD_SEALING_KEM_P384,
+                })
                 .expect("SD sealing-key generation");
             KeyMaterial {
                 masked: key.masked_key.to_vec(),
@@ -422,10 +426,7 @@ fn key_outcome(masked: &[u8], original: &[u8]) -> Expected {
 }
 
 /// Assert both directions of the oracle, including socket session-ownership rejections.
-fn check_result(
-    result: Result<TborKeyReportResp, DdiError>,
-    expected: Expected,
-) -> Option<TborKeyReportResp> {
+fn check_result(result: Result<Vec<u8>, DdiError>, expected: Expected) -> Option<Vec<u8>> {
     match (result, expected) {
         (Ok(response), Expected::Success) => Some(response),
         (Ok(_), _) => panic!("invalid KeyReport unexpectedly succeeded: {expected:?}"),
@@ -461,13 +462,13 @@ fn unpad_integer(bytes: &[u8]) -> &[u8] {
 /// Verify PID signature, v2 payload, public-key binding, flags, and authenticated AppId.
 fn verify_report(
     ctx: &TestCtx,
-    response: &TborKeyReportResp,
+    report: &[u8],
     request: &TborKeyReportReq,
     key: &KeyMaterial,
     app_id: &[u8],
 ) {
-    assert!(!response.report.is_empty() && response.report.len() <= KEY_REPORT_MAX_LEN);
-    assert_eq!(response.report.first(), Some(&0xD2));
+    assert!(!report.is_empty() && report.len() <= KEY_REPORT_MAX_LEN);
+    assert_eq!(report.first(), Some(&0xD2));
     let info = ctx.cert_chain_info().expect("certificate-chain info");
     assert!(info.data.num_certs > 0);
     let leaf = ctx
@@ -477,7 +478,7 @@ fn verify_report(
         X509Certificate::from_der(leaf.data.certificate.as_slice()).expect("PID certificate");
     let public = EccPublicKey::from_bytes(&cert.get_public_key_der().expect("PID SPKI"))
         .expect("PID public key");
-    let cose = CoseSign1Object::decode(&response.report).expect("COSE envelope");
+    let cose = CoseSign1Object::decode(report).expect("COSE envelope");
     let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
     let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
         .expect("encode COSE Sig_structure");
@@ -569,7 +570,7 @@ fn semantic_auth(
     HashAlgo::sha384()
         .hash(&data, Some(&mut digest))
         .expect("request digest");
-    let mut aad = build_key_report_auth_aad(request.session_id);
+    let mut aad = build_key_report_auth_aad(request.session_id, request.bank);
     if wrong_aad {
         aad[0] ^= 1;
     } else {
@@ -603,12 +604,13 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
             .expect("default-PSK session");
         let req = TborKeyReportReq {
             session_id: session.session_id(),
+            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: Vec::new(),
             report_data: input.report_data,
             auth_envelope: Vec::new(),
         };
         check_result(
-            ctx.tbor(&req),
+            ctx.key_report(&req),
             Expected::Status(TborStatus::DefaultPskMustRotate),
         );
         session.close().expect("close default-PSK session");
@@ -645,13 +647,17 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
     };
     let mut req = TborKeyReportReq {
         session_id: session.session_id,
+        bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
         masked_key: Vec::new(),
         report_data: input.report_data,
         auth_envelope: Vec::new(),
     };
     if scenario == Scenario::Unfinalized {
         req.auth_envelope = seal_key_report_auth(&session.param_key, &req).expect("authenticate");
-        check_result(caller.tbor(&req), Expected::Status(TborStatus::InvalidArg));
+        check_result(
+            caller.key_report(&req),
+            Expected::Status(TborStatus::InvalidArg),
+        );
         caller
             .session_close(session.session_id)
             .expect("close unfinalized session");
@@ -729,7 +735,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
             fresh_req.session_id = fresh.session_id;
             fresh_req.auth_envelope = seal_key_report_auth(&fresh.param_key, &fresh_req)
                 .expect("authenticate fresh credential");
-            let response = check_result(other.tbor(&fresh_req), Expected::Success)
+            let response = check_result(other.key_report(&fresh_req), Expected::Success)
                 .expect("fresh credential remains valid");
             verify_report(ctx, &response, &fresh_req, &key, &next_psk[..16]);
             other
@@ -896,7 +902,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
         _ => {}
     }
     let request_ctx = extra.as_ref().unwrap_or(caller);
-    if let Some(response) = check_result(request_ctx.tbor(&req), expected) {
+    if let Some(response) = check_result(request_ctx.key_report(&req), expected) {
         verify_report(ctx, &response, &req, &key, &psk[..16]);
     }
     if !matches!(expected, Expected::Success)
@@ -904,7 +910,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
         && !matches!(scenario, Scenario::StaleCredential | Scenario::Symmetric)
     {
         let response =
-            check_result(caller.tbor(&original), Expected::Success).expect("valid retry");
+            check_result(caller.key_report(&original), Expected::Success).expect("valid retry");
         verify_report(ctx, &response, &original, &key, &psk[..16]);
     }
     if !closed {

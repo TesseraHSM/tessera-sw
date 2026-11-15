@@ -22,7 +22,8 @@
 //! 4. Dispatch by key kind to build the attested public key. ECC-private
 //!    kinds derive the public key via
 //!    [`HsmEcc::ecc_pub_from_priv`](tsra_fw_hsm_pal_traits::HsmEcc::ecc_pub_from_priv).
-//!    RSA-private kinds, including CRT, use `rsa_priv_pub_key`. Symmetric
+//!    RSA-private kinds, including CRT, use `rsa_priv_pub_key`. ML-KEM-1024
+//!    and MLKEM1024-P384 SD sealing seeds derive their HPKE public key. Symmetric
 //!    keys (no public component) and other non-attestable kinds are rejected with
 //!    [`HsmError::UnsupportedKeyType`].
 //! 5. Build and PID-sign the COSE_Sign1 report over the derived key,
@@ -42,6 +43,7 @@ use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_crypto_key_report::key_report_with;
+use tsra_fw_core_crypto_key_report::transfer::TransferKem;
 use tsra_fw_core_crypto_key_report::AttestedPubKey;
 use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KeyReportParams;
@@ -102,7 +104,7 @@ fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs, kind: HsmVaultKeyKind) -> KeyFl
         .with_can_wrap(attrs.wrap())
         .with_can_unwrap(attrs.unwrap())
         .with_can_derive(attrs.derive())
-        .with_is_sd_sealing(kind == HsmVaultKeyKind::SdSealing && attrs.local())
+        .with_is_sd_sealing(super::sd_transfer::sealing_kem(kind).is_ok() && attrs.local())
 }
 
 /// Allocate the report's AppId captured by the authenticated handshake.
@@ -144,6 +146,16 @@ async fn attested_pub_key<'a, P: HsmPal>(
             n: modulus,
             e: exponent,
         });
+    }
+
+    if let Ok(kem) = super::sd_transfer::sealing_kem(key_kind) {
+        if kem != TransferKem::P384 {
+            let pk = super::sd_transfer::sealing_public(pal, io, alloc, kem, priv_key).await?;
+            return Ok(match kem {
+                TransferKem::MlKem1024 => AttestedPubKey::MlKem1024 { pk },
+                _ => AttestedPubKey::MlKem1024P384 { pk },
+            });
+        }
     }
 
     let Some(curve) = super::from_pal::ecc_curve(key_kind) else {

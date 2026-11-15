@@ -122,6 +122,28 @@ pub const MLDSA_SEED_LEN: usize = 32;
 /// this long rather than padded.
 pub const MLDSA87_COSE_KEY_LEN: usize = 1 + 2 + 3 + 1 + 3 + MLDSA87_PUB_KEY_LEN;
 
+/// ML-KEM-1024 encapsulation-key length (FIPS 203).
+pub const MLKEM1024_PUB_KEY_LEN: usize = 1568;
+
+/// MLKEM1024-P384 hybrid public-key length: `ek_PQ ‖ SEC1(ek_T)`
+/// (draft-ietf-hpke-pq).
+pub const MLKEM1024P384_PUB_KEY_LEN: usize = MLKEM1024_PUB_KEY_LEN + 97;
+
+/// Size of an ML-KEM-1024 AKP COSE_Key `{ 1: 7, 3: alg, -1: pub }`: the
+/// map header, the `kty` pair (2 bytes), the `alg` pair with a 5-byte
+/// private-use algorithm (6 bytes), the `pub` label and its 3-byte bstr
+/// header, and the key. Like ML-DSA-87 it exceeds [`PUBLIC_KEY_MAX_SIZE`].
+pub const MLKEM1024_COSE_KEY_LEN: usize = 1 + 2 + 6 + 1 + 3 + MLKEM1024_PUB_KEY_LEN;
+
+/// Size of an MLKEM1024-P384 AKP COSE_Key (see [`MLKEM1024_COSE_KEY_LEN`]).
+pub const MLKEM1024P384_COSE_KEY_LEN: usize = 1 + 2 + 6 + 1 + 3 + MLKEM1024P384_PUB_KEY_LEN;
+
+/// Upper bound on an ES384-signed key-attestation report whose attested key
+/// is an ML-KEM-1024 or MLKEM1024-P384 key: [`KEY_REPORT_MAX_LEN`] with the
+/// padded `public_key` field replaced by the largest KEM COSE_Key.
+pub const KEM_KEY_REPORT_MAX_LEN: usize =
+    KEY_REPORT_MAX_LEN - PUBLIC_KEY_MAX_SIZE + MLKEM1024P384_COSE_KEY_LEN;
+
 /// P-384 attestation private-key (raw scalar) length.
 pub const PRIV_KEY_LEN: usize = 48;
 

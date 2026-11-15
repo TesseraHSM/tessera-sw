@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
 use crate::tbor;
+use crate::tbor_int::U16;
 use crate::CertDescriptor;
 
 /// TBOR opcode for `SdCreateRemoteBackup`.
@@ -39,8 +40,20 @@ pub const MASKED_SD_LEN: usize = 280;
 /// POK_REMOTE_BACKUP_LEN`; the firmware schema is the length authority.
 pub const POK_REMOTE_BACKUP_LEN: usize = 322;
 
-/// Maximum PID-signed SD operation report length.
-pub const SD_BACKUP_REPORT_MAX_LEN: usize = 896;
+/// Largest remote-backup envelope (MLKEM1024-P384: `enc` is 1665 B).
+pub const POK_REMOTE_BACKUP_MAX_LEN: usize = 161 + 1665 + 48 + 16;
+
+/// Maximum PID-signed SD operation-report length: an ML-DSA-87 signature
+/// (4627 B) over the fixed SdBackup payload.
+pub const SD_BACKUP_REPORT_MAX_LEN: usize = 5120;
+/// Out-of-band item that receives the PID-signed SdBackup report of
+/// `SdCreateRemoteBackup`, `SdCreatePeerBackup` and `SdResealRemoteBackup`;
+/// request descriptors index the items after it.
+pub const SD_BACKUP_REPORT_OOB_INDEX: usize = 0;
+
+/// Maximum attestation / receiver key-report length accepted as evidence:
+/// an ML-DSA-87 signature over a report attesting the largest key.
+pub const SD_EVIDENCE_REPORT_MAX_LEN: usize = 8192;
 
 /// Exact on-the-wire length of the security-domain masking-key backup
 /// envelope (`SDMK` masked under `SDBMK`).  Mirrors the firmware
@@ -62,6 +75,11 @@ pub struct TborSdCreateRemoteBackupReq {
     /// remote backup is sealed to.  The DER bytes travel out of band.
     #[tbor(max_len = 24)]
     pub receiver_cert_chain: Vec<CertDescriptor>,
+
+    /// Optional key report, signed by the receiver leaf, attesting the
+    /// recipient's sealing KEM key.  Empty: the leaf P-384 key is used.
+    #[tbor(max_len = 1)]
+    pub receiver_key_report: Vec<ReportDescriptor>,
 
     /// Receiver manufacturer certificate-chain descriptors.  Flattened
     /// from the firmware `receiver_evidence` field group (first of its
@@ -90,12 +108,12 @@ pub struct TborSdCreateRemoteBackupReq {
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreateRemoteBackupResp {
-    /// Remote partition-owner-key backup: an HPKE Base seal of BKS3
-    /// (exactly [`POK_REMOTE_BACKUP_LEN`] = 322 B on the wire; the
-    /// firmware schema is the length authority).  A fixed-length `[u8; N]`
-    /// field so host decode enforces the exact length — rejecting any
-    /// malformed frame — instead of allocating from the encoded length.
-    pub pok_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Remote partition-owner-key backup: an HPKE Base seal of BKS3: [`POK_REMOTE_BACKUP_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN)
+    /// (322 B) for a P-384 recipient, up to
+    /// [`POK_REMOTE_BACKUP_MAX_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN)
+    /// for ML-KEM-1024 / MLKEM1024-P384.
+    #[tbor(align = 4, min_len = 322, max_len = 1890)]
+    pub pok_remote_backup: Vec<u8>,
 
     /// Local partition-owner-key backup: the fresh BKS3 masked under the
     /// partition-local masking key (exactly [`MASKED_SD_LEN`] = 280 B on
@@ -110,9 +128,9 @@ pub struct TborSdCreateRemoteBackupResp {
     #[tbor(align = 4)]
     pub sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
 
-    /// Required PID-signed SdBackup report accompanying the Base envelope.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
+    /// Bytes of the PID-signed SdBackup report written to out-of-band item
+    /// [`SD_BACKUP_REPORT_OOB_INDEX`](crate::SD_BACKUP_REPORT_OOB_INDEX).
+    pub report_len: U16,
 }
 
 #[cfg(test)]
@@ -126,6 +144,7 @@ mod tests {
         let req = TborSdCreateRemoteBackupReq {
             session_id: 9,
             receiver_cert_chain: Vec::new(),
+            receiver_key_report: Vec::new(),
             receiver_mfgr_cert_chain: Vec::new(),
             receiver_owner_cert_chain: Vec::new(),
             receiver_part_owner_cert_chain: Vec::new(),

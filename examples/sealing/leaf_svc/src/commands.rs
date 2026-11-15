@@ -28,6 +28,7 @@ use tsra_sealing_api::load_partition_recovery;
 use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
+use tsra_sealing_api::TransferKem;
 use tsra_sealing_common::http::Client;
 use tsra_sealing_common::runtime::finish_restore;
 use tsra_sealing_common::runtime::open_restore_session;
@@ -172,7 +173,7 @@ fn create(args: &CreateArgs) -> Result<()> {
     let domain = SecurityDomain::new(env);
     let env = domain.env();
     let certs: Vec<_> = chain.iter().map(|cert| HsmCert { cert }).collect();
-    let backup = domain.create(&session, &seed, &certs, &evidence, |csr, report| {
+    let backup = domain.create(&session, &seed, &certs, None, &evidence, |csr, report| {
         env.certify(csr, report)
     })?;
     progress(
@@ -281,8 +282,10 @@ fn join(args: &JoinArgs) -> Result<()> {
     env.store.write_immutable("leaf.json", &record)?;
     let domain = SecurityDomain::new(env);
     let env = domain.env();
-    let prepared = domain
-        .prepare_remote_instance(&session, &env.seed, |csr, report| env.certify(csr, report))?;
+    let prepared =
+        domain.prepare_remote_instance(&session, &env.seed, TransferKem::P384, |csr, report| {
+            env.certify(csr, report)
+        })?;
     save_prepared(env, &prepared)?;
     progress(
         &args.state,
@@ -400,8 +403,10 @@ fn restore_remote(args: &RestoreArgs) -> Result<()> {
     env.manufacturer = device_cert_chain(&session.partition, 0)?;
     let domain = SecurityDomain::new(env);
     let env = domain.env();
-    let prepared = domain
-        .prepare_remote_restore(&session, &env.seed, |csr, report| env.certify(csr, report))?;
+    let prepared =
+        domain.prepare_remote_restore(&session, &env.seed, TransferKem::P384, |csr, report| {
+            env.certify(csr, report)
+        })?;
     save_prepared(env, &prepared)?;
     progress(
         &args.state,

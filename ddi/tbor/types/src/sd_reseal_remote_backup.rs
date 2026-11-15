@@ -23,9 +23,8 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
-use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
+use crate::tbor_int::U16;
 use crate::CertDescriptor;
 
 /// TBOR opcode for `SdResealRemoteBackup`.
@@ -40,12 +39,12 @@ pub struct TborSdResealRemoteBackupReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The masked SD-sealing key (from `SdSealingKeyGen`), exactly
-    /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
-    /// the receiver's private HPKE key; a fixed-length `[u8; N]` field
-    /// (mirrors the firmware `len = 280`), never a vault handle.
-    #[tbor(align = 4)]
-    pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
+    /// The masked SD-sealing key (from `SdSealingKeyGen`): 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+    /// (MLKEM1024-P384).
+    /// Unmasked on-device to recover the receiver's private HPKE key; never
+    /// a vault handle.
+    #[tbor(align = 4, min_len = 264, max_len = 296)]
+    pub masked_sealing_key: Vec<u8>,
 
     /// Unified [`PartPolicy`] the source and destination must share.
     /// Encoded as its deterministic CBOR document of at most 384 bytes.
@@ -86,25 +85,27 @@ pub struct TborSdResealRemoteBackupReq {
     /// Destination attestation-report (COSE_Sign1) descriptor.
     pub dest_report: ReportDescriptor,
 
-    /// Source remote backup to reseal: an HPKE Base seal, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  A fixed-length `[u8; N]` field
-    /// (the host derive's exact-length form; the firmware schema is the
-    /// length authority).
-    pub src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Source remote backup to reseal: an HPKE Base seal of BKS3: [`POK_REMOTE_BACKUP_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN)
+    /// (322 B) for a P-384 recipient, up to
+    /// [`POK_REMOTE_BACKUP_MAX_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN)
+    /// for ML-KEM-1024 / MLKEM1024-P384.
+    #[tbor(min_len = 322, max_len = 1890)]
+    pub src_remote_backup: Vec<u8>,
 }
 
 /// Host-facing TBOR `SdResealRemoteBackup` response.
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdResealRemoteBackupResp {
-    /// Resealed remote backup: an HPKE Base seal of the same BKS3 to the
-    /// destination receiver, exactly [`POK_REMOTE_BACKUP_LEN`] (322 B).  A
-    /// fixed-length `[u8; N]` field so host decode enforces the exact
-    /// length — the firmware schema is the length authority.
-    pub dst_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
-    /// Required SA PID-signed SdBackup report.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
+    /// Resealed remote backup to the destination receiver: an HPKE Base seal of BKS3: [`POK_REMOTE_BACKUP_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN)
+    /// (322 B) for a P-384 recipient, up to
+    /// [`POK_REMOTE_BACKUP_MAX_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN)
+    /// for ML-KEM-1024 / MLKEM1024-P384.
+    #[tbor(align = 4, min_len = 322, max_len = 1890)]
+    pub dst_remote_backup: Vec<u8>,
+    /// Bytes of the PID-signed SdBackup report written to out-of-band item
+    /// [`SD_BACKUP_REPORT_OOB_INDEX`](crate::SD_BACKUP_REPORT_OOB_INDEX).
+    pub report_len: U16,
 }
 
 #[cfg(test)]
@@ -112,12 +113,14 @@ mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
+    use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+    use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 
     #[test]
     fn request_encodes_session_policy_and_src_remote_backup() {
         let req = TborSdResealRemoteBackupReq {
             session_id: 9,
-            masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
+            masked_sealing_key: alloc::vec![0u8; MASKED_SEALING_KEY_LEN],
             policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
@@ -127,7 +130,7 @@ mod tests {
             dest_owner_cert_chain: Vec::new(),
             dest_part_owner_cert_chain: Vec::new(),
             dest_report: ReportDescriptor::default(),
-            src_remote_backup: [0xABu8; POK_REMOTE_BACKUP_LEN],
+            src_remote_backup: alloc::vec![0xABu8; POK_REMOTE_BACKUP_LEN],
         };
 
         let mut buf = [0u8; 2048];

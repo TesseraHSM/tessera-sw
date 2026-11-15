@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use tsra_sealing_api::TransferKem;
 
 /// Root service for the TSRA sealing example.
 #[derive(Parser, Debug)]
@@ -43,6 +44,11 @@ pub(crate) struct CloneArgs {
     /// New directory for this peer's recovery state.
     #[arg(long, value_name = "DIR")]
     pub state_dir: PathBuf,
+
+    /// Transfer KEM for SD sealing: p384 (HPKE P-384), mlkem1024 (HPKE-13)
+    /// or mlkem1024-p384 (HPKE-10 hybrid).
+    #[arg(long, value_name = "KEM", default_value = "p384", value_parser = parse_kem)]
+    pub kem: TransferKem,
 }
 
 #[derive(Args, Debug)]
@@ -67,6 +73,11 @@ pub(crate) struct CreateArgs {
     #[arg(long)]
     pub remote_restorable: bool,
 
+    /// Transfer KEM for SD sealing: p384 (HPKE P-384), mlkem1024 (HPKE-13)
+    /// or mlkem1024-p384 (HPKE-10 hybrid).
+    #[arg(long, value_name = "KEM", default_value = "p384", value_parser = parse_kem)]
+    pub kem: TransferKem,
+
     /// Serve peer cloning and named leaf enrollment (loopback IP:port only).
     #[arg(long, value_name = "ADDR", value_parser = crate::peer::http::listen_addr)]
     pub listen: Option<std::net::SocketAddr>,
@@ -90,4 +101,8 @@ pub(crate) struct RestoreArgs {
     /// Serve peer cloning and named leaf enrollment (loopback IP:port only).
     #[arg(long, value_name = "ADDR", value_parser = crate::peer::http::listen_addr)]
     pub listen: Option<std::net::SocketAddr>,
+}
+
+fn parse_kem(name: &str) -> Result<TransferKem, String> {
+    TransferKem::from_name(name).map_err(|error| error.to_string())
 }

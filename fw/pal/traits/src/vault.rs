@@ -81,6 +81,7 @@ use super::*;
 /// | 58–60 | ML-KEM private keys | `MlKem512Private` .. `MlKem1024Private` |
 /// | 61–63 | ML-KEM public keys | `MlKem512Public` .. `MlKem1024Public` |
 /// | 64 | AES-256-XTS key (`K1 ‖ K2`) | `AesXts512` |
+/// | 65–66 | Post-quantum SD sealing keys | `SdSealingMlKem1024`, `SdSealingMlKem1024P384` |
 #[repr(u8)]
 #[open_enum]
 #[derive(Clone, Copy, Debug)]
@@ -320,6 +321,21 @@ pub enum HsmVaultKeyKind {
 
     // AES-256-XTS key, `K1 || K2` (TBOR; distinct from the MBOR bulk kind)
     AesXts512 = 64,
+
+    /// Security-domain sealing key — ML-KEM-1024 (HPKE-13) recipient key.
+    ///
+    /// Same lifecycle as [`SdSealing`](Self::SdSealing) (masked-only,
+    /// scope-tagged); represented as the 64-byte FIPS 203 `d ‖ z` seed.
+    /// Kept distinct from [`MlKem1024Seed`](Self::MlKem1024Seed) so SD
+    /// sealing keys are never interchangeable with general ML-KEM keys.
+    SdSealingMlKem1024 = 65,
+
+    /// Security-domain sealing key — MLKEM1024-P384 (HPKE-10) recipient
+    /// key.
+    ///
+    /// Same lifecycle as [`SdSealing`](Self::SdSealing); represented as the
+    /// 32-byte hybrid seed of draft-ietf-hpke-pq.
+    SdSealingMlKem1024P384 = 66,
 }
 
 /// Key scope: the lifecycle / visibility domain a vault key belongs

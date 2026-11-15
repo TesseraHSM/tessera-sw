@@ -126,7 +126,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Integrity gate: the re-supplied policy must match the one
         // bound at `PartInit` (`SHA-384(part_policy) == policy_hash`).
-        verify_policy_hash(pal, io, alloc, req.part_policy).await?;
+        verify_policy_hash(pal, io, req.part_policy, alloc.dma_alloc(SHA384_LEN)?).await?;
 
         // Validate the typed policy (rejects malformed input) and recover
         // the POTA trust-anchor thumbprint for cert-chain validation.
@@ -372,14 +372,18 @@ async fn derive_local_bmk<'a, P: HsmPal>(
 }
 
 /// Verify `SHA-384(part_policy)` equals the partition's stored
-/// `policy_hash` (bound at `PartInit`).
+/// `policy_hash` (bound at `PartInit`), leaving the verified digest in
+/// `digest` (exactly [`SHA384_LEN`] bytes) so callers needing the policy
+/// hash do not hash the policy again.
 pub(crate) async fn verify_policy_hash<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
     part_policy: &HsmDmaBuf,
+    digest: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
+    if digest.len() != SHA384_LEN {
+        return Err(HsmError::InternalError);
+    }
     pal.hash(
         io,
         HsmHashAlgo::Sha384,

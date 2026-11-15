@@ -763,7 +763,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
             &policy_buf, &key_buf, &evidence, &remote_backup, &mk_backup,
         };
 
-        std::vector<uint8_t> remote(kPokRemoteBackupLen, 0);
+        std::vector<uint8_t> remote(kPokRemoteBackupMaxLen, 0);
         std::vector<uint8_t> local(kPokLocalBackupLen, 0);
         std::vector<uint8_t> mk(kSdMkBackupLen, 0);
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };

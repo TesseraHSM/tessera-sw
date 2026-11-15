@@ -335,6 +335,7 @@ TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
         // A second create on the same (now initialized) partition must
         // fail. The buffers are already large enough, so the request clears
         // validation and reaches the firmware's one-shot guard.
+        pok_remote.resize(kPokRemoteBackupMaxLen);
         tsra_buffer remote_buf{ pok_remote.data(), static_cast<uint32_t>(pok_remote.size()) };
         tsra_buffer local_buf{ pok_local.data(), static_cast<uint32_t>(pok_local.size()) };
         tsra_buffer mk_buf{ sd_mk.data(), static_cast<uint32_t>(sd_mk.size()) };
@@ -438,7 +439,7 @@ TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
             &report_buf
         );
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
-        std::vector<uint8_t> remote(kPokRemoteBackupLen);
+        std::vector<uint8_t> remote(kPokRemoteBackupMaxLen);
         tsra_buffer remote_buf{ remote.data(), static_cast<uint32_t>(remote.size()) };
         err = tsra_sd_create_remote_backup(
             ctx.session,

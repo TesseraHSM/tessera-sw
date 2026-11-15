@@ -210,8 +210,10 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
                 || seen & !0x1ff != 0
                 || version != expected_version
                 || !(pk.1 - pk.0 == PUBLIC_KEY_MAX_SIZE
-                    || (pk.1 - pk.0 == MLDSA87_COSE_KEY_LEN
-                        && usize::from(public_key_size) == MLDSA87_COSE_KEY_LEN))
+                    || (matches!(
+                        pk.1 - pk.0,
+                        MLDSA87_COSE_KEY_LEN | MLKEM1024_COSE_KEY_LEN | MLKEM1024P384_COSE_KEY_LEN
+                    ) && usize::from(public_key_size) == pk.1 - pk.0))
                 || uuid.1 - uuid.0 != APP_UUID_LEN
                 || rd.1 - rd.0 != REPORT_DATA_LEN
                 || vm.1 - vm.0 != VM_LAUNCH_ID_LEN

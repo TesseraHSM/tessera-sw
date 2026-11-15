@@ -69,6 +69,9 @@ use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
+use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::SD_SEALING_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::ENVELOPE_AAD_LEN;
@@ -189,15 +192,36 @@ fn sample_report_data() -> [u8; KEY_REPORT_DATA_LEN] {
 /// returning `(masked_key, sealing_pub_le)`.  The public key is in the
 /// little-endian DDI wire form (`x_le ‖ y_le`).
 fn masked_sealing_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Vec<u8>) {
+    masked_kem_sealing_key(ctx, session_id, scope, SD_SEALING_KEM_P384)
+}
+
+/// [`masked_sealing_key`] for a sealing key of the given `kem`.
+pub(crate) fn masked_kem_sealing_key(
+    ctx: &TestCtx,
+    session_id: u16,
+    scope: u8,
+    kem: u8,
+) -> (Vec<u8>, Vec<u8>) {
     let seal = ctx
-        .tbor(&TborSdSealingKeyGenReq { session_id, scope })
+        .tbor(&TborSdSealingKeyGenReq {
+            session_id,
+            scope,
+            kem,
+        })
         .expect("SdSealingKeyGen");
-    (seal.masked_key.to_vec(), seal.pub_key.to_vec())
+    (seal.masked_key, seal.pub_key)
 }
 
 /// Verifies a COSE_Sign1 report's ES384 signature under the PID public key
 /// (`pid_spki_der`) and returns the decoded attestation payload.
 pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttestationReport {
+    minicbor::decode(verify_cose_sign1_payload(report, pid_spki_der))
+        .expect("report payload decodes as KeyAttestationReport")
+}
+
+/// Verifies a COSE_Sign1 report's ES384 signature under `pid_spki_der` and
+/// returns the raw payload bytes.
+pub(crate) fn verify_cose_sign1_payload<'a>(report: &'a [u8], pid_spki_der: &[u8]) -> &'a [u8] {
     use tsra_crypto::EccAlgo;
     use tsra_crypto::EccPublicKey;
     use tsra_crypto::HashAlgo;
@@ -216,7 +240,77 @@ pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttest
     let ok = Verifier::verify(&mut EccAlgo::default(), &pid_pub, &digest, &cose.signature)
         .expect("ECDSA verify");
     assert!(ok, "COSE_Sign1 must verify under PID pubkey");
-    minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport")
+    cose.payload
+}
+
+/// Private-use COSE algorithm ids of the ML-KEM sealing keys.
+const COSE_ALG_MLKEM1024: i32 = -65537;
+const COSE_ALG_MLKEM1024_P384: i32 = -65538;
+
+/// `KeyFlags::is_generated` and `KeyFlags::is_sd_sealing` bits.
+const KEY_FLAG_GENERATED: u32 = 1 << 2;
+const KEY_FLAG_SD_SEALING: u32 = 1 << 10;
+
+/// Fields of a key-report payload whose COSE_Key is an ML-KEM AKP key
+/// (larger than the fixed [`KeyAttestationReport`] field).
+pub(crate) struct KemReportFields {
+    /// AKP COSE `alg`.
+    pub alg: i32,
+    /// AKP `pub` (the HPKE public key).
+    pub public_key: Vec<u8>,
+    /// Report flags.
+    pub flags: u32,
+    /// Caller report data.
+    pub report_data: Vec<u8>,
+}
+
+/// Decode a report payload carrying an AKP COSE_Key.
+pub(crate) fn decode_kem_report(payload: &[u8]) -> KemReportFields {
+    let mut d = minicbor::Decoder::new(payload);
+    let n = d.map().expect("payload map").expect("definite map");
+    let (mut cose, mut size, mut flags, mut report_data) = (None, None, None, None);
+    for _ in 0..n {
+        match d.u8().expect("payload key") {
+            1 => cose = Some(d.bytes().expect("public_key").to_vec()),
+            2 => size = Some(d.u16().expect("public_key_size")),
+            3 => flags = Some(d.u32().expect("flags")),
+            5 => report_data = Some(d.bytes().expect("report_data").to_vec()),
+            _ => d.skip().expect("skip payload field"),
+        }
+    }
+    let cose = cose.expect("public_key present");
+    assert_eq!(
+        usize::from(size.expect("public_key_size present")),
+        cose.len()
+    );
+    let mut k = minicbor::Decoder::new(&cose);
+    assert_eq!(k.map().expect("COSE_Key map"), Some(3));
+    assert_eq!(k.u8().expect("kty label"), 1);
+    assert_eq!(k.u8().expect("kty"), 7, "AKP key type");
+    assert_eq!(k.u8().expect("alg label"), 3);
+    let alg = k.i32().expect("alg");
+    assert_eq!(k.i8().expect("pub label"), -1);
+    let public_key = k.bytes().expect("pub").to_vec();
+    assert_eq!(k.position(), cose.len(), "no trailing COSE_Key bytes");
+    KemReportFields {
+        alg,
+        public_key,
+        flags: flags.expect("flags present"),
+        report_data: report_data.expect("report_data present"),
+    }
+}
+
+/// Verify an ES384 PID-signed key report attesting an ML-KEM sealing key
+/// and return its fields.
+pub(crate) fn verify_kem_key_report(ctx: &TestCtx, report: &[u8]) -> KemReportFields {
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    assert_eq!(split_cose_sign1(report).0, COSE_ALG_ES384);
+    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("PID leaf parses");
+    let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI");
+    decode_kem_report(verify_cose_sign1_payload(report, &pid_spki))
 }
 
 /// COSE algorithm identifiers carried in the report's protected header.
@@ -466,6 +560,40 @@ fn report_roundtrip_for_scope(scope: u8) {
         "report must begin with the COSE_Sign1 CBOR tag (0xD2)",
     );
     verify_key_report(&ctx, &resp, &sealing_pub, &report_data);
+}
+
+/// ML-KEM-1024 and MLKEM1024-P384 sealing keys are attested as AKP
+/// COSE_Keys carrying the keygen public key, flagged as generated SD
+/// sealing keys.
+#[test]
+fn key_report_attests_pq_sealing_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (kem, alg) in [
+        (SD_SEALING_KEM_MLKEM1024, COSE_ALG_MLKEM1024),
+        (SD_SEALING_KEM_MLKEM1024_P384, COSE_ALG_MLKEM1024_P384),
+    ] {
+        let (masked_key, public_key) =
+            masked_kem_sealing_key(&ctx, session.session_id, SCOPE_LOCAL, kem);
+        let report_data = sample_report_data();
+        let report = ctx
+            .key_report(&TborKeyReportReq {
+                auth_envelope: Vec::new(),
+                session_id: session.session_id,
+                bank: CERT_BANK_ECC,
+                masked_key,
+                report_data,
+            })
+            .expect("KeyReport");
+        let fields = verify_kem_key_report(&ctx, &report);
+        assert_eq!(fields.alg, alg);
+        assert_eq!(fields.public_key, public_key);
+        assert_eq!(fields.report_data, report_data);
+        assert_eq!(
+            fields.flags & (KEY_FLAG_GENERATED | KEY_FLAG_SD_SEALING),
+            KEY_FLAG_GENERATED | KEY_FLAG_SD_SEALING,
+        );
+    }
 }
 
 /// Verifies a signed key report for an ephemeral sealing key.

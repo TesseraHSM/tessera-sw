@@ -8,6 +8,10 @@
 //! * RSA  → RSA `COSE_Key` map `{ 1: 3, -1: n, -2: e }`.
 //! * ML-DSA-87 → AKP `COSE_Key` map `{ 1: 7, 3: -50, -1: pub }`
 //!   (draft-ietf-cose-dilithium).
+//! * ML-KEM-1024 / MLKEM1024-P384 → AKP `COSE_Key` map
+//!   `{ 1: 7, 3: alg, -1: pub }` with a private-use COSE algorithm
+//!   ([`COSE_ALG_MLKEM1024`] / [`COSE_ALG_MLKEM1024_P384`]) until IANA
+//!   assigns identifiers. `pub` is the HPKE public-key encoding.
 //! * Symmetric → no public component (empty; `public_key_size == 0`).
 //!
 //! Coordinates / modulus / exponent are big-endian raw bytes, matching
@@ -22,6 +26,10 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::consts::MLDSA87_COSE_KEY_LEN;
 use crate::consts::MLDSA87_PUB_KEY_LEN;
+use crate::consts::MLKEM1024P384_COSE_KEY_LEN;
+use crate::consts::MLKEM1024P384_PUB_KEY_LEN;
+use crate::consts::MLKEM1024_COSE_KEY_LEN;
+use crate::consts::MLKEM1024_PUB_KEY_LEN;
 use crate::consts::PUBLIC_KEY_MAX_SIZE;
 use crate::consts::RSA_EXPONENT_MAX_LEN;
 use crate::consts::RSA_MODULUS_MAX_LEN;
@@ -41,6 +49,13 @@ const COSE_KTY_AKP: u8 = 7;
 const COSE_KEY_ALG: u8 = 3;
 const COSE_AKP_PUB: i8 = -1;
 const COSE_ALG_MLDSA87: i8 = -50;
+
+/// Private-use COSE algorithm (RFC 9052 §16.4, `< -65536`) naming an
+/// ML-KEM-1024 HPKE-13 recipient key.
+pub const COSE_ALG_MLKEM1024: i32 = -65537;
+
+/// Private-use COSE algorithm naming an MLKEM1024-P384 HPKE-10 recipient key.
+pub const COSE_ALG_MLKEM1024_P384: i32 = -65538;
 
 // COSE elliptic-curve identifiers (RFC 9053 Table 18).
 const COSE_CRV_P256: i8 = 1;
@@ -71,6 +86,17 @@ pub enum AttestedPubKey<'a> {
     /// ML-DSA-87 public key, [`MLDSA87_PUB_KEY_LEN`] bytes.
     MlDsa87 {
         /// Encoded public key.
+        pk: &'a HsmDmaBuf,
+    },
+    /// ML-KEM-1024 encapsulation key, [`MLKEM1024_PUB_KEY_LEN`] bytes.
+    MlKem1024 {
+        /// Encoded encapsulation key.
+        pk: &'a HsmDmaBuf,
+    },
+    /// MLKEM1024-P384 hybrid public key `ek_PQ ‖ SEC1(ek_T)`,
+    /// [`MLKEM1024P384_PUB_KEY_LEN`] bytes.
+    MlKem1024P384 {
+        /// Encoded hybrid public key.
         pk: &'a HsmDmaBuf,
     },
     /// Symmetric key — no public component (empty COSE_Key).
@@ -104,6 +130,16 @@ impl AttestedPubKey<'_> {
                     return Err(HsmError::InvalidArg);
                 }
             }
+            AttestedPubKey::MlKem1024 { pk } => {
+                if pk.len() != MLKEM1024_PUB_KEY_LEN {
+                    return Err(HsmError::InvalidArg);
+                }
+            }
+            AttestedPubKey::MlKem1024P384 { pk } => {
+                if pk.len() != MLKEM1024P384_PUB_KEY_LEN || pk[MLKEM1024_PUB_KEY_LEN] != 0x04 {
+                    return Err(HsmError::InvalidArg);
+                }
+            }
             AttestedPubKey::Symmetric => {}
         }
         Ok(())
@@ -115,6 +151,8 @@ impl AttestedPubKey<'_> {
     pub(crate) fn field_len(&self) -> usize {
         match self {
             AttestedPubKey::MlDsa87 { .. } => MLDSA87_COSE_KEY_LEN,
+            AttestedPubKey::MlKem1024 { .. } => MLKEM1024_COSE_KEY_LEN,
+            AttestedPubKey::MlKem1024P384 { .. } => MLKEM1024P384_COSE_KEY_LEN,
             _ => PUBLIC_KEY_MAX_SIZE,
         }
     }
@@ -161,12 +199,12 @@ fn encode_rsa_key(enc: &mut Encoder<&mut [u8]>, n: &[u8], e: &[u8]) -> HsmResult
     Ok(())
 }
 
-fn encode_mldsa87_key(enc: &mut Encoder<&mut [u8]>, pk: &[u8]) -> HsmResult<()> {
+fn encode_akp_key(enc: &mut Encoder<&mut [u8]>, alg: i32, pk: &[u8]) -> HsmResult<()> {
     map_encode_err(enc.map(3))?;
     map_encode_err(enc.u8(COSE_KTY))?;
     map_encode_err(enc.u8(COSE_KTY_AKP))?;
     map_encode_err(enc.u8(COSE_KEY_ALG))?;
-    map_encode_err(enc.i8(COSE_ALG_MLDSA87))?;
+    map_encode_err(enc.i32(alg))?;
     map_encode_err(enc.i8(COSE_AKP_PUB))?;
     map_encode_err(enc.bytes(pk))?;
     Ok(())
@@ -191,7 +229,13 @@ pub(crate) fn to_cose_key(key: &AttestedPubKey<'_>, out: &mut [u8]) -> HsmResult
             encode_rsa_key(&mut enc, n, e)?;
         }
         AttestedPubKey::MlDsa87 { pk } => {
-            encode_mldsa87_key(&mut enc, pk)?;
+            encode_akp_key(&mut enc, COSE_ALG_MLDSA87.into(), pk)?;
+        }
+        AttestedPubKey::MlKem1024 { pk } => {
+            encode_akp_key(&mut enc, COSE_ALG_MLKEM1024, pk)?;
+        }
+        AttestedPubKey::MlKem1024P384 { pk } => {
+            encode_akp_key(&mut enc, COSE_ALG_MLKEM1024_P384, pk)?;
         }
     }
 
@@ -302,4 +346,30 @@ pub fn parse_ec2_cose_key(cose_key: &HsmDmaBuf) -> HsmResult<Ec2CoseKey<'_>> {
         x: &cose_key[x0..x1],
         y: &cose_key[y0..y1],
     })
+}
+
+/// Decode an AKP `COSE_Key` map `{ 1: 7, 3: alg, -1: pub }` in the canonical
+/// label order the encoder emits, returning the algorithm and a zero-copy
+/// view of `pub`.
+///
+/// No-panic across the trust boundary: any other shape, including trailing
+/// bytes, returns [`HsmError::InvalidArg`]. The key length is not checked.
+pub fn parse_akp_cose_key(cose_key: &HsmDmaBuf) -> HsmResult<(i32, &HsmDmaBuf)> {
+    let mut d = Decoder::new(cose_key);
+    if map_decode_err(d.map())? != Some(3)
+        || map_decode_err(d.u8())? != COSE_KTY
+        || map_decode_err(d.u8())? != COSE_KTY_AKP
+        || map_decode_err(d.u8())? != COSE_KEY_ALG
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    let alg = map_decode_err(d.i32())?;
+    if map_decode_err(d.i8())? != COSE_AKP_PUB {
+        return Err(HsmError::InvalidArg);
+    }
+    let (start, end) = bytes_span(&mut d)?;
+    if d.position() != cose_key.len() {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok((alg, &cose_key[start..end]))
 }

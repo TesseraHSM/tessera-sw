@@ -1,59 +1,136 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! P-384 SD transfer sealing, PID reports, and verification before opening.
+//! SD transfer sealing (P-384, ML-KEM-1024 or MLKEM1024-P384 recipients), PID
+//! reports, and verification before opening.
 
-use tsra_fw_core_crypto_key_report::report;
+use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_report::report_with;
+use tsra_fw_core_crypto_key_report::sd_backup_report_len;
 use tsra_fw_core_crypto_key_report::transfer::*;
+use tsra_fw_core_crypto_key_report::ReportAlg;
 use tsra_fw_core_crypto_key_report::ReportKind;
-use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
+use tsra_fw_core_crypto_key_report::ReportSigner;
 use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_core_evidence::verify_evidence_signer;
 use tsra_fw_core_evidence::EvidenceRefs;
+use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
+use tsra_fw_core_evidence::SIGNER_KEY_MAX_LEN;
+use tsra_fw_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
 
 use crate::part_state;
 
-pub(super) async fn policy_hash<'a, P: HsmPal>(
+/// SHA-384 of the policy into a 48-byte `out`.
+pub(super) async fn hash_policy<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     policy: &HsmDmaBuf,
-) -> HsmResult<&'a mut HsmDmaBuf> {
-    let hash = alloc.dma_alloc(48)?;
+    out: &mut HsmDmaBuf,
+) -> HsmResult<()> {
     pal.hash(
         io,
         HsmHashAlgo::Sha384,
         policy,
-        hash,
+        out,
         HsmDigestForm::Standard,
     )
-    .await?;
-    Ok(hash)
+    .await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn seal_backup<P: HsmPal>(
+/// Transfer KEM of a security-domain sealing-key vault kind.
+pub(super) fn sealing_kem(kind: HsmVaultKeyKind) -> HsmResult<TransferKem> {
+    match kind {
+        HsmVaultKeyKind::SdSealing => Ok(TransferKem::P384),
+        HsmVaultKeyKind::SdSealingMlKem1024 => Ok(TransferKem::MlKem1024),
+        HsmVaultKeyKind::SdSealingMlKem1024P384 => Ok(TransferKem::MlKem1024P384),
+        _ => Err(HsmError::UnsupportedKeyType),
+    }
+}
+
+/// Wire-form public key of a sealing private key: SEC1 for P-384, the
+/// HPKE `pkR` encoding for the ML-KEM suites.
+pub(super) async fn sealing_public<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+    alloc: &'a impl HsmScopedAlloc,
+    kem: TransferKem,
+    private: &HsmDmaBuf,
+) -> HsmResult<&'a HsmDmaBuf> {
+    let public = alloc.dma_alloc(kem.public_key_len())?;
+    if kem == TransferKem::P384 {
+        public[0] = 4;
+        pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, &mut public[1..])
+            .await?;
+        byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut public[1..])?;
+    } else {
+        // Nested scope: release the ML-KEM keygen scratch before the caller's
+        // decap/encap needs its own.
+        pal.alloc_scoped_async(io, async |scratch| {
+            tsra_fw_core_crypto_hpke::public_key(pal, io, kem.suite(), private, public, scratch)
+                .await
+        })
+        .await?;
+    }
+    Ok(public)
+}
+
+/// Exact `(envelope, report)` lengths of an SdBackup sealed to `recipient`
+/// and signed by this partition's PID under the policy `pta_alg`, so
+/// handlers can reserve response slots before sealing.
+pub(super) fn backup_lens<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    recipient: &[u8],
+) -> HsmResult<(usize, usize)> {
+    let kem = TransferKem::from_public_key(recipient)?;
+    let alg = match super::pta::pta_key(pal, io)? {
+        super::pta::PtaKey::Ecc(_) => ReportAlg::Es384,
+        super::pta::PtaKey::MlDsa87(_) => ReportAlg::MlDsa87,
+    };
+    Ok((sd_backup_envelope_len(kem), sd_backup_report_len(alg)?))
+}
+
+/// Seals `bks3` to `recipient` (any [`TransferKem`]) straight into the
+/// caller's `envelope` response slot, then PID-signs the report into a
+/// `report_len`-byte buffer from `alloc` (allocated only after sealing so
+/// HPKE scratch and the report never coexist). Both lengths come from
+/// [`backup_lens`].
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn seal_backup<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
     policy_hash: &HsmDmaBuf,
     recipient: &HsmDmaBuf,
     bks3: &HsmDmaBuf,
     envelope: &mut HsmDmaBuf,
-    signed_report: &mut HsmDmaBuf,
-) -> HsmResult<usize> {
-    let private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
-    let public = alloc.dma_alloc(97)?;
-    public[0] = 4;
-    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, &mut public[1..])
-        .await?;
-    byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut public[1..])?;
+    report_len: usize,
+) -> HsmResult<&'a HsmDmaBuf> {
+    let kem = TransferKem::from_public_key(recipient)?;
     let ids = alloc.dma_alloc(96)?;
     let (source, destination) = ids.split_at_mut(48);
-    p384_key_id(pal, io, public, source, alloc).await?;
-    p384_key_id(pal, io, recipient, destination, alloc).await?;
+    // The PID signs with the policy `pta_alg`: the PTA's algorithm.
+    let signer = match super::pta::pta_key(pal, io)? {
+        super::pta::PtaKey::Ecc(_) => {
+            let private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
+            let public = sealing_public(pal, io, alloc, TransferKem::P384, private).await?;
+            p384_key_id(pal, io, public, source).await?;
+            ReportSigner::Es384(private)
+        }
+        super::pta::PtaKey::MlDsa87(_) => {
+            let seed = part_state::part_id_mldsa_seed_key_id(pal, io)?;
+            // Scoped: only the key ID outlives the 2592-byte public key.
+            pal.alloc_scoped_async(io, async |alloc| {
+                let public = super::pta::mldsa87_public_key(pal, io, alloc, seed).await?;
+                signer_key_id(pal, io, public, source).await
+            })
+            .await?;
+            ReportSigner::MlDsa87Seed(pal.vault_key(io, seed)?)
+        }
+    };
+    transfer_key_id(pal, io, recipient, destination).await?;
     let source: &[u8] = source;
     let destination: &[u8] = destination;
     let hash: &[u8] = policy_hash;
@@ -63,79 +140,117 @@ pub(super) async fn seal_backup<P: HsmPal>(
             .try_into()
             .map_err(|_| HsmError::InternalError)?,
         policy_hash: hash.try_into().map_err(|_| HsmError::InternalError)?,
+        kem,
     };
-    seal_transfer(pal, io, &header, recipient, bks3, envelope, alloc).await?;
-    let digest = alloc.dma_alloc(48)?;
-    transfer_envelope_hash(pal, io, envelope, digest, alloc).await?;
-    let params = transfer_report_params(envelope, digest)?;
-    report(pal, io, &params, private, Some(signed_report)).await
-}
-
-/// An absent anchor is intentional signature-only SA operation verification.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn source<'a, P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
-    evidence: &EvidenceRefs<'_>,
-    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
-    pid_public: Option<&[u8]>,
-) -> HsmResult<(&'a HsmDmaBuf, &'a HsmDmaBuf)> {
-    let signer = alloc.dma_alloc(97)?;
-    if let Some(anchor) = anchor {
-        verify_evidence_signer(pal, io, evidence, anchor, signer).await?;
-        if let Some(public) = pid_public {
-            let actual: &[u8] = &signer[1..];
-            if public != actual {
-                return Err(HsmError::InvalidArg);
-            }
-        }
-    } else {
-        let public = pid_public.ok_or(HsmError::InvalidArg)?;
-        if public.len() != 96 {
-            return Err(HsmError::InvalidArg);
-        }
-        signer[0] = 4;
-        signer[1..].copy_from_slice(public);
-    }
-    let len = evidence.report.length.get() as usize;
-    if len == 0 || len > KEY_REPORT_MAX_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let report = alloc.dma_alloc(len)?;
-    pal.recv_oob(io, evidence.report.index as usize, report)
+    let len = pal
+        .alloc_scoped_async(io, async |scratch| {
+            seal_transfer(pal, io, &header, recipient, bks3, envelope, scratch).await
+        })
         .await?;
-    Ok((signer, report))
+    // A short write would publish uninitialized response bytes.
+    if len != envelope.len() {
+        return Err(HsmError::InternalError);
+    }
+    let envelope: &HsmDmaBuf = envelope;
+    let digest = alloc.dma_alloc(48)?;
+    transfer_envelope_hash(pal, io, envelope, digest).await?;
+    let params = transfer_report_params(envelope, digest)?;
+    let signed_report = alloc.dma_alloc(report_len)?;
+    if report_with(pal, io, &params, signer, Some(signed_report)).await? != report_len {
+        return Err(HsmError::InternalError);
+    }
+    Ok(signed_report)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn open_backup<P: HsmPal>(
+/// A received SdBackup: the recipient's masked sealing key, the source's
+/// evidence, PID identity checks and the sealed envelope.
+pub(super) struct BackupSource<'r> {
+    /// Recipient's masked sealing key (unmasked in scratch).
+    pub masked_key: &'r [u8],
+    /// Source PID evidence carrying the SdBackup report.
+    pub evidence: EvidenceRefs<'r>,
+    /// Partition-owner anchor for the source; `None` is signature-only.
+    pub anchor: Option<&'r [u8; SPKI_THUMBPRINT_LEN]>,
+    /// Expected source PID public key, when supplied.
+    pub pid_public: Option<&'r [u8]>,
+    /// Sealed envelope.
+    pub envelope: &'r HsmDmaBuf,
+}
+
+/// Unmask the recipient sealing key under `mk_id`, verify the source's
+/// evidence and SdBackup report for `source.envelope` sealed under
+/// `policy_hash` to that key, and open it into the 48-byte `bks3`. All
+/// staging comes from `alloc`; the source key and report are staged in a
+/// nested scope released before the (ML-KEM) decapsulation scratch. An
+/// absent anchor is intentional signature-only SA operation verification.
+pub(super) async fn unseal_backup<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    private: &HsmDmaBuf,
-    signer: &HsmDmaBuf,
-    report: &HsmDmaBuf,
-    envelope: &HsmDmaBuf,
+    mk_id: HsmKeyId,
+    source: &BackupSource<'_>,
     policy_hash: &HsmDmaBuf,
     bks3: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let recipient = alloc.dma_alloc(97)?;
-    recipient[0] = 4;
-    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, &mut recipient[1..])
-        .await?;
-    byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut recipient[1..])?;
+    let blob = alloc.dma_alloc(source.masked_key.len())?;
+    blob.copy_from_slice(source.masked_key);
+    let key = unmask(pal, io, pal.vault_key(io, mk_id)?, blob).await?;
+    let recipient =
+        sealing_public(pal, io, alloc, sealing_kem(key.key_kind)?, key.target_key).await?;
     let hash: &[u8] = policy_hash;
-    let config = TransferOpenConfig {
-        verification: TransferVerifyConfig {
-            expected_kind: ReportKind::SdBackup,
-            signer_public_key: signer,
-            recipient_public_key: recipient,
-            expected_policy_hash: Some(hash.try_into().map_err(|_| HsmError::InternalError)?),
-        },
-        recipient_private_key: private,
-    };
-    let len = open_transfer(pal, io, &config, envelope, report, bks3, alloc).await?;
+    let expected_policy_hash = Some(hash.try_into().map_err(|_| HsmError::InternalError)?);
+    let verified = pal
+        .alloc_scoped_async(io, async |scratch| {
+            let signer = scratch.dma_alloc(SIGNER_KEY_MAX_LEN)?;
+            let signer_len = if let Some(anchor) = source.anchor {
+                let len = verify_evidence_signer(pal, io, &source.evidence, anchor, signer).await?;
+                if let Some(public) = source.pid_public {
+                    // A P-384 PID travels as raw `X ‖ Y`, without the SEC1 tag.
+                    let actual = if len == ATTESTED_KEY_LEN {
+                        &signer[1..len]
+                    } else {
+                        &signer[..len]
+                    };
+                    if actual != public {
+                        return Err(HsmError::InvalidArg);
+                    }
+                }
+                len
+            } else {
+                let public = source.pid_public.ok_or(HsmError::InvalidArg)?;
+                let len = match public.len() {
+                    96 => {
+                        signer[0] = 4;
+                        signer[1..ATTESTED_KEY_LEN].copy_from_slice(public);
+                        ATTESTED_KEY_LEN
+                    }
+                    SIGNER_KEY_MAX_LEN => {
+                        signer.copy_from_slice(public);
+                        SIGNER_KEY_MAX_LEN
+                    }
+                    _ => return Err(HsmError::InvalidArg),
+                };
+                signer_alg(&signer[..len])?;
+                len
+            };
+            let report_ref = source.evidence.report;
+            let len = report_ref.length.get() as usize;
+            if len == 0 || len > SD_BACKUP_REPORT_MAX_LEN {
+                return Err(HsmError::InvalidArg);
+            }
+            let report = scratch.dma_alloc(len)?;
+            pal.recv_oob(io, report_ref.index as usize, report).await?;
+            let config = TransferVerifyConfig {
+                expected_kind: ReportKind::SdBackup,
+                signer_public_key: &signer[..signer_len],
+                recipient_public_key: recipient,
+                expected_policy_hash,
+            };
+            verify_transfer(pal, io, &config, source.envelope, report, scratch).await
+        })
+        .await?;
+    let len =
+        open_verified_transfer(pal, io, &verified, key.target_key, recipient, bks3, alloc).await?;
     if len != 48 {
         return Err(HsmError::InvalidArg);
     }

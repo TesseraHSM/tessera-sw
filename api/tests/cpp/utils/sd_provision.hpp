@@ -20,7 +20,10 @@ inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 bac
 inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
 /// SdBackup envelope: header(161) + enc(97) + ciphertext(48) + tag(16).
 inline constexpr uint32_t kPokRemoteBackupLen = 322;
-inline constexpr uint32_t kSdBackupReportCapacity = 896;
+/// Output capacity for remote/peer backups: the MLKEM1024-P384 envelope,
+/// header(161) + enc(1665) + ciphertext(48) + tag(16).
+inline constexpr uint32_t kPokRemoteBackupMaxLen = 1890;
+inline constexpr uint32_t kSdBackupReportCapacity = 5120;
 
 // Security-domain provisioning helper for the sealing round-trip test.
 //

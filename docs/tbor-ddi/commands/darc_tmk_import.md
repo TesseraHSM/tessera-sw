@@ -54,7 +54,7 @@ never-extractable, under the distinct `DarcTmk` key kind, scoped
 This command is **Crypto-Officer-only**: a Crypto-User session is
 rejected with `InvalidPermissions`.
 
-See [`KeyReport`](key_report.md#p-384-transfer-envelope-binding) for the
+See [`KeyReport`](key_report.md#transfer-envelope-binding) for the
 canonical envelope and report formats. The import policy is the target
 partition's bound policy; DARC reports contain no policy hash. Reports
 do not by themselves provide replay protection or certificate freshness.

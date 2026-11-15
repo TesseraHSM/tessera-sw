@@ -17,9 +17,8 @@
 use anyhow::Context;
 use anyhow::Result;
 use tsra_api::HsmCert;
-use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
+use tsra_sealing_report::TransferKem;
 
 pub use crate::env::SecurityDomainEnv;
 use crate::error::Error;
@@ -67,21 +66,22 @@ pub struct RemoteRecovery {
     pub sd_mk_backup: Vec<u8>,
     /// Actual operation signer's P-384 PID key, raw big-endian X||Y (96 bytes).
     pub sender_pid_pub_key: Vec<u8>,
-    /// SATA-endorsed HSM receiver HPKE chain for the external-SA flow.
+    /// SATA-endorsed receiver chain for the external-SA flow. Its leaf is
+    /// the HSM receiver key, or signs `receiver_key_report`.
     pub receiver_cert_chain: Vec<Vec<u8>>,
+    /// Optional leaf-signed key report attesting a post-quantum HSM receiver
+    /// key; empty when the chain leaf itself is the P-384 receiver.
+    pub receiver_key_report: Vec<u8>,
 }
 
 impl RemoteRecovery {
     /// Validate backup lengths and mandatory evidence before device operations.
     pub fn validate(&self) -> Result<()> {
-        Self::validate_transfer_envelope(&self.backup.pok_remote_backup)?;
+        let kem = Self::validate_transfer_envelope(&self.backup.pok_remote_backup)?;
         anyhow::ensure!(
-            self.masked_receiver_key.len() == MASKED_SEALING_KEY_LEN,
-            "invalid remote receiver key length"
-        );
-        anyhow::ensure!(
-            self.backup.pok_remote_backup.len() == POK_REMOTE_BACKUP_LEN,
-            "invalid remote POK backup length"
+            self.masked_receiver_key.len() == kem.masked_key_len(),
+            "remote receiver key does not match the {} backup",
+            kem.name()
         );
         anyhow::ensure!(
             self.sd_mk_backup.len() == SD_MK_BACKUP_LEN,
@@ -99,14 +99,9 @@ impl RemoteRecovery {
         Ok(())
     }
 
-    pub(crate) fn validate_transfer_envelope(envelope: &[u8]) -> Result<()> {
-        anyhow::ensure!(
-            envelope.len() == POK_REMOTE_BACKUP_LEN
-                && envelope.starts_with(b"TSRA-XFER\x01\x02\x00\x11\x00\x02\x00\x02")
-                && envelope.get(161) == Some(&4),
-            "invalid P-384 HPKE Base SD envelope; legacy Auth backups are unsupported"
-        );
-        Ok(())
+    /// Check HPKE Base SD envelope framing and return its KEM.
+    pub(crate) fn validate_transfer_envelope(envelope: &[u8]) -> Result<TransferKem> {
+        tsra_sealing_report::validate_sd_envelope(envelope)
     }
 }
 
@@ -118,6 +113,7 @@ impl std::fmt::Debug for RemoteRecovery {
             .field("sd_mk_backup_len", &self.sd_mk_backup.len())
             .field("sender_pid_pub_key_len", &self.sender_pid_pub_key.len())
             .field("receiver_cert_chain_len", &self.receiver_cert_chain.len())
+            .field("receiver_key_report_len", &self.receiver_key_report.len())
             .finish()
     }
 }
@@ -154,7 +150,9 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// The signer returns the complete root-first certificate chain, including
     /// any intermediates, with one DER certificate per entry.
     /// Firmware obtains `RcvrPub` from the receiver chain's leaf certificate and
-    /// validates it against SATA. Attestation evidence is required when
+    /// validates it against SATA. When `receiver_key_report` is supplied, the
+    /// leaf must sign it and its attested P-384, ML-KEM-1024 or MLKEM1024-P384
+    /// key becomes the recipient instead. Attestation evidence is required when
     /// the policy sets `require_trusted_sa_key`; otherwise its chains and
     /// report may be empty. Source operation evidence is always mandatory.
     /// Receiver and source evidence both use
@@ -172,6 +170,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         session: &SealingSession,
         tee_seed: &[u8],
         receiver_cert_chain: &[HsmCert<'_>],
+        receiver_key_report: Option<&[u8]>,
         receiver_evidence: &Evidence,
         sign_pta: SignPta,
     ) -> Result<RemoteBackup>
@@ -185,6 +184,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             session,
             &partition_state,
             receiver_cert_chain,
+            receiver_key_report,
             receiver_evidence,
         ) {
             Ok(created) => created,
@@ -399,6 +399,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         session: &SealingSession,
         partition_state: &PartitionState,
         receiver_cert_chain: &[HsmCert<'_>],
+        receiver_key_report: Option<&[u8]>,
         receiver_evidence: &Evidence,
     ) -> Result<(SecurityDomainState, RemoteBackup)> {
         let part_owner_cert_chain = self
@@ -419,6 +420,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         self.seal_backup(
             session,
             receiver_cert_chain,
+            receiver_key_report,
             receiver_evidence,
             &sender_evidence,
         )
@@ -428,14 +430,16 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         &self,
         session: &SealingSession,
         receiver_cert_chain: &[HsmCert<'_>],
+        receiver_key_report: Option<&[u8]>,
         receiver_evidence: &Evidence,
         sender_evidence: &Evidence,
     ) -> Result<(SecurityDomainState, RemoteBackup)> {
         let backup = receiver_evidence
             .with_hsm_evidence(|evidence| {
-                session.session.sd_create_remote_backup(
+                session.session.sd_create_remote_backup_with_key_report(
                     self.env.policy().as_bytes(),
                     receiver_cert_chain,
+                    receiver_key_report,
                     evidence,
                 )
             })

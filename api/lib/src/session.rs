@@ -281,12 +281,36 @@ impl HsmSession {
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &HsmSdEvidence<'_>,
     ) -> HsmResult<HsmSdRemoteBackupResult> {
+        self.sd_create_remote_backup_with_key_report(
+            part_policy,
+            receiver_cert_chain,
+            None,
+            receiver_evidence,
+        )
+    }
+
+    /// As [`Self::sd_create_remote_backup`], optionally sealing to the KEM
+    /// key attested by `receiver_key_report` instead of the receiver leaf.
+    ///
+    /// `receiver_key_report` is a COSE_Sign1 (ES384) key report signed by
+    /// the receiver chain's leaf key; its attested P-384, ML-KEM-1024 or
+    /// MLKEM1024-P384 key becomes the recipient, so a SATA-certified P-384
+    /// leaf can delegate to a post-quantum sealing key. Under
+    /// `require_trusted_sa_key` the evidence report must attest the same key.
+    pub fn sd_create_remote_backup_with_key_report(
+        &self,
+        part_policy: &[u8],
+        receiver_cert_chain: &[HsmCert<'_>],
+        receiver_key_report: Option<&[u8]>,
+        receiver_evidence: &HsmSdEvidence<'_>,
+    ) -> HsmResult<HsmSdRemoteBackupResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_remote_backup_ex(
                 &inner.partition,
                 inner.id,
                 receiver_cert_chain,
+                receiver_key_report,
                 receiver_evidence,
                 part_policy,
                 &inner.ddi_cookie,

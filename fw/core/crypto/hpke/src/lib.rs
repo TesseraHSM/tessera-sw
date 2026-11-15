@@ -78,6 +78,8 @@ mod ops;
 mod schedule;
 mod suite;
 
+pub use kem::generate_key_pair;
+pub use kem::public_key;
 pub use ops::open;
 pub use ops::receive_export;
 pub use ops::seal;

@@ -15,7 +15,8 @@
 //!   lifetime.
 //! * [`SecurityDomainStore`] — atomically persists [`PartitionState`] and
 //!   [`SecurityDomainState`] recovery records in one save.
-//! * [`mint_sealing_key`] — the HSM-side sealing key.
+//! * [`mint_sealing_key`] — the HSM-side sealing key for a [`TransferKem`]:
+//!   P-384, ML-KEM-1024 (HPKE-13) or MLKEM1024-P384 (HPKE-10).
 //! * [`SecurityDomain::create`] — drives a factory-reset partition through the full
 //!   security-domain provisioning flow, taking externally supplied
 //!   receiver certificates and evidence, plus a POTA signing callback.
@@ -94,3 +95,4 @@ pub use store::load_partition_recovery;
 pub use store::PartitionState;
 pub use store::SecurityDomainState;
 pub use store::SecurityDomainStore;
+pub use tsra_sealing_report::TransferKem;

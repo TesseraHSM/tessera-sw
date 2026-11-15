@@ -45,14 +45,14 @@ async fn recover_signer_pub<P: HsmPal>(
     public: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let req = TborDarcTmkImportReq::decode(req_buf)?;
-    verify_policy_hash(pal, io, alloc, req.policy()).await?;
+    verify_policy_hash(pal, io, req.policy(), alloc.dma_alloc(48)?).await?;
     let policy = super::policy::from_bytes(req.policy())?;
     let pota = policy.pota_spki_thumbprint;
     let chain = req.remote_cert_chain();
     if chain.is_empty() || chain.len() > DARC_SOURCE_CERT_CHAIN_MAX_CERTS {
         return Err(HsmError::InvalidArg);
     }
-    validate_chain(
+    let len = validate_chain(
         pal,
         io,
         alloc,
@@ -62,6 +62,10 @@ async fn recover_signer_pub<P: HsmPal>(
         async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
+    // Only a P-384 leaf fills the `X ‖ Y` slot; shorter EC leaves are rejected.
+    if len != public.len() - 1 {
+        return Err(HsmError::InvalidArg);
+    }
     public[0] = 4;
     Ok(())
 }

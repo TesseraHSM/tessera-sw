@@ -377,11 +377,9 @@ async fn check_transfer_bindings() {
         (source_public, source_id_out),
         (recipient_public, recipient_id_out),
     ] {
-        pal.alloc_scoped_async(&io, async |alloc| {
-            p384_key_id(&pal, &io, public, id, alloc).await
-        })
-        .await
-        .expect("derive key identifier");
+        p384_key_id(&pal, &io, public, id)
+            .await
+            .expect("derive key identifier");
         let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent hash");
         hash.update(b"TSRA-P384-KEY-v1").expect("key domain");
         hash.update(public).expect("public key");
@@ -399,7 +397,7 @@ async fn check_transfer_bindings() {
         pal.alloc_scoped_async(&io, async |alloc| {
             use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
             let digest = alloc.dma_alloc(48)?;
-            transfer_envelope_hash(&pal, &io, envelope, digest, alloc).await?;
+            transfer_envelope_hash(&pal, &io, envelope, digest).await?;
             let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent hash");
             hash.update(b"TSRA-XFER-HASH-v1").expect("envelope domain");
             hash.update(envelope).expect("envelope bytes");
@@ -429,6 +427,7 @@ async fn check_transfer_bindings() {
             source_pid_key_id: source_id,
             recipient_key_id: recipient_id,
             policy_hash: &policy,
+            kem: tsra_fw_core_crypto_key_report::transfer::TransferKem::P384,
         },
     ] {
         let secret = pal.dma_alloc(&io, header.plaintext_len()).expect("secret");
@@ -563,7 +562,7 @@ async fn check_transfer_bindings() {
                 .alloc_scoped_async(&io, async |alloc| {
                     use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
                     let digest = alloc.dma_alloc(48)?;
-                    transfer_envelope_hash(&pal, &io, envelope, digest, alloc).await?;
+                    transfer_envelope_hash(&pal, &io, envelope, digest).await?;
                     let mut params = transfer_report_params(envelope, digest)?;
                     let transfer = match &mut params {
                         ReportParams::Darc(transfer) => transfer,

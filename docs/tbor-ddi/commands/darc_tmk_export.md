@@ -40,7 +40,7 @@ Handler flow:
    Return both artifacts. IO teardown scrubs the plaintext TMK.
 
 The envelope and report formats are specified in
-[`KeyReport`](key_report.md#p-384-transfer-envelope-binding).
+[`KeyReport`](key_report.md#transfer-envelope-binding).
 The report authenticates this operation; a generic public-key report
 cannot replace it. Replay protection is not provided by the report itself.
 

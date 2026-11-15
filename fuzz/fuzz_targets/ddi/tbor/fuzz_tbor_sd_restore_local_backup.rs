@@ -7,6 +7,7 @@
 mod common;
 
 use common::COORD_LEN;
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -104,16 +105,17 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
         .tbor(&TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope: key_scope.to_tbor(),
+            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     let receiver_pub = raw_pub_from_wire(&sealing_key.pub_key);
     let receiver_chain = make_chain(&sata, &receiver_pub);
-    let mut oob_items = Vec::new();
+    let mut oob_items = common::sd_oob_items();
     let receiver_cert_chain = push_chain(&mut oob_items, receiver_chain);
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain,
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: Vec::new(),
         receiver_owner_cert_chain: Vec::new(),
         receiver_part_owner_cert_chain: Vec::new(),
@@ -122,7 +124,7 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
     };
     let oob: Vec<&[u8]> = oob_items.iter().map(Vec::as_slice).collect();
     let response = ctx
-        .tbor_oob(&request, &oob)
+        .sd_oob(&request, &oob)
         .expect("valid SdCreateRemoteBackup fixture");
 
     SourceBackups {

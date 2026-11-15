@@ -213,7 +213,7 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
             &policy_buf, &masked_buf, &src_ev.get(), &dst_ev.get(), &src_buf,
         };
 
-        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupMaxLen);
         std::vector<uint8_t> probe_report(kSdBackupReportCapacity);
         tsra_buffer probe_backup_buf{ probe_backup.data(),
                                       static_cast<uint32_t>(probe_backup.size()) };

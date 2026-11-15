@@ -21,9 +21,7 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
-use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -39,11 +37,12 @@ pub struct TborSdRestorePeerBackupReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`),
-    /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
-    /// recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(align = 4)]
-    pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
+    /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`):
+    /// 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+    /// (MLKEM1024-P384).  Unmasked on-device to recover the receiver's
+    /// private HPKE key (`RcvrPriv`).
+    #[tbor(align = 4, min_len = 264, max_len = 296)]
+    pub masked_sealing_key: Vec<u8>,
 
     /// Unified [`PartPolicy`] describing the security domain being
     /// restored.  Encoded as its deterministic CBOR document of at most 384 bytes.
@@ -67,10 +66,12 @@ pub struct TborSdRestorePeerBackupReq {
     /// Source peer attestation-report (COSE_Sign1) descriptor.
     pub src_report: ReportDescriptor,
 
-    /// Peer backup to restore: an HPKE Base seal of BKS3, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  The firmware schema is the length
-    /// authority.
-    pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Peer backup to restore: an HPKE Base seal of BKS3: [`POK_REMOTE_BACKUP_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN)
+    /// (322 B) for a P-384 recipient, up to
+    /// [`POK_REMOTE_BACKUP_MAX_LEN`](crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN)
+    /// for ML-KEM-1024 / MLKEM1024-P384.
+    #[tbor(min_len = 322, max_len = 1890)]
+    pub pok_peer_backup: Vec<u8>,
 
     /// Previous security-domain masking-key backup (SDMK masked under the
     /// derived SDBMK), exactly [`SD_MK_BACKUP_LEN`] (264 B), from which
@@ -99,18 +100,20 @@ mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
+    use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+    use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 
     #[test]
     fn request_encodes_all_fields() {
         let req = TborSdRestorePeerBackupReq {
             session_id: 9,
-            masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
+            masked_sealing_key: alloc::vec![0u8; MASKED_SEALING_KEY_LEN],
             policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
             src_report: ReportDescriptor::default(),
-            pok_peer_backup: [0xABu8; POK_REMOTE_BACKUP_LEN],
+            pok_peer_backup: alloc::vec![0xABu8; POK_REMOTE_BACKUP_LEN],
             prev_sd_mk_backup: [0xCDu8; SD_MK_BACKUP_LEN],
         };
 

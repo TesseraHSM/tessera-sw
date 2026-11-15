@@ -19,6 +19,7 @@ use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::ImportableKey;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
+use tsra_sealing_report::TransferKem;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 
@@ -60,23 +61,23 @@ pub struct SealingKey {
     pub report: Vec<u8>,
 }
 
-/// Well-formed sealing-key props: a `Sealing`-kind P-384 secret key
-/// permitted for derivation only.
-pub fn sealing_props() -> Result<HsmKeyProps> {
+/// Well-formed sealing-key props: a `Sealing`-kind secret key permitted for
+/// derivation only. The bit length selects `kem`.
+pub fn sealing_props(kem: TransferKem) -> Result<HsmKeyProps> {
     HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(kem.sealing_key_bits())
         .can_derive(true)
         .build()
         .context("build sealing key props")
 }
 
-/// Mint an SD sealing key on `session` and return its masked blob and a
+/// Mint a `kem` SD sealing key on `session` and return its masked blob and a
 /// COSE_Sign1 `KeyReport` containing and attesting its public key.
-pub fn mint_sealing_key(session: &HsmSession) -> Result<SealingKey> {
+pub fn mint_sealing_key(session: &HsmSession, kem: TransferKem) -> Result<SealingKey> {
     let mut algo = HsmSealingKeyGenAlgo::default();
-    let key = HsmKeyManager::generate_key(session, &mut algo, sealing_props()?)
+    let key = HsmKeyManager::generate_key(session, &mut algo, sealing_props(kem)?)
         .context("generate sealing key")?;
 
     let masked = key.masked_key_vec().context("masked sealing key")?;
@@ -90,6 +91,10 @@ pub fn mint_sealing_key(session: &HsmSession) -> Result<SealingKey> {
         .generate_key_report(&report_data, Some(&mut report))
         .context("key report")?;
     report.truncate(written);
+    anyhow::ensure!(
+        masked.len() == kem.masked_key_len(),
+        "sealing key does not match the requested KEM"
+    );
 
     Ok(SealingKey { masked, report })
 }

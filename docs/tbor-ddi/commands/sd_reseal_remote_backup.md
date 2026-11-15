@@ -29,23 +29,28 @@ with its actual SA PID.
 | Field | Shape | Meaning |
 |---|---|---|
 | `session_id` | Inline session ID | Active CO session |
-| `masked_sealing_key` | 280 B, aligned to 4 B | Actual source-envelope recipient key |
+| `masked_sealing_key` | 264 / 280 / 296 B, aligned to 4 B | Actual source-envelope recipient key |
 | `policy` | 1-384 B | Client SD policy |
 | `src_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized source PID and `SdBackup` report |
 | `dest_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized destination `PublicKey` evidence |
-| `src_remote_backup` | 322 B | Canonical source Base envelope |
+| `src_remote_backup` | 322 / 1793 / 1890 B | Canonical source Base envelope |
 
 Each evidence group expands to four TOC entries; referenced DER certificates
 and reports travel out of band.
+
+Out-of-band item 0 is the report output: reserve at least 5120 B
+(`SD_BACKUP_REPORT_MAX_LEN`). Evidence input descriptors therefore index
+from 1. `report_len` gives the bytes written; firmware writes the report
+only on success.
 
 ## Response
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `dst_remote_backup` | 322 B | Fresh canonical Base envelope |
-| `report` | 1..896 B | SA-PID-signed `SdBackup` report |
+| `dst_remote_backup` | 322 / 1793 / 1890 B, aligned to 4 B | Fresh canonical Base envelope |
+| `report_len` | `U16` (inline) | Bytes of the SA-PID-signed `SdBackup` report (ES384 or ML-DSA-87, per policy PTA algorithm) written to out-of-band item 0 |
 
-See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+See [transfer format](key_report.md#transfer-envelope-binding).
 The source signature, report kind, PID ID, recipient ID, envelope digest,
 and client policy are verified **before HPKE decapsulation**. A different
 source key's `PublicKey` report cannot authorize a transfer. Failures do not

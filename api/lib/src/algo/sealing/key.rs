@@ -31,10 +31,6 @@ enum KeyScope {
     Internal = 5,
 }
 
-/// Bit length of a security-domain sealing key. `SdSealingKeyGen` always
-/// produces an ECC P-384 keypair, so the props must be sized to match.
-const SEALING_KEY_BITS: u32 = 384;
-
 impl HsmSealingKey {
     /// No-op: unpinned, so there is no device handle to restore.
     /// Kept for `#[resiliency_key_op]` compatibility.
@@ -44,17 +40,18 @@ impl HsmSealingKey {
     }
 
     /// Validates that `props` describe a supported HSM sealing key: a
-    /// `Sealing`-kind secret key, P-384 sized, permitted for derivation
-    /// only.
-    fn validate_props(props: &HsmKeyProps) -> HsmResult<()> {
+    /// `Sealing`-kind secret key permitted for derivation only, whose bit
+    /// length selects the KEM (384: P-384, 1024: ML-KEM-1024, 1408:
+    /// MLKEM1024-P384).
+    fn validate_props(props: &HsmKeyProps) -> HsmResult<ddi::SealingKem> {
+        let kem = ddi::SealingKem::from_bits(props.bits()).ok_or(HsmError::InvalidKeyProps)?;
         if props.class() != HsmKeyClass::Secret
-            || props.bits() != SEALING_KEY_BITS
             || !Self::check_key_kind(props)
             || !Self::check_key_usage(props)
         {
             return Err(HsmError::InvalidKeyProps);
         }
-        Ok(())
+        Ok(kem)
     }
 
     fn check_key_kind(props: &HsmKeyProps) -> bool {
@@ -107,6 +104,11 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
     /// unpinned masked blob cached in `props`, not stored in the
     /// partition vault.
     ///
+    /// The props bit length selects the KEM: 384 (DHKEM P-384), 1024
+    /// (ML-KEM-1024) or 1408 (MLKEM1024-P384 hybrid). Only P-384 keys
+    /// carry a DER public key in props; PQ public keys are attested by the
+    /// key report.
+    ///
     /// Only valid on a V2 (security-domain) session; a V1 session yields
     /// [`HsmError::InvalidSession`].
     /// [`HsmKeyScope::SecurityDomain`] requires an already-provisioned
@@ -117,7 +119,7 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
         props: HsmKeyProps,
     ) -> Result<Self::Key, Self::Error> {
         // Validate key properties before generating the key.
-        HsmSealingKey::validate_props(&props)?;
+        let kem = HsmSealingKey::validate_props(&props)?;
 
         // Session-scoped sealing keys are unsupported. SecurityDomain
         // requires a provisioned SD masking key; an unset scope defaults
@@ -134,10 +136,12 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
         // Cache the masked blob and public key in props. The key is
         // unpinned (`Unpinned`) until unmasked on-use under the requested
         // scope's masking key.
-        let (masked_key, pub_key_der) = ddi::sd_sealing_key_gen(session, scope as u8)?;
+        let (masked_key, pub_key_der) = ddi::sd_sealing_key_gen(session, scope as u8, kem)?;
         let mut props = props;
         props.set_masked_key(&masked_key);
-        props.set_pub_key_der(&pub_key_der);
+        if let Some(der) = pub_key_der {
+            props.set_pub_key_der(&der);
+        }
         Ok(HsmSealingKey::new(
             session.clone(),
             props,

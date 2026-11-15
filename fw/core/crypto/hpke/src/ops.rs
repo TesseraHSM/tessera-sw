@@ -592,15 +592,20 @@ where
     let suite = cfg.suite;
     check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, &cfg.auth) {
+    // Encapsulation scratch is released before the key schedule.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, &cfg.auth) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, alloc).await?
+            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, scratch).await
         }
         (Mode::Auth, Some(a)) | (Mode::AuthPsk, Some(a)) => {
-            kem::auth_encap(pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, alloc).await?
+            kem::auth_encap(
+                pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, scratch,
+            )
+            .await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     // AEAD `key ‖ base_nonce` share one allocation; the two LabeledExpand
     // outputs write into the split halves.
@@ -659,15 +664,18 @@ where
     let suite = cfg.suite;
     check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, cfg.auth_pk_s) {
+    // Decapsulation scratch (KB-sized for ML-KEM) is released before the
+    // key schedule; only the shared secret outlives it.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, cfg.auth_pk_s) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, alloc).await?
+            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, scratch).await
         }
         (Mode::Auth, Some(pk_s)) | (Mode::AuthPsk, Some(pk_s)) => {
-            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, alloc).await?
+            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, scratch).await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     let key = alloc_bytes(suite.nk(), alloc)?;
     let nonce = alloc_bytes(suite.nn(), alloc)?;
@@ -744,15 +752,20 @@ where
     let suite = cfg.suite;
     check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, &cfg.auth) {
+    // Encapsulation scratch is released before the key schedule.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, &cfg.auth) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, alloc).await?
+            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, scratch).await
         }
         (Mode::Auth, Some(a)) | (Mode::AuthPsk, Some(a)) => {
-            kem::auth_encap(pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, alloc).await?
+            kem::auth_encap(
+                pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, scratch,
+            )
+            .await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     derive_exported(
         pal,
@@ -796,15 +809,18 @@ where
     let suite = cfg.suite;
     check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, cfg.auth_pk_s) {
+    // Decapsulation scratch (KB-sized for ML-KEM) is released before the
+    // key schedule; only the shared secret outlives it.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, cfg.auth_pk_s) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, alloc).await?
+            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, scratch).await
         }
         (Mode::Auth, Some(pk_s)) | (Mode::AuthPsk, Some(pk_s)) => {
-            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, alloc).await?
+            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, scratch).await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     derive_exported(
         pal,

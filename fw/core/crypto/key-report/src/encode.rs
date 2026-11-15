@@ -426,6 +426,22 @@ where
     sign_into(pal, io, signer, payload_len, &encode, out).await
 }
 
+/// Exact length of an SdBackup operation report signed under `alg`; its
+/// payload carries only fixed-width digests.
+pub fn sd_backup_report_len(alg: ReportAlg) -> HsmResult<usize> {
+    // Only the digest widths matter; the placeholder lives in rodata.
+    static DIGEST: [u8; SHA384_LEN] = [0; SHA384_LEN];
+    let payload = TransferReportPayload {
+        version: REPORT_VERSION_V3,
+        policy_hash: Some(&DIGEST),
+        report_kind: ReportKind::SdBackup as u8,
+        source_pid_key_id: &DIGEST,
+        recipient_key_id: &DIGEST,
+        envelope_hash: &DIGEST,
+    };
+    Ok(Sign1Layout::new(alg, minicbor::len(&payload))?.total)
+}
+
 /// Assemble a tagged COSE_Sign1 in `out`: `encode` writes the
 /// `payload_len`-byte payload at its final offset and `signer` signs
 /// straight into the trailing signature field.

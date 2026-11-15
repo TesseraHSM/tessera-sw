@@ -39,6 +39,9 @@ Report building:
    kind and attributes).
 3. **Derive** the attested public key. ECC-private kinds, including the
    P-384 `SdSealing` key, re-derive the public point via `pub = priv · G`.
+   ML-KEM-1024 and MLKEM1024-P384 `SdSealing` keys re-expand their seed and
+   attest the encapsulation key as an AKP `COSE_Key` `{ 1: 7, 3: alg, -1: pub }`
+   with private-use `alg` -65537 (ML-KEM-1024) or -65538 (MLKEM1024-P384).
    RSA-private and RSA-CRT kinds extract the public modulus and exponent.
    Symmetric and non-attestable internal kinds are rejected with
    `UnsupportedKeyType`.
@@ -169,11 +172,19 @@ or a digest does not prove export provenance. Signature verification also
 does not replace signer authorization, recipient/envelope binding checks,
 or replay policy.
 
-### P-384 transfer-envelope binding
+### Transfer-envelope binding
 
 The DARC and SD export, reseal, and import/restore commands use this
-envelope with HPKE Base and PID-signed operation reports.
-Only P-384 is supported; there are no PQ or hybrid selectors.
+envelope with HPKE Base and PID-signed operation reports. DARC always uses
+P-384. SD uses the recipient sealing key's KEM:
+
+| KEM | Suite (KEM / KDF / AEAD) | Key ID domain | Public key / `enc` |
+|---|---|---|---|
+| DHKEM(P-384, HKDF-SHA384) | `0x0011` / `0x0002` / `0x0002` | `TSRA-P384-KEY-v1` | 97 B SEC1 |
+| ML-KEM-1024 (HPKE-13) | `0x0042` / `0x0011` (SHAKE256) / `0x0002` | `TSRA-MLKEM1024-KEY-v1` | 1568 B |
+| MLKEM1024-P384 (HPKE-10) | `0x0051` / `0x0011` (SHAKE256) / `0x0002` | `TSRA-MLKEM1024-P384-KEY-v1` | 1665 B `ek_PQ ‖ SEC1(ek_T)` |
+
+The source PID is always P-384.
 
 The envelope is `header || enc || ciphertext || tag`. The report is a separate
 COSE_Sign1 value, excluded from the envelope hash. All integer fields below
@@ -184,25 +195,25 @@ are unsigned; suite IDs use network byte order.
 | 0 | ASCII `TSRA-XFER` | 9 |
 | 9 | Envelope version (1) | 1 |
 | 10 | Operation kind: `Darc` (1) or `SdBackup` (2) | 1 |
-| 11 | DHKEM(P-384, HKDF-SHA384) ID (`0x0011`) | 2 |
-| 13 | HKDF-SHA384 ID (`0x0002`) | 2 |
+| 11 | KEM ID | 2 |
+| 13 | KDF ID | 2 |
 | 15 | AES-256-GCM ID (`0x0002`) | 2 |
 | 17 | Source PID key ID | 48 |
 | 65 | Recipient key ID | 48 |
 | 113 | Transferred SD policy hash, `SdBackup` only | 48 |
 
-Both identifiers are
-`SHA-384(ASCII("TSRA-P384-KEY-v1") || SEC1_public_key)`.
-The SEC1 public key and encapsulation are exactly 97 bytes:
-`0x04 || X_be[48] || Y_be[48]`.
+Both identifiers are `SHA-384(ASCII(domain) || public_key)` with the
+KEM's domain above. A P-384 public key and encapsulation are exactly 97
+bytes: `0x04 || X_be[48] || Y_be[48]`.
 The curve-specific domain identifies the key algorithm; the header/report
 field identifies its source-PID or recipient role.
 
-HPKE uses **Base** mode with the fixed suite above. The complete canonical
+HPKE uses **Base** mode with the suite above. The complete canonical
 header is passed verbatim as both HPKE `info` and AEAD AAD. DARC encrypts
 exactly 32 bytes of TMK; SD encrypts exactly 48 bytes of BKS3. Their headers
 are 113 and 161 bytes respectively, and their complete encrypted envelopes
-are 258 and 322 bytes respectively, including the 16-byte GCM tag.
+are 258 and 322 bytes respectively (P-384), including the 16-byte GCM tag.
+PQ SD envelopes are 1793 (ML-KEM-1024) and 1890 (MLKEM1024-P384) bytes.
 Unknown versions/kinds/suites, malformed SEC1 encodings, missing fields,
 wrong secret/ciphertext sizes, and trailing bytes are rejected.
 

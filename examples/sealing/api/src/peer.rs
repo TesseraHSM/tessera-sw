@@ -7,8 +7,8 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
+use tsra_sealing_report::TransferKem;
 
 use crate::hsm::mint_sealing_key;
 use crate::hsm::SealingKey;
@@ -44,10 +44,12 @@ pub struct PreparedPeer {
 impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// Finalize a new destination without creating an SD. The POTA signer may
     /// be remote. A fresh local MK is generated; no source local MK is imported.
+    /// The receiver sealing key uses `kem`.
     pub fn prepare_peer<SignPta>(
         &self,
         session: &SealingSession,
         seed: &[u8],
+        kem: TransferKem,
         sign_pta: SignPta,
     ) -> Result<PreparedPeer>
     where
@@ -59,11 +61,12 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         );
         self.ensure_can_create()?;
         let partition = self.init_partition(session, seed, None, sign_pta)?;
-        let receiver =
-            mint_sealing_key(&session.session).map_err(|source| Error::PartitionPersistence {
+        let receiver = mint_sealing_key(&session.session, kem).map_err(|source| {
+            Error::PartitionPersistence {
                 state: partition.clone(),
                 source,
-            })?;
+            }
+        })?;
         Ok(PreparedPeer {
             partition,
             receiver,
@@ -133,8 +136,10 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             "peer policy mismatch"
         );
         anyhow::ensure!(
-            backup.pok_peer_backup.len() == POK_REMOTE_BACKUP_LEN,
-            "invalid peer backup length"
+            crate::RemoteRecovery::validate_transfer_envelope(&backup.pok_peer_backup)?
+                .masked_key_len()
+                == prepared.receiver.masked.len(),
+            "peer backup does not match the prepared receiver KEM"
         );
         anyhow::ensure!(
             backup.sd_mk_backup.len() == SD_MK_BACKUP_LEN,

@@ -50,14 +50,14 @@ async fn recover_target_pub<P: HsmPal>(
     public: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let req = TborDarcTmkExportReq::decode(req_buf)?;
-    verify_policy_hash(pal, io, alloc, req.policy()).await?;
+    verify_policy_hash(pal, io, req.policy(), alloc.dma_alloc(48)?).await?;
     let policy = super::policy::from_bytes(req.policy())?;
     let data = policy.data_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
     let chain = req.target_cert_chain();
     if chain.is_empty() || chain.len() > MAX_CERTS {
         return Err(HsmError::InvalidArg);
     }
-    validate_chain(
+    let len = validate_chain(
         pal,
         io,
         alloc,
@@ -67,6 +67,10 @@ async fn recover_target_pub<P: HsmPal>(
         async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
+    // Only a P-384 leaf fills the `X ‖ Y` slot; shorter EC leaves are rejected.
+    if len != public.len() - 1 {
+        return Err(HsmError::InvalidArg);
+    }
     public[0] = 4;
     Ok(())
 }
@@ -120,8 +124,8 @@ pub(crate) async fn handle<P: HsmPal>(
             byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut pid_public[1..])?;
             let ids = alloc.dma_alloc(96)?;
             let (source_id, recipient_id) = ids.split_at_mut(48);
-            p384_key_id(pal, io, pid_public, source_id, alloc).await?;
-            p384_key_id(pal, io, recipient, recipient_id, alloc).await?;
+            p384_key_id(pal, io, pid_public, source_id).await?;
+            p384_key_id(pal, io, recipient, recipient_id).await?;
             let source_bytes: &[u8] = source_id;
             let recipient_bytes: &[u8] = recipient_id;
             let header = TransferHeader::Darc {
@@ -134,7 +138,7 @@ pub(crate) async fn handle<P: HsmPal>(
             };
             seal_transfer(pal, io, &header, recipient, view.target_key, sealed, alloc).await?;
             let digest = alloc.dma_alloc(48)?;
-            transfer_envelope_hash(pal, io, sealed, digest, alloc).await?;
+            transfer_envelope_hash(pal, io, sealed, digest).await?;
             let params = transfer_report_params(sealed, digest)?;
             report(pal, io, &params, pid_private, Some(signed_report)).await
         })

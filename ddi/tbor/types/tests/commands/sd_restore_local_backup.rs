@@ -42,6 +42,7 @@ use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
+use crate::commands::sd_create_remote_backup::SdOob;
 
 /// Material captured from the first device's `CreateSD`, replayed on the
 /// second (rebooted) device to restore the security domain.
@@ -86,7 +87,7 @@ fn create_sd_on_first_device(seed: &[u8], sata: &CaKey, pota: &CaKey) -> Created
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, sata, &report);
     let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 
     CreatedSd {
@@ -186,7 +187,7 @@ fn sd_restore_local_backup_is_one_shot() {
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     let req = backup_request(session.session_id, &evidence, &policy);
     let created = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 
     ctx.expect_fw_reject(

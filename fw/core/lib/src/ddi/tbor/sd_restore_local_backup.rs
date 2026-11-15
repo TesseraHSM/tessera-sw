@@ -44,7 +44,6 @@ use tsra_fw_ddi_tbor_types::TborSdRestoreLocalBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
-use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
@@ -90,17 +89,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         }
     }
 
-    // Allocate the two fixed-size response backups in the IO scope so they
-    // survive the crypto scratch allocator's reset.
-    let pok_local_out = pal.dma_alloc(io, MASKED_SD_LEN)?;
-    let sd_mk_out = pal.dma_alloc(io, SD_MK_BACKUP_LEN)?;
-
-    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+    pal.alloc_scoped_async(io, async |alloc| {
         let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
 
-        // Stage the two masked backups in scratch so they can be unmasked
-        // (decrypted) in place without borrowing the request buffer across
-        // the re-mask / vault steps.
+        // Stage the two masked backups in scratch: they are unmasked
+        // (decrypted) in place, which must not happen in the request region,
+        // and the response is then encoded over that region.
         let pok_scratch = alloc.dma_alloc(MASKED_SD_LEN)?;
         let mk_scratch = alloc.dma_alloc(SD_MK_BACKUP_LEN)?;
         {
@@ -109,50 +103,37 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             mk_scratch.copy_from_slice(req.sd_mk_backup());
         }
 
-        // BKS3 and SDMK are recovered into `pok_scratch` / `mk_scratch`.
-        let res = async {
-            // ── Recover BKS3 from pok_local_backup under PartLocalMK ──
-            let bks3 = sd_backup::recover_bks3_from_pok_local(pal, io, svn, pok_scratch).await?;
+        // Recover BKS3 from pok_local_backup under PartLocalMK.
+        let bks3 = sd_backup::recover_bks3_from_pok_local(pal, io, svn, pok_scratch).await?;
 
-            // Recover SDMK from `mk_scratch`, re-mask both backups, and
-            // commit the SD to the vault (shared with the remote restore).
-            sd_backup::reprovision_sd_from_bks3(
-                pal,
-                io,
-                alloc,
-                undo,
-                svn,
-                owner,
-                bks3,
-                mk_scratch,
-                pok_local_out,
-                sd_mk_out,
-            )
-            .await
-        }
-        .await;
+        // The refreshed backups are written straight into their response
+        // slots.
+        let len = cmd_buf.encode_response(|buf| {
+            Ok(TborSdRestoreLocalBackupResp::encode(buf, 0, false)?
+                .pok_local_backup_reserve(MASKED_SD_LEN)?
+                .sd_mk_backup_reserve(SD_MK_BACKUP_LEN)?
+                .finish()
+                .as_bytes()
+                .len())
+        })?;
+        let out = TborSdRestoreLocalBackupResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
 
-        // Scrub the recovered BKS3 / SDMK plaintext from scratch on every
-        // path before the buffers return to the per-IO pool.
-        res
+        // Recover SDMK from `mk_scratch`, re-mask both backups, and commit
+        // the SD to the vault (shared with the remote restore).
+        sd_backup::reprovision_sd_from_bks3(
+            pal,
+            io,
+            alloc,
+            undo,
+            svn,
+            owner,
+            bks3,
+            mk_scratch,
+            out.pok_local_backup,
+            out.sd_mk_backup,
+        )
+        .await?;
+        Ok(len)
     })
-    .await?;
-
-    encode_response(cmd_buf, pok_local_out, sd_mk_out)
-}
-
-/// Encode the `SdRestoreLocalBackup` response around the refreshed backups.
-fn encode_response(
-    cmd_buf: &mut HsmCmdBuf<'_>,
-    pok_local: &HsmDmaBuf,
-    sd_mk: &HsmDmaBuf,
-) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdRestoreLocalBackupResp::encode(buf, 0, false)?
-            .pok_local_backup(pok_local)?
-            .sd_mk_backup(sd_mk)?
-            .finish();
-        Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    .await
 }

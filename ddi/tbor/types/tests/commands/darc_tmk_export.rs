@@ -19,6 +19,7 @@ use crate::commands::sd_create_remote_backup::backing_test_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
+use crate::commands::sd_create_remote_backup::SdOob;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 const SCOPE_LOCAL: u8 = 3;
@@ -71,7 +72,7 @@ pub(crate) fn sd_initialized_session_with_data() -> ExportReady {
     let pid_chain = vec![chain.root_der, chain.pta_der, leaf];
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
-    ctx.tbor_oob(
+    ctx.sd_oob(
         &backup_request(session.session_id, &evidence, &policy),
         &evidence.oob(),
     )

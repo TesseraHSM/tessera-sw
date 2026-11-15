@@ -4,7 +4,8 @@
 //! Host-side decoding and signature verification of sealing reports.
 //!
 //! Supports PublicKey COSE_Sign1 v1/v2/v3 and mandatory v3 SdBackup operation
-//! reports, canonical P-384 HPKE Base envelopes and software-authority signing.
+//! reports, canonical P-384, ML-KEM-1024 and MLKEM1024-P384 HPKE Base
+//! envelopes, and software-authority signing.
 //! Decoding validates the encoding, not the signature, certificate chains,
 //! policy binding, or trustworthiness of the claims. All byte fields borrow
 //! the input; no DMA buffers or firmware APIs are required.
@@ -27,10 +28,12 @@ use minicbor::Decoder;
 use minicbor::Encoder;
 pub use transfer::*;
 use tsra_crypto::EccCurve;
+use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::EcdsaAlgo;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::ImportableKey;
+use tsra_crypto::Signer;
 use tsra_crypto::VerifyOp;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
@@ -80,7 +83,8 @@ pub struct KeyReport<'a> {
     payload: &'a [u8],
     /// PublicKey report version: 1, 2, or discriminated version 3.
     pub version: u16,
-    /// Padded COSE_Key field.
+    /// COSE_Key field, padded to [`PUBLIC_KEY_MAX_SIZE`] or exact-length
+    /// when larger.
     pub public_key: &'a [u8],
     /// Actual COSE_Key length within the padded field.
     pub public_key_size: u16,
@@ -193,12 +197,16 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
         report.version == expected_version,
         "report version does not match its claims"
     );
+    // Keys up to the padded size use the padded field; larger (AKP) keys
+    // use an exact-length field.
+    let size = usize::from(report.public_key_size);
     anyhow::ensure!(
-        report.public_key.len() == PUBLIC_KEY_MAX_SIZE,
-        "invalid padded public-key size"
-    );
-    anyhow::ensure!(
-        report.public_key_size > 0 && usize::from(report.public_key_size) <= PUBLIC_KEY_MAX_SIZE,
+        size > 0
+            && if report.public_key.len() == PUBLIC_KEY_MAX_SIZE {
+                size <= PUBLIC_KEY_MAX_SIZE
+            } else {
+                report.public_key.len() > PUBLIC_KEY_MAX_SIZE && size == report.public_key.len()
+            },
         "invalid COSE public-key length",
     );
     anyhow::ensure!(
@@ -341,4 +349,133 @@ pub fn parse_ec2_cose_key_bytes(bytes: &[u8]) -> Result<Ec2PublicKey<'_>> {
         "invalid EC2 coordinate lengths",
     );
     Ok(Ec2PublicKey { curve, x, y })
+}
+
+/// Decode a canonical AKP COSE_Key `{ 1: 7, 3: alg, -1: pub }`.
+///
+/// # Errors
+/// Rejects other key types, non-canonical field order and trailing bytes.
+pub fn parse_akp_cose_key_bytes(bytes: &[u8]) -> Result<(i32, &[u8])> {
+    let mut decoder = Decoder::new(bytes);
+    anyhow::ensure!(
+        decoder.map()? == Some(3) && decoder.u8()? == 1 && decoder.u8()? == 7 && decoder.u8()? == 3,
+        "expected an AKP public key"
+    );
+    let alg = decoder.i32()?;
+    anyhow::ensure!(decoder.i8()? == -1, "expected AKP pub");
+    let public = decoder.bytes()?;
+    anyhow::ensure!(
+        decoder.position() == bytes.len(),
+        "trailing bytes after AKP key"
+    );
+    Ok((alg, public))
+}
+
+/// Recover a report's attested sealing key as a transfer recipient: raw
+/// P-384 `X || Y` or the ML-KEM-1024 / MLKEM1024-P384 public key.
+///
+/// # Errors
+/// Rejects keys that are not P-384 or an ML-KEM sealing key.
+pub fn attested_recipient(report: &KeyReport<'_>) -> Result<Vec<u8>> {
+    let cose = report
+        .public_key
+        .get(..usize::from(report.public_key_size))
+        .context("invalid attested public-key length")?;
+    let recipient = if let Ok(key) = parse_ec2_cose_key_bytes(cose) {
+        anyhow::ensure!(key.curve == Curve::P384, "attested key must be P-384");
+        [key.x, key.y].concat()
+    } else {
+        let (alg, public) = parse_akp_cose_key_bytes(cose)?;
+        let kem = TransferKem::from_recipient(public)?;
+        anyhow::ensure!(
+            kem.cose_alg() == Some(alg),
+            "attested AKP algorithm mismatch"
+        );
+        public.to_vec()
+    };
+    TransferKem::from_recipient(&recipient)?;
+    Ok(recipient)
+}
+
+/// Encode a transfer recipient as its COSE_Key.
+pub fn recipient_cose_key(recipient: &[u8]) -> Result<Vec<u8>> {
+    let kem = TransferKem::from_recipient(recipient)?;
+    let mut key = Encoder::new(Vec::new());
+    match kem.cose_alg() {
+        None => {
+            key.map(4)?
+                .u8(1)?
+                .u8(2)?
+                .i8(-1)?
+                .u8(2)?
+                .i8(-2)?
+                .bytes(&recipient[..48])?
+                .i8(-3)?
+                .bytes(&recipient[48..])?;
+        }
+        Some(alg) => {
+            key.map(3)?
+                .u8(1)?
+                .u8(7)?
+                .u8(3)?
+                .i32(alg)?
+                .i8(-1)?
+                .bytes(recipient)?;
+        }
+    }
+    Ok(key.into_writer())
+}
+
+/// Sign a software v1 key report attesting `recipient`, for a SATA receiver
+/// leaf delegating to a separate sealing key. It asserts no HSM provenance.
+pub fn sign_software_key_report(key: &EccPrivateKey, recipient: &[u8]) -> Result<Vec<u8>> {
+    let cose = recipient_cose_key(recipient)?;
+    let mut field = cose.clone();
+    if field.len() < PUBLIC_KEY_MAX_SIZE {
+        field.resize(PUBLIC_KEY_MAX_SIZE, 0);
+    }
+    let mut payload = Encoder::new(Vec::new());
+    payload
+        .map(7)?
+        .u8(0)?
+        .u16(1)?
+        .u8(1)?
+        .bytes(&field)?
+        .u8(2)?
+        .u16(u16::try_from(cose.len())?)?
+        .u8(3)?
+        .u32(0)?
+        .u8(4)?
+        .bytes(&[0; 16])?
+        .u8(5)?
+        .bytes(&[0; 128])?
+        .u8(6)?
+        .bytes(&[0; 16])?;
+    let payload = payload.into_writer();
+    let mut input = Encoder::new(Vec::new());
+    input
+        .array(4)?
+        .str("Signature1")?
+        .bytes(PROTECTED_HEADER)?
+        .bytes(&[])?
+        .bytes(&payload)?;
+    let signature = Signer::sign_vec(
+        &mut EcdsaAlgo::new(HashAlgo::sha384()),
+        key,
+        &input.into_writer(),
+    )?;
+    let mut report = Encoder::new(Vec::new());
+    report
+        .tag(minicbor::data::Tag::Unassigned(18))?
+        .array(4)?
+        .bytes(PROTECTED_HEADER)?
+        .map(0)?
+        .bytes(&payload)?
+        .bytes(&signature)?;
+    let report = report.into_writer();
+    anyhow::ensure!(
+        attested_recipient(&parse_key_report_bytes(&report)?)? == recipient,
+        "software key report does not round-trip"
+    );
+    Ok(report)
 }

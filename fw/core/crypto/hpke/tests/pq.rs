@@ -23,6 +23,8 @@ use hpke::OpModeS;
 use hpke::PskBundle;
 use hpke::Serializable;
 use tsra_fw_core_crypto_hpke::*;
+use tsra_fw_hsm_pal_std_uno::StdHsmIo;
+use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::*;
 
 const INFO: &[u8] = b"tsra hpke pq info";
@@ -322,4 +324,76 @@ async fn invalid_encapsulation_key_rejected() {
     *pk.last_mut().expect("pk") ^= 1;
     let cfg = HpkeSealConfig::base(suite, &pk, INFO, AAD);
     assert!(fw_seal(&pal, &io, &cfg, PT).await.is_err());
+}
+
+async fn fw_public_key(
+    pal: &StdHsmPal,
+    io: &StdHsmIo,
+    suite: HpkeSuite,
+    sk: &[u8],
+) -> HsmResult<Vec<u8>> {
+    pal.alloc_scoped_async(io, async |alloc| {
+        let mut pk = vec![0u8; suite.npk()];
+        public_key(pal, io, suite, sk, &mut pk, alloc).await?;
+        Ok(pk)
+    })
+    .await
+}
+
+async fn fw_generate(
+    pal: &StdHsmPal,
+    io: &StdHsmIo,
+    suite: HpkeSuite,
+) -> HsmResult<(Vec<u8>, Vec<u8>)> {
+    pal.alloc_scoped_async(io, async |alloc| {
+        let mut sk = vec![0u8; suite.nsk()];
+        let mut pk = vec![0u8; suite.npk()];
+        generate_key_pair(pal, io, suite, dma_mut(&mut sk), &mut pk, alloc).await?;
+        Ok((sk, pk))
+    })
+    .await
+}
+
+#[tokio::test]
+async fn public_key_matches_vectors() {
+    let (pal, io) = pal_and_io();
+    for suite in SUITES {
+        let (sk, pk) = recipient(suite);
+        let got = fw_public_key(&pal, &io, suite, &sk)
+            .await
+            .expect("public key");
+        assert_eq!(got, pk, "{suite:?}");
+        assert!(fw_public_key(&pal, &io, suite, &sk[1..]).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn generated_key_pairs_interoperate() {
+    let (pal, io) = pal_and_io();
+    for suite in SUITES {
+        let (sk, pk) = fw_generate(&pal, &io, suite).await.expect("generate");
+        let (sk2, _) = fw_generate(&pal, &io, suite).await.expect("generate");
+        assert_ne!(sk, sk2, "{suite:?} seeds must be fresh");
+        assert_eq!(
+            fw_public_key(&pal, &io, suite, &sk)
+                .await
+                .expect("public key"),
+            pk
+        );
+        let (enc, ct) = with_ref_kem!(suite, ref_seal(&pk, false));
+        let cfg = HpkeOpenConfig::base(suite, &sk, &pk, INFO, AAD);
+        let pt = fw_open(&pal, &io, &cfg, &enc, &ct).await.expect("fw open");
+        assert_eq!(pt, PT);
+        let cfg = HpkeSealConfig::base(suite, &pk, INFO, AAD);
+        let (enc, ct) = fw_seal(&pal, &io, &cfg, PT).await.expect("fw seal");
+        assert_eq!(with_ref_kem!(suite, ref_open(&sk, false, &enc, &ct)), PT);
+    }
+}
+
+#[tokio::test]
+async fn key_generation_rejects_dhkem_suites() {
+    let (pal, io) = pal_and_io();
+    let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
+    assert!(fw_generate(&pal, &io, suite).await.is_err());
+    assert!(fw_public_key(&pal, &io, suite, &[1; 48]).await.is_err());
 }

@@ -71,12 +71,12 @@ pub struct TborSdRestoreLocalBackupReq<'a> {
 pub struct TborSdRestoreLocalBackupResp<'a> {
     /// Refreshed local partition-owner-key backup.  Always exactly
     /// [`MASKED_SD_LEN`] (280 B).
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280, mutable)]
     pub pok_local_backup: &'a [u8],
 
     /// Refreshed security-domain masking-key backup envelope.  Always
     /// exactly [`SD_MK_BACKUP_LEN`] (264 B).
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264, mutable)]
     pub sd_mk_backup: &'a [u8],
 }
 

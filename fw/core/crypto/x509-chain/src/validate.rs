@@ -619,7 +619,20 @@ struct ChainWalker<'a> {
     validator: ChainValidator,
     anchor: Option<&'a [u8; SPKI_THUMBPRINT_LEN]>,
     anchored: bool,
-    leaf_out: Option<&'a mut [u8]>,
+    leaf: LeafSink<'a>,
+    /// Bytes of the leaf public key written to [`LeafSink::Out`].
+    leaf_len: usize,
+}
+
+/// What chain validation does with the validated leaf public key
+/// ([`PubKey::as_bytes`] form).
+pub enum LeafSink<'a> {
+    /// Discard it (issuing-chain validation).
+    None,
+    /// Copy it into the prefix of the buffer.
+    Out(&'a mut [u8]),
+    /// Require it to equal these bytes, compared in place without a copy.
+    Expect(&'a [u8]),
 }
 
 impl ChainWalker<'_> {
@@ -672,13 +685,22 @@ impl ChainWalker<'_> {
                 if !self.anchored {
                     return Err(HsmError::InvalidArg);
                 }
-                if let Some(leaf_out) = self.leaf_out.as_deref_mut() {
-                    let point = leaf_pub_key.as_bytes();
-                    if point.len() != leaf_out.len() {
-                        return Err(HsmError::InvalidArg);
+                let point = leaf_pub_key.as_bytes();
+                match &mut self.leaf {
+                    LeafSink::None => {}
+                    LeafSink::Out(leaf_out) => {
+                        let out = leaf_out
+                            .get_mut(..point.len())
+                            .ok_or(HsmError::InvalidArg)?;
+                        out.copy_from_slice(point);
                     }
-                    leaf_out.copy_from_slice(point);
+                    LeafSink::Expect(expected) => {
+                        if point != *expected {
+                            return Err(HsmError::InvalidArg);
+                        }
+                    }
                 }
+                self.leaf_len = point.len();
                 Ok(true)
             }
             StepResult::NeedNext => Ok(false),
@@ -780,16 +802,16 @@ impl IssuerCarry {
 ///   `thumbprint`, binding the chain to an external trust anchor (e.g. a
 ///   policy POTA / SATA key).
 ///
-/// On success `leaf_out` is filled with [`PubKey::as_bytes`]: raw
-/// big-endian `X‖Y`, DER RSAPublicKey, or raw ML-DSA bytes. Its length
-/// must exactly match. Existing 96-byte leaf consumers remain P-384-only.
+/// On success the prefix of `leaf_out` is filled with [`PubKey::as_bytes`]:
+/// raw big-endian `X‖Y`, DER RSAPublicKey, or raw ML-DSA bytes, and its
+/// length is returned. Callers classify the key by that length.
 ///
 /// # Errors
 ///
 /// * [`HsmError::InvalidArg`] — empty `descriptors`, a zero-length or
 ///   oversized certificate, an issuer whose carried fields exceed
-///   [`MAX_ISSUER_CARRY_LEN`], `leaf_out`'s length does not match the leaf
-///   public-key length, or the `anchor` requirement was not satisfied.
+///   [`MAX_ISSUER_CARRY_LEN`], `leaf_out` is smaller than the leaf
+///   public key, or the `anchor` requirement was not satisfied.
 /// * [`HsmError::InternalError`] — the validator did not reach the leaf
 ///   after every certificate was consumed (internal invariant).
 /// * Any [`HsmError`] surfaced by `fetch`, [`parse_cert`], or signature
@@ -802,7 +824,7 @@ pub async fn validate_chain<P, F>(
     anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     fetch: F,
-) -> HsmResult<()>
+) -> HsmResult<usize>
 where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
@@ -813,12 +835,39 @@ where
         alloc,
         descriptors,
         anchor,
-        Some(leaf_out),
+        LeafSink::Out(leaf_out),
         fetch,
         false,
     )
     .await
-    .map(|_| ())
+    .map(|(_, leaf_len)| leaf_len)
+}
+
+/// Like [`validate_chain`], but with the leaf public key handled by `leaf`
+/// (e.g. [`LeafSink::Expect`] compares it in place, so callers can check
+/// that several chains certify one key without a second leaf-sized
+/// buffer). Returns the leaf public key length.
+///
+/// # Errors
+///
+/// As [`validate_chain`]; additionally [`HsmError::InvalidArg`] when the
+/// leaf public key differs from a [`LeafSink::Expect`] key.
+pub async fn validate_chain_into<P, F>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    descriptors: &[CertDescriptor],
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
+    leaf: LeafSink<'_>,
+    fetch: F,
+) -> HsmResult<usize>
+where
+    P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
+{
+    validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf, fetch, false)
+        .await
+        .map(|(_, leaf_len)| leaf_len)
 }
 
 /// Like [`validate_chain`], but validates the terminal certificate as an
@@ -849,7 +898,18 @@ where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'b> AsyncFnMut(usize, &'b mut HsmDmaBuf) -> HsmResult<()>,
 {
-    validate_chain_inner(pal, io, alloc, descriptors, anchor, None, fetch, true).await
+    validate_chain_inner(
+        pal,
+        io,
+        alloc,
+        descriptors,
+        anchor,
+        LeafSink::None,
+        fetch,
+        true,
+    )
+    .await
+    .map(|(der, _)| der)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -859,10 +919,10 @@ async fn validate_chain_inner<'a, P, F>(
     alloc: &'a impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
-    leaf_out: Option<&mut [u8]>,
+    leaf: LeafSink<'_>,
     mut fetch: F,
     terminal_is_issuing_ca: bool,
-) -> HsmResult<&'a HsmDmaBuf>
+) -> HsmResult<(&'a HsmDmaBuf, usize)>
 where
     P: HsmAlloc + HsmHash + HsmEcc + HsmRsa + HsmMlDsa,
     F: for<'b> AsyncFnMut(usize, &'b mut HsmDmaBuf) -> HsmResult<()>,
@@ -899,7 +959,8 @@ where
         },
         anchor,
         anchored: anchor.is_none(),
-        leaf_out,
+        leaf,
+        leaf_len: 0,
     })?;
 
     let der = alloc.dma_alloc(der_capacity)?;
@@ -916,8 +977,9 @@ where
     let curr = &mut der[..len];
     fetch(usize::from(terminal.index), curr).await?;
     walk_one(pal, io, walker, curr, carry, &mut issuer, true).await?;
+    let leaf_len = walker.leaf_len;
     let der: &'a HsmDmaBuf = der;
-    Ok(&der[..len])
+    Ok((&der[..len], leaf_len))
 }
 
 /// Validate the fetched certificate `cert` against the carried `issuer`;

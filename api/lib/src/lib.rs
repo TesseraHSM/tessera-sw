@@ -27,6 +27,7 @@ pub use ddi::MASKED_TMK_LEN;
 pub use ddi::MAX_CERTS;
 pub use ddi::PART_POLICY_MAX_LEN;
 pub use ddi::POK_REMOTE_BACKUP_LEN;
+pub use ddi::POK_REMOTE_BACKUP_MAX_LEN;
 pub use ddi::POLICY_BACKUP_PART_ID_LEN;
 pub use ddi::POLICY_INFO_MAX_LEN;
 pub use ddi::POLICY_PTA_ALG_ES384;

@@ -63,3 +63,26 @@ pub(crate) fn push_report<'a>(
     oob.push(TborOobItem::In(report));
     Ok(descriptor)
 }
+
+/// Truncates the out-of-band report buffer to the firmware-reported length.
+pub(crate) fn take_report(mut report: Vec<u8>, report_len: tbor_int::U16) -> HsmResult<Vec<u8>> {
+    let len = usize::from(report_len.get());
+    if len == 0 || len > report.len() {
+        return Err(HsmError::InternalError);
+    }
+    report.truncate(len);
+    Ok(report)
+}
+
+/// Pushes the SdBackup report output buffer as out-of-band item
+/// [`SD_BACKUP_REPORT_OOB_INDEX`]; it must precede every input item.
+pub(crate) fn push_report_out<'a>(
+    report: &'a mut [u8],
+    oob: &mut Vec<TborOobItem<'a>>,
+) -> HsmResult<()> {
+    if oob.len() != SD_BACKUP_REPORT_OOB_INDEX {
+        return Err(HsmError::InternalError);
+    }
+    oob.push(TborOobItem::Out(report));
+    Ok(())
+}

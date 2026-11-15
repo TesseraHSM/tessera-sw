@@ -7,9 +7,8 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
+use tsra_sealing_report::TransferKem;
 
 use crate::load_partition_recovery;
 use crate::mint_sealing_key;
@@ -37,7 +36,7 @@ pub struct PreparedRemoteRestore {
 /// Backup resealed by an authority to the prepared receiver.
 #[derive(Clone)]
 pub struct ResealedBackup {
-    /// P-384 HPKE Base envelope addressed to the recovering partition.
+    /// HPKE Base envelope addressed to the recovering partition's receiver.
     pub pok_remote_backup: Vec<u8>,
     /// Original SDMK backup paired with the security-domain seed.
     pub sd_mk_backup: Vec<u8>,
@@ -52,10 +51,6 @@ impl ResealedBackup {
     /// the sender evidence against their trusted authority's policy.
     pub fn validate(&self) -> Result<()> {
         crate::RemoteRecovery::validate_transfer_envelope(&self.pok_remote_backup)?;
-        anyhow::ensure!(
-            self.pok_remote_backup.len() == POK_REMOTE_BACKUP_LEN,
-            "invalid resealed backup length"
-        );
         anyhow::ensure!(
             self.sd_mk_backup.len() == SD_MK_BACKUP_LEN,
             "invalid remote SDMK backup length"
@@ -92,12 +87,9 @@ pub fn reseal_remote_backup(
     destination: &Evidence,
 ) -> Result<tsra_api::HsmSdTransferResult> {
     anyhow::ensure!(
-        masked_receiver.len() == MASKED_SEALING_KEY_LEN,
-        "invalid authority receiver length"
-    );
-    anyhow::ensure!(
-        source.pok_remote_backup.len() == POK_REMOTE_BACKUP_LEN,
-        "invalid source backup length"
+        TransferKem::from_masked_key_len(masked_receiver.len())?
+            == crate::RemoteRecovery::validate_transfer_envelope(&source.pok_remote_backup)?,
+        "authority receiver does not match the source backup KEM"
     );
     require_evidence(&source.evidence)?;
     require_evidence(destination)?;
@@ -129,6 +121,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         &self,
         session: &SealingSession,
         seed: &[u8],
+        kem: TransferKem,
         sign_pta: SignPta,
     ) -> Result<PreparedRemoteRestore>
     where
@@ -136,7 +129,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     {
         self.ensure_can_create()?;
         let partition = self.init_partition(session, seed, None, sign_pta)?;
-        self.prepare_receiver(session, partition)
+        self.prepare_receiver(session, partition, kem)
     }
 
     /// Restore only the partition, then mint a fresh receiver for remote SD
@@ -147,6 +140,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         &self,
         session: &SealingSession,
         seed: &[u8],
+        kem: TransferKem,
         sign_pta: SignPta,
     ) -> Result<PreparedRemoteRestore>
     where
@@ -159,16 +153,17 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         );
         let partition =
             self.init_partition(session, seed, Some(&previous.local_mk_backup), sign_pta)?;
-        self.prepare_receiver(session, partition)
+        self.prepare_receiver(session, partition, kem)
     }
 
     fn prepare_receiver(
         &self,
         session: &SealingSession,
         partition: PartitionState,
+        kem: TransferKem,
     ) -> Result<PreparedRemoteRestore> {
         let prepared = (|| {
-            let receiver = mint_sealing_key(&session.session)?;
+            let receiver = mint_sealing_key(&session.session, kem)?;
             let evidence = Evidence {
                 mfgr_cert_chain: self.env().mfgr_cert_chain().to_vec(),
                 owner_cert_chain: self.env().owner_cert_chain().to_vec(),
@@ -210,8 +205,10 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             "prepared remote policy mismatch"
         );
         anyhow::ensure!(
-            prepared.receiver.masked.len() == MASKED_SEALING_KEY_LEN,
-            "invalid prepared receiver length"
+            prepared.receiver.masked.len()
+                == crate::RemoteRecovery::validate_transfer_envelope(&backup.pok_remote_backup)?
+                    .masked_key_len(),
+            "prepared receiver does not match the resealed backup KEM"
         );
         let result = backup.sender_evidence.with_hsm_evidence(|evidence| {
             session.session.sd_restore_remote_backup(

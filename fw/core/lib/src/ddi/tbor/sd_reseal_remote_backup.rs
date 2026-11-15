@@ -4,10 +4,12 @@
 //! Verify the client's signed SD operation before opening and PID-signing a reseal.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::EvidenceRefs;
+use tsra_fw_core_evidence::KeySink;
 use tsra_fw_core_evidence::TrustAnchors;
+use tsra_fw_core_evidence::ATTESTED_KEY_MAX_LEN;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::*;
 use tsra_fw_hsm_pal_traits::*;
 
@@ -40,33 +42,38 @@ pub(crate) async fn handle<P: HsmPal>(
                 .scope(),
         )?
     };
-    let envelope = pal.dma_alloc(io, POK_REMOTE_BACKUP_LEN)?;
-    let report = pal.dma_alloc(io, SD_BACKUP_REPORT_MAX_LEN)?;
-    let report_len = pal
+    // Only the recipient, policy hash and BKS3 outlive the request; the
+    // envelope and report are written straight into their response slots.
+    let recipient = pal.dma_alloc(io, ATTESTED_KEY_MAX_LEN)?;
+    let hash = pal.dma_alloc(io, 48)?;
+    let bks3 = pal.dma_alloc(io, sd_backup::BKS3_LEN)?;
+    let req = TborSdResealRemoteBackupReq::decode(cmd.request())?;
+    let policy = super::policy::from_bytes(req.policy())?;
+    // Source verification, unmasking and decapsulation scratch is released
+    // before sealing to keep PQ KEMs within the IO budget.
+    pal.alloc_scoped_async(io, async |scratch| {
+        sd_transfer::hash_policy(pal, io, req.policy(), hash).await?;
+        let ev = req.src_evidence();
+        let source = sd_transfer::BackupSource {
+            masked_key: req.masked_sealing_key(),
+            evidence: EvidenceRefs {
+                mfgr_chain: ev.mfgr_cert_chain(),
+                owner_chain: ev.owner_cert_chain(),
+                part_owner_chain: ev.part_owner_cert_chain(),
+                report: ev.evidence(),
+            },
+            anchor: Some(policy.pota_spki_thumbprint),
+            pid_public: None,
+            envelope: req.src_remote_backup(),
+        };
+        sd_transfer::unseal_backup(pal, io, scratch, mk_id, &source, hash, bks3).await
+    })
+    .await?;
+    let recipient_len = pal
         .alloc_scoped_async(io, async |alloc| {
-            let req = TborSdResealRemoteBackupReq::decode(cmd.request())?;
-            let policy = super::policy::from_bytes(req.policy())?;
-            let pota = policy.pota_spki_thumbprint;
-            let hash = sd_transfer::policy_hash(pal, io, alloc, req.policy()).await?;
-            let ev = req.src_evidence();
-            let (signer, source_report) = sd_transfer::source(
-                pal,
-                io,
-                alloc,
-                &EvidenceRefs {
-                    mfgr_chain: ev.mfgr_cert_chain(),
-                    owner_chain: ev.owner_cert_chain(),
-                    part_owner_chain: ev.part_owner_cert_chain(),
-                    report: ev.evidence(),
-                },
-                Some(pota),
-                None,
-            )
-            .await?;
             let ev = req.dest_evidence();
-            let recipient = alloc.dma_alloc(97)?;
             let dst_hash = alloc.dma_alloc(48)?;
-            verify_evidence(
+            let recipient_len = verify_evidence(
                 pal,
                 io,
                 &EvidenceRefs {
@@ -76,43 +83,46 @@ pub(crate) async fn handle<P: HsmPal>(
                     report: ev.evidence(),
                 },
                 &TrustAnchors {
-                    part_owner_anchor: pota,
+                    part_owner_anchor: policy.pota_spki_thumbprint,
                     require_sd_sealing: true,
                 },
-                recipient,
+                KeySink::Out(recipient),
                 Some(dst_hash),
             )
             .await?;
             if hash[..] != dst_hash[..] {
                 return Err(HsmError::InvalidArg);
             }
-            let blob = alloc.dma_alloc(MASKED_SEALING_KEY_LEN)?;
-            blob.copy_from_slice(req.masked_sealing_key());
-            let key = unmask(pal, io, pal.vault_key(io, mk_id)?, blob).await?;
-            if key.key_kind != HsmVaultKeyKind::SdSealing {
-                return Err(HsmError::UnsupportedKeyType);
-            }
-            let bks3 = alloc.dma_alloc(sd_backup::BKS3_LEN)?;
-            sd_transfer::open_backup(
-                pal,
-                io,
-                alloc,
-                key.target_key,
-                signer,
-                source_report,
-                req.src_remote_backup(),
-                hash,
-                bks3,
-            )
-            .await?;
-            sd_transfer::seal_backup(pal, io, alloc, hash, recipient, bks3, envelope, report).await
+            Ok(recipient_len)
         })
         .await?;
-    cmd.encode_response(|buf| {
-        let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
-            .dst_remote_backup(envelope)?
-            .report(&report[..report_len])?
-            .finish();
-        Ok(frame.as_bytes().len())
+    let recipient = &recipient[..recipient_len];
+    let (envelope_len, report_len) = sd_transfer::backup_lens(pal, io, recipient)?;
+    let report_len_wire = U16::new(u16::try_from(report_len).map_err(|_| HsmError::InternalError)?);
+    let len = cmd.encode_response(|buf| {
+        Ok(TborSdResealRemoteBackupResp::encode(buf, 0, false)?
+            .dst_remote_backup_reserve(envelope_len)?
+            .report_len(report_len_wire)?
+            .finish()
+            .as_bytes()
+            .len())
+    })?;
+    let out = TborSdResealRemoteBackupResp::decode_mut(&mut cmd.buffer_mut()[..len])?;
+    pal.alloc_scoped_async(io, async |alloc| {
+        let report = sd_transfer::seal_backup(
+            pal,
+            io,
+            alloc,
+            hash,
+            recipient,
+            bks3,
+            out.dst_remote_backup,
+            report_len,
+        )
+        .await?;
+        pal.send_oob_bounded(io, SD_BACKUP_REPORT_OOB_INDEX, report)
+            .await
     })
+    .await?;
+    Ok(len)
 }

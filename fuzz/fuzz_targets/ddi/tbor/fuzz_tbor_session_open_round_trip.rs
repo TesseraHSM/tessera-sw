@@ -252,14 +252,15 @@ fn build_valid_finish_req(
 /// returns its public key in both parsed and raw SEC1 form; all failure
 /// modes collapse to `()` since callers only need to bail out via `?`.
 fn fetch_pk_hsm(ctx: &TestCtx) -> Result<(EccPublicKey, [u8; PK_INIT_LEN]), ()> {
-    let info_req = TborGetCertChainInfoReq::new(0);
+    let info_req = TborGetCertChainInfoReq::new(0, CERT_BANK_ECC);
     let info = ctx.tbor(&info_req).map_err(|_| ())?;
     if info.num_certs == 0 {
         return Err(());
     }
-    let cert_req = TborGetCertReq::new(0, info.num_certs - 1);
-    let leaf = ctx.tbor(&cert_req).map_err(|_| ())?;
-    let cert = x509::X509Certificate::from_der(leaf.certificate.as_slice()).map_err(|_| ())?;
+    let leaf = ctx
+        .get_cert(0, CERT_BANK_ECC, info.num_certs - 1)
+        .map_err(|_| ())?;
+    let cert = x509::X509Certificate::from_der(&leaf).map_err(|_| ())?;
     let pk_der = cert.get_public_key_der().map_err(|_| ())?;
     let pk = EccPublicKey::from_bytes(&pk_der).map_err(|_| ())?;
     let sec1 = ec_pub_to_sec1(&pk).map_err(|_| ())?;

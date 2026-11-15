@@ -9,8 +9,14 @@ use tsra_fw_core_crypto_x509_chain::P384_SPKI_LEN;
 use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::verify_receiver_cert_chain;
+use tsra_fw_core_evidence::verify_receiver_key_report;
 use tsra_fw_core_evidence::EvidenceRefs;
+use tsra_fw_core_evidence::KeySink;
 use tsra_fw_core_evidence::TrustAnchors;
+use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
+use tsra_fw_core_evidence::ATTESTED_KEY_MAX_LEN;
+use tsra_fw_core_evidence::SIGNER_KEY_MAX_LEN;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::*;
 use tsra_fw_hsm_pal_traits::*;
 use tsra_fw_hsm_undo::UndoLog;
@@ -41,19 +47,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             return Err(HsmError::SdAlreadyInitialized);
         }
     }
-    let remote = pal.dma_alloc(io, POK_REMOTE_BACKUP_LEN)?;
-    let local = pal.dma_alloc(io, MASKED_SD_LEN)?;
-    let mk_backup = pal.dma_alloc(io, SD_MK_BACKUP_LEN)?;
-    let report = pal.dma_alloc(io, SD_BACKUP_REPORT_MAX_LEN)?;
-    let report_len = pal
-        .alloc_scoped_async(io, async |alloc| {
-            let req = TborSdCreateRemoteBackupReq::decode(cmd.request())?;
-            verify_policy_hash(pal, io, alloc, req.policy()).await?;
-            let policy = super::policy::from_bytes(req.policy())?;
-            let backup = policy.backup_part.ok_or(HsmError::InvalidArg)?;
-            if part_state::part_id(pal, io)?[..] != backup.id[..] {
-                return Err(HsmError::InvalidArg);
-            }
+    // Only the authorized recipient and the policy hash outlive the
+    // request; every output is then written straight into its response slot.
+    let recipient = pal.dma_alloc(io, ATTESTED_KEY_MAX_LEN)?;
+    let hash = pal.dma_alloc(io, 48)?;
+    let recipient_len = async {
+        let req = TborSdCreateRemoteBackupReq::decode(cmd.request())?;
+        verify_policy_hash(pal, io, req.policy(), hash).await?;
+        let policy = super::policy::from_bytes(req.policy())?;
+        let backup = policy.backup_part.ok_or(HsmError::InvalidArg)?;
+        if part_state::part_id(pal, io)?[..] != backup.id[..] {
+            return Err(HsmError::InvalidArg);
+        }
+        pal.alloc_scoped_async(io, async |alloc| {
             let pid = alloc.dma_alloc(P384_POINT_LEN)?;
             part_state::part_id_pub_key(pal, io, pid).await?;
             let spki = alloc.dma_alloc(P384_SPKI_LEN)?;
@@ -62,58 +68,94 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             if thumbprint[..] != backup.spki_thumbprint[..] {
                 return Err(HsmError::InvalidArg);
             }
-            let sata = policy.sata_spki_thumbprint;
-            let recipient = alloc.dma_alloc(97)?;
-            verify_receiver_cert_chain(pal, io, req.receiver_cert_chain(), sata, recipient).await?;
-            if policy.flags.require_trusted_sa_key() {
-                let sapota = policy.sapota_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
-                let ev = req.receiver_evidence();
-                let attested = alloc.dma_alloc(97)?;
-                verify_evidence(
-                    pal,
-                    io,
-                    &EvidenceRefs {
-                        mfgr_chain: ev.mfgr_cert_chain(),
-                        owner_chain: ev.owner_cert_chain(),
-                        part_owner_chain: ev.part_owner_cert_chain(),
-                        report: ev.evidence(),
-                    },
-                    &TrustAnchors {
-                        part_owner_anchor: sapota,
-                        require_sd_sealing: false,
-                    },
-                    attested,
-                    None,
-                )
-                .await?;
-                if attested[..] != recipient[..] {
-                    return Err(HsmError::InvalidArg);
-                }
-            }
-            let hash = sd_transfer::policy_hash(pal, io, alloc, req.policy()).await?;
-            let bks3 = alloc.dma_alloc(sd_backup::BKS3_LEN)?;
-            pal.rng_fill_bytes(io, bks3)?;
-            let len =
-                sd_transfer::seal_backup(pal, io, alloc, hash, recipient, bks3, remote, report)
-                    .await?;
-            let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
-            let sdbmk = sd_backup::derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?;
-            let sdmk = alloc.dma_alloc(sd_backup::SDMK_LEN)?;
-            pal.rng_fill_bytes(io, sdmk)?;
-            sd_backup::mask_sd_mk_backup(pal, io, alloc, sdbmk, sdmk, svn, owner, mk_backup)
-                .await?;
-            sd_backup::mask_pok_local_backup(pal, io, alloc, bks3, svn, owner, local).await?;
-            sd_backup::commit_sd_to_vault(pal, io, undo, sdmk).await?;
-            Ok(len)
+            Ok(())
         })
         .await?;
-    cmd.encode_response(|buf| {
-        let frame = TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
-            .pok_remote_backup(remote)?
-            .pok_local_backup(local)?
-            .sd_mk_backup(mk_backup)?
-            .report(&report[..report_len])?
-            .finish();
-        Ok(frame.as_bytes().len())
+        let sata = policy.sata_spki_thumbprint;
+        // The SATA leaf (P-384 or ML-DSA-87) and its key report are
+        // scoped; only the authorized recipient KEM key survives.
+        let recipient_len = pal
+            .alloc_scoped_async(io, async |alloc| {
+                let leaf = alloc.dma_alloc(SIGNER_KEY_MAX_LEN)?;
+                let chain = req.receiver_cert_chain();
+                let len = verify_receiver_cert_chain(pal, io, chain, sata, leaf).await?;
+                let leaf = &leaf[..len];
+                match req.receiver_key_report() {
+                    // Without a key report the leaf itself is the P-384
+                    // recipient.
+                    [] if len == ATTESTED_KEY_LEN => {
+                        recipient[..len].copy_from_slice(leaf);
+                        Ok(len)
+                    }
+                    [report] => verify_receiver_key_report(pal, io, leaf, report, recipient).await,
+                    _ => Err(HsmError::InvalidArg),
+                }
+            })
+            .await?;
+        if policy.flags.require_trusted_sa_key() {
+            let sapota = policy.sapota_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
+            let ev = req.receiver_evidence();
+            verify_evidence(
+                pal,
+                io,
+                &EvidenceRefs {
+                    mfgr_chain: ev.mfgr_cert_chain(),
+                    owner_chain: ev.owner_cert_chain(),
+                    part_owner_chain: ev.part_owner_cert_chain(),
+                    report: ev.evidence(),
+                },
+                &TrustAnchors {
+                    part_owner_anchor: sapota,
+                    require_sd_sealing: false,
+                },
+                KeySink::Expect(&recipient[..recipient_len]),
+                None,
+            )
+            .await?;
+        }
+        Ok::<_, HsmError>(recipient_len)
+    }
+    .await?;
+    let recipient = &recipient[..recipient_len];
+    let (remote_len, report_len) = sd_transfer::backup_lens(pal, io, recipient)?;
+    let report_len_wire = U16::new(u16::try_from(report_len).map_err(|_| HsmError::InternalError)?);
+    let len = cmd.encode_response(|buf| {
+        Ok(TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
+            .pok_remote_backup_reserve(remote_len)?
+            .pok_local_backup_reserve(MASKED_SD_LEN)?
+            .sd_mk_backup_reserve(SD_MK_BACKUP_LEN)?
+            .report_len(report_len_wire)?
+            .finish()
+            .as_bytes()
+            .len())
+    })?;
+    let out = TborSdCreateRemoteBackupResp::decode_mut(&mut cmd.buffer_mut()[..len])?;
+    pal.alloc_scoped_async(io, async |alloc| {
+        let bks3 = alloc.dma_alloc(sd_backup::BKS3_LEN)?;
+        pal.rng_fill_bytes(io, bks3)?;
+        let report = sd_transfer::seal_backup(
+            pal,
+            io,
+            alloc,
+            hash,
+            recipient,
+            bks3,
+            out.pok_remote_backup,
+            report_len,
+        )
+        .await?;
+        let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
+        let sdbmk = sd_backup::derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?;
+        let sdmk = alloc.dma_alloc(sd_backup::SDMK_LEN)?;
+        pal.rng_fill_bytes(io, sdmk)?;
+        sd_backup::mask_sd_mk_backup(pal, io, alloc, sdbmk, sdmk, svn, owner, out.sd_mk_backup)
+            .await?;
+        sd_backup::mask_pok_local_backup(pal, io, alloc, bks3, svn, owner, out.pok_local_backup)
+            .await?;
+        pal.send_oob_bounded(io, SD_BACKUP_REPORT_OOB_INDEX, report)
+            .await?;
+        sd_backup::commit_sd_to_vault(pal, io, undo, sdmk).await
     })
+    .await?;
+    Ok(len)
 }

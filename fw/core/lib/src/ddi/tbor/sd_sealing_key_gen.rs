@@ -3,10 +3,10 @@
 
 //! TBOR `SdSealingKeyGen` handler.
 //!
-//! Generates a fresh security-domain sealing key — a P-384 ECC keypair
-//! for ECDH key agreement (ECIES-style seal / unseal) — under the active
-//! session's partition, and returns the **masked** private key plus the
-//! public key.
+//! Generates a fresh security-domain sealing key for the requested HPKE
+//! KEM — a P-384 ECC keypair (DHKEM), an ML-KEM-1024 seed (HPKE-13) or an
+//! MLKEM1024-P384 hybrid seed (HPKE-10) — under the active session's
+//! partition, and returns the **masked** private key plus the public key.
 //!
 //! The private key is **not** stored on the device.  Instead it is masked
 //! (AEAD-GCM-256) under the masking key associated with the requested
@@ -35,11 +35,13 @@
 //! rejected with [`HsmError::InvalidPermissions`].
 
 use tsra_fw_core_crypto_key_masking::aead::mask;
+use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
+use tsra_fw_core_crypto_key_report::transfer::TransferKem;
+use tsra_fw_ddi_tbor_types::SdSealingKem;
 use tsra_fw_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_fw_ddi_tbor_types::TborSdSealingKeyGenResp;
-use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -80,7 +82,51 @@ fn sealing_key_attrs(scope: HsmKeyScope) -> HsmVaultKeyAttrs {
         .with_scope(scope)
 }
 
+/// Generate an ML-KEM-1024 or MLKEM1024-P384 sealing key pair: the
+/// private seed (64 or 32 B) and the HPKE `pkR` encoding.
+async fn generate_pq_sealing_keypair<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    kem: TransferKem,
+    seed_len: usize,
+) -> HsmResult<(&'p mut HsmDmaBuf, &'p mut HsmDmaBuf)> {
+    let priv_key = pal.dma_alloc(io, seed_len)?;
+    let pub_key = pal.dma_alloc(io, kem.public_key_len())?;
+    pal.alloc_scoped_async(io, async |a| {
+        tsra_fw_core_crypto_hpke::generate_key_pair(pal, io, kem.suite(), priv_key, pub_key, a)
+            .await
+    })
+    .await?;
+    Ok((priv_key, pub_key))
+}
+
 async fn generate_sealing_keypair<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    kem: SdSealingKem,
+) -> HsmResult<(HsmVaultKeyKind, &'p mut HsmDmaBuf, &'p mut HsmDmaBuf)> {
+    let (kind, kem, seed_len) = match kem {
+        SdSealingKem::P384 => {
+            let (priv_key, pub_key) = generate_p384_sealing_keypair(pal, io).await?;
+            return Ok((HsmVaultKeyKind::SdSealing, priv_key, pub_key));
+        }
+        SdSealingKem::MlKem1024 => (
+            HsmVaultKeyKind::SdSealingMlKem1024,
+            TransferKem::MlKem1024,
+            64,
+        ),
+        SdSealingKem::MlKem1024P384 => (
+            HsmVaultKeyKind::SdSealingMlKem1024P384,
+            TransferKem::MlKem1024P384,
+            32,
+        ),
+        _ => return Err(HsmError::InvalidArg),
+    };
+    let (priv_key, pub_key) = generate_pq_sealing_keypair(pal, io, kem, seed_len).await?;
+    Ok((kind, priv_key, pub_key))
+}
+
+async fn generate_p384_sealing_keypair<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
 ) -> HsmResult<(&'p mut HsmDmaBuf, &'p mut HsmDmaBuf)> {
@@ -115,12 +161,13 @@ async fn mask_sealing_private_key<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     mk_key_id: HsmKeyId,
+    key_kind: HsmVaultKeyKind,
     attrs: HsmVaultKeyAttrs,
     svn: u64,
     owner: u16,
     priv_key: &HsmDmaBuf,
 ) -> HsmResult<&'p mut HsmDmaBuf> {
-    let masked_key = pal.dma_alloc(io, MASKED_SEALING_KEY_LEN)?;
+    let masked_key = pal.dma_alloc(io, masked_blob_len(AeadAlg::AesGcm256, priv_key.len()))?;
 
     // The masked blob lives in an IO-scoped buffer allocated before the
     // masking scope so it survives the scratch allocator's reset.
@@ -129,7 +176,7 @@ async fn mask_sealing_private_key<'p, P: HsmPal>(
         let key_label = alloc.dma_alloc(SEALING_KEY_LABEL.len())?;
         key_label.copy_from_slice(SEALING_KEY_LABEL);
         let params = MaskParams {
-            key_kind: HsmVaultKeyKind::SdSealing,
+            key_kind,
             key_attrs: attrs,
             svn,
             owner_seed_id: owner,
@@ -205,12 +252,13 @@ pub(crate) async fn handle<P: HsmPal>(
     let svn = part_state::part_mfgr_svn(pal);
     let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
     let attrs = sealing_key_attrs(scope);
-    let (priv_key, pub_key) = generate_sealing_keypair(pal, io).await?;
+    let (kind, priv_key, pub_key) = generate_sealing_keypair(pal, io, req.kem()).await?;
     let masked_key =
-        mask_sealing_private_key(pal, io, mk_key_id, attrs, svn, owner, &priv_key[..]).await?;
+        mask_sealing_private_key(pal, io, mk_key_id, kind, attrs, svn, owner, &priv_key[..])
+            .await?;
 
     // Encode the response: the masked private key plus the public key.
-    // The PAL already emitted the public key in wire format (little-endian),
-    // so copy it through unchanged.
+    // The P-384 public key is already in device wire order; the PQ keys
+    // are in their HPKE encoding.
     encode_sealing_response(cmd_buf, masked_key, pub_key)
 }

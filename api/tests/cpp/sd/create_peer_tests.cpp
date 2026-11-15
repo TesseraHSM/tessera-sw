@@ -219,7 +219,7 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
             &local_buf,
         };
 
-        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupMaxLen);
         std::vector<uint8_t> probe_report(kSdBackupReportCapacity);
         tsra_buffer probe_backup_buf{ probe_backup.data(),
                                       static_cast<uint32_t>(probe_backup.size()) };

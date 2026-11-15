@@ -71,6 +71,7 @@ use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
+use crate::commands::sd_create_remote_backup::SdOob;
 
 /// `KeyScope::Local` discriminant (wire mirror of the firmware
 /// `HsmKeyScope`).
@@ -119,7 +120,7 @@ pub(crate) fn sd_initialized_session() -> SdReady {
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     let create_req = backup_request(session.session_id, &evidence, &policy);
-    ctx.tbor_oob(&create_req, &evidence.oob())
+    ctx.sd_oob(&create_req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
 
     SdReady {
@@ -345,6 +346,7 @@ fn darc_tmk_import_rejects_wrong_key_kind() {
         .tbor(&TborSdSealingKeyGenReq {
             session_id: ready.session.session_id,
             scope: SCOPE_LOCAL,
+            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     req.masked_kex_key = seal

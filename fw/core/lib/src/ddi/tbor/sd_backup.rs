@@ -289,9 +289,14 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
 
     // SDBMK for the UNMASK, derived at the backup's own `{svn, owner}`; and
     // SDBMK for the RE-MASK, derived at the current `{svn, owner}` so the
-    // refreshed envelope is bound to this firmware's identity.
-    let sdbmk_prev = derive_sdbmk(pal, io, alloc, bks3, prev_svn, prev_owner).await?;
-    let sdbmk_curr = derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?;
+    // refreshed envelope is bound to this firmware's identity.  A backup
+    // minted at the current identity (the usual case) uses one key for both.
+    let sdbmk_prev: &HsmDmaBuf = derive_sdbmk(pal, io, alloc, bks3, prev_svn, prev_owner).await?;
+    let sdbmk_curr: &HsmDmaBuf = if (prev_svn, prev_owner) == (svn, owner) {
+        sdbmk_prev
+    } else {
+        derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?
+    };
     let res = async {
         let sdmk = {
             let view = unmask(pal, io, sdbmk_prev, prev_sd_mk_scratch).await?;
