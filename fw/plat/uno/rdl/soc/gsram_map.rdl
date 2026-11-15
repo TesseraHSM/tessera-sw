@@ -24,7 +24,8 @@
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
 //   0xA9000 - 0xAAD40  Crypto command buffers (AES, UPKA, SHA)
 //   0xAB000 - 0xAD800  BCP (CDMA) rings
-//   0xAD800 - 0xB8000  Unused (former HSM code window)
+//   0xAD800 - 0xADD00  PKA staged-command descriptors
+//   0xADD00 - 0xB8000  Unused (former HSM code window)
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
 //   0xBB000 - 0xEBC00  Partition store
 //   0xEBC00 - 0x16DC00 Key vault (65 × 8 KB tables)
@@ -537,7 +538,7 @@ regfile aes_cmd_entry_t {
 
 regfile upka_cmd_entry_t {
     name = "UPKA Command Entry";
-    desc = "20-byte PKA command descriptor (per-engine slot).";
+    desc = "20-byte PKA command descriptor (per-engine or per-ticket slot).";
     io_sq_dw_t COMMAND_CODE @ 0x00;
     io_sq_dw_t RESULT_ADDR  @ 0x04;
     io_sq_dw_t ARG1_ADDR    @ 0x08;
@@ -858,7 +859,7 @@ addrmap io_gsram {
     sram_io_buf_t    SRAM_IO_BUF[34]     @ 0x20D60 += 0x4000;
 
     // ─── Crypto command buffers, in the former HSM code window (HSM_CODE
-    // moved above the key vault); 0xAD800 - 0xB8000 is unused. ───
+    // moved above the key vault); 0xADD00 - 0xB8000 is unused. ───
     aes_cmd_entry_t  AES_CMD[128]        @ 0xA9000 += 0x18;   // 0xA9000 - 0xA9C00
     upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0xA9C00 += 0x14;   // 0xA9C00 - 0xA9D40
     sha_cmd_entry_t  SHA_CMD[128]        @ 0xA9D40 += 0x20;   // 0xA9D40 - 0xAAD40
@@ -875,6 +876,12 @@ addrmap io_gsram {
     // the rings around it.
     upka_cmd_entry_t UPKA_WIPE_CMD       @ 0xAB610;
     bcp_dfl_entry_t  BCP_DFL[64]         @ 0xAB800 += 0x80;   // 0xAB800 - 0xAD800
+
+    // One PKA command descriptor per staged-command ticket (the PKA
+    // driver's TICKETS), written when the command is submitted, so that
+    // the PKA interrupt handler starts a queued command on a freed engine
+    // with one command-register write.
+    upka_cmd_entry_t UPKA_TICKET_CMD[64] @ 0xAD800 += 0x14;   // 0xAD800 - 0xADD00
 
     // ─── FP bulk-key slot map: 65 × 1-byte table bitmaps ───
     fp_slot_map_t    FP_SLOT_MAP         @ 0xB8000;   // 0xB8000 - 0xB8041
