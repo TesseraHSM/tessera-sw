@@ -30,6 +30,7 @@ use tsra_fw_uno_reg_soc::bcp::SQ_CFG;
 use tsra_fw_uno_reg_soc::bcp::SQ_PI;
 use tsra_fw_uno_reg_soc::bcp::STATUS;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
+use tsra_fw_uno_reg_soc::io_gsram::BcpCqe;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_PI_SHADOW_OFFSET;
@@ -600,9 +601,10 @@ impl BcpDriver {
             if s.bell {
                 doorbell(s);
             }
-            let pi = (GSRAM.bcp_cq_pi_shadow.get() as u16) & MASK;
+            let shadow = GSRAM.bcp_cq_pi_shadow.get();
+            let pi = (shadow as u16) & MASK;
             if pi != s.cq_ci {
-                reap(s, pi);
+                reap(s, pi, shadow);
             }
             // Checked after reaping as well, so that other commands
             // completing on every pass cannot hold off the reset of one
@@ -931,13 +933,13 @@ fn doorbell(s: &mut BcpState) {
     BCP.sq_pi.write(SQ_PI::INDEX.val(s.sq_pi.into()));
 }
 
-/// Consume completions up to `pi`.
-fn reap(s: &mut BcpState, pi: u16) {
+/// Consume completions up to `pi`, read from the index shadow as `shadow`.
+fn reap(s: &mut BcpState, pi: u16, shadow: u32) {
     // Read the entries only after the index that published them.
-    cortex_m::asm::dmb();
+    let cq = cq_ring_after(shadow);
 
     while s.cq_ci != pi {
-        let (dw0, dw1) = read_cqe(s.cq_ci as usize);
+        let (dw0, dw1) = read_cqe(cq, s.cq_ci as usize);
         s.cq_ci = (s.cq_ci + 1) & MASK;
 
         let id = dw0.cmd_id() as usize;
@@ -1333,10 +1335,38 @@ fn write_dfl(dw: &mut [u32; DFL_DWORDS], id: usize, cmd: &Cmd<'_>) {
     tsra_fw_bulk_copy::copy_slice(out, dw);
 }
 
-/// Read the completion-ring entry at `ci`, with one burst.
-fn read_cqe(ci: usize) -> (CqeDw0, CqeDw1) {
-    let entry = core::ptr::from_ref(&GSRAM.bcp_cq[ci]).cast::<u32>();
-    // SAFETY: the entry is two words of the GSRAM ring, 8-byte aligned.
+/// The completion ring, at an address computed from `loaded`, a value just
+/// loaded: entries read through it are read after that load. The address
+/// dependency orders the loads without a barrier, which would also wait for
+/// every store before it to complete.
+#[inline(always)]
+fn cq_ring_after(loaded: u32) -> *const BcpCqe {
+    let zero: usize;
+    #[cfg(target_arch = "arm")]
+    // SAFETY: computes `loaded ^ loaded` in a register; touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "eor {z}, {v}, {v}",
+            z = lateout(reg) zero,
+            v = in(reg) loaded,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let _ = loaded;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        zero = 0;
+    }
+    GSRAM.bcp_cq.as_ptr().wrapping_byte_add(zero)
+}
+
+/// Read the completion-ring entry at `ci` of `ring` (see
+/// [`cq_ring_after`]), with one burst.
+fn read_cqe(ring: *const BcpCqe, ci: usize) -> (CqeDw0, CqeDw1) {
+    let entry = ring.wrapping_add(ci).cast::<u32>();
+    // SAFETY: the entry is two words of the GSRAM ring (`ci` is masked to
+    // its length), 8-byte aligned.
     let [dw0, dw1] = unsafe { burst_read::<2>(entry) };
     (CqeDw0::from(dw0), CqeDw1::from(dw1))
 }
