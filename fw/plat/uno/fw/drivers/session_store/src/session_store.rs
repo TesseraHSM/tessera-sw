@@ -271,6 +271,30 @@ impl SessionTable {
         HsmSessionState::Active
     }
 
+    /// [`state`](Self::state) of session `id`, with the vault key id of its
+    /// slot when it is allocated: its [`physical_id`](Self::physical_id),
+    /// or [`pending_phys`](Self::pending_phys) when Pending. One read of the
+    /// session table, which `state` and then either of those take several.
+    ///
+    /// Inlined: every in-session request looks its session up this way.
+    #[inline]
+    pub fn state_and_phys(&self, id: HsmSessId) -> (HsmSessionState, Option<HsmKeyId>) {
+        let words = self.0.session_words();
+        let slot = u16::from(id) as usize;
+        if slot >= MAX_SESSIONS || (words.table_byte(ALLOC_MASK) & (1 << slot)) == 0 {
+            return (HsmSessionState::Invalid, None);
+        }
+        let state = if (words.meta_byte(0) & (1 << slot)) != 0 {
+            HsmSessionState::Pending
+        } else if (words.table_byte(RENEGO_MASK) & (1 << slot)) != 0 {
+            HsmSessionState::NeedsRenegotiation
+        } else {
+            HsmSessionState::Active
+        };
+        let phys = HsmKeyId::from(words.table_u16(PHYS_IDS + slot * 2));
+        (state, Some(phys))
+    }
+
     /// Returns `true` when every slot is occupied.
     #[inline(never)]
     pub fn limit_reached(&self) -> bool {

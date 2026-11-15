@@ -440,17 +440,17 @@ impl HsmSessionManager for UnoHsmPal {
         dir: HsmSessionTransportDir,
     ) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
-        let (blob, keys_off) = match table.state(id) {
-            HsmSessionState::Pending => {
-                let blob = self.vault_key(io, table.pending_phys(id)?)?;
+        let (blob, keys_off) = match table.state_and_phys(id) {
+            (HsmSessionState::Pending, Some(phys)) => {
+                let blob = self.vault_key(io, phys)?;
                 let off = blob
                     .len()
                     .checked_sub(2 * SESSION_TRANSPORT_KEY_LEN)
                     .ok_or(HsmError::InvalidPermissions)?;
                 (blob, off)
             }
-            HsmSessionState::Active => {
-                let blob = self.vault_key_static(io, table.physical_id(id)?)?;
+            (HsmSessionState::Active, Some(phys)) => {
+                let blob = self.vault_key_static(io, phys)?;
                 if blob.len() != SESSION_EX_BLOB_SIZE {
                     return Err(HsmError::InvalidPermissions);
                 }

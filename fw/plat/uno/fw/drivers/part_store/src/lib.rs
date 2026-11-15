@@ -33,6 +33,7 @@ pub use part_store::Partition;
 pub use part_store::PinPolicy;
 pub use part_store::PinPolicyState;
 pub use part_store::SessionFieldMut;
+pub use part_store::SessionWords;
 pub use part_store::UnwrappingKeySlot;
 pub use part_store::NUM_PARTITIONS;
 pub use part_store::STORE_VERSION;

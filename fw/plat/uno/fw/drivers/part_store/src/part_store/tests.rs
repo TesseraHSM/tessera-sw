@@ -427,3 +427,36 @@ fn shadowed_fields_follow_writes() {
     Partition(pid).set_sd_initialized(false);
     assert!(!Partition(pid).sd_initialized());
 }
+
+#[test]
+fn session_words_match_the_field_reads() {
+    let pid = 16usize;
+    Partition(pid).reset();
+    let mut table = [0u8; SESSION_TABLE_LEN];
+    for (i, b) in table.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(0x25).wrapping_add(0x11);
+    }
+    // Twice, the second time over changed fields: the copy must follow
+    // the writes.
+    for round in 0..2u8 {
+        Partition(pid)
+            .session_table_mut()
+            .copy_from_slice(&table.map(|b| b ^ round));
+        Partition(pid)
+            .session_meta_mut()
+            .copy_from_slice(&[0xa5 ^ round, 0x3c]);
+        let p = Partition(pid);
+        let words = p.session_words();
+        for off in 0..SESSION_TABLE_LEN {
+            assert_eq!(words.table_byte(off), p.session_table_byte(off));
+        }
+        for off in (0..SESSION_TABLE_LEN).step_by(2) {
+            assert_eq!(words.table_u16(off), p.session_table_u16(off));
+        }
+        for i in 0..2 {
+            assert_eq!(words.meta_byte(i), p.session_meta_byte(i));
+        }
+        assert_eq!(words.table_byte(3), table[3] ^ round);
+        assert_eq!(words.meta_byte(0), 0xa5 ^ round);
+    }
+}

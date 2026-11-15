@@ -238,6 +238,37 @@ impl SessionCache {
 static SESSION_CACHES: [SessionCache; NUM_PARTITIONS] =
     [const { SessionCache::new() }; NUM_PARTITIONS];
 
+/// A copy of a partition's [`SessionCache`], for a reader of several of its
+/// fields (see [`Partition::session_words`]).
+#[derive(Clone, Copy)]
+pub struct SessionWords([u32; 6]);
+
+impl SessionWords {
+    /// Byte `off` of the session table, as
+    /// [`Partition::session_table_byte`] reads it.
+    #[inline]
+    pub fn table_byte(&self, off: usize) -> u8 {
+        debug_assert!(off < SESSION_TABLE_LEN);
+        (self.0[off / 4] >> (8 * (off % 4))) as u8
+    }
+
+    /// The little-endian 16-bit field at even offset `off` of the session
+    /// table, as [`Partition::session_table_u16`] reads it.
+    #[inline]
+    pub fn table_u16(&self, off: usize) -> u16 {
+        debug_assert!(off.is_multiple_of(2) && off + 2 <= SESSION_TABLE_LEN);
+        (self.0[off / 4] >> (8 * (off % 4))) as u16
+    }
+
+    /// Byte `i` of the session metadata, as
+    /// [`Partition::session_meta_byte`] reads it.
+    #[inline]
+    pub fn meta_byte(&self, i: usize) -> u8 {
+        debug_assert!(i < 2);
+        (self.0[5] >> (8 * i)) as u8
+    }
+}
+
 /// Exclusive access to a partition's session table or session metadata.
 /// Dropping it drops the partition's [`SessionCache`], which a write made
 /// through it may have left stale.
@@ -1964,6 +1995,17 @@ impl Partition {
             self.load_session_cache();
         }
         cache.words[i].load(Relaxed)
+    }
+
+    /// This slot's [`SessionCache`], loading it first if need be: one check
+    /// that it is loaded for a reader of several fields.
+    #[inline]
+    pub fn session_words(self) -> SessionWords {
+        let cache = &SESSION_CACHES[self.0];
+        if !cache.valid.load(Relaxed) {
+            self.load_session_cache();
+        }
+        SessionWords(core::array::from_fn(|i| cache.words[i].load(Relaxed)))
     }
 
     /// Load this slot's [`SessionCache`].
