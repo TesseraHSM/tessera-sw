@@ -140,13 +140,28 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         cortex_m::interrupt::free(|_| self.state.with(f))
     }
 
+    /// Run `f` on the driver state from the engines' interrupt handler,
+    /// without masking interrupts: nothing else can reach the state while
+    /// it runs. Thread-mode code reaches it only through
+    /// [`with_state`](Self::with_state), with interrupts masked; no other
+    /// handler touches it; and the thirty-two PKA vectors share one
+    /// priority, so the handler never preempts itself.
+    #[inline(always)]
+    pub(crate) fn with_state_in_handler<R>(
+        &self,
+        f: impl FnOnce(&mut UpkaState<DEPTH, ENGINES>) -> R,
+    ) -> R {
+        self.state.with(f)
+    }
+
     /// Handle engine `id`'s completion, if it has one: wake the command's
     /// waiter, start the wipe that follows it, or return the wiped engine
     /// to the pool, starting the next queued command on it.
     ///
     /// Called from the engines' done and error interrupt handler, as soon
     /// as an engine finishes, so that it never sits idle waiting for the
-    /// run loop.
+    /// run loop. Only that handler may call it: it updates the driver
+    /// state without masking interrupts (see `with_state_in_handler`).
     ///
     /// # Parameters
     ///

@@ -151,21 +151,23 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         .await
     }
 
-    /// Poll one engine and wake waiters if completed.
+    /// Poll one engine and wake waiters if completed. Called only from the
+    /// engines' interrupt handler (see
+    /// [`UpkaDriver::wake_engine`](crate::UpkaDriver::wake_engine)).
     pub(crate) fn wake_engine(&self, id: u8) {
-        self.driver.with_state(|s| {
-            Self::wake_engine_inner(s, id as usize);
-        });
+        self.driver
+            .with_state_in_handler(|s| Self::wake_engine_inner(s, id as usize));
     }
 
     fn wake_engine_inner(s: &mut UpkaState<DEPTH, ENGINES>, id: usize) {
+        // The engine posts its status before it raises its done or its error
+        // interrupt (one per command), and entering the handler cleared it.
+        // The read goes first, so that the checks overlap it.
+        let flags = EngineExecutor::completion_flags(id as u8);
         let slot = &mut s.engine_slots[id];
         if !slot.is_in_use() || !slot.is_completion_armed() || slot.has_completion_status() {
             return;
         }
-        // The engine posts its status before it raises its done or its error
-        // interrupt (one per command), and entering the handler cleared it.
-        let flags = EngineExecutor::completion_flags(id as u8);
         if flags != 0 {
             if slot.wiping {
                 Self::finish_wipe(s, id, flags as u8);

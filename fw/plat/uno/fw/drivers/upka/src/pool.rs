@@ -359,6 +359,29 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
     }
 
     pub(crate) fn release_engine_and_dispatch(&mut self, id: u8) -> Option<QueueDispatchAction> {
+        // Under load the queue's head is a staged command and no task waits
+        // for this very engine: start the command before the bookkeeping,
+        // as the engine idles until it starts. The engine stays claimed
+        // (its free bit clear), as on the path below.
+        if !self.specific_waiters[id as usize].waiting && self.queue_head != self.queue_tail {
+            let idx = Self::queue_index(self.queue_head);
+            let head = &self.queue_slots[idx];
+            if head.is_unassigned_waiter() && head.pre_staged() {
+                let t = head.ticket;
+                EngineExecutor::submit_ticket_command(id, t);
+                self.engine_slots[id as usize].clear();
+                self.clear_queue_entry(idx as u8);
+                self.tickets[t as usize].state = TicketState::Running;
+                let slot = &mut self.engine_slots[id as usize];
+                slot.arm_completion_wait();
+                slot.ticket = Some(t);
+                return Some(QueueDispatchAction {
+                    queue_slot: idx as u8,
+                    pre_staged: true,
+                });
+            }
+        }
+
         self.engine_slots[id as usize].clear();
 
         if self.specific_waiters[id as usize].waiting {
@@ -452,14 +475,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
 
     /// Engine `id` finished ticket `t`'s command with `status`: start wiping
     /// the engine, whose completion releases it, then hand the status to the
-    /// ticket, waking its caller. The wipe goes first: the engine idles until
-    /// it starts, and the wake is not free.
+    /// ticket, waking its caller. The wipe goes first, ahead of even the
+    /// engine's bookkeeping: the engine idles until it starts, and the wake
+    /// is not free.
     pub(crate) fn finish_staged(&mut self, id: u8, t: u8, status: u8) {
+        EngineExecutor::submit_wipe(id);
         let slot = &mut self.engine_slots[id as usize];
         slot.ticket = None;
         slot.arm_completion_wait();
         slot.wiping = true;
-        EngineExecutor::submit_wipe(id);
         let ticket = &mut self.tickets[t as usize];
         if ticket.state == TicketState::Abandoned {
             ticket.state = TicketState::Free;
