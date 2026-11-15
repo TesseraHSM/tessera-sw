@@ -162,21 +162,23 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
     fn wake_engine_inner(s: &mut UpkaState<DEPTH, ENGINES>, id: usize) {
         // The engine posts its status before it raises its done or its error
         // interrupt (one per command), and entering the handler cleared it.
-        // The read goes first, so that the checks overlap it.
+        // No flags: the engine has not finished (it is busy, or idle), so
+        // the interrupt is spurious.
         let flags = EngineExecutor::completion_flags(id as u8);
-        let slot = &mut s.engine_slots[id];
-        if !slot.is_in_use() || !slot.is_completion_armed() || slot.has_completion_status() {
+        if flags == 0 {
             return;
         }
-        if flags != 0 {
-            if slot.wiping {
-                Self::finish_wipe(s, id, flags as u8);
-            } else if let Some(t) = slot.ticket {
-                s.finish_staged(id as u8, t, flags as u8);
-            } else {
-                slot.capture_completion_status(flags as u8);
-                slot.wake_waiter();
-            }
+        let slot = &mut s.engine_slots[id];
+        // A wipe or a staged command was started with the slot armed, in use
+        // and its status clear (see `arm_completion_wait`), so only a held
+        // engine's completion needs the checks.
+        if slot.wiping {
+            Self::finish_wipe(s, id, flags as u8);
+        } else if let Some(t) = slot.ticket {
+            s.finish_staged(id as u8, t, flags as u8);
+        } else if slot.is_in_use() && slot.is_completion_armed() && !slot.has_completion_status() {
+            slot.capture_completion_status(flags as u8);
+            slot.wake_waiter();
         }
     }
 
