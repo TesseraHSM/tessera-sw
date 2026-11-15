@@ -59,7 +59,6 @@ use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_vault::VaultStorage;
 use tsra_fw_uno_key_vault::KeyVault;
-use tsra_fw_uno_key_vault::TableStorage;
 use zerocopy::FromBytes;
 use zerocopy::IntoBytes;
 use zeroize::Zeroizing;
@@ -94,11 +93,11 @@ pub(crate) struct SessionKeyBlob {
 
 /// Whether the IO's partition owns the table of key `key_id`, as
 /// [`vault_for_key`] would find it.
+#[inline(always)]
 fn owns_key_table(io: &UnoHsmIo, key_id: HsmKeyId) -> bool {
     let table = KeyVault::<VaultStorage>::key_table(key_id);
-    let word = table / 32;
-    let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(word));
-    VaultStorage::with_mask_word(word, bits).is_valid_table(table)
+    let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(table / 32));
+    VaultStorage::owns_table(table, bits)
 }
 
 /// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
