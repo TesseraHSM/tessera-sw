@@ -471,7 +471,7 @@ regfile aes_cmd_entry_t {
 
 regfile upka_cmd_entry_t {
     name = "UPKA Command Entry";
-    desc = "20-byte PKA command descriptor (per-engine slot).";
+    desc = "20-byte PKA command descriptor (per-engine or per-ticket slot).";
     io_sq_dw_t COMMAND_CODE @ 0x00;
     io_sq_dw_t RESULT_ADDR  @ 0x04;
     io_sq_dw_t ARG1_ADDR    @ 0x08;
@@ -748,6 +748,12 @@ addrmap io_gsram {
     aes_cmd_entry_t  AES_CMD[32]         @ 0x15064 += 0x18;
     upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0x15364 += 0x14;
     sha_cmd_entry_t  SHA_CMD[32]         @ 0x154A4 += 0x20;
+
+    // One PKA command descriptor per staged-command ticket (the PKA
+    // driver's TICKETS), written when the command is submitted, so that
+    // the PKA interrupt handler starts a queued command on a freed engine
+    // with one command-register write.
+    upka_cmd_entry_t UPKA_TICKET_CMD[64] @ 0x158C0 += 0x14;   // 0x158C0 - 0x15DC0
 
     // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
     // may master (0x0F000 - 0xB8000), and below the Admin core's heap

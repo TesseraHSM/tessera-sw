@@ -20,7 +20,6 @@ use crate::executor::EngineExecutor;
 use crate::pool::EngineSlot;
 use crate::pool::QueueSlot;
 use crate::pool::SpecificWaiter;
-use crate::pool::StagedCmd;
 use crate::pool::Ticket;
 use crate::pool::TicketState;
 use crate::pool::UpkaState;
@@ -121,7 +120,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                 tickets: core::array::from_fn(|_| Ticket {
                     waker: WakerRegistration::new(),
                     state: TicketState::Free,
-                    cmd: StagedCmd::default(),
                 }),
                 ticket_free: if TICKETS == 64 {
                     u64::MAX
