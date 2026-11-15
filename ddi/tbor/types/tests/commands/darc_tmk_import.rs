@@ -171,12 +171,9 @@ fn seal_tmk(
     header.extend_from_slice(&recipient_id);
     let cfg = HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, pk_r, &header, &header);
     let sealed = seal_vec(&cfg, tmk).expect("HPKE Base seal");
-    let (ex, ey) = sealed.enc.coord_vec().expect("enc coordinates");
     let mut out = [0; SEALED_TMK_LEN];
     out[..113].copy_from_slice(&header);
-    out[113] = 4;
-    out[114..162].copy_from_slice(&ex);
-    out[162..210].copy_from_slice(&ey);
+    out[113..210].copy_from_slice(&sealed.enc);
     out[210..].copy_from_slice(&sealed.ct);
     let mut digest_input = b"TSRA-XFER-HASH-v1".to_vec();
     digest_input.extend_from_slice(&out);

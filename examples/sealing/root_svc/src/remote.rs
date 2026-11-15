@@ -169,8 +169,7 @@ fn reseal(
     header: &[u8],
 ) -> Result<Vec<u8>> {
     validate_sd_envelope(original)?;
-    let enc =
-        EccPublicKey::from_coordinates(EccCurve::P384, &original[162..210], &original[210..258])?;
+    let enc = &original[SD_HEADER_LEN..258];
     let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
     let open = HpkeOpenConfig::base(
         suite,
@@ -180,12 +179,11 @@ fn reseal(
         &original[..SD_HEADER_LEN],
     );
     let mut plaintext = Zeroizing::new([0u8; 64]);
-    let length = hpke::open(&open, &enc, &original[258..], Some(&mut plaintext[..]))?;
+    let length = hpke::open(&open, enc, &original[258..], Some(&mut plaintext[..]))?;
     anyhow::ensure!(length == 48, "remote backup did not contain a 48-byte BKS3");
     let seal = HpkeSealConfig::base(suite, receiver, header, header);
     let sealed = hpke::seal_vec(&seal, &plaintext[..length])?;
-    let (x, y) = sealed.enc.coord_vec()?;
-    Ok([header, &[4], &x, &y, &sealed.ct].concat())
+    Ok([header, &sealed.enc, &sealed.ct].concat())
 }
 
 pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {

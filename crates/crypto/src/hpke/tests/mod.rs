@@ -9,6 +9,7 @@ mod helpers;
 
 mod aead_roundtrip;
 mod export_roundtrip;
+mod interop;
 mod kdf_labels;
 mod kem_roundtrip;
 mod rfc9180_vectors;

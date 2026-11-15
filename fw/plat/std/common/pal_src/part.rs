@@ -1022,7 +1022,7 @@ impl StdHsmPal {
     /// `SessionEncryption` keys are stored as `pub(96) ‖ priv(48)` (144 B,
     /// matching the Uno PAL and the reference on-storage layout, so ECDH
     /// derivation can split off the public half); every other kind stores
-    /// the bare raw HSM-format private scalar `d` (48 B for P-384).
+    /// the bare private scalar `d` in PAL operand order (48 B for P-384).
     ///
     /// `big_endian` selects the public-key byte order (the BE↔LE flip is
     /// the driver's responsibility): [`HsmByteOrder::Be`] yields
@@ -1051,13 +1051,13 @@ impl StdHsmPal {
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
         self.ecc.pub_coords(&pub_key, order, pub_key_out).await?;
 
-        // Export the private key as raw HSM scalar bytes (48 B for P-384).
+        // Export the private key in vault format: the scalar in PAL
+        // operand order (48 B for P-384), independent of `order`.
         // `Zeroizing` scrubs the transient heap copy on drop once the vault
         // owns its own copy.
         let priv_len = pk.hsm_bytes_len();
         let mut priv_buf = Zeroizing::new(vec![0u8; priv_len]);
-        pk.to_hsm_bytes(&mut priv_buf[..priv_len])
-            .map_err(|_| HsmError::EccExportError)?;
+        crate::drivers::ecc::export_priv(StdHsmPal::BYTE_ORDER, &pk, &mut priv_buf[..priv_len])?;
 
         // The establish-credential and session-encryption keys are stored as
         // `pub(P384_PUB_KEY_LEN) ‖ priv(priv_len)` (144 B) — matching the Uno

@@ -27,14 +27,17 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
+use super::alloc_bytes;
 use crate::helpers::dma_copy_in;
 use crate::kdf;
 use crate::suite::HpkeSuite;
+use crate::suite::KemKind;
 
 // =============================================================================
 // kem_context layout
@@ -74,10 +77,6 @@ fn build_kem_context(
     }
 }
 
-fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDmaBuf> {
-    alloc.dma_alloc(len)
-}
-
 // =============================================================================
 // SEC1 ↔ PAL-native byte-format conversion helpers
 // =============================================================================
@@ -110,7 +109,7 @@ fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDma
 /// must be **at least** `2*coord_len`.  A missing or wrong SEC1 tag
 /// byte is rejected so callers can't pass compressed / hybrid
 /// encodings the PAL would silently mis-interpret.
-fn sec1_to_operand(
+pub(super) fn sec1_to_operand(
     order: HsmByteOrder,
     sec1: &[u8],
     dst: &mut [u8],
@@ -131,7 +130,7 @@ fn sec1_to_operand(
 ///
 /// Input length must be **exactly** `2*coord_len`; output buffer
 /// must be **at least** `1 + 2*coord_len`.
-fn operand_to_sec1(
+pub(super) fn operand_to_sec1(
     order: HsmByteOrder,
     operand: &[u8],
     dst: &mut [u8],
@@ -153,8 +152,14 @@ fn operand_to_sec1(
 /// (`0x04`-prefixed) shape this code generates.
 ///
 /// Today that means rejecting P-521 — see the module-level comment
-/// above the helpers.
-fn kem_sizes(suite: HpkeSuite) -> HsmResult<(usize, usize, usize)> {
+/// above the helpers — and every non-DH KEM.
+fn kem_sizes(suite: HpkeSuite) -> HsmResult<(HsmEccCurve, usize, usize, usize)> {
+    let curve = match suite.kem() {
+        KemKind::DhP256 | KemKind::DhP384 | KemKind::DhP521 => {
+            suite.kem_curve().ok_or(HsmError::InvalidArg)?
+        }
+        KemKind::MlKem1024 | KemKind::MlKem1024P384 => return Err(HsmError::InvalidArg),
+    };
     let npk_wire = suite.npk();
     let npk_pal = suite.npk_pal();
     if npk_wire != npk_pal + 1 {
@@ -162,7 +167,7 @@ fn kem_sizes(suite: HpkeSuite) -> HsmResult<(usize, usize, usize)> {
         // BE encoding would not round-trip.
         return Err(HsmError::InvalidArg);
     }
-    Ok((npk_wire, npk_pal, npk_pal / 2))
+    Ok((curve, npk_wire, npk_pal, npk_pal / 2))
 }
 
 // =============================================================================
@@ -208,8 +213,7 @@ pub async fn encap<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let curve = suite.kem_curve();
-    let (npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
+    let (curve, npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
     let ndh = suite.ndh();
 
     if pk_r.len() != npk_wire || enc.len() < npk_wire {
@@ -302,8 +306,7 @@ pub async fn decap<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let curve = suite.kem_curve();
-    let (npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
+    let (curve, npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
     let ndh = suite.ndh();
 
     if enc.len() != npk_wire || pk_r.len() != npk_wire {
@@ -366,8 +369,7 @@ pub async fn auth_encap<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let curve = suite.kem_curve();
-    let (npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
+    let (curve, npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
     let ndh = suite.ndh();
 
     if pk_r.len() != npk_wire || pk_s.len() != npk_wire || enc.len() < npk_wire {
@@ -462,8 +464,7 @@ pub async fn auth_decap<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let curve = suite.kem_curve();
-    let (npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
+    let (curve, npk_wire, npk_pal, coord_len) = kem_sizes(suite)?;
     let ndh = suite.ndh();
 
     if enc.len() != npk_wire || pk_r.len() != npk_wire || pk_s.len() != npk_wire {
@@ -532,8 +533,8 @@ async fn extract_and_expand<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let algo = suite.kem_hash();
-    let nh = suite.nh();
+    let algo = suite.kem_hash().ok_or(HsmError::InvalidArg)?;
+    let nh = algo.digest_len();
     let kem_suite_id = suite.kem_suite_id();
 
     let eae_prk = alloc_bytes(nh, alloc)?;

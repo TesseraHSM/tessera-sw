@@ -57,6 +57,9 @@ pub enum PqcOp {
 
     /// Verify a signature under a key given as its seed `ξ`.
     MlDsaVerifySeed = 10,
+
+    /// Hash a message with SHA3-256.
+    Sha3_256 = 11,
 }
 
 /// Number of `u32` words in a request message.

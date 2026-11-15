@@ -254,6 +254,7 @@ const _: () = assert!(crate::request::PqcOp::Shake128 as u32 == 7);
 const _: () = assert!(crate::request::PqcOp::Shake256 as u32 == 8);
 const _: () = assert!(crate::request::PqcOp::MlDsaSignSeed as u32 == 9);
 const _: () = assert!(crate::request::PqcOp::MlDsaVerifySeed as u32 == 10);
+const _: () = assert!(crate::request::PqcOp::Sha3_256 as u32 == 11);
 
 /// A response read back from a core.
 #[derive(Debug, Clone, Copy)]

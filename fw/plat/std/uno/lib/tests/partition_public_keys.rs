@@ -9,6 +9,7 @@ use tsra_fw_hsm_pal_std_uno::HsmIoRequest;
 use tsra_fw_hsm_pal_std_uno::HsmPartId;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
@@ -52,8 +53,11 @@ async fn check_public_keys() {
     let io = pal.poll_io().await.expect("poll IO");
 
     let identity_id = part_state::part_id_key_id(&pal, &io).expect("identity key ID");
-    let identity = EccPrivateKey::from_hsm_bytes(pal.vault_key(&io, identity_id).expect("key"))
-        .expect("identity private key");
+    // The vault holds the scalar in PAL operand order.
+    let vault = pal.vault_key(&io, identity_id).expect("key");
+    let mut d = vec![0u8; vault.len()];
+    tsra_fw_hsm_byte_order::int_copy_to_be(StdHsmPal::BYTE_ORDER, &mut d, vault).expect("to BE");
+    let identity = EccPrivateKey::from_hsm_bytes(&d).expect("identity private key");
     let identity_public = identity.public_key().expect("identity public key");
     let mut expected = [0u8; 96];
     identity_public
@@ -87,9 +91,11 @@ async fn check_public_keys() {
     );
     assert!(misaligned.iter().all(|&b| b == 0xA5));
 
+    // Vault scalars are in PAL operand order; `lsb` is d's low byte.
+    let lsb = if StdHsmPal::BYTE_ORDER.is_be() { 47 } else { 0 };
     let scalar = pal.dma_alloc(&io, 48).expect("private scalar");
     scalar.fill(0);
-    scalar[47] = 1;
+    scalar[lsb] = 1;
     let first = pal
         .vault_key_create(
             &io,
@@ -117,7 +123,7 @@ async fn check_public_keys() {
         part_state::part_pta_pub_key(&pal, &io, public).await,
         Err(HsmError::PartPropNotFound)
     );
-    scalar[47] = 2;
+    scalar[lsb] = 2;
     let second = pal
         .vault_key_create(
             &io,

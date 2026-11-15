@@ -494,7 +494,7 @@ mod cbc_impl {
                 return Err(HsmError::InvalidArg);
             }
             Ok(Self {
-                hash: suite.aead_hash(),
+                hash: suite.aead_hash().ok_or(HsmError::InvalidArg)?,
                 tag_len: suite.nt(),
                 mac_key: &key[..mac_key_len],
                 enc_key: &key[mac_key_len..],

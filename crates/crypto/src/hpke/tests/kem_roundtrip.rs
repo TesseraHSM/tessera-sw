@@ -17,8 +17,8 @@ fn base_encap_decap_matches_per_curve() {
     ];
     for suite in curves {
         let (sk_r, pk_r) = gen_keypair(suite);
-        let (enc, ss_sender) = kem::encap(suite, &pk_r).expect("encap");
-        let ss_receiver = kem::decap(suite, &enc, &sk_r, &pk_r).expect("decap");
+        let (enc, ss_sender) = kem::encap(suite, (&pk_r).into()).expect("encap");
+        let ss_receiver = kem::decap(suite, &enc, (&sk_r).into(), (&pk_r).into()).expect("decap");
         assert_eq!(
             ss_sender, ss_receiver,
             "KEM shared secret mismatch for suite {:?}",
@@ -39,8 +39,9 @@ fn auth_encap_decap_matches_per_curve() {
         let (sk_r, pk_r) = gen_keypair(suite);
         let (sk_s, pk_s) = gen_keypair(suite);
 
-        let (enc, ss_sender) = kem::auth_encap(suite, &pk_r, &sk_s).expect("auth_encap");
-        let ss_receiver = kem::auth_decap(suite, &enc, &sk_r, &pk_r, &pk_s).expect("auth_decap");
+        let (enc, ss_sender) = kem::auth_encap(suite, (&pk_r).into(), &sk_s).expect("auth_encap");
+        let ss_receiver = kem::auth_decap(suite, &enc, (&sk_r).into(), (&pk_r).into(), &pk_s)
+            .expect("auth_decap");
         assert_eq!(ss_sender, ss_receiver, "Auth KEM mismatch for {:?}", suite);
     }
 }
@@ -51,8 +52,8 @@ fn decap_with_wrong_sk_diverges() {
     let (_, pk_r) = gen_keypair(suite);
     let (wrong_sk, wrong_pk) = gen_keypair(suite);
 
-    let (enc, ss_sender) = kem::encap(suite, &pk_r).expect("encap");
-    let ss_wrong = kem::decap(suite, &enc, &wrong_sk, &wrong_pk).expect("decap");
+    let (enc, ss_sender) = kem::encap(suite, (&pk_r).into()).expect("encap");
+    let ss_wrong = kem::decap(suite, &enc, (&wrong_sk).into(), (&wrong_pk).into()).expect("decap");
     assert_ne!(ss_sender, ss_wrong);
 }
 

@@ -118,7 +118,7 @@ impl HsmEcc for StdHsmPal {
         self.ecc
             .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
             .await?;
-        export_priv(&pk, scratch_priv)?;
+        export_priv(StdHsmPal::BYTE_ORDER, &pk, scratch_priv)?;
 
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
         pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
@@ -182,7 +182,7 @@ impl HsmEcc for StdHsmPal {
         let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
         let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
-        export_priv(&pk, scratch_priv)?;
+        export_priv(StdHsmPal::BYTE_ORDER, &pk, scratch_priv)?;
         let pub_key = pk
             .public_key()
             .map_err(|_| HsmError::EccGetCoordinatesError)?;
@@ -212,7 +212,7 @@ impl HsmEcc for StdHsmPal {
         if signature.len() < wire_len {
             return Err(HsmError::InvalidArg);
         }
-        let key = import_priv(priv_key)?;
+        let key = import_priv(StdHsmPal::BYTE_ORDER, priv_key)?;
         self.ecc
             .ecc_sign_op(&key, hash, &mut signature[..wire_len])
             .await
@@ -296,7 +296,7 @@ impl HsmEcc for StdHsmPal {
         if pub_key.len() < wire_pub_len || secret.len() < curve.secret_len() {
             return Err(HsmError::InvalidArg);
         }
-        let pk = import_priv(priv_key)?;
+        let pk = import_priv(StdHsmPal::BYTE_ORDER, priv_key)?;
         self.ecc
             .ecdh_derive_op(
                 &pk,
@@ -314,8 +314,8 @@ impl HsmEcc for StdHsmPal {
         out: Option<&mut HsmDmaBuf>,
         pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)> {
-        // The std PAL vault is the big-endian scalar, zero-padded to the
-        // wire coordinate length. Like Uno, the key must carry a well-formed
+        // The std PAL vault is the scalar in operand order, zero-padded to
+        // the wire coordinate length. Like Uno, the key must carry a well-formed
         // public key and a valid scalar in both modes; use mode also checks
         // the public key against the scalar and runs `pct`. The key is built
         // from the scalar alone: backends validate or keep the DER's embedded
@@ -331,10 +331,10 @@ impl HsmEcc for StdHsmPal {
         if out.len() < vault_len {
             return Err(HsmError::InvalidArg);
         }
-        let pad = vault_len - scalar.len();
-        out[..pad].fill(0);
-        out[pad..vault_len].copy_from_slice(scalar);
-        let pk = import_priv(&out[..vault_len])?;
+        let pk = EccPrivateKey::from_scalar(to_ecc_curve(curve), scalar)
+            .map_err(|_| HsmError::InvalidArg)?;
+        export_priv(StdHsmPal::BYTE_ORDER, &pk, &mut out[..vault_len])
+            .map_err(|_| HsmError::InvalidArg)?;
         self.check_ecc_import(curve, pct, &pk, embedded).await?;
         Ok((vault_len, curve))
     }
@@ -353,7 +353,7 @@ impl HsmEcc for StdHsmPal {
         }
         // `from_scalar` validates `d` is in `[1, n-1]` and `check_key`s
         // the derived key; re-export in the vault representation (the
-        // big-endian scalar padded to `wire_coord_len`).
+        // operand-order scalar padded to `wire_coord_len`).
         let pk =
             EccPrivateKey::from_scalar(to_ecc_curve(curve), d).map_err(|_| HsmError::InvalidArg)?;
         let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
@@ -361,7 +361,8 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
+            export_priv(StdHsmPal::BYTE_ORDER, &pk, &mut out[..priv_len])
+                .map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
     }
@@ -373,13 +374,13 @@ impl HsmEcc for StdHsmPal {
         vault: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        // std PAL vault format is raw big-endian HSM scalar bytes, left
-        // zero-padded to `wire_coord_len`. Parse and validate it, then
+        // std PAL vault format is the operand-order scalar, zero-padded
+        // to `wire_coord_len`. Parse and validate it, then
         // return the canonical big-endian COSE `d` at the field width.
         if vault.len() != curve.wire_coord_len(StdHsmPal::BYTE_ORDER) {
             return Err(HsmError::InvalidArg);
         }
-        let pk = import_priv(vault)?;
+        let pk = import_priv(StdHsmPal::BYTE_ORDER, vault)?;
         if from_ecc_curve(pk.curve()) != curve {
             return Err(HsmError::InvalidArg);
         }
@@ -388,7 +389,8 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
+            export_priv(HsmByteOrder::Be, &pk, &mut out[..priv_len])
+                .map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
     }
@@ -399,7 +401,8 @@ impl HsmEcc for StdHsmPal {
         priv_key: &HsmDmaBuf,
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        self.ecc_public_point(import_priv(priv_key)?, pub_out).await
+        self.ecc_public_point(import_priv(StdHsmPal::BYTE_ORDER, priv_key)?, pub_out)
+            .await
     }
 
     async fn ecc_vault_pub_key(
@@ -411,7 +414,7 @@ impl HsmEcc for StdHsmPal {
         if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
             return Err(HsmError::InvalidArg);
         }
-        let pk = import_priv(self.vault_key(io, key_id)?)?;
+        let pk = import_priv(StdHsmPal::BYTE_ORDER, self.vault_key(io, key_id)?)?;
         self.ecc_public_point(pk, Some(pub_out)).await
     }
 }

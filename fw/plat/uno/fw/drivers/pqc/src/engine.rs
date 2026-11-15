@@ -804,11 +804,12 @@ impl PqcEngine<'_> {
         }
     }
 
-    /// Hash `msg` with SHAKE on this engine.
+    /// Hash `msg` with SHAKE or SHA3-256 on this engine.
     ///
     /// # Parameters
     /// * `algo` — [`HsmHashAlgo::Shake128`] or [`HsmHashAlgo::Shake256`],
-    ///   carrying the number of output bytes (at most [`SHAKE_OUT_MAX`]).
+    ///   carrying the number of output bytes (at most [`SHAKE_OUT_MAX`]), or
+    ///   [`HsmHashAlgo::Sha3_256`] for a 32-byte digest.
     /// * `msg` — up to [`SHAKE_MSG_MAX`] bytes, staged into the operand slot.
     /// * `out` — at least that many bytes; only the first that many are
     ///   written, as with [`HsmHash`](tsra_fw_hsm_pal_traits::HsmHash).
@@ -816,6 +817,7 @@ impl PqcEngine<'_> {
         let (op, out_len) = match algo {
             HsmHashAlgo::Shake128(len) => (PqcOp::Shake128, usize::from(len.get())),
             HsmHashAlgo::Shake256(len) => (PqcOp::Shake256, usize::from(len.get())),
+            HsmHashAlgo::Sha3_256 => (PqcOp::Sha3_256, HsmHashAlgo::Sha3_256.digest_len()),
             _ => return Err(HsmError::UnsupportedDigestHashAlgorithm),
         };
         if msg.len() > SHAKE_MSG_MAX || out_len > SHAKE_OUT_MAX {

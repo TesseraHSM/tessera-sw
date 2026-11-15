@@ -3,12 +3,20 @@
 
 //! Hybrid Public Key Encryption (HPKE — RFC 9180), single-shot API.
 //!
-//! Sync port of `fw/core/crypto/hpke` for host use. Supports all four
-//! HPKE modes (Base / PSK / Auth / AuthPSK) across six ciphersuites
-//! built from three KEMs and two AEAD primitives — three of those
-//! suites are RFC 9180 standard combinations and three substitute
-//! AES-256-CBC + HMAC for AES-GCM under a private-use AEAD identifier
-//! (`0xFFFF`).
+//! Sync port of `fw/core/crypto/hpke` for host use. Eight ciphersuites:
+//!
+//! * Three RFC 9180 DHKEM(P-256/P-384/P-521) + HKDF + AES-256-GCM
+//!   suites, and three that substitute AES-256-CBC + HMAC for AES-GCM
+//!   under a private-use AEAD identifier (`0xFFFF`). All four HPKE
+//!   modes (Base / PSK / Auth / AuthPSK) are supported.
+//! * Two post-quantum suites (draft-ietf-hpke-pq) with the one-stage
+//!   SHAKE256 KDF and AES-256-GCM: HPKE-10 (MLKEM1024-P384) and HPKE-13
+//!   (ML-KEM-1024). Base and PSK modes only.
+//!
+//! Recipient keys are passed as [`HpkePublicKey`] / [`HpkePrivateKey`];
+//! [`HpkeSuite::generate_keypair`] and [`HpkeSuite::derive_keypair`]
+//! produce an [`HpkeKeyPair`] for any suite. The encapsulated key
+//! `enc` is exchanged as bytes.
 //!
 //! # Public surface
 //!
@@ -26,15 +34,20 @@
 //! the established [`crate::AesGcmAlgo::for_encrypt`] pattern.
 //!
 //! See [`suite`] for ciphersuite constants and wire-format conventions
-//! (host uses SEC1 uncompressed public keys and raw scalar private keys).
+//! (host uses SEC1 uncompressed public keys and raw scalar private keys
+//! for DHKEM).
 
 mod aead;
 mod kdf;
 mod kem;
+mod keys;
 mod ops;
 mod schedule;
 mod suite;
 
+pub use keys::HpkeKeyPair;
+pub use keys::HpkePrivateKey;
+pub use keys::HpkePublicKey;
 pub use ops::HpkeExportSent;
 pub use ops::HpkeOpenConfig;
 pub use ops::HpkeReceiveExportConfig;

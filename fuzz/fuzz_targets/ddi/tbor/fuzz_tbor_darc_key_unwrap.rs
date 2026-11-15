@@ -264,14 +264,8 @@ fn import_tmk(
         tmk,
     )
     .expect("seal known TMK");
-    let (ex, ey) = sealed
-        .enc
-        .coord_vec()
-        .expect("encapsulated public coordinates");
     let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[0] = 4;
-    sealed_tmk[1..1 + common::COORD_LEN].copy_from_slice(&ex);
-    sealed_tmk[1 + common::COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
+    sealed_tmk[..SEC1_PUB_LEN].copy_from_slice(&sealed.enc);
     sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
     let mut evidence = Vec::new();
     let remote_cert_chain = chain

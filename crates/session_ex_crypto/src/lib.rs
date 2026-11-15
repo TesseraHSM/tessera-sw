@@ -170,7 +170,7 @@ pub fn receive_exported(
     psk: &[u8],
     psk_id_byte: &[u8],
 ) -> SessionExCryptoResult<Vec<u8>> {
-    let enc = ec_pub_from_sec1(pk_resp_sec1)?;
+    ec_pub_from_sec1(pk_resp_sec1)?;
     let cfg = HpkeReceiveExportConfig::auth_psk(
         SUITE,
         sk_init,
@@ -183,7 +183,7 @@ pub fn receive_exported(
             psk_id: psk_id_byte,
         },
     );
-    receive_export_vec(&cfg, &enc, SUITE.nh()).map_err(|_| SessionExCryptoError::Crypto)
+    receive_export_vec(&cfg, pk_resp_sec1, SUITE.nh()).map_err(|_| SessionExCryptoError::Crypto)
 }
 
 /// Compute the Phase-1 confirm MAC and compare it against the

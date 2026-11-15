@@ -25,8 +25,10 @@ use super::*;
 /// algorithms differently) with a `match`, never by casting.
 ///
 /// The SHAKE XOFs carry their output length, so [`digest_len`] is the length
-/// they produce. The SHA-3 variants are not implemented yet: PALs reject them
-/// with [`HsmError::UnsupportedDigestHashAlgorithm`].
+/// they produce. SHA3-384 and SHA3-512 are not implemented yet: PALs reject
+/// them with [`HsmError::UnsupportedDigestHashAlgorithm`]. SHA3-256 is
+/// implemented by the std and Uno PALs, where it shares the SHAKE engine's
+/// limits.
 ///
 /// [`digest_len`]: Self::digest_len
 #[repr(u32)]

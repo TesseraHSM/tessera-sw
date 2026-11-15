@@ -16,7 +16,7 @@ use tsra_crypto::HashStreamingOp;
 use super::*;
 
 /// The OpenSSL hash for `algo`; fixed-length algorithms only, so the HMAC,
-/// KDF and RSA paths that share it reject SHAKE. SHA-3 is not supported yet.
+/// KDF and RSA paths that share it reject SHAKE and SHA-3.
 pub(crate) fn to_hash_algo(algo: HsmHashAlgo) -> HsmResult<HashAlgo> {
     match algo {
         HsmHashAlgo::Sha1 => Ok(HashAlgo::sha1()),
@@ -32,9 +32,10 @@ pub(crate) fn to_hash_algo(algo: HsmHashAlgo) -> HsmResult<HashAlgo> {
 }
 
 /// The OpenSSL hash for [`HsmHash`]: [`to_hash_algo`] plus the SHAKE XOFs,
-/// with their output length.
+/// with their output length, and SHA3-256 (plain hashing only, as on Uno).
 fn digest_algo(algo: HsmHashAlgo) -> HsmResult<HashAlgo> {
     match algo {
+        HsmHashAlgo::Sha3_256 => Ok(HashAlgo::sha3_256()),
         HsmHashAlgo::Shake128(len) => Ok(HashAlgo::shake128(len.into())),
         HsmHashAlgo::Shake256(len) => Ok(HashAlgo::shake256(len.into())),
         _ => to_hash_algo(algo),
@@ -398,6 +399,29 @@ mod tests {
         }
     }
 
+    /// FIPS 202 SHA3-256 digests of the empty string and "abc".
+    const SHA3_256_EMPTY: &str = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a";
+    const SHA3_256_ABC: &str = "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532";
+
+    /// SHA3-256 matches FIPS 202 vectors, and `tsra_crypto` on a multi-block
+    /// message, one-shot and multi-step, in both byte orders.
+    #[tokio::test]
+    async fn sha3_256_validate() {
+        let algo = HsmHashAlgo::Sha3_256;
+        for (msg, expected) in [(&b""[..], SHA3_256_EMPTY), (&b"abc"[..], SHA3_256_ABC)] {
+            let expected = hex::decode(expected).expect("valid hex");
+            verify_endianness(algo, msg, &expected).await;
+            verify_streaming(algo, msg, &expected).await;
+        }
+
+        let msg = multiblock_msg();
+        let mut expected = [0u8; 32];
+        tsra_crypto::HashOp::hash(&mut HashAlgo::sha3_256(), &msg, Some(&mut expected))
+            .expect("reference SHA3-256");
+        verify_endianness(algo, &msg, &expected).await;
+        verify_streaming(algo, &msg, &expected).await;
+    }
+
     #[tokio::test]
     async fn sha3_is_unsupported() {
         let (_tx, rx) = async_channel::bounded(1);
@@ -407,11 +431,7 @@ mod tests {
         let data = pal.dma_alloc(&io, 3).unwrap();
         data.copy_from_slice(b"abc");
         let digest = pal.dma_alloc(&io, 64).unwrap();
-        for algo in [
-            HsmHashAlgo::Sha3_256,
-            HsmHashAlgo::Sha3_384,
-            HsmHashAlgo::Sha3_512,
-        ] {
+        for algo in [HsmHashAlgo::Sha3_384, HsmHashAlgo::Sha3_512] {
             assert_eq!(
                 pal.hash(&io, algo, data, digest, HsmDigestForm::Standard)
                     .await,

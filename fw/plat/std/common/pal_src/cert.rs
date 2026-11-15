@@ -654,8 +654,7 @@ impl StdHsmPal {
             let table = unsafe { &*self.part_table.get() };
             let entry = &table.entries[pid as usize];
             let key_id = entry.id_key_id.ok_or(HsmError::PartPropNotFound)?;
-            EccPrivateKey::from_hsm_bytes(entry.vault.key(key_id)?)
-                .map_err(|_| HsmError::InvalidArg)?
+            crate::drivers::ecc::import_priv(StdHsmPal::BYTE_ORDER, entry.vault.key(key_id)?)?
                 .public_key()
                 .map_err(|_| HsmError::EccGetCoordinatesError)?
         };

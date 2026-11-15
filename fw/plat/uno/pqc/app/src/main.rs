@@ -251,7 +251,10 @@ fn SysTick() {
 /// the public key straight into this core's operand slot.
 ///
 fn service(lane: u8, req: &mailbox::Request) {
-    if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
+    if matches!(
+        req.op,
+        mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256 | mailbox::OP_SHA3_256
+    ) {
         service_shake(lane, req);
         scrub_shake_stack();
         return;
@@ -503,16 +506,21 @@ struct Align4<const N: usize>([u8; N]);
 /// SHAKE message and squeezing its output.
 const SHAKE_CHUNK: usize = 512;
 
-/// Hash the message staged in the operand slot with SHAKE128 or SHAKE256,
-/// writing `sig_len` bytes of output back into the slot.
+/// Hash the message staged in the operand slot with SHAKE128, SHAKE256 or
+/// SHA3-256, writing `sig_len` bytes of output back into the slot.
+///
+/// SHA3-256 is SHAKE256's sponge (same rate) with the SHA-3 padding, and
+/// takes exactly [`mailbox::SHA3_256_LEN`] bytes of output.
 ///
 /// Both directions go through a dTCM buffer: PSRAM is far cheaper to move
 /// in bursts (see [`mailbox::stage`]) than to feed the sponge byte by byte.
 #[inline(never)]
 fn service_shake(lane: u8, req: &mailbox::Request) {
     let out_len = req.sig_len;
+    let sha3 = req.op == mailbox::OP_SHA3_256;
     // The message has to end before the output begins.
     let fits = out_len != 0
+        && (!sha3 || out_len == mailbox::SHA3_256_LEN)
         && req.msg_len <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET
         && out_len <= mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
     let msg = if fits {
@@ -536,7 +544,11 @@ fn service_shake(lane: u8, req: &mailbox::Request) {
         mailbox::stage(staged, part);
         sponge.absorb(staged);
     }
-    sponge.finalize();
+    if sha3 {
+        sponge.finalize_sha3();
+    } else {
+        sponge.finalize();
+    }
 
     let Some(out) = mailbox::slot_range_mut(lane, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len) else {
         buf.0.zeroize();

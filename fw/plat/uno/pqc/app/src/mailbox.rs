@@ -308,6 +308,13 @@ pub const OP_MLDSA_SIGN_SEED: u32 = 9;
 /// its seed in `xi` rather than a staged public key.
 pub const OP_MLDSA_VERIFY_SEED: u32 = 10;
 
+/// Operation selector: hash the staged message with SHA3-256. Laid out as
+/// [`OP_SHAKE256`], with the output length fixed at [`SHA3_256_LEN`].
+pub const OP_SHA3_256: u32 = 11;
+
+/// Length of a SHA3-256 digest.
+pub const SHA3_256_LEN: usize = 32;
+
 /// Status: request serviced.
 pub const STATUS_OK: u32 = 0;
 

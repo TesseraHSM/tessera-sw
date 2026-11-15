@@ -165,7 +165,7 @@ impl<'a> CbcKey<'a> {
         Ok(Self {
             mac_key: &key[..mac_len],
             enc_key: &key[mac_len..],
-            hash: suite.kdf_hash(),
+            hash: suite.kdf_hash().ok_or(CryptoError::HpkeUnsupportedSuite)?,
             tag_len: suite.nt(),
         })
     }

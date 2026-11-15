@@ -370,10 +370,11 @@ impl StdEcc {
         // scalar when the worker closure drops it, so the plaintext key
         // bytes don't linger in freed process heap memory.
         let priv_owned = Zeroizing::new(priv_vault.to_vec());
+        let order = self.order;
         let (x_be, y_be) = self
             .pool
             .submit_with_result(async move {
-                let pk = import_priv(&priv_owned)?;
+                let pk = import_priv(order, &priv_owned)?;
                 let pub_key = pk
                     .public_key()
                     .map_err(|_| HsmError::EccGetCoordinatesError)?;
@@ -396,27 +397,32 @@ impl StdEcc {
     }
 }
 
-/// Import a vault-format ECC private key: the big-endian scalar, left
-/// zero-padded to the PAL's `wire_coord_len` (P-521 is 68 bytes on
-/// little-endian PALs and 66 on big-endian ones).
+/// Import a vault-format ECC private key: the scalar in operand
+/// `order`, zero-padded to the PAL's `wire_coord_len` (P-521 is 68
+/// bytes on little-endian PALs and 66 on big-endian ones).
 ///
 /// # Errors
 /// [`HsmError::InvalidArg`] if the length or scalar is invalid.
-pub fn import_priv(vault: &[u8]) -> HsmResult<EccPrivateKey> {
-    let key = if vault.len() == priv_key_len(EccCurve::P521) {
-        EccPrivateKey::from_scalar(EccCurve::P521, vault)
+pub fn import_priv(order: HsmByteOrder, vault: &[u8]) -> HsmResult<EccPrivateKey> {
+    let mut full = Zeroizing::new([0u8; 68]);
+    let be = full.get_mut(..vault.len()).ok_or(HsmError::InvalidArg)?;
+    byte_order::int_copy_to_be(order, be, vault)?;
+    let key = if be.len() == priv_key_len(EccCurve::P521) {
+        EccPrivateKey::from_scalar(EccCurve::P521, be)
     } else {
-        EccPrivateKey::from_hsm_bytes(vault)
+        EccPrivateKey::from_hsm_bytes(be)
     };
     key.map_err(|_| HsmError::InvalidArg)
 }
 
-/// Export `pk` in vault format (see [`import_priv`]) filling all of
-/// `out`, which must be `wire_coord_len` for the key's curve.
+/// Export `pk`'s scalar in operand `order`, zero-padded to fill all of
+/// `out`: the vault format (see [`import_priv`]) when `out` is
+/// `wire_coord_len`, or the exact-width big-endian scalar with
+/// [`HsmByteOrder::Be`] and `priv_key_len`.
 ///
 /// # Errors
 /// [`HsmError::EccExportError`] if `out` cannot hold the scalar.
-pub fn export_priv(pk: &EccPrivateKey, out: &mut [u8]) -> HsmResult<()> {
+pub fn export_priv(order: HsmByteOrder, pk: &EccPrivateKey, out: &mut [u8]) -> HsmResult<()> {
     let mut full = Zeroizing::new([0u8; 68]);
     let n = pk
         .to_hsm_bytes(&mut full[..])
@@ -427,6 +433,7 @@ pub fn export_priv(pk: &EccPrivateKey, out: &mut [u8]) -> HsmResult<()> {
         return Err(HsmError::EccExportError);
     }
     out.copy_from_slice(scalar);
+    byte_order::int_from_be(order, out);
     Ok(())
 }
 
@@ -577,8 +584,8 @@ mod tests {
         // Export the private scalar in the vault format the mask /
         // unmask pipeline round-trips.
         let mut priv_vault = [0u8; 68];
-        export_priv(&priv_key, &mut priv_vault[..priv_len]).expect("export");
-        let reimported = import_priv(&priv_vault[..priv_len]).expect("import");
+        export_priv(order, &priv_key, &mut priv_vault[..priv_len]).expect("export");
+        let reimported = import_priv(order, &priv_vault[..priv_len]).expect("import");
         assert_eq!(EccKeyOp::curve(&reimported), curve);
 
         // Derive the public key from the private scalar.
