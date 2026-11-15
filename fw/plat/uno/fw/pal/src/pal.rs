@@ -816,6 +816,13 @@ fn is_pcie_reset_event(value: u32) -> bool {
 /// well inside Admin's smallest IDFU drain budget (500 ms).
 const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
 
+/// Longest the IDFU shutdown handler waits for host IO to finish before
+/// failing closed. Admin sends the shutdown once every host credit is
+/// restored, but a detached IO grants its credit back with its completion
+/// post (see `OicDriver::send_detached`), a moment before the run loop
+/// scrubs and frees its slot: a tail of microseconds.
+const SHUTDOWN_IO_DRAIN_MS: u64 = 10;
+
 impl UnoHsmPal {
     /// Returns the current boot phase.
     ///
@@ -1215,9 +1222,10 @@ impl UnoHsmPal {
         // Map the IPC action onto a partition-lifecycle primitive. `Migrate`
         // drives an NSSR reset (handled by `part_migrate` below); only an
         // unknown action is rejected as unsupported. No partition lock: a
-        // partition cannot be disabled/freed while host IOs are in flight,
-        // and admin-IPC is strictly serial, so this cannot race a host
-        // command (see lock.rs).
+        // partition cannot be disabled/freed while host IOs are in flight
+        // (bar a detached IO's slot scrub, which touches no partition
+        // state), and admin-IPC is strictly serial, so this cannot race a
+        // host command (see lock.rs).
         let result = match PfnEnableDisableAction(msg.info.action) {
             PfnEnableDisableAction::Enable => self.part_enable(pid, is_pf).await,
             PfnEnableDisableAction::Disable => self.part_disable(pid).await,
@@ -1283,7 +1291,8 @@ impl UnoHsmPal {
         // The ACK's owned-table count is a pure function of the mask — an
         // IPC-reply concern, computed here rather than in the partition layer.
         // No partition lock: a partition cannot be freed/allocated while host
-        // IOs are in flight, and admin-IPC is strictly serial (see lock.rs).
+        // IOs are in flight (bar a detached IO's slot scrub, which touches no
+        // partition state), and admin-IPC is strictly serial (see lock.rs).
         let result = if mask == 0 {
             self.part_free(pid).await
         } else {
@@ -1309,8 +1318,11 @@ impl UnoHsmPal {
     /// replies — mirroring the reference firmware's fail-closed
     /// `scheduler.occupancy_list() != 0` guard:
     ///
-    /// - non-zero in-flight IO -> reply `OperationFailed`, so Admin aborts
-    ///   (rolls back) the IDFU instead of resetting with resident work;
+    /// - host IO still in flight after [`SHUTDOWN_IO_DRAIN_MS`] -> reply
+    ///   `OperationFailed`, so Admin aborts (rolls back) the IDFU instead of
+    ///   resetting with resident work. The wait covers a detached IO, whose
+    ///   credit returns with its completion post, just before its slot is
+    ///   scrubbed and freed;
     /// - PKA engines still out of the pool after [`SHUTDOWN_PKA_DRAIN_MS`]
     ///   -> reply `OperationFailed` likewise. A request can finish while the
     ///   wipe that follows its PKA command (or the retry of a failed wipe)
@@ -1350,19 +1362,19 @@ impl UnoHsmPal {
         }
 
         // Admin owns the drain (see the docstring): fail closed while any host
-        // IO is still in flight, otherwise acknowledge readiness once the PKA
-        // has finished the cleanup host IO leaves behind. This relies
-        // on every received IO eventually reaching `drop_io` (each
+        // IO is still in flight after a short wait for the detached tail,
+        // otherwise acknowledge readiness once the PKA has finished the
+        // cleanup host IO leaves behind. This relies on every received IO
+        // eventually reaching `drop_io` or its detached free (each
         // `handle_io` task runs to completion, or the core faults into a
         // reset); a task that hung on an `.await` would keep the count
         // non-zero and block IDFU.
-        let in_flight = self.io_in_flight();
-        let status = if in_flight != 0 {
+        let status = if !self.drain_io().await {
             error!(
                 "idfu",
                 HsmError::IoDrainInProgress,
                 "shutdown requested with {} IO in flight; failing closed",
-                in_flight
+                self.io_in_flight()
             );
             IpcMessageStatusCode::OperationFailed
         } else if !self.drain_pka().await {
@@ -1379,6 +1391,22 @@ impl UnoHsmPal {
         let reply = encode_shutdown_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
+    }
+
+    /// Wait up to [`SHUTDOWN_IO_DRAIN_MS`] for every host IO to finish: the
+    /// run loop, which this task yields to, frees a detached IO's slot once
+    /// its completion post is done.
+    async fn drain_io(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_IO_DRAIN_MS);
+        loop {
+            if self.io_in_flight() == 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            embassy_futures::yield_now().await;
+        }
     }
 
     /// Wait up to [`SHUTDOWN_PKA_DRAIN_MS`] for every PKA engine to return to

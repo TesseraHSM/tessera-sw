@@ -395,6 +395,13 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         self.state.with(|s| self.free_io_in(s, index, queue_id));
     }
 
+    /// Free an IO slot whose completion post already granted its credit back
+    /// to the source queue (the OIC's detached post sets the OSQ entry's
+    /// `RX_CREDIT`): return the buffer to the ISQ only.
+    pub fn release_io(&self, index: u16) {
+        self.state.with(|s| self.release_buffer_in(s, index));
+    }
+
     /// [`free_io`](Self::free_io) with the driver state already borrowed.
     #[inline]
     fn free_io_in(&self, s: &mut ChannelState, index: u16, queue_id: u16) {
@@ -405,6 +412,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     }
 
     /// Return slot `index`'s buffer to the ISQ for hardware reuse.
+    #[inline]
     fn release_buffer_in(&self, s: &mut ChannelState, index: u16) {
         // Return buffer to DFL
         let buf_addr = self.buf_addr(index);

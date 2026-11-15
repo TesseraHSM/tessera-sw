@@ -835,9 +835,10 @@ impl UnoHsmPal {
         while let Some((index, _)) = self.oic.take_detached() {
             // As `drop_io`: wipe the slot's scratch before the slot can be
             // reused. A failed post is dropped like a failed `complete_io`.
+            // The post granted the IO's queue credit back (see
+            // `OicDriver::send_detached`), so only the buffer returns here.
             self.scrub_io_slot_cpu(index);
-            self.iic
-                .free_io(index, self.detached[index as usize].get().queue_id);
+            self.iic.release_io(index);
             self.io_in_flight_dec(HsmIoKind::Cmd);
         }
     }
