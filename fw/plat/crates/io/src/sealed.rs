@@ -231,21 +231,27 @@ where
 /// its padding is invalid.
 ///
 /// The padding lies within the last block, which is read out of DMA memory
-/// (uncached on Uno) with one burst rather than a load per byte.
+/// (uncached on Uno) with one burst rather than a load per byte, and
+/// checked a word at a time: the `p` bytes before the pad byte are zero iff
+/// the block's last nonzero byte before it lies in the message.
 fn unpad(pt: &HsmDmaBuf) -> Option<usize> {
+    const WORDS: usize = SEALED_BLOCK_LEN / 4;
     let start = pt.len().checked_sub(SEALED_BLOCK_LEN)?;
     let (words, _) = pt.split_at(start).1.read_head_words();
-    let mut last = [0u8; SEALED_BLOCK_LEN];
-    for (bytes, word) in last.as_chunks_mut::<4>().0.iter_mut().zip(words) {
-        *bytes = word.to_ne_bytes();
-    }
-    let (&pad, body) = last.split_last()?;
-    let pad = pad as usize;
+    // Byte `i` of the block is bits `8 * (i % 4)..` of word `i / 4`.
+    let mut block = words.map(u32::from_le);
+    let pad = (block[WORDS - 1] >> 24) as usize;
     if pad >= SEALED_BLOCK_LEN {
         return None;
     }
-    let tail = body.len() - pad;
-    body[tail..].iter().all(|&b| b == 0).then_some(start + tail)
+    block[WORDS - 1] &= 0x00FF_FFFF;
+    let msg = SEALED_BLOCK_LEN - 1 - pad;
+    // One past the last nonzero byte before the pad byte, 0 if none.
+    let end = block[..WORDS]
+        .iter()
+        .rposition(|&w| w != 0)
+        .map_or(0, |k| 4 * k + 4 - (block[k].leading_zeros() / 8) as usize);
+    (end <= msg).then_some(start + msg)
 }
 
 #[cfg(test)]
