@@ -143,6 +143,16 @@ impl VaultStorage {
         Self { res_mask }
     }
 
+    /// Whether a partition owns table `table`, `bits` being word
+    /// `table / 32` of its resource mask: as
+    /// [`with_mask_word`](Self::with_mask_word)`(table / 32, bits)` would
+    /// find it, without building the mask.
+    #[inline]
+    pub fn owns_table(table: usize, bits: u32) -> bool {
+        const { assert!(TABLE_COUNT <= 32 * 4) };
+        table < TABLE_COUNT && (bits >> (table % 32)) & 1 != 0
+    }
+
     /// Absolute GSRAM address of table `table`'s entry-metadata region.
     ///
     /// # Parameters
