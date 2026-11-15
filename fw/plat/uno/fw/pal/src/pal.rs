@@ -356,10 +356,9 @@ pub struct UnoHsmPal {
     /// Per host IO slot: what finishing a detached IO still needs.
     pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
 
-    /// Per host IO slot: the session key blob its sealed request was opened
-    /// with, for its response to be sealed with (see
-    /// [`session_key_blob`](Self::session_key_blob)).
-    pub(crate) io_session_key: [Cell<Option<crate::vault::SessionKeyBlob>>; IO_SQ_COUNT as usize],
+    /// Where vault lookups found keys, by key ID (see
+    /// [`vault_key_static`](Self::vault_key_static)).
+    pub(crate) key_locations: [Cell<Option<crate::vault::KeyLocation>>; crate::vault::KEY_LOCATIONS],
 
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
@@ -530,7 +529,7 @@ impl Default for UnoHsmPal {
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
-            io_session_key: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
+            key_locations: [const { Cell::new(None) }; crate::vault::KEY_LOCATIONS],
             detached_post_pending: Cell::new(0),
             detached_copy_pending: Cell::new(0),
             prefetch_io: [const { Cell::new(None) }; IO_SQ_COUNT as usize],

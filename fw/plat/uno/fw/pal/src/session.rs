@@ -444,7 +444,7 @@ impl HsmSessionManager for UnoHsmPal {
                 (blob, off)
             }
             HsmSessionState::Active => {
-                let blob = self.session_key_blob(io, table.physical_id(id)?)?;
+                let blob = self.vault_key_static(io, table.physical_id(id)?)?;
                 if blob.len() != SESSION_EX_BLOB_SIZE {
                     return Err(HsmError::InvalidPermissions);
                 }
