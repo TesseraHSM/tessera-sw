@@ -159,7 +159,11 @@ impl<S: TableStorage> KeyVault<S> {
                 continue;
             };
 
-            let start = match crate::block::alloc(self.storage.bitmap_mut(table)?, need) {
+            let start = match crate::block::alloc(
+                self.storage.bitmap_mut(table)?,
+                need,
+                block_align(kind),
+            ) {
                 Ok(s) => s,
                 Err(HsmError::DefragmentationNeeded) => {
                     saw_defrag = true;
@@ -655,6 +659,26 @@ fn split_key_id(key_id: HsmKeyId) -> (usize, usize) {
     let raw = u16::from(key_id);
     (usize::from(raw >> 8), usize::from(raw & 0xFF))
 }
+
+/// Blocks that the run of a key of `kind` starts on a multiple of.
+///
+/// The AES-256-GCM keys the BCP loads on every sealed command (a session's
+/// transport and masking keys, at the start of its `SessionEx` blob, and
+/// the partition's and security domain's masking keys) start on a 32-byte
+/// boundary of the blob, which is 32-byte aligned, past their 32-byte
+/// attributes: the GSRAM vault is read uncached, and a load within one
+/// 32-byte line costs half one that crosses into the next.
+fn block_align(kind: HsmVaultKeyKind) -> usize {
+    match kind {
+        HsmVaultKeyKind::SessionEx
+        | HsmVaultKeyKind::PartitionLocalMaskingKey
+        | HsmVaultKeyKind::PartitionEphemeralMaskingKey
+        | HsmVaultKeyKind::SdMasking => 32 / BLOCK_ALIGNMENT,
+        _ => 1,
+    }
+}
+
+const _: () = assert!(ATTRIBUTES_BLOB_SIZE.is_multiple_of(32));
 
 /// Block-aligned total storage for a key of `key_len` bytes
 /// (`attributes + align8(key)`).

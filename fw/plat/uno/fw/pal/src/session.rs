@@ -59,18 +59,25 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 /// `Session`-kind blob: `[api_rev(8) || masking_key(80)]` = 88 bytes.
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
-/// Offset of `masking_key` in a `SessionEx` blob.
-const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
-/// Offset of `auth_binding` in a `SessionEx` blob.
-const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
 /// Offset of the `h2m ‖ m2h` transport keys in a `SessionEx` blob.
-const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
+const SESSION_EX_KEYS_OFF: usize = 0;
+/// Offset of `masking_key` in a `SessionEx` blob.
+const SESSION_EX_MASKING_OFF: usize = SESSION_EX_KEYS_OFF + 2 * SESSION_TRANSPORT_KEY_LEN;
+/// Offset of `param_key` in a `SessionEx` blob.
+const SESSION_EX_PARAM_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
+/// Offset of `api_rev` in a `SessionEx` blob.
+const SESSION_EX_API_REV_OFF: usize = SESSION_EX_PARAM_OFF + SESSION_PARAM_KEY_LEN;
+/// Offset of `auth_binding` in a `SessionEx` blob.
+const SESSION_EX_AUTH_OFF: usize = SESSION_EX_API_REV_OFF + SESSION_API_REV_SIZE;
 
-/// `SessionEx` blob: `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
-/// auth_binding(68) ‖ h2m(32) ‖ m2h(32)` = 204 bytes.  The SessionEx
-/// masking key is the 32 B AES-256-GCM `key_masking::aead` key
-/// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_KEYS_OFF + 2 * SESSION_TRANSPORT_KEY_LEN;
+/// `SessionEx` blob: `h2m(32) ‖ m2h(32) ‖ masking_key(32) ‖ param_key(32)
+/// ‖ api_rev(8) ‖ auth_binding(68)` = 204 bytes.  The SessionEx masking key
+/// is the 32 B AES-256-GCM `key_masking::aead` key
+/// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.  The keys
+/// the BCP loads on every sealed command come first, each on a 32-byte
+/// line of the vault, which places `SessionEx` blobs 32-byte aligned.
+const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
+const _: () = assert!(SESSION_EX_BLOB_SIZE == 204 && SESSION_EX_MASKING_OFF.is_multiple_of(32));
 
 impl HsmSessionManager for UnoHsmPal {
     fn session_limit_reached(&self, io: &UnoHsmIo) -> bool {
@@ -331,14 +338,13 @@ impl HsmSessionManager for UnoHsmPal {
         }
 
         let blob = self.dma_alloc(io, SESSION_EX_BLOB_SIZE)?;
-        let (head, keys) = blob.split_at_mut(SESSION_EX_KEYS_OFF);
-        head[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
-        head[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
-        head[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
-        head[SESSION_EX_AUTH_OFF..].copy_from_slice(auth_binding);
-        let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
-        h2m.copy_from_slice(h2m_key);
-        m2h.copy_from_slice(m2h_key);
+        let m2h_off = SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_KEY_LEN;
+        blob[SESSION_EX_KEYS_OFF..m2h_off].copy_from_slice(h2m_key);
+        blob[m2h_off..SESSION_EX_MASKING_OFF].copy_from_slice(m2h_key);
+        blob[SESSION_EX_MASKING_OFF..SESSION_EX_PARAM_OFF].copy_from_slice(masking_key);
+        blob[SESSION_EX_PARAM_OFF..SESSION_EX_API_REV_OFF].copy_from_slice(param_key);
+        blob[SESSION_EX_API_REV_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(api_rev);
+        blob[SESSION_EX_AUTH_OFF..].copy_from_slice(auth_binding);
 
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
         let physical_id = {
@@ -370,8 +376,8 @@ impl HsmSessionManager for UnoHsmPal {
     fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
-        // The param_key is the 32-byte field following the 8-byte api_rev
-        // in the committed SessionEx blob.
+        // The param_key is the 32-byte field following the masking key in
+        // the committed SessionEx blob.
         let blob = self.vault_key(io, physical_id)?;
         // A committed SessionEx blob is always long enough to carry the
         // param_key; a short blob indicates vault corruption, not a caller
@@ -381,7 +387,7 @@ impl HsmSessionManager for UnoHsmPal {
             return Err(HsmError::InvalidPermissions);
         }
         Ok(blob
-            .split_at(SESSION_API_REV_SIZE)
+            .split_at(SESSION_EX_PARAM_OFF)
             .1
             .split_at(SESSION_PARAM_KEY_LEN)
             .0)
@@ -392,8 +398,8 @@ impl HsmSessionManager for UnoHsmPal {
         let physical_id = table.physical_id(id)?;
         let blob = self.vault_key(io, physical_id)?;
         // The masking key follows `api_rev` in a legacy MBOR `Session`
-        // blob (80 B `aes32 ‖ hmac48` cbc key), or `api_rev ‖ param_key`
-        // in a `SessionEx` blob (32 B AES-256-GCM aead key); pick the
+        // blob (80 B `aes32 ‖ hmac48` cbc key), or `h2m ‖ m2h` in a
+        // `SessionEx` blob (32 B AES-256-GCM aead key); pick the
         // offset *and length* from the blob length so both schedules
         // work.  A blob of any other length indicates vault corruption, not a
         // caller error — surface it as `InternalError` (matches the trait

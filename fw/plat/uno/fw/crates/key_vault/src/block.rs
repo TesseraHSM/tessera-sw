@@ -33,6 +33,8 @@ use crate::storage::BLOB_BLOCKS;
 /// - `words`: The mutable bitmap array to allocate from. Blocks marked in-use
 ///   are updated in place. The array must have length [`BITMAP_WORDS`].
 /// - `count`: The number of contiguous blocks to allocate.
+/// - `align`: The run starts on a block that is a multiple of `align` (a
+///   value of 0 counts as 1).
 ///
 /// # Returns
 ///
@@ -43,16 +45,18 @@ use crate::storage::BLOB_BLOCKS;
 /// # Errors
 ///
 /// - [`HsmError::DefragmentationNeeded`] if `count` total free blocks
-///   exist but no single run is long enough.
+///   exist but no single run starting on such a block is long enough.
 /// - [`HsmError::NotEnoughSpace`] if fewer than `count` free blocks
 ///   remain (also for `count == 0` or `count > BLOB_BLOCKS`).
-pub fn alloc(words: &mut [u32], count: usize) -> HsmResult<u16> {
+pub fn alloc(words: &mut [u32], count: usize, align: usize) -> HsmResult<u16> {
     if count == 0 || count > BLOB_BLOCKS {
         return Err(HsmError::NotEnoughSpace);
     }
+    let align = align.max(1);
 
-    // First-fit scan: find the first run of `count` contiguous free blocks.
-    // Track three quantities across the scan:
+    // First-fit scan: find the first run of `count` contiguous free blocks
+    // starting on a multiple of `align`. Track three quantities across the
+    // scan:
     // - `run_start`: index of the first block in the current free run
     // - `run`: length of the current free run
     // - `total_free`: total count of all free blocks (for fragmentation detection)
@@ -61,13 +65,18 @@ pub fn alloc(words: &mut [u32], count: usize) -> HsmResult<u16> {
     let mut total_free = 0usize;
     for block in 0..BLOB_BLOCKS {
         if used(words, block) {
-            // Hit a used block; reset the current run and update start position
-            // for the next potential run immediately after this block.
+            // Hit a used block; reset the current run.
             run = 0;
-            run_start = block + 1;
             continue;
         }
         total_free += 1;
+        if run == 0 {
+            // A run starts only on a multiple of `align`.
+            if block % align != 0 {
+                continue;
+            }
+            run_start = block;
+        }
         run += 1;
         if run == count {
             // Found a contiguous run of `count` free blocks; mark them all in use.
@@ -214,8 +223,8 @@ mod tests {
     #[test]
     fn alloc_is_contiguous_and_marks_used() {
         let mut b = empty();
-        assert_eq!(alloc(&mut b, 4), Ok(0));
-        assert_eq!(alloc(&mut b, 4), Ok(4));
+        assert_eq!(alloc(&mut b, 4, 1), Ok(0));
+        assert_eq!(alloc(&mut b, 4, 1), Ok(4));
         // Blocks 0..8 now used.
         for i in 0..8 {
             assert!(used(&b, i));
@@ -226,21 +235,31 @@ mod tests {
     #[test]
     fn free_reopens_space() {
         let mut b = empty();
-        let a = alloc(&mut b, 10).unwrap();
+        let a = alloc(&mut b, 10, 1).unwrap();
         free(&mut b, a, 10);
         for i in 0..10 {
             assert!(!used(&b, i));
         }
-        assert_eq!(alloc(&mut b, 10), Ok(0));
+        assert_eq!(alloc(&mut b, 10, 1), Ok(0));
     }
 
     #[test]
     fn not_enough_space_when_total_insufficient() {
         let mut b = empty();
         // Consume all but 3 blocks.
-        alloc(&mut b, BLOB_BLOCKS - 3).unwrap();
-        assert_eq!(alloc(&mut b, 4), Err(HsmError::NotEnoughSpace));
-        assert_eq!(alloc(&mut b, 3), Ok((BLOB_BLOCKS - 3) as u16));
+        alloc(&mut b, BLOB_BLOCKS - 3, 1).unwrap();
+        assert_eq!(alloc(&mut b, 4, 1), Err(HsmError::NotEnoughSpace));
+        assert_eq!(alloc(&mut b, 3, 1), Ok((BLOB_BLOCKS - 3) as u16));
+    }
+
+    #[test]
+    fn alloc_aligned_starts_on_a_multiple() {
+        let mut b = [0u32; BITMAP_WORDS];
+        assert_eq!(alloc(&mut b, 1, 1), Ok(0));
+        // Blocks 1-3 are free but start no run on a multiple of 4.
+        assert_eq!(alloc(&mut b, 2, 4), Ok(4));
+        assert_eq!(alloc(&mut b, 3, 1), Ok(1));
+        assert_eq!(alloc(&mut b, 1, 4), Ok(8));
     }
 
     #[test]
@@ -249,27 +268,27 @@ mod tests {
         // Allocate three 4-block runs, free the middle one → a 4-block
         // hole plus the tail, but request 8 contiguous with the tail
         // consumed so only fragmented free space remains.
-        let r0 = alloc(&mut b, 4).unwrap();
-        let _r1 = alloc(&mut b, 4).unwrap();
-        let r2 = alloc(&mut b, 4).unwrap();
+        let r0 = alloc(&mut b, 4, 1).unwrap();
+        let _r1 = alloc(&mut b, 4, 1).unwrap();
+        let r2 = alloc(&mut b, 4, 1).unwrap();
         // Fill the remainder of the region so only r0 (freed) + r2 (freed)
         // are free: two separate 4-block holes = 8 free, no run of 8.
-        let mid = alloc(&mut b, BLOB_BLOCKS - 12).unwrap();
+        let mid = alloc(&mut b, BLOB_BLOCKS - 12, 1).unwrap();
         let _ = mid;
         free(&mut b, r0, 4);
         free(&mut b, r2, 4);
-        assert_eq!(alloc(&mut b, 8), Err(HsmError::DefragmentationNeeded));
+        assert_eq!(alloc(&mut b, 8, 1), Err(HsmError::DefragmentationNeeded));
         // But two 4-block requests still succeed.
-        assert!(alloc(&mut b, 4).is_ok());
-        assert!(alloc(&mut b, 4).is_ok());
+        assert!(alloc(&mut b, 4, 1).is_ok());
+        assert!(alloc(&mut b, 4, 1).is_ok());
     }
 
     #[test]
     fn zero_and_oversized_rejected() {
         let mut b = empty();
-        assert_eq!(alloc(&mut b, 0), Err(HsmError::NotEnoughSpace));
+        assert_eq!(alloc(&mut b, 0, 1), Err(HsmError::NotEnoughSpace));
         assert_eq!(
-            alloc(&mut b, BLOB_BLOCKS + 1),
+            alloc(&mut b, BLOB_BLOCKS + 1, 1),
             Err(HsmError::NotEnoughSpace)
         );
     }
