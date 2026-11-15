@@ -380,9 +380,27 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         self.state.with(|s| self.free_io_in(s, index, queue_id));
     }
 
+    /// Free an IO slot whose completion post already granted its credit back
+    /// to the source queue (the OIC's detached post sets the OSQ entry's
+    /// `RX_CREDIT`): return the buffer to the ISQ only.
+    pub fn release_io(&self, index: u16) {
+        self.state.with(|s| self.refill_in(s, index));
+    }
+
     /// [`free_io`](Self::free_io) with the driver state already borrowed.
     #[inline]
     fn free_io_in(&self, s: &mut ChannelState, index: u16, queue_id: u16) {
+        self.refill_in(s, index);
+
+        // Grant one credit back to the source queue
+        let iq = &self.regs.iq[queue_id as usize];
+        let current = iq.credit.read(IQ_QUEUE_CREDIT::CREDIT);
+        iq.credit.write(IQ_QUEUE_CREDIT::CREDIT.val(current + 1));
+    }
+
+    /// Returns slot `index`'s buffer to the ISQ (DFL refill).
+    #[inline]
+    fn refill_in(&self, s: &mut ChannelState, index: u16) {
         // Return buffer to DFL
         let buf_addr = self.buf_addr(index);
         s.isq_tail = (s.isq_tail + 1) & Self::MASK;
@@ -398,11 +416,6 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         self.regs.isq_ch[self.channel as usize]
             .tail
             .write(ISQ_CHANNEL_TAIL::TAIL.val(new_pi.into()));
-
-        // Grant one credit back to the source queue
-        let iq = &self.regs.iq[queue_id as usize];
-        let current = iq.credit.read(IQ_QUEUE_CREDIT::CREDIT);
-        iq.credit.write(IQ_QUEUE_CREDIT::CREDIT.val(current + 1));
     }
 
     /// Receive an inbound IO request asynchronously (zero-copy).
