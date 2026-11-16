@@ -38,20 +38,20 @@ const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE
 
 /// `SessionEx`-kind blob size (TBOR handshake sessions):
 /// `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖
-/// h2m(32) ‖ m2h(32)` = 204 B.  The SessionEx masking key is the 32 B
+/// h2m(36) ‖ m2h(36)` = 212 B.  The SessionEx masking key is the 32 B
 /// AES-256-GCM `key_masking::aead` key ([`SESSION_MASKING_KEY_LEN`]), not
 /// the legacy 80 B cbc key.
 pub(crate) const SESSION_EX_BLOB_SIZE: usize = SESSION_API_REV_SIZE
     + SESSION_PARAM_KEY_LEN
     + SESSION_MASKING_KEY_LEN
     + SESSION_AUTH_BINDING_LEN
-    + 2 * SESSION_TRANSPORT_KEY_LEN;
+    + 2 * SESSION_TRANSPORT_SECRET_LEN;
 
 /// Offset of `masking_key` in a `SessionEx` blob.
 const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
 /// Offset of `auth_binding` in a `SessionEx` blob.
 const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
-/// Offset of the `h2m ‖ m2h` transport keys in a `SessionEx` blob.
+/// Offset of the `h2m ‖ m2h` transport secrets in a `SessionEx` blob.
 const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
 
 impl HsmSessionManager for StdHsmPal {
@@ -224,15 +224,15 @@ impl HsmSessionManager for StdHsmPal {
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
-        h2m_key: &HsmDmaBuf,
-        m2h_key: &HsmDmaBuf,
+        h2m_secret: &HsmDmaBuf,
+        m2h_secret: &HsmDmaBuf,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
             || masking_key.len() != SESSION_MASKING_KEY_LEN
             || auth_binding.len() != SESSION_AUTH_BINDING_LEN
-            || h2m_key.len() != SESSION_TRANSPORT_KEY_LEN
-            || m2h_key.len() != SESSION_TRANSPORT_KEY_LEN
+            || h2m_secret.len() != SESSION_TRANSPORT_SECRET_LEN
+            || m2h_secret.len() != SESSION_TRANSPORT_SECRET_LEN
         {
             return Err(HsmError::InvalidArg);
         }
@@ -252,9 +252,9 @@ impl HsmSessionManager for StdHsmPal {
         blob[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
         blob[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
         blob[SESSION_EX_AUTH_OFF..SESSION_EX_KEYS_OFF].copy_from_slice(auth_binding);
-        blob[SESSION_EX_KEYS_OFF..SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_KEY_LEN]
-            .copy_from_slice(h2m_key);
-        blob[SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_KEY_LEN..].copy_from_slice(m2h_key);
+        let (h2m, m2h) = blob[SESSION_EX_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
+        h2m.copy_from_slice(h2m_secret);
+        m2h.copy_from_slice(m2h_secret);
 
         let physical_id = entry
             .vault
@@ -315,21 +315,21 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw(binding) })
     }
 
-    /// Borrows a directional transport key: from a Pending slot's
-    /// handshake blob tail, or an Active session's `SessionEx` blob.
+    /// Borrows a directional transport key and salt: from a Pending
+    /// slot's handshake blob tail, or an Active session's `SessionEx` blob.
     fn session_transport_key(
         &self,
         io: &StdHsmIo,
         id: HsmSessId,
         dir: HsmSessionTransportDir,
-    ) -> HsmResult<&HsmDmaBuf> {
+    ) -> HsmResult<HsmSessionTransportKey<'_>> {
         let entry = self.active_part(io.pid())?;
         let (blob, keys_off) = match entry.session_table.state(id) {
             HsmSessionState::Pending => {
                 let blob = entry.session_table.pending_state(id)?;
                 let off = blob
                     .len()
-                    .checked_sub(2 * SESSION_TRANSPORT_KEY_LEN)
+                    .checked_sub(2 * SESSION_TRANSPORT_SECRET_LEN)
                     .ok_or(HsmError::InvalidPermissions)?;
                 (blob, off)
             }
@@ -345,12 +345,19 @@ impl HsmSessionManager for StdHsmPal {
         };
         let offset = match dir {
             HsmSessionTransportDir::H2m => keys_off,
-            HsmSessionTransportDir::M2h => keys_off + SESSION_TRANSPORT_KEY_LEN,
+            HsmSessionTransportDir::M2h => keys_off + SESSION_TRANSPORT_SECRET_LEN,
         };
-        let key = &blob[offset..offset + SESSION_TRANSPORT_KEY_LEN];
+        let secret = blob
+            .get(offset..offset + SESSION_TRANSPORT_SECRET_LEN)
+            .ok_or(HsmError::InvalidPermissions)?;
         // SAFETY: this is a sub-view of the session table's / vault's
         // DMA-reachable host storage.
-        Ok(unsafe { HsmDmaBuf::from_raw(key) })
+        HsmSessionTransportKey::new(unsafe { HsmDmaBuf::from_raw(secret) })
+    }
+
+    fn session_transport_next_seq(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<u64> {
+        let entry = self.active_part_mut(io.pid())?;
+        entry.session_table.next_m2h_seq(id)
     }
 
     fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {

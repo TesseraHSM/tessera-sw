@@ -126,7 +126,8 @@ const RESERVED3_LEN: usize = 626
     - CREDENTIAL_LEN
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
-    - 2; // session_meta (pending_mask + psk_change_mask)
+    - 2  // session_meta (pending_mask + psk_change_mask)
+    - 2; // transport_epoch
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -426,6 +427,13 @@ struct Storage {
     // psk_change_mask (bit N set once slot N has consumed its one
     // allowed PSK change). Owned by the session_store driver.
     session_meta: [u8; 2],
+    // Little-endian TBOR session transport epoch: the top 16 bits of every
+    // HSM→VM sequence number. Bumped on every warm / fw-update boot, which
+    // preserves sessions but restarts the DTCM message counters, so a
+    // sequence number (and thus an AES-GCM nonce) is never reused under a
+    // surviving session's keys. Zeroed only by `reset` (power-on), which
+    // also drops every session.
+    transport_epoch: [u8; 2],
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -506,6 +514,23 @@ impl PartStore {
             if part.res_mask() != 0 {
                 part.set_unwrapping_key_required(true);
             }
+        }
+    }
+
+    /// Advances every partition's session transport epoch after a warm /
+    /// fw-update reboot, which keeps sessions but restarts their volatile
+    /// message counters. Saturates at `u16::MAX`, after which
+    /// [`Partition::transport_epoch`] reports exhaustion.
+    pub fn bump_transport_epochs() {
+        for idx in 0..NUM_PARTITIONS {
+            let slot = Partition(idx).slot_ptr();
+            // SAFETY: the index is in range, keeping the slot within the
+            // partition-store GSRAM region; boot runs before any task, so
+            // nothing else accesses the slot. `transport_epoch` is not
+            // shadowed, so the shadow caches need no invalidation.
+            let epoch = unsafe { &mut (*slot).transport_epoch };
+            let next = u16::from_le_bytes(*epoch).saturating_add(1);
+            *epoch = next.to_le_bytes();
         }
     }
 }
@@ -1656,6 +1681,15 @@ impl Partition {
     #[inline(never)]
     pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
         &mut self.slot_mut().session_meta
+    }
+
+    /// The session transport epoch (see
+    /// [`PartStore::bump_transport_epochs`]), or `None` once it has
+    /// saturated and no fresh sequence numbers remain.
+    #[inline(never)]
+    pub fn transport_epoch(self) -> Option<u16> {
+        let epoch = u16::from_le_bytes(self.slot().transport_epoch);
+        (epoch != u16::MAX).then_some(epoch)
     }
 }
 

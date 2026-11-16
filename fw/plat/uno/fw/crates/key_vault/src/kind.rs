@@ -22,13 +22,13 @@ use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
-use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
 
 const SESSION_EX_LEN: u16 = (8
     + SESSION_PARAM_KEY_LEN
     + SESSION_MASKING_KEY_LEN
     + SESSION_AUTH_BINDING_LEN
-    + 2 * SESSION_TRANSPORT_KEY_LEN) as u16;
+    + 2 * SESSION_TRANSPORT_SECRET_LEN) as u16;
 
 /// Length contract for one key kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -351,7 +351,7 @@ mod tests {
     fn session_ex_len_is_derived_from_pal_layout() {
         use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
         use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
-        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
 
         // `api_rev` prefix on every SessionEx blob (mirrors the uno PAL's
         // private `SESSION_API_REV_SIZE` in `session.rs`).
@@ -361,8 +361,8 @@ mod tests {
             + SESSION_PARAM_KEY_LEN
             + SESSION_MASKING_KEY_LEN
             + SESSION_AUTH_BINDING_LEN
-            + 2 * SESSION_TRANSPORT_KEY_LEN;
-        assert_eq!(len, 204);
+            + 2 * SESSION_TRANSPORT_SECRET_LEN;
+        assert_eq!(len, 212);
         assert_eq!(
             key_len(HsmVaultKeyKind::SessionEx),
             Ok(KeyLen::Fixed(len as u16))
@@ -374,14 +374,14 @@ mod tests {
     #[test]
     fn session_ex_rejects_other_sizes() {
         let len = key_len(HsmVaultKeyKind::SessionEx).expect("SessionEx kind");
-        assert_eq!(len.check(204), Ok(204));
+        assert_eq!(len.check(212), Ok(212));
         // The retired PlainText / Authenticated sizes are rejected.
         assert!(len.check(140).is_err());
         assert!(len.check(236).is_err());
-        assert!(len.check(203).is_err());
-        assert!(len.check(205).is_err());
+        assert!(len.check(211).is_err());
+        assert!(len.check(213).is_err());
         let pending = key_len(HsmVaultKeyKind::SessionExPending).expect("Pending kind");
-        assert_eq!(pending.check(230), Ok(230));
+        assert_eq!(pending.check(238), Ok(238));
         assert_eq!(pending.check(SESSION_PENDING_BLOB_MAX), Ok(256));
         assert!(pending.check(SESSION_PENDING_BLOB_MAX + 1).is_err());
     }

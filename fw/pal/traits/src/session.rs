@@ -192,6 +192,52 @@ pub enum HsmSessionTransportDir {
     M2h,
 }
 
+/// One direction's session transport key and nonce salt.
+///
+/// Every AES-GCM nonce in a direction is `salt ‖ be64(seq)`, where `seq`
+/// is the sender's per-direction message counter, so no per-message
+/// randomness is needed and a nonce never repeats under a key as long as
+/// the sender never reuses a `seq`.
+#[derive(Clone, Copy)]
+pub struct HsmSessionTransportKey<'a> {
+    key: &'a HsmDmaBuf,
+    salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+}
+
+impl<'a> HsmSessionTransportKey<'a> {
+    /// Splits a [`SESSION_TRANSPORT_SECRET_LEN`]-byte `key ‖ salt` secret.
+    ///
+    /// # Errors
+    ///
+    /// [`HsmError::InvalidArg`] if `secret` has the wrong length.
+    #[inline]
+    pub fn new(secret: &'a HsmDmaBuf) -> HsmResult<Self> {
+        if secret.len() != SESSION_TRANSPORT_SECRET_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let (key, salt) = secret.split_at(SESSION_TRANSPORT_KEY_LEN);
+        let mut out = [0u8; SESSION_TRANSPORT_SALT_LEN];
+        out.copy_from_slice(salt);
+        Ok(Self { key, salt: out })
+    }
+
+    /// The [`SESSION_TRANSPORT_KEY_LEN`]-byte AES-256-GCM key.
+    #[inline]
+    pub fn key(&self) -> &'a HsmDmaBuf {
+        self.key
+    }
+
+    /// The AES-GCM nonce of message `seq`: `salt ‖ be64(seq)`.
+    #[inline]
+    pub fn nonce(&self, seq: u64) -> [u8; SESSION_TRANSPORT_IV_LEN] {
+        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        let (salt, ctr) = iv.split_at_mut(SESSION_TRANSPORT_SALT_LEN);
+        salt.copy_from_slice(&self.salt);
+        ctr.copy_from_slice(&seq.to_be_bytes());
+        iv
+    }
+}
+
 /// Session management interface.
 ///
 /// All methods take an [`HsmIo`] handle, which scopes the operation to
@@ -375,8 +421,8 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX)
     /// bytes.
     ///
-    /// The blob's trailing `2 × SESSION_TRANSPORT_KEY_LEN` bytes are the
-    /// transport keys `h2m ‖ m2h`;
+    /// The blob's trailing `2 × SESSION_TRANSPORT_SECRET_LEN` bytes are the
+    /// transport secrets `h2m ‖ m2h` (each `key ‖ salt`);
     /// [`session_transport_key`](Self::session_transport_key) serves the
     /// Pending slot from them, so `OpenSessionFinish` already travels on
     /// the encrypted channel.
@@ -386,7 +432,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `io` — caller's I/O context (partition scope).
     /// - `role` — role the handshake is claiming.
     /// - `handshake_state` — opaque handshake material ending with the
-    ///   transport keys; retrieved verbatim by
+    ///   transport secrets; retrieved verbatim by
     ///   [`session_pending_state`](Self::session_pending_state).
     ///
     /// # Returns
@@ -439,8 +485,13 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// verifies.  The Pending handshake state is zeroized and replaced
     /// by the session-key vault blob:
     ///
-    /// 204 B blob = `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
-    /// auth_binding(68) ‖ h2m(32) ‖ m2h(32)]`, identical for CO and CU.
+    /// 212 B blob = `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
+    /// auth_binding(68) ‖ h2m(36) ‖ m2h(36)]`, identical for CO and CU.
+    ///
+    /// The transport secrets are the same ones the Pending slot served,
+    /// so the HSM→VM sequence counter (see
+    /// [`session_transport_next_seq`](Self::session_transport_next_seq))
+    /// carries over from Pending to Active rather than restarting.
     ///
     /// On error the slot is left untouched; callers may either retry
     /// `session_promote` with corrected arguments or
@@ -461,8 +512,10 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   separately from the per-parameter `param_key`.
     /// - `auth_binding` — [`SESSION_AUTH_BINDING_LEN`] bytes captured from
     ///   the authenticated handshake: role, AppId and PSK digest.
-    /// - `h2m_key` — [`SESSION_TRANSPORT_KEY_LEN`] VM→HSM transport key.
-    /// - `m2h_key` — [`SESSION_TRANSPORT_KEY_LEN`] HSM→VM transport key.
+    /// - `h2m_secret` — [`SESSION_TRANSPORT_SECRET_LEN`] VM→HSM transport
+    ///   `key ‖ salt`.
+    /// - `m2h_secret` — [`SESSION_TRANSPORT_SECRET_LEN`] HSM→VM transport
+    ///   `key ‖ salt`.
     ///
     /// # Returns
     ///
@@ -480,11 +533,12 @@ pub trait HsmSessionManager: HsmIoTypes {
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
-        h2m_key: &HsmDmaBuf,
-        m2h_key: &HsmDmaBuf,
+        h2m_secret: &HsmDmaBuf,
+        m2h_secret: &HsmDmaBuf,
     ) -> HsmResult<()>;
 
-    /// Borrows a session's directional AES-256-GCM transport key.
+    /// Borrows a session's directional AES-256-GCM transport key and
+    /// nonce salt.
     ///
     /// Served from a [`Pending`](HsmSessionState::Pending) slot's
     /// handshake blob tail, or from an [`Active`](HsmSessionState::Active)
@@ -492,7 +546,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(&HsmDmaBuf)` — exactly [`SESSION_TRANSPORT_KEY_LEN`] bytes.
+    /// - `Ok(key)` — the direction's key and salt.
     /// - `Err(HsmError::SessionNotFound)` — `id` is neither Pending nor
     ///   Active in the caller's partition.
     /// - `Err(HsmError::InvalidPermissions)` — the session carries no
@@ -502,7 +556,26 @@ pub trait HsmSessionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmSessId,
         dir: HsmSessionTransportDir,
-    ) -> HsmResult<&HsmDmaBuf>;
+    ) -> HsmResult<HsmSessionTransportKey<'_>>;
+
+    /// Reserves the next HSM→VM sequence number of session `id`, for the
+    /// nonce of one sealed response.
+    ///
+    /// Each call returns a value never returned before under the
+    /// session's current transport keys — including across warm resets
+    /// that preserve the session — so a reserved number must be used for
+    /// at most one message. The counter restarts only when new transport
+    /// keys are installed by
+    /// [`session_create_pending`](Self::session_create_pending).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(seq)` — the reserved sequence number.
+    /// - `Err(HsmError::SessionNotFound)` — `id` is neither Pending nor
+    ///   Active in the caller's partition.
+    /// - `Err(HsmError::SessionTransportError)` — the counter is
+    ///   exhausted; the session must be re-established.
+    fn session_transport_next_seq(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<u64>;
 
     /// Returns a borrowed view of the active session's `param_key`
     /// (a 32-byte AES-256 key used by

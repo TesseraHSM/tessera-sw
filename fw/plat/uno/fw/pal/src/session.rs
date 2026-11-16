@@ -29,6 +29,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
+use tsra_fw_hsm_pal_traits::HsmSessionTransportKey;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -36,7 +37,11 @@ use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
-use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
+use tsra_fw_single_cell::SingleCell;
+use tsra_fw_uno_drivers_part_store::NUM_PARTITIONS;
+use tsra_fw_uno_drivers_part_store::PartStore;
+use tsra_fw_uno_drivers_session_store::MAX_SESSIONS;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
@@ -56,14 +61,32 @@ const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE
 const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
 /// Offset of `auth_binding` in a `SessionEx` blob.
 const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
-/// Offset of the `h2m ‖ m2h` transport keys in a `SessionEx` blob.
+/// Offset of the `h2m ‖ m2h` transport secrets in a `SessionEx` blob.
 const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
 
 /// `SessionEx` blob: `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
-/// auth_binding(68) ‖ h2m(32) ‖ m2h(32)` = 204 bytes.  The SessionEx
+/// auth_binding(68) ‖ h2m(36) ‖ m2h(36)` = 212 bytes.  The SessionEx
 /// masking key is the 32 B AES-256-GCM `key_masking::aead` key
 /// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_KEYS_OFF + 2 * SESSION_TRANSPORT_KEY_LEN;
+const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_KEYS_OFF + 2 * SESSION_TRANSPORT_SECRET_LEN;
+
+/// Bits of an HSM→VM sequence number taken by the per-session message
+/// count; the partition's transport epoch fills the top 16 bits.
+const M2H_COUNT_BITS: u32 = 48;
+
+/// Per-slot HSM→VM message counts. Volatile (DTCM): a warm reset that
+/// keeps the sessions restarts them, and the partition's transport epoch,
+/// bumped on that boot, keeps the resulting sequence numbers fresh.
+static M2H_COUNTS: [[SingleCell<u64>; MAX_SESSIONS]; NUM_PARTITIONS] =
+    [const { [const { SingleCell::new(0) }; MAX_SESSIONS] }; NUM_PARTITIONS];
+
+/// The message-count cell of slot `id` in partition `pid`.
+fn m2h_count(pid: u8, id: HsmSessId) -> HsmResult<&'static SingleCell<u64>> {
+    M2H_COUNTS
+        .get(usize::from(pid))
+        .and_then(|slots| slots.get(usize::from(u16::from(id))))
+        .ok_or(HsmError::SessionNotFound)
+}
 
 impl HsmSessionManager for UnoHsmPal {
     fn session_limit_reached(&self, io: &UnoHsmIo) -> bool {
@@ -252,6 +275,8 @@ impl HsmSessionManager for UnoHsmPal {
         let mut store = SessionStore::partition(io.pid())?;
         match store.create_pending(role, physical_id) {
             Ok((sess_id, evicted)) => {
+                // Fresh transport keys: restart the message count.
+                m2h_count(u8::from(io.pid()), sess_id)?.with(|c| *c = 0);
                 if let Some(old) = evicted {
                     let mut v = crate::vault::vault(io);
                     let _ = v.delete(self, io, old).await;
@@ -296,15 +321,15 @@ impl HsmSessionManager for UnoHsmPal {
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
-        h2m_key: &HsmDmaBuf,
-        m2h_key: &HsmDmaBuf,
+        h2m_secret: &HsmDmaBuf,
+        m2h_secret: &HsmDmaBuf,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
             || masking_key.len() != SESSION_MASKING_KEY_LEN
             || auth_binding.len() != SESSION_AUTH_BINDING_LEN
-            || h2m_key.len() != SESSION_TRANSPORT_KEY_LEN
-            || m2h_key.len() != SESSION_TRANSPORT_KEY_LEN
+            || h2m_secret.len() != SESSION_TRANSPORT_SECRET_LEN
+            || m2h_secret.len() != SESSION_TRANSPORT_SECRET_LEN
         {
             return Err(HsmError::InvalidArg);
         }
@@ -321,9 +346,9 @@ impl HsmSessionManager for UnoHsmPal {
         head[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
         head[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
         head[SESSION_EX_AUTH_OFF..].copy_from_slice(auth_binding);
-        let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
-        h2m.copy_from_slice(h2m_key);
-        m2h.copy_from_slice(m2h_key);
+        let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
+        h2m.copy_from_slice(h2m_secret);
+        m2h.copy_from_slice(m2h_secret);
 
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
         let physical_id = {
@@ -409,22 +434,22 @@ impl HsmSessionManager for UnoHsmPal {
             .0)
     }
 
-    /// Borrows a directional transport key: from the tail of a Pending
-    /// slot's `SessionExPending` handshake blob, or from an Active
+    /// Borrows a directional transport key and salt: from the tail of a
+    /// Pending slot's `SessionExPending` handshake blob, or from an Active
     /// session's `SessionEx` blob.
     fn session_transport_key(
         &self,
         io: &UnoHsmIo,
         id: HsmSessId,
         dir: HsmSessionTransportDir,
-    ) -> HsmResult<&HsmDmaBuf> {
+    ) -> HsmResult<HsmSessionTransportKey<'_>> {
         let table = SessionStore::partition(io.pid())?;
         let (blob, keys_off) = match table.state(id) {
             HsmSessionState::Pending => {
                 let blob = self.vault_key(io, table.pending_phys(id)?)?;
                 let off = blob
                     .len()
-                    .checked_sub(2 * SESSION_TRANSPORT_KEY_LEN)
+                    .checked_sub(2 * SESSION_TRANSPORT_SECRET_LEN)
                     .ok_or(HsmError::InvalidPermissions)?;
                 (blob, off)
             }
@@ -439,12 +464,37 @@ impl HsmSessionManager for UnoHsmPal {
         };
         let offset = match dir {
             HsmSessionTransportDir::H2m => keys_off,
-            HsmSessionTransportDir::M2h => keys_off + SESSION_TRANSPORT_KEY_LEN,
+            HsmSessionTransportDir::M2h => keys_off + SESSION_TRANSPORT_SECRET_LEN,
         };
-        Ok(blob
-            .split_at(offset)
-            .1
-            .split_at(SESSION_TRANSPORT_KEY_LEN)
-            .0)
+        HsmSessionTransportKey::new(
+            blob.split_at(offset)
+                .1
+                .split_at(SESSION_TRANSPORT_SECRET_LEN)
+                .0,
+        )
+    }
+
+    /// `epoch(16) ‖ count(48)`: the partition's transport epoch and the
+    /// slot's message count, which fails rather than wrapping.
+    fn session_transport_next_seq(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<u64> {
+        let table = SessionStore::partition(io.pid())?;
+        if !matches!(
+            table.state(id),
+            HsmSessionState::Pending | HsmSessionState::Active
+        ) {
+            return Err(HsmError::SessionNotFound);
+        }
+        let epoch = PartStore::partition(io.pid())?
+            .transport_epoch()
+            .ok_or(HsmError::SessionTransportError)?;
+        let count = m2h_count(u8::from(io.pid()), id)?.with(|c| {
+            let count = *c;
+            if count >> M2H_COUNT_BITS != 0 {
+                return Err(HsmError::SessionTransportError);
+            }
+            *c = count + 1;
+            Ok(count)
+        })?;
+        Ok(u64::from(epoch) << M2H_COUNT_BITS | count)
     }
 }

@@ -441,7 +441,7 @@ mod tests {
     /// writes.
     #[test]
     fn session_ex_len_matches_session_blob_size() {
-        assert_eq!(SESSION_EX_BLOB_SIZE, 204);
+        assert_eq!(SESSION_EX_BLOB_SIZE, 212);
         assert!(session_ex_len_valid(SESSION_EX_BLOB_SIZE));
         assert!(!session_ex_len_valid(SESSION_EX_BLOB_SIZE - 1));
         assert!(!session_ex_len_valid(SESSION_EX_BLOB_SIZE + 1));

@@ -6,8 +6,10 @@
 //! [`DuoOp::Tbor`] requests and responses travel in plaintext over the
 //! SQE's PRP pair. [`DuoOp::TborSecure`] ones are AES-256-GCM protected
 //! under the SQE session's transport keys: the request with the VM→HSM key
-//! (IV and tag in the SQE), the response with the HSM→VM key (a fresh IV
-//! and the tag in the CQE).
+//! (IV and tag in the SQE), the response with the HSM→VM key (IV and tag
+//! in the CQE). Each sender builds its IV as `salt ‖ be64(seq)` from its
+//! direction's salt and message counter; the receiver uses the IV it is
+//! given.
 
 use tsra_fw_hsm_io::duo::DuoCqeEntry;
 use tsra_fw_hsm_io::duo::DuoOp;
@@ -67,7 +69,7 @@ impl StdHsmPal {
                 .session_transport_key(io, id, HsmSessionTransportDir::H2m)
                 .map_err(|_| HsmError::SessionTransportError)?;
             let mut copy = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
-            copy.copy_from_slice(key);
+            copy.copy_from_slice(key.key());
             Some(copy)
         } else {
             None
@@ -111,14 +113,16 @@ impl StdHsmPal {
         }
 
         let id = HsmSessId::from(sqe.session_id());
+        let xport = self
+            .session_transport_key(io, id, HsmSessionTransportDir::M2h)
+            .map_err(|_| HsmError::SessionTransportError)?;
         let mut key = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
-        key.copy_from_slice(
-            self.session_transport_key(io, id, HsmSessionTransportDir::M2h)
-                .map_err(|_| HsmError::SessionTransportError)?,
-        );
-        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        key.copy_from_slice(xport.key());
+        let seq = self
+            .session_transport_next_seq(io, id)
+            .map_err(|_| HsmError::SessionTransportError)?;
+        let iv = xport.nonce(seq);
         let mut tag = [0u8; SESSION_TRANSPORT_TAG_LEN];
-        self.rng_fill_bytes(io, &mut iv)?;
         let ciphertext = self.dma_alloc(io, resp.len())?;
         self.aes
             .gcm_encrypt(&key[..], &iv, None, resp, ciphertext, &mut tag)

@@ -56,13 +56,13 @@ pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v2";
 pub const SESSION_PARAM_KEY_LEN: usize = 32;
 
 /// HKDF-Expand-Labeled label producing the **VM→HSM** session transport
-/// key.
+/// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_H2M_LABEL`.
 pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v2";
 
 /// HKDF-Expand-Labeled label producing the **HSM→VM** session transport
-/// key.
+/// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_M2H_LABEL`.
 pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
@@ -72,10 +72,27 @@ pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN`.
 pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
 
-/// AES-GCM IV length of a session transport message.
+/// Length in bytes of each directional nonce salt.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN`.
+pub const SESSION_TRANSPORT_SALT_LEN: usize = 4;
+
+/// Length in bytes of the big-endian per-direction sequence number that
+/// completes a nonce (`nonce = salt ‖ seq`).
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SEQ_LEN`.
+pub const SESSION_TRANSPORT_SEQ_LEN: usize = 8;
+
+/// Length in bytes of each directional transport secret, `key ‖ salt`.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN`.
+pub const SESSION_TRANSPORT_SECRET_LEN: usize =
+    SESSION_TRANSPORT_KEY_LEN + SESSION_TRANSPORT_SALT_LEN;
+
+/// AES-GCM IV length of a session transport message: `salt ‖ seq`.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN`.
-pub const SESSION_TRANSPORT_IV_LEN: usize = 12;
+pub const SESSION_TRANSPORT_IV_LEN: usize = SESSION_TRANSPORT_SALT_LEN + SESSION_TRANSPORT_SEQ_LEN;
 
 /// AES-GCM tag length of a session transport message.
 ///

@@ -16,8 +16,11 @@
 //! sig  = ECDSA-P384(PID, T1)
 //! prk  = HKDF-Extract(salt = "TSRA-SESSION-v2", Z ‖ PSK)
 //! hs   = HKDF-Expand(prk, "tsra-session-hs-v2" ‖ T1, 48)
-//! h2m, m2h = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v2", 32)
+//! key ‖ salt = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v2", 36)
 //! ```
+//!
+//! Each direction's AES-GCM nonce is `salt(4) ‖ be64(seq)`, `seq` being
+//! the sender's per-direction message counter.
 //!
 //! The signature authenticates the HSM to the host; knowledge of the PSK
 //! (proven by the host's `fin` in `SessionOpenFinish`) authenticates the
@@ -75,17 +78,18 @@ pub(super) const PENDING_TYPE_OFF: usize = PENDING_AUTH_OFF + SESSION_AUTH_BINDI
 /// Offset of the `suite_id` byte in the Pending blob.
 pub(super) const PENDING_SUITE_OFF: usize = PENDING_TYPE_OFF + 1;
 
-/// Offset of the transport keys `h2m ‖ m2h` in the Pending blob.
+/// Offset of the transport secrets `h2m ‖ m2h` (each `key ‖ salt`) in the
+/// Pending blob.
 pub(super) const PENDING_KEYS_OFF: usize = PENDING_SUITE_OFF + 1;
 
 /// Length of the Pending handshake-state blob:
 /// `hs(48) ‖ T1(48) ‖ auth_binding(68) ‖ session_type(1) ‖ suite_id(1)
-/// ‖ h2m(32) ‖ m2h(32)`.
+/// ‖ h2m(36) ‖ m2h(36)`.
 ///
-/// The transport keys must end the blob (see
+/// The transport secrets must end the blob (see
 /// [`HsmSessionManager::session_create_pending`]), so `SessionOpenFinish`
 /// already travels on the encrypted channel.
-pub(super) const PENDING_BLOB_LEN: usize = PENDING_KEYS_OFF + 2 * SESSION_TRANSPORT_KEY_LEN;
+pub(super) const PENDING_BLOB_LEN: usize = PENDING_KEYS_OFF + 2 * SESSION_TRANSPORT_SECRET_LEN;
 
 const _: () = assert!(PENDING_BLOB_LEN <= SESSION_PENDING_BLOB_MAX);
 
@@ -401,7 +405,7 @@ async fn create_pending_slot<P: HsmPal>(
     blob[PENDING_AUTH_OFF..PENDING_TYPE_OFF].copy_from_slice(auth_binding);
     blob[PENDING_TYPE_OFF] = session_type.to_u8();
     blob[PENDING_SUITE_OFF] = suite.to_u8();
-    let (h2m, m2h) = blob[PENDING_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_KEY_LEN);
+    let (h2m, m2h) = blob[PENDING_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
     hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_H2M_LABEL, h2m).await?;
     hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_M2H_LABEL, m2h).await?;
     pal.session_create_pending(io, role, blob).await

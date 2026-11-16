@@ -314,9 +314,10 @@ pub const SESSION_SEED_LEN: usize = 32;
 ///
 /// Holds: handshake secret `hs` (48 B) ‖ transcript hash `T1` (48 B) ‖
 /// credential binding (68 B) ‖ `session_type` (1 B) ‖ suite (1 B) ‖ the
-/// session transport keys `h2m ‖ m2h` (2 × [`SESSION_TRANSPORT_KEY_LEN`]),
-/// 230 B in total, so `OpenSessionFinish` already travels on the encrypted
-/// channel. Rounded up to give a small implementation margin.
+/// session transport secrets `h2m ‖ m2h` (2 ×
+/// [`SESSION_TRANSPORT_SECRET_LEN`]), 238 B in total, so
+/// `OpenSessionFinish` already travels on the encrypted channel. Rounded
+/// up to give a small implementation margin.
 pub const SESSION_PENDING_BLOB_MAX: usize = 256;
 
 /// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
@@ -358,10 +359,10 @@ pub const SESSION_SIG_LEN: usize = 96;
 /// envelopes carried by in-session commands such as `ChangePsk`.
 pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v2";
 
-/// HKDF-Expand label producing the **VM→HSM** session transport key.
+/// HKDF-Expand label producing the **VM→HSM** session transport secret.
 pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v2";
 
-/// HKDF-Expand label producing the **HSM→VM** session transport key.
+/// HKDF-Expand label producing the **HSM→VM** session transport secret.
 pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
 
 /// Length in bytes of each directional AES-256-GCM session transport key.
@@ -371,8 +372,21 @@ pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
 /// [`HsmSessionManager::session_transport_key`].
 pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
 
-/// AES-GCM IV length of a session transport message.
-pub const SESSION_TRANSPORT_IV_LEN: usize = 12;
+/// Length in bytes of each directional nonce salt: the first bytes of
+/// every AES-GCM nonce in that direction.
+pub const SESSION_TRANSPORT_SALT_LEN: usize = 4;
+
+/// Length in bytes of the big-endian per-direction sequence number that
+/// completes a nonce (`nonce = salt ‖ seq`).
+pub const SESSION_TRANSPORT_SEQ_LEN: usize = 8;
+
+/// Length in bytes of each directional transport secret, `key ‖ salt`,
+/// expanded from the handshake secret under the direction's label.
+pub const SESSION_TRANSPORT_SECRET_LEN: usize =
+    SESSION_TRANSPORT_KEY_LEN + SESSION_TRANSPORT_SALT_LEN;
+
+/// AES-GCM IV length of a session transport message: `salt ‖ seq`.
+pub const SESSION_TRANSPORT_IV_LEN: usize = SESSION_TRANSPORT_SALT_LEN + SESSION_TRANSPORT_SEQ_LEN;
 
 /// AES-GCM tag length of a session transport message.
 pub const SESSION_TRANSPORT_TAG_LEN: usize = 16;

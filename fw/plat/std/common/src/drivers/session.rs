@@ -90,6 +90,10 @@ pub struct SessionTable {
     /// Monotonic counter incremented for every Pending allocation;
     /// stamped into `pending_seqs` to order evictions.
     next_init_seq: u64,
+    /// Per-slot next HSM→VM transport sequence number.  Restarts when a
+    /// Pending slot installs fresh transport keys; carries over on
+    /// promote, which keeps them.
+    m2h_seqs: [u64; MAX_SESSIONS],
 }
 
 /// Opaque per-slot handshake state for Pending sessions.
@@ -147,6 +151,7 @@ impl SessionTable {
             pending_blobs: core::array::from_fn(|_| PendingBlob::default()),
             pending_seqs: [0u64; MAX_SESSIONS],
             next_init_seq: 0,
+            m2h_seqs: [0u64; MAX_SESSIONS],
         }
     }
 
@@ -183,6 +188,7 @@ impl SessionTable {
         }
         self.pending_seqs = [0u64; MAX_SESSIONS];
         self.next_init_seq = 0;
+        self.m2h_seqs = [0u64; MAX_SESSIONS];
     }
 
     /// Validate that a logical session ID refers to an allocated slot.
@@ -240,6 +246,7 @@ impl SessionTable {
         self.phys_ids[slot] = 0;
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
+        self.m2h_seqs[slot] = 0;
         Ok(phys)
     }
 
@@ -392,7 +399,29 @@ impl SessionTable {
         self.next_init_seq = self.next_init_seq.wrapping_add(1);
         self.pending_seqs[slot] = self.next_init_seq;
         self.phys_ids[slot] = 0;
+        self.m2h_seqs[slot] = 0;
         Ok(())
+    }
+
+    /// Reserves the next HSM→VM transport sequence number of a Pending or
+    /// Active slot.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotFound`] — the slot is free or awaiting
+    ///   renegotiation.
+    /// - [`HsmError::SessionTransportError`] — the counter is exhausted.
+    pub fn next_m2h_seq(&mut self, id: HsmSessId) -> HsmResult<u64> {
+        if !matches!(
+            self.state(id),
+            HsmSessionState::Pending | HsmSessionState::Active
+        ) {
+            return Err(HsmError::SessionNotFound);
+        }
+        let slot = u16::from(id) as usize;
+        let seq = self.m2h_seqs[slot];
+        self.m2h_seqs[slot] = seq.checked_add(1).ok_or(HsmError::SessionTransportError)?;
+        Ok(seq)
     }
 
     /// Borrow the Pending blob for a slot.
@@ -997,5 +1026,37 @@ mod tests {
         assert_eq!(err, HsmError::SessionNotFound);
         let err = table.psk_change_used(id).unwrap_err();
         assert_eq!(err, HsmError::SessionNotFound);
+    }
+
+    #[test]
+    fn m2h_seq_carries_over_promote_and_restarts_with_new_keys() {
+        let mut table = SessionTable::new();
+        let id = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        assert_eq!(table.next_m2h_seq(id), Ok(0));
+        assert_eq!(table.next_m2h_seq(id), Ok(1));
+        table.promote(id, HsmKeyId::from(0x10)).unwrap();
+        assert_eq!(table.next_m2h_seq(id), Ok(2));
+
+        table.set_needs_renego(id);
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionNotFound));
+
+        table.delete(id).unwrap();
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionNotFound));
+        let id = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        assert_eq!(table.next_m2h_seq(id), Ok(0));
+    }
+
+    #[test]
+    fn m2h_seq_fails_when_exhausted() {
+        let mut table = SessionTable::new();
+        let id = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        table.m2h_seqs[u16::from(id) as usize] = u64::MAX;
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionTransportError));
     }
 }
