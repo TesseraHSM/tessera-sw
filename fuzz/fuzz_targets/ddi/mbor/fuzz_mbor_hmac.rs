@@ -1,20 +1,19 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_hmac;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
 
 /// Fuzz input for HMAC DDI op.
 #[derive(Arbitrary, Debug)]
@@ -38,14 +37,6 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_hmac(input: FuzzInput) {
-    #[cfg(feature = "mock")]
-    if matches!(
-        input.hmac_key_type,
-        HmacKeyType::VarHmac256(_) | HmacKeyType::VarHmac384(_) | HmacKeyType::VarHmac512(_)
-    ) {
-        // Mock device doesnot support variable length HMAC key.
-        return;
-    }
     let ddi = DdiTest::default();
     let dev_infos = ddi.dev_info_list();
     if dev_infos.is_empty() {
@@ -89,29 +80,10 @@ pub fn fuzz_ddi_hmac(input: FuzzInput) {
         };
     }
 
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}",
-        input.use_valid_key_id
-    ));
-    static FUZZ_DDI_HMAC_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_HMAC_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_hmac",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_key_id),
-    );
-
     let resp = helper_hmac(&dev, Some(sess_id), rev, key_id, cmdreq_data.msg);
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id {

@@ -1,24 +1,23 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use tsra_ddi::*;
-use tsra_ddi_mbor::MborByteArray;
+use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_rsa_mod_exp;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
-use rand::RngCore;
-use rand::SeedableRng;
 
 /// Fuzz input for RSA Mod Exp DDI op.
 #[derive(Arbitrary, Debug)]
@@ -80,36 +79,16 @@ pub fn fuzz_ddi_rsa_mod_exp(input: FuzzInput) {
             }
         };
     }
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}",
-        input.use_valid_key_id
-    ));
     let mut rng = StdRng::seed_from_u64(input.rand_seed);
     let mut y_buf = vec![0u8; 512];
     rng.fill_bytes(&mut y_buf);
 
     let y = MborByteArray::from_slice(&y_buf).expect("Failed to create y buffer");
 
-    static FUZZ_DDI_RSA_MOD_EXP_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_RSA_MOD_EXP_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    let effective_info = format!("{}\nEffective y length: {}", effective_key_id, y.len());
-    debug_print_request_with_meta(
-        "fuzz_ddi_rsa_mod_exp",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_info),
-    );
-
     let resp = helper_rsa_mod_exp(&dev, Some(sess_id), rev, key_id, y, cmdreq_data.op_type);
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id {

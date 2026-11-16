@@ -1,21 +1,20 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_hkdf_derive;
 use tsra_ddi_mbor_test_helpers::helper_key_properties;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
 
 /// Fuzz input for HKDF Derive DDI op.
 #[derive(Arbitrary, Debug)]
@@ -73,22 +72,7 @@ pub fn fuzz_ddi_hkdf_derive(input: FuzzInput) {
         };
     }
 
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}",
-        input.use_valid_key_id
-    ));
     let key_props = helper_key_properties(input.key_usage, input.key_availability);
-
-    static FUZZ_DDI_HKDF_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_HKDF_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_hkdf_derive",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_key_id),
-    );
 
     let resp = helper_hkdf_derive(
         &dev,
@@ -99,17 +83,12 @@ pub fn fuzz_ddi_hkdf_derive(input: FuzzInput) {
         cmdreq_data.salt,
         cmdreq_data.info,
         cmdreq_data.key_type,
-        cmdreq_data.key_tag,
         key_props,
         cmdreq_data.key_length,
     );
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id {

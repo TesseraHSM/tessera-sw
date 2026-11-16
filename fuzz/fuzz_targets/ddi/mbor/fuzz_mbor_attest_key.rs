@@ -1,14 +1,15 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_aes_generate;
 use tsra_ddi_mbor_test_helpers::helper_attest_key_cmd;
@@ -17,8 +18,6 @@ use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
 use tsra_ddi_mbor_test_helpers::helper_get_unwrapping_key;
 use tsra_ddi_mbor_test_helpers::helper_key_properties;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 pub enum KeySource {
@@ -57,14 +56,6 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_attest_key(input: FuzzInput) {
-    #[cfg(feature = "mock")]
-    if matches!(
-        input.hmac_key_type,
-        HmacKeyType::VarHmac256(_) | HmacKeyType::VarHmac384(_) | HmacKeyType::VarHmac512(_)
-    ) {
-        // Mock device doesnot support variable length HMAC key.
-        return;
-    }
     let ddi = DdiTest::default();
     let dev_infos = ddi.dev_info_list();
     if dev_infos.is_empty() {
@@ -97,7 +88,6 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                     Some(sess_id),
                     rev,
                     input.key_curve,
-                    None,
                     key_props,
                 );
                 match key_resp {
@@ -133,14 +123,8 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
             KeySource::GeneratedAesKey => {
                 let key_props =
                     helper_key_properties(DdiKeyUsage::EncryptDecrypt, input.key_availability);
-                let resp = helper_aes_generate(
-                    &dev,
-                    Some(sess_id),
-                    rev,
-                    input.aes_key_size,
-                    None,
-                    key_props,
-                );
+                let resp =
+                    helper_aes_generate(&dev, Some(sess_id), rev, input.aes_key_size, key_props);
                 match resp {
                     Ok(resp) => resp.data.key_id,
                     Err(err) => {
@@ -176,31 +160,12 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
         };
     }
 
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}, key_source: {:?}",
-        input.use_valid_key_id, input.key_source
-    ));
     let report_data = cmdreq_data.report_data.data_take();
-
-    static FUZZ_DDI_ATTEST_KEY_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_ATTEST_KEY_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_attest_key",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_key_id),
-    );
 
     let resp = helper_attest_key_cmd(&dev, Some(sess_id), rev, report_data, key_id);
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {

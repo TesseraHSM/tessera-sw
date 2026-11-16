@@ -1,16 +1,18 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 // Checking decoder for potential crashes by feeding random input data]
 #![no_main]
 
 // Imports
+use libfuzzer_sys::Corpus;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiReqHdr;
-use libfuzzer_sys::fuzz_target;
-use libfuzzer_sys::Corpus;
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 use crate::common::get_rand_ddi_request;
 

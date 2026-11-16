@@ -1,22 +1,21 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_aes_encrypt_decrypt;
 use tsra_ddi_mbor_test_helpers::helper_aes_generate;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_key_properties;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
 
 /// Fuzz input for AES Encrypt/Decrypt DDI op.
 #[derive(Arbitrary, Debug)]
@@ -62,8 +61,7 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
 
     if input.use_valid_key_id {
         let key_props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, input.key_availability);
-        let key_resp =
-            helper_aes_generate(&dev, Some(sess_id), rev, input.key_size, None, key_props);
+        let key_resp = helper_aes_generate(&dev, Some(sess_id), rev, input.key_size, key_props);
 
         key_id = match key_resp {
             Ok(resp) => resp.data.key_id,
@@ -72,21 +70,6 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
             }
         };
     }
-
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}",
-        input.use_valid_key_id
-    ));
-    static FUZZ_DDI_AES_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_AES_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_aes_encrypt_decrypt",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_key_id),
-    );
 
     let resp = helper_aes_encrypt_decrypt(
         &dev,
@@ -98,12 +81,8 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
         cmdreq_data.iv,
     );
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id {

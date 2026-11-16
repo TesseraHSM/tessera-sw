@@ -1,19 +1,16 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use crate::common::*;
-
-static FUZZ_CMD_REQS_INVOCATION: AtomicUsize = AtomicUsize::new(0);
 
 // The minimum and maximum number of DDI requests to generate and execute in
 // this fuzzing test.
@@ -43,19 +40,6 @@ fuzz_target!(|input: FuzzInput| {
     // Use `number_of_reqs` from the fuzz input to generate a new vector and
     // randomly select `TestDdiReqs` enum types.
     let reqs: Vec<TestDdiReqs> = generate_random_testddireqs_list(number_of_reqs, input.rand_seed);
-    let invocation = FUZZ_CMD_REQS_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    debug_println!(
-        "\n================================================================================"
-    );
-    debug_println!("fuzz_cmd_reqs wrapper invocation #{}", invocation);
-    debug_println!("Input rand_seed: {}", input.rand_seed);
-    debug_println!("Input use_valid_header: {}", input.use_valid_header);
-    debug_println!("Number of DDI requests: {}", number_of_reqs);
-    debug_println!("Request types: {:#?}", reqs);
-    debug_println!(
-        "================================================================================\n"
-    );
-
-    fuzz_cmd_reqs(reqs, input.rand_seed, input.use_valid_header, invocation);
+    fuzz_cmd_reqs(reqs, input.rand_seed, input.use_valid_header);
 });

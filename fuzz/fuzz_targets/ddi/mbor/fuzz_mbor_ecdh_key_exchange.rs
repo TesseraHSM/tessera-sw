@@ -1,26 +1,25 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use tsra_ddi::*;
-use tsra_ddi_mbor::MborByteArray;
+use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
 use tsra_ddi_mbor_test_helpers::helper_ecdh_key_exchange;
 use tsra_ddi_mbor_test_helpers::helper_key_properties;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
-use rand::RngCore;
-use rand::SeedableRng;
 
 /// Fuzz input for ECDH Key Exchange DDI op.
 #[derive(Arbitrary, Debug)]
@@ -70,14 +69,9 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
 
     let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
 
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}, use_valid_pub_key_der: {}",
-        input.use_valid_key_id, input.use_valid_pub_key_der
-    ));
-
     if input.use_valid_key_id {
         let key_resp =
-            helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, None, key_props);
+            helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, key_props);
 
         priv_key_id = match key_resp {
             Ok(resp) => resp.data.private_key_id,
@@ -87,14 +81,8 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
         };
 
         if input.use_valid_pub_key_der {
-            let pub_key_resp = helper_ecc_generate_key_pair(
-                &dev,
-                Some(sess_id),
-                rev,
-                input.curve,
-                None,
-                key_props,
-            );
+            let pub_key_resp =
+                helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, key_props);
 
             // Extract both pub_key_der and the peer private key id from the same match,
             let (pub_key_der, peer_priv_id) = match pub_key_resp {
@@ -127,34 +115,18 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
         }
     }
 
-    static FUZZ_DDI_ECDH_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_ECDH_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_priv_key_id = format!("Effective priv_key_id: {:?}", priv_key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_ecdh_key_exchange",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_priv_key_id),
-    );
-
     let resp = helper_ecdh_key_exchange(
         &dev,
         Some(sess_id),
         rev,
         priv_key_id,
         cmdreq_data.pub_key_der,
-        cmdreq_data.key_tag,
         cmdreq_data.key_type,
         key_props,
     );
 
-    if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     if input.use_valid_key_id {

@@ -1,29 +1,28 @@
-// Copyright (C) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
+use common::*;
+use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::RsaPrivateKey;
 use tsra_ddi::*;
-use tsra_ddi_mbor::MborByteArray;
+use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_get_unwrapping_key;
 use tsra_ddi_mbor_test_helpers::helper_key_properties;
 use tsra_ddi_mbor_test_helpers::helper_rsa_unwrap;
 use tsra_ddi_mbor_types::*;
-use common::*;
-use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
-use rand::RngCore;
-use rand::SeedableRng;
 
 /// Fuzz input for RSA Unwrap DDI op.
 #[derive(Arbitrary, Debug)]
@@ -111,21 +110,6 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
             .expect("Failed to create randomized wrapped blob");
     }
 
-    debug_print_control_flags(&format!(
-        "Input use_valid_key_id: {}, use_valid_wrapped_blob: {}",
-        input.use_valid_key_id, input.use_valid_wrapped_blob
-    ));
-    static FUZZ_DDI_RSA_UNWRAP_INVOCATION: AtomicUsize = AtomicUsize::new(0);
-    let invocation = FUZZ_DDI_RSA_UNWRAP_INVOCATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let effective_key_id = format!("Effective key_id: {:?}", key_id);
-    debug_print_request_with_meta(
-        "fuzz_ddi_rsa_unwrap",
-        invocation,
-        invocation,
-        &cmdreq_data,
-        Some(&effective_key_id),
-    );
-
     let key_props = helper_key_properties(input.key_usage, input.key_availability);
 
     let resp = helper_rsa_unwrap(
@@ -137,7 +121,6 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
         cmdreq_data.wrapped_blob_key_class,
         cmdreq_data.wrapped_blob_padding,
         cmdreq_data.wrapped_blob_hash_algorithm,
-        cmdreq_data.key_tag,
         key_props,
     );
 
@@ -146,12 +129,8 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
         // Clean up the unwrapped key if it was created successfully
         helper_delete_key(&dev, Some(sess_id), rev, rsa_unwrapped_key_id)
             .expect("Could not delete unwrapped key");
-    } else if let Err(err) = &resp {
-        if matches!(err, DdiError::DriverError(_)) {
-            panic!("Crash Detected: {}", err);
-        } else {
-            debug_print_control_flags(&format!("Other error detected: {}", err));
-        }
+    } else if let Err(err @ DdiError::DriverError(_)) = &resp {
+        panic!("Crash Detected: {err}");
     }
 
     cleanup_with_session(&dev, Some(sess_id));
