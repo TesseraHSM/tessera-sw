@@ -6,8 +6,8 @@
 //! `GetPublicKey` is an **in-session** command that takes a masked private
 //! key (RSA / RSA-CRT / ECC), unmasks it on-device (verifying the AEAD
 //! tag), and returns its wire public key in the same format as
-//! [`TborUnwrapKeyResp::pub_key`](crate::TborUnwrapKeyResp): `n_le ‖ e_le`
-//! for RSA, `x ‖ y` for ECC.
+//! [`TborUnwrapKeyResp::pub_key`](crate::TborUnwrapKeyResp): `n ‖ e` for
+//! RSA, `x ‖ y` for ECC, in device byte order.
 
 use alloc::vec::Vec;
 
@@ -32,7 +32,7 @@ pub struct TborGetPublicKeyReq {
 
     /// The masked private-key envelope. Variable length up to
     /// [`GET_PUBLIC_KEY_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 }
 

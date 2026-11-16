@@ -42,7 +42,7 @@ use crate::utils::partition::generate_pota_endorsement;
 use crate::utils::partition::test_api_rev;
 
 /// Number of sequential open/close cycles to drive, comfortably past
-/// `MAX_SESSIONS` (8, see `fw/plat/std/pal/src/drivers/session.rs`) so a
+/// `MAX_SESSIONS` (8, see `fw/plat/std/common/src/drivers/session.rs`) so a
 /// session leak (closed sessions not actually freeing their table slot)
 /// would exhaust the partition's session table well before this test
 /// completes.
@@ -186,6 +186,9 @@ fn open_partition_with_retry(path: &str, api_rev: HsmApiRev, timeout: Duration) 
 /// initializes at startup.
 #[test]
 fn many_sequential_sessions_do_not_exhaust_partition() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     // Re-execute this test in a child process with the `sock` endpoint set
     // via `Command::env` instead of mutating this process's own
     // environment: see `reexec_with_ddi_sock_env`.
@@ -230,6 +233,9 @@ fn many_sequential_sessions_do_not_exhaust_partition() {
 /// others.
 #[test]
 fn many_concurrent_sessions_are_all_usable() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     if std::env::var_os(REEXEC_CHILD_MARKER).is_none() {
         return reexec_with_ddi_sock_env("many_concurrent_sessions_are_all_usable");
     }

@@ -47,6 +47,8 @@ use tsra_fw_ddi_tbor_types::TborDarcKeyWrapReq;
 use tsra_fw_ddi_tbor_types::TborDarcKeyWrapResp;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_WRAPPED_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -118,22 +120,23 @@ fn cose_ops_for_attrs(attrs: HsmVaultKeyAttrs) -> HsmResult<([u8; 4], usize)> {
     Ok((ops, n))
 }
 
-/// Convert a wire-LE coordinate `wire_le` (field-width low bytes are the
-/// little-endian field element; any high bytes are zero pad) into the
-/// big-endian COSE coordinate `be_out` (`field` bytes).
+/// Convert an operand-order coordinate `wire` (the field element in the
+/// low `field` bytes; any high bytes are zero pad) into the big-endian
+/// COSE coordinate `be_out` (`field` bytes).
 ///
 /// Returns [`HsmError::InvalidArg`] if any padding above the field width
 /// is non-zero (a malformed wire coordinate).
-fn wire_le_coord_to_be(be_out: &mut HsmDmaBuf, wire_le: &HsmDmaBuf, field: usize) -> HsmResult<()> {
-    for i in 0..field {
-        be_out[i] = wire_le[field - 1 - i];
+fn wire_coord_to_be(
+    order: HsmByteOrder,
+    be_out: &mut HsmDmaBuf,
+    wire: &HsmDmaBuf,
+    field: usize,
+) -> HsmResult<()> {
+    let (value, pad) = wire.split_at(field);
+    if pad.iter().any(|&b| b != 0) {
+        return Err(HsmError::InvalidArg);
     }
-    for &b in wire_le[field..].iter() {
-        if b != 0 {
-            return Err(HsmError::InvalidArg);
-        }
-    }
-    Ok(())
+    byte_order::int_copy_to_be(order, be_out, value)
 }
 
 /// Handle a TBOR `DarcKeyWrap` request.
@@ -232,10 +235,10 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 let build_res = async {
                     let field = curve.priv_key_len();
-                    let wc = curve.wire_coord_len();
-                    let wire_pub_len = curve.wire_pub_key_len();
+                    let wc = curve.wire_coord_len(P::BYTE_ORDER);
+                    let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
 
-                    // Re-derive the wire-LE public key and the big-endian
+                    // Re-derive the operand-order public key and the big-endian
                     // COSE scalar `d` from the vault key.
                     let pub_wire = alloc.dma_alloc(wire_pub_len)?;
                     pal.ecc_pub_from_priv(io, curve, vault, &mut pub_wire[..wire_pub_len])
@@ -244,11 +247,12 @@ pub(crate) async fn handle<P: HsmPal>(
                     let d_res = async {
                         pal.ecc_vault_to_priv(io, curve, vault, Some(d))?;
 
-                        // Big-endian coordinates from the wire-LE public key.
+                        // Big-endian coordinates from the operand-order
+                        // public key.
                         let x = alloc.dma_alloc(field)?;
                         let y = alloc.dma_alloc(field)?;
-                        wire_le_coord_to_be(x, &pub_wire[0..wc], field)?;
-                        wire_le_coord_to_be(y, &pub_wire[wc..2 * wc], field)?;
+                        wire_coord_to_be(P::BYTE_ORDER, x, &pub_wire[0..wc], field)?;
+                        wire_coord_to_be(P::BYTE_ORDER, y, &pub_wire[wc..2 * wc], field)?;
 
                         // Encode the EC2 private COSE_Key directly after the
                         // 8-byte KWP header slot, then AES-KWP-wrap it in

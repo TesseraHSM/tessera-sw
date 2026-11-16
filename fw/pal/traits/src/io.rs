@@ -18,18 +18,20 @@
 //!
 //! ## SQE / CQE layout
 //!
-//! Submission and completion queue entries are dword slices with
-//! platform-defined lengths and contents. This crate exposes only
-//! the raw views ([`HsmSqe`], [`HsmCqe`]); supported sizes and field
-//! layouts belong to the protocol codec (`tsra_fw_hsm_io`).
+//! Submission and completion queue entry layouts are platform-defined.
+//! The core sees them only through [`HsmSqe`] (opcode and session fields)
+//! and [`HsmCqe`] (the outcome); request and response transfers go
+//! through [`HsmIoController`].
 //!
 //! ## Pipeline
 //!
 //! ```text
 //! poll_io().await        — receive next request
 //!   ↓
-//! io.sqe() / io.cqe()    — decode SQE, populate CQE
+//! recv_request(io)       — validate SQE, fetch request
 //! PAL operations         — resolve partition from private IO context
+//! io.cqe().set_ok_ex(..) — record outcome
+//! send_response(io, ..)  — return response
 //!   ↓
 //! complete_io(io).await  — emit CQE; or
 //! drop_io(io).await      — silently discard (e.g. disabled partition)
@@ -37,15 +39,88 @@
 
 use super::*;
 
-/// A submission queue entry as a raw dword slice.
-///
-/// Length and layout are platform-defined and validated by the protocol codec.
-pub type HsmSqe = [u32];
+/// Session-control kind of a command, as its SQE declares it and its CQE
+/// reports it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HsmSessCtrl {
+    /// The IO protocol does not declare session control in its SQE.
+    Unspecified,
 
-/// A completion queue entry as a raw dword slice.
+    /// No session is involved.
+    #[default]
+    NoSession,
+
+    /// Opens a new session.
+    Open,
+
+    /// Runs within an existing session.
+    InSession,
+
+    /// Closes an existing session.
+    Close,
+}
+
+/// Session fields of a successful completion
+/// ([`HsmCqe::set_ok_ex`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HsmCqeSession {
+    /// Session control of the completed command.
+    pub ctrl: HsmSessCtrl,
+
+    /// Session the command opened or closed.
+    pub id: Option<u16>,
+
+    /// Application vault of an opened session.
+    pub vault_id: Option<u8>,
+
+    /// Whether the command closed the session.
+    pub closed: bool,
+}
+
+/// A submission queue entry.
 ///
-/// Length and layout are platform-defined and validated by the protocol codec.
-pub type HsmCqe = [u32];
+/// Layout is platform-defined; the core reads only the fields below.
+pub trait HsmSqe {
+    /// Returns the raw command opcode.
+    fn opcode(&self) -> u16;
+
+    /// Returns the session the SQE names, if any.
+    fn session_id(&self) -> Option<u16>;
+
+    /// Returns the session control the SQE declares;
+    /// [`Unspecified`](HsmSessCtrl::Unspecified) if the IO protocol has none.
+    fn session_ctrl(&self) -> HsmSessCtrl;
+}
+
+/// A completion queue entry.
+///
+/// Layout is platform-defined. The platform fills identity and routing
+/// fields (command id, queue id); the core writes only the outcome.
+pub trait HsmCqe {
+    /// Records a success with a `dst_len`-byte response.
+    fn set_ok(&mut self, dst_len: u32);
+
+    /// Records a success with a `dst_len`-byte response and its session
+    /// fields. Protocols without CQE session fields ignore `sess`.
+    fn set_ok_ex(&mut self, dst_len: u32, sess: HsmCqeSession);
+
+    /// Records a failure; the entry maps `err` to its wire status.
+    fn set_err(&mut self, err: HsmError);
+}
+
+/// A request received by [`HsmIoController::recv_request`].
+pub struct HsmRequest<'a> {
+    /// Exchange storage holding the request in its first
+    /// [`len`](Self::len) bytes; growable with
+    /// [`HsmAlloc::dma_grow`](crate::HsmAlloc::dma_grow).
+    pub buf: HsmDmaAllocation<'a>,
+
+    /// Request length in bytes.
+    pub len: usize,
+
+    /// Largest response the host accepts, in bytes.
+    pub resp_capacity: usize,
+}
 
 /// Queue kind of an [`HsmIo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,30 +149,25 @@ pub enum HsmIoKind {
 /// [`HsmIoController::drop_io`]; failing to do so leaks the
 /// underlying queue slot.
 pub trait HsmIo {
+    /// Submission queue entry type.
+    type Sqe: HsmSqe + ?Sized;
+
+    /// Completion queue entry type.
+    type Cqe: HsmCqe + ?Sized;
+
     /// Borrows the submission queue entry.
     ///
     /// The SQE is read-only from the firmware's perspective: the
     /// host populated it before raising the doorbell that triggered
     /// [`HsmIoController::poll_io`].
-    ///
-    /// # Returns
-    ///
-    /// An immutable reference to the [`HsmSqe`] dword slice. Borrow
-    /// lives for the duration of the `&self` borrow.
-    fn sqe(&self) -> &HsmSqe;
+    fn sqe(&self) -> &Self::Sqe;
 
-    /// Borrows the completion queue entry for in-place population.
+    /// Borrows the completion queue entry.
     ///
-    /// The firmware writes the status word, response length, and any
-    /// session-control fields here before calling
-    /// [`HsmIoController::complete_io`].  Contents prior to that
-    /// call are unspecified; callers must overwrite, not read.
-    ///
-    /// # Returns
-    ///
-    /// A mutable reference to the [`HsmCqe`] dword slice. Borrow
-    /// lives for the duration of the `&mut self` borrow.
-    fn cqe(&mut self) -> &mut HsmCqe;
+    /// The platform fills its identity fields when the IO is received; the
+    /// core records the outcome before
+    /// [`HsmIoController::complete_io`].
+    fn cqe(&mut self) -> &mut Self::Cqe;
 
     /// Returns which queue kind this IO came from.
     ///
@@ -165,6 +235,56 @@ pub trait HsmIoController: HsmIoTypes {
     ///   unrecoverable).
     async fn poll_io(&self) -> HsmResult<Self::Io>;
 
+    /// Receives `io`'s request from the host.
+    ///
+    /// Validates the SQE's transfer fields, allocates exchange storage and
+    /// transfers the request into it, decrypting it if the IO protocol
+    /// protects it.
+    ///
+    /// # Errors
+    ///
+    /// Errors are canonical; the CQE maps each to its wire status:
+    ///
+    /// - `SqeInvalidPsdt`, `IoChannelInvalid{Src,Dst,Oob}{Len,Alignment}` —
+    ///   a malformed transfer field.
+    /// - `InvalidArg` — another malformed SQE field.
+    /// - `NotEnoughSpace` — the exchange storage cannot be allocated.
+    /// - `FailedToStartDmaTransaction` — the host transfer failed.
+    /// - `SessionTransportError` — a protected request failed authentication
+    ///   or its session has no transport keys.
+    async fn recv_request(&self, io: &Self::Io) -> HsmResult<HsmRequest<'_>>;
+
+    /// Sends the response `resp` to the host for `io`.
+    ///
+    /// The core records the success in the CQE first
+    /// ([`HsmCqe::set_ok_ex`]); a platform that builds its own success CQE
+    /// (for example with transport protection fields) overwrites it.
+    ///
+    /// # Errors
+    ///
+    /// Canonical, as for [`recv_request`](Self::recv_request): `InvalidArg`
+    /// if `resp` exceeds the host's capacity, `FailedToStartDmaTransaction`,
+    /// `NotEnoughSpace`, or `SessionTransportError`. The core then records
+    /// the error in the CQE.
+    async fn send_response(&self, io: &mut Self::Io, resp: &HsmDmaBuf) -> HsmResult<()>;
+
+    /// Copies out-of-band item `index` of `io` from the host into `dst`;
+    /// the item's length must equal `dst.len()`.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidArg` — `io` has no such item, or its length differs.
+    /// - `FailedToStartDmaTransaction` — the host transfer failed.
+    async fn recv_oob(&self, io: &Self::Io, index: usize, dst: &mut HsmDmaBuf) -> HsmResult<()>;
+
+    /// Copies `src` to out-of-band item `index` of `io` in host memory; the
+    /// item's length must equal `src.len()`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`recv_oob`](Self::recv_oob).
+    async fn send_oob(&self, io: &Self::Io, index: usize, src: &HsmDmaBuf) -> HsmResult<()>;
+
     /// Posts the completion entry (CQE) for `io` to the host.
     ///
     /// Borrows `io` by `&mut` and leaves its queue slot **allocated**, so
@@ -209,30 +329,19 @@ pub trait HsmIoController: HsmIoTypes {
     ///   IO is no longer accessible regardless).
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()>;
 
-    /// Finishes `io` without the caller: copies `resp` to the host at
-    /// `dst`/`dst2` (as [`HsmGdmaController::copy_mem_to_host`] would), then
-    /// posts its completion (as [`complete_io`](Self::complete_io)) and
-    /// drops it (as [`drop_io`](Self::drop_io)).
+    /// Finishes `io` without the caller: sends `resp` (as
+    /// [`send_response`](Self::send_response)), then posts its completion
+    /// (as [`complete_io`](Self::complete_io)) and drops it (as
+    /// [`drop_io`](Self::drop_io)).
     ///
     /// For an IO with nothing left to do once its completion is posted, so
-    /// that its task can move on at once. The CQE must already hold the
-    /// completion of a successful copy; if the copy fails, `copy_failed`
-    /// first rewrites it to report that.
+    /// that its task can move on at once. The CQE must already record the
+    /// success; if the transfer fails, the platform records that instead.
     ///
     /// # Errors
     ///
     /// Returns `io`, having started nothing, if the platform cannot take it
-    /// over now; the caller then copies, completes and drops it itself. The
-    /// default implementation never takes it.
-    fn finish_io(
-        &self,
-        io: Self::Io,
-        resp: &HsmDmaBuf,
-        dst: HsmDmaAddr,
-        dst2: HsmDmaAddr,
-        copy_failed: fn(&mut HsmCqe),
-    ) -> Result<(), Self::Io> {
-        let _ = (resp, dst, dst2, copy_failed);
-        Err(io)
-    }
+    /// over now; the caller then sends, completes and drops it itself.
+    /// Platforms without a detached transfer engine always return `Err(io)`.
+    fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io>;
 }

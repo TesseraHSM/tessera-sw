@@ -33,10 +33,10 @@ caller computes `μ`, on the host or on the device with [`Hash`](./hash.md).
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `pub_key` | `buffer` (up to 2592 B) | ML-DSA public key bytes. |
-| — | `mu` | `buffer` (64 B) | The message representative `μ` the signature covers. |
-| — | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `pub_key` | `buffer` (up to 2592 B) | ML-DSA public key bytes. |
+| 16 | `mu` | `buffer` (64 B) | The message representative `μ` the signature covers. |
+| 20 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes. |
 
 ### Data section
 

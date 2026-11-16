@@ -45,6 +45,7 @@
 //! `clear_enabled_state`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -73,6 +74,7 @@ use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_ENABLED;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
@@ -274,18 +276,9 @@ pub(crate) fn masked_key_report_and_pub(
 
     const COORD_LEN: usize = RAW_PUB_LEN / 2;
     let mut rcvr_pub = [0u8; RAW_PUB_LEN];
-    for (dst, src) in rcvr_pub[..COORD_LEN]
-        .iter_mut()
-        .zip(seal.pub_key[..COORD_LEN].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in rcvr_pub[COORD_LEN..]
-        .iter_mut()
-        .zip(seal.pub_key[COORD_LEN..].iter().rev())
-    {
-        *dst = *src;
-    }
+    rcvr_pub.copy_from_slice(&seal.pub_key);
+    dev_rev_in_place(&mut rcvr_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
         .tbor(&TborKeyReportReq {
@@ -1067,4 +1060,17 @@ fn sd_create_remote_backup_accepts_duplicate_receiver_cert_descriptor() {
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN,);
 
     assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN,);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_create_remote_backup_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sata_key = CaKey::generate();
+    let (session, policy, pid_pub) = finalized_backing_session(&ctx, &sata_key);
+    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    assert_masked_key_layout_rejected(&ctx, &req);
 }

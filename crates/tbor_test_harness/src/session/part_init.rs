@@ -14,9 +14,6 @@
 use tsra_crypto::aead_envelope;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::Rng;
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborPartInitReq;
@@ -29,6 +26,7 @@ use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 
 use super::finish::SessionHandshake;
+use crate::fixture::TestDev;
 
 /// Issue `PartInit` on the CO session represented by `session`.
 ///
@@ -41,7 +39,7 @@ use super::finish::SessionHandshake;
 /// [`DdiError::InvalidParameter`] before the request reaches the
 /// device.
 pub fn part_init(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     session: &SessionHandshake,
     mach_seed: &[u8],
     part_policy: &[u8],

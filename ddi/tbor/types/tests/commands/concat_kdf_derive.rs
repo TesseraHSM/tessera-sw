@@ -43,6 +43,7 @@ use tsra_ddi_tbor_types::KDF_KEY_TYPE_VAR_HMAC384;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_VAR_HMAC512;
 use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Session` discriminant.
@@ -906,5 +907,26 @@ fn concat_kdf_var_hmac384_above_max_length_rejected() {
             info: Vec::new(),
         },
         TborStatus::InvalidKeyLength,
+    );
+}
+
+/// Rejects a misaligned masked secret and one without its padding entry.
+#[test]
+fn concat_kdf_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let ikm = fresh_masked_secret(&ctx, session.session_id);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborConcatKdfDeriveReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            hash_algo: HASH_SHA384,
+            kdf_alg: CONCAT_KDF_ALG_X963,
+            key_type: KDF_KEY_TYPE_AES256,
+            key_length: 0,
+            masked_secret: ikm,
+            info: Vec::new(),
+        },
     );
 }

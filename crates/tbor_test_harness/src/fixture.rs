@@ -24,19 +24,39 @@
 //! call sites (`let dev = open_dev(); helper(&dev, ...)`) keep
 //! compiling without modification — deref coercion supplies the
 //! `&<Dev>` automatically.
+//!
+//! On a Duo device (API revision 2.x) in-session and close commands must
+//! travel encrypted under the session transport keys. [`TestDev`]
+//! shadows the TBOR exec methods to route those commands over
+//! [`DdiDev::exec_op_tbor_secure`] for every session whose handshake it
+//! finished, so tests run unchanged on both Uno and Duo.
 
+use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
+use tsra_ddi_interface::DdiDeviceModel;
+use tsra_ddi_interface::DdiError;
+use tsra_ddi_interface::DdiResult;
+use tsra_ddi_interface::DdiTransportSeal;
+use tsra_ddi_interface::TborOobItem;
+use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborResp;
 pub use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 pub use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
 pub use tsra_ddi_tbor_types::PSK_LEN;
 pub use tsra_ddi_tbor_types::SESSION_SEED_LEN;
+use tsra_session_ex_crypto::SessionTransport;
+use tsra_session_ex_crypto::SessionTransportSeal;
 
 use super::ctx::TestCtx;
 use super::session::SessionHandshake;
@@ -121,12 +141,166 @@ pub struct TestDev {
     /// multi-fd tests can bind extra `TestDev`s to the *same*
     /// underlying device via [`TestCtx::new_with_path`](crate::TestCtx::new_with_path).
     path: String,
+    /// Device model, discovered on first use.
+    model: OnceLock<DdiDeviceModel>,
+    /// Session transports of the encrypted (Duo) sessions this handle
+    /// opened, keyed by session id.
+    transports: Mutex<HashMap<u16, Arc<SessionTransport>>>,
 }
 
+/// Upper bound on an encoded TBOR request sent over the session transport.
+const SECURE_REQ_CAP: usize = 8192;
+
 impl TestDev {
+    fn new(dev: <TsraDdi as Ddi>::Dev, guard: Option<MutexGuard<'static, ()>>, path: &str) -> Self {
+        let dev = Self {
+            dev,
+            _guard: guard,
+            path: path.to_string(),
+            model: OnceLock::new(),
+            transports: Mutex::new(HashMap::new()),
+        };
+        dev.model();
+        dev
+    }
+
     /// The backend path this device was opened on.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The device model.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the backend cannot report its model.
+    pub fn model(&self) -> DdiDeviceModel {
+        *self.model.get_or_init(|| {
+            let model = self
+                .dev
+                .discover()
+                .expect("discover test backend device model")
+                .model;
+            crate::byte_order::record_model(model);
+            model
+        })
+    }
+
+    /// Whether in-session commands travel under the session transport
+    /// (Duo, API revision 2.x).
+    pub fn uses_session_transport(&self) -> bool {
+        self.model() == DdiDeviceModel::Duo
+    }
+
+    /// Route later in-session and close commands for `session_id` over
+    /// the session transport.
+    pub(crate) fn set_session_transport(&self, session_id: u16, transport: SessionTransport) {
+        self.transports
+            .lock()
+            .insert(session_id, Arc::new(transport));
+    }
+
+    /// Stop routing `session_id` over the session transport.
+    pub(crate) fn remove_session_transport(&self, session_id: u16) {
+        self.transports.lock().remove(&session_id);
+    }
+
+    /// Whether `req` is an in-session or close command that a Duo device
+    /// receives without transport protection, because this handle holds
+    /// no transport keys for its session (an unknown or closed session,
+    /// or one opened on another connection). Duo's channel policy then
+    /// rejects it before any session lookup.
+    pub fn sends_unsealed_session_cmd<T: TborOpReq>(&self, req: &T) -> bool {
+        self.uses_session_transport()
+            && matches!(
+                req.session_ctrl(),
+                SessionControlKind::InSession | SessionControlKind::Close
+            )
+            && self.session_transport(req).is_none()
+    }
+
+    /// The session transport for `req`, if it is an in-session or close
+    /// command of a session this handle opened under the transport.
+    fn session_transport<T: TborOpReq>(&self, req: &T) -> Option<(u16, Arc<SessionTransport>)> {
+        if !matches!(
+            req.session_ctrl(),
+            SessionControlKind::InSession | SessionControlKind::Close
+        ) {
+            return None;
+        }
+        let id = req.get_session_id()?;
+        let transport = self.transports.lock().get(&id).cloned()?;
+        Some((id, transport))
+    }
+
+    /// Encode `req`, seal it with `transport`, execute it as a
+    /// `TborSecure` command, and open and decode the response.
+    fn exec_op_tbor_sealed<T: TborOpReq>(
+        &self,
+        session_id: u16,
+        transport: &SessionTransport,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<T::OpResp> {
+        let mut buf = vec![0u8; SECURE_REQ_CAP];
+        let len = req.encode_request(&mut buf)?.len();
+        buf.truncate(len);
+        let seal = transport
+            .seal_request(&mut buf)
+            .map_err(|_| DdiError::TborEncodeError)?;
+        let seal = DdiTransportSeal {
+            iv: seal.iv,
+            tag: seal.tag,
+        };
+        let (mut resp, seal) = self
+            .dev
+            .exec_op_tbor_secure(session_id, &buf, seal, oob_items)?;
+        let seal = SessionTransportSeal {
+            iv: seal.iv,
+            tag: seal.tag,
+        };
+        transport
+            .open_response(&seal, &mut resp)
+            .map_err(|_| DdiError::TborDecodeError)?;
+        Ok(T::OpResp::decode_response(&resp)?)
+    }
+
+    /// [`DdiDev::exec_op_tbor`], routed over the session transport for
+    /// the in-session and close commands of an encrypted session.
+    pub fn exec_op_tbor<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: Option<&[&[u8]]>,
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            let mut items: Vec<_> = oob_items
+                .unwrap_or_default()
+                .iter()
+                .map(|item| TborOobItem::In(item))
+                .collect();
+            return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
+        }
+        self.dev.exec_op_tbor(req, oob_items, cookie)
+    }
+
+    /// [`DdiDev::exec_op_tbor_oob`], routed like [`Self::exec_op_tbor`].
+    pub fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
+        }
+        self.dev.exec_op_tbor_oob(req, oob_items, cookie)
+    }
+
+    /// Factory-reset the device, dropping every session transport.
+    pub fn erase(&self) -> DdiResult<()> {
+        self.transports.lock().clear();
+        self.dev.erase()
     }
 }
 
@@ -165,11 +339,7 @@ pub fn open_dev() -> TestDev {
     let dev = ddi.open_dev(&path).expect("open test backend device");
     dev.erase()
         .expect("open_dev: factory-reset backend before test");
-    TestDev {
-        dev,
-        _guard: Some(guard),
-        path,
-    }
+    TestDev::new(dev, Some(guard), &path)
 }
 
 /// Primary counterpart to [`open_dev`] that opens the caller-
@@ -191,11 +361,7 @@ pub fn open_dev_with_path(path: &str) -> TestDev {
         .expect("open test backend device on caller-supplied path");
     dev.erase()
         .expect("open_dev_with_path: factory-reset backend before test");
-    TestDev {
-        dev,
-        _guard: Some(guard),
-        path: path.to_string(),
-    }
+    TestDev::new(dev, Some(guard), path)
 }
 
 /// Open a secondary [`TestDev`] on the same backend path as the
@@ -217,9 +383,5 @@ pub fn open_dev_secondary(path: &str) -> TestDev {
     let dev = TsraDdi::default()
         .open_dev(path)
         .expect("open secondary backend device on the same path as the primary TestDev");
-    TestDev {
-        dev,
-        _guard: None,
-        path: path.to_string(),
-    }
+    TestDev::new(dev, None, path)
 }

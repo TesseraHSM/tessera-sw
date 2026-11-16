@@ -23,9 +23,6 @@
 //! `commands::part_final::fw_rejects`. Anything that reaches the chain
 //! walk must pass real certificates.
 
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
@@ -35,6 +32,7 @@ use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::PART_POLICY_LEN;
 
 use super::finish::SessionHandshake;
+use crate::fixture::TestDev;
 
 /// Issue `PartFinal` on the CO session represented by `session`.
 ///
@@ -47,7 +45,7 @@ use super::finish::SessionHandshake;
 /// OOB region is emitted).  `prev_local_mk_backup` is the optional prior
 /// backup to restore (empty = first instantiation).
 pub fn part_final(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     session: &SessionHandshake,
     part_policy: &[u8],
     prev_local_mk_backup: &[u8],
@@ -99,7 +97,7 @@ pub fn part_final(
 /// its out-of-band item) to exercise the firmware's input validation on
 /// the `PartFinal` OOB path.
 pub fn part_final_raw(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     session: &SessionHandshake,
     part_policy: &[u8],
     prev_local_mk_backup: &[u8],

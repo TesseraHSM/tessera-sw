@@ -52,9 +52,10 @@ fn unpack_cert_chain(chain: &TsraDarcCertChain) -> Result<Vec<api::HsmCert<'_>>,
 ///
 /// Generates a new DARC key-exchange key (ECC-P384) on the calling
 /// session's partition and returns the masked private key plus its raw
-/// P-384 public key (`x ‖ y`, 96 bytes). Run on the target it yields the
-/// HPKE receiver identity; run on the source it yields the HPKE sender-auth
-/// identity. The key is not stored on the device.
+/// P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
+/// the target it yields the HPKE receiver identity; run on the source it
+/// yields the HPKE sender-auth identity. The key is not stored on the
+/// device.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)

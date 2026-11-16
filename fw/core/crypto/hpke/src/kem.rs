@@ -22,7 +22,9 @@
 //! [`labeled_extract`]: crate::kdf::labeled_extract
 //! [`labeled_expand`]: crate::kdf::labeled_expand
 
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
@@ -86,15 +88,15 @@ fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDma
 //     enc / pk = 0x04 ‖ X_be ‖ Y_be   (length = 1 + 2*coord_len)
 //
 // The PAL ECC traits — [`HsmEcc::ecc_gen_keypair`] /
-// [`HsmEcc::ecdh_derive`] — traffic in HSM-native LE coordinates with
-// no SEC1 prefix:
+// [`HsmEcc::ecdh_derive`] — traffic in operand-order coordinates
+// ([`HsmCryptoOrder::BYTE_ORDER`]) with no SEC1 prefix:
 //
-//     pal pub = X_le ‖ Y_le             (length = 2*coord_len)
+//     pal pub = X ‖ Y                   (length = 2*coord_len)
 //
-// These helpers do the byte-reversal + 0x04 prefix add/strip.
+// These helpers convert each coordinate and add/strip the 0x04 prefix.
 //
 // Curve constraint: the SEC1 BE form is exactly one byte longer
-// than the PAL-native LE form (`npk_wire = npk_pal + 1`).  This
+// than the PAL operand form (`npk_wire = npk_pal + 1`).  This
 // holds for P-256 and P-384.  P-521 currently violates this in
 // `HpkeSuite` (both sizes are 136) because the suite registry uses
 // the PAL-padded length for `npk` to keep callers compiling; HPKE
@@ -102,40 +104,47 @@ fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDma
 // rather than silently mis-encoding the transcript.
 
 /// Convert SEC1-uncompressed BE bytes (`0x04 ‖ X_be ‖ Y_be`) into
-/// the PAL-native LE coordinate form (`X_le ‖ Y_le`) the PAL ECC
-/// trait expects.
+/// the operand-order coordinate form (`X ‖ Y`) the PAL ECC trait expects.
 ///
 /// Input length must be **exactly** `1 + 2*coord_len`; output buffer
 /// must be **at least** `2*coord_len`.  A missing or wrong SEC1 tag
 /// byte is rejected so callers can't pass compressed / hybrid
 /// encodings the PAL would silently mis-interpret.
-fn sec1_be_to_pal_le(sec1: &[u8], dst: &mut [u8], coord_len: usize) -> HsmResult<()> {
+fn sec1_to_operand(
+    order: HsmByteOrder,
+    sec1: &[u8],
+    dst: &mut [u8],
+    coord_len: usize,
+) -> HsmResult<()> {
     let need = 1 + 2 * coord_len;
     if sec1.len() != need || dst.len() < 2 * coord_len || sec1[0] != 0x04 {
         return Err(HsmError::InvalidArg);
     }
-    for i in 0..coord_len {
-        dst[i] = sec1[1 + (coord_len - 1 - i)];
-        dst[coord_len + i] = sec1[1 + coord_len + (coord_len - 1 - i)];
-    }
-    Ok(())
+    let (x, y) = sec1[1..].split_at(coord_len);
+    let (dx, dy) = dst[..2 * coord_len].split_at_mut(coord_len);
+    byte_order::int_copy_from_be(order, dx, x)?;
+    byte_order::int_copy_from_be(order, dy, y)
 }
 
-/// Convert PAL-native LE coordinates (`X_le ‖ Y_le`) into SEC1
-/// uncompressed BE (`0x04 ‖ X_be ‖ Y_be`) for HPKE on-wire / kem_context use.
+/// Convert operand-order coordinates (`X ‖ Y`) into SEC1 uncompressed
+/// BE (`0x04 ‖ X_be ‖ Y_be`) for HPKE on-wire / kem_context use.
 ///
 /// Input length must be **exactly** `2*coord_len`; output buffer
 /// must be **at least** `1 + 2*coord_len`.
-fn pal_le_to_sec1_be(le: &[u8], dst: &mut [u8], coord_len: usize) -> HsmResult<()> {
-    if le.len() != 2 * coord_len || dst.len() < 1 + 2 * coord_len {
+fn operand_to_sec1(
+    order: HsmByteOrder,
+    operand: &[u8],
+    dst: &mut [u8],
+    coord_len: usize,
+) -> HsmResult<()> {
+    if operand.len() != 2 * coord_len || dst.len() < 1 + 2 * coord_len {
         return Err(HsmError::InvalidArg);
     }
     dst[0] = 0x04;
-    for i in 0..coord_len {
-        dst[1 + i] = le[coord_len - 1 - i];
-        dst[1 + coord_len + i] = le[2 * coord_len - 1 - i];
-    }
-    Ok(())
+    let (x, y) = operand.split_at(coord_len);
+    let (dx, dy) = dst[1..1 + 2 * coord_len].split_at_mut(coord_len);
+    byte_order::int_copy_to_be(order, dx, x)?;
+    byte_order::int_copy_to_be(order, dy, y)
 }
 
 /// Common preflight for the four KEM entry points.  Returns the
@@ -207,8 +216,8 @@ where
         return Err(HsmError::InvalidArg);
     }
 
-    // Query-alloc-use ECC keygen.  PAL writes `pk_e_le` as
-    // `X_le ‖ Y_le` (no SEC1 prefix), `npk_pal` bytes.  The ephemeral key
+    // Query-alloc-use ECC keygen.  PAL writes `pk_e_op` as
+    // operand-order `X ‖ Y` (no SEC1 prefix), `npk_pal` bytes.  The ephemeral key
     // is used for ECDH, so its generation runs a key-agreement PCT.
     let (priv_size, pub_size) = pal
         .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
@@ -216,15 +225,15 @@ where
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
     }
-    // Ephemeral `sk_e ‖ pk_e_le` share one allocation.
+    // Ephemeral `sk_e ‖ pk_e_op` share one allocation.
     let ek = alloc_bytes(priv_size + pub_size, alloc)?;
-    let (sk_e, pk_e_le) = ek.split_at_mut(priv_size);
+    let (sk_e, pk_e_op) = ek.split_at_mut(priv_size);
     let (sk_len, pk_len) = pal
         .ecc_gen_keypair(
             io,
             alloc,
             curve,
-            Some((&mut *sk_e, &mut *pk_e_le)),
+            Some((&mut *sk_e, &mut *pk_e_op)),
             HsmEccPct::KeyAgreement,
         )
         .await?;
@@ -232,21 +241,25 @@ where
         return Err(HsmError::InvalidArg);
     }
 
-    // Convert caller-supplied SEC1 BE `pk_r` to PAL-native LE so the
+    // Convert caller-supplied SEC1 BE `pk_r` to operand order so the
     // PAL ECDH primitive can consume it directly.
-    let pk_r_le = alloc_bytes(npk_pal, alloc)?;
-    sec1_be_to_pal_le(pk_r, &mut pk_r_le[..], coord_len)?;
+    let pk_r_op = alloc_bytes(npk_pal, alloc)?;
+    sec1_to_operand(P::BYTE_ORDER, pk_r, &mut pk_r_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh, alloc)?;
-    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_le, dh)
+    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, dh)
         .await?;
-    // `ecdh_derive` returns the shared secret PKA-native little-endian; HPKE
-    // (RFC 9180) feeds the SEC1 big-endian secret to the KDF, so reverse it.
-    dh[..ndh].reverse();
+    // HPKE (RFC 9180) feeds the big-endian secret to the KDF.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
 
     // Serialise ephemeral public key into SEC1 BE wire form for `enc`
     // and the transcript-binding `kem_context`.
-    pal_le_to_sec1_be(&pk_e_le[..pk_len], &mut enc[..npk_wire], coord_len)?;
+    operand_to_sec1(
+        P::BYTE_ORDER,
+        &pk_e_op[..pk_len],
+        &mut enc[..npk_wire],
+        coord_len,
+    )?;
 
     let kem_context = alloc_bytes(npk_wire * 2, alloc)?;
     build_kem_context(kem_context, npk_wire, &enc[..npk_wire], pk_r, None);
@@ -297,15 +310,15 @@ where
         return Err(HsmError::InvalidArg);
     }
 
-    // Convert SEC1 BE `enc` to PAL-native LE before the ECDH.
-    let pk_e_le = alloc_bytes(npk_pal, alloc)?;
-    sec1_be_to_pal_le(enc, &mut pk_e_le[..], coord_len)?;
+    // Convert SEC1 BE `enc` to operand order before the ECDH.
+    let pk_e_op = alloc_bytes(npk_pal, alloc)?;
+    sec1_to_operand(P::BYTE_ORDER, enc, &mut pk_e_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh, alloc)?;
     let sk_r_dma = dma_copy_in(alloc, sk_r)?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_le, dh).await?;
-    // PKA-native LE -> SEC1 BE for the HPKE KDF input (RFC 9180).
-    dh[..ndh].reverse();
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, dh).await?;
+    // HPKE (RFC 9180) feeds the big-endian secret to the KDF.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
 
     let kem_context = alloc_bytes(npk_wire * 2, alloc)?;
     build_kem_context(kem_context, npk_wire, enc, pk_r, None);
@@ -368,15 +381,15 @@ where
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
     }
-    // Ephemeral `sk_e ‖ pk_e_le` share one allocation.
+    // Ephemeral `sk_e ‖ pk_e_op` share one allocation.
     let ek = alloc_bytes(priv_size + pub_size, alloc)?;
-    let (sk_e, pk_e_le) = ek.split_at_mut(priv_size);
+    let (sk_e, pk_e_op) = ek.split_at_mut(priv_size);
     let (sk_len, pk_len) = pal
         .ecc_gen_keypair(
             io,
             alloc,
             curve,
-            Some((&mut *sk_e, &mut *pk_e_le)),
+            Some((&mut *sk_e, &mut *pk_e_op)),
             HsmEccPct::KeyAgreement,
         )
         .await?;
@@ -384,22 +397,26 @@ where
         return Err(HsmError::InvalidArg);
     }
 
-    // SEC1 BE → PAL-native LE for the recipient public key (shared
+    // SEC1 BE → operand order for the recipient public key (shared
     // across both ECDH calls).
-    let pk_r_le = alloc_bytes(npk_pal, alloc)?;
-    sec1_be_to_pal_le(pk_r, &mut pk_r_le[..], coord_len)?;
+    let pk_r_op = alloc_bytes(npk_pal, alloc)?;
+    sec1_to_operand(P::BYTE_ORDER, pk_r, &mut pk_r_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh * 2, alloc)?;
-    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_le, &mut dh[..ndh])
+    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, &mut dh[..ndh])
         .await?;
-    pal.ecdh_derive(io, curve, sk_s, pk_r_le, &mut dh[ndh..])
+    pal.ecdh_derive(io, curve, sk_s, pk_r_op, &mut dh[ndh..])
         .await?;
-    // Each ECDH secret is PKA-native LE; reverse each `Ndh` half to SEC1 BE
-    // for the HPKE `dh1 || dh2` KDF input (RFC 9180).
-    dh[..ndh].reverse();
-    dh[ndh..].reverse();
+    // HPKE (RFC 9180) feeds the big-endian `dh1 || dh2` to the KDF.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[ndh..]);
 
-    pal_le_to_sec1_be(&pk_e_le[..pk_len], &mut enc[..npk_wire], coord_len)?;
+    operand_to_sec1(
+        P::BYTE_ORDER,
+        &pk_e_op[..pk_len],
+        &mut enc[..npk_wire],
+        coord_len,
+    )?;
 
     let kem_context = alloc_bytes(npk_wire * 3, alloc)?;
     build_kem_context(kem_context, npk_wire, &enc[..npk_wire], pk_r, Some(pk_s));
@@ -453,21 +470,20 @@ where
         return Err(HsmError::InvalidArg);
     }
 
-    let pk_e_le = alloc_bytes(npk_pal, alloc)?;
-    sec1_be_to_pal_le(enc, &mut pk_e_le[..], coord_len)?;
-    let pk_s_le = alloc_bytes(npk_pal, alloc)?;
-    sec1_be_to_pal_le(pk_s, &mut pk_s_le[..], coord_len)?;
+    let pk_e_op = alloc_bytes(npk_pal, alloc)?;
+    sec1_to_operand(P::BYTE_ORDER, enc, &mut pk_e_op[..], coord_len)?;
+    let pk_s_op = alloc_bytes(npk_pal, alloc)?;
+    sec1_to_operand(P::BYTE_ORDER, pk_s, &mut pk_s_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh * 2, alloc)?;
     let sk_r_dma = dma_copy_in(alloc, sk_r)?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_le, &mut dh[..ndh])
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, &mut dh[..ndh])
         .await?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_s_le, &mut dh[ndh..])
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_s_op, &mut dh[ndh..])
         .await?;
-    // Each ECDH secret is PKA-native LE; reverse each `Ndh` half to SEC1 BE
-    // for the HPKE `dh1 || dh2` KDF input (RFC 9180).
-    dh[..ndh].reverse();
-    dh[ndh..].reverse();
+    // HPKE (RFC 9180) feeds the big-endian `dh1 || dh2` to the KDF.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
+    byte_order::int_to_be(P::BYTE_ORDER, &mut dh[ndh..]);
 
     let kem_context = alloc_bytes(npk_wire * 3, alloc)?;
     build_kem_context(kem_context, npk_wire, enc, pk_r, Some(pk_s));
@@ -551,7 +567,7 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    //! Pure-byte unit tests for the SEC1↔PAL-LE conversion helpers.
+    //! Pure-byte unit tests for the SEC1↔operand conversion helpers.
     //!
     //! End-to-end ECDH coverage lives in the TBOR `OpenSessionInit`
     //! integration tests (`ddi/tbor/types/tests/integration/`); these
@@ -575,7 +591,7 @@ mod tests {
     fn sec1_to_pal_reverses_each_coordinate() {
         let sec1 = sample_sec1();
         let mut le = [0u8; 2 * P384_COORD];
-        sec1_be_to_pal_le(&sec1, &mut le, P384_COORD).unwrap();
+        sec1_to_operand(HsmByteOrder::Le, &sec1, &mut le, P384_COORD).unwrap();
         for i in 0..P384_COORD {
             assert_eq!(le[i], sec1[1 + (P384_COORD - 1 - i)]);
             assert_eq!(
@@ -589,9 +605,9 @@ mod tests {
     fn pal_to_sec1_round_trip() {
         let sec1 = sample_sec1();
         let mut le = [0u8; 2 * P384_COORD];
-        sec1_be_to_pal_le(&sec1, &mut le, P384_COORD).unwrap();
+        sec1_to_operand(HsmByteOrder::Le, &sec1, &mut le, P384_COORD).unwrap();
         let mut sec1_rt = [0u8; 1 + 2 * P384_COORD];
-        pal_le_to_sec1_be(&le, &mut sec1_rt, P384_COORD).unwrap();
+        operand_to_sec1(HsmByteOrder::Le, &le, &mut sec1_rt, P384_COORD).unwrap();
         assert_eq!(sec1, sec1_rt);
     }
 
@@ -601,7 +617,7 @@ mod tests {
         sec1[0] = 0x02;
         let mut le = [0u8; 2 * P384_COORD];
         assert!(matches!(
-            sec1_be_to_pal_le(&sec1, &mut le, P384_COORD),
+            sec1_to_operand(HsmByteOrder::Le, &sec1, &mut le, P384_COORD),
             Err(HsmError::InvalidArg),
         ));
     }
@@ -611,7 +627,7 @@ mod tests {
         let short = [0x04u8; 1 + 2 * P384_COORD - 1];
         let mut le = [0u8; 2 * P384_COORD];
         assert!(matches!(
-            sec1_be_to_pal_le(&short, &mut le, P384_COORD),
+            sec1_to_operand(HsmByteOrder::Le, &short, &mut le, P384_COORD),
             Err(HsmError::InvalidArg),
         ));
     }
@@ -621,7 +637,7 @@ mod tests {
         let long = [0x04u8; 1 + 2 * P384_COORD + 1];
         let mut le = [0u8; 2 * P384_COORD];
         assert!(matches!(
-            sec1_be_to_pal_le(&long, &mut le, P384_COORD),
+            sec1_to_operand(HsmByteOrder::Le, &long, &mut le, P384_COORD),
             Err(HsmError::InvalidArg),
         ));
     }
@@ -631,7 +647,7 @@ mod tests {
         let bad_le = [0u8; 2 * P384_COORD + 1];
         let mut sec1 = [0u8; 1 + 2 * P384_COORD];
         assert!(matches!(
-            pal_le_to_sec1_be(&bad_le, &mut sec1, P384_COORD),
+            operand_to_sec1(HsmByteOrder::Le, &bad_le, &mut sec1, P384_COORD),
             Err(HsmError::InvalidArg),
         ));
     }
@@ -643,7 +659,7 @@ mod tests {
         // X_be = [0x01, 0x02, 0x03, 0x04], Y_be = [0x05, 0x06, 0x07, 0x08]
         let sec1: [u8; 9] = [0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let mut le = [0u8; 8];
-        sec1_be_to_pal_le(&sec1, &mut le, 4).unwrap();
+        sec1_to_operand(HsmByteOrder::Le, &sec1, &mut le, 4).unwrap();
         assert_eq!(le, [0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05]);
     }
 }

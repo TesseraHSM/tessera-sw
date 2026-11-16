@@ -17,8 +17,11 @@
 //! pass plain `&str` values.
 
 use bitfield_struct::bitfield;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -235,7 +238,7 @@ pub async fn build_root_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
         patch_root_tbs(tbs, params)
     })
     .await?;
-    assemble_signed(out, tbs_dma, sig_dma)
+    assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)
 }
 
 /// Build a Leaf (end-entity) certificate from the
@@ -268,8 +271,8 @@ pub async fn build_leaf_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
 
 /// Signer hook for [`build_leaf_cert_with_signer`].
 ///
-/// Produces a raw ECDSA-P384 signature — `r || s`, little-endian by half,
-/// `SIGNATURE_LEN` (96) bytes — over a caller-supplied SHA-384 `digest`,
+/// Produces a raw ECDSA-P384 signature — `r || s`, each half in the PAL's
+/// operand order, `SIGNATURE_LEN` (96) bytes — over a caller-supplied SHA-384 `digest`,
 /// writing it into `sig`. Implement this to inject a signer other than the
 /// PAL's default [`HsmEcc::ecc_sign`]; in particular a *deterministic*
 /// (RFC 6979) signer, so the resulting certificate is byte-stable across
@@ -278,10 +281,9 @@ pub async fn build_leaf_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
 /// [`HsmEcc::ecc_sign`]: tsra_fw_hsm_pal_traits::HsmEcc::ecc_sign
 #[allow(async_fn_in_trait)]
 pub trait TbsSigner<I: HsmIo> {
-    /// Sign `digest` (48-byte SHA-384, natural big-endian) into `sig`
-    /// (`r || s`, LE-by-half, 96 B). The signer converts the digest to its
-    /// backend's operand order (a PKA/`ecc_sign_deterministic` signer reverses
-    /// it to little-endian).
+    /// Sign `digest` (48-byte standard SHA-384) into `sig` (`r || s`, each
+    /// half in the PAL's operand order, 96 B). The signer converts the
+    /// digest to its backend's operand order.
     async fn sign_digest(&self, io: &I, digest: &HsmDmaBuf, sig: &mut HsmDmaBuf) -> HsmResult<()>;
 }
 
@@ -345,16 +347,21 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
     patch(tbs_dma)?;
 
     let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    // Natural big-endian SHA-384 over the TBS; the `TbsSigner` reverses it to
-    // the PKA little-endian message hash (the full byte reversal of the natural
-    // digest).
-    pal.hash(io, HsmHashAlgo::Sha384, tbs_dma, digest_dma, true)
-        .await?;
+    // Standard SHA-384 over the TBS; the `TbsSigner` converts it to its
+    // operand order.
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        tbs_dma,
+        digest_dma,
+        HsmDigestForm::Standard,
+    )
+    .await?;
 
     let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
     signer.sign_digest(io, digest_dma, sig_dma).await?;
 
-    assemble_signed(out, tbs_dma, sig_dma)
+    assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)
 }
 
 struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
@@ -370,13 +377,10 @@ impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, 
         digest: &HsmDmaBuf,
         sig: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        // `ecc_sign` consumes the message hash in PKA-native little-endian: the
-        // full byte reversal of the natural big-endian SHA-384 digest that
-        // `build_signed_from_template` produces (per the `TbsSigner` contract).
+        // `ecc_sign` consumes the message hash in operand order; `digest`
+        // is the standard SHA-384 (per the `TbsSigner` contract).
         let e = self.alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-        for i in 0..SHA384_DIGEST_LEN {
-            e[i] = digest[SHA384_DIGEST_LEN - 1 - i];
-        }
+        byte_order::int_copy_from_be(P::BYTE_ORDER, e, digest)?;
         self.pal
             .ecc_sign(io, HsmEccCurve::P384, self.priv_key, e, sig)
             .await
@@ -396,7 +400,7 @@ fn preflight(priv_key: &HsmDmaBuf, tbs_len: usize) -> HsmResult<()> {
 /// Allocate the TBS scratch buffer, hand it to the caller's `patch`
 /// closure, run `SHA-384 → ECDSA-P384 sign` against the supplied
 /// private key, and return the DMA buffers holding the patched TBS
-/// and the LE-by-half signature.
+/// and the operand-order signature.
 async fn sign<'a, P: HsmCrypto + HsmAlloc + 'a, F>(
     pal: &P,
     io: &P::Io,
@@ -411,19 +415,19 @@ where
     let tbs_dma = alloc.dma_alloc(tbs_len)?;
     patch(tbs_dma)?;
 
+    // SHA-384 straight into the operand form `ecc_sign` consumes.
     let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    // Natural big-endian SHA-384, then a full byte reversal to the PKA-native
-    // little-endian message hash `ecc_sign` consumes.
-    pal.hash(io, HsmHashAlgo::Sha384, tbs_dma, digest_dma, true)
-        .await?;
-
-    let hash_le = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    for i in 0..SHA384_DIGEST_LEN {
-        hash_le[i] = digest_dma[SHA384_DIGEST_LEN - 1 - i];
-    }
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        tbs_dma,
+        digest_dma,
+        HsmDigestForm::Operand,
+    )
+    .await?;
 
     let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, hash_le, sig_dma)
+    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, sig_dma)
         .await?;
 
     Ok((tbs_dma, sig_dma))
@@ -483,10 +487,15 @@ fn patch_field(tbs: &mut [u8], offset: usize, value: &[u8]) {
 }
 
 /// Assemble `SEQUENCE { TBS, AlgId, BIT STRING sig }` into `out`.
-/// PAL signature is `r || s` LE-by-half; convert each half to BE for
-/// the DER INTEGERs.
-fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmResult<usize> {
-    let (sig_r_be, sig_s_be) = sig_le_halves_to_be(sig_le)?;
+/// PAL signature is `r || s` in operand order; convert each half to BE
+/// for the DER INTEGERs.
+fn assemble_signed(
+    order: HsmByteOrder,
+    out: &mut [u8],
+    tbs: &HsmDmaBuf,
+    sig: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let (sig_r_be, sig_s_be) = sig_halves_to_be(order, sig)?;
 
     let mut sig_buf = [0u8; MAX_ECDSA384_SIG_DER_LEN];
     let sig_len = der_helpers::encode_ecdsa_signature(&mut sig_buf, &sig_r_be, &sig_s_be)
@@ -518,17 +527,17 @@ fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmRe
     Ok(pos)
 }
 
-fn sig_le_halves_to_be(sig_le: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
-    let bytes: &[u8] = sig_le;
+/// Convert the PAL ECDSA-P384 signature (`r || s`, each 48 B in operand
+/// order) into the big-endian halves required for DER INTEGER encoding.
+fn sig_halves_to_be(order: HsmByteOrder, sig: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
+    let bytes: &[u8] = sig;
     if bytes.len() != SIGNATURE_LEN {
         return Err(HsmError::InternalError);
     }
-    let half = SIGNATURE_LEN / 2;
+    let (r_op, s_op) = bytes.split_at(SIGNATURE_LEN / 2);
     let mut r = [0u8; 48];
     let mut s = [0u8; 48];
-    for i in 0..half {
-        r[i] = bytes[half - 1 - i];
-        s[i] = bytes[SIGNATURE_LEN - 1 - i];
-    }
+    byte_order::int_copy_to_be(order, &mut r, r_op)?;
+    byte_order::int_copy_to_be(order, &mut s, s_op)?;
     Ok((r, s))
 }

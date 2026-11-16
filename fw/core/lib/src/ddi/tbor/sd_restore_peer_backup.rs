@@ -62,8 +62,9 @@ use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -110,7 +111,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
@@ -143,7 +143,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
     // The sender attestation evidence is mandatory side-band data carried
     // in the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the two fixed-size response backups in the IO scope so they
     // survive the crypto scratch allocator's reset.
@@ -179,8 +178,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
             // The sender peer's report must attest to the same policy.
             let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            pal.hash(io, HsmHashAlgo::Sha384, policy, expected, true)
-                .await?;
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                policy,
+                expected,
+                HsmDigestForm::Standard,
+            )
+            .await?;
 
             let src_hash = alloc.dma_alloc(POLICY_HASH_LEN)?;
             {
@@ -188,7 +193,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 verify_evidence(
                     pal,
                     io,
-                    &oob,
                     &EvidenceRefs {
                         mfgr_chain: ev.mfgr_cert_chain(),
                         owner_chain: ev.owner_cert_chain(),
@@ -247,8 +251,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            pk_r[1..1 + coord].reverse();
-            pk_r[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3

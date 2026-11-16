@@ -54,6 +54,7 @@ pub struct TborDarcTmkImportReq {
     /// The receiver's masked DARC key-exchange key (from `DarcKexKeyGen`),
     /// exactly [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the receiver's private HPKE key (`RcvrPriv`).
+    #[tbor(align = 4)]
     pub masked_kex_key: [u8; MASKED_KEX_KEY_LEN],
 
     /// Unified [`PartPolicy`] whose `POTAPubKey` anchors
@@ -81,7 +82,7 @@ pub struct TborDarcTmkImportReq {
 pub struct TborDarcTmkImportResp {
     /// The imported TMK, masked under the partition SDMK (exactly 264 B on
     /// the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub masked_tmk: Vec<u8>,
 }
 

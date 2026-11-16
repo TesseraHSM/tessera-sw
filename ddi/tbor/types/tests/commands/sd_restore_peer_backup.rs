@@ -45,6 +45,7 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
@@ -325,4 +326,16 @@ fn sd_restore_peer_backup_rejects_sata_anchored_sender_evidence() {
     ctx.tbor_oob(&req, &backup.evidence.oob())
         .expect("SdRestorePeerBackup with POTA-rooted evidence");
     assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_restore_peer_backup_rejects_bad_masked_key_layout() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = restore_target(&seed, &pota, &backup);
+    assert_masked_key_layout_rejected(&ctx, &restore_peer_req(session_id, &backup));
 }

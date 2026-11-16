@@ -43,7 +43,7 @@ pub struct TborVerifyKeyReq<'a> {
 
     /// The masked-key envelope. `mutable` so the handler can unmask it in
     /// place.
-    #[tbor(buffer, max_len = 5160, mutable)]
+    #[tbor(align = 4, buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 }
 

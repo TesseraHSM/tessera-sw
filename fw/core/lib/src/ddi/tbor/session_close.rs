@@ -30,18 +30,24 @@
 use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::TborSessionCloseResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionState;
+use tsra_fw_hsm_undo::UndoLog;
 
 /// Handle a TBOR `SessionClose` request.
 ///
 /// Routes through `pal.session_destroy` to free the slot and any
-/// associated vault state.
-pub(crate) async fn handle<P: HsmPal>(
-    pal: &P,
+/// associated vault state.  With secure sessions (Duo) the destroy is deferred
+/// to the commit walk (after the completion posts), so the response can
+/// still be encrypted under the session's transport key.
+pub(crate) async fn handle<'p, P: HsmPal>(
+    pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
+    undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     let req = TborSessionCloseReq::decode(cmd_buf.request())?;
     let session_id: u16 = req.session_id().into();
@@ -52,7 +58,14 @@ pub(crate) async fn handle<P: HsmPal>(
     // request in the outer AEAD-authenticated framing layer once it
     // lands; until then this is vulnerable to same-partition DoS by
     // a caller who guesses an active slot id.
-    pal.session_destroy(io, id).await?;
+    if P::IO_PROTOCOL.secure_session() {
+        if matches!(pal.session_state(io, id), HsmSessionState::Invalid) {
+            return Err(HsmError::SessionNotFound);
+        }
+        undo.push_session_close(id)?;
+    } else {
+        pal.session_destroy(io, id).await?;
+    }
     let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSessionCloseResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())

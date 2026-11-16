@@ -21,6 +21,7 @@
 //! * Not finalized → `InvalidArg`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
@@ -39,6 +40,7 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use zerocopy::IntoBytes;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -258,8 +260,8 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
 
     let mut imported_pub = [0u8; RAW_PUB_LEN];
     imported_pub.copy_from_slice(&imported.pub_key);
-    imported_pub[..48].reverse();
-    imported_pub[48..].reverse();
+    dev_rev_in_place(&mut imported_pub[..48]);
+    dev_rev_in_place(&mut imported_pub[48..]);
     let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
     let req = create_peer_req(
         sid,
@@ -735,4 +737,12 @@ fn sd_create_peer_backup_zero_session_id_boundary() {
             "Inactive session ID zero must be rejected",
         );
     }
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_create_peer_backup_rejects_bad_masked_key_layout() {
+    let (ctx, req, _evidence) = valid_peer_backup_fixture();
+    assert_masked_key_layout_rejected(&ctx, &req);
 }

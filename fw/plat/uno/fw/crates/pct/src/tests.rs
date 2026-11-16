@@ -17,7 +17,11 @@ use core::task::Context;
 use core::task::Poll;
 use core::task::Waker;
 
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCqe;
+use tsra_fw_hsm_pal_traits::HsmCqeSession;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -32,6 +36,7 @@ use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 
 use super::ct_eq;
@@ -140,6 +145,10 @@ impl HsmIoTypes for FakePal {
     type Io = FakeIo;
 }
 
+impl HsmCryptoOrder for FakePal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+}
+
 impl HsmHash for FakePal {
     type HashCtx<'a> = ();
 
@@ -149,7 +158,7 @@ impl HsmHash for FakePal {
         _algo: HsmHashAlgo,
         data: &HsmDmaBuf,
         digest: &mut HsmDmaBuf,
-        _big_endian: bool,
+        _form: HsmDigestForm,
     ) -> HsmResult<()> {
         self.hash.run(&self.calls, data, digest)
     }
@@ -180,7 +189,7 @@ impl HsmHash for FakePal {
         _io: &Self::Io,
         _ctx: Self::HashCtx<'_>,
         _digest: &mut HsmDmaBuf,
-        _big_endian: bool,
+        _form: HsmDigestForm,
     ) -> HsmResult<()> {
         unimplemented!()
     }
@@ -534,16 +543,39 @@ impl HsmScopedAlloc for FakeAlloc {
 
 #[derive(Default)]
 struct FakeIo {
-    sqe: [u32; 16],
-    cqe: [u32; 4],
+    entry: FakeEntry,
+}
+
+#[derive(Default)]
+struct FakeEntry;
+
+impl HsmSqe for FakeEntry {
+    fn opcode(&self) -> u16 {
+        0
+    }
+    fn session_id(&self) -> Option<u16> {
+        None
+    }
+    fn session_ctrl(&self) -> HsmSessCtrl {
+        HsmSessCtrl::NoSession
+    }
+}
+
+impl HsmCqe for FakeEntry {
+    fn set_ok(&mut self, _dst_len: u32) {}
+    fn set_ok_ex(&mut self, _dst_len: u32, _sess: HsmCqeSession) {}
+    fn set_err(&mut self, _err: HsmError) {}
 }
 
 impl HsmIo for FakeIo {
-    fn sqe(&self) -> &HsmSqe {
-        &self.sqe
+    type Sqe = FakeEntry;
+    type Cqe = FakeEntry;
+
+    fn sqe(&self) -> &FakeEntry {
+        &self.entry
     }
-    fn cqe(&mut self) -> &mut HsmCqe {
-        &mut self.cqe
+    fn cqe(&mut self) -> &mut FakeEntry {
+        &mut self.entry
     }
 }
 
@@ -573,8 +605,8 @@ fn run_ecc(
     curve: HsmEccCurve,
     pct: &HsmEccPct,
 ) -> HsmResult<bool> {
-    let priv_key = key(curve.wire_coord_len());
-    let pub_key = key(curve.wire_pub_key_len());
+    let priv_key = key(curve.wire_coord_len(FakePal::BYTE_ORDER));
+    let pub_key = key(curve.wire_pub_key_len(FakePal::BYTE_ORDER));
     block_on(ecc_pct(
         pal,
         &FakeIo::default(),

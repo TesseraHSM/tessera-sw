@@ -23,6 +23,8 @@
 use core::ops::AsyncFnMut;
 
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
+use tsra_fw_hsm_byte_order as byte_order;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -349,44 +351,33 @@ impl ChainValidator {
         let digest_len = hash_algo.digest_len();
         let curve = verify_key.curve;
         let coord_len = curve.priv_key_len();
-        let hw_len = curve.wire_coord_len();
 
-        // Allocate DMA buffer for digest output.
+        // Hash the TBSCertificate (already in DMA memory) straight into the
+        // operand form `ecc_verify` expects.
         let digest_dma = alloc.dma_alloc(digest_len)?;
+        pal.hash(
+            io,
+            hash_algo,
+            curr.tbs_raw,
+            digest_dma,
+            HsmDigestForm::Operand,
+        )
+        .await?;
 
-        // Hash the TBSCertificate (already in DMA memory).  The digest is
-        // the natural big-endian SHA value the signer signed over; reverse it
-        // in place to the PKA-LE order the (now LE-native) `ecc_verify` expects,
-        // like the public key / signature components below.
-        pal.hash(io, hash_algo, curr.tbs_raw, digest_dma, true)
-            .await?;
-        digest_dma[..digest_len].reverse();
+        // X.509 carries the public key and signature as big-endian
+        // `x ‖ y` / `r ‖ s`; convert each pair in place to the operand
+        // layout `ecc_verify` expects.
+        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
+        let point = verify_key
+            .point
+            .get(..2 * coord_len)
+            .ok_or(HsmError::X509ParseError)?;
+        pk_dma[..2 * coord_len].copy_from_slice(point);
+        byte_order::pair_from_be(P::BYTE_ORDER, curve, pk_dma)?;
 
-        // `HsmEcc::ecc_verify` wants the public key and signature in the
-        // little-endian wire form: each component's magnitude in the first
-        // `coord_len` bytes of its `hw_len` slot (any padding — P-521 — at
-        // the slot tail).  X.509 carries both big-endian, so place each
-        // component in its slot and reverse it in place.
-        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len())?;
-        pk_dma.fill(0);
-        pk_dma[..coord_len].copy_from_slice(&verify_key.point[..coord_len]);
-        pk_dma[hw_len..hw_len + coord_len]
-            .copy_from_slice(&verify_key.point[coord_len..coord_len * 2]);
-        pk_dma[..coord_len].reverse();
-        pk_dma[hw_len..hw_len + coord_len].reverse();
-
-        // Decode the DER ECDSA signature (big-endian `r ‖ s`, contiguous)
-        // directly into the wire buffer, shift `s` to its slot when the
-        // slot is padded (P-521), then reverse each component in place.
-        let sig_dma = alloc.dma_alloc(curve.wire_sig_len())?;
-        sig_dma.fill(0);
+        let sig_dma = alloc.dma_alloc(curve.wire_sig_len(P::BYTE_ORDER))?;
         ecdsa::decode_ecdsa_sig(curr.signature, curve, sig_dma)?;
-        if hw_len != coord_len {
-            sig_dma.copy_within(coord_len..coord_len * 2, hw_len);
-            sig_dma[coord_len..hw_len].fill(0);
-        }
-        sig_dma[..coord_len].reverse();
-        sig_dma[hw_len..hw_len + coord_len].reverse();
+        byte_order::pair_from_be(P::BYTE_ORDER, curve, sig_dma)?;
 
         let result_dma = alloc.dma_alloc(4)?;
 

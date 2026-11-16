@@ -28,9 +28,9 @@
 //!    `commonName` holding the fixed PTA name (`"Tessera Integrated HSM
 //!    PTA"`), a separating space, and the hex-encoded **PTAID**
 //!    (`SHA-384("TSRA-PTAID-v1" || sec1_pub)[..16]`), padded with
-//!    trailing spaces.  The TBS is hashed (LE digest) and signed via
-//!    [`HsmEcc::ecc_sign`]; the resulting LE `(r, s)` are byte-
-//!    reversed to BE for DER encoding.
+//!    trailing spaces.  The TBS is hashed (operand-order digest) and signed
+//!    via [`HsmEcc::ecc_sign`]; the resulting operand-order `(r, s)` are
+//!    converted to BE for DER encoding.
 //!
 //! 5. **PTAReport build** — produces a COSE_Sign1 key-attestation
 //!    report signed by the per-partition identity key (PID).  Claims
@@ -67,6 +67,7 @@ use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
 use tsra_fw_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_fw_ddi_tbor_types::PTA_REPORT_MAX_LEN;
 use tsra_fw_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -88,7 +89,7 @@ use super::*;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// Length of a P-384 raw private scalar in bytes (LE on the PAL wire).
+/// Length of a P-384 raw private scalar in bytes (operand order on the PAL wire).
 const P384_PRIV_LEN: usize = 48;
 
 /// Length of a single P-384 coordinate (X or Y).
@@ -194,8 +195,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // PartPolicy is consumed transiently during PartRoot derivation
         // (above) and is never stored in the partition.
         let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
-        pal.hash(io, HsmHashAlgo::Sha384, policy_dma, policy_hash_dma, true)
-            .await?;
+        pal.hash(
+            io,
+            HsmHashAlgo::Sha384,
+            policy_dma,
+            policy_hash_dma,
+            HsmDigestForm::Standard,
+        )
+        .await?;
 
         // Stage the partition's vault keys (async; independent slots) so the
         // commit below is a single await-free, atomic block.  Their
@@ -281,7 +288,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
     })
 }
 
-/// Materialized PTA keypair: private scalar (LE) plus uncompressed
+/// Materialized PTA keypair: private scalar (operand order) plus uncompressed
 /// SEC1 public key (`0x04 || X || Y`).  All buffers live in the
 /// caller's scoped allocator.
 struct PtaKeypair<'a> {
@@ -399,14 +406,16 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     pub_sec1[0] = 0x04;
     let pub_xy = pub_sec1.split_at_mut(1).1;
     let _ = kdf::derive_pta_keypair(pal, io, alloc, root, Some((priv_scalar, pub_xy))).await?;
-    // `ecc_gen_keypair_from_root` returns each coordinate in PAL-LE
-    // wire form, but every downstream consumer here (CSR SPKI,
-    // PTAID hash, KeyReport `pk_x`/`pk_y`) expects standard SEC1
-    // big-endian. Reverse each coordinate in place so `pub_sec1`
-    // is canonical SEC1 (`0x04 || X_be || Y_be`).
-    let (x_le, y_le) = pub_xy.split_at_mut(P384_COORD_LEN);
-    x_le.reverse();
-    y_le.reverse();
+    // `ecc_gen_keypair_from_root` returns each coordinate in operand
+    // order, but every downstream consumer here (CSR SPKI, PTAID hash,
+    // KeyReport `pk_x`/`pk_y`) expects standard SEC1 big-endian.
+    // Convert in place so `pub_sec1` is canonical SEC1
+    // (`0x04 || X_be || Y_be`).
+    byte_order::pair_to_be(
+        P::BYTE_ORDER,
+        tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
+        pub_xy,
+    )?;
     Ok(PtaKeypair {
         priv_scalar,
         pub_sec1,
@@ -429,8 +438,14 @@ async fn build_signed_csr<'a, P: HsmPal>(
     ptaid_input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
     ptaid_input[PTAID_LABEL.len()..].copy_from_slice(pub_sec1);
     let ptaid_digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, ptaid_input, ptaid_digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        ptaid_input,
+        ptaid_digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
 
     let digest_bytes: &[u8] = ptaid_digest;
     let digest =
@@ -495,8 +510,14 @@ async fn build_pta_report<'a, P: HsmPal>(
     // (SHA-384, big-endian — the same digest persisted at commit and
     // surfaced later by the KeyReport command as the provisioned hash).
     let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, policy, policy_hash_dma, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        policy,
+        policy_hash_dma,
+        HsmDigestForm::Standard,
+    )
+    .await?;
 
     let params = KeyReportParams {
         key: AttestedPubKey::Ecc {
@@ -577,8 +598,14 @@ async fn build_report_data<'a, P: HsmPal>(
     }
 
     let report_data = alloc.dma_alloc_zeroed(REPORT_DATA_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, input, report_data, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        input,
+        report_data,
+        HsmDigestForm::Standard,
+    )
+    .await?;
     Ok(report_data)
 }
 
@@ -1033,8 +1060,8 @@ pub(crate) mod kdf {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let curve = HsmEccCurve::P384;
-        let priv_len = curve.wire_coord_len();
-        let pub_len = curve.wire_pub_key_len();
+        let priv_len = curve.wire_coord_len(P::BYTE_ORDER);
+        let pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
 
         if root.len() != PART_ROOT_LEN {
             return Err(HsmError::InvalidArg);

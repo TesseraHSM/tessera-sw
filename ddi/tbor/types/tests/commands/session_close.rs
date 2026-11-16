@@ -20,7 +20,6 @@
 //! Cross-test isolation comes from `open_dev`'s factory-reset; no
 //! per-test cleanup is required.
 
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
@@ -75,7 +74,7 @@ fn session_close_unknown_id() {
     let err = ctx
         .session_close(0xFFFF)
         .expect_err("close of unknown id must fail");
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 #[test]
@@ -92,7 +91,7 @@ fn session_close_double_close() {
     let err = ctx
         .session_close(session_id)
         .expect_err("second close against the same id must fail");
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 // ---------------------------------------------------------------------------

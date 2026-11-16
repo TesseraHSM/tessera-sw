@@ -39,6 +39,7 @@ use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -65,6 +66,7 @@ use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -132,13 +134,13 @@ pub(crate) fn sd_initialized_session() -> SdReady {
     }
 }
 
-/// Import the device's little-endian `x ‖ y` key-exchange public key as a
-/// host [`EccPublicKey`] (`from_hsm_bytes` parses big-endian coordinates,
-/// so each coordinate is reversed).
+/// Import the device's `x ‖ y` key-exchange public key (device byte order)
+/// as a host [`EccPublicKey`] (`from_hsm_bytes` parses big-endian
+/// coordinates).
 fn kex_pub_to_host(pub_le: &[u8]) -> EccPublicKey {
     let mut be = pub_le.to_vec();
-    be[..COORD_LEN].reverse();
-    be[COORD_LEN..].reverse();
+    dev_rev_in_place(&mut be[..COORD_LEN]);
+    dev_rev_in_place(&mut be[COORD_LEN..]);
     EccPublicKey::from_hsm_bytes(&be).expect("import kex public key")
 }
 
@@ -379,4 +381,13 @@ fn darc_tmk_import_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked key-exchange key and one without its
+/// padding entry; the decoder rejects before the OOB chain is read.
+#[test]
+fn darc_tmk_import_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let (req, _chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    assert_masked_key_layout_rejected(&ready.ctx, &req);
 }

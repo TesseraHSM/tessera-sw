@@ -1,0 +1,17 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Firmware core is byte-order neutral: convert between operand order and
+# big-endian through `tsra_fw_hsm_byte_order`, never with a raw reverse.
+# Clippy uses the nearest config, so this repeats the root settings.
+
+disallowed-methods = [
+  { path = "slice::reverse", reason = "use the tsra_fw_hsm_byte_order helpers" },
+]
+
+disallowed-types = [
+  { path = "std::sync::Mutex", reason = "use parking_lot::Mutex" },
+  { path = "std::sync::RwLock", reason = "use parking_lot::RwLock" },
+]
+
+check-private-items = true

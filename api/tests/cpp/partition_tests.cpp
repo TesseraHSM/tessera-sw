@@ -758,6 +758,10 @@ TEST(tsra_part, get_prop_manufacturer_cert_buffer_below_hint_succeeds)
 
 TEST(tsra_part, get_prop_backup_masking_key)
 {
+    if (!api_rev_at_most(1, 1))
+    {
+        GTEST_SKIP() << "legacy partition init is unsupported from API revision 2.0";
+    }
     auto part_list = PartitionListHandle();
 
     part_list.for_each_part([](std::vector<tsra_char> &path) {
@@ -779,6 +783,10 @@ TEST(tsra_part, get_prop_backup_masking_key)
 
 TEST(tsra_part, get_prop_masked_owner_backup_key)
 {
+    if (!api_rev_at_most(1, 1))
+    {
+        GTEST_SKIP() << "legacy partition init is unsupported from API revision 2.0";
+    }
     auto part_list = PartitionListHandle();
 
     part_list.for_each_part([](std::vector<tsra_char> &path) {
@@ -904,6 +912,13 @@ TEST(tsra_part, get_prop_all_supported_properties)
         for (const auto &test_prop : supported_props)
         {
             SCOPED_TRACE(test_prop.name);
+            // Only legacy init sets the backup keys.
+            if (!api_rev_at_most(1, 1) &&
+                (test_prop.id == TSRA_PART_PROP_ID_BACKUP_MASKING_KEY ||
+                 test_prop.id == TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY))
+            {
+                continue;
+            }
 
             // First call to get size
             tsra_part_prop prop = { test_prop.id, nullptr, 0 };
@@ -1116,6 +1131,10 @@ TEST(tsra_part, init_invalid_source_with_endorsement_fails)
 
 TEST(tsra_part, init_with_resiliency_config)
 {
+    if (!api_rev_at_most(1, 1))
+    {
+        GTEST_SKIP() << "legacy partition init is unsupported from API revision 2.0";
+    }
     auto part_list = PartitionListHandle();
 
     part_list.for_each_part([](std::vector<tsra_char> &path) {

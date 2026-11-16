@@ -18,6 +18,7 @@ use tsra_fw_ddi_tbor_types::TborHashReq;
 use tsra_fw_ddi_tbor_types::TborHashResp;
 use tsra_fw_ddi_tbor_types::HASH_DIGEST_MAX_LEN;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -71,7 +72,8 @@ pub(crate) async fn handle<P: HsmPal>(
             .finish()
             .len();
         let out = TborHashResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
-        pal.hash_finish(io, ctx, out.digest, true).await?;
+        pal.hash_finish(io, ctx, out.digest, HsmDigestForm::Standard)
+            .await?;
         Ok(len)
     })
     .await

@@ -60,6 +60,7 @@ pub struct TborSdCreateRemoteBackupReq {
     /// recover the sender's private ECDH key.  A fixed-length `[u8; N]`
     /// field (a `min_len == max_len` buffer): the array type is the host
     /// derive's exact-length form, mirroring the firmware `len = 280`.
+    #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Receiver key certificate-chain descriptors (spec `RcvrCertChain`).

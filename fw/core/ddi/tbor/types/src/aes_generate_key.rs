@@ -117,7 +117,7 @@ pub struct TborAesGenerateKeyResp<'a> {
     /// requested scope's masking key.  248 / 264 / 264 B for
     /// AES-128 / 192 / 256.  The key is not stored on the device; the
     /// caller passes this blob back to `AesEncryptDecrypt`.
-    #[tbor(buffer, max_len = 264, mutable)]
+    #[tbor(align = 4, buffer, max_len = 264, mutable)]
     pub masked_key: &'a [u8],
 }
 

@@ -54,11 +54,11 @@ available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain. |
-| 12 | `hash_algo` | `uint8` (inline) | HMAC hash variant (`HashAlgo` discriminant): `1` = SHA-256, `2` = SHA-384, `3` = SHA-512. |
-| 16 | `key_length` | `uint8` (inline) | Requested key length in bytes; must be in the variant's `[min, max]` range (see table above). |
-| 20 | `key_label` | `buffer` (≤ 128 B) | Caller-supplied key label recorded in the masked blob's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain. |
+| 16 | `hash_algo` | `uint8` (inline) | HMAC hash variant (`HashAlgo` discriminant): `1` = SHA-256, `2` = SHA-384, `3` = SHA-512. |
+| 20 | `key_length` | `uint8` (inline) | Requested key length in bytes; must be in the variant's `[min, max]` range (see table above). |
+| 24 | `key_label` | `buffer` (≤ 128 B) | Caller-supplied key label recorded in the masked blob's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
 
 ### Data section
 
@@ -71,7 +71,8 @@ key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_key` | `buffer` (260–356 B) | The generated HMAC key, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(key) ‖ tag(16)`. Not stored on-device. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (260–356 B) | The generated HMAC key, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(key) ‖ tag(16)`. Not stored on-device. |
 
 ### Data section
 

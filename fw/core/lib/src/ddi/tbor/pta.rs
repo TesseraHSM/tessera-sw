@@ -12,6 +12,7 @@ use tsra_fw_core_crypto_x509_chain::key_usage;
 use tsra_fw_core_crypto_x509_chain::CertInfo;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -82,7 +83,8 @@ async fn hash<'a, P: HsmPal>(
     input: &HsmDmaBuf,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let digest = alloc.dma_alloc(algorithm.digest_len())?;
-    pal.hash(io, algorithm, input, digest, true).await?;
+    pal.hash(io, algorithm, input, digest, HsmDigestForm::Standard)
+        .await?;
     Ok(digest)
 }
 
@@ -239,8 +241,14 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
 pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<HsmCertChainInfo> {
     let cert = pid_certificate(pal, io).await?;
     let digest = pal.dma_alloc(io, SHA256_DIGEST_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha256, cert, digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha256,
+        cert,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
     let thumbprint = *fixed_size::<SHA256_DIGEST_LEN>(digest)?;
     Ok(HsmCertChainInfo {
         count: 1,

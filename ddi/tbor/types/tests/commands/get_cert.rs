@@ -62,6 +62,10 @@ fn all_indices_round_trip() {
 #[test]
 fn matches_mbor_path() {
     let ctx = TestCtx::new();
+    if ctx.is_duo() {
+        // Duo has no MBOR channel.
+        return;
+    }
     let count = num_certs(&ctx);
 
     for cert_id in 0..count {
@@ -367,6 +371,10 @@ fn first_and_last_valid_indices_succeed() {
 #[test]
 fn mbor_tbor_interleaved_reads_remain_identical() {
     let ctx = TestCtx::new();
+    if ctx.is_duo() {
+        // Duo has no MBOR channel.
+        return;
+    }
 
     for cert_id in 0..num_certs(&ctx) {
         let tbor_before = ctx
