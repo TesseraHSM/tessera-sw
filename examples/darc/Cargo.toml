@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_darc_example"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "darc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { features = ["derive"], workspace = true }
+hex.workspace = true
+tsra_api.workspace = true
+tsra_sealing_api.workspace = true
+tsra_sealing_common.workspace = true
+
+[lints]
+workspace = true

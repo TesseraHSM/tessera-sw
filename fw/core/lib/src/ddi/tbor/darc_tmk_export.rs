@@ -1,88 +1,45 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Export a local DARC TMK to a DATA-authorized recipient using P-384 HPKE
-//! Base, then PID-sign an operation report over the exact encrypted envelope.
-//! No sender KEX key, caller-supplied report claims, or persistent writes.
+//! Export a local DARC TMK to a DATA-authorized recipient using HPKE Base
+//! (P-384, ML-KEM-1024 or MLKEM1024-P384), then PID-sign an operation report
+//! over the exact encrypted envelope.
+//!
+//! The recipient is authenticated like an SD remote-backup receiver: the
+//! target PID chain (P-384 or ML-DSA-87 leaf) must be anchored to the policy
+//! DATA, and the target key report must be signed by that PID and attest a
+//! device-generated DARC key-exchange key. No sender KEX key, caller-supplied
+//! report claims, or persistent writes.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
-use tsra_fw_core_crypto_key_report::report;
-use tsra_fw_core_crypto_key_report::transfer::p384_key_id;
-use tsra_fw_core_crypto_key_report::transfer::seal_transfer;
-use tsra_fw_core_crypto_key_report::transfer::transfer_envelope_hash;
-use tsra_fw_core_crypto_key_report::transfer::transfer_report_params;
-use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
-use tsra_fw_core_crypto_key_report::transfer::DARC_ENVELOPE_LEN;
-use tsra_fw_core_crypto_x509_chain::validate_chain;
-use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
+use tsra_fw_core_crypto_key_report::ReportKind;
+use tsra_fw_core_evidence::verify_receiver_cert_chain;
+use tsra_fw_core_evidence::verify_receiver_key_report;
+use tsra_fw_core_evidence::ATTESTED_KEY_MAX_LEN;
+use tsra_fw_core_evidence::SIGNER_KEY_MAX_LEN;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportResp;
-use tsra_fw_ddi_tbor_types::DARC_REPORT_MAX_LEN;
+use tsra_fw_ddi_tbor_types::DARC_REPORT_OOB_INDEX;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
-use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
-use tsra_fw_hsm_byte_order as byte_order;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
-use tsra_fw_hsm_pal_traits::HsmDmaBuf;
-use tsra_fw_hsm_pal_traits::HsmEccCurve;
-use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPartState;
-use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::*;
 
 use super::masking_key_id_for_scope;
 use super::part_final::verify_policy_hash;
+use super::sd_transfer;
 use super::validate_crypto_officer_active_session;
 use crate::part_state;
-
-const _: () = assert!(SEALED_TMK_LEN == DARC_ENVELOPE_LEN);
-const _: () = assert!(DARC_REPORT_MAX_LEN == tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN);
-
-async fn recover_target_pub<P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
-    req_buf: &HsmDmaBuf,
-    public: &mut HsmDmaBuf,
-) -> HsmResult<()> {
-    let req = TborDarcTmkExportReq::decode(req_buf)?;
-    verify_policy_hash(pal, io, req.policy(), alloc.dma_alloc(48)?).await?;
-    let policy = super::policy::from_bytes(req.policy())?;
-    let data = policy.data_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
-    let chain = req.target_cert_chain();
-    if chain.is_empty() || chain.len() > MAX_CERTS {
-        return Err(HsmError::InvalidArg);
-    }
-    let len = validate_chain(
-        pal,
-        io,
-        alloc,
-        chain,
-        Some(data),
-        &mut public[1..],
-        async |index, buf| pal.recv_oob(io, index, buf).await,
-    )
-    .await?;
-    // Only a P-384 leaf fills the `X ‖ Y` slot; shorter EC leaves are rejected.
-    if len != public.len() - 1 {
-        return Err(HsmError::InvalidArg);
-    }
-    public[0] = 4;
-    Ok(())
-}
 
 /// CO-only, SD-initialized, stateless export. IO teardown scrubs the TMK.
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     let tmk_mk_id = {
-        let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
+        let req = TborDarcTmkExportReq::decode(cmd.request())?;
         validate_crypto_officer_active_session(
             pal,
             io,
@@ -99,56 +56,61 @@ pub(crate) async fn handle<P: HsmPal>(
             peek_metadata(req.masked_tmk())?.usage_flags().scope(),
         )?
     };
-    let sealed = pal.dma_alloc(io, SEALED_TMK_LEN)?;
-    let signed_report = pal.dma_alloc(io, DARC_REPORT_MAX_LEN)?;
-    let report_len = pal
+    // Only the authorized recipient and the TMK outlive the request; the
+    // envelope is then sealed straight into its response slot.
+    let recipient = pal.dma_alloc(io, ATTESTED_KEY_MAX_LEN)?;
+    let blob = pal.dma_alloc(io, MASKED_TMK_LEN)?;
+    let recipient_len = pal
         .alloc_scoped_async(io, async |alloc| {
-            let recipient = alloc.dma_alloc(97)?;
-            recover_target_pub(pal, io, alloc, cmd_buf.request(), recipient).await?;
-
-            let blob = alloc.dma_alloc(MASKED_TMK_LEN)?;
-            blob.copy_from_slice(TborDarcTmkExportReq::decode(cmd_buf.request())?.masked_tmk());
-            let view = unmask(pal, io, pal.vault_key(io, tmk_mk_id)?, blob).await?;
-            if view.key_kind != HsmVaultKeyKind::DarcTmk {
-                return Err(HsmError::UnsupportedKeyType);
-            }
-            if view.target_key.len() != TMK_LEN {
-                return Err(HsmError::InvalidArg);
-            }
-
-            let pid_private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
-            let pid_public = alloc.dma_alloc(97)?;
-            pid_public[0] = 4;
-            pal.ecc_pub_from_priv(io, HsmEccCurve::P384, pid_private, &mut pid_public[1..])
-                .await?;
-            byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut pid_public[1..])?;
-            let ids = alloc.dma_alloc(96)?;
-            let (source_id, recipient_id) = ids.split_at_mut(48);
-            p384_key_id(pal, io, pid_public, source_id).await?;
-            p384_key_id(pal, io, recipient, recipient_id).await?;
-            let source_bytes: &[u8] = source_id;
-            let recipient_bytes: &[u8] = recipient_id;
-            let header = TransferHeader::Darc {
-                source_pid_key_id: source_bytes
-                    .try_into()
-                    .map_err(|_| HsmError::InternalError)?,
-                recipient_key_id: recipient_bytes
-                    .try_into()
-                    .map_err(|_| HsmError::InternalError)?,
-            };
-            seal_transfer(pal, io, &header, recipient, view.target_key, sealed, alloc).await?;
-            let digest = alloc.dma_alloc(48)?;
-            transfer_envelope_hash(pal, io, sealed, digest).await?;
-            let params = transfer_report_params(sealed, digest)?;
-            report(pal, io, &params, pid_private, Some(signed_report)).await
+            let req = TborDarcTmkExportReq::decode(cmd.request())?;
+            verify_policy_hash(pal, io, req.policy(), alloc.dma_alloc(48)?).await?;
+            let policy = super::policy::from_bytes(req.policy())?;
+            let data = policy.data_spki_thumbprint.ok_or(HsmError::InvalidArg)?;
+            let leaf = alloc.dma_alloc(SIGNER_KEY_MAX_LEN)?;
+            let len =
+                verify_receiver_cert_chain(pal, io, req.target_cert_chain(), data, leaf).await?;
+            let report = req.target_key_report();
+            let len =
+                verify_receiver_key_report(pal, io, &leaf[..len], report, true, recipient).await?;
+            blob.copy_from_slice(req.masked_tmk());
+            Ok::<_, HsmError>(len)
         })
         .await?;
-
-    cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkExportResp::encode(buf, 0, false)?
-            .sealed_tmk(sealed)?
-            .report(&signed_report[..report_len])?
-            .finish();
-        Ok(frame.as_bytes().len())
+    let recipient = &recipient[..recipient_len];
+    let view = unmask(pal, io, pal.vault_key(io, tmk_mk_id)?, blob).await?;
+    if view.key_kind != HsmVaultKeyKind::DarcTmk {
+        return Err(HsmError::UnsupportedKeyType);
+    }
+    if view.target_key.len() != TMK_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let (sealed_len, report_len) =
+        sd_transfer::transfer_lens(pal, io, ReportKind::Darc, recipient)?;
+    let report_len_wire = U16::new(u16::try_from(report_len).map_err(|_| HsmError::InternalError)?);
+    let len = cmd.encode_response(|buf| {
+        Ok(TborDarcTmkExportResp::encode(buf, 0, false)?
+            .sealed_tmk_reserve(sealed_len)?
+            .report_len(report_len_wire)?
+            .finish()
+            .as_bytes()
+            .len())
+    })?;
+    let out = TborDarcTmkExportResp::decode_mut(&mut cmd.buffer_mut()[..len])?;
+    pal.alloc_scoped_async(io, async |alloc| {
+        let report = sd_transfer::seal_signed(
+            pal,
+            io,
+            alloc,
+            None,
+            recipient,
+            view.target_key,
+            out.sealed_tmk,
+            report_len,
+        )
+        .await?;
+        pal.send_oob_bounded(io, DARC_REPORT_OOB_INDEX, report)
+            .await
     })
+    .await?;
+    Ok(len)
 }

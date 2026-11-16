@@ -273,7 +273,7 @@ pub fn seal_key_report_auth(
     HashAlgo::sha384()
         .hash(&data, Some(&mut digest))
         .map_err(|_| SessionExCryptoError::Crypto)?;
-    let aad = build_key_report_auth_aad(request.session_id, request.bank);
+    let aad = build_key_report_auth_aad(request.session_id);
     let iv =
         Rng::rand_vec(AeadAlg::AesGcm256.iv_len()).map_err(|_| SessionExCryptoError::Crypto)?;
     let mut envelope = vec![0u8; KEY_REPORT_AUTH_ENVELOPE_LEN];

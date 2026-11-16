@@ -323,6 +323,7 @@ fn import_tmk(
         .tbor(&TborDarcKexKeyGenReq {
             session_id,
             scope: common::KEY_SCOPE_LOCAL,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("DarcKexKeyGen");
     let mut recipient_be = kex.pub_key;
@@ -342,13 +343,18 @@ fn import_tmk(
         .iter()
         .map(|der| common::add_evidence_item(&mut evidence, der))
         .collect();
+    let report_item = common::add_evidence_item(&mut evidence, &report);
+    let report = ReportDescriptor {
+        index: report_item.index,
+        length: report_item.length,
+    };
     let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
     ctx.tbor_oob(
         &TborDarcTmkImportReq {
             session_id,
             masked_kex_key: kex.masked_key,
             policy: fixture.policy,
-            sealed_tmk,
+            sealed_tmk: sealed_tmk.to_vec(),
             report,
             remote_cert_chain,
         },

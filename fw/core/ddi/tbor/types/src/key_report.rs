@@ -8,18 +8,15 @@
 //! [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), unmasks it, derives
 //! the attested key's public component on-device, and returns a signed
 //! COSE_Sign1 key-attestation report over it. The report is signed by the
-//! partition-identity (PID) key of the requested bank: the P-384 PID key
-//! (ES384) or the ML-DSA-87 PID key (ML-DSA-87).
+//! partition-identity (PID) key of the policy `pta_alg`: the P-384 PID key
+//! (ES384) or the ML-DSA-87 PID key (ML-DSA-87), the same signer as the
+//! partition's transfer reports.
 //!
 //! Inputs:
 //!
 //! * `session_id` — TOC-carried session id; cross-checked against the
 //!   SQE-carried session id by the dispatcher (parity with the other
 //!   in-session commands).
-//! * `bank` — the PID signer: [`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
-//!   [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA), matching the `GetCert`
-//!   bank whose leaf verifies the report. A bank without a provisioned PID
-//!   key is an error; there is no fallback.
 //! * `masked_key` — the masked-key envelope to attest, as produced by a
 //!   masking command. Variable length (the plaintext size depends on the
 //!   key kind) up to [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
@@ -27,7 +24,7 @@
 //!   bound into the report payload (typically a freshness nonce or a
 //!   challenge digest).
 //! * `auth_envelope` — session-parameter-key authentication of the original
-//!   masked key and report data, its AAD binding the session and `bank`;
+//!   masked key and report data, its AAD binding the command and session;
 //!   mandatory for CU requests.
 //!
 //! Outputs:
@@ -35,7 +32,7 @@
 //! * Out-of-band item [`KEY_REPORT_OOB_INDEX`] — the tagged COSE_Sign1
 //!   key-attestation report, at most [`KEY_REPORT_MAX_LEN`] bytes. Its
 //!   protected header names the signing algorithm, which verifiers must
-//!   match against the requested bank.
+//!   match against the partition's PID leaf.
 //! * `report_len` — the number of report bytes written.
 
 use tsra_fw_ddi_tbor_api::tbor;
@@ -67,12 +64,11 @@ pub const KEY_REPORT_DATA_LEN: usize = 128;
 /// AEAD authentication envelope: 32 B AAD and a 48 B request digest.
 pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
 
-/// Bind request authentication to this command, session and signing bank.
-pub fn build_key_report_auth_aad(session_id: u16, bank: u8) -> [u8; 32] {
+/// Bind request authentication to this command and session.
+pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
     let mut aad = [0u8; 32];
-    aad[..13].copy_from_slice(b"key-report-v2");
+    aad[..13].copy_from_slice(b"key-report-v3");
     aad[13..15].copy_from_slice(&session_id.to_le_bytes());
-    aad[15] = bank;
     aad
 }
 
@@ -93,11 +89,6 @@ pub struct TborKeyReportReq<'a> {
     /// cross-checks it against the SQE-carried session id.
     #[tbor(session_id)]
     pub session_id: SessionId,
-
-    /// PID signer bank ([`CERT_BANK_ECC`](crate::CERT_BANK_ECC) or
-    /// [`CERT_BANK_MLDSA`](crate::CERT_BANK_MLDSA)).
-    #[tbor(U8)]
-    pub bank: u8,
 
     /// The masked-key envelope to attest. Variable length up to
     /// [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
@@ -139,8 +130,6 @@ mod tests {
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
-            .bank(crate::CERT_BANK_MLDSA)
-            .unwrap()
             .masked_key(&masked)
             .unwrap()
             .report_data(&report_data)
@@ -148,7 +137,6 @@ mod tests {
             .auth_envelope(&[])
             .unwrap()
             .finish();
-        assert_eq!(frame.bank(), crate::CERT_BANK_MLDSA);
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.report_data(), &report_data[..]);
     }

@@ -4,7 +4,8 @@
 //! Host-side wrapper for the TBOR `DarcKexKeyGen` command.
 //!
 //! `DarcKexKeyGen` is an **in-session** Crypto-Officer command that
-//! generates a new DARC key-exchange key (ECC-P384) and returns the
+//! generates a new DARC key-exchange key (P-384, ML-KEM-1024 or
+//! MLKEM1024-P384, selected by the request `kem`) and returns the
 //! **masked** private key plus its public key.  The private key is not
 //! stored on the device; the caller holds the masked blob and
 //! re-imports it (unmask-on-use) when the key is later needed.
@@ -17,6 +18,8 @@
 //! same byte as a raw `u8`.  The private key is masked under the masking
 //! key associated with the scope.
 
+use alloc::vec::Vec;
+
 use crate::tbor;
 
 /// TBOR opcode for `DarcKexKeyGen`.
@@ -26,10 +29,24 @@ pub const TBOR_OP_DARC_KEX_KEY_GEN: u8 = 0x20;
 /// point (`x ‖ y`, 48 + 48 bytes).
 pub const KEX_PUB_KEY_LEN: usize = 96;
 
-/// Wire length of the masked key-exchange private key: an AEAD-GCM-256
-/// masked-key envelope (`header(8) ‖ iv(16) ‖ aad(192) ‖ pt(48) ‖
-/// tag(16)`) over the 48-byte raw P-384 private scalar.
+/// Largest key-exchange public key (MLKEM1024-P384 `ek_PQ ‖ SEC1(ek_T)`).
+pub const KEX_PUB_KEY_MAX_LEN: usize = 1568 + 97;
+
+/// Wire length of the masked P-384 key-exchange private key: an
+/// AEAD-GCM-256 masked-key envelope (`header(8) ‖ iv(16) ‖ aad(192) ‖
+/// pt(48) ‖ tag(16)`) over the 48-byte raw P-384 private scalar.
 pub const MASKED_KEX_KEY_LEN: usize = 8 + 16 + 192 + 48 + 16;
+/// Smallest masked key-exchange private key (32-byte MLKEM1024-P384 seed).
+pub const MASKED_KEX_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
+/// Largest masked key-exchange private key (64-byte ML-KEM-1024 seed).
+pub const MASKED_KEX_KEY_MAX_LEN: usize = 8 + 16 + 192 + 64 + 16;
+
+/// Vault kind of a P-384 DARC key-exchange key in masked-key metadata.
+pub const KEY_KIND_DARC_KEX: u8 = 44;
+/// Vault kind of an ML-KEM-1024 DARC key-exchange key (64-byte seed).
+pub const KEY_KIND_DARC_KEX_MLKEM1024: u8 = 67;
+/// Vault kind of an MLKEM1024-P384 DARC key-exchange key (32-byte seed).
+pub const KEY_KIND_DARC_KEX_MLKEM1024_P384: u8 = 68;
 
 /// Host-facing TBOR `DarcKexKeyGen` request.
 #[tbor(opcode = TBOR_OP_DARC_KEX_KEY_GEN, session_ctrl = in_session)]
@@ -43,22 +60,25 @@ pub struct TborDarcKexKeyGenReq {
     /// Requested key scope (lifecycle / visibility domain) as the 1-byte
     /// `KeyScope` discriminant (mirror of the firmware `HsmKeyScope`).
     pub scope: u8,
+
+    /// Key-exchange KEM (`TRANSFER_KEM_*`); 0 is P-384.
+    pub kem: u8,
 }
 
 /// Host-facing TBOR `DarcKexKeyGen` response.
 #[tbor(response)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborDarcKexKeyGenResp {
-    /// The new key-exchange key's ECC-P384 private half, masked
-    /// (AEAD-GCM-256) under the requested scope's masking key.  Always
-    /// exactly [`MASKED_KEX_KEY_LEN`] (280 B); not stored on-device.
-    #[tbor(align = 4)]
-    pub masked_key: [u8; MASKED_KEX_KEY_LEN],
+    /// The new key-exchange key's private half, masked (AEAD-GCM-256)
+    /// under the requested scope's masking key; not stored on-device.
+    #[tbor(align = 4, min_len = 264, max_len = 296)]
+    pub masked_key: Vec<u8>,
 
-    /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// device byte order per coordinate) of the new key-exchange key.  Not a
-    /// SEC1 point encoding (no `0x04` prefix).
-    pub pub_key: [u8; KEX_PUB_KEY_LEN],
+    /// Public key: raw P-384 `x ‖ y` (96 bytes, device byte order per
+    /// coordinate, not SEC1), the ML-KEM-1024 encapsulation key, or the
+    /// hybrid `ek_PQ ‖ SEC1(ek_T)`.
+    #[tbor(min_len = 96, max_len = 1665)]
+    pub pub_key: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -73,6 +93,7 @@ mod tests {
             session_id: 9,
             // KeyScope::Local discriminant (0b011).
             scope: 0b011,
+            kem: crate::TRANSFER_KEM_MLKEM1024,
         };
 
         let mut buf = [0u8; 256];

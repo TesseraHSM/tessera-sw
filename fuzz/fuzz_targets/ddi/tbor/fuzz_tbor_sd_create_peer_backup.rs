@@ -239,13 +239,12 @@ fuzz_target!(|input: FuzzInput| {
             .tbor(&TborSdSealingKeyGenReq {
                 session_id: session.session_id,
                 scope: input.key_scope.to_tbor(),
-                kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+                kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
             })
             .expect("recipient SdSealingKeyGen should succeed");
         let report = ctx
             .key_report(&TborKeyReportReq {
                 session_id: session.session_id,
-                bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
                 masked_key: recipient.masked_key.to_vec(),
                 report_data: input.report_data,
                 auth_envelope: Vec::new(),
@@ -362,7 +361,7 @@ fuzz_target!(|input: FuzzInput| {
                     .tbor(&TborSdSealingKeyGenReq {
                         session_id: session.session_id,
                         scope: common::KeyScope::Local.to_tbor(),
-                        kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+                        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
                     })
                     .expect("wrong-kind envelope fixture should be valid")
                     .masked_key

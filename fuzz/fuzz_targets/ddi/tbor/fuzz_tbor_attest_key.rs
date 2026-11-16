@@ -441,7 +441,6 @@ fuzz_target!(|input: FuzzInput| {
         };
         let req = TborKeyReportReq {
             session_id: session.session_id,
-            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key,
             report_data: input.fuzzed_key_data.report_data,
             auth_envelope: Vec::new(),

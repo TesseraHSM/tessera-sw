@@ -7,9 +7,10 @@
 //! (e.g. the `masked_key` returned by `SdSealingKeyGen`), unmasks it,
 //! derives the attested key's public component on-device, and returns a
 //! signed COSE_Sign1 key-attestation report over it. The report is signed
-//! by the partition-identity (PID) key of the requested `bank`: ES384 for
-//! [`CERT_BANK_ECC`] or ML-DSA-87 for [`CERT_BANK_MLDSA`]. Verify it with the
-//! leaf of the same `GetCert` bank and check the protected-header alg.
+//! by the partition-identity (PID) key of the policy `pta_alg`: ES384 for a
+//! P-384 PTA or ML-DSA-87 for an ML-DSA-87 PTA. Verify it with the PID leaf
+//! of the matching `GetCert` bank ([`CERT_BANK_ECC`] or [`CERT_BANK_MLDSA`])
+//! and check the protected-header alg.
 //! The report is returned through out-of-band item [`KEY_REPORT_OOB_INDEX`].
 //!
 //! The request carries the masked-key envelope to attest plus a
@@ -45,12 +46,11 @@ pub const KEY_REPORT_DATA_LEN: usize = 128;
 /// AEAD authentication envelope: 32 B AAD and a 48 B request digest.
 pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
 
-/// Bind request authentication to this command, session and signing bank.
-pub fn build_key_report_auth_aad(session_id: u16, bank: u8) -> [u8; 32] {
+/// Bind request authentication to this command and session.
+pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
     let mut aad = [0u8; 32];
-    aad[..13].copy_from_slice(b"key-report-v2");
+    aad[..13].copy_from_slice(b"key-report-v3");
     aad[13..15].copy_from_slice(&session_id.to_le_bytes());
-    aad[15] = bank;
     aad
 }
 
@@ -69,9 +69,6 @@ pub struct TborKeyReportReq {
     /// SQE-carried session id by the dispatcher.
     #[tbor(session_id)]
     pub session_id: u16,
-
-    /// PID signer bank ([`CERT_BANK_ECC`] or [`CERT_BANK_MLDSA`]).
-    pub bank: u8,
 
     /// The masked-key envelope to attest. Variable length up to
     /// [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
@@ -107,7 +104,6 @@ mod tests {
         let req = TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: 9,
-            bank: crate::CERT_BANK_MLDSA,
             masked_key: alloc::vec![0xCD; 180],
             report_data: [0xAB; KEY_REPORT_DATA_LEN],
         };

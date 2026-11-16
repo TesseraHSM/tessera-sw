@@ -725,13 +725,12 @@ pub fn create_test_security_domain_with_policy(
         .tbor(&TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope: KEY_SCOPE_LOCAL,
-            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("local SD sealing-key generation should succeed");
     let report = ctx
         .key_report(&TborKeyReportReq {
             session_id: session.session_id,
-            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
@@ -803,7 +802,7 @@ pub fn exercise_non_partition_key_scope(
     let req = TborSdSealingKeyGenReq {
         session_id: session.session_id,
         scope: scope.to_tbor(),
-        kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     };
     match scope {
         KeyScope::SecurityDomain => {

@@ -76,8 +76,6 @@ async fn check_credential_guard() {
         .expect("encode")
         .session_id(0u16.into())
         .expect("session id")
-        .bank(0)
-        .expect("bank")
         .masked_key(&[])
         .expect("masked key")
         .report_data(&[0; KEY_REPORT_DATA_LEN])
@@ -422,6 +420,7 @@ async fn check_transfer_bindings() {
         TransferHeader::Darc {
             source_pid_key_id: source_id,
             recipient_key_id: recipient_id,
+            kem: tsra_fw_core_crypto_key_report::transfer::TransferKem::P384,
         },
         TransferHeader::SdBackup {
             source_pid_key_id: source_id,

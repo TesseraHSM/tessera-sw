@@ -39,8 +39,8 @@ use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
@@ -361,7 +361,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
 /// (SATA-leaf-signed receiver key report) restore the SD on device 2.
 #[test]
 fn sd_restore_remote_backup_pq_trusted_sa_roundtrip() {
-    for kem in [SD_SEALING_KEM_MLKEM1024, SD_SEALING_KEM_MLKEM1024_P384] {
+    for kem in [TRANSFER_KEM_MLKEM1024, TRANSFER_KEM_MLKEM1024_P384] {
         let sata = CaKey::generate();
         let sapota = CaKey::generate();
         let pota = CaKey::generate();
@@ -385,7 +385,7 @@ fn sd_create_remote_backup_rejects_receiver_key_report_wrong_signer() {
         &src,
         &sata,
         &sapota,
-        SD_SEALING_KEM_MLKEM1024,
+        TRANSFER_KEM_MLKEM1024,
         Some(&impostor),
     );
     src.ctx
@@ -403,8 +403,8 @@ fn sd_create_remote_backup_rejects_receiver_key_report_mismatch() {
 
     // Swap the trusted-SA evidence for a report over a different PQ key.
     let (_, evidence, req) =
-        pq_remote_request(&src, &sata, &sapota, SD_SEALING_KEM_MLKEM1024_P384, None);
-    let (_, other) = kem_sealing_key_and_report(&src.ctx, sid, SD_SEALING_KEM_MLKEM1024_P384);
+        pq_remote_request(&src, &sata, &sapota, TRANSFER_KEM_MLKEM1024_P384, None);
+    let (_, other) = kem_sealing_key_and_report(&src.ctx, sid, TRANSFER_KEM_MLKEM1024_P384);
     let swapped = evidence.with_report(&other);
     let mut mismatched = req.clone();
     mismatched.receiver_report = swapped.report;
@@ -413,7 +413,7 @@ fn sd_create_remote_backup_rejects_receiver_key_report_mismatch() {
 
     // Two receiver key reports are rejected at decode (`max_len = 1`).
     let (_, evidence, mut req) =
-        pq_remote_request(&src, &sata, &sapota, SD_SEALING_KEM_MLKEM1024, None);
+        pq_remote_request(&src, &sata, &sapota, TRANSFER_KEM_MLKEM1024, None);
     req.receiver_key_report.push(req.receiver_key_report[0]);
     src.ctx
         .expect_sd_reject(&req, &evidence.oob(), TborStatus::TborInvalidFixedLength);

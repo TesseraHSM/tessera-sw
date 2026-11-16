@@ -191,7 +191,7 @@ fn sealing_key_report_and_pub(
         .tbor(&TborSdSealingKeyGenReq {
             session_id,
             scope: key_scope.to_tbor(),
-            kem: SD_SEALING_KEM_P384,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     let masked_key = seal.masked_key;
@@ -199,7 +199,6 @@ fn sealing_key_report_and_pub(
     let report = ctx
         .key_report(&TborKeyReportReq {
             session_id,
-            bank: CERT_BANK_ECC,
             masked_key: masked_key.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),

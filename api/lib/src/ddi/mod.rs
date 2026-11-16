@@ -85,12 +85,16 @@ pub use tsra_ddi_tbor_types::DARC_WRAP_MASKED_KEY_MAX_LEN;
 pub use tsra_ddi_tbor_types::DARC_WRAP_WRAPPED_KEY_MAX_LEN;
 /// Maximum number of certificates in one SD-evidence certificate chain.
 pub use tsra_ddi_tbor_types::EVIDENCE_CHAIN_MAX_CERTS;
-/// Wire length of the DARC key-exchange public key (raw P-384 `x ‖ y`).
+/// Wire length of a P-384 DARC key-exchange public key (raw `x ‖ y`).
 pub use tsra_ddi_tbor_types::KEX_PUB_KEY_LEN;
+/// Maximum DARC key-exchange public key length (MLKEM1024-P384).
+pub use tsra_ddi_tbor_types::KEX_PUB_KEY_MAX_LEN;
 /// Size, in bytes, of the `part_final` `local_mk_backup` envelope.
 pub use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
-/// Wire length of the masked DARC key-exchange private key.
+/// Wire length of a masked P-384 DARC key-exchange private key.
 pub use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
+/// Maximum masked DARC key-exchange private key length (ML-KEM-1024).
+pub use tsra_ddi_tbor_types::MASKED_KEX_KEY_MAX_LEN;
 /// Exact length of the local (masked) security-domain backup.
 pub use tsra_ddi_tbor_types::MASKED_SD_LEN;
 /// Wire length of the masked DARC TMK envelope.
@@ -126,8 +130,10 @@ pub use tsra_ddi_tbor_types::PolicyThumbprint;
 pub use tsra_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
 /// Exact length of the security-domain masking-key backup envelope.
 pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-/// Wire length of a sealed DARC TMK.
+/// Wire length of a P-384 sealed DARC TMK.
 pub use tsra_ddi_tbor_types::SEALED_TMK_LEN;
+/// Maximum sealed DARC TMK length (MLKEM1024-P384).
+pub use tsra_ddi_tbor_types::SEALED_TMK_MAX_LEN;
 use tsra_ddi_tbor_types::TborStatus;
 pub(crate) use wire_order::*;
 

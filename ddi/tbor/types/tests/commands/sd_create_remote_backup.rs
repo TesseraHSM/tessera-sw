@@ -71,7 +71,6 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
-use tsra_ddi_tbor_types::CERT_BANK_ECC;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
@@ -246,7 +245,7 @@ pub(crate) fn masked_key_report_and_pub(
         .tbor(&TborSdSealingKeyGenReq {
             session_id,
             scope: SCOPE_LOCAL,
-            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     let masked = seal.masked_key.clone();
@@ -260,7 +259,6 @@ pub(crate) fn masked_key_report_and_pub(
     let report = ctx
         .key_report(&TborKeyReportReq {
             session_id,
-            bank: CERT_BANK_ECC,
             auth_envelope: Vec::new(),
             masked_key: masked.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
@@ -323,7 +321,6 @@ pub(crate) fn kem_sealing_key_and_report(
     let report = ctx
         .key_report(&TborKeyReportReq {
             session_id,
-            bank: CERT_BANK_ECC,
             auth_envelope: Vec::new(),
             masked_key: seal.masked_key.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
@@ -368,6 +365,7 @@ sd_report_len! {
     tsra_ddi_tbor_types::TborSdCreateRemoteBackupResp => |r: &tsra_ddi_tbor_types::TborSdCreateRemoteBackupResp| usize::from(r.report_len.get()),
     tsra_ddi_tbor_types::TborSdCreatePeerBackupResp => |r: &tsra_ddi_tbor_types::TborSdCreatePeerBackupResp| usize::from(r.report_len.get()),
     tsra_ddi_tbor_types::TborSdResealRemoteBackupResp => |r: &tsra_ddi_tbor_types::TborSdResealRemoteBackupResp| usize::from(r.report_len.get()),
+    tsra_ddi_tbor_types::TborDarcTmkExportResp => |r: &tsra_ddi_tbor_types::TborDarcTmkExportResp| usize::from(r.report_len.get()),
     tsra_ddi_tbor_types::TborSdRestoreRemoteBackupResp => |_: &_| 0,
     tsra_ddi_tbor_types::TborSdRestorePeerBackupResp => |_: &_| 0,
     tsra_ddi_tbor_types::TborSdRestoreLocalBackupResp => |_: &_| 0,
@@ -637,6 +635,7 @@ fn sd_create_remote_backup_roundtrip() {
     ctx.tbor(&TborDarcKexKeyGenReq {
         session_id: session.session_id,
         scope: SCOPE_LOCAL,
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     })
     .expect("DarcKexKeyGen must remain available after SD provisioning");
 

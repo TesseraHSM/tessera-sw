@@ -4,8 +4,8 @@
 //! Canonical transfer envelopes and their operation-report bindings.
 //!
 //! The recipient KEM ([`TransferKem`]) is named by the header's HPKE suite
-//! identifiers: DARC envelopes are always P-384; SD backup envelopes may
-//! also use ML-KEM-1024 (HPKE-13) or MLKEM1024-P384 (HPKE-10). Reports are
+//! identifiers: P-384, ML-KEM-1024 (HPKE-13) or MLKEM1024-P384 (HPKE-10),
+//! for both DARC and SD backup envelopes. Reports are
 //! separate from envelopes. The header is used verbatim as both
 //! HPKE Base `info` and AEAD AAD. Identifiers and envelope hashes use
 //! domain-separated SHA-384. Signer and recipient authorization remains the
@@ -153,12 +153,19 @@ impl TransferKem {
 pub const DARC_HEADER_LEN: usize = POLICY_OFFSET;
 /// Canonical security-domain header size, including its required policy hash.
 pub const SD_BACKUP_HEADER_LEN: usize = POLICY_OFFSET + TRANSFER_HASH_LEN;
-/// Encrypted DARC TMK envelope size, excluding its operation report.
-pub const DARC_ENVELOPE_LEN: usize = DARC_HEADER_LEN + P384_PUBLIC_LEN + 32 + 16;
+/// Encrypted P-384 DARC TMK envelope size, excluding its operation report.
+pub const DARC_ENVELOPE_LEN: usize = darc_envelope_len(TransferKem::P384);
+/// Largest encrypted DARC TMK envelope size (MLKEM1024-P384).
+pub const DARC_ENVELOPE_MAX_LEN: usize = darc_envelope_len(TransferKem::MlKem1024P384);
 /// Encrypted P-384 BKS3 envelope size, excluding its operation report.
 pub const SD_BACKUP_ENVELOPE_LEN: usize = sd_backup_envelope_len(TransferKem::P384);
 /// Largest encrypted BKS3 envelope size (MLKEM1024-P384).
 pub const SD_BACKUP_ENVELOPE_MAX_LEN: usize = sd_backup_envelope_len(TransferKem::MlKem1024P384);
+
+/// Encrypted DARC TMK envelope size for `kem`, excluding its operation report.
+pub const fn darc_envelope_len(kem: TransferKem) -> usize {
+    DARC_HEADER_LEN + kem.public_key_len() + 32 + 16
+}
 
 /// Encrypted BKS3 envelope size for `kem`, excluding its operation report.
 pub const fn sd_backup_envelope_len(kem: TransferKem) -> usize {
@@ -172,8 +179,10 @@ pub enum TransferHeader<'a> {
     Darc {
         /// Identifier of the exporting PID public key.
         source_pid_key_id: &'a [u8; TRANSFER_HASH_LEN],
-        /// Identifier of the recipient P-384 public key.
+        /// Identifier of the recipient public key.
         recipient_key_id: &'a [u8; TRANSFER_HASH_LEN],
+        /// Recipient KEM.
+        kem: TransferKem,
     },
     /// Transfer of a 48-byte BKS3, including resealing.
     SdBackup {
@@ -205,11 +214,10 @@ impl TransferHeader<'_> {
         }
     }
 
-    /// Recipient KEM; DARC transfers are always P-384.
+    /// Recipient KEM.
     pub fn kem(&self) -> TransferKem {
         match self {
-            Self::Darc { .. } => TransferKem::P384,
-            Self::SdBackup { kem, .. } => *kem,
+            Self::Darc { kem, .. } | Self::SdBackup { kem, .. } => *kem,
         }
     }
 
@@ -310,9 +318,10 @@ pub fn parse_transfer_envelope(envelope: &[u8]) -> HsmResult<TransferEnvelopeVie
         .try_into()
         .map_err(|_| HsmError::InvalidArg)?;
     let header = match prefix[MAGIC.len() + 1] {
-        1 if kem == TransferKem::P384 => TransferHeader::Darc {
+        1 => TransferHeader::Darc {
             source_pid_key_id: source,
             recipient_key_id: recipient,
+            kem,
         },
         2 => TransferHeader::SdBackup {
             source_pid_key_id: source,

@@ -1,15 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-owned DARC export request and encrypted-envelope/report response.
+//! Host-owned DARC export request and encrypted-envelope response; the
+//! PID-signed report is written to out-of-band item
+//! [`DARC_REPORT_OOB_INDEX`](crate::DARC_REPORT_OOB_INDEX).
 
 use alloc::vec::Vec;
 
-use crate::darc_tmk_import::DARC_REPORT_MAX_LEN;
 use crate::darc_tmk_import::MASKED_TMK_LEN;
-use crate::darc_tmk_import::SEALED_TMK_LEN;
 use crate::tbor;
+use crate::tbor_int::U16;
 use crate::CertDescriptor;
+use crate::ReportDescriptor;
 
 /// TBOR opcode for `DarcTmkExport`.
 pub const TBOR_OP_DARC_TMK_EXPORT: u8 = 0x24;
@@ -24,33 +26,37 @@ pub struct TborDarcTmkExportReq {
     /// Local masked TMK, not a caller-supplied plaintext or report claim.
     #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
-    /// Bound policy whose DATA key authorizes the target KEX certificate.
+    /// Bound policy whose DATA key authorizes the target PID chain.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
-    /// Target chain descriptors for 1..=2 out-of-band certificates.
-    #[tbor(min_len = 3, max_len = 6)]
+    /// DATA-anchored target PID chain descriptors (1..=3 out-of-band
+    /// certificates, normally DATA -> PTA -> PID).
+    #[tbor(min_len = 3, max_len = 9)]
     pub target_cert_chain: Vec<CertDescriptor>,
+    /// Descriptor of the out-of-band key report, signed by the target PID,
+    /// attesting the device-generated DARC KEX recipient key.
+    pub target_key_report: ReportDescriptor,
 }
 
-/// Canonical encrypted TMK and separate PID-signed operation report.
+/// Canonical encrypted TMK; the PID-signed operation report is out of band.
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborDarcTmkExportResp {
-    /// `header(113) || enc(97) || ciphertext(32) || tag(16)`.
-    pub sealed_tmk: [u8; SEALED_TMK_LEN],
-    /// Version-3 `Darc` report binding this envelope and its recipient.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
+    /// `header(113) || enc || ciphertext(32) || tag(16)`; `enc` is 97, 1568
+    /// or 1665 bytes for a P-384, ML-KEM-1024 or MLKEM1024-P384 recipient.
+    #[tbor(align = 4, min_len = 258, max_len = 1826)]
+    pub sealed_tmk: Vec<u8>,
+    /// Bytes of the version-3 `Darc` report, binding this envelope and its
+    /// recipient, written to out-of-band item
+    /// [`DARC_REPORT_OOB_INDEX`](crate::DARC_REPORT_OOB_INDEX).
+    pub report_len: U16,
 }
-
-const _: () = assert!(DARC_REPORT_MAX_LEN == 896);
 
 #[cfg(test)]
 mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
-    use crate::tbor_int::U16;
 
     #[test]
     fn request_encodes_all_fields() {
@@ -62,6 +68,10 @@ mod tests {
                 index: 0,
                 length: U16::new(32)
             }],
+            target_key_report: ReportDescriptor {
+                index: 1,
+                length: U16::new(4700),
+            },
         };
         let mut buf = [0; 2048];
         assert!(

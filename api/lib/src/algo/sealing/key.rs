@@ -43,8 +43,8 @@ impl HsmSealingKey {
     /// `Sealing`-kind secret key permitted for derivation only, whose bit
     /// length selects the KEM (384: P-384, 1024: ML-KEM-1024, 1408:
     /// MLKEM1024-P384).
-    fn validate_props(props: &HsmKeyProps) -> HsmResult<ddi::SealingKem> {
-        let kem = ddi::SealingKem::from_bits(props.bits()).ok_or(HsmError::InvalidKeyProps)?;
+    fn validate_props(props: &HsmKeyProps) -> HsmResult<HsmTransferKem> {
+        let kem = HsmTransferKem::from_bits(props.bits()).ok_or(HsmError::InvalidKeyProps)?;
         if props.class() != HsmKeyClass::Secret
             || !Self::check_key_kind(props)
             || !Self::check_key_usage(props)

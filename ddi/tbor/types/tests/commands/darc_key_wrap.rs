@@ -50,9 +50,11 @@ use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::darc_tmk_export::build_valid_export;
+use crate::commands::darc_tmk_export::export;
 use crate::commands::darc_tmk_export::gen_masked_tmk;
 use crate::commands::darc_tmk_export::mint_kex;
 use crate::commands::darc_tmk_export::reimport;
@@ -271,18 +273,13 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
     // export (DATA-anchored target chain), then import (POTA-anchored
     // source PID chain). Import re-masks the *same* 32-byte TMK under the
     // SDMK, so a key wrapped under the generated TMK unwraps under it.
-    let target_kex = mint_kex(&ready);
-    let (export_req, export_chain) =
-        build_valid_export(&ready, &ready.data, &target_kex.pub_raw, masked_tmk);
-    let export = ready
-        .ctx
-        .tbor_oob(&export_req, &export_chain.der_items())
-        .expect("DarcTmkExport");
+    let target_kex = mint_kex(&ready, TRANSFER_KEM_P384);
+    let export = export(&ready, &build_valid_export(&ready, &target_kex, masked_tmk));
     let imported_tmk = reimport(
         &ready,
-        target_kex.masked,
-        export.sealed_tmk.as_slice().try_into().expect("sealed TMK"),
-        export.report,
+        &target_kex.masked,
+        export.resp.sealed_tmk,
+        &export.report,
     );
     let imported_tmk = tmk_array(&imported_tmk);
 
@@ -353,10 +350,10 @@ fn darc_key_wrap_rejects_wrong_masked_key_kind() {
     // Feed a masked TMK where the masked EC key is expected: it unmasks
     // fine but its kind is `DarcTmk`, not an EC private key.
     let ready = sd_initialized_session();
-    let (import_req, chain) = build_valid_import(&ready, &ready.pota, &TMK);
+    let (import_req, items) = build_valid_import(&ready, &ready.pota, &TMK);
     let tmk_resp = ready
         .ctx
-        .tbor_oob(&import_req, &chain.der_items())
+        .tbor_oob(&import_req, &items.oob())
         .expect("DarcTmkImport");
     let masked_tmk = tmk_array(&tmk_resp.masked_tmk);
 

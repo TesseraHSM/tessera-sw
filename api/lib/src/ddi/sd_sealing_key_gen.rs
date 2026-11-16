@@ -57,19 +57,7 @@ const SEALING_MASK_OVERHEAD: usize = aead_envelope::HEADER_LEN
 const _: () = assert!(MASKED_SEALING_KEY_LEN == SEALING_MASK_OVERHEAD + 48);
 const _: () = assert!(MASKED_SEALING_KEY_MAX_LEN == SEALING_MASK_OVERHEAD + 64);
 
-/// Security-domain sealing-key KEM, selected by the sealing key props'
-/// bit length.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SealingKem {
-    /// DHKEM(P-384, HKDF-SHA384); 384 bits.
-    P384,
-    /// ML-KEM-1024 (HPKE-13); 1024 bits.
-    MlKem1024,
-    /// MLKEM1024-P384 hybrid (HPKE-10); 1408 (1024 + 384) bits.
-    MlKem1024P384,
-}
-
-impl SealingKem {
+impl HsmTransferKem {
     /// Maps a sealing key props bit length to its KEM.
     pub(crate) fn from_bits(bits: u32) -> Option<Self> {
         match bits {
@@ -80,16 +68,16 @@ impl SealingKem {
         }
     }
 
-    /// The `SdSealingKeyGen` `kem` discriminant.
-    fn wire(self) -> u8 {
+    /// The TBOR `TransferKemId` discriminant.
+    pub(crate) fn wire(self) -> u8 {
         match self {
-            Self::P384 => SD_SEALING_KEM_P384,
-            Self::MlKem1024 => SD_SEALING_KEM_MLKEM1024,
-            Self::MlKem1024P384 => SD_SEALING_KEM_MLKEM1024_P384,
+            Self::P384 => TRANSFER_KEM_P384,
+            Self::MlKem1024 => TRANSFER_KEM_MLKEM1024,
+            Self::MlKem1024P384 => TRANSFER_KEM_MLKEM1024_P384,
         }
     }
 
-    /// Length of the private seed carried in the masked blob.
+    /// Length of the private seed carried in a masked recipient key.
     fn seed_len(self) -> usize {
         match self {
             Self::P384 => 48,
@@ -98,26 +86,30 @@ impl SealingKem {
         }
     }
 
+    /// Length of a masked recipient (SD sealing or DARC KEX) key.
+    pub(crate) fn masked_key_len(self) -> usize {
+        SEALING_MASK_OVERHEAD + self.seed_len()
+    }
+
     /// Length of the returned public key.
-    fn pub_key_len(self) -> usize {
+    pub(crate) fn pub_key_len(self) -> usize {
         match self {
             Self::P384 => SD_SEALING_PUB_KEY_LEN,
             Self::MlKem1024 => SD_SEALING_MLKEM1024_PUB_KEY_LEN,
             Self::MlKem1024P384 => SD_SEALING_MLKEM1024_P384_PUB_KEY_LEN,
         }
     }
+
+    /// All supported KEMs.
+    pub(crate) const ALL: [Self; 3] = [Self::P384, Self::MlKem1024, Self::MlKem1024P384];
 }
 
 /// Checks that `masked` has the length of a masked sealing key of some
 /// supported KEM and returns it as an owned wire field.
 pub(crate) fn masked_sealing_key_wire(masked: &[u8]) -> HsmResult<Vec<u8>> {
-    let valid = [
-        SealingKem::P384,
-        SealingKem::MlKem1024,
-        SealingKem::MlKem1024P384,
-    ]
-    .iter()
-    .any(|kem| masked.len() == SEALING_MASK_OVERHEAD + kem.seed_len());
+    let valid = HsmTransferKem::ALL
+        .iter()
+        .any(|kem| masked.len() == kem.masked_key_len());
     if !valid {
         return Err(HsmError::InvalidArgument);
     }
@@ -152,8 +144,8 @@ const _: () = assert!(POK_REMOTE_BACKUP_MAX_LEN == POK_REMOTE_BACKUP_LEN - 97 + 
 /// well-formed IV16 AES-256-GCM masked-key envelope of the expected shape
 /// for `kem`: valid header/magic, the masked-key profile, and the 192-byte
 /// metadata AAD.
-fn validate_masked_sealing_key(kem: SealingKem, masked_key: &[u8]) -> HsmResult<()> {
-    if masked_key.len() != SEALING_MASK_OVERHEAD + kem.seed_len() {
+pub(crate) fn validate_masked_sealing_key(kem: HsmTransferKem, masked_key: &[u8]) -> HsmResult<()> {
+    if masked_key.len() != kem.masked_key_len() {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let env = aead_envelope::inspect(masked_key).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
@@ -207,7 +199,7 @@ fn sealing_pub_key_to_der(order: WireOrder, pub_key: &[u8]) -> HsmResult<Vec<u8>
 pub(crate) fn sd_sealing_key_gen(
     session: &HsmSession,
     scope: u8,
-    kem: SealingKem,
+    kem: HsmTransferKem,
 ) -> HsmResult<(Vec<u8>, Option<Vec<u8>>)> {
     let req = TborSdSealingKeyGenReq {
         session_id: session.ex_session_id()?,
@@ -228,11 +220,11 @@ pub(crate) fn sd_sealing_key_gen(
         return Err(HsmError::InternalError);
     }
     let pub_key_der = match kem {
-        SealingKem::P384 => Some(sealing_pub_key_to_der(
+        HsmTransferKem::P384 => Some(sealing_pub_key_to_der(
             WireOrder::of(session),
             &resp.pub_key,
         )?),
-        SealingKem::MlKem1024 | SealingKem::MlKem1024P384 => None,
+        HsmTransferKem::MlKem1024 | HsmTransferKem::MlKem1024P384 => None,
     };
     Ok((resp.masked_key, pub_key_der))
 }
@@ -288,7 +280,6 @@ pub(crate) fn masked_key_report(
 
     let mut req = TborKeyReportReq {
         session_id: session.ex_session_id()?,
-        bank: CERT_BANK_ECC,
         masked_key: masked_key.to_vec(),
         report_data: report_data_arr,
         auth_envelope: Vec::new(),
@@ -323,12 +314,12 @@ mod tests {
     /// Builds a masked-key blob with the given AEAD header fields
     /// over a sealed, version-1 sealing-key envelope.
     fn masked_key_with_header(magic: [u8; 4], alg: u8, aad_len: u16) -> Vec<u8> {
-        masked_kem_key_with_header(SealingKem::P384, magic, alg, aad_len)
+        masked_kem_key_with_header(HsmTransferKem::P384, magic, alg, aad_len)
     }
 
     /// As [`masked_key_with_header`] for a sealing key of `kem`.
     fn masked_kem_key_with_header(
-        kem: SealingKem,
+        kem: HsmTransferKem,
         magic: [u8; 4],
         alg: u8,
         aad_len: u16,
@@ -338,9 +329,9 @@ mod tests {
         metadata[..4].copy_from_slice(b"MKEY");
         metadata[4..6].copy_from_slice(&1u16.to_le_bytes());
         metadata[6] = match kem {
-            SealingKem::P384 => KEY_KIND_SD_SEALING,
-            SealingKem::MlKem1024 => KEY_KIND_SD_SEALING_MLKEM1024,
-            SealingKem::MlKem1024P384 => KEY_KIND_SD_SEALING_MLKEM1024_P384,
+            HsmTransferKem::P384 => KEY_KIND_SD_SEALING,
+            HsmTransferKem::MlKem1024 => KEY_KIND_SD_SEALING_MLKEM1024,
+            HsmTransferKem::MlKem1024P384 => KEY_KIND_SD_SEALING_MLKEM1024_P384,
         };
         // Metadata carries packed vault flags, not request KeyUsage bits.
         let usage = (1u64 << 16) | (3u64 << 17);
@@ -368,7 +359,7 @@ mod tests {
     #[test]
     fn validate_accepts_iv16_sealing_key_with_v1_metadata() {
         let blob = masked_key_with_header(*b"AEAD", ALG_AES_GCM_256, SEALING_META_LEN as u16);
-        assert!(validate_masked_sealing_key(SealingKem::P384, &blob).is_ok());
+        assert!(validate_masked_sealing_key(HsmTransferKem::P384, &blob).is_ok());
         let props = HsmMaskedKey::to_key_props(&blob).expect("parse version-1 sealing key");
         assert_eq!(props.kind(), HsmKeyKind::Sealing);
         assert_eq!(props.bits(), 384);
@@ -380,21 +371,21 @@ mod tests {
     #[test]
     fn validate_accepts_pq_sealing_keys() {
         for (kem, bits) in [
-            (SealingKem::MlKem1024, 1024),
-            (SealingKem::MlKem1024P384, 1408),
+            (HsmTransferKem::MlKem1024, 1024),
+            (HsmTransferKem::MlKem1024P384, 1408),
         ] {
             let blob =
                 masked_kem_key_with_header(kem, *b"AEAD", ALG_AES_GCM_256, SEALING_META_LEN as u16);
             assert!(validate_masked_sealing_key(kem, &blob).is_ok());
             assert_eq!(
-                validate_masked_sealing_key(SealingKem::P384, &blob),
+                validate_masked_sealing_key(HsmTransferKem::P384, &blob),
                 Err(HsmError::MaskedKeyDecodeFailed),
             );
             assert!(masked_sealing_key_wire(&blob).is_ok());
             let props = HsmMaskedKey::to_key_props(&blob).expect("parse PQ sealing key");
             assert_eq!(props.kind(), HsmKeyKind::Sealing);
             assert_eq!(props.bits(), bits);
-            assert_eq!(SealingKem::from_bits(bits), Some(kem));
+            assert_eq!(HsmTransferKem::from_bits(bits), Some(kem));
         }
         assert!(masked_sealing_key_wire(&[0u8; MASKED_SEALING_KEY_LEN + 1]).is_err());
     }
@@ -413,7 +404,7 @@ mod tests {
     fn validate_rejects_removed_iv16_algorithm() {
         let blob = masked_key_with_header(*b"AEAD", 0x04, SEALING_META_LEN as u16);
         assert_eq!(
-            validate_masked_sealing_key(SealingKem::P384, &blob),
+            validate_masked_sealing_key(HsmTransferKem::P384, &blob),
             Err(HsmError::MaskedKeyDecodeFailed),
         );
     }
@@ -422,7 +413,7 @@ mod tests {
     fn validate_rejects_bad_magic() {
         let blob = masked_key_with_header(*b"XXXX", ALG_AES_GCM_256, SEALING_META_LEN as u16);
         assert_eq!(
-            validate_masked_sealing_key(SealingKem::P384, &blob),
+            validate_masked_sealing_key(HsmTransferKem::P384, &blob),
             Err(HsmError::MaskedKeyDecodeFailed),
         );
     }
@@ -431,7 +422,7 @@ mod tests {
     fn validate_rejects_unsupported_alg() {
         let blob = masked_key_with_header(*b"AEAD", 0xFF, SEALING_META_LEN as u16);
         assert_eq!(
-            validate_masked_sealing_key(SealingKem::P384, &blob),
+            validate_masked_sealing_key(HsmTransferKem::P384, &blob),
             Err(HsmError::MaskedKeyDecodeFailed),
         );
     }
@@ -442,7 +433,7 @@ mod tests {
         // metadata size, so it must be rejected.
         let blob = masked_key_with_header(*b"AEAD", ALG_AES_GCM_256, 32);
         assert_eq!(
-            validate_masked_sealing_key(SealingKem::P384, &blob),
+            validate_masked_sealing_key(HsmTransferKem::P384, &blob),
             Err(HsmError::MaskedKeyDecodeFailed),
         );
     }

@@ -71,7 +71,9 @@ pub struct KeyFlags {
     pub can_derive: bool,
     /// HSM-generated SD sealing key.
     pub is_sd_sealing: bool,
-    #[bits(21)]
+    /// HSM-generated DARC key-exchange key.
+    pub is_darc_kex: bool,
+    #[bits(20)]
     _reserved: u32,
 }
 

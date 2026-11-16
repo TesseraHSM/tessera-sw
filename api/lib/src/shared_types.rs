@@ -39,11 +39,23 @@ pub struct HsmPartFinalExResult {
     pub local_mk_backup: Vec<u8>,
 }
 
+/// HPKE KEM of a key-transfer recipient key (security-domain sealing key or
+/// DARC key-exchange key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HsmTransferKem {
+    /// DHKEM(P-384, HKDF-SHA384).
+    P384,
+    /// ML-KEM-1024 (HPKE-13).
+    MlKem1024,
+    /// MLKEM1024-P384 hybrid (HPKE-10).
+    MlKem1024P384,
+}
+
 /// Result of `darc_tmk_export`: an encrypted TMK and its PID-signed report.
 /// Both artifacts must be retained and supplied together to the recipient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HsmDarcTmkExportResult {
-    /// Canonical P-384 HPKE Base envelope, excluding its report.
+    /// Canonical HPKE Base envelope, excluding its report.
     pub sealed_tmk: Vec<u8>,
     /// Version-3 `Darc` report binding the exporter, recipient, and envelope.
     pub report: Vec<u8>,

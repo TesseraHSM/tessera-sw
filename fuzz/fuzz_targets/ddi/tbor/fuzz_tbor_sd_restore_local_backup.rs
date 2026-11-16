@@ -105,7 +105,7 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
         .tbor(&TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope: key_scope.to_tbor(),
-            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
     let receiver_pub = raw_pub_from_wire(&sealing_key.pub_key);

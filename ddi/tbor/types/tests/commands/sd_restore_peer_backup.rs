@@ -41,9 +41,9 @@ use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024_P384;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
@@ -82,7 +82,7 @@ struct PeerBackup {
 /// and `CreatePeerBackup`, capturing everything device 2 needs to restore
 /// the domain from the peer backup.
 fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
-    create_kem_peer_backup(seed, sata, pota, SD_SEALING_KEM_P384)
+    create_kem_peer_backup(seed, sata, pota, TRANSFER_KEM_P384)
 }
 
 /// [`create_peer_backup`] sealed to a destination sealing key of `kem`.
@@ -99,7 +99,7 @@ fn create_kem_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey, kem: u8) -> P
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
-    let (masked, evidence) = if kem == SD_SEALING_KEM_P384 {
+    let (masked, evidence) = if kem == TRANSFER_KEM_P384 {
         (masked, evidence)
     } else {
         let (pq_masked, pq_report) = kem_sealing_key_and_report(&ctx, session_id, kem);
@@ -213,7 +213,7 @@ fn sd_restore_peer_backup_roundtrip() {
 /// P-384 one.
 #[test]
 fn sd_restore_peer_backup_pq_roundtrip() {
-    for kem in [SD_SEALING_KEM_MLKEM1024, SD_SEALING_KEM_MLKEM1024_P384] {
+    for kem in [TRANSFER_KEM_MLKEM1024, TRANSFER_KEM_MLKEM1024_P384] {
         let seed = mach_seed();
         let sata = CaKey::generate();
         let pota = CaKey::generate();
@@ -238,7 +238,7 @@ fn sd_restore_peer_backup_rejects_kem_mismatch() {
     let seed = mach_seed();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
-    let mut backup = create_kem_peer_backup(&seed, &sata, &pota, SD_SEALING_KEM_MLKEM1024);
+    let mut backup = create_kem_peer_backup(&seed, &sata, &pota, TRANSFER_KEM_MLKEM1024);
     let (ctx, session_id) = restore_target(&seed, &pota, &backup);
     let (p384_masked, _, _) = masked_key_report_and_pub(&ctx, session_id);
     backup.masked_sealing_key = p384_masked;

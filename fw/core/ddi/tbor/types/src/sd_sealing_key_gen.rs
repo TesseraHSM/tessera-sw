@@ -17,7 +17,7 @@
 //!   domain), carried as its 1-byte [`open_enum`](open_enum::open_enum)
 //!   discriminant.  Mirrors the firmware
 //!   [`HsmKeyScope`](tsra_fw_hsm_pal_traits::HsmKeyScope).
-//! * `kem` — the sealing key's HPKE KEM ([`SdSealingKem`]): P-384,
+//! * `kem` — the sealing key's HPKE KEM ([`TransferKemId`]): P-384,
 //!   ML-KEM-1024 (HPKE-13) or MLKEM1024-P384 (HPKE-10).
 //!
 //! Outputs:
@@ -33,10 +33,10 @@
 //!   SEC1); for ML-KEM-1024 the 1568-byte encapsulation key; for the hybrid
 //!   the 1665-byte `ek_PQ ‖ SEC1(ek_T)`.
 
-use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::key_props::KeyScope;
+use crate::key_props::TransferKemId;
 
 /// TBOR opcode for `SdSealingKeyGen`.
 pub const TBOR_OP_SD_SEALING_KEY_GEN: u8 = 0x09;
@@ -65,19 +65,6 @@ pub const SD_SEALING_PUB_KEY_MAX_LEN: usize = 1568 + 97;
 /// sealing-key fields.
 pub const MASKED_SEALING_KEY_MAX_LEN: usize = 8 + 16 + 192 + 64 + 16;
 
-/// HPKE KEM of a security-domain sealing key on the TBOR wire.
-#[repr(u8)]
-#[open_enum]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SdSealingKem {
-    /// DHKEM(P-384, HKDF-SHA384).
-    P384 = 0,
-    /// ML-KEM-1024 (HPKE-13).
-    MlKem1024 = 1,
-    /// MLKEM1024-P384 hybrid (HPKE-10).
-    MlKem1024P384 = 2,
-}
-
 /// `SdSealingKeyGen` request schema.
 ///
 /// Generates a security-domain sealing key under the active session's
@@ -94,10 +81,10 @@ pub struct TborSdSealingKeyGenReq {
     #[tbor(U8)]
     pub scope: KeyScope,
 
-    /// Sealing-key KEM, carried as the 1-byte [`SdSealingKem`]
+    /// Sealing-key KEM, carried as the 1-byte [`TransferKemId`]
     /// discriminant.
     #[tbor(U8)]
-    pub kem: SdSealingKem,
+    pub kem: TransferKemId,
 }
 
 /// `SdSealingKeyGen` response schema.
@@ -134,13 +121,13 @@ mod tests {
             .unwrap()
             .scope(KeyScope::SecurityDomain)
             .unwrap()
-            .kem(SdSealingKem::MlKem1024P384)
+            .kem(TransferKemId::MlKem1024P384)
             .unwrap()
             .finish();
 
         // The wire carries the 1-byte scope and KEM discriminants.
         assert_eq!(frame.scope(), KeyScope::SecurityDomain);
-        assert_eq!(frame.kem(), SdSealingKem::MlKem1024P384);
+        assert_eq!(frame.kem(), TransferKemId::MlKem1024P384);
     }
 
     #[test]

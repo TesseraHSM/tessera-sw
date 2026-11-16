@@ -92,7 +92,7 @@ fuzz_target!(|input: FuzzInput| {
         let req = TborSdSealingKeyGenReq {
             session_id,
             scope,
-            kem: SD_SEALING_KEM_P384,
+            kem: TRANSFER_KEM_P384,
         };
         let result = ctx.tbor(&req);
 

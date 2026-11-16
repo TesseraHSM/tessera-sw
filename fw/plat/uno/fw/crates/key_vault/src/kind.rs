@@ -124,7 +124,7 @@ pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 }
 /// `SessionOpenFinish` as `TborStatus::InvalidArg`, long after the
 /// handshake crypto had succeeded. `session_ex_range_is_derived_from_pal_layout`
 /// pins the range to the PAL constants so it cannot drift back.
-static KIND_LEN: [KeyLen; 67] = [
+static KIND_LEN: [KeyLen; 69] = [
     /* 0  Free                         */ KeyLen::Invalid,
     /* 1  Rsa2kPublic                  */ KeyLen::Fixed(260),
     /* 2  Rsa3kPublic                  */ KeyLen::Fixed(388),
@@ -200,6 +200,8 @@ static KIND_LEN: [KeyLen; 67] = [
     /* 64 AesXts512                    */ KeyLen::Fixed(64),
     /* 65 SdSealingMlKem1024           */ KeyLen::Fixed(64),
     /* 66 SdSealingMlKem1024P384       */ KeyLen::Fixed(32),
+    /* 67 DarcKexMlKem1024             */ KeyLen::Fixed(64),
+    /* 68 DarcKexMlKem1024P384         */ KeyLen::Fixed(32),
 ];
 
 /// Resolves the length contract for `kind` in O(1).
@@ -290,6 +292,8 @@ mod tests {
             (HsmVaultKeyKind::AesXts512, 64),
             (HsmVaultKeyKind::SdSealingMlKem1024, 64),
             (HsmVaultKeyKind::SdSealingMlKem1024P384, 32),
+            (HsmVaultKeyKind::DarcKexMlKem1024, 64),
+            (HsmVaultKeyKind::DarcKexMlKem1024P384, 32),
         ];
         for (kind, len) in table {
             assert_eq!(key_len(kind), Ok(KeyLen::Fixed(len)), "{kind:?}");

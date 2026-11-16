@@ -20,8 +20,10 @@ pub use ddi::DARC_WRAP_MASKED_KEY_MAX_LEN;
 pub use ddi::DARC_WRAP_WRAPPED_KEY_MAX_LEN;
 pub use ddi::EVIDENCE_CHAIN_MAX_CERTS;
 pub use ddi::KEX_PUB_KEY_LEN;
+pub use ddi::KEX_PUB_KEY_MAX_LEN;
 pub use ddi::LOCAL_MK_BACKUP_LEN;
 pub use ddi::MASKED_KEX_KEY_LEN;
+pub use ddi::MASKED_KEX_KEY_MAX_LEN;
 pub use ddi::MASKED_SD_LEN;
 pub use ddi::MASKED_TMK_LEN;
 pub use ddi::MAX_CERTS;
@@ -45,6 +47,7 @@ pub use ddi::PolicyThumbprint;
 pub use ddi::SD_BACKUP_REPORT_MAX_LEN;
 pub use ddi::SD_MK_BACKUP_LEN;
 pub use ddi::SEALED_TMK_LEN;
+pub use ddi::SEALED_TMK_MAX_LEN;
 pub use ddi::policy_key_thumbprint;
 // Starts an in-process DDI sock server for the unit tests.
 #[cfg(test)]

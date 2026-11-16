@@ -11,15 +11,34 @@
 //! HPKE Base opens `sealed_tmk` to recover the TMK, and
 //! re-masks it under the partition SDMK as a `DarcTmk` masked-key blob.
 //!
-//! The source certificate-chain DER travels **out of band**; the request
-//! carries only `(index, length)` descriptors, built here via
-//! [`push_cert_chain`]. Runs **inside an already-open** security-domain
+//! The source certificate-chain DER and the report travel **out of band**;
+//! the request carries only `(index, length)` descriptors. Runs **inside an already-open** security-domain
 //! (V2) session.
 
 use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_types::*;
 
 use super::*;
+
+/// Checks that `sealed` has the length of a DARC envelope of some supported
+/// KEM (`header ‖ enc ‖ ct`; `enc` is 97, 1568 or 1665 bytes) and returns
+/// it as an owned wire field.
+fn sealed_tmk_wire(sealed: &[u8]) -> HsmResult<Vec<u8>> {
+    const ENVELOPE_OVERHEAD: usize = SEALED_TMK_LEN - 97;
+    let valid = [
+        97,
+        SD_SEALING_MLKEM1024_PUB_KEY_LEN,
+        SD_SEALING_MLKEM1024_P384_PUB_KEY_LEN,
+    ]
+    .iter()
+    .any(|enc| sealed.len() == ENVELOPE_OVERHEAD + enc);
+    if !valid {
+        return Err(HsmError::InvalidArgument);
+    }
+    Ok(sealed.to_vec())
+}
+
+const _: () = assert!(SEALED_TMK_MAX_LEN == SEALED_TMK_LEN - 97 + 1665);
 
 /// Issue `DarcTmkImport` (opcode `0x21`) on the active session.
 ///
@@ -32,8 +51,8 @@ use super::*;
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes)
 ///   whose POTA key thumbprint anchors `remote_cert_chain`.
 /// * `sealed_tmk` - The sealed TMK from
-///   [`darc_tmk_export`](super::darc_tmk_export), exactly
-///   [`SEALED_TMK_LEN`] bytes.
+///   [`darc_tmk_export`](super::darc_tmk_export) (258, 1729 or 1826
+///   bytes for P-384, ML-KEM-1024 or MLKEM1024-P384).
 /// * `report` - The PID-signed `Darc` report returned with `sealed_tmk`.
 /// * `remote_cert_chain` - POTA-anchored source PID certificate chain
 ///   (1..=3 certs, normally POTA -> PTA -> PID); DER carried out of band.
@@ -51,14 +70,10 @@ pub(crate) fn darc_tmk_import(
     report: &[u8],
     remote_cert_chain: &[HsmCert<'_>],
 ) -> HsmResult<Vec<u8>> {
-    let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = masked_kex_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    let sealed_tmk: [u8; SEALED_TMK_LEN] = sealed_tmk
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
+    let masked_kex_key = masked_sealing_key_wire(masked_kex_key)?;
+    let sealed_tmk = sealed_tmk_wire(sealed_tmk)?;
     let policy = policy_wire(policy)?;
-    if report.is_empty() || report.len() > DARC_REPORT_MAX_LEN {
+    if report.len() > DARC_REPORT_MAX_LEN {
         return Err(HsmError::InvalidArgument);
     }
 
@@ -68,13 +83,14 @@ pub(crate) fn darc_tmk_import(
         &mut oob,
         DARC_SOURCE_CERT_CHAIN_MAX_CERTS,
     )?;
+    let report = push_report(report, &mut oob)?;
 
     let req = TborDarcTmkImportReq {
         session_id: session.ex_session_id()?,
         masked_kex_key,
         policy,
         sealed_tmk,
-        report: report.to_vec(),
+        report,
         remote_cert_chain,
     };
 

@@ -34,9 +34,9 @@ use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::TborSdResealRemoteBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024_P384;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_create_remote_backup::backup_request;
@@ -294,7 +294,7 @@ fn create_kem_source_backup(
     policy: &[u8],
     kem: u8,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    if kem == SD_SEALING_KEM_P384 {
+    if kem == TRANSFER_KEM_P384 {
         let (masked, report, rcvr_pub) = masked_key_report_and_pub(ctx, sid);
         let (backup, sndr) =
             create_source_backup(ctx, sid, pid_pub, &rcvr_pub, sata_key, &report, policy);
@@ -324,9 +324,9 @@ fn create_kem_source_backup(
 #[test]
 fn sd_reseal_remote_backup_pq_kems() {
     let kems = [
-        SD_SEALING_KEM_P384,
-        SD_SEALING_KEM_MLKEM1024,
-        SD_SEALING_KEM_MLKEM1024_P384,
+        TRANSFER_KEM_P384,
+        TRANSFER_KEM_MLKEM1024,
+        TRANSFER_KEM_MLKEM1024_P384,
     ];
     for rcvr_kem in kems {
         for dest_kem in kems {
@@ -346,7 +346,7 @@ fn sd_reseal_remote_backup_pq_kems() {
                 .sd_oob(&req, &evidence.oob())
                 .unwrap_or_else(|e| panic!("reseal {rcvr_kem} -> {dest_kem}: {e:?}"));
             let len = resp.dst_remote_backup.len();
-            if dest_kem == SD_SEALING_KEM_P384 {
+            if dest_kem == TRANSFER_KEM_P384 {
                 assert_eq!(len, POK_REMOTE_BACKUP_LEN);
             } else {
                 assert!(

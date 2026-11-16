@@ -46,12 +46,12 @@ use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_MAX_LEN;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_MLKEM1024_P384;
-use tsra_ddi_tbor_types::SD_SEALING_KEM_P384;
 use tsra_ddi_tbor_types::SD_SEALING_MLKEM1024_P384_PUB_KEY_LEN;
 use tsra_ddi_tbor_types::SD_SEALING_MLKEM1024_PUB_KEY_LEN;
 use tsra_ddi_tbor_types::SD_SEALING_PUB_KEY_LEN;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::part_policy_with_pota;
@@ -88,17 +88,17 @@ pub(crate) fn finalized_co_session(ctx: &TestCtx) -> SessionHandshake {
 /// `(kem, masked key length, public key length)` for each sealing KEM.
 const KEMS: [(u8, usize, usize); 3] = [
     (
-        SD_SEALING_KEM_P384,
+        TRANSFER_KEM_P384,
         MASKED_SEALING_KEY_LEN,
         SD_SEALING_PUB_KEY_LEN,
     ),
     (
-        SD_SEALING_KEM_MLKEM1024,
+        TRANSFER_KEM_MLKEM1024,
         MASKED_SEALING_KEY_MAX_LEN,
         SD_SEALING_MLKEM1024_PUB_KEY_LEN,
     ),
     (
-        SD_SEALING_KEM_MLKEM1024_P384,
+        TRANSFER_KEM_MLKEM1024_P384,
         264,
         SD_SEALING_MLKEM1024_P384_PUB_KEY_LEN,
     ),
@@ -189,7 +189,7 @@ fn sd_sealing_key_gen_rejects_unsupported_scope() {
         let req = TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope,
-            kem: SD_SEALING_KEM_P384,
+            kem: TRANSFER_KEM_P384,
         };
         ctx.expect_fw_reject(&req, TborStatus::UnsupportedKeyScope);
     }
@@ -205,7 +205,7 @@ fn sd_sealing_key_gen_rejects_before_finalize() {
     let req = TborSdSealingKeyGenReq {
         session_id: session.session_id,
         scope: SCOPE_EPHEMERAL,
-        kem: SD_SEALING_KEM_P384,
+        kem: TRANSFER_KEM_P384,
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
@@ -225,7 +225,7 @@ fn sd_sealing_key_gen_rejected_on_cu_session() {
     let req = TborSdSealingKeyGenReq {
         session_id: session.session_id,
         scope: SCOPE_EPHEMERAL,
-        kem: SD_SEALING_KEM_P384,
+        kem: TRANSFER_KEM_P384,
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
 }
@@ -243,7 +243,7 @@ fn sd_sealing_key_gen_rejected_on_default_psk() {
     let req = TborSdSealingKeyGenReq {
         session_id: session.session_id(),
         scope: SCOPE_EPHEMERAL,
-        kem: SD_SEALING_KEM_P384,
+        kem: TRANSFER_KEM_P384,
     };
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
 }

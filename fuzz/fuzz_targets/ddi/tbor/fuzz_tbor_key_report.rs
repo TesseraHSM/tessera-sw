@@ -307,7 +307,7 @@ fn make_key(ctx: &TestCtx, session_id: u16, scope: u8, input: &FuzzInput) -> Key
                 .tbor(&TborSdSealingKeyGenReq {
                     session_id,
                     scope,
-                    kem: SD_SEALING_KEM_P384,
+                    kem: TRANSFER_KEM_P384,
                 })
                 .expect("SD sealing-key generation");
             KeyMaterial {
@@ -570,7 +570,7 @@ fn semantic_auth(
     HashAlgo::sha384()
         .hash(&data, Some(&mut digest))
         .expect("request digest");
-    let mut aad = build_key_report_auth_aad(request.session_id, request.bank);
+    let mut aad = build_key_report_auth_aad(request.session_id);
     if wrong_aad {
         aad[0] ^= 1;
     } else {
@@ -604,7 +604,6 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
             .expect("default-PSK session");
         let req = TborKeyReportReq {
             session_id: session.session_id(),
-            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: Vec::new(),
             report_data: input.report_data,
             auth_envelope: Vec::new(),
@@ -647,7 +646,6 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
     };
     let mut req = TborKeyReportReq {
         session_id: session.session_id,
-        bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
         masked_key: Vec::new(),
         report_data: input.report_data,
         auth_envelope: Vec::new(),

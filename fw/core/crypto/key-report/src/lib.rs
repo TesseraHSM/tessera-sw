@@ -70,7 +70,7 @@ pub use encode::key_report;
 pub use encode::key_report_with;
 pub use encode::report;
 pub use encode::report_with;
-pub use encode::sd_backup_report_len;
+pub use encode::transfer_report_len;
 pub use encode::KeyReportParams;
 pub use report::ReportAlg;
 pub use report::ReportKind;

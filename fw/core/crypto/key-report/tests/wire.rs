@@ -657,32 +657,30 @@ fn transfer_envelopes_use_canonical_operation_specific_headers() {
         policy_hash: &policy,
         kem,
     };
+    let darc = |kem| TransferHeader::Darc {
+        source_pid_key_id: &source,
+        recipient_key_id: &recipient,
+        kem,
+    };
     // Independent wire fixture: network-order IANA suite IDs, encapsulation
     // length and SEC1 tag offset within the encapsulation.
-    for (header, suite, enc_len, tag_at) in [
+    let kems = [
+        (TransferKem::P384, [0, 0x11, 0, 2, 0, 2], 97, Some(0)),
+        (TransferKem::MlKem1024, [0, 0x42, 0, 0x11, 0, 2], 1568, None),
         (
-            TransferHeader::Darc {
-                source_pid_key_id: &source,
-                recipient_key_id: &recipient,
-            },
-            [0, 0x11, 0, 2, 0, 2],
-            97,
-            Some(0),
-        ),
-        (sd(TransferKem::P384), [0, 0x11, 0, 2, 0, 2], 97, Some(0)),
-        (
-            sd(TransferKem::MlKem1024),
-            [0, 0x42, 0, 0x11, 0, 2],
-            1568,
-            None,
-        ),
-        (
-            sd(TransferKem::MlKem1024P384),
+            TransferKem::MlKem1024P384,
             [0, 0x51, 0, 0x11, 0, 2],
             1665,
             Some(1568),
         ),
-    ] {
+    ];
+    let rows = kems.into_iter().flat_map(|(kem, suite, enc_len, tag_at)| {
+        [
+            (darc(kem), suite, enc_len, tag_at),
+            (sd(kem), suite, enc_len, tag_at),
+        ]
+    });
+    for (header, suite, enc_len, tag_at) in rows {
         let mut expected = b"TSRA-XFER".to_vec();
         expected.extend_from_slice(&[1, header.kind() as u8]);
         expected.extend_from_slice(&suite);
@@ -730,14 +728,15 @@ fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
         policy_hash: &id,
         kem,
     };
+    let darc = |kem| TransferHeader::Darc {
+        source_pid_key_id: &id,
+        recipient_key_id: &id,
+        kem,
+    };
     for (header, tag_at) in [
-        (
-            TransferHeader::Darc {
-                source_pid_key_id: &id,
-                recipient_key_id: &id,
-            },
-            Some(0),
-        ),
+        (darc(TransferKem::P384), Some(0)),
+        (darc(TransferKem::MlKem1024), None),
+        (darc(TransferKem::MlKem1024P384), Some(1568)),
         (sd(TransferKem::P384), Some(0)),
         (sd(TransferKem::MlKem1024), None),
         (sd(TransferKem::MlKem1024P384), Some(1568)),

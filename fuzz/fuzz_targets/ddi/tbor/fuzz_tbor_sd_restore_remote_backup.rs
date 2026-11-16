@@ -173,7 +173,7 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
     let sealing_key = match ctx.tbor(&TborSdSealingKeyGenReq {
         session_id: source_session.session_id,
         scope: bootstrap_scope.to_tbor(),
-        kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     }) {
         Ok(key) => key,
         Err(DdiError::TborStatus(status)) if status == TborStatus::UnsupportedKeyScope => {
@@ -200,7 +200,6 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
     let report_bytes = ctx
         .key_report(&TborKeyReportReq {
             session_id: source_session.session_id,
-            bank: tsra_ddi_tbor_types::CERT_BANK_ECC,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
@@ -233,7 +232,7 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
         ctx.tbor(&TborSdSealingKeyGenReq {
             session_id: source_session.session_id,
             scope: key_scope.to_tbor(),
-            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("SecurityDomain-scope key generation should succeed after SD creation")
     } else {

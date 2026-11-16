@@ -321,16 +321,38 @@ impl HsmSession {
 
     /// Issues TBOR `DarcKexKeyGen` (opcode `0x20`) on this CO session.
     ///
-    /// Generates a new DARC key-exchange key (ECC-P384) and returns the
-    /// masked private key plus its raw P-384 public key (`x ‖ y`, 96
-    /// bytes, big-endian per coordinate). This is the HPKE recipient key;
-    /// the source authenticates exports using its PID instead. Only valid on
-    /// a V2 session; a V1 session returns [`HsmError::InvalidSession`].
+    /// Generates a new DARC key-exchange key for `kem` and returns the
+    /// masked private key plus its public key: for P-384 the raw `x ‖ y`
+    /// point (96 bytes, big-endian per coordinate), for ML-KEM-1024 the
+    /// 1568-byte encapsulation key, for MLKEM1024-P384 the 1665-byte
+    /// `ek_PQ ‖ SEC1 point`. This is the HPKE recipient key; exporters
+    /// authenticate it through a PID-signed key report over the masked key
+    /// (see [`darc_kex_key_report`](Self::darc_kex_key_report)). Only valid on a V2 session; a
+    /// V1 session returns [`HsmError::InvalidSession`].
     pub fn darc_kex_key_gen(
         &self,
         scope: u8,
-    ) -> HsmResult<([u8; MASKED_KEX_KEY_LEN], [u8; KEX_PUB_KEY_LEN])> {
-        ddi::darc_kex_key_gen(self, scope)
+        kem: HsmTransferKem,
+    ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
+        ddi::darc_kex_key_gen(self, scope, kem)
+    }
+
+    /// Issues TBOR `KeyReport` on a masked DARC key-exchange key from
+    /// [`darc_kex_key_gen`](Self::darc_kex_key_gen).
+    ///
+    /// The partition PID signs a report attesting the key (signed flag
+    /// `is_darc_kex`), with the policy PTA algorithm (ES384 or ML-DSA-87);
+    /// pass it as `target_key_report` to the exporter's
+    /// [`darc_tmk_export`](Self::darc_tmk_export). `report_data` must be
+    /// exactly 128 bytes. With `report = None` returns the maximum report
+    /// size without a round-trip; otherwise returns the actual length.
+    pub fn darc_kex_key_report(
+        &self,
+        masked_kex_key: &[u8],
+        report_data: &[u8],
+        report: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        ddi::masked_key_report(self, masked_kex_key, report_data, report)
     }
 
     /// Issues TBOR `DarcTmkGen` (opcode `0x23`) on this CO session.
@@ -344,19 +366,27 @@ impl HsmSession {
 
     /// Issues TBOR `DarcTmkExport` (opcode `0x24`) on this CO session.
     ///
-    /// Seals the TMK to an authenticated target: validates
-    /// `target_cert_chain` against the policy `data_spki_thumbprint`, then HPKE Base
-    /// seals the TMK to the target's KEX key and PID-signs a `Darc` report.
-    /// Returns both artifacts; no sender KEX key is required. Only
-    /// valid on a V2 session; a V1 session returns
+    /// Seals the TMK to an authenticated target: validates the target PID
+    /// chain `target_cert_chain` against the policy `data_spki_thumbprint`,
+    /// verifies `target_key_report` (the target PID's key report over its
+    /// DARC KEX key), then HPKE Base seals the TMK to the attested KEX key
+    /// and PID-signs a `Darc` report. Returns both artifacts; no sender KEX
+    /// key is required. Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn darc_tmk_export(
         &self,
         masked_tmk: &[u8],
         policy: &[u8],
         target_cert_chain: &[HsmCert<'_>],
+        target_key_report: &[u8],
     ) -> HsmResult<HsmDarcTmkExportResult> {
-        ddi::darc_tmk_export(self, masked_tmk, policy, target_cert_chain)
+        ddi::darc_tmk_export(
+            self,
+            masked_tmk,
+            policy,
+            target_cert_chain,
+            target_key_report,
+        )
     }
 
     /// Issues TBOR `DarcTmkImport` (opcode `0x21`) on this CO session.

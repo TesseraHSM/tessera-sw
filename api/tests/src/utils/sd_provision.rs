@@ -37,7 +37,7 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 
 use crate::utils::partition_ex_helpers::new_partition;
 
-const SEC1_PUB_LEN: usize = 97;
+pub(crate) const SEC1_PUB_LEN: usize = 97;
 pub(crate) const RAW_PUB_LEN: usize = 96;
 pub(crate) const SEALING_KEY_BITS: u32 = 384;
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
@@ -990,6 +990,27 @@ pub(crate) struct DarcReady {
     /// Policy POTA CA — anchors the `darc_tmk_import` sender chain.
     /// POTA -> PTA -> freshly generated slot-2 PID certificate.
     pub(crate) pid_chain: Vec<Vec<u8>>,
+    /// DATA -> PTA -> slot-2 PID certificate: the chain an exporter
+    /// presents for this partition as the `darc_tmk_export` target.
+    pub(crate) target_chain: Vec<Vec<u8>>,
+    /// SEC1 public key of the partition PTA, for re-anchoring its chain.
+    pub(crate) pta_pub: [u8; SEC1_PUB_LEN],
+}
+
+/// Build an `anchor` -> PTA -> PID chain over a partition's device-issued
+/// PID certificate, certifying its PTA key (`pta_pub`) under `anchor`.
+pub(crate) fn pid_chain_under(
+    anchor: &CaKey,
+    pta_pub: &[u8; SEC1_PUB_LEN],
+    pid_cert: &[u8],
+) -> Vec<Vec<u8>> {
+    let chain = make_pta_chain(anchor, pta_pub);
+    vec![chain.root_der, chain.pta_der, pid_cert.to_vec()]
+}
+
+/// Borrow a DER chain as the `HsmCert` list the DARC commands take.
+pub(crate) fn hsm_certs(chain: &[Vec<u8>]) -> Vec<HsmCert<'_>> {
+    chain.iter().map(|cert| HsmCert { cert }).collect()
 }
 
 /// Provision a fresh partition with a DATA+POTA-anchored policy, finalize
@@ -1053,7 +1074,8 @@ pub(crate) fn darc_sd_initialized_partition(
         .part_init_ex(&policy, &mach_seed())
         .expect("part_init_ex");
 
-    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    let pta_pub = pta_pub_from_csr(&init.pta_csr);
+    let chain = make_pta_chain(&pota, &pta_pub);
     let certs = [
         HsmCert {
             cert: &chain.root_der,
@@ -1067,6 +1089,7 @@ pub(crate) fn darc_sd_initialized_partition(
         .expect("part_final_ex");
     let pid_cert = tsra_crypto::pem_to_der(part.cert_chain(2).expect("PID chain").as_bytes())
         .expect("PID DER");
+    let target_chain = pid_chain_under(&data, &pta_pub, &pid_cert);
     let pid_chain = vec![chain.root_der, chain.pta_der, pid_cert];
 
     // Provision the security domain (self-backup), marking the partition
@@ -1085,5 +1108,7 @@ pub(crate) fn darc_sd_initialized_partition(
         policy,
         data,
         pid_chain,
+        target_chain,
+        pta_pub,
     }
 }

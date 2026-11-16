@@ -196,7 +196,6 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
     use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
     use tsra_ddi_tbor_types::TborKeyReportReq;
-    use tsra_ddi_tbor_types::CERT_BANK_ECC;
     use tsra_ddi_tbor_types::KEY_CLASS_ECC;
     use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 
@@ -225,7 +224,6 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     );
     let mut request = TborKeyReportReq {
         session_id: cu.session_id,
-        bank: CERT_BANK_ECC,
         masked_key: imported.masked_key,
         report_data: [0u8; KEY_REPORT_DATA_LEN],
         auth_envelope: Vec::new(),

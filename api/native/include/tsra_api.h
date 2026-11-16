@@ -23,6 +23,21 @@
 #define TSRA_AES_GCM_TAG_SIZE 16
 
 /*
+ DARC key-exchange KEM: DHKEM(P-384, HKDF-SHA384).
+ */
+#define TSRA_TRANSFER_KEM_P384 0
+
+/*
+ DARC key-exchange KEM: ML-KEM-1024 (HPKE-13).
+ */
+#define TSRA_TRANSFER_KEM_MLKEM1024 1
+
+/*
+ DARC key-exchange KEM: MLKEM1024-P384 hybrid (HPKE-10).
+ */
+#define TSRA_TRANSFER_KEM_MLKEM1024_P384 2
+
+/*
  Length, in bytes, of a partition PSK (Pre-Shared Key). This module is
  shared with the native crate (which does not depend on the wire-types
  crate), so the value is a literal here and pinned to the wire-schema
@@ -873,9 +888,15 @@ struct tsra_darc_tmk_export_params
      */
     const struct tsra_buffer *policy;
     /*
-     DATA-anchored target certificate chain (1..=2 certs).
+     DATA-anchored target PID certificate chain (1..=3 certs).
      */
     struct tsra_darc_cert_chain target_cert_chain;
+    /*
+     Target PID's key report over its DARC KEX key (from
+     `tsra_darc_kex_key_report` on the masked KEX key), at most
+     8192 B.
+     */
+    const struct tsra_buffer *target_key_report;
 };
 
 /*
@@ -884,8 +905,8 @@ struct tsra_darc_tmk_export_params
 struct tsra_darc_tmk_import_params
 {
     /*
-     Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (280 B).
+     Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`); its KEM
+     selects the HPKE suite.
      */
     const struct tsra_buffer *masked_kex_key;
     /*
@@ -895,8 +916,8 @@ struct tsra_darc_tmk_import_params
      */
     const struct tsra_buffer *policy;
     /*
-     Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-     (258 B).
+     Sealed TMK (from `tsra_darc_tmk_export`): 258, 1729 or 1826 B for
+     P-384, ML-KEM-1024 or MLKEM1024-P384.
      */
     const struct tsra_buffer *sealed_tmk;
     /*
@@ -2226,22 +2247,26 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
 /*
  @brief Generate a DARC key-exchange (KEX) key
 
- Generates a new DARC key-exchange key (ECC-P384) on the calling
- session's partition and returns the masked private key plus its raw
- P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
- the target it yields the HPKE recipient key. The source uses its PID
- to authenticate export reports. The key is not stored on the
- device.
+ Generates a new DARC key-exchange key for `kem` on the calling
+ session's partition and returns the masked private key plus its public
+ key: for P-384 the raw `x ‖ y` point (96 B, big-endian per coordinate),
+ for ML-KEM-1024 the 1568-byte encapsulation key, for MLKEM1024-P384 the
+ 1665-byte `ek_PQ ‖ SEC1 point`. Run on the target it yields the HPKE
+ recipient key; the exporter authenticates it through the target PID's
+ key report over the masked key (`tsra_darc_kex_key_report`). The key is not
+ stored on the device.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
+ @param[in] kem Recipient KEM (`TSRA_TRANSFER_KEM_*`)
  @param[in,out] masked_key Output buffer for the masked KEX private key
-                (`MASKED_KEX_KEY_LEN`, 280 B)
- @param[in,out] pub_key Output buffer for the raw P-384 public key
-                (`KEX_PUB_KEY_LEN`, 96 B)
+                (at most `MASKED_KEX_KEY_MAX_LEN`, 296 B)
+ @param[in,out] pub_key Output buffer for the public key
+                (at most `KEX_PUB_KEY_MAX_LEN`, 1665 B)
 
- Both output buffers follow the probe/fill convention and are validated
- **before** the round-trip.
+ Both output buffers follow the probe/fill convention: their
+ `KEM`-independent maximum sizes are validated **before** the round-trip
+ and the actual lengths are returned on success.
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2254,8 +2279,39 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
 tsra_status tsra_darc_kex_key_gen(
     tsra_handle sess_handle,
     uint8_t scope,
+    uint8_t kem,
     struct tsra_buffer *masked_key,
     struct tsra_buffer *pub_key
+);
+
+/*
+ @brief Attest a DARC key-exchange (KEX) key
+
+ Signs a key report with the partition PID over a masked KEX key from
+ `tsra_darc_kex_key_gen`. The exporter passes it as `target_key_report`
+ to `tsra_darc_tmk_export`.
+
+ @param[in] sess_handle Handle to the security-domain session
+ @param[in] masked_kex_key Masked KEX private key
+ @param[in] report_data Exactly 128 bytes of caller data bound into the report
+ @param[in,out] report Output buffer for the report. Probe/fill validates
+                the maximum report size before issuing the command, then
+                returns the actual length on success.
+
+ @return `TsraStatus` indicating the result of the operation
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `masked_kex_key` and `report_data` must be valid `tsra_buffer`s.
+ - `report` must be a valid `tsra_buffer` with writable backing storage
+   of the advertised length.
+ */
+tsra_status tsra_darc_kex_key_report(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *masked_kex_key,
+    const struct tsra_buffer *report_data,
+    struct tsra_buffer *report
 );
 
 /*
@@ -2281,16 +2337,21 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
 /*
  @brief Seal a DARC TMK to an authenticated target
 
- Validates the target certificate chain against the policy `data_spki_thumbprint`,
- then HPKE Base seals the TMK to the target's KEX key and PID-signs the
- operation report. Retain and transfer both outputs together.
+ Validates the target PID certificate chain against the policy
+ `data_spki_thumbprint` and the target key report under that PID, then
+ HPKE Base seals the TMK to the attested KEX key (P-384, ML-KEM-1024 or
+ MLKEM1024-P384) and PID-signs the operation report. Retain and transfer
+ both outputs together.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Export input buffers
- @param[in,out] sealed_tmk Output buffer for the sealed TMK
-                (`SEALED_TMK_LEN`, 258 B)
+ @param[in,out] sealed_tmk Output buffer for the sealed TMK. Probe/fill
+                validates the `SEALED_TMK_MAX_LEN` (1826 B) upper bound
+                before issuing the command, then returns the actual length
+                (258 B for P-384, 1729 B for ML-KEM-1024, 1826 B for
+                MLKEM1024-P384) on success.
  @param[in,out] report Output buffer for the PID-signed `Darc` report.
-                Probe/fill validates the `DARC_REPORT_MAX_LEN` (896 B)
+                Probe/fill validates the `DARC_REPORT_MAX_LEN` (5120 B)
                 upper bound before issuing the command, then returns the
                 actual report length on success.
 

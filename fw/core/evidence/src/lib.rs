@@ -156,56 +156,60 @@ pub struct TrustAnchors<'a> {
 ///
 /// Validates `chain` as an X.509 chain (root→leaf) with a P-384 or
 /// ML-DSA-87 leaf, requiring a **non-leaf** certificate's public-key
-/// thumbprint to equal `sata_anchor` (the policy `sata_spki_thumbprint`),
-/// and writes the leaf public key — the receiver public key (`RcvrPub`) —
-/// into `rcvr_pub` in signer form (see [`signer_alg`]): SEC1 uncompressed
-/// big-endian P-384 ([`ATTESTED_KEY_LEN`] bytes) or the encoded ML-DSA-87
-/// key. Returns its length; `rcvr_pub` must hold [`SIGNER_KEY_MAX_LEN`]
-/// bytes to accept either.
+/// thumbprint to equal `anchor`, and writes the leaf public key — the
+/// receiver public key (`RcvrPub`) — into `rcvr_pub` in signer form (see
+/// [`signer_alg`]): SEC1 uncompressed big-endian P-384 ([`ATTESTED_KEY_LEN`]
+/// bytes) or the encoded ML-DSA-87 key. Returns its length; `rcvr_pub` must
+/// hold [`SIGNER_KEY_MAX_LEN`] bytes to accept either.
 ///
-/// This is the spec `RcvrCertChain` step of `CreateSD`: it authorizes the
-/// recipient key under the Sealing Authority (SATA) independently of any
-/// attestation report.
+/// This is the spec `RcvrCertChain` step of `CreateSD` (anchored to the
+/// policy SATA) and of DARC export / import (anchored to the policy DATA /
+/// POTA): it authorizes the leaf key independently of any attestation report.
 ///
 /// # Errors
 ///
 /// * [`HsmError::InvalidArg`] — `rcvr_pub` is too small, the chain is empty,
 ///   the leaf is neither P-384 nor ML-DSA-87, or no non-leaf certificate
-///   matches `sata_anchor`.
+///   matches `anchor`.
 /// * `X509…` errors — a certificate is malformed or its signature / chain
 ///   linkage is invalid (propagated from the chain validator).
 pub async fn verify_receiver_cert_chain<P>(
     pal: &P,
     io: &P::Io,
     chain: &[CertDescriptor],
-    sata_anchor: &[u8; SPKI_THUMBPRINT_LEN],
+    anchor: &[u8; SPKI_THUMBPRINT_LEN],
     rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<usize>
 where
     P: HsmIoController + HsmAlloc + HsmCrypto,
 {
-    let len = validate_chain(pal, io, chain, Some(sata_anchor), LeafSink::Out(rcvr_pub)).await?;
+    let len = validate_chain(pal, io, chain, Some(anchor), LeafSink::Out(rcvr_pub)).await?;
     signer_leaf(rcvr_pub, len)
 }
 
-/// Verify a receiver key report signed by the SATA-authorized receiver
+/// Verify a receiver key report signed by the anchor-authorized receiver
 /// leaf and recover the KEM key it attests.
 ///
 /// `rcvr_pub` is the leaf key from [`verify_receiver_cert_chain`]; the
 /// report must verify under it (ES384 for P-384, ML-DSA-87 otherwise) and
 /// attest a P-384, ML-KEM-1024 or MLKEM1024-P384 key, which is written to
 /// `kem_pub` in its HPKE `SerializePublicKey` form.  Returns the key length.
+/// With `require_darc_kex` the report must also flag the key as a
+/// device-generated, never-imported DARC key-exchange key, so the receiver
+/// cannot substitute a key whose private half left a device.
 ///
 /// # Errors
 ///
 /// * [`HsmError::InvalidArg`] — the report is empty, oversized, not signed
-///   by `rcvr_pub`, or attests an unsupported key, or `kem_pub` is too small.
+///   by `rcvr_pub`, attests an unsupported key or lacks the required DARC
+///   KEX flags, or `kem_pub` is too small.
 /// * Other [`HsmError`] values propagated from the PAL / OOB copy.
 pub async fn verify_receiver_key_report<P>(
     pal: &P,
     io: &P::Io,
     rcvr_pub: &HsmDmaBuf,
     report: &ReportDescriptor,
+    require_darc_kex: bool,
     kem_pub: &mut HsmDmaBuf,
 ) -> HsmResult<usize>
 where
@@ -224,6 +228,12 @@ where
             return Err(HsmError::InvalidArg);
         }
         let view = parse_key_report(buf)?;
+        let flags = KeyFlags::from(view.flags);
+        if require_darc_kex
+            && (!flags.is_darc_kex() || !flags.is_generated() || flags.is_imported())
+        {
+            return Err(HsmError::InvalidArg);
+        }
         attested_kem_key(
             &view.public_key[..view.public_key_size as usize],
             KeySink::Out(kem_pub),

@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! SD transfer sealing (P-384, ML-KEM-1024 or MLKEM1024-P384 recipients), PID
-//! reports, and verification before opening.
+//! SD and DARC transfer sealing (P-384, ML-KEM-1024 or MLKEM1024-P384
+//! recipients), PID reports, and verification before opening.
 
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_crypto_key_report::report_with;
-use tsra_fw_core_crypto_key_report::sd_backup_report_len;
 use tsra_fw_core_crypto_key_report::transfer::*;
+use tsra_fw_core_crypto_key_report::transfer_report_len;
 use tsra_fw_core_crypto_key_report::ReportAlg;
 use tsra_fw_core_crypto_key_report::ReportKind;
 use tsra_fw_core_crypto_key_report::ReportSigner;
@@ -16,6 +16,7 @@ use tsra_fw_core_evidence::verify_evidence_signer;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
 use tsra_fw_core_evidence::SIGNER_KEY_MAX_LEN;
+use tsra_fw_ddi_tbor_types::evidence::ReportDescriptor;
 use tsra_fw_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
@@ -49,6 +50,16 @@ pub(super) fn sealing_kem(kind: HsmVaultKeyKind) -> HsmResult<TransferKem> {
     }
 }
 
+/// Transfer KEM of a DARC key-exchange-key vault kind.
+pub(super) fn darc_kex_kem(kind: HsmVaultKeyKind) -> HsmResult<TransferKem> {
+    match kind {
+        HsmVaultKeyKind::DarcKex => Ok(TransferKem::P384),
+        HsmVaultKeyKind::DarcKexMlKem1024 => Ok(TransferKem::MlKem1024),
+        HsmVaultKeyKind::DarcKexMlKem1024P384 => Ok(TransferKem::MlKem1024P384),
+        _ => Err(HsmError::UnsupportedKeyType),
+    }
+}
+
 /// Wire-form public key of a sealing private key: SEC1 for P-384, the
 /// HPKE `pkR` encoding for the ML-KEM suites.
 pub(super) async fn sealing_public<'a, P: HsmPal>(
@@ -76,12 +87,14 @@ pub(super) async fn sealing_public<'a, P: HsmPal>(
     Ok(public)
 }
 
-/// Exact `(envelope, report)` lengths of an SdBackup sealed to `recipient`
-/// and signed by this partition's PID under the policy `pta_alg`, so
-/// handlers can reserve response slots before sealing.
-pub(super) fn backup_lens<P: HsmPal>(
+/// Exact `(envelope, report)` lengths of a `kind` transfer (`Darc` or
+/// `SdBackup`) sealed to `recipient` and signed by this partition's PID
+/// under the policy `pta_alg`, so handlers can reserve response slots
+/// before sealing.
+pub(super) fn transfer_lens<P: HsmPal>(
     pal: &P,
     io: &P::Io,
+    kind: ReportKind,
     recipient: &[u8],
 ) -> HsmResult<(usize, usize)> {
     let kem = TransferKem::from_public_key(recipient)?;
@@ -89,22 +102,27 @@ pub(super) fn backup_lens<P: HsmPal>(
         super::pta::PtaKey::Ecc(_) => ReportAlg::Es384,
         super::pta::PtaKey::MlDsa87(_) => ReportAlg::MlDsa87,
     };
-    Ok((sd_backup_envelope_len(kem), sd_backup_report_len(alg)?))
+    let envelope_len = match kind {
+        ReportKind::Darc => darc_envelope_len(kem),
+        _ => sd_backup_envelope_len(kem),
+    };
+    Ok((envelope_len, transfer_report_len(kind, alg)?))
 }
 
-/// Seals `bks3` to `recipient` (any [`TransferKem`]) straight into the
+/// Seals `secret` to `recipient` (any [`TransferKem`]) straight into the
 /// caller's `envelope` response slot, then PID-signs the report into a
 /// `report_len`-byte buffer from `alloc` (allocated only after sealing so
-/// HPKE scratch and the report never coexist). Both lengths come from
-/// [`backup_lens`].
+/// HPKE scratch and the report never coexist). A `policy_hash` makes an
+/// SdBackup (48-byte BKS3) transfer; `None` a DARC (32-byte TMK) one. Both
+/// lengths come from [`transfer_lens`].
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn seal_backup<'a, P: HsmPal>(
+pub(super) async fn seal_signed<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    policy_hash: &HsmDmaBuf,
+    policy_hash: Option<&HsmDmaBuf>,
     recipient: &HsmDmaBuf,
-    bks3: &HsmDmaBuf,
+    secret: &HsmDmaBuf,
     envelope: &mut HsmDmaBuf,
     report_len: usize,
 ) -> HsmResult<&'a HsmDmaBuf> {
@@ -133,18 +151,29 @@ pub(super) async fn seal_backup<'a, P: HsmPal>(
     transfer_key_id(pal, io, recipient, destination).await?;
     let source: &[u8] = source;
     let destination: &[u8] = destination;
-    let hash: &[u8] = policy_hash;
-    let header = TransferHeader::SdBackup {
-        source_pid_key_id: source.try_into().map_err(|_| HsmError::InternalError)?,
-        recipient_key_id: destination
-            .try_into()
-            .map_err(|_| HsmError::InternalError)?,
-        policy_hash: hash.try_into().map_err(|_| HsmError::InternalError)?,
-        kem,
+    let source_pid_key_id = source.try_into().map_err(|_| HsmError::InternalError)?;
+    let recipient_key_id = destination
+        .try_into()
+        .map_err(|_| HsmError::InternalError)?;
+    let header = match policy_hash {
+        Some(hash) => {
+            let hash: &[u8] = hash;
+            TransferHeader::SdBackup {
+                source_pid_key_id,
+                recipient_key_id,
+                policy_hash: hash.try_into().map_err(|_| HsmError::InternalError)?,
+                kem,
+            }
+        }
+        None => TransferHeader::Darc {
+            source_pid_key_id,
+            recipient_key_id,
+            kem,
+        },
     };
     let len = pal
         .alloc_scoped_async(io, async |scratch| {
-            seal_transfer(pal, io, &header, recipient, bks3, envelope, scratch).await
+            seal_transfer(pal, io, &header, recipient, secret, envelope, scratch).await
         })
         .await?;
     // A short write would publish uninitialized response bytes.
@@ -160,6 +189,24 @@ pub(super) async fn seal_backup<'a, P: HsmPal>(
         return Err(HsmError::InternalError);
     }
     Ok(signed_report)
+}
+
+/// Receives the out-of-band operation report `desc` (1..=`max_len` bytes)
+/// into a buffer from `alloc`.
+pub(super) async fn recv_report<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    desc: &ReportDescriptor,
+    max_len: usize,
+) -> HsmResult<&'a HsmDmaBuf> {
+    let len = desc.length.get() as usize;
+    if len == 0 || len > max_len {
+        return Err(HsmError::InvalidArg);
+    }
+    let report = alloc.dma_alloc(len)?;
+    pal.recv_oob(io, desc.index as usize, report).await?;
+    Ok(report)
 }
 
 /// A received SdBackup: the recipient's masked sealing key, the source's
@@ -233,13 +280,14 @@ pub(super) async fn unseal_backup<P: HsmPal>(
                 signer_alg(&signer[..len])?;
                 len
             };
-            let report_ref = source.evidence.report;
-            let len = report_ref.length.get() as usize;
-            if len == 0 || len > SD_BACKUP_REPORT_MAX_LEN {
-                return Err(HsmError::InvalidArg);
-            }
-            let report = scratch.dma_alloc(len)?;
-            pal.recv_oob(io, report_ref.index as usize, report).await?;
+            let report = recv_report(
+                pal,
+                io,
+                scratch,
+                source.evidence.report,
+                SD_BACKUP_REPORT_MAX_LEN,
+            )
+            .await?;
             let config = TransferVerifyConfig {
                 expected_kind: ReportKind::SdBackup,
                 signer_public_key: &signer[..signer_len],

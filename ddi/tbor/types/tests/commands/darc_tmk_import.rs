@@ -13,7 +13,9 @@
 //! which provisions the SDMK), mints a DARC key-exchange key
 //! (`DarcKexKeyGen`), then — entirely on the host with `tsra_crypto` —
 //! seals a TMK and independently builds a signed v3 operation-report
-//! fixture under a synthetic POTA-authorized PID, then imports it.
+//! fixture under a synthetic POTA-authorized PID, then imports it. The
+//! report travels out of band after the sender chain. The PQ KEMs are
+//! covered by the export → import lifecycle in `darc_tmk_export`.
 //!
 //! Coverage:
 //! * Round-trip — the imported TMK comes back as a non-zero 264-byte
@@ -23,7 +25,8 @@
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 //! * Wrong masked-key kind (an `SdSealing` key) → `UnsupportedKeyType`.
 //! * Tampered envelope/report or substituted recipient -> `InvalidArg`.
-//! * A generic public-key report cannot replace an operation report.
+//! * A generic public-key report cannot replace an operation report; a
+//!   zero-length or oversized report descriptor → `InvalidArg`.
 //! * `policy` hash mismatch → `InvalidArg`.
 //! * Sender chain not anchored to the policy POTA → `InvalidArg`.
 
@@ -45,24 +48,27 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
-use tsra_ddi_tbor_test_harness::x509_fixture::GeneratedChain;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
+use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
+use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborDarcTmkImportReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::DARC_REPORT_MAX_LEN;
 use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
@@ -159,11 +165,7 @@ fn key_id(key: &impl EccKeyOp) -> [u8; 48] {
 }
 
 /// Independent host-side HPKE Base and canonical v3 COSE operation fixture.
-fn seal_tmk(
-    pk_r: &EccPublicKey,
-    sk_s: &EccPrivateKey,
-    tmk: &[u8],
-) -> ([u8; SEALED_TMK_LEN], Vec<u8>) {
+fn seal_tmk(pk_r: &EccPublicKey, sk_s: &EccPrivateKey, tmk: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let source_id = key_id(sk_s);
     let recipient_id = key_id(pk_r);
     let mut header = b"TSRA-XFER".to_vec();
@@ -172,7 +174,7 @@ fn seal_tmk(
     header.extend_from_slice(&recipient_id);
     let cfg = HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, pk_r, &header, &header);
     let sealed = seal_vec(&cfg, tmk).expect("HPKE Base seal");
-    let mut out = [0; SEALED_TMK_LEN];
+    let mut out = vec![0; SEALED_TMK_LEN];
     out[..113].copy_from_slice(&header);
     out[113..210].copy_from_slice(&sealed.enc);
     out[210..].copy_from_slice(&sealed.ct);
@@ -242,9 +244,9 @@ fn darc_tmk_import_roundtrip() {
     let ctx = &ready.ctx;
 
     // A fully valid import anchored to the policy POTA.
-    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
-    let der = chain.der_items();
-    let resp = ctx.tbor_oob(&req, &der).expect("DarcTmkImport roundtrip");
+    let (req, items) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    let oob = items.oob();
+    let resp = ctx.tbor_oob(&req, &oob).expect("DarcTmkImport roundtrip");
 
     // The imported TMK comes back as a full, non-zero masked envelope.
     assert_eq!(resp.masked_tmk.len(), MASKED_TMK_LEN);
@@ -255,7 +257,7 @@ fn darc_tmk_import_roundtrip() {
 
     // A second import of the same inputs yields a distinct envelope (fresh
     // masking IV) — the command is deterministic in effect but not output.
-    let resp2 = ctx.tbor_oob(&req, &der).expect("second DarcTmkImport");
+    let resp2 = ctx.tbor_oob(&req, &oob).expect("second DarcTmkImport");
     assert_ne!(
         resp.masked_tmk, resp2.masked_tmk,
         "each import must yield a fresh masked envelope",
@@ -268,15 +270,14 @@ fn darc_tmk_import_roundtrip() {
 /// synthetic PID key, certifies it under `anchor_ca`, HPKE Base seals
 /// `tmk`, and signs an operation-report fixture over that envelope.
 ///
-/// Returns the request together with the owning [`GeneratedChain`] (its
-/// DER must outlive the request and be passed out of band via
-/// [`GeneratedChain::der_items`]).  Pass `&ready.pota` for the happy path;
+/// Returns the request together with its out-of-band items (the sender
+/// chain at indexes 0..2, then the report; pass [`ImportOob::oob`]).  Pass `&ready.pota` for the happy path;
 /// pass a foreign CA to exercise the unanchored-chain rejection.
 pub(crate) fn build_valid_import(
     ready: &SdReady,
     anchor_ca: &CaKey,
     tmk: &[u8; TMK_LEN],
-) -> (TborDarcTmkImportReq, GeneratedChain) {
+) -> (TborDarcTmkImportReq, ImportOob) {
     let ctx = &ready.ctx;
 
     // Receiver: mint a DARC key-exchange key; keep its masked blob (the
@@ -285,6 +286,7 @@ pub(crate) fn build_valid_import(
         .tbor(&TborDarcKexKeyGenReq {
             session_id: ready.session.session_id,
             scope: SCOPE_LOCAL,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("DarcKexKeyGen");
     let pk_r = kex_pub_to_host(&kex.pub_key);
@@ -303,11 +305,6 @@ pub(crate) fn build_valid_import(
 
     // Seal with HPKE Base and separately sign the operation report.
     let (sealed_tmk, report) = seal_tmk(&pk_r, &sk_s, tmk);
-    let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = kex
-        .masked_key
-        .as_slice()
-        .try_into()
-        .expect("masked kex key length");
     let remote_cert_chain = vec![
         CertDescriptor {
             index: 0,
@@ -319,15 +316,46 @@ pub(crate) fn build_valid_import(
         },
     ];
 
-    let req = TborDarcTmkImportReq {
+    let mut req = TborDarcTmkImportReq {
         session_id: ready.session.session_id,
-        masked_kex_key,
+        masked_kex_key: kex.masked_key,
         policy: ready.policy.clone(),
         sealed_tmk,
-        report,
+        report: ReportDescriptor::default(),
         remote_cert_chain,
     };
-    (req, chain)
+    let mut items = ImportOob {
+        items: vec![chain.root_der, chain.leaf_der, Vec::new()],
+    };
+    items.set_report(&mut req, &report);
+    (req, items)
+}
+
+/// Out-of-band items of a [`build_valid_import`] request: the two sender
+/// chain certificates, then the report.
+pub(crate) struct ImportOob {
+    items: Vec<Vec<u8>>,
+}
+
+impl ImportOob {
+    const REPORT_INDEX: usize = 2;
+
+    pub(crate) fn oob(&self) -> Vec<&[u8]> {
+        self.items.iter().map(Vec::as_slice).collect()
+    }
+
+    pub(crate) fn report(&self) -> &[u8] {
+        &self.items[Self::REPORT_INDEX]
+    }
+
+    /// Replace the report item and point `req.report` at it.
+    pub(crate) fn set_report(&mut self, req: &mut TborDarcTmkImportReq, report: &[u8]) {
+        self.items[Self::REPORT_INDEX] = report.to_vec();
+        req.report = ReportDescriptor {
+            index: Self::REPORT_INDEX as u8,
+            length: U16::new(u16::try_from(report.len()).expect("report length")),
+        };
+    }
 }
 
 /// A masked key of the wrong kind is rejected with `UnsupportedKeyType`.
@@ -340,22 +368,18 @@ pub(crate) fn build_valid_import(
 fn darc_tmk_import_rejects_wrong_key_kind() {
     let ready = sd_initialized_session();
     let ctx = &ready.ctx;
-    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    let (mut req, items) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
 
     let seal = ctx
         .tbor(&TborSdSealingKeyGenReq {
             session_id: ready.session.session_id,
             scope: SCOPE_LOCAL,
-            kem: tsra_ddi_tbor_types::SD_SEALING_KEM_P384,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
-    req.masked_kex_key = seal
-        .masked_key
-        .as_slice()
-        .try_into()
-        .expect("masked sealing key length");
+    req.masked_kex_key = seal.masked_key;
 
-    ctx.expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::UnsupportedKeyType);
+    ctx.expect_fw_reject_oob(&req, &items.oob(), TborStatus::UnsupportedKeyType);
 }
 
 /// A flipped ciphertext byte fails the signed envelope digest before opening.
@@ -363,59 +387,58 @@ fn darc_tmk_import_rejects_wrong_key_kind() {
 fn darc_tmk_import_rejects_tampered_sealed_tmk() {
     let ready = sd_initialized_session();
     let ctx = &ready.ctx;
-    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    let (mut req, items) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
 
     // Flip a byte in the ciphertext region (past the 97-byte `enc`).
     req.sealed_tmk[SEALED_TMK_LEN - 1] ^= 0xFF;
 
-    ctx.expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
+    ctx.expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
 fn darc_tmk_import_rejects_report_and_recipient_substitution() {
     let ready = sd_initialized_session();
-    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
-    let last = req.report.len() - 1;
-    req.report[last] ^= 1;
+    let (mut req, mut items) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let report = items.report().to_vec();
+    let mut tampered = report.clone();
+    *tampered.last_mut().expect("non-empty report") ^= 1;
+    items.set_report(&mut req, &tampered);
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
-    req.report[last] ^= 1;
+        .expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
+    items.set_report(&mut req, &report);
     let other = ready
         .ctx
         .tbor(&TborDarcKexKeyGenReq {
             session_id: ready.session.session_id,
             scope: SCOPE_LOCAL,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("other recipient");
-    req.masked_kex_key = other
-        .masked_key
-        .as_slice()
-        .try_into()
-        .expect("recipient key");
+    req.masked_kex_key = other.masked_key;
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
+        .expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
 fn darc_tmk_import_rejects_public_key_report_and_empty_report() {
     let ready = sd_initialized_session();
-    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let (mut req, mut items) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
     let (_, public_key_report, _) = masked_key_report_and_pub(&ready.ctx, ready.session.session_id);
-    req.report = public_key_report;
+    items.set_report(&mut req, &public_key_report);
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
-    req.report.clear();
+        .expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
+    // A zero-length descriptor (the transport forbids empty OOB items).
+    req.report.length = U16::new(0);
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::TborInvalidFixedLength);
-    req.report
-        .resize(tsra_ddi_tbor_types::DARC_REPORT_MAX_LEN + 1, 0);
+        .expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
+    items.set_report(&mut req, &vec![0; DARC_REPORT_MAX_LEN + 1]);
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::TborInvalidFixedLength);
+        .expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
 }
 
 /// A `policy` whose SHA-384 digest does not match the partition's bound
@@ -425,13 +448,13 @@ fn darc_tmk_import_rejects_public_key_report_and_empty_report() {
 fn darc_tmk_import_rejects_policy_hash_mismatch() {
     let ready = sd_initialized_session();
     let ctx = &ready.ctx;
-    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    let (mut req, items) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
 
     // Perturb an opaque, POTA-independent field so only the hash changes
     // (the anchor stays valid, isolating the hash gate).
     req.policy = perturb_policy_info(&req.policy);
 
-    ctx.expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
+    ctx.expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
 }
 
 /// A sender certificate chain that does not chain up to the policy POTA is
@@ -444,9 +467,9 @@ fn darc_tmk_import_rejects_unanchored_cert_chain() {
     let ctx = &ready.ctx;
 
     let rogue_ca = CaKey::generate();
-    let (req, chain) = build_valid_import(&ready, &rogue_ca, &[0x5Au8; TMK_LEN]);
+    let (req, items) = build_valid_import(&ready, &rogue_ca, &[0x5Au8; TMK_LEN]);
 
-    ctx.expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
+    ctx.expect_fw_reject_oob(&req, &items.oob(), TborStatus::InvalidArg);
 }
 
 /// A dummy well-formed request whose crypto inputs never get exercised —
@@ -455,10 +478,13 @@ fn darc_tmk_import_rejects_unanchored_cert_chain() {
 fn dummy_req(session_id: u16) -> TborDarcTmkImportReq {
     TborDarcTmkImportReq {
         session_id,
-        masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
+        masked_kex_key: vec![0u8; MASKED_KEX_KEY_LEN],
         policy: Vec::new(),
-        sealed_tmk: [0u8; SEALED_TMK_LEN],
-        report: vec![0],
+        sealed_tmk: vec![0u8; SEALED_TMK_LEN],
+        report: ReportDescriptor {
+            index: 1,
+            length: 1u16.into(),
+        },
         // A single (unused) descriptor so the request decodes past the FW
         // fixed-length check — these tests fail at the session/lifecycle
         // gate, which runs after decode but before any chain/crypto work.

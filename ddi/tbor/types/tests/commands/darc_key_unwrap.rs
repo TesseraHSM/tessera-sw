@@ -83,10 +83,10 @@ fn curve_params(curve: EccCurve) -> (i32, i32, usize, usize) {
 /// A masked TMK envelope (from a real `DarcTmkImport`) plus the raw TMK
 /// bytes the host wrapped the `COSE_Key` under.
 fn masked_tmk(ready: &SdReady) -> [u8; MASKED_TMK_LEN] {
-    let (req, chain) = build_valid_import(ready, &ready.pota, &TMK);
+    let (req, items) = build_valid_import(ready, &ready.pota, &TMK);
     let resp = ready
         .ctx
-        .tbor_oob(&req, &chain.der_items())
+        .tbor_oob(&req, &items.oob())
         .expect("DarcTmkImport");
     resp.masked_tmk
         .as_slice()

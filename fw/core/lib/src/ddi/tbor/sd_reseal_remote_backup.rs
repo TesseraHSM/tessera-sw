@@ -4,6 +4,7 @@
 //! Verify the client's signed SD operation before opening and PID-signing a reseal.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
+use tsra_fw_core_crypto_key_report::ReportKind;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::KeySink;
@@ -97,7 +98,8 @@ pub(crate) async fn handle<P: HsmPal>(
         })
         .await?;
     let recipient = &recipient[..recipient_len];
-    let (envelope_len, report_len) = sd_transfer::backup_lens(pal, io, recipient)?;
+    let (envelope_len, report_len) =
+        sd_transfer::transfer_lens(pal, io, ReportKind::SdBackup, recipient)?;
     let report_len_wire = U16::new(u16::try_from(report_len).map_err(|_| HsmError::InternalError)?);
     let len = cmd.encode_response(|buf| {
         Ok(TborSdResealRemoteBackupResp::encode(buf, 0, false)?
@@ -109,11 +111,11 @@ pub(crate) async fn handle<P: HsmPal>(
     })?;
     let out = TborSdResealRemoteBackupResp::decode_mut(&mut cmd.buffer_mut()[..len])?;
     pal.alloc_scoped_async(io, async |alloc| {
-        let report = sd_transfer::seal_backup(
+        let report = sd_transfer::seal_signed(
             pal,
             io,
             alloc,
-            hash,
+            Some(hash),
             recipient,
             bks3,
             out.dst_remote_backup,

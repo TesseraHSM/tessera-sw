@@ -59,5 +59,10 @@
 |            | `tsra_policy_key_thumbprint`                                     |
 |            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
 |            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
+|            | Added `kem` parameter (`TSRA_TRANSFER_KEM_*`) to                 |
+|            | `tsra_darc_kex_key_gen` for ML-KEM-1024 and MLKEM1024-P384       |
+|            | Added `target_key_report` to `tsra_darc_tmk_export_params`;      |
+|            | the target chain now ends in the target PID                      |
+|            | Added `tsra_darc_kex_key_report`                                 |
 
 \pagebreak

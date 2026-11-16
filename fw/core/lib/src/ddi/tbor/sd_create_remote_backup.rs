@@ -3,6 +3,7 @@
 
 //! Create an SD and PID-sign its Base-mode remote backup before provisioning.
 
+use tsra_fw_core_crypto_key_report::ReportKind;
 use tsra_fw_core_crypto_x509_chain::p384_spki_thumbprint;
 use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_core_crypto_x509_chain::P384_SPKI_LEN;
@@ -87,7 +88,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                         recipient[..len].copy_from_slice(leaf);
                         Ok(len)
                     }
-                    [report] => verify_receiver_key_report(pal, io, leaf, report, recipient).await,
+                    [report] => {
+                        verify_receiver_key_report(pal, io, leaf, report, false, recipient).await
+                    }
                     _ => Err(HsmError::InvalidArg),
                 }
             })
@@ -117,7 +120,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     }
     .await?;
     let recipient = &recipient[..recipient_len];
-    let (remote_len, report_len) = sd_transfer::backup_lens(pal, io, recipient)?;
+    let (remote_len, report_len) =
+        sd_transfer::transfer_lens(pal, io, ReportKind::SdBackup, recipient)?;
     let report_len_wire = U16::new(u16::try_from(report_len).map_err(|_| HsmError::InternalError)?);
     let len = cmd.encode_response(|buf| {
         Ok(TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
@@ -133,11 +137,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| {
         let bks3 = alloc.dma_alloc(sd_backup::BKS3_LEN)?;
         pal.rng_fill_bytes(io, bks3)?;
-        let report = sd_transfer::seal_backup(
+        let report = sd_transfer::seal_signed(
             pal,
             io,
             alloc,
-            hash,
+            Some(hash),
             recipient,
             bks3,
             out.pok_remote_backup,

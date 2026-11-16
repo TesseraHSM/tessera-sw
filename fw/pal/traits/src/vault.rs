@@ -82,6 +82,7 @@ use super::*;
 /// | 61–63 | ML-KEM public keys | `MlKem512Public` .. `MlKem1024Public` |
 /// | 64 | AES-256-XTS key (`K1 ‖ K2`) | `AesXts512` |
 /// | 65–66 | Post-quantum SD sealing keys | `SdSealingMlKem1024`, `SdSealingMlKem1024P384` |
+/// | 67–68 | Post-quantum DARC key-exchange keys | `DarcKexMlKem1024`, `DarcKexMlKem1024P384` |
 #[repr(u8)]
 #[open_enum]
 #[derive(Clone, Copy, Debug)]
@@ -336,6 +337,18 @@ pub enum HsmVaultKeyKind {
     /// Same lifecycle as [`SdSealing`](Self::SdSealing); represented as the
     /// 32-byte hybrid seed of draft-ietf-hpke-pq.
     SdSealingMlKem1024P384 = 66,
+
+    /// DARC key-exchange key — ML-KEM-1024 (HPKE-13) recipient key.
+    ///
+    /// Same lifecycle as [`DarcKex`](Self::DarcKex) (masked-only,
+    /// scope-tagged); represented as the 64-byte FIPS 203 `d ‖ z` seed.
+    DarcKexMlKem1024 = 67,
+
+    /// DARC key-exchange key — MLKEM1024-P384 (HPKE-10) recipient key.
+    ///
+    /// Same lifecycle as [`DarcKex`](Self::DarcKex); represented as the
+    /// 32-byte hybrid seed of draft-ietf-hpke-pq.
+    DarcKexMlKem1024P384 = 68,
 }
 
 /// Key scope: the lifecycle / visibility domain a vault key belongs

@@ -32,12 +32,13 @@ pub const KEY_KIND_SD_SEALING_MLKEM1024: u8 = 65;
 /// Vault kind of an MLKEM1024-P384 SD sealing key (32-byte seed).
 pub const KEY_KIND_SD_SEALING_MLKEM1024_P384: u8 = 66;
 
-/// `kem` discriminant: DHKEM(P-384, HKDF-SHA384).
-pub const SD_SEALING_KEM_P384: u8 = 0;
+/// `kem` discriminant of `SdSealingKeyGen` and `DarcKexKeyGen`:
+/// DHKEM(P-384, HKDF-SHA384).
+pub const TRANSFER_KEM_P384: u8 = 0;
 /// `kem` discriminant: ML-KEM-1024 (HPKE-13).
-pub const SD_SEALING_KEM_MLKEM1024: u8 = 1;
+pub const TRANSFER_KEM_MLKEM1024: u8 = 1;
 /// `kem` discriminant: MLKEM1024-P384 hybrid (HPKE-10).
-pub const SD_SEALING_KEM_MLKEM1024_P384: u8 = 2;
+pub const TRANSFER_KEM_MLKEM1024_P384: u8 = 2;
 
 /// Wire length of the returned sealing public key: a raw P-384 point
 /// (`x ‖ y`, 48 + 48 bytes).
@@ -67,7 +68,7 @@ pub struct TborSdSealingKeyGenReq {
     /// `KeyScope` discriminant (mirror of the firmware `HsmKeyScope`).
     pub scope: u8,
 
-    /// Sealing-key KEM (`SD_SEALING_KEM_*`); 0 is P-384.
+    /// Sealing-key KEM (`TRANSFER_KEM_*`); 0 is P-384.
     pub kem: u8,
 }
 
@@ -100,7 +101,7 @@ mod tests {
             session_id: 9,
             // KeyScope::SecurityDomain discriminant (0b100).
             scope: 0b100,
-            kem: SD_SEALING_KEM_MLKEM1024_P384,
+            kem: TRANSFER_KEM_MLKEM1024_P384,
         };
 
         let mut buf = [0u8; 256];

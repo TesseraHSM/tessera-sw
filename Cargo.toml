@@ -36,6 +36,7 @@ members = [
   "ddi/tbor/derive",
   "ddi/tbor/types",
   "ddi/win",
+  "examples/darc",
   "examples/sealing/api",
   "examples/sealing/common",
   "examples/sealing/leaf_svc",
