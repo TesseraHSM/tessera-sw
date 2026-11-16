@@ -1,22 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Bring-up smoke test for the TBOR `MlKemEncapsulate` command.
+//! Integration tests for the TBOR `MlKemEncapsulate` command.
 //!
-//! Deliberately minimal: one host-only wire-shape check plus one
-//! generate-then-encapsulate round-trip.  Scope sweeps and malformed
-//! public-key rejection land once the firmware handlers do.
+//! Wire shape, response sizes, output scope and DERIVE-only permissions,
+//! and malformed request-layout rejection across ML-KEM parameter sets.
 //!
 //! The command is in-session: each test brings up a finalized CO
 //! session and binds the request to it, as the ECC/AES tests do.
 
 use tsra_ddi_tbor_codec::RequestView;
+use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::pqc::assert_not_truncated_at_page;
 use tsra_ddi_tbor_test_harness::pqc::MlKemParams;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_1024;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_768;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborMlKemEncapsulateReq;
 use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
@@ -25,11 +26,13 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLKEM_ENCAPSULATE;
 
+use crate::commands::common::assert_derive_only_secret;
 use crate::commands::common::PayloadGapReq;
+use crate::commands::common::SCOPE_EPHEMERAL;
+use crate::commands::common::SCOPE_LOCAL;
+use crate::commands::common::SCOPE_SECURITY_DOMAIN;
+use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
-
-/// `KeyScope::Local` discriminant.
-const SCOPE_LOCAL: u8 = 0b011;
 
 /// Host-only: opcode, in-session control and TOC arity.
 #[test]
@@ -52,7 +55,7 @@ fn mlkem_encapsulate_request_wire_shape() {
 }
 
 /// Happy path: generate a keypair, then encapsulate to its public key.
-fn encapsulate_case(p: &MlKemParams) {
+fn encapsulate_case(p: &MlKemParams, scope: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -67,7 +70,7 @@ fn encapsulate_case(p: &MlKemParams) {
     let resp = ctx
         .tbor(&TborMlKemEncapsulateReq {
             session_id: session.session_id,
-            scope: SCOPE_LOCAL,
+            scope,
             pub_key: key.pub_key,
         })
         .unwrap_or_else(|e| panic!("MlKemEncapsulate({}): {e:?}", p.name));
@@ -96,21 +99,98 @@ fn encapsulate_case(p: &MlKemParams) {
     );
     assert_not_truncated_at_page(&resp.ciphertext, p.name);
     assert_not_truncated_at_page(&resp.masked_shared_secret, p.name);
+    assert_derive_only_secret(&resp.masked_shared_secret, scope);
 }
 
 #[test]
 fn mlkem_encapsulate_smoke_512() {
-    encapsulate_case(&ML_KEM_512);
+    encapsulate_case(&ML_KEM_512, SCOPE_LOCAL);
 }
 
 #[test]
 fn mlkem_encapsulate_smoke_768() {
-    encapsulate_case(&ML_KEM_768);
+    encapsulate_case(&ML_KEM_768, SCOPE_LOCAL);
 }
 
 #[test]
 fn mlkem_encapsulate_smoke_1024() {
-    encapsulate_case(&ML_KEM_1024);
+    encapsulate_case(&ML_KEM_1024, SCOPE_LOCAL);
+}
+
+/// Each parameter set preserves the requested output scope with DERIVE-only usage.
+#[test]
+fn mlkem_encapsulate_output_scopes() {
+    for params in [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024] {
+        for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL] {
+            encapsulate_case(params, scope);
+        }
+    }
+}
+
+/// Unknown scopes and an unprovisioned SecurityDomain scope are rejected.
+#[test]
+fn mlkem_encapsulate_unsupported_scopes() {
+    for params in [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024] {
+        let ctx = TestCtx::new();
+        let session = finalized_co_session(&ctx);
+        let key = ctx
+            .tbor(&TborMlKemGenerateKeyReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                key_kind: params.key_kind,
+            })
+            .expect("MlKemGenerateKey");
+        let req = TborMlKemEncapsulateReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            pub_key: key.pub_key,
+        };
+        let control = ctx.tbor(&req).expect("valid output scope control");
+        assert_derive_only_secret(&control.masked_shared_secret, SCOPE_LOCAL);
+
+        for scope in [0, 5, u8::MAX, SCOPE_SECURITY_DOMAIN] {
+            ctx.expect_fw_reject(
+                &TborMlKemEncapsulateReq {
+                    scope,
+                    ..req.clone()
+                },
+                TborStatus::UnsupportedKeyScope,
+            );
+        }
+    }
+}
+
+/// Only Session output is available before partition finalization.
+#[test]
+fn mlkem_encapsulate_unprovisioned_scopes() {
+    for params in [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024] {
+        let ctx = TestCtx::new();
+        let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+        let key = ctx
+            .tbor(&TborMlKemGenerateKeyReq {
+                session_id: session.session_id,
+                scope: SCOPE_SESSION,
+                key_kind: params.key_kind,
+            })
+            .expect("MlKemGenerateKey at Session scope");
+        let req = TborMlKemEncapsulateReq {
+            session_id: session.session_id,
+            scope: SCOPE_SESSION,
+            pub_key: key.pub_key,
+        };
+        let control = ctx.tbor(&req).expect("Session output before finalization");
+        assert_derive_only_secret(&control.masked_shared_secret, SCOPE_SESSION);
+
+        for scope in [SCOPE_EPHEMERAL, SCOPE_LOCAL, SCOPE_SECURITY_DOMAIN] {
+            ctx.expect_fw_reject(
+                &TborMlKemEncapsulateReq {
+                    scope,
+                    ..req.clone()
+                },
+                TborStatus::UnsupportedKeyScope,
+            );
+        }
+    }
 }
 
 /// Rejects an otherwise valid request whose payload data starts after a

@@ -42,6 +42,13 @@ use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
+use zerocopy::byteorder::LittleEndian;
+use zerocopy::byteorder::U16;
+use zerocopy::byteorder::U64;
+use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::KnownLayout;
+use zerocopy::Unaligned;
 
 /// `KeyScope::Session` discriminant.
 pub(crate) const SCOPE_SESSION: u8 = 0b001;
@@ -72,6 +79,41 @@ pub(crate) const ENVELOPE_AAD_LEN: usize = 192;
 
 /// Length in bytes of the masked-key envelope authentication tag.
 pub(crate) const ENVELOPE_TAG_LEN: usize = 16;
+
+#[repr(C)]
+#[derive(FromBytes, Immutable, KnownLayout, Unaligned)]
+struct SharedSecretMetadata {
+    magic: [u8; 4],
+    version: U16<LittleEndian>,
+    _key_kind: u8,
+    _label_len: u8,
+    usage_flags: U64<LittleEndian>,
+}
+
+const _: () = assert!(size_of::<SharedSecretMetadata>() == 16);
+
+/// Verify output scope and all seven operation permissions in masked-secret metadata.
+pub(crate) fn assert_derive_only_secret(masked: &[u8], scope: u8) {
+    const OPERATION_USAGES: u64 = 0x7f << 10;
+    const DERIVE: u64 = 1 << 16;
+    const SCOPE_SHIFT: u32 = 17;
+    const SCOPE_MASK: u64 = 0b111;
+
+    let envelope =
+        tsra_crypto::aead_envelope::inspect(masked).expect("valid masked-secret envelope");
+    assert_eq!(envelope.aad.len(), ENVELOPE_AAD_LEN);
+    let (metadata, _) = SharedSecretMetadata::ref_from_prefix(envelope.aad)
+        .expect("valid masked-secret metadata prefix");
+    assert_eq!(metadata.magic, *b"MKEY");
+    assert_eq!(metadata.version.get(), 1);
+    let attrs = metadata.usage_flags.get();
+    assert_eq!(
+        attrs & OPERATION_USAGES,
+        DERIVE,
+        "secret must be DERIVE-only"
+    );
+    assert_eq!((attrs >> SCOPE_SHIFT) & SCOPE_MASK, u64::from(scope));
+}
 
 /// Creates a Crypto-Officer session, generates a session-scoped ECC signing key,
 /// and keeps the session alive while `test` runs.
