@@ -34,9 +34,14 @@ use tsra_ddi_mbor_test_hooks::DDI_OP_TEST_ACTION;
 use tsra_ddi_mbor_types::DdiApiRev;
 use tsra_ddi_mbor_types::DdiStatus;
 
+/// Requires mock sealing; TPM-backed provisioning is not supported.
 #[test]
 #[ignore = "Destructive: clears BK3 provisioning; run last on a dedicated test device"]
 fn test_clear_bk3() {
+    assert!(
+        std::env::var("TSRA_USE_TPM").is_err(),
+        "ClearBk3 test requires mock sealing and cannot run with TSRA_USE_TPM set"
+    );
     ddi_dev_test(
         common_setup,
         common_cleanup,
