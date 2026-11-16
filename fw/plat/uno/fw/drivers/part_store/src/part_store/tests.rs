@@ -316,6 +316,29 @@ fn rearm_sets_gate1_only_for_resourced_partitions() {
     assert!(!empty.unwrapping_key_required());
 }
 
+/// Warm boots advance the transport epoch, which survives everything but
+/// a power-on `reset`, and report exhaustion once it saturates.
+#[test]
+fn transport_epoch_bumps_and_saturates() {
+    let mut p = Partition(60);
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), Some(1));
+    p.clear_state(PartResetKind::Disable);
+    assert_eq!(p.transport_epoch(), Some(1));
+
+    p.slot_mut().transport_epoch = (u16::MAX - 1).to_le_bytes();
+    assert_eq!(p.transport_epoch(), Some(u16::MAX - 1));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
+}
+
 /// The unwrapping-key slot's validity byte decodes to its three states, and
 /// any other byte decodes to `None`, which callers treat as not importable.
 #[test]

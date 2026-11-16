@@ -180,7 +180,7 @@ fn load_pending_state<'a, P: HsmPal>(
     let (t1, rest) = rest.split_at_mut(PENDING_AUTH_OFF - PENDING_T1_OFF);
     let (auth_binding, rest) = rest.split_at_mut(PENDING_TYPE_OFF - PENDING_AUTH_OFF);
     let (h2m, m2h) =
-        rest[PENDING_KEYS_OFF - PENDING_TYPE_OFF..].split_at_mut(SESSION_TRANSPORT_KEY_LEN);
+        rest[PENDING_KEYS_OFF - PENDING_TYPE_OFF..].split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
     Ok(HandshakeState {
         hs,
         t1,

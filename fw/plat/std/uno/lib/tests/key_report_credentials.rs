@@ -28,6 +28,8 @@ use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
 
 /// Core's crate-private `SessionCtrl::InSession` session-control value.
 const SESSION_CTRL_IN_SESSION: u8 = 3;
@@ -35,11 +37,14 @@ const SESSION_CTRL_IN_SESSION: u8 = 3;
 /// VM→HSM transport key of the session the test installs.
 const H2M_KEY: [u8; SESSION_TRANSPORT_KEY_LEN] = [0x11; SESSION_TRANSPORT_KEY_LEN];
 
+/// VM→HSM nonce salt of the session the test installs.
+const H2M_SALT: [u8; SESSION_TRANSPORT_SALT_LEN] = [0x5a; SESSION_TRANSPORT_SALT_LEN];
+
 #[repr(align(4096))]
 struct HostPage([u8; 4096]);
 
-/// Installs an Active CO session whose VM→HSM transport key is
-/// [`H2M_KEY`], returning its id.
+/// Installs an Active CO session whose VM→HSM transport key and salt are
+/// [`H2M_KEY`] and [`H2M_SALT`], returning its id.
 async fn install_session(
     pal: &StdHsmPal,
     io: &<StdHsmPal as tsra_fw_hsm_pal_traits::HsmIoTypes>::Io,
@@ -54,8 +59,12 @@ async fn install_session(
         buf.fill(fill);
         &*buf
     };
-    let h2m = pal.dma_alloc(io, SESSION_TRANSPORT_KEY_LEN).expect("h2m");
-    h2m.copy_from_slice(&H2M_KEY);
+    let h2m = pal
+        .dma_alloc(io, SESSION_TRANSPORT_SECRET_LEN)
+        .expect("h2m");
+    let (h2m_key, h2m_salt) = h2m.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
+    h2m_key.copy_from_slice(&H2M_KEY);
+    h2m_salt.copy_from_slice(&H2M_SALT);
     pal.session_promote(
         io,
         id,
@@ -64,7 +73,7 @@ async fn install_session(
         key(0x33, 32),
         key(0, SESSION_AUTH_BINDING_LEN),
         h2m,
-        key(0x44, SESSION_TRANSPORT_KEY_LEN),
+        key(0x44, SESSION_TRANSPORT_SECRET_LEN),
     )
     .await
     .expect("promote session");
@@ -72,13 +81,16 @@ async fn install_session(
 }
 
 /// Seals `msg` into `out` as an Uno transport frame
-/// (`ct ‖ iv ‖ tag`, block-padded, no AAD), returning the frame length.
-fn seal_frame(msg: &[u8], out: &mut [u8]) -> usize {
+/// (`ct ‖ iv ‖ tag`, block-padded, no AAD, `iv = salt ‖ seq`), returning
+/// the frame length.
+fn seal_frame(msg: &[u8], seq: u64, out: &mut [u8]) -> usize {
     let pt_len = (msg.len() + 1).next_multiple_of(16);
     let mut pt = vec![0u8; pt_len];
     pt[..msg.len()].copy_from_slice(msg);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
-    let iv = [0x5a; SESSION_TRANSPORT_IV_LEN];
+    let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+    iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&H2M_SALT);
+    iv[SESSION_TRANSPORT_SALT_LEN..].copy_from_slice(&seq.to_be_bytes());
     let key = AesKey::from_bytes(&H2M_KEY).expect("transport key");
     let mut algo = AesGcmAlgo::for_encrypt(&iv, None).expect("gcm");
     algo.encrypt(&key, &pt, Some(&mut out[..pt_len]))
@@ -146,7 +158,7 @@ async fn check_credential_guard() {
         .expect("auth envelope")
         .finish()
         .len();
-    let request_len = seal_frame(&msg[..msg_len], &mut request.0);
+    let request_len = seal_frame(&msg[..msg_len], 0, &mut request.0);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
     tx.send(HsmIoRequest::cmd(
         HsmPartId::from(0u8),

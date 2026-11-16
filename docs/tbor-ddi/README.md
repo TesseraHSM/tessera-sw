@@ -328,32 +328,47 @@ On `TborSecure`, the TBOR body's `session_id` must equal the SQE
 
 ### Transport keys
 
-`SessionOpenInit` derives two AES-256-GCM keys from the HPKE `exported`
-secret and stores them with the Pending session, so `SessionOpenFinish`
-already travels encrypted:
+`SessionOpenInit` derives an AES-256-GCM key and a 4-byte nonce salt per
+direction from the HPKE `exported` secret and stores them with the
+Pending session, so `SessionOpenFinish` already travels encrypted:
 
 ```text
-key_h2m = HKDF-Expand-SHA-384(exported, "tsra-session-xport-h2m-v1" ‖ be16(32), 32)
-key_m2h = HKDF-Expand-SHA-384(exported, "tsra-session-xport-m2h-v1" ‖ be16(32), 32)
+key_h2m ‖ salt_h2m = HKDF-Expand-SHA-384(exported, "tsra-session-xport-h2m-v2" ‖ be16(36), 36)
+key_m2h ‖ salt_m2h = HKDF-Expand-SHA-384(exported, "tsra-session-xport-m2h-v2" ‖ be16(36), 36)
 ```
 
 `key_h2m` protects requests (host → HSM) and `key_m2h` protects responses
 (HSM → host); separate keys stop reflection of one direction into the
-other. Both CO and CU sessions use them, and at revision 2.0 they replace
+other. Each message's 96-bit IV is deterministic, so sealing draws no
+randomness:
+
+```text
+iv = salt_dir(4) ‖ be64(seq_dir)
+```
+
+`seq_dir` counts the messages the sender has sealed in that direction,
+starting at 0 for the Pending session and continuing after
+`SessionOpenFinish` promotes it (the keys are unchanged). Sealing fails
+rather than let a counter wrap. On Uno, sessions survive warm and
+firmware-update resets while the HSM→VM counter (kept in DTCM) does not,
+so its top 16 bits hold a per-partition epoch that every warm boot
+advances; a session whose epoch is exhausted can no longer send and must
+be reopened. The receiver uses the IV it is given: nonce uniqueness is
+the sender's responsibility. Both CO and CU sessions use them, and at revision 2.0 they replace
 the CO outer HMAC envelope. The keys never leave the session's key-vault
 entry; the host zeroizes its copies on close or flush.
 
 ### Encrypted exchange
 
 1. The host encrypts the entire TBOR request (header, TOC and data)
-   in place with `key_h2m` under a fresh random 96-bit IV, and places the
+   in place with `key_h2m` under its next VM→HSM IV, and places the
    IV (DW23–25) and 16-byte tag (DW19–22) in the SQE. `aad_len` (DW26)
    must be `0`; there is no AAD.
 2. The HSM decrypts the request and checks the tag before parsing. A tag
    failure, or a session without transport keys, completes with CQE
    status `SESSION_TRANSPORT_ERR` (`0xCC`); session state is unchanged.
 3. The TBOR response, success or error, is encrypted with `key_m2h`
-   under a fresh IV; the IV (CQE DW5–7) and tag (CQE DW1–4) are returned
+   under the next HSM→VM IV; the IV (CQE DW5–7) and tag (CQE DW1–4) are returned
    in the CQE.
 
 Because the SQE `session_id` selects the key, tampering with it fails the

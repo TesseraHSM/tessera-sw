@@ -29,6 +29,9 @@
 //! `tsra_api`. Callers map [`SessionExCryptoError`] onto their own error
 //! domain at the boundary.
 
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering;
+
 use tsra_crypto::aead_envelope::*;
 use tsra_crypto::*;
 use tsra_ddi_tbor_types::*;
@@ -239,6 +242,33 @@ fn hkdf_expand_labeled(
 fn derive_aes_key(hs: &[u8], label: &[u8]) -> SessionExCryptoResult<AesKey> {
     let bytes = hkdf_expand_labeled(hs, label, SESSION_TRANSPORT_KEY_LEN)?;
     AesKey::from_bytes(&bytes).map_err(|_| SessionExCryptoError::Crypto)
+}
+
+/// One direction's transport key and nonce salt.
+struct TransportDir {
+    key: AesKey,
+    salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+}
+
+impl TransportDir {
+    /// Expand the direction's `key ‖ salt` from `hs` under `label`.
+    fn derive(hs: &[u8], label: &[u8]) -> SessionExCryptoResult<Self> {
+        let bytes = hkdf_expand_labeled(hs, label, SESSION_TRANSPORT_SECRET_LEN)?;
+        let (key, salt) = bytes.split_at(SESSION_TRANSPORT_KEY_LEN);
+        Ok(Self {
+            key: AesKey::from_bytes(key).map_err(|_| SessionExCryptoError::Crypto)?,
+            salt: salt.try_into().map_err(|_| SessionExCryptoError::Crypto)?,
+        })
+    }
+
+    /// The nonce of message `seq`: `salt ‖ be64(seq)`.
+    fn nonce(&self, seq: u64) -> [u8; SESSION_TRANSPORT_IV_LEN] {
+        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        let (salt, ctr) = iv.split_at_mut(SESSION_TRANSPORT_SALT_LEN);
+        salt.copy_from_slice(&self.salt);
+        ctr.copy_from_slice(&seq.to_be_bytes());
+        iv
+    }
 }
 
 /// The per-handshake ephemeral key.
@@ -486,7 +516,7 @@ pub fn seal_seed_envelope(param_key: &AesKey, seed: &[u8]) -> SessionExCryptoRes
 /// the SQE (request) or CQE (response) rather than in the payload.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionTransportSeal {
-    /// Random per-message IV.
+    /// Per-message IV: the direction's `salt ‖ be64(seq)`.
     pub iv: [u8; SESSION_TRANSPORT_IV_LEN],
 
     /// Authentication tag.
@@ -495,37 +525,53 @@ pub struct SessionTransportSeal {
 
 /// Per-session transport encryption.
 ///
-/// Holds the VM→HSM and HSM→VM AES-256-GCM keys derived from the
-/// handshake secret. Every in-session request (including
+/// Holds the VM→HSM and HSM→VM AES-256-GCM keys and nonce salts derived
+/// from the handshake secret. Every in-session request (including
 /// `SessionOpenFinish` and the close) is sealed with one, and its
-/// response opened with the other, under a random 96-bit IV and no AAD.
+/// response opened with the other, with no AAD. Each direction's nonce is
+/// `salt(4) ‖ be64(seq)`, where `seq` counts the sender's messages, so
+/// sealing draws no randomness. Requests take the next value of this
+/// value's VM→HSM counter, so concurrent senders sharing one session
+/// never reuse a nonce.
 /// On Duo the IV and tag ride in the SQE/CQE
 /// ([`seal_request`](Self::seal_request) /
 /// [`open_response`](Self::open_response)); on Uno they trail the
 /// block-padded ciphertext in-band ([`seal_frame`](Self::seal_frame) /
-/// [`open_frame`](Self::open_frame)). The keys are zeroized when this
-/// value is dropped.
+/// [`open_frame`](Self::open_frame)). Like the device, the receiver uses
+/// the IV it is given.
+/// The keys are zeroized when this value is dropped.
 pub struct SessionTransport {
-    h2m: AesKey,
-    m2h: AesKey,
+    h2m: TransportDir,
+    m2h: TransportDir,
+    h2m_seq: AtomicU64,
 }
 
 impl SessionTransport {
-    /// Derive both directional keys from the handshake secret `hs`.
+    /// Derive both directional keys and salts from the handshake secret
+    /// `hs`.
     pub fn derive(hs: &[u8]) -> SessionExCryptoResult<Self> {
         Ok(Self {
-            h2m: derive_aes_key(hs, SESSION_TRANSPORT_H2M_LABEL)?,
-            m2h: derive_aes_key(hs, SESSION_TRANSPORT_M2H_LABEL)?,
+            h2m: TransportDir::derive(hs, SESSION_TRANSPORT_H2M_LABEL)?,
+            m2h: TransportDir::derive(hs, SESSION_TRANSPORT_M2H_LABEL)?,
+            h2m_seq: AtomicU64::new(0),
         })
     }
 
-    /// Encrypt a request payload in place with the VM→HSM key under a
-    /// fresh random IV (Duo).
+    /// Reserve the next VM→HSM sequence number; fails rather than wrap.
+    fn next_h2m_seq(&self) -> SessionExCryptoResult<u64> {
+        self.h2m_seq
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
+                seq.checked_add(1)
+            })
+            .map_err(|_| SessionExCryptoError::Crypto)
+    }
+
+    /// Encrypt a request payload in place with the VM→HSM key under the
+    /// next VM→HSM nonce (Duo).
     pub fn seal_request(&self, buf: &mut [u8]) -> SessionExCryptoResult<SessionTransportSeal> {
-        let mut sealed = SessionTransportSeal::default();
-        Rng::rand_bytes(&mut sealed.iv).map_err(|_| SessionExCryptoError::Crypto)?;
-        sealed.tag = gcm_encrypt(&self.h2m, &sealed.iv, buf)?;
-        Ok(sealed)
+        let iv = self.h2m.nonce(self.next_h2m_seq()?);
+        let tag = gcm_encrypt(&self.h2m.key, &iv, buf)?;
+        Ok(SessionTransportSeal { iv, tag })
     }
 
     /// Decrypt a response payload in place with the HSM→VM key (Duo).
@@ -537,12 +583,13 @@ impl SessionTransport {
         sealed: &SessionTransportSeal,
         buf: &mut [u8],
     ) -> SessionExCryptoResult<()> {
-        gcm_decrypt(&self.m2h, &sealed.iv, &sealed.tag, buf)
+        gcm_decrypt(&self.m2h.key, &sealed.iv, &sealed.tag, buf)
     }
 
     /// Seal a request message into a Uno frame
     /// `ct ‖ iv(12) ‖ tag(16)`, where the plaintext is
-    /// `msg ‖ 0^p ‖ p` padded to whole AES blocks.
+    /// `msg ‖ 0^p ‖ p` padded to whole AES blocks and the IV is the next
+    /// VM→HSM nonce.
     pub fn seal_frame(&self, msg: &[u8]) -> SessionExCryptoResult<Vec<u8>> {
         let frame_len = sealed_frame_len(msg.len());
         let pt_len = frame_len - SEALED_TRAILER_LEN;
@@ -551,12 +598,10 @@ impl SessionTransport {
         pt[..msg.len()].copy_from_slice(msg);
         // `sealed_frame_len` pads by 1..=16 bytes, so this fits in a byte.
         pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
-        let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
-        Rng::rand_bytes(iv).map_err(|_| SessionExCryptoError::Crypto)?;
-        let iv: [u8; SESSION_TRANSPORT_IV_LEN] = (&*iv)
-            .try_into()
-            .map_err(|_| SessionExCryptoError::Crypto)?;
-        tag.copy_from_slice(&gcm_encrypt(&self.h2m, &iv, pt)?);
+        let iv = self.h2m.nonce(self.next_h2m_seq()?);
+        let (iv_out, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
+        iv_out.copy_from_slice(&iv);
+        tag.copy_from_slice(&gcm_encrypt(&self.h2m.key, &iv, pt)?);
         Ok(frame)
     }
 
@@ -579,7 +624,7 @@ impl SessionTransport {
         };
         let (ct, trailer) = frame.split_at_mut(ct_len);
         let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
-        let opened = gcm_decrypt(&self.m2h, iv, tag, ct)
+        let opened = gcm_decrypt(&self.m2h.key, iv, tag, ct)
             .ok()
             .and_then(|()| unpad(ct));
         match opened {
@@ -700,8 +745,18 @@ mod tests {
     /// The device's key for one direction.
     fn device_key(label: &[u8]) -> AesKey {
         let bytes =
-            hkdf_expand_labeled(&HS, label, SESSION_TRANSPORT_KEY_LEN).expect("test crypto");
-        AesKey::from_bytes(&bytes).expect("test crypto")
+            hkdf_expand_labeled(&HS, label, SESSION_TRANSPORT_SECRET_LEN).expect("test crypto");
+        AesKey::from_bytes(&bytes[..SESSION_TRANSPORT_KEY_LEN]).expect("test crypto")
+    }
+
+    /// The device's nonce for message `seq` in one direction.
+    fn device_nonce(label: &[u8], seq: u64) -> [u8; SESSION_TRANSPORT_IV_LEN] {
+        let bytes =
+            hkdf_expand_labeled(&HS, label, SESSION_TRANSPORT_SECRET_LEN).expect("test crypto");
+        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&bytes[SESSION_TRANSPORT_KEY_LEN..]);
+        iv[SESSION_TRANSPORT_SALT_LEN..].copy_from_slice(&seq.to_be_bytes());
+        iv
     }
 
     /// The device side of `SessionOpenInit`: encapsulates to `pk_init`,
@@ -803,6 +858,10 @@ mod tests {
         let mut request = *b"tbor secure request";
         let sealed = transport.seal_request(&mut request).expect("test crypto");
         assert_ne!(&request, b"tbor secure request");
+        assert_eq!(sealed.iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, 0));
+        let mut next = *b"x";
+        let next = transport.seal_request(&mut next).expect("test crypto");
+        assert_eq!(next.iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, 1));
         gcm_decrypt(
             &device_key(SESSION_TRANSPORT_H2M_LABEL),
             &sealed.iv,
@@ -841,13 +900,14 @@ mod tests {
         assert!(transport.open_response(&tampered, &mut buf).is_err());
     }
 
-    /// Seal `msg` as the device would: `ct ‖ iv ‖ tag` under the HSM→VM key.
-    fn device_seal_frame(msg: &[u8]) -> Vec<u8> {
+    /// Seal `msg` as the device would: `ct ‖ iv ‖ tag` under the HSM→VM
+    /// key and nonce `salt ‖ seq`.
+    fn device_seal_frame(msg: &[u8], seq: u64) -> Vec<u8> {
         let pt_len = sealed_frame_len(msg.len()) - SEALED_TRAILER_LEN;
         let mut frame = msg.to_vec();
         frame.resize(pt_len, 0);
         frame[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
-        let iv = [9; SESSION_TRANSPORT_IV_LEN];
+        let iv = device_nonce(SESSION_TRANSPORT_M2H_LABEL, seq);
         let tag = gcm_encrypt(&device_key(SESSION_TRANSPORT_M2H_LABEL), &iv, &mut frame)
             .expect("test crypto");
         frame.extend_from_slice(&iv);
@@ -858,7 +918,8 @@ mod tests {
     #[test]
     fn frames_interoperate_with_device_keys() {
         let transport = SessionTransport::derive(&HS).expect("test crypto");
-        for len in [0, 1, 15, 16, 17, 100] {
+        for (seq, len) in [0, 1, 15, 16, 17, 100].into_iter().enumerate() {
+            let seq = seq as u64;
             let msg: Vec<u8> = (0..len as u8).collect();
 
             let frame = transport.seal_frame(&msg).expect("test crypto");
@@ -868,12 +929,13 @@ mod tests {
             let (ct, trailer) = frame.split_at(ct_len);
             let mut pt = ct.to_vec();
             let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
+            assert_eq!(iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, seq));
             gcm_decrypt(&device_key(SESSION_TRANSPORT_H2M_LABEL), iv, tag, &mut pt)
                 .expect("test crypto");
             assert_eq!(unpad(&pt), Some(len));
             assert_eq!(&pt[..len], msg.as_slice());
 
-            let mut frame = device_seal_frame(&msg);
+            let mut frame = device_seal_frame(&msg, seq * 3);
             transport.open_frame(&mut frame).expect("test crypto");
             assert_eq!(frame, msg);
         }
@@ -882,14 +944,16 @@ mod tests {
     #[test]
     fn open_frame_rejects_bad_frames() {
         let transport = SessionTransport::derive(&HS).expect("test crypto");
-        let good = device_seal_frame(b"response");
+        let good = device_seal_frame(b"response", 5);
 
         let mut tampered = good.clone();
         tampered[0] ^= 1;
+        let mut bad_iv = good.clone();
+        bad_iv[good.len() - SEALED_TRAILER_LEN + SESSION_TRANSPORT_IV_LEN - 1] ^= 1;
         let mut short = good[..good.len() - 1].to_vec();
         // A request frame is under the VM→HSM key.
         let mut reflected = transport.seal_frame(b"response").expect("test crypto");
-        for frame in [&mut tampered, &mut short, &mut reflected] {
+        for frame in [&mut tampered, &mut bad_iv, &mut short, &mut reflected] {
             assert!(matches!(
                 transport.open_frame(frame),
                 Err(SessionExCryptoError::MacMismatch)

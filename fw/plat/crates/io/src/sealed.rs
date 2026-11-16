@@ -11,6 +11,7 @@
 //! ```text
 //! frame     = ct ‖ iv(12) ‖ tag(16)
 //! plaintext = msg ‖ 0^p ‖ p(1)          // p = pad_len, 0..=15
+//! iv        = salt(4) ‖ seq(8)          // salt and counter of the sender
 //! ```
 //!
 //! The plaintext is padded to whole AES blocks, so the engine never takes
@@ -20,14 +21,17 @@
 //! is left at offset 0 of the exchange buffer.
 //!
 //! Requests are opened with the session's VM→HSM transport key, responses
-//! sealed with the HSM→VM key under a fresh random IV.
+//! sealed with the HSM→VM key. The sender builds the IV from its
+//! direction's salt and big-endian message counter, so no per-message
+//! randomness is needed and nonces never repeat under a key. As on Duo,
+//! the receiver uses the IV it is given: it is read in place from the
+//! frame, so opening needs no extra DMA staging.
 
 use tsra_fw_hsm_pal_traits::HsmAesGcm;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
@@ -113,20 +117,21 @@ where
         .map_err(|_| HsmError::SessionTransportError)?;
     let (ct, trailer) = frame.split_at_mut(ct_len);
     let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
-    pal.gcm_decrypt_in_place(io, key, iv, 0, tag, ct)
+    pal.gcm_decrypt_in_place(io, key.key(), iv, 0, tag, ct)
         .await
         .map_err(|_| HsmError::SessionTransportError)?;
     unpad(ct).ok_or(HsmError::SessionTransportError)
 }
 
-/// Seals the response `msg` with session `id`'s HSM→VM key under a fresh
-/// IV, returning the frame in a new DMA buffer.
+/// Seals the response `msg` with session `id`'s HSM→VM key under the
+/// session's next HSM→VM sequence number, returning the frame in a new DMA
+/// buffer.
 ///
 /// # Errors
 ///
 /// [`HsmError::SessionTransportError`] if the session has no transport
-/// key or the encryption fails; `NotEnoughSpace` if the frame cannot be
-/// allocated; the RNG's error if it fails.
+/// key, its sequence numbers are exhausted, or the encryption fails;
+/// `NotEnoughSpace` if the frame cannot be allocated.
 pub async fn sealed_seal<'a, P>(
     pal: &'a P,
     io: &P::Io,
@@ -134,7 +139,7 @@ pub async fn sealed_seal<'a, P>(
     msg: &HsmDmaBuf,
 ) -> HsmResult<&'a HsmDmaBuf>
 where
-    P: HsmAesGcm + HsmSessionManager + HsmAlloc + HsmRng,
+    P: HsmAesGcm + HsmSessionManager + HsmAlloc,
 {
     let frame_len = sealed_frame_len(msg.len());
     let pt_len = frame_len - SEALED_TRAILER_LEN;
@@ -143,12 +148,15 @@ where
     pt[..msg.len()].copy_from_slice(msg);
     pt[msg.len()..pt_len - 1].fill(0);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
-    let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
-    pal.rng_fill_bytes(io, iv)?;
     let key = pal
         .session_transport_key(io, id, HsmSessionTransportDir::M2h)
         .map_err(|_| HsmError::SessionTransportError)?;
-    pal.gcm_encrypt_in_place(io, key, iv, 0, pt, tag)
+    let seq = pal
+        .session_transport_next_seq(io, id)
+        .map_err(|_| HsmError::SessionTransportError)?;
+    let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
+    iv.copy_from_slice(&key.nonce(seq));
+    pal.gcm_encrypt_in_place(io, key.key(), iv, 0, pt, tag)
         .await
         .map_err(|_| HsmError::SessionTransportError)?;
     Ok(frame)

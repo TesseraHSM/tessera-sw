@@ -167,7 +167,7 @@ pub enum HsmVaultKeyKind {
     /// and CU).
     ///
     /// `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)
-    /// ‖ h2m(32) ‖ m2h(32)]` = 204 B, identical for CO and CU.
+    /// ‖ h2m(36) ‖ m2h(36)]` = 212 B, identical for CO and CU.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used
