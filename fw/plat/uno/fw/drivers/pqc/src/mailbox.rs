@@ -630,7 +630,7 @@ pub fn response_seq(engine: EngineId) -> u32 {
 }
 
 /// Withdraw whatever request `engine`'s lane holds, by numbering it as
-/// answered, and [`scrub`] the lane.
+/// answered, clear its core's stale crash marker, and [`scrub`] the lane.
 ///
 /// For the first acquire after boot, before any lane is handed out. Nothing
 /// can be serving one then: every reset restarts the fastpath cores along
@@ -642,8 +642,14 @@ pub fn response_seq(engine: EngineId) -> u32 {
 /// instead.
 pub fn reset_lane(engine: EngineId) {
     let answered = response_seq(engine);
+    let crash_mb = MAILBOX_ADDRS[engine.core() as usize] as *mut u32;
     // SAFETY: as `post_request`.
-    unsafe { write_volatile(mailbox(engine).add(word::REQUEST_SEQ), answered) };
+    unsafe {
+        write_volatile(mailbox(engine).add(word::REQUEST_SEQ), answered);
+        // All lanes reset before any request is posted. A previous boot's
+        // crash must not let FpReadGuard release a live DMA operand.
+        write_volatile(crash_mb.add(CRASH_WORD), 0);
+    }
     scrub(engine);
 }
 

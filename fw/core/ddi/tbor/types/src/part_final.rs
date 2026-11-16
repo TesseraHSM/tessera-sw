@@ -19,8 +19,8 @@
 //!   in `PartInit`, re-supplied so the handler can recover `POTAPubKey`
 //!   for cert-chain validation.  The handler verifies
 //!   `SHA-384(part_policy) == ` the stored policy hash before trusting
-//!   it.  Layout owned by [`crate::policy::PartPolicy`]; length pinned by
-//!   [`PART_POLICY_LEN`].
+//!   it.  Layout owned by [`crate::policy::PartPolicy`]; length bounded by
+//!   [`PART_POLICY_MAX_LEN`].
 //! * `cert_descriptors` — a packed list of [`CertDescriptor`] entries
 //!   `(index, length)` referencing where each DER certificate of the PTA
 //!   chain is carried **out of band** as an SGL Data Block (the
@@ -50,7 +50,7 @@ pub const TBOR_OP_PART_FINAL: u8 = 0x08;
 /// [`crate::policy`].
 ///
 /// [`PartPolicy`]: crate::policy::PartPolicy
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 
 /// Exact on-the-wire length of a `local_mk` backup envelope
 /// (`prev_local_mk_backup` / `local_mk_backup`).
@@ -94,7 +94,7 @@ pub struct TborPartFinalReq<'a> {
 
     /// Caller-asserted unified [`PartPolicy`] blob, re-supplied from
     /// `PartInit` so the handler can recover `POTAPubKey` for cert-chain
-    /// validation.  Length pinned to [`PART_POLICY_LEN`].
+    /// validation.  Length bounded by [`PART_POLICY_MAX_LEN`].
     ///
     /// Carried as a raw `&[u8]`: the handler hashes it
     /// (`SHA-384(part_policy) == policy_hash`) and, when it needs typed
@@ -102,7 +102,7 @@ pub struct TborPartFinalReq<'a> {
     /// `super::policy::from_bytes`.
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub part_policy: &'a [u8],
 
     /// Packed list of [`CertDescriptor`] entries `(index, length)` for
@@ -159,18 +159,18 @@ mod tests {
 
     #[test]
     fn part_policy_len_matches_pinned_value() {
-        // The `#[tbor(len = 584)]` attribute on `part_policy` must remain
+        // The `#[tbor(max_len = 384)]` attribute on `part_policy` must remain
         // a numeric literal; this pins it against the canonical
-        // `PART_POLICY_LEN` from `crate::policy`.
-        const _: () = assert!(584 == PART_POLICY_LEN);
-        assert_eq!(PART_POLICY_LEN, 584);
+        // `PART_POLICY_MAX_LEN` from `crate::policy`.
+        const _: () = assert!(384 == PART_POLICY_MAX_LEN);
+        assert_eq!(PART_POLICY_MAX_LEN, 384);
     }
 
     #[test]
     fn encoder_accepts_part_policy_and_typed_descriptors() {
         use tsra_fw_ddi_tbor_api::SessionId;
 
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let descs = [
             CertDescriptor {
                 index: 0,

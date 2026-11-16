@@ -17,10 +17,6 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::TborPartInitReq;
 
 #[derive(Arbitrary, Debug)]
@@ -31,14 +27,8 @@ struct FuzzInput {
     mach_seed: [u8; MACH_SEED_LEN],
     /// Optional post-seal mutation for reject-path coverage.
     envelope_mutation: common::EnvelopeMutation,
-    /// Fixed-length fuzzed POTA thumbprint.
-    pota_thumbprint: [u8; POTA_THUMBPRINT_LEN],
-    /// Fixed-length fuzzed SATA thumbprint.
-    sata_thumbprint: [u8; SATA_THUMBPRINT_LEN],
-    /// Whether to include a SAPOTA thumbprint (empty = absent).
-    sapota_present: bool,
-    /// Fixed-length fuzzed SAPOTA thumbprint (used when `sapota_present`).
-    sapota_thumbprint: [u8; SAPOTA_THUMBPRINT_LEN],
+    /// Fuzzed CBOR partition policy (known-good, structured or raw).
+    policy: common::FuzzPolicy,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -47,20 +37,10 @@ fuzz_target!(|input: FuzzInput| {
         // gate `PartInit` needs cleared before the fuzzed opcode can fire.
         let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
 
-        let sapota_thumbprint = if input.sapota_present {
-            input.sapota_thumbprint.to_vec()
-        } else {
-            Vec::new()
-        };
-
-        // Wire-valid PartPolicy — required so the handler advances past
-        // policy decode into the envelope/pipeline logic under fuzz.
-        // POTA pubkey is a synthetic pattern because `PartInit` records
-        // the policy as a claim but never walks the PTA cert chain.
-        let policy_bytes = common::known_good_part_policy(common::fill_ecc384_pubkey_pattern(0x10));
-        let part_policy =
-            <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(&policy_bytes)
-                .expect("known_good_part_policy must decode");
+        // `PartInit` records the policy as a claim but never walks the
+        // PTA cert chain, so thumbprints need not name real keys.
+        let part_policy = input.policy.to_bytes();
+        let policy_is_valid = common::is_valid_part_policy(&part_policy);
 
         // Seal the fuzzed 32-byte mach_seed under the freshly negotiated
         // param_key so the envelope authenticates; then optionally apply
@@ -82,9 +62,6 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             mach_seed_envelope,
             part_policy,
-            pota_thumbprint: input.pota_thumbprint,
-            sata_thumbprint: input.sata_thumbprint,
-            sapota_thumbprint,
         };
 
         // Classify the fuzzed inputs by deterministic outcome so we can
@@ -92,20 +69,18 @@ fuzz_target!(|input: FuzzInput| {
         // is accepted (silent regressions the `let _` discard would hide).
         //
         // * expect_success: envelope is unchanged except possibly in
-        //   the ignored IV suffix AND the rest of the request is
-        //   wire/handler-valid
-        //   by construction (known-good policy, fixed-length thumbprints,
-        //   SAPOTA is 0 or exactly SAPOTA_THUMBPRINT_LEN). The AEAD open
-        //   authenticates and the handler runs the provisioning
-        //   pipeline through Commit.
+        //   the ignored IV suffix AND the policy is a canonical,
+        //   schema-valid CBOR document. The AEAD open authenticates and
+        //   the handler runs the provisioning pipeline through Commit.
         // * expect_failure: any other non-noop envelope mutation changes
         //   the required length, invalidates the header, or tampers with
-        //   the nonce/AAD/ciphertext/tag. Encoding, firmware decoding,
+        //   the nonce/AAD/ciphertext/tag; or the policy is malformed,
+        //   non-canonical or oversized. Encoding, firmware decoding,
         //   or AEAD authentication rejects it with `TborEncodeError`
         //   or a firmware `TborStatus`, never a response-decoding failure.
         let result = ctx.tbor(&part_init_req);
 
-        if envelope_is_valid {
+        if envelope_is_valid && policy_is_valid {
             result.expect(
                 "PartInit should succeed with an authentic envelope and a wire-valid request",
             );
@@ -115,8 +90,8 @@ fuzz_target!(|input: FuzzInput| {
                     &result,
                     Err(DdiError::TborStatus(_) | DdiError::TborEncodeError)
                 ),
-                "PartInit should reject an invalid envelope with a firmware status or \
-                 request-encoding error, got {result:?}"
+                "PartInit should reject an invalid envelope or policy with a firmware \
+                 status or request-encoding error, got {result:?}"
             );
         }
 

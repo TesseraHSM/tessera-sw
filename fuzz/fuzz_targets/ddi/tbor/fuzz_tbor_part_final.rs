@@ -191,16 +191,11 @@ fuzz_target!(|input: FuzzInput| {
 
         // Generate a POTA trust anchor and embed its public key in the policy.
         let pota = CaKey::generate();
-        let policy = common::known_good_part_policy(pota.raw_pub());
+        let policy = common::known_good_part_policy(pota.spki_thumbprint());
 
         // PartInit: transition the partition to HsmPartState::Initializing.
         let init = ctx
-            .part_init(
-                &session,
-                &common::mach_seed(),
-                &policy,
-                &common::pota_thumbprint(),
-            )
+            .part_init(&session, &common::mach_seed(), &policy)
             .expect("PartInit should succeed");
 
         // Build the valid PTA chain anchored to the POTA key, then apply

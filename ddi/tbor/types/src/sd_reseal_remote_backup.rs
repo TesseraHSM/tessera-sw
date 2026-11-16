@@ -22,7 +22,6 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::policy::PartPolicy;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
@@ -47,9 +46,10 @@ pub struct TborSdResealRemoteBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified [`PartPolicy`] the source and destination must share.
-    /// Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy the source and destination must share.
+    /// Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 
     /// Source manufacturer certificate-chain descriptors.  Flattened from
     /// the firmware `src_evidence` field group (its four TOC entries); the
@@ -114,7 +114,7 @@ mod tests {
         let req = TborSdResealRemoteBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
@@ -129,10 +129,10 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy image plus the 161-byte src_remote_backup must
+        // The maximum-length policy image plus the 161-byte src_remote_backup must
         // be carried in the data section.
         assert!(
-            frame.len() > 584 + POK_REMOTE_BACKUP_LEN,
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN + POK_REMOTE_BACKUP_LEN,
             "encoded frame must carry the policy and src_remote_backup"
         );
     }

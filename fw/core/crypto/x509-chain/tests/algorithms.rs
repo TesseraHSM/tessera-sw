@@ -276,7 +276,7 @@ async fn walk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     certs: &[Vec<u8>],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     issuing: bool,
 ) -> HsmResult<()> {
     let descriptors: Vec<_> = certs
@@ -422,17 +422,17 @@ async fn mldsa_cases<P: HsmPal>(pal: &P, io: &P::Io) {
             SigAlgo::EcdsaSha384,
             false,
         );
-        let anchor = parse_cert(dma(&ca_cert))
-            .expect("parse CA")
-            .pub_key
-            .as_bytes()
-            .to_vec();
+        let anchor: [u8; SPKI_THUMBPRINT_LEN] =
+            Hasher::hash_vec(&mut HashAlgo::sha384(), &ec.spki())
+                .expect("SPKI thumbprint")
+                .try_into()
+                .expect("SHA-384 length");
         let certs = vec![root_cert, ca_cert, leaf_cert];
         walk(pal, io, &certs, Some(&anchor), false)
             .await
             .expect("mixed ML-DSA / EC chain");
         assert_eq!(
-            walk(pal, io, &certs, Some(&[0; 96]), false).await,
+            walk(pal, io, &certs, Some(&[0; SPKI_THUMBPRINT_LEN]), false).await,
             Err(HsmError::InvalidArg)
         );
         assert_eq!(
@@ -489,17 +489,20 @@ async fn mldsa_key_usage_cases<P: HsmPal>(pal: &P, io: &P::Io) {
         walk(pal, io, &[ec_root.clone(), leaf(false, &[])], None, false)
             .await
             .expect("optional ML-DSA KeyUsage");
-        assert_eq!(
-            walk(
-                pal,
-                io,
-                &[ec_root.clone(), leaf(false, &[usage_bits(0)])],
-                None,
-                false
-            )
-            .await,
-            Err(HsmError::X509KeyUsageInvalid)
-        );
+        for usage in [0, key_usage::KEY_CERT_SIGN, 0x8400] {
+            assert_eq!(
+                walk(
+                    pal,
+                    io,
+                    &[ec_root.clone(), leaf(false, &[usage_bits(usage)])],
+                    None,
+                    false
+                )
+                .await,
+                Err(HsmError::X509KeyUsageInvalid),
+                "non-CA ML-DSA leaf accepted invalid usage {usage:#06x}"
+            );
+        }
         for forbidden in [0x2000, 0x1000, 0x0800, 0x0100, 0x0080] {
             let invalid_leaf = leaf(false, &[usage_bits(0x8000 | forbidden)]);
             assert_eq!(
@@ -671,6 +674,22 @@ async fn profile_key_usage_cases<P: HsmPal>(pal: &P, io: &P::Io, pss: bool) {
         }
     }
     if pss {
+        for usage in [0, key_usage::KEY_CERT_SIGN, 0x8400] {
+            let unrestricted = certificate_with_key_usage(
+                b"leaf",
+                b"root",
+                key.spki(),
+                &key,
+                algo,
+                false,
+                &[usage_bits(usage)],
+            );
+            assert_eq!(
+                walk(pal, io, &[root.clone(), unrestricted], None, false).await,
+                Err(HsmError::X509KeyUsageInvalid),
+                "non-CA rsaEncryption leaf accepted invalid usage {usage:#06x}"
+            );
+        }
         for usage in [0x2000, 0x1000] {
             let unrestricted = certificate_with_key_usage(
                 b"leaf",

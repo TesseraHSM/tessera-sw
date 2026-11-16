@@ -29,6 +29,7 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -42,6 +43,9 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use crate::ecdsa;
 use crate::parse::parse_cert;
+use crate::spki::p384_spki_thumbprint;
+use crate::spki::P384_SPKI_LEN;
+use crate::spki::SPKI_THUMBPRINT_LEN;
 use crate::types::key_usage;
 use crate::types::CertInfo;
 use crate::types::EcPubKey;
@@ -300,11 +304,14 @@ impl ChainValidator {
         let Some(usage) = curr.key_usage else {
             return Ok(());
         };
-        let signatures = key_usage::DIGITAL_SIGNATURE | key_usage::NON_REPUDIATION;
-        let ca_signatures = if curr
+        let is_ca = curr
             .basic_constraints
-            .is_some_and(|constraints| constraints.ca)
-        {
+            .is_some_and(|constraints| constraints.ca);
+        if usage == 0 || (usage & key_usage::KEY_CERT_SIGN != 0 && !is_ca) {
+            return Err(HsmError::X509KeyUsageInvalid);
+        }
+        let signatures = key_usage::DIGITAL_SIGNATURE | key_usage::NON_REPUDIATION;
+        let ca_signatures = if is_ca {
             key_usage::KEY_CERT_SIGN | key_usage::CRL_SIGN
         } else {
             0
@@ -326,7 +333,7 @@ impl ChainValidator {
             }
             PubKey::Rsa(_) => return Ok(()),
         };
-        if usage == 0 || usage & !allowed != 0 {
+        if usage & !allowed != 0 {
             return Err(HsmError::X509KeyUsageInvalid);
         }
         Ok(())
@@ -605,7 +612,7 @@ impl ChainValidator {
 
 struct ChainWalker<'a> {
     validator: ChainValidator,
-    anchor: Option<&'a [u8]>,
+    anchor: Option<&'a [u8; SPKI_THUMBPRINT_LEN]>,
     anchored: bool,
     leaf_out: &'a mut [u8],
 }
@@ -629,11 +636,16 @@ impl ChainWalker<'_> {
             Some(&*alloc.alloc_val(IssuerInfo::from(&parse_cert(previous)?))?)
         };
 
+        // Trust-anchor binding: some non-leaf (issuing) P-384
+        // certificate's public-key thumbprint must equal the anchor.
         if let Some(anchor) = self.anchor {
-            if self.validator.index + 1 < self.validator.chain_len {
+            if !self.anchored && self.validator.index + 1 < self.validator.chain_len {
                 if let PubKey::Ec(key) = &current.pub_key {
-                    if &**key.point == anchor {
-                        self.anchored = true;
+                    if key.curve == HsmEccCurve::P384 {
+                        let spki = alloc.dma_alloc(P384_SPKI_LEN)?;
+                        let thumb = alloc.dma_alloc(SPKI_THUMBPRINT_LEN)?;
+                        p384_spki_thumbprint(pal, io, spki, key.point, thumb).await?;
+                        self.anchored = &thumb[..] == anchor.as_slice();
                     }
                 }
             }
@@ -695,9 +707,10 @@ pub const MAX_CERT_DER_LEN: usize = 8192;
 ///
 /// * `anchor == None` — the chain is trusted by its self-signed root
 ///   alone (no external anchor).
-/// * `anchor == Some(pubkey)` — some **non-leaf** (issuing) certificate's
-///   EC public key MUST equal `pubkey` (raw big-endian `X‖Y`), binding the
-///   chain to an external trust anchor (e.g. a policy POTA / SATA key).
+/// * `anchor == Some(thumbprint)` — some **non-leaf** (issuing)
+///   certificate's P-384 public-key thumbprint (see
+///   [`p384_spki_thumbprint`]) MUST equal `thumbprint`, binding the chain
+///   to an external trust anchor (e.g. a policy POTA / SATA key).
 ///
 /// On success `leaf_out` is filled with [`PubKey::as_bytes`]: raw
 /// big-endian `X‖Y`, DER RSAPublicKey, or raw ML-DSA bytes. Its length
@@ -717,7 +730,7 @@ pub async fn validate_chain<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     fetch: F,
 ) -> HsmResult<()>
@@ -745,7 +758,7 @@ pub async fn validate_issuing_chain<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     fetch: F,
 ) -> HsmResult<()>
@@ -762,7 +775,7 @@ async fn validate_chain_inner<P, F>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
     mut fetch: F,
     terminal_is_issuing_ca: bool,

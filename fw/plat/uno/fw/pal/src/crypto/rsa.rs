@@ -769,6 +769,7 @@ impl HsmRsa for UnoHsmPal {
         em[3 + ps_len..3 + ps_len + prefix.len()].copy_from_slice(prefix);
         em[3 + ps_len + prefix.len()..k].copy_from_slice(message_hash);
 
+        em.reverse();
         self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
             .await
     }
@@ -1045,6 +1046,7 @@ impl HsmRsa for UnoHsmPal {
         // Clear top bit
         em[0] &= 0x7F;
 
+        em.reverse();
         self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
             .await
     }

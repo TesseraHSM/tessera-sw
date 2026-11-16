@@ -35,21 +35,17 @@ use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborSdRestorePeerBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::TryFromBytes;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_peer_backup::create_peer_req;
 use crate::commands::sd_create_peer_backup::finalize_peer_partition;
 use crate::commands::sd_create_remote_backup::backup_request;
@@ -68,7 +64,7 @@ struct PeerBackup {
     /// self-peer backup this is the same evidence the seal used.
     evidence: ReceiverEvidence,
     /// The 584-byte `PartPolicy` image (with `allow_peer_cloning` set).
-    policy: [u8; PART_POLICY_LEN],
+    policy: Vec<u8>,
     /// `pok_peer_backup` from `CreatePeerBackup` — the HPKE seal to restore.
     pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
     /// `sd_mk_backup` from `CreateSD` — the previous SDMK backup.
@@ -136,7 +132,7 @@ fn restore_peer_req_with(
             .as_slice()
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
-        policy: PartPolicy::try_read_from_bytes(&backup.policy).expect("policy image is canonical"),
+        policy: backup.policy.clone(),
         src_mfgr_cert_chain: evidence.mfgr.clone(),
         src_owner_cert_chain: evidence.owner.clone(),
         src_part_owner_cert_chain: evidence.part_owner.clone(),
@@ -153,7 +149,7 @@ fn restore_target(seed: &[u8], pota: &CaKey, backup: &PeerBackup) -> (TestCtx, u
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(&session, seed, &backup.policy, &pota_thumbprint())
+        .part_init(&session, seed, &backup.policy)
         .expect("PartInit (device 2)");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
@@ -292,7 +288,7 @@ fn sd_restore_peer_backup_rejects_before_finalize() {
     let req = TborSdRestorePeerBackupReq {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: Vec::new(),
         src_mfgr_cert_chain: Vec::new(),
         src_owner_cert_chain: Vec::new(),
         src_part_owner_cert_chain: Vec::new(),

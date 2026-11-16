@@ -15,8 +15,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 #[derive(Arbitrary, Debug)]
 enum ByteMutation {
@@ -205,7 +203,7 @@ fn build_evidence(
 
 struct PeerBackup {
     masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
-    policy: PartPolicy,
+    policy: Vec<u8>,
     evidence: Evidence,
     peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
     previous_sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
@@ -226,39 +224,21 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     let pota = CaKey::generate();
     let sata = CaKey::generate();
 
-    let mut policy_bytes = common::known_good_part_policy(pota.raw_pub());
-    let mut policy = PartPolicy::try_read_from_bytes(&policy_bytes)
-        .expect("common known-good policy should decode");
-    policy.sata_pub_key = tsra_ddi_tbor_types::PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata.raw_pub(),
-    );
-    policy.backup_part_id.copy_from_slice(&part_info.pid);
     let pid_pub: [u8; RAW_PUB_LEN] = part_info
         .pid_pub_key
         .as_slice()
         .try_into()
         .expect("partition public key must be P-384");
-    policy.backup_part_pub_key = tsra_ddi_tbor_types::PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        pid_pub,
-    );
-    policy.flags = policy.flags.with_allow_peer_cloning(true);
-    policy_bytes.copy_from_slice(policy.as_bytes());
+    let policy = common::backup_test_policy(&pota, &sata, &part_info.pid, &pid_pub)
+        .with_flags(PolicyFlags::ALLOW_PEER_CLONING)
+        .encode();
 
     let init = ctx
-        .part_init(
-            &session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&session, &common::mach_seed(), &policy)
         .expect("PartInit should succeed");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
-        .part_final(&session, &policy_bytes, &[], &pta_chain.der_items())
+        .part_final(&session, &policy, &[], &pta_chain.der_items())
         .expect("PartFinal should succeed")
         .local_mk_backup;
 
@@ -375,17 +355,12 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
 
     let restore_session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(
-            &restore_session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(&restore_session, &common::mach_seed(), &policy)
         .expect("PartInit after reset should succeed");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
         &restore_session,
-        &policy_bytes,
+        &policy,
         &local_mk_backup,
         &pta_chain.der_items(),
     )
@@ -417,7 +392,7 @@ fn mutate_request(
             true
         }
         MutationTarget::MaskedSealingKey => input.bytes.apply(&mut req.masked_sealing_key),
-        MutationTarget::Policy => input.bytes.apply(&mut req.policy.info),
+        MutationTarget::Policy => input.bytes.apply(&mut req.policy),
         MutationTarget::ManufacturerChain => input.descriptors.apply(&mut req.src_mfgr_cert_chain),
         MutationTarget::OwnerChain => input.descriptors.apply(&mut req.src_owner_cert_chain),
         MutationTarget::PartitionOwnerChain => {

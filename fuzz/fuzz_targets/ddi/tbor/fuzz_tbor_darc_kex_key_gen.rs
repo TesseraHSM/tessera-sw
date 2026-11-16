@@ -159,14 +159,9 @@ fn prepare_fixture<'ctx>(
             }
             Scenario::Initializing => {
                 let pota = CaKey::generate();
-                let policy = common::known_good_part_policy(pota.raw_pub());
-                ctx.part_init(
-                    session.handshake(),
-                    &common::mach_seed(),
-                    &policy,
-                    &common::pota_thumbprint(),
-                )
-                .expect("PartInit without PartFinal should succeed");
+                let policy = common::known_good_part_policy(pota.spki_thumbprint());
+                ctx.part_init(session.handshake(), &common::mach_seed(), &policy)
+                    .expect("PartInit without PartFinal should succeed");
             }
             _ => {}
         }

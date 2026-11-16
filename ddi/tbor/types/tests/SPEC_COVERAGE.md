@@ -117,7 +117,7 @@ All test names below are relative to the
 |---|---|---|---|
 | CO session with default PSK → `DefaultPskMustRotate` (dispatcher gate) | ✅ | `part_init::fw_rejects::part_init_reject_default_psk_co` |  |
 | CU session (under rotated PSK) → `InvalidPermissions` (handler role gate) | ✅ | `part_init::fw_rejects::part_init_reject_cu_session` | CU PSK rotated up-front so default-PSK gate doesn't fire first |
-| Rotated CO session with malformed `PartPolicy` (all zeros) → `InvalidArg` (`policy::from_bytes` decode gate) | ✅ | `part_init::fw_rejects::part_init_reject_bad_policy` |  |
+| Rotated CO session with malformed CBOR `part_policy` (all zeros) → `InvalidArg` (`policy::from_bytes` decode gate) | ✅ | `part_init::fw_rejects::part_init_reject_bad_policy` |  |
 | Second `PartInit` after a successful one → `PtaKeyAlreadySet` (one-shot `part_set_pta_key` guard) | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Verified as step 2 of the smoke roundtrip |
 | Concurrent valid `PartInit` requests → exactly one success; every loser gets `PtaKeyAlreadySet`; final state is `Initializing` | ✅ | `part_init::success_path::part_init_multi_threaded_single_winner` | Runs on emulator and hardware using the same active CO session; verifies the winning atomic commit through `PartInfo` |
 
@@ -130,7 +130,8 @@ All test names below are relative to the
 | Returns CBOR-tagged (`0xD2` = COSE_Sign1) PTAReport ≤ `PTA_REPORT_MAX_LEN` | ✅ | `part_init::success_path::part_init_smoke_roundtrip` |  |
 | PTAReport COSE_Sign1 verifies under PID-leaf pubkey (slot-0 cert chain leaf) | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Via `verify_pta_report` helper using `KeyAttester::verify` |
 | PTAReport's embedded COSE_Key `(pk_x, pk_y)` matches CSR SPKI | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Cross-binds report to CSR pubkey |
-| Cold-start determinism: same `(UDS, MachineSeed, Policy, POTA thumb)` → byte-identical PTA pubkey | ✅ | `part_init::success_path::part_init_determinism` | Uses `ctx.erase()` between runs |
+| Cold-start determinism: same `(UDS, MachineSeed, Policy)` → byte-identical PTA pubkey | ✅ | `part_init::success_path::part_init_determinism` | Uses `ctx.erase()` between runs |
+| Any policy change (POTA/SATA thumbprint, SAPOTA presence) → different PTA pubkey | ✅ | `part_init::success_path::part_init_changed_inputs_are_still_deterministic`, `part_init::sd_config::part_init_sata_thumbprint_changes_pta_key`, `part_init::sd_config::part_init_sapota_presence_changes_pta_key` | Anchor thumbprints live inside the policy document |
 
 ### `mach_seed_envelope` AEAD bindings
 
@@ -141,7 +142,16 @@ All test names below are relative to the
 | Envelope from a different session's `param_key` | ✅ | `part_init::crypto_rejects::part_init_envelope_from_other_session` | Two CO sessions sequentially (close A, open B); CO + Authenticated cannot run concurrent because of `VaultSessionLimitReached` |
 | AAD length ≠ `PART_INIT_MACH_SEED_AAD_LEN` | ✅ | `part_init::crypto_rejects::part_init_wrong_aad_length` | 64-byte AAD; FW length-checks before AAD compare |
 | `mach_seed` plaintext length ≠ `MACH_SEED_LEN` | ✅ 🔁 | `part_init::crypto_rejects::part_init_wrong_mach_seed_length` | Loop over `[MACH_SEED_LEN - 1, MACH_SEED_LEN + 1]`; one rotated-CO session reused across iterations (length check fires before any partition mutation) |
-| Malformed `pota_thumbprint` length | ⚠️ | — | Wire field is fixed-size; FW reaction not exercised |
+
+### `part_policy` CBOR document (deterministic encoding)
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Non-deterministic or schema-violating policy → `InvalidArg` | ✅ 🔁 | `part_init::fw_rejects::part_init_rejects_malformed_cbor_policies` | Table: empty doc, bad version / flags type or range, reserved flag bits, missing required key, unknown key, keys out of order or duplicated, non-shortest heads, indefinite map, trailing bytes, truncation, map-count mismatch, `backup_part_id` / `backup_part_spki_thumbprint` pairing, `info` length 0 / 65, wrong thumbprint / id length or type; valid policy still accepted afterwards |
+| All-`0xFF` and version-0 policies → `InvalidArg` | ✅ | `part_init::fw_rejects::part_init_reject_all_ff_policy`, `part_init::fw_rejects::part_init_reject_zero_policy_version` |  |
+| Policy with every optional field (SAPOTA, backup pair, all flags, 64-byte info, DATA) accepted | ✅ | `part_init::fw_rejects::part_init_accepts_policy_with_all_optional_fields` |  |
+| Minimal policy (required keys only) and 1-byte `info` accepted | ✅ | `part_init::fw_rejects::part_init_accepts_minimal_policy_boundaries` |  |
+| Policy longer than `PART_POLICY_MAX_LEN` → harness `InvalidParameter`; raw request → `TborInvalidFixedLength` | ✅ | `part_init::fw_rejects::part_init_rejects_oversized_policy` | FW codec enforces the schema `max_len` |
 
 ## `PartFinal` (opcode in-session, gated)
 
@@ -725,7 +735,6 @@ The rows marked ⚠️ above, consolidated:
 
 1. **`SessionOpenInit`**: malformed `pk_init` (length / curve) — no negative test.
 2. **`SessionOpenFinish`**: Finish against a pending slot opened for a different role — no test.
-3. **`PartInit` wire fields**: `pota_thumbprint` is fixed-size on the wire so the FW reaction to a malformed value is not exercised; would require host-side encoding bypass.
 
 Indirect coverage (🟡) — these rows assert only `DdiError::DdiError(_)`
 and could be tightened to assert a specific `TborStatus`:

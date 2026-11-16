@@ -66,7 +66,7 @@ variable-length data section.
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **sender's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover `SndrPriv`. Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
-| 20 | `policy` | `buffer` (fixed 584 B) | Caller-asserted unified `PartPolicy` describing the security domain being backed up. Length pinned to `PART_POLICY_LEN` (584 B); its SHA-384 digest must equal the partition's bound `policy_hash` and the receiver report's v2 `policy_hash`. |
+| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being backed up. Its SHA-384 digest must equal the partition's bound `policy_hash` and the receiver report's v2 `policy_hash`. |
 | 24 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination manufacturer certificate-chain descriptors (from the `dst_evidence` field group). |
 | 28 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination owner certificate-chain descriptors. |
 | 32 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination partition-owner certificate-chain descriptors. |
@@ -81,7 +81,7 @@ COSE_Sign1 report travel **out of band**, referenced by these
 
 ### Data section
 
-Carries the 276-byte `masked_sealing_key`, the 584-byte `policy` image,
+Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
 the packed destination cert-chain and report descriptors, and the 276-byte
 `pok_local_backup` blob.
 
@@ -104,7 +104,7 @@ Carries the 161-byte `pok_peer_backup` seal.
 
 | Error | Cause |
 |---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` ≠ 584 B, or `pok_local_backup` ≠ 276 B (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` > 384 B, or `pok_local_backup` ≠ 276 B (rejected at decode before the handler runs) |
 | `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `POTA` key is not P-384; the destination report's `policy_hash` ≠ `SHA-384(policy)`; or the missing OOB evidence page |
 | `SdPeerCloningNotAllowed` | The partition's policy does not set `allow_peer_cloning` |
 | `SdBackupSvnRollback` | `pok_local_backup`'s bound SVN is newer than the current firmware SVN (anti-rollback) |
