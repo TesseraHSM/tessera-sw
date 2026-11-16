@@ -45,6 +45,7 @@ members = [
   "examples/sock/api_sock_get_api_rev",
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
+  "fuzz",
   "fw/core/byte-order",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
@@ -106,7 +107,7 @@ members = [
 # without this it would claim `fw/plat/uno/fw/drivers/*` and their
 # `workspace = true` dependencies would be looked up here instead of in their
 # own workspace.
-exclude = ["fuzz", "fw/plat/uno"]
+exclude = ["fw/plat/uno"]
 
 [workspace.dependencies]
 # Internal crates

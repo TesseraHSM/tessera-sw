@@ -33,7 +33,7 @@ pub const MLKEM_SHARED_SECRET_LEN: usize = 32;
 /// take it rather than a vault key kind, and callers map a stored key's
 /// kind onto it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HsmMlDsaParam {
+pub enum HsmMlDsaParamSet {
     /// ML-DSA-44.
     MlDsa44,
 
@@ -44,7 +44,7 @@ pub enum HsmMlDsaParam {
     MlDsa87,
 }
 
-impl HsmMlDsaParam {
+impl HsmMlDsaParamSet {
     /// Encoded public key length: 1312 / 1952 / 2592 bytes.
     pub const fn pk_len(&self) -> usize {
         match self {
@@ -90,7 +90,7 @@ impl HsmMlDsaParam {
 /// take it rather than a vault key kind, and callers map a stored key's
 /// kind onto it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HsmMlKemParam {
+pub enum HsmMlKemParamSet {
     /// ML-KEM-512.
     MlKem512,
 
@@ -101,7 +101,7 @@ pub enum HsmMlKemParam {
     MlKem1024,
 }
 
-impl HsmMlKemParam {
+impl HsmMlKemParamSet {
     /// Encapsulation (public) key length: 800 / 1184 / 1568 bytes.
     pub const fn pk_len(&self) -> usize {
         match self {
@@ -339,7 +339,7 @@ pub enum HsmMlSeedSrc {
 }
 
 /// Pairwise consistency test run on an ML-DSA key pair by
-/// [`HsmMlDsa::mldsa_gen_keypair`].
+/// [`HsmMlDsa::mldsa_gen_keypair`] and [`HsmMlDsa::mldsa_gen_seed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmMlDsaPct {
     /// No PCT — skip the consistency test.
@@ -350,7 +350,7 @@ pub enum HsmMlDsaPct {
 }
 
 /// Pairwise consistency test run on an ML-KEM key pair by
-/// [`HsmMlKem::mlkem_gen_keypair`].
+/// [`HsmMlKem::mlkem_gen_keypair`] and [`HsmMlKem::mlkem_gen_seed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmMlKemPct {
     /// No PCT — skip the consistency test.
@@ -358,6 +358,56 @@ pub enum HsmMlKemPct {
 
     /// Encapsulate / decapsulate round-trip with the key pair under test.
     EncapsDecaps,
+}
+
+/// ML-DSA signing key in a key/signature region, as passed to
+/// [`HsmMlDsa::mldsa_sign_in_place`].
+///
+/// Mirrors PKCS#11 3.2, where an ML-DSA private key carries `CKA_SEED`, the
+/// key-generation seed `ξ`, and/or `CKA_VALUE`, the expanded key.  The
+/// variant names the form of the key at the end of the buffer.
+#[derive(Debug)]
+pub enum HsmMlDsaPrivKeyMut<'a> {
+    /// The seed `ξ`, [`MLDSA_SEED_LEN`] bytes, from which the key pair is
+    /// derived (FIPS 204 Algorithm 6, `ML-DSA.KeyGen_internal`).
+    Seed(&'a mut HsmDmaBuf),
+
+    /// The expanded secret key, [`HsmMlDsaParamSet::sk_len`] bytes.
+    Expanded(&'a mut HsmDmaBuf),
+}
+
+impl HsmMlDsaPrivKeyMut<'_> {
+    /// The length of the private key in this form for `param_set`.
+    pub const fn key_len(&self, param_set: HsmMlDsaParamSet) -> usize {
+        match self {
+            Self::Seed(_) => MLDSA_SEED_LEN,
+            Self::Expanded(_) => param_set.sk_len(),
+        }
+    }
+}
+
+/// ML-DSA signing key, as passed to [`HsmMlDsa::mldsa_sign`].
+#[derive(Debug, Clone, Copy)]
+pub enum HsmMlDsaPrivKey<'a> {
+    /// The seed `ξ`, [`MLDSA_SEED_LEN`] bytes (`CKA_SEED`); the
+    /// implementation derives the expanded key from it.
+    Seed(&'a HsmDmaBuf),
+
+    /// The expanded secret key, [`HsmMlDsaParamSet::sk_len`] bytes
+    /// (`CKA_VALUE`).
+    Expanded(&'a HsmDmaBuf),
+}
+
+/// ML-DSA verification key, as passed to [`HsmMlDsa::mldsa_verify`].
+#[derive(Debug, Clone, Copy)]
+pub enum HsmMlDsaPubKey<'a> {
+    /// The seed `ξ`, [`MLDSA_SEED_LEN`] bytes; the implementation derives
+    /// the public key from it.  Private key material.
+    Seed(&'a HsmDmaBuf),
+
+    /// The encoded public key, [`HsmMlDsaParamSet::pk_len`] bytes
+    /// (`CKA_VALUE` of the public key).
+    Encoded(&'a HsmDmaBuf),
 }
 
 /// Asynchronous ML-DSA signature operations.
@@ -369,12 +419,17 @@ pub enum HsmMlKemPct {
 /// `ctx || message` input; signing also takes an [`HsmMlDsaHedge`] saying how
 /// the signature is randomized.
 ///
+/// Signing and verification keys can be given as the seed `ξ` or in their
+/// expanded / encoded form.  An implementation may support only some forms.
+///
 /// Errors common to signing and verification:
 ///
 /// - `Err(HsmError::InvalidArg)` — a key or signature buffer of the wrong
 ///   length, or a message larger than the implementation accepts.
 /// - `Err(HsmError::UnsupportedCmd)` — the implementation does not support
-///   the message type, its hash function, or the requested hedging.
+///   the key form, the message type, its hash function, or the requested
+///   hedging.  An unsupported key form is reported before any other check,
+///   including in query mode.
 /// - `Err(HsmError)` — propagated from the FP offload path.
 pub trait HsmMlDsa: HsmIoTypes {
     /// Generates an ML-DSA key pair, optionally writing it into
@@ -385,7 +440,7 @@ pub trait HsmMlDsa: HsmIoTypes {
     ///
     /// 1. **Query** — call with `out = None`.  Nothing is generated and
     ///    `seed` is not touched; the method returns `(sk_len, pk_len)`
-    ///    = ([`HsmMlDsaParam::sk_len`], [`HsmMlDsaParam::pk_len`]).
+    ///    = ([`HsmMlDsaParamSet::sk_len`], [`HsmMlDsaParamSet::pk_len`]).
     /// 2. **Alloc** — caller allocates two DMA buffers of those sizes.
     /// 3. **Use** — call with `out = Some((sk, pk))`.  The method takes `ξ`
     ///    from `seed_src`, derives the key pair from it, writes the expanded
@@ -400,7 +455,7 @@ pub trait HsmMlDsa: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-DSA parameter set.
+    /// - `param_set` — the ML-DSA parameter set.
     /// - `seed_src` — whether `ξ` is generated or supplied in `seed`.
     /// - `pct` — pairwise consistency test selector.
     /// - `seed` — the seed `ξ`, exactly [`MLDSA_SEED_LEN`] bytes.  Filled
@@ -421,28 +476,68 @@ pub trait HsmMlDsa: HsmIoTypes {
     async fn mldsa_gen_keypair(
         &self,
         io: &Self::Io,
-        param: HsmMlDsaParam,
+        param_set: HsmMlDsaParamSet,
         seed_src: HsmMlSeedSrc,
         pct: HsmMlDsaPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
 
-    /// Signs `msg` with an expanded secret key.
+    /// Generates only an ML-DSA key-generation seed, without returning the
+    /// key pair.
     ///
-    /// Uses the query-alloc-use workflow: with `sig = None` the method
-    /// checks its inputs, signs nothing, and returns
-    /// [`HsmMlDsaParam::sig_len`]; with `sig = Some(..)` it signs.
+    /// Follows the query-alloc-use pattern: call with `seed = None` to
+    /// learn the seed length, then with `Some(buf)` to fill `buf` with a
+    /// fresh random seed `ξ` (FIPS 204 Algorithm 1, `ML-DSA.KeyGen`).  No key pair
+    /// is returned: the seed alone identifies it, and it can be derived
+    /// from the seed later.  When `pct` asks for a pairwise consistency
+    /// test, the implementation derives the key pair internally, runs the
+    /// test on it, and wipes it before returning.  This
+    /// maps onto a PKCS#11 3.2 `CKK_ML_DSA` private key that carries only
+    /// `CKA_SEED`.  The seed is private key material.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-DSA parameter set.
-    /// - `sk` — expanded secret key, exactly [`HsmMlDsaParam::sk_len`] bytes.
+    /// - `param_set` — the ML-DSA parameter set the seed is for.
+    /// - `pct` — pairwise consistency test selector; not run in query
+    ///   mode.
+    /// - `seed` — `None` to query; otherwise the seed output, at least
+    ///   [`MLDSA_SEED_LEN`] bytes, of which only `seed[..seed_len]` is written.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(seed_len)` — [`MLDSA_SEED_LEN`]: the size to allocate (query mode) or
+    ///   the bytes written (use mode).
+    /// - `Err(HsmError::InvalidArg)` — `seed` is too short.
+    /// - `Err(HsmError::UnsupportedCmd)` — the implementation does not
+    ///   support seed-only generation; reported before any other check,
+    ///   including in query mode.
+    /// - `Err(HsmError)` — RNG, offload, or PCT failure.
+    async fn mldsa_gen_seed(
+        &self,
+        io: &Self::Io,
+        param_set: HsmMlDsaParamSet,
+        pct: HsmMlDsaPct,
+        seed: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
+
+    /// Signs `msg` with a private key.
+    ///
+    /// Uses the query-alloc-use workflow: with `sig = None` the method
+    /// checks its inputs, signs nothing, and returns
+    /// [`HsmMlDsaParamSet::sig_len`]; with `sig = Some(..)` it signs.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `param_set` — the ML-DSA parameter set.
+    /// - `sk` — the private key, as the seed or the expanded key; its buffer
+    ///   must be exactly the length its form names.
     /// - `hedge` — whether the signature is hedged or deterministic.
     /// - `msg` — the input to sign.
     /// - `sig` — `None` to query; `Some(sig)` with at least
-    ///   [`HsmMlDsaParam::sig_len`] bytes, of which the leading `sig_len` are
+    ///   [`HsmMlDsaParamSet::sig_len`] bytes, of which the leading `sig_len` are
     ///   written.
     ///
     /// # Returns
@@ -453,8 +548,8 @@ pub trait HsmMlDsa: HsmIoTypes {
     async fn mldsa_sign(
         &self,
         io: &Self::Io,
-        param: HsmMlDsaParam,
-        sk: &HsmDmaBuf,
+        param_set: HsmMlDsaParamSet,
+        sk: HsmMlDsaPrivKey<'_>,
         hedge: HsmMlDsaHedge,
         msg: HsmMlDsaMsg<'_>,
         sig: Option<&mut HsmDmaBuf>,
@@ -463,11 +558,12 @@ pub trait HsmMlDsa: HsmIoTypes {
     /// Signs `msg`, replacing the prefix of a key/signature region with the
     /// signature.
     ///
-    /// The expanded secret key occupies the final [`HsmMlDsaParam::sk_len`]
-    /// bytes of `sk_sig`; any preceding bytes are scratch.  The signature is
-    /// written at the start of `sk_sig` after all inputs have been consumed,
-    /// so `sk_sig` must be at least [`HsmMlDsaParam::sig_len`] bytes.  The
-    /// caller wipes private bytes not replaced by the signature.
+    /// The private key, in the form `sk_sig`'s variant names, occupies the
+    /// final [`HsmMlDsaPrivKeyMut::key_len`] bytes of the buffer; any
+    /// preceding bytes are scratch.  The signature is written at the start of `sk_sig` after
+    /// all inputs have been consumed, so `sk_sig` must be at least
+    /// [`HsmMlDsaParamSet::sig_len`] bytes.  The caller wipes private bytes
+    /// not replaced by the signature.
     ///
     /// # Returns
     ///
@@ -476,8 +572,8 @@ pub trait HsmMlDsa: HsmIoTypes {
     async fn mldsa_sign_in_place(
         &self,
         io: &Self::Io,
-        param: HsmMlDsaParam,
-        sk_sig: &mut HsmDmaBuf,
+        param_set: HsmMlDsaParamSet,
+        sk_sig: HsmMlDsaPrivKeyMut<'_>,
         hedge: HsmMlDsaHedge,
         msg: HsmMlDsaMsg<'_>,
     ) -> HsmResult<usize>;
@@ -487,10 +583,11 @@ pub trait HsmMlDsa: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-DSA parameter set.
-    /// - `pk` — encoded public key, exactly [`HsmMlDsaParam::pk_len`] bytes.
+    /// - `param_set` — the ML-DSA parameter set.
+    /// - `pk` — the verification key, as the seed or the encoded public
+    ///   key; its buffer must be exactly the length its form names.
     /// - `msg` — the signed input.
-    /// - `sig` — exactly [`HsmMlDsaParam::sig_len`] bytes.
+    /// - `sig` — exactly [`HsmMlDsaParamSet::sig_len`] bytes.
     ///
     /// # Returns
     ///
@@ -501,17 +598,75 @@ pub trait HsmMlDsa: HsmIoTypes {
     async fn mldsa_verify(
         &self,
         io: &Self::Io,
-        param: HsmMlDsaParam,
-        pk: &HsmDmaBuf,
+        param_set: HsmMlDsaParamSet,
+        pk: HsmMlDsaPubKey<'_>,
         msg: HsmMlDsaMsg<'_>,
         sig: &HsmDmaBuf,
     ) -> HsmResult<bool>;
+}
+
+/// ML-KEM encapsulation key in a key/ciphertext region, as passed to
+/// [`HsmMlKem::mlkem_encaps_in_place`].
+///
+/// Mirrors PKCS#11 3.2, where an ML-KEM private key carries `CKA_SEED`, the
+/// key-generation seed pair `d || z`, from which the public key can be
+/// derived.  The variant names the form of the key at the start of the
+/// buffer.
+#[derive(Debug)]
+pub enum HsmMlKemPubKeyMut<'a> {
+    /// The seed pair `d || z`, [`MLKEM_SEED_LEN`] bytes, from which the key
+    /// pair is derived (FIPS 203 Algorithm 16, `ML-KEM.KeyGen_internal`).
+    /// Private key material.
+    Seed(&'a mut HsmDmaBuf),
+
+    /// The encoded encapsulation key, [`HsmMlKemParamSet::pk_len`] bytes.
+    Encoded(&'a mut HsmDmaBuf),
+}
+
+impl HsmMlKemPubKeyMut<'_> {
+    /// The length of the encapsulation key in this form for `param_set`.
+    pub const fn key_len(&self, param_set: HsmMlKemParamSet) -> usize {
+        match self {
+            Self::Seed(_) => MLKEM_SEED_LEN,
+            Self::Encoded(_) => param_set.pk_len(),
+        }
+    }
+}
+
+/// ML-KEM decapsulation key, as passed to [`HsmMlKem::mlkem_decaps`].
+#[derive(Debug, Clone, Copy)]
+pub enum HsmMlKemPrivKey<'a> {
+    /// The seed pair `d || z`, [`MLKEM_SEED_LEN`] bytes (`CKA_SEED`); the
+    /// implementation derives the expanded key from it.
+    Seed(&'a HsmDmaBuf),
+
+    /// The expanded decapsulation key, [`HsmMlKemParamSet::sk_len`] bytes
+    /// (`CKA_VALUE`).
+    Expanded(&'a HsmDmaBuf),
+}
+
+/// ML-KEM encapsulation key, as passed to [`HsmMlKem::mlkem_encaps`].
+#[derive(Debug, Clone, Copy)]
+pub enum HsmMlKemPubKey<'a> {
+    /// The seed pair `d || z`, [`MLKEM_SEED_LEN`] bytes; the implementation
+    /// derives the encapsulation key from it.  Private key material.
+    Seed(&'a HsmDmaBuf),
+
+    /// The encoded encapsulation key, [`HsmMlKemParamSet::pk_len`] bytes
+    /// (`CKA_VALUE` of the public key).
+    Encoded(&'a HsmDmaBuf),
 }
 
 /// Asynchronous ML-KEM key-encapsulation operations.
 ///
 /// Async because every method is a round trip to an FP core: the
 /// implementation yields while the request is in flight.
+///
+/// Encapsulation and decapsulation keys can be given as the seed pair
+/// `d || z` or in their encoded / expanded form.  An implementation may
+/// support only some forms; an unsupported form is refused with
+/// `Err(HsmError::UnsupportedCmd)` before any other check, including in
+/// query mode.
 pub trait HsmMlKem: HsmIoTypes {
     /// Generates an ML-KEM key pair, optionally writing it into
     /// caller-provided buffers.
@@ -521,7 +676,7 @@ pub trait HsmMlKem: HsmIoTypes {
     ///
     /// 1. **Query** — call with `out = None`.  Nothing is generated and
     ///    `seed` is not touched; the method returns `(sk_len, pk_len)`
-    ///    = ([`HsmMlKemParam::sk_len`], [`HsmMlKemParam::pk_len`]).
+    ///    = ([`HsmMlKemParamSet::sk_len`], [`HsmMlKemParamSet::pk_len`]).
     /// 2. **Alloc** — caller allocates two DMA buffers of those sizes.
     /// 3. **Use** — call with `out = Some((sk, pk))`.  The method takes
     ///    `d || z` from `seed_src`, derives the key pair from it, writes the
@@ -537,7 +692,7 @@ pub trait HsmMlKem: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-KEM parameter set.
+    /// - `param_set` — the ML-KEM parameter set.
     /// - `seed_src` — whether `d || z` is generated or supplied in `seed`.
     /// - `pct` — pairwise consistency test selector.
     /// - `seed` — the seed pair `d || z`, exactly [`MLKEM_SEED_LEN`] bytes.
@@ -558,12 +713,52 @@ pub trait HsmMlKem: HsmIoTypes {
     async fn mlkem_gen_keypair(
         &self,
         io: &Self::Io,
-        param: HsmMlKemParam,
+        param_set: HsmMlKemParamSet,
         seed_src: HsmMlSeedSrc,
         pct: HsmMlKemPct,
         seed: &mut HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
+
+    /// Generates only an ML-KEM key-generation seed, without returning the
+    /// key pair.
+    ///
+    /// Follows the query-alloc-use pattern: call with `seed = None` to
+    /// learn the seed length, then with `Some(buf)` to fill `buf` with a
+    /// fresh random seed pair `d || z` (FIPS 203 Algorithm 19,
+    /// `ML-KEM.KeyGen`).  No key pair
+    /// is returned: the seed alone identifies it, and it can be derived
+    /// from the seed later.  When `pct` asks for a pairwise consistency
+    /// test, the implementation derives the key pair internally, runs the
+    /// test on it, and wipes it before returning.  This
+    /// maps onto a PKCS#11 3.2 `CKK_ML_KEM` private key that carries only
+    /// `CKA_SEED`.  The seed is private key material.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `param_set` — the ML-KEM parameter set the seed is for.
+    /// - `pct` — pairwise consistency test selector; not run in query
+    ///   mode.
+    /// - `seed` — `None` to query; otherwise the seed output, at least
+    ///   [`MLKEM_SEED_LEN`] bytes, of which only `seed[..seed_len]` is written.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(seed_len)` — [`MLKEM_SEED_LEN`]: the size to allocate (query mode) or
+    ///   the bytes written (use mode).
+    /// - `Err(HsmError::InvalidArg)` — `seed` is too short.
+    /// - `Err(HsmError::UnsupportedCmd)` — the implementation does not
+    ///   support seed-only generation; reported before any other check,
+    ///   including in query mode.
+    /// - `Err(HsmError)` — RNG, offload, or PCT failure.
+    async fn mlkem_gen_seed(
+        &self,
+        io: &Self::Io,
+        param_set: HsmMlKemParamSet,
+        pct: HsmMlKemPct,
+        seed: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Encapsulate to an ML-KEM public key (FIPS 203 `ML-KEM.Encaps`).
     ///
@@ -572,7 +767,7 @@ pub trait HsmMlKem: HsmIoTypes {
     ///
     /// 1. **Query** — call with `out = None`.  Nothing is computed and `pk`
     ///    is not read; the method returns `(ct_len, ss_len)` =
-    ///    ([`HsmMlKemParam::ct_len`], [`MLKEM_SHARED_SECRET_LEN`]).
+    ///    ([`HsmMlKemParamSet::ct_len`], [`MLKEM_SHARED_SECRET_LEN`]).
     /// 2. **Alloc** — caller allocates two DMA buffers of those sizes.
     /// 3. **Use** — call with `out = Some((ct, ss))`.  The method writes the
     ///    ciphertext into `ct[..ct_len]` and the shared secret into
@@ -587,9 +782,9 @@ pub trait HsmMlKem: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-KEM parameter set.
-    /// - `pk` — the encapsulation key, exactly [`HsmMlKemParam::pk_len`]
-    ///   bytes.
+    /// - `param_set` — the ML-KEM parameter set.
+    /// - `pk` — the encapsulation key, as the seed pair or the encoded key;
+    ///   its buffer must be exactly the length its form names.
     /// - `out` — `None` to query buffer sizes; `Some((ct, ss))` to
     ///   encapsulate.  Each buffer must be at least as large as the
     ///   corresponding queried length.
@@ -600,29 +795,32 @@ pub trait HsmMlKem: HsmIoTypes {
     ///   bytes written (use mode).
     /// - `Err(HsmError::InvalidArg)` — `pk` has the wrong length or an
     ///   output buffer is too short.
+    /// - `Err(HsmError::UnsupportedCmd)` — the key form is not supported.
     /// - `Err(HsmError)` — RNG or offload failure.
     async fn mlkem_encaps(
         &self,
         io: &Self::Io,
-        param: HsmMlKemParam,
-        pk: &HsmDmaBuf,
+        param_set: HsmMlKemParamSet,
+        pk: HsmMlKemPubKey<'_>,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
 
     /// Encapsulate, replacing the public key with the ciphertext.
     ///
-    /// Same as [`HsmMlKem::mlkem_encaps`], except that `pk_ct` holds the
-    /// encapsulation key in `pk_ct[..pk_len]` on entry and the ciphertext
-    /// in `pk_ct[..ct_len]` on return.  Every parameter set has
-    /// `ct_len <= pk_len`, so `pk_ct` needs at least `pk_len` bytes.  The
-    /// key is consumed before its prefix is overwritten.
+    /// Same as [`HsmMlKem::mlkem_encaps`], except that the `pk_ct` buffer
+    /// holds the encapsulation key, in the form its variant names, in its
+    /// first [`HsmMlKemPubKeyMut::key_len`] bytes on entry and the
+    /// ciphertext in its first `ct_len` bytes on return, so `pk_ct` needs at least
+    /// the larger of the two lengths.  The key is consumed before its prefix
+    /// is overwritten; the caller wipes seed bytes not replaced by the
+    /// ciphertext.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-KEM parameter set.
+    /// - `param_set` — the ML-KEM parameter set.
     /// - `pk_ct` — encapsulation key in, ciphertext out; at least
-    ///   [`HsmMlKemParam::pk_len`] bytes.
+    ///   `max(pk_ct.key_len(param_set), param_set.ct_len())` bytes.
     /// - `ss` — shared-secret output, at least [`MLKEM_SHARED_SECRET_LEN`]
     ///   bytes; disjoint from `pk_ct`.
     ///
@@ -630,12 +828,13 @@ pub trait HsmMlKem: HsmIoTypes {
     ///
     /// - `Ok((ct_len, ss_len))` — bytes written to `pk_ct` and `ss`.
     /// - `Err(HsmError::InvalidArg)` — a buffer is too short.
+    /// - `Err(HsmError::UnsupportedCmd)` — the key form is not supported.
     /// - `Err(HsmError)` — RNG or offload failure.
     async fn mlkem_encaps_in_place(
         &self,
         io: &Self::Io,
-        param: HsmMlKemParam,
-        pk_ct: &mut HsmDmaBuf,
+        param_set: HsmMlKemParamSet,
+        pk_ct: HsmMlKemPubKeyMut<'_>,
         ss: &mut HsmDmaBuf,
     ) -> HsmResult<(usize, usize)>;
 
@@ -656,10 +855,10 @@ pub trait HsmMlKem: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `param` — the ML-KEM parameter set.
-    /// - `sk` — expanded decapsulation key, exactly
-    ///   [`HsmMlKemParam::sk_len`] bytes.
-    /// - `ct` — ciphertext, exactly [`HsmMlKemParam::ct_len`] bytes.
+    /// - `param_set` — the ML-KEM parameter set.
+    /// - `sk` — the decapsulation key, as the seed pair or the expanded key;
+    ///   its buffer must be exactly the length its form names.
+    /// - `ct` — ciphertext, exactly [`HsmMlKemParamSet::ct_len`] bytes.
     /// - `ss` — `None` to query; otherwise the shared-secret output, at
     ///   least [`MLKEM_SHARED_SECRET_LEN`] bytes.  Key material; the caller
     ///   is expected to mask it before it leaves the device.
@@ -670,12 +869,13 @@ pub trait HsmMlKem: HsmIoTypes {
     ///   written (use mode).
     /// - `Err(HsmError::InvalidArg)` — `sk` or `ct` has the wrong length,
     ///   or `ss` is too short.
+    /// - `Err(HsmError::UnsupportedCmd)` — the key form is not supported.
     /// - `Err(HsmError)` — offload failure.
     async fn mlkem_decaps(
         &self,
         io: &Self::Io,
-        param: HsmMlKemParam,
-        sk: &HsmDmaBuf,
+        param_set: HsmMlKemParamSet,
+        sk: HsmMlKemPrivKey<'_>,
         ct: &HsmDmaBuf,
         ss: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! GHASH (NIST SP 800-38D) for the Uno PAL's AES-GCM.
+//! GHASH (NIST SP 800-38D) for the Uno PAL's AES-GCM paths.
 //!
 //! GHASH processes input in 16-byte blocks over `GF(2^128)`.  The
 //! accumulator is updated as:
@@ -25,7 +25,7 @@
 /// neither `Copy` nor `Clone`: the table makes a copy expensive, and
 /// nothing needs one.
 #[derive(Debug)]
-pub(super) struct Ghash {
+pub struct Ghash {
     /// `H`'s multiples, high and low halves: entry `i` is `i · H`.
     hh: [u64; 16],
     hl: [u64; 16],
@@ -38,7 +38,7 @@ impl Ghash {
     /// Create a new GHASH accumulator from a 16-byte hash subkey `H`.
     ///
     /// Returns `None` when `h.len() != 16`.
-    pub(super) fn new(h: &[u8]) -> Option<Self> {
+    pub fn new(h: &[u8]) -> Option<Self> {
         let h: &[u8; 16] = h.try_into().ok()?;
 
         let mut hh = [0u64; 16];
@@ -88,7 +88,7 @@ impl Ghash {
     ///
     /// Follows the GHASH update rule: each block is XORed into the
     /// running state before a finite-field multiplication by `H`.
-    pub(super) fn update(&mut self, data: &[u8]) {
+    pub fn update(&mut self, data: &[u8]) {
         for chunk in data.chunks(16) {
             let mut block = [0u8; 16];
             block[..chunk.len()].copy_from_slice(chunk);
@@ -151,8 +151,13 @@ impl Ghash {
         self.y[8..].copy_from_slice(&zl.to_be_bytes());
     }
 
+    /// Return the running GHASH state without consuming the accumulator.
+    pub fn state(&self) -> [u8; 16] {
+        self.y
+    }
+
     /// Return the final GHASH value as a byte array.
-    pub(super) fn finish(self) -> [u8; 16] {
+    pub fn finish(self) -> [u8; 16] {
         self.y
     }
 }

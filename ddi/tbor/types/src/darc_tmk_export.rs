@@ -24,7 +24,6 @@ use alloc::vec::Vec;
 use crate::darc_kex_key_gen::MASKED_KEX_KEY_LEN;
 use crate::darc_tmk_import::MASKED_TMK_LEN;
 use crate::darc_tmk_import::SEALED_TMK_LEN;
-use crate::policy::PartPolicy;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -56,9 +55,10 @@ pub struct TborDarcTmkExportReq {
     #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
-    /// Unified [`PartPolicy`] whose `DATAPubKey` anchors
-    /// `target_cert_chain`.  Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy whose `DATAPubKey` anchors
+    /// `target_cert_chain`.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 
     /// Target certificate-chain descriptors `(index, length)` referencing
     /// the out-of-band SGL Data Blocks; carries 1..=2 entries.  The chain
@@ -93,7 +93,7 @@ mod tests {
             session_id: 9,
             masked_sender_key: [0u8; MASKED_KEX_KEY_LEN],
             masked_tmk: [0u8; MASKED_TMK_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
             target_cert_chain: alloc::vec![
                 CertDescriptor {
                     index: 0,
@@ -109,8 +109,10 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy plus the masked keys must be carried in the
+        // The maximum-length policy plus the masked keys must be carried in the
         // data section.
-        assert!(frame.len() > 584 + MASKED_KEX_KEY_LEN + MASKED_TMK_LEN);
+        assert!(
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN + MASKED_KEX_KEY_LEN + MASKED_TMK_LEN
+        );
     }
 }

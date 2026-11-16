@@ -399,11 +399,29 @@ impl HsmEcc for StdHsmPal {
         priv_key: &HsmDmaBuf,
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        // Parse the vault-format (raw HSM scalar) private key and report
-        // the wire public-key length; in use mode derive the public key
-        // and serialize it (`x || y`, operand order) via the shared driver
-        // helper (same chain as `ecc_gen_keypair_from_root`).
-        let pk = import_priv(priv_key)?;
+        self.ecc_public_point(import_priv(priv_key)?, pub_out).await
+    }
+
+    async fn ecc_vault_pub_key(
+        &self,
+        io: &StdHsmIo,
+        key_id: HsmKeyId,
+        pub_out: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
+            return Err(HsmError::InvalidArg);
+        }
+        let pk = import_priv(self.vault_key(io, key_id)?)?;
+        self.ecc_public_point(pk, Some(pub_out)).await
+    }
+}
+
+impl StdHsmPal {
+    async fn ecc_public_point(
+        &self,
+        pk: EccPrivateKey,
+        pub_out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let wire_pub_len = from_ecc_curve(pk.curve()).wire_pub_key_len(StdHsmPal::BYTE_ORDER);
         if let Some(out) = pub_out {
             if out.len() < wire_pub_len {

@@ -32,7 +32,7 @@ use super::*;
 ///   `SdSealingKeyGen`), exactly [`MASKED_SEALING_KEY_LEN`] bytes.
 /// * `dst_evidence` - Destination (peer) attestation evidence (cert chains
 ///   and report), transmitted out of band.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `pok_local_backup` - The device-local partition-owner-key backup from
 ///   which BKS3 is recovered, exactly [`MASKED_SD_LEN`] bytes.
 ///
@@ -57,7 +57,7 @@ pub(crate) fn sd_create_peer_backup_ex(
     let pok_local_backup: [u8; MASKED_SD_LEN] = pok_local_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Flatten the destination evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();

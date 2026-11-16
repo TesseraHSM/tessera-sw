@@ -6,7 +6,7 @@
 //! `PartFinal` is a CO-session command that finalizes a partition after
 //! `PartInit` by installing the POTA-endorsed PTA certificate chain and
 //! deriving the partition's local masking keys.  It re-supplies the
-//! unified `PartPolicy` (for `POTAPubKey` recovery), the PTA cert-chain
+//! partition policy (for the POTA trust anchor), the PTA cert-chain
 //! descriptor list (referencing out-of-band SGL Data Blocks), and an
 //! optional prior `local_mk` backup to restore; it returns the current
 //! `local_mk` backup.  See `tsra_fw_ddi_tbor_types::part_final` for the
@@ -20,7 +20,6 @@ use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 use zerocopy::Unaligned;
 
-use crate::policy::PartPolicy;
 use crate::tbor;
 use crate::tbor_int::U16;
 
@@ -92,10 +91,11 @@ pub struct TborPartFinalReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// Caller-asserted unified [`PartPolicy`], re-supplied from
-    /// `PartInit` for `POTAPubKey` recovery.  Encoded as its 584-byte
-    /// little-endian image.
-    pub part_policy: PartPolicy,
+    /// Caller-asserted unified partition policy, re-supplied from
+    /// `PartInit` for the POTA trust anchor.  Deterministic CBOR
+    /// document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub part_policy: Vec<u8>,
 
     /// PTA certificate chain descriptors `(index, length)` referencing
     /// the out-of-band SGL Data Blocks.  Encoded as the packed
@@ -139,7 +139,7 @@ mod tests {
     fn request_encodes_typed_cert_descriptors_le() {
         let req = TborPartFinalReq {
             session_id: 7,
-            part_policy: PartPolicy::zeroed(),
+            part_policy: Vec::new(),
             cert_descriptors: alloc::vec![
                 CertDescriptor {
                     index: 0,
@@ -172,7 +172,7 @@ mod tests {
 
         let req = TborPartFinalReq {
             session_id: 7,
-            part_policy: PartPolicy::zeroed(),
+            part_policy: Vec::new(),
             cert_descriptors: alloc::vec![CertDescriptor {
                 index: 0,
                 length: U16::new(32),

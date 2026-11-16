@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCertStore;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -162,100 +163,92 @@ impl UnoHsmPal {
         part_id: HsmPartId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
-        // Partition identity public key (X ‖ Y) — must be provisioned.
         let part = PartStore::partition(part_id)?;
-        if part.id_key_id().is_none() {
-            return Err(HsmError::InvalidArg);
-        }
-        let id_pub = part.id_pub_key();
-        // P-384-only path: require an exact `X ‖ Y` length. A longer key would
-        // silently ignore trailing bytes and could yield an invalid cert.
-        if id_pub.len() != P384_PUB_XY_LEN {
-            return Err(HsmError::InternalError);
-        }
-        // `id_pub` is the identity point in natural big-endian (`X_be ‖ Y_be`),
-        // normalized at the PAL; build the SEC1 uncompressed point directly.
-        let mut uncompressed = [0u8; P384_UNCOMPRESSED_LEN];
-        uncompressed[0] = 0x04;
-        uncompressed[1..].copy_from_slice(&id_pub[..P384_PUB_XY_LEN]);
-
-        // Subject Key Identifier = SHA-1(uncompressed public key).
-        let ski = self.sha1_20(io, &uncompressed).await?;
-        // Partition identifier → subject CN (uppercase hex) and serial number.
-        let id = part.id();
-        if id.len() < PART_ID_LEN {
-            return Err(HsmError::InternalError);
-        }
-        let subject_cn = subject_cn_hex(&id[..PART_ID_LEN]);
-        let serial = pid_serial(&id[..PART_ID_LEN]);
-
-        // Issuer DN and Authority Key Identifier come from the alias cert so the
-        // PID leaf chains to the CP alias certificate (subject CN → issuer CN,
-        // alias SKI → leaf AKI).
-        let alias_cert = gsram_alias::alias_cert();
-        // Missing alias material (bring-up / provisioning failure) is a caller-
-        // facing `InvalidArg`, not an internal error — match the HsmCertStore docs
-        // and fail before attempting to parse an empty buffer.
-        if alias_cert.is_empty() {
-            return Err(HsmError::InvalidArg);
-        }
-        let mut issuer_cn = [0u8; ISSUER_CN_LEN];
-        let cn = der::get_subject_cn(alias_cert).ok_or(HsmError::InternalError)?;
-        if cn.len() != ISSUER_CN_LEN {
-            return Err(HsmError::InternalError);
-        }
-        issuer_cn.copy_from_slice(cn);
-
-        let mut authority_key_id = [0u8; SKI_LEN];
-        // The leaf's AKI must be the alias cert's SKI; fail rather than emit a
-        // leaf with an all-zero AKI if the alias cert lacks the extension.
-        let aki = der::get_subject_key_identifier(alias_cert).ok_or(HsmError::InternalError)?;
-        if aki.len() != SKI_LEN {
-            return Err(HsmError::InternalError);
-        }
-        authority_key_id.copy_from_slice(aki);
-
-        // Alias signing key from GSRAM.
-        let alias_key = gsram_alias::alias_key();
-        if alias_key.is_empty() {
-            return Err(HsmError::InvalidArg);
-        }
-
-        let params = LeafCertParams {
-            public_key: &uncompressed,
-            serial_number: &serial,
-            not_before: NOT_BEFORE,
-            not_after: NOT_AFTER,
-            issuer_cn: &issuer_cn,
-            subject_cn: &subject_cn,
-            subject_key_id: &ski,
-            authority_key_id: &authority_key_id,
-        };
-
-        let signer = AliasSigner {
-            pal: self,
-            alias_key,
-        };
+        let key_id = part.id_key_id().ok_or(HsmError::InvalidArg)?;
         self.alloc_scoped_async(io, async |scope| {
+            // Leave room before the SEC1 tag so the PKA point starts word-aligned.
+            let uncompressed = scope
+                .dma_alloc(P384_UNCOMPRESSED_LEN + 3)?
+                .split_at_mut(3)
+                .1;
+            uncompressed[0] = 0x04;
+            let public = uncompressed.split_at_mut(1).1;
+            if self.ecc_vault_pub_key(io, key_id, public).await? != P384_PUB_XY_LEN {
+                return Err(HsmError::InternalError);
+            }
+            public[..P384_FIELD].reverse();
+            public[P384_FIELD..].reverse();
+
+            // Subject Key Identifier = SHA-1(uncompressed public key).
+            let ski = scope.dma_alloc(SKI_LEN)?;
+            self.hash(
+                io,
+                HsmHashAlgo::Sha1,
+                uncompressed,
+                ski,
+                HsmDigestForm::Standard,
+            )
+            .await?;
+            let uncompressed: &[u8; P384_UNCOMPRESSED_LEN] = (&**uncompressed)
+                .try_into()
+                .map_err(|_| HsmError::InternalError)?;
+            let ski: &[u8; SKI_LEN] = (&**ski).try_into().map_err(|_| HsmError::InternalError)?;
+            // Partition identifier → subject CN (uppercase hex) and serial number.
+            let id = part.id();
+            if id.len() < PART_ID_LEN {
+                return Err(HsmError::InternalError);
+            }
+            let subject_cn = subject_cn_hex(&id[..PART_ID_LEN]);
+            let serial = pid_serial(&id[..PART_ID_LEN]);
+
+            // Issuer DN and Authority Key Identifier come from the alias cert so the
+            // PID leaf chains to the CP alias certificate (subject CN → issuer CN,
+            // alias SKI → leaf AKI).
+            let alias_cert = gsram_alias::alias_cert();
+            // Missing alias material (bring-up / provisioning failure) is a caller-
+            // facing `InvalidArg`, not an internal error — match the HsmCertStore docs
+            // and fail before attempting to parse an empty buffer.
+            if alias_cert.is_empty() {
+                return Err(HsmError::InvalidArg);
+            }
+            let mut issuer_cn = [0u8; ISSUER_CN_LEN];
+            let cn = der::get_subject_cn(alias_cert).ok_or(HsmError::InternalError)?;
+            if cn.len() != ISSUER_CN_LEN {
+                return Err(HsmError::InternalError);
+            }
+            issuer_cn.copy_from_slice(cn);
+
+            let mut authority_key_id = [0u8; SKI_LEN];
+            // The leaf's AKI must be the alias cert's SKI; fail rather than emit a
+            // leaf with an all-zero AKI if the alias cert lacks the extension.
+            let aki = der::get_subject_key_identifier(alias_cert).ok_or(HsmError::InternalError)?;
+            if aki.len() != SKI_LEN {
+                return Err(HsmError::InternalError);
+            }
+            authority_key_id.copy_from_slice(aki);
+
+            // Alias signing key from GSRAM.
+            let alias_key = gsram_alias::alias_key();
+            if alias_key.is_empty() {
+                return Err(HsmError::InvalidArg);
+            }
+
+            let params = LeafCertParams {
+                public_key: uncompressed,
+                serial_number: &serial,
+                not_before: NOT_BEFORE,
+                not_after: NOT_AFTER,
+                issuer_cn: &issuer_cn,
+                subject_cn: &subject_cn,
+                subject_key_id: ski,
+                authority_key_id: &authority_key_id,
+            };
+
+            let signer = AliasSigner {
+                pal: self,
+                alias_key,
+            };
             build_leaf_cert_with_signer(self, io, scope, &params, &signer, out).await
-        })
-        .await
-    }
-
-    /// SHA-1 over `data`, returning the 20-byte digest.
-    async fn sha1_20(&self, io: &UnoHsmIo, data: &[u8]) -> HsmResult<[u8; SKI_LEN]> {
-        self.alloc_scoped_async(io, async |scope| {
-            let inp = scope.dma_alloc(data.len())?;
-            inp.copy_from_slice(data);
-            let outd = scope.dma_alloc(SKI_LEN)?;
-            // `Standard`: the SKI is the standard SHA-1 of the key (RFC 5280).
-            // `Operand` would byte-reverse the digest and encode an incorrect
-            // Subject Key Identifier.
-            self.hash(io, HsmHashAlgo::Sha1, inp, outd, HsmDigestForm::Standard)
-                .await?;
-            let mut out = [0u8; SKI_LEN];
-            out.copy_from_slice(&outd[..SKI_LEN]);
-            Ok(out)
         })
         .await
     }
