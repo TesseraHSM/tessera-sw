@@ -505,6 +505,23 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// Derive the operand-order public point from a vault key reference.
+    ///
+    /// Accepts the same raw-scalar key representation as
+    /// [`Self::ecc_priv_pub_key`]. The PAL snapshots the key before yielding
+    /// and writes directly into `pub_out`, returning the number of bytes
+    /// written. The output must be 4-byte aligned and fit the curve's wire
+    /// public-key length.
+    ///
+    /// Propagates vault lookup, invalid-scalar, undersized-buffer, allocation
+    /// and ECC-engine errors.
+    async fn ecc_vault_pub_key(
+        &self,
+        io: &Self::Io,
+        key_id: HsmKeyId,
+        pub_out: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
+
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
     ///
     /// Computes the public point by base-point scalar multiplication and

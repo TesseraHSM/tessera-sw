@@ -374,22 +374,9 @@ async fn verify_pota_signature<P: HsmPal>(
     signer_pub_key_raw: &HsmDmaBuf,
     signature_raw: &HsmDmaBuf,
 ) -> HsmResult<()> {
-    // `part_id_pub_key` returns the raw `x ‖ y` form (96 B) in natural
-    // big-endian; prepend the SEC1 `0x04` uncompressed-point tag to build the
-    // `0x04 ‖ x_be ‖ y_be` form the host (and X.509 leaf) signs over.
-    let id_pub_key_len = {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        if pk.len() != P384_PUB_RAW_LEN {
-            return Err(HsmError::EccInvalidKeyLength);
-        }
-        pk.len()
-    };
-    let id_uncompressed = pal.dma_alloc(io, id_pub_key_len + 1)?;
+    let id_uncompressed = pal.dma_alloc(io, P384_PUB_RAW_LEN + 4)?.split_at_mut(3).1;
     id_uncompressed[0] = 0x04;
-    {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        id_uncompressed[1..].copy_from_slice(&pk[..id_pub_key_len]);
-    }
+    crate::part_state::part_id_pub_key(pal, io, id_uncompressed.split_at_mut(1).1).await?;
 
     // `ecc_verify` consumes the digest in operand order.
     let digest = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;

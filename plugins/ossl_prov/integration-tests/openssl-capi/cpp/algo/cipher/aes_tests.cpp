@@ -724,4 +724,98 @@ TEST_F(aes_skey, generate_rejects_unsupported_key_length_RequiresOpenssl35)
     EXPECT_NE(generate_skey(prov_.libctx(), 32, nullptr), nullptr) << "AES-256 must still generate";
 }
 
+/// AES-GCM without a data update still runs the HSM operation: encryption
+/// returns a tag, and decryption fails for a changed or missing tag and for
+/// changed AAD, through EVP_CipherFinal_ex() and through EVP_Cipher().
+TEST_F(aes_skey, gcm_empty_message_authentication_RequiresOpenssl35)
+{
+    struct Tamper
+    {
+        const char *name;
+        bool flip_tag;
+        bool omit_tag;
+        bool flip_aad;
+    };
+    const Tamper tampers[] = {
+        { "none", false, false, false },
+        { "tag", true, false, false },
+        { "no tag", false, true, false },
+        { "aad", false, false, true },
+    };
+    const unsigned char aad[] = { 'a', 'a', 'd' };
+
+    auto skey = generate_skey(prov_.libctx(), 32, "AES-GCM");
+    auto cipher = fetch_cipher(prov_.libctx(), "AES-256-GCM");
+    ASSERT_NE(skey, nullptr);
+    ASSERT_NE(cipher, nullptr);
+
+    for (int aad_len : { 0, static_cast<int>(sizeof(aad)) })
+    {
+        SCOPED_TRACE(aad_len);
+        // A distinct IV for each encryption under the key.
+        unsigned char iv[12] = { static_cast<unsigned char>(aad_len) };
+        unsigned char out[16] = { 0 };
+        unsigned char tag[16] = { 0 };
+        int outl = 0;
+
+        EvpCipherCtxPtr enc(EVP_CIPHER_CTX_new());
+        ASSERT_NE(enc, nullptr);
+        ASSERT_EQ(
+            EVP_CipherInit_SKEY(enc.get(), cipher.get(), skey.get(), iv, sizeof(iv), 1, nullptr),
+            1
+        );
+        ASSERT_EQ(EVP_CipherUpdate(enc.get(), nullptr, &outl, aad, aad_len), 1);
+        ASSERT_EQ(EVP_CipherFinal_ex(enc.get(), out, &outl), 1);
+        EXPECT_EQ(outl, 0);
+        OSSL_PARAM get_tag[] = {
+            OSSL_PARAM_octet_string(OSSL_CIPHER_PARAM_AEAD_TAG, tag, sizeof(tag)),
+            OSSL_PARAM_END
+        };
+        ASSERT_EQ(EVP_CIPHER_CTX_get_params(enc.get(), get_tag), 1);
+
+        for (const Tamper &tamper : tampers)
+        {
+            SCOPED_TRACE(tamper.name);
+            unsigned char supplied_tag[sizeof(tag)];
+            unsigned char supplied_aad[sizeof(aad)];
+            std::memcpy(supplied_tag, tag, sizeof(tag));
+            std::memcpy(supplied_aad, aad, sizeof(aad));
+            supplied_tag[0] ^= tamper.flip_tag ? 1 : 0;
+            supplied_aad[0] ^= tamper.flip_aad ? 1 : 0;
+            // With no AAD, a flipped AAD byte is not passed in.
+            const bool valid =
+                !tamper.flip_tag && !tamper.omit_tag && (!tamper.flip_aad || aad_len == 0);
+            OSSL_PARAM set_tag[] = { OSSL_PARAM_octet_string(
+                                         OSSL_CIPHER_PARAM_AEAD_TAG,
+                                         supplied_tag,
+                                         sizeof(supplied_tag)
+                                     ),
+                                     OSSL_PARAM_END };
+            EvpCipherCtxPtr dec(EVP_CIPHER_CTX_new());
+            ASSERT_NE(dec, nullptr);
+            auto init_decrypt = [&]() {
+                return EVP_CipherInit_SKEY(
+                           dec.get(),
+                           cipher.get(),
+                           skey.get(),
+                           iv,
+                           sizeof(iv),
+                           0,
+                           nullptr
+                       ) == 1 &&
+                       (tamper.omit_tag || EVP_CIPHER_CTX_set_params(dec.get(), set_tag) == 1);
+            };
+
+            ASSERT_TRUE(init_decrypt());
+            ASSERT_EQ(EVP_CipherUpdate(dec.get(), nullptr, &outl, supplied_aad, aad_len), 1);
+            EXPECT_EQ(EVP_CipherFinal_ex(dec.get(), out, &outl) == 1, valid);
+
+            // EVP_Cipher() finalises with a NULL input: 0 bytes on success, -1 on failure.
+            ASSERT_TRUE(init_decrypt());
+            ASSERT_EQ(EVP_Cipher(dec.get(), nullptr, supplied_aad, aad_len), 0);
+            EXPECT_EQ(EVP_Cipher(dec.get(), nullptr, nullptr, 0), valid ? 0 : -1);
+        }
+    }
+}
+
 #endif // OPENSSL_VERSION_NUMBER >= 0x30500000L

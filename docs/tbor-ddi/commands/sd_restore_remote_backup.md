@@ -97,7 +97,7 @@ variable-length data section.
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **receiver's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover the receiver's private HPKE key (`RcvrPriv`). Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
-| 20 | `policy` | `buffer` (fixed 484 B) | Caller-asserted unified `PartPolicy` describing the security domain being restored. Length pinned to `PART_POLICY_LEN` (484 B); its SHA-384 digest must equal the destination partition's bound `policy_hash`, not the sealing authority's report hash. |
+| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being restored. Its SHA-384 digest must equal the destination partition's bound `policy_hash`, not the sealing authority's report hash. |
 | 24 | `sender_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender key certificate-chain descriptors (spec `SndrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `SndrPub`. |
 | 28 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender manufacturer certificate-chain descriptors (from the `sender_evidence` field group). Optional (see below). |
 | 32 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender owner certificate-chain descriptors. Optional. |
@@ -117,7 +117,7 @@ otherwise sent empty and ignored.
 
 ### Data section
 
-Carries the 276-byte `masked_sealing_key`, the 484-byte `policy` image,
+Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
 the packed sender cert-chain and report descriptors (the always-present
 `sender_cert_chain` and the optional evidence group), the 161-byte
 `src_remote_backup` seal, and the 260-byte `prev_sd_mk_backup` envelope.
@@ -143,7 +143,7 @@ Carries the 276-byte `pok_local_backup` blob and the 260-byte
 
 | Error | Cause |
 |---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` ≠ 484 B, `src_remote_backup` ≠ 161 B, or `prev_sd_mk_backup` ≠ 260 B (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` > 384 B, `src_remote_backup` ≠ 161 B, or `prev_sd_mk_backup` ≠ 260 B (rejected at decode before the handler runs) |
 | `InvalidArg` | Partition is not `Initialized` (not finalized); or the request policy differs from the destination's bound policy; or the policy `SATA` key is not P-384; or (when `require_trusted_sa_key` is set) the policy `SAPOTA` key is not P-384 or the attested COSE_Key ≠ `SndrPub`; or the opened backup is not a 48-byte BKS3 |
 | `SdAlreadyInitialized` | A security domain is already initialized on this partition incarnation (one-shot gate) |
 | `SdBackupSvnRollback` | A backup's bound SVN is newer than the current firmware SVN (anti-rollback) |

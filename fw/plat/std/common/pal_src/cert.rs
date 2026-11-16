@@ -29,6 +29,7 @@ use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::HashAlgo;
+use tsra_crypto::PrivateKey;
 
 use super::*;
 use crate::part::NUM_PARTITIONS;
@@ -380,11 +381,7 @@ impl StdHsmPal {
             if idx >= NUM_PARTITIONS {
                 return Err(HsmError::InvalidArg);
             }
-            // Reject Unallocated and Disabled — in both cases the
-            // partition has no live identity key to sign against
-            // (Unallocated has no `id_pub_key` at all; Disabled has
-            // a zeroed one).  Allocated is fine: `part_alloc`
-            // provisions `id_pub_key` before transitioning.
+            // Unallocated and Disabled have no live identity key.
             let state = table.entries[idx].state;
             if state == HsmPartState::Unallocated || state == HsmPartState::Disabled {
                 return Err(HsmError::InvalidArg);
@@ -394,9 +391,20 @@ impl StdHsmPal {
             }
         }
 
-        let table = unsafe { &*self.part_table.get() };
-        let entry = &table.entries[pid as usize];
-        let uncompressed = to_uncompressed(&entry.id_pub_key);
+        let public_key = {
+            let table = unsafe { &*self.part_table.get() };
+            let entry = &table.entries[pid as usize];
+            let key_id = entry.id_key_id.ok_or(HsmError::PartPropNotFound)?;
+            EccPrivateKey::from_hsm_bytes(entry.vault.key(key_id)?)
+                .map_err(|_| HsmError::InvalidArg)?
+                .public_key()
+                .map_err(|_| HsmError::EccGetCoordinatesError)?
+        };
+        let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
+        self.ecc
+            .pub_coords(&public_key, HsmByteOrder::Be, &mut pub_raw)
+            .await?;
+        let uncompressed = to_uncompressed(&pub_raw);
 
         // SKI = SHA-1(uncompressed pubkey).
         let mut ski = [0u8; 20];

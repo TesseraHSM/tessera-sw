@@ -55,8 +55,6 @@ use tsra_fw_core_evidence::verify_receiver_cert_chain;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
 use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
@@ -166,23 +164,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // The re-supplied policy must match the one bound at `PartInit`.
             verify_policy_hash(pal, io, alloc, policy).await?;
             let part_policy = super::policy::from_bytes(policy)?;
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
-                return Err(HsmError::InvalidArg);
-            }
+            let sata = part_policy.sata_spki_thumbprint;
 
             // Sender key authorization: validate the sender certificate
             // chain, anchor it to the policy SATA key, and recover the
             // sender public key (`SndrPub`) into `pk_sndr`.  This is the
             // sole source of the HPKE-Auth sender key, always required.
-            verify_receiver_cert_chain(
-                pal,
-                io,
-                req.sender_cert_chain(),
-                &sata.data[..POLICY_MAX_KEY_LEN],
-                pk_sndr,
-            )
-            .await?;
+            verify_receiver_cert_chain(pal, io, req.sender_cert_chain(), sata, pk_sndr).await?;
 
             // Sender attestation: required only when the policy demands a
             // trusted Sealing Authority key. Validate the
@@ -192,10 +180,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // clear the evidence group is ignored (spec `Option<SndrEvidence>`
             // absent).
             if part_policy.flags.require_trusted_sa_key() {
-                let sapota = &part_policy.sapota_pub_key;
-                if sapota.kind() != PolicyKeyKind::Ecc384 || sapota.len() != POLICY_MAX_KEY_LEN {
-                    return Err(HsmError::InvalidArg);
-                }
+                let sapota = part_policy
+                    .sapota_spki_thumbprint
+                    .ok_or(HsmError::InvalidArg)?;
 
                 // Retain the v2-report requirement, but do not equate an
                 // external sealing authority's policy with the restored SD's.
@@ -213,7 +200,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                             report: ev.evidence(),
                         },
                         &TrustAnchors {
-                            part_owner_anchor: &sapota.data[..POLICY_MAX_KEY_LEN],
+                            part_owner_anchor: sapota,
                             require_sd_sealing: false,
                         },
                         report_pk,

@@ -56,7 +56,7 @@ variable-length data section.
 | 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | Receiver's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `RcvrPriv`. The same key both opens the source and authenticates the reseal; never a vault handle. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 20 | `policy` | `buffer` (fixed 584 B) | Caller-asserted unified `PartPolicy` the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key anchors both evidence chains. Length pinned to `PART_POLICY_LEN` (584 B). |
+| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key thumbprint anchors both evidence chains. |
 | 24 | `src_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source **sender** manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
 | 28 | `src_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender owner certificate-chain descriptors. |
 | 32 | `src_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender partition-owner certificate-chain descriptors. |
@@ -78,7 +78,7 @@ band, referenced by these `(offset, length)` descriptors.
 
 ### Data section
 
-Carries the 276-byte `masked_sealing_key`, the 584-byte `policy` image,
+Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
 the packed source / destination cert-chain and report descriptors, and the
 161-byte `src_remote_backup` seal.  The referenced evidence payloads (the
 two `KeyReport`s and their certificate chains) travel out of band.
@@ -102,7 +102,7 @@ Carries the 161-byte `dst_remote_backup` seal.
 
 | Error | Cause |
 |---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` (276 B), `policy` (584 B), or `src_remote_backup` (161 B) is the wrong length (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `masked_sealing_key` (276 B) or `src_remote_backup` (161 B) is the wrong length, or `policy` exceeds 384 B, (rejected at decode before the handler runs) |
 | `InvalidArg` | Not `Initialized`; missing out-of-band evidence; a report is not v2 (no `policy_hash`); a report's `policy_hash` does not match `SHA-384(policy)`; or evidence chain verification fails |
 | `InvalidPermissions` | Not a Crypto-Officer session |
 | `UnsupportedKeyScope` | The masked sealing key's scope has no provisioned masking key |

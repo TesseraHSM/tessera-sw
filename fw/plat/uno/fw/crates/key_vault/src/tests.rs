@@ -409,6 +409,10 @@ fn disable_enable_reject_non_present() {
         v.enable(HsmKeyId::from(0)).unwrap_err(),
         HsmError::KeyNotFound
     );
+    // A slot index past the table's entry count is not present either.
+    let past_end = HsmKeyId::from(ENTRIES_PER_TABLE as u16);
+    assert_eq!(v.disable(past_end).unwrap_err(), HsmError::KeyNotFound);
+    assert_eq!(v.enable(past_end).unwrap_err(), HsmError::KeyNotFound);
 
     let id = with_key(&[0x22u8; 32], |k| {
         block_on(v.create(&g, &io, 0, k, HsmVaultKeyKind::Aes256, None, aes_attrs())).unwrap()
@@ -570,7 +574,7 @@ fn slot_exhaustion_reports_not_enough_space() {
 
 #[test]
 fn blob_exhaustion_reports_not_enough_space() {
-    // Large keys exhaust blob space well before the 256 slots.
+    // Large keys exhaust blob space well before the slot limit.
     let (mut v, g, io) = vault::<1>();
     let mut created = 0;
     loop {

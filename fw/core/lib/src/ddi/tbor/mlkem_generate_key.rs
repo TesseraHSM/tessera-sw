@@ -39,7 +39,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 
-use super::from_pal::mlkem_param;
+use super::from_pal::mlkem_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -92,8 +92,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // in-session now, so the restriction no longer has a reason.
 
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let param = mlkem_param(vault_kind)?;
-        let pub_len = param.pk_len();
+        let param_set = mlkem_param_set(vault_kind)?;
+        let pub_len = param_set.pk_len();
 
         let svn = part_state::part_mfgr_svn(pal);
         let owner =
@@ -104,7 +104,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // decapsulation key, masked as a unit. The seeds still regenerate the
         // encapsulation key; the expanded key keeps a full key generation out
         // of every decapsulation.
-        let sec_len = param.sk_len();
+        let sec_len = param_set.sk_len();
         let plain_len = MLKEM_SEED_LEN + sec_len;
 
         // The seed pair, expanded key and public key are generated straight
@@ -133,7 +133,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 let (written, _) = pal
                     .mlkem_gen_keypair(
                         io,
-                        param,
+                        param_set,
                         HsmMlSeedSrc::Random,
                         HsmMlKemPct::EncapsDecaps,
                         seed,

@@ -10,9 +10,7 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
-ddi_sock_server = { features = [
-  "autostart-isolated",
-], path = "../ddi/sock/server" }
+ddi_sock_server = { path = "../ddi/sock/server" }
 rand.workspace = true
 tokio = { features = ["rt-multi-thread", "time"], workspace = true }
 tsra_cred_encrypt = { path = "../crates/cred_encrypt" }
@@ -39,6 +37,7 @@ minicbor = "0.19.1"
 [features]
 default = []
 # Fuzz against an in-process simulated HSM reached over the sock transport.
+autostart-isolated = ["ddi_sock_server/autostart-isolated"]
 
 [[bin]]
 bench = false

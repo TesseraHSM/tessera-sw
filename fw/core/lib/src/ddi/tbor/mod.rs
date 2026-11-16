@@ -327,8 +327,8 @@ pub(crate) mod opcode {
     /// (TMK, see [`DARC_TMK_GEN`] / [`DARC_TMK_IMPORT`]) to a remote
     /// **target**, producing a 145-byte `sealed_tmk` byte-compatible with
     /// what [`DARC_TMK_IMPORT`] consumes.  The target is authenticated by
-    /// a certificate chain anchored to the policy `DATAPubKey` (the
-    /// export-side mirror of the `POTAPubKey`-anchored sender chain
+    /// a certificate chain anchored to the policy `data_spki_thumbprint` (the
+    /// export-side mirror of the `pota_spki_thumbprint`-anchored sender chain
     /// [`DARC_TMK_IMPORT`] verifies).  Nothing is persisted on-device.
     /// See [`super::darc_tmk_export`].
     pub(crate) const DARC_TMK_EXPORT: u8 = 0x24;
@@ -727,7 +727,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::PSK_CHANGE => psk_change::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_INIT => part_init::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_FINAL => part_final::handle(pal, io, cmd_buf, undo).await,
-        opcode::PART_INFO => part_info::handle(pal, io, cmd_buf),
+        opcode::PART_INFO => part_info::handle(pal, io, cmd_buf).await,
         opcode::SD_SEALING_KEY_GEN => sd_sealing_key_gen::handle(pal, io, cmd_buf).await,
         opcode::SD_CREATE_REMOTE_BACKUP => {
             sd_create_remote_backup::handle(pal, io, cmd_buf, undo).await

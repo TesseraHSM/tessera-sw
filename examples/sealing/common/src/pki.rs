@@ -90,8 +90,8 @@ impl CaKey {
         })
     }
 
-    /// Raw `X ‖ Y` (96-byte) public coordinates — the policy `PubKey`
-    /// form.
+    /// Raw `X ‖ Y` (96-byte) public coordinates, the input to
+    /// [`tsra_sealing_api::spki_thumbprint`].
     pub fn raw_pub(&self) -> [u8; RAW_PUB_LEN] {
         self.pub_sec1[1..].try_into().expect("raw pub")
     }
@@ -122,9 +122,9 @@ impl CaKey {
     }
 }
 
-/// SHA-384 thumbprint of a DER certificate — the policy anchor thumbprint
-/// (POTA / SATA / SAPOTA) bound at `part_init_ex`. SHA-384 produces exactly
-/// the 48-byte `*_THUMBPRINT_LEN` the firmware stores.
+/// SHA-384 thumbprint of a DER certificate, used to pin saved authority
+/// certificates. Policy key thumbprints use
+/// [`tsra_sealing_api::spki_thumbprint`] instead.
 pub fn thumbprint(cert_der: &[u8]) -> [u8; 48] {
     let mut algo = HashAlgo::sha384();
     let mut out = [0u8; 48];

@@ -16,6 +16,7 @@ use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -61,17 +62,19 @@ fn fixed_size<const N: usize>(bytes: &[u8]) -> HsmResult<&[u8; N]> {
     bytes.try_into().map_err(|_| HsmError::InternalError)
 }
 
-fn sec1_public_key<'a>(
+async fn sec1_public_key<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    raw_public_key: &HsmDmaBuf,
+    key_id: HsmKeyId,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    if raw_public_key.len() != P384_RAW_PUBLIC_KEY_LEN {
-        return Err(HsmError::InternalError);
-    }
-
-    let public_key = alloc.dma_alloc(P384_SEC1_PUBLIC_KEY_LEN)?;
+    // The SEC1 tag precedes a word-aligned PKA output point.
+    let public_key = alloc
+        .dma_alloc(P384_SEC1_PUBLIC_KEY_LEN + 3)?
+        .split_at_mut(3)
+        .1;
     public_key[0] = SEC1_UNCOMPRESSED_TAG;
-    public_key[1..].copy_from_slice(raw_public_key);
+    part_state::key_id_pub_key(pal, io, key_id, public_key.split_at_mut(1).1).await?;
     Ok(public_key)
 }
 
@@ -124,7 +127,8 @@ pub(crate) async fn validate_pta_profile<P: HsmPal>(
     alloc: &impl HsmScopedAlloc,
     pta_cert: &CertInfo<'_>,
 ) -> HsmResult<()> {
-    let pta_public_key = sec1_public_key(alloc, part_state::part_pta_pub_key(pal, io)?)?;
+    let pta_public_key =
+        sec1_public_key(pal, io, alloc, part_state::part_pta_key_id(pal, io)?).await?;
 
     // Subject DN must byte-match the deterministic single-CN(64) profile
     // the PID leaf stamps as its issuer.
@@ -164,8 +168,9 @@ async fn build_pid_certificate<P: HsmPal>(
     private_key: &HsmDmaBuf,
     output: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
-    let public_key = sec1_public_key(alloc, part_state::part_id_pub_key(pal, io)?)?;
-    let pta_public_key = sec1_public_key(alloc, part_state::part_pta_pub_key(pal, io)?)?;
+    let public_key = sec1_public_key(pal, io, alloc, part_state::part_id_key_id(pal, io)?).await?;
+    let pta_public_key =
+        sec1_public_key(pal, io, alloc, part_state::part_pta_key_id(pal, io)?).await?;
     let issuer_cn = issuer_cn(pal, io, alloc, pta_public_key).await?;
     let subject_key_id = hash(pal, io, alloc, HsmHashAlgo::Sha1, public_key).await?;
     let authority_key_id = hash(pal, io, alloc, HsmHashAlgo::Sha1, pta_public_key).await?;

@@ -27,7 +27,7 @@
 //!   receiver's private HPKE key (`RcvrPriv`) that opens the backup; never
 //!   a vault handle.
 //! * `policy` — the unified [`PartPolicy`] describing the security domain
-//!   being restored.  Length pinned to [`PART_POLICY_LEN`] (584 B); its
+//!   being restored.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B); its
 //!   SHA-384 digest must equal the partition's bound `policy_hash` and each
 //!   report's v2 `policy_hash`.
 //! * `src_evidence` — **source** peer side-band attestation evidence
@@ -49,7 +49,7 @@
 use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::evidence::*;
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 pub use crate::sd_create_remote_backup::MASKED_SD_LEN;
 pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 pub use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
@@ -64,9 +64,9 @@ pub const TBOR_OP_SD_RESTORE_PEER_BACKUP: u8 = 0x0F;
 const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
-// literal on the field, so the length is spelled out as `484` and pinned
+// literal on the field, so the maximum length is spelled out as `384` and pinned
 // against the canonical value here.
-const _: () = assert!(PART_POLICY_LEN == 584);
+const _: () = assert!(PART_POLICY_MAX_LEN == 384);
 
 // `pok_peer_backup` is an HPKE-Auth seal; the derive needs an integer
 // literal on the field, so the length is spelled out as `161` and pinned
@@ -99,11 +99,11 @@ pub struct TborSdRestorePeerBackupReq<'a> {
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security
-    /// domain being restored.  Length pinned to [`PART_POLICY_LEN`]
-    /// (584 B).
+    /// domain being restored.  Length bounded by [`PART_POLICY_MAX_LEN`]
+    /// (384 B).
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 
     /// Source peer side-band attestation evidence (manufacturer / owner /
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn request_round_trips_fields() {
         let masked = [0u8; MASKED_SEALING_KEY_LEN];
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let pok_peer = [0xABu8; POK_REMOTE_BACKUP_LEN];
         let prev_sd_mk = [0xCDu8; SD_MK_BACKUP_LEN];
         let cert = CertDescriptor {
@@ -184,7 +184,7 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_sealing_key().len(), MASKED_SEALING_KEY_LEN);
-        assert_eq!(frame.policy().len(), PART_POLICY_LEN);
+        assert_eq!(frame.policy().len(), PART_POLICY_MAX_LEN);
         assert_eq!(frame.pok_peer_backup().len(), POK_REMOTE_BACKUP_LEN);
         assert_eq!(frame.prev_sd_mk_backup().len(), SD_MK_BACKUP_LEN);
     }

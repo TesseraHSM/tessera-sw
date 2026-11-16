@@ -110,9 +110,6 @@ const SEALED_BK3_SIZE: usize = 512;
 /// Length of a partition's random identity blob in bytes.
 const PART_ID_LEN: usize = 16;
 
-/// Length of a POTA SHA-384 thumbprint in bytes.
-const POTA_THUMBPRINT_LEN: usize = 48;
-
 /// Size of a single P-384 coordinate (x or y) in bytes.
 const P384_COORD_SIZE: usize = 48;
 
@@ -149,8 +146,7 @@ const STD_VM_LAUNCH_GUID: [u8; VM_LAUNCH_GUID_LEN] = [
 /// | `gen` | 4 B | Incarnation counter (bumped on alloc / free) |
 /// | `res_mask` | 16 B | Resource bitmask (each bit = one vault table) |
 /// | `id` | 16 B | Random identity blob |
-/// | `pub_key` | 96 B | Raw P-384 public key (x ∥ y) |
-/// | `priv_key` | 48 B | Raw HSM P-384 private scalar |
+/// | `id_key_id` | vault handle | Identity private key; public point derived on demand |
 /// | `leaf_cert` | 2 KB | Cached DER-encoded partition leaf certificate |
 /// | `session_table` | 2 B | Bitmask session allocator |
 ///
@@ -164,7 +160,7 @@ const STD_VM_LAUNCH_GUID: [u8; VM_LAUNCH_GUID_LEN] = [
 /// ## Zeroization
 ///
 /// When a partition is freed via [`part_free_internal`], all
-/// cryptographic material (`id`, `pub_key`, `priv_key`,
+/// cryptographic material (`id`, vault keys,
 /// `leaf_cert`) is explicitly zeroed before the state transitions
 /// back to `Disabled`.
 ///
@@ -184,10 +180,7 @@ pub(crate) struct PartitionEntry {
     id: [u8; PART_ID_LEN],
 
     /// Vault key ID for the partition's identity ECC-384 private key.
-    id_key_id: Option<HsmKeyId>,
-
-    /// Raw public key coordinates (x ∥ y, 96 bytes) for identity key.
-    pub(crate) id_pub_key: [u8; P384_PUB_KEY_LEN],
+    pub(crate) id_key_id: Option<HsmKeyId>,
 
     /// Cached DER-encoded partition leaf certificate (lazily generated).
     pub(crate) leaf_cert: [u8; MAX_CERT_DER_LEN],
@@ -320,22 +313,8 @@ pub(crate) struct PartitionEntry {
     /// bound by `SdCreateRemoteBackup`.
     sd_mk_key_id: Option<HsmKeyId>,
 
-    /// SEC1 uncompressed P-384 public key for the Partition Trust Anchor.
-    pta_pub_key: Option<[u8; P384_PUB_KEY_LEN]>,
-
     /// Raw partition policy bytes bound by PartInit.
     policy_hash: Option<[u8; POLICY_HASH_LEN]>,
-
-    /// POTA SHA-384 thumbprint bound by PartInit.
-    pota_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
-
-    /// SATA SHA-384 thumbprint bound by PartInit (security-domain
-    /// configuration).
-    sata_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
-
-    /// SAPOTA SHA-384 thumbprint bound by PartInit.  Optional — `None`
-    /// when the request carried no SAPOTA thumbprint.
-    sapota_thumbprint: Option<[u8; POTA_THUMBPRINT_LEN]>,
 }
 
 impl Default for PartitionEntry {
@@ -346,7 +325,6 @@ impl Default for PartitionEntry {
             res_mask: 0,
             id: [0u8; PART_ID_LEN],
             id_key_id: None,
-            id_pub_key: [0u8; P384_PUB_KEY_LEN],
             leaf_cert: [0u8; MAX_CERT_DER_LEN],
             leaf_cert_len: 0,
             session_table: SessionTable::new(),
@@ -376,11 +354,7 @@ impl Default for PartitionEntry {
             local_mk_key_id: None,
             ephemeral_mk_key_id: None,
             sd_mk_key_id: None,
-            pta_pub_key: None,
             policy_hash: None,
-            pota_thumbprint: None,
-            sata_thumbprint: None,
-            sapota_thumbprint: None,
         }
     }
 }
@@ -754,7 +728,6 @@ impl StdHsmPal {
             Ok(id_kid) => {
                 entry.id = id;
                 entry.id_key_id = Some(id_kid);
-                entry.id_pub_key = id_pub;
             }
             Err(e) => {
                 // Rollback: release resources.
@@ -861,11 +834,7 @@ impl StdHsmPal {
             let table = self.table_mut();
             let entry = &mut table.entries[idx];
             entry.id_key_id = Some(id_kid);
-            entry.id_pub_key = id_pub;
-            // Defensive: a `GetCertificate` request that slipped in
-            // between `part_disable` and here would have rebuilt the
-            // leaf-cert cache over the zeroed `id_pub_key`.  Invalidate
-            // again so the next request rebuilds against the fresh key.
+            // Rebuild the leaf certificate against the fresh identity key.
             entry.leaf_cert[..entry.leaf_cert_len].fill(0);
             entry.leaf_cert_len = 0;
         }
@@ -995,7 +964,6 @@ impl StdHsmPal {
         if let Some(kid) = entry.id_key_id.take() {
             let _ = entry.vault.delete(kid);
         }
-        entry.id_pub_key.fill(0);
         entry.leaf_cert[..entry.leaf_cert_len].fill(0);
         entry.leaf_cert_len = 0;
 
@@ -1159,11 +1127,7 @@ impl StdHsmPal {
         entry.bk3_session_set = false;
 
         // Provisioning material (write-once fields bound by PartInit).
-        drop_secret(&mut entry.pta_pub_key);
         drop_secret(&mut entry.policy_hash);
-        drop_secret(&mut entry.pota_thumbprint);
-        drop_secret(&mut entry.sata_thumbprint);
-        drop_secret(&mut entry.sapota_thumbprint);
 
         // Rotated PSK material.
         drop_secret(&mut entry.psk_co);
@@ -1413,14 +1377,8 @@ impl PartitionEntry {
                 Ok(&self.masked_bk_boot[..n])
             }
             HsmPartPropId::VM_LAUNCH_GUID => Ok(&self.vm_launch_guid),
-            HsmPartPropId::PART_ID_ECC_PUB_KEY => Ok(&self.id_pub_key),
             HsmPartPropId::SESSION_ENC_ECC_PUB_KEY => Ok(&self.session_enc_pub_key),
             HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY => Ok(&self.establish_cred_pub_key),
-            HsmPartPropId::PTA_ECC_PUB_KEY => self
-                .pta_pub_key
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
             HsmPartPropId::BK3_SESSION => {
                 if !self.bk3_session_set {
                     return Err(HsmError::PartPropNotFound);
@@ -1429,21 +1387,6 @@ impl PartitionEntry {
             }
             HsmPartPropId::POLICY_HASH => self
                 .policy_hash
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::POTA_THUMBPRINT => self
-                .pota_thumbprint
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::SATA_THUMBPRINT => self
-                .sata_thumbprint
-                .as_ref()
-                .map(|a| a.as_slice())
-                .ok_or(HsmError::PartPropNotFound),
-            HsmPartPropId::SAPOTA_THUMBPRINT => self
-                .sapota_thumbprint
                 .as_ref()
                 .map(|a| a.as_slice())
                 .ok_or(HsmError::PartPropNotFound),
@@ -1519,42 +1462,6 @@ impl PartitionEntry {
                 let mut buf = [0u8; POLICY_HASH_LEN];
                 buf.copy_from_slice(data);
                 self.policy_hash = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::POTA_THUMBPRINT => {
-                if self.pota_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.pota_thumbprint = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::SATA_THUMBPRINT => {
-                if self.sata_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.sata_thumbprint = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::SAPOTA_THUMBPRINT => {
-                if self.sapota_thumbprint.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; POTA_THUMBPRINT_LEN];
-                buf.copy_from_slice(data);
-                self.sapota_thumbprint = Some(buf);
-                Ok(())
-            }
-            HsmPartPropId::PTA_ECC_PUB_KEY => {
-                if self.pta_pub_key.is_some() {
-                    return Err(HsmError::InvalidArg);
-                }
-                let mut buf = [0u8; P384_PUB_KEY_LEN];
-                buf.copy_from_slice(data);
-                self.pta_pub_key = Some(buf);
                 Ok(())
             }
             HsmPartPropId::BK3_SESSION => {
@@ -1642,22 +1549,6 @@ impl PartitionEntry {
             }
             HsmPartPropId::POLICY_HASH => {
                 self.policy_hash = None;
-                Ok(())
-            }
-            HsmPartPropId::POTA_THUMBPRINT => {
-                self.pota_thumbprint = None;
-                Ok(())
-            }
-            HsmPartPropId::SATA_THUMBPRINT => {
-                self.sata_thumbprint = None;
-                Ok(())
-            }
-            HsmPartPropId::SAPOTA_THUMBPRINT => {
-                self.sapota_thumbprint = None;
-                Ok(())
-            }
-            HsmPartPropId::PTA_ECC_PUB_KEY => {
-                self.pta_pub_key = None;
                 Ok(())
             }
             HsmPartPropId::BK3_SESSION => {
@@ -2237,29 +2128,6 @@ mod tests {
     }
 
     #[test]
-    fn id_pub_key_returns_fixed_size_buffer() {
-        let mut e = fresh_entry();
-        e.id_pub_key[0] = 0xAA;
-        let got = e
-            .prop_get_bytes(HsmPartPropId::PART_ID_ECC_PUB_KEY)
-            .unwrap();
-        assert_eq!(got.len(), 96);
-        assert_eq!(got[0], 0xAA);
-    }
-
-    #[test]
-    fn id_pub_key_is_read_only() {
-        assert!(matches!(
-            validate_set(
-                HsmPartPropId::PART_ID_ECC_PUB_KEY,
-                ExpectedKind::Bytes,
-                Some(96)
-            ),
-            Err(HsmError::InvalidArg)
-        ));
-    }
-
-    #[test]
     fn session_enc_pub_key_returns_field() {
         let mut e = fresh_entry();
         e.session_enc_pub_key[1] = 0x5A;
@@ -2279,39 +2147,6 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 96);
         assert_eq!(got[95], 0x77);
-    }
-
-    #[test]
-    fn pta_pub_key_round_trip() {
-        let mut e = fresh_entry();
-        assert!(matches!(
-            e.prop_get_bytes(HsmPartPropId::PTA_ECC_PUB_KEY),
-            Err(HsmError::PartPropNotFound)
-        ));
-        let payload = [0x33u8; P384_PUB_KEY_LEN];
-        e.prop_set_bytes(HsmPartPropId::PTA_ECC_PUB_KEY, &payload)
-            .unwrap();
-        assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::PTA_ECC_PUB_KEY).unwrap(),
-            &payload[..]
-        );
-        e.prop_clear(HsmPartPropId::PTA_ECC_PUB_KEY).unwrap();
-        assert!(matches!(
-            e.prop_get_bytes(HsmPartPropId::PTA_ECC_PUB_KEY),
-            Err(HsmError::PartPropNotFound)
-        ));
-    }
-
-    #[test]
-    fn pta_pub_key_wrong_size_rejected() {
-        assert!(matches!(
-            validate_set(
-                HsmPartPropId::PTA_ECC_PUB_KEY,
-                ExpectedKind::Bytes,
-                Some(P384_PUB_KEY_LEN - 1)
-            ),
-            Err(HsmError::InvalidArg)
-        ));
     }
 
     #[test]

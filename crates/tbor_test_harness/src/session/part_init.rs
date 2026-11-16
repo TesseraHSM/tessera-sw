@@ -6,7 +6,7 @@
 //! Wraps the 32-byte `mach_seed` plaintext in an AEAD-GCM envelope
 //! keyed by [`SessionHandshake::param_key`] (AAD =
 //! [`build_part_init_mach_seed_aad(session_id)`](build_part_init_mach_seed_aad))
-//! and ships it alongside `part_policy` + `pota_thumbprint` via
+//! and ships it alongside `part_policy` via
 //! [`TborPartInitReq`].
 //!
 //! [`exec_op_tbor`]: tsra_ddi_interface::DdiDev::exec_op_tbor
@@ -15,15 +15,12 @@ use tsra_crypto::aead_envelope;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::Rng;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborPartInitReq;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 
 use super::finish::SessionHandshake;
 use crate::fixture::TestDev;
@@ -32,47 +29,27 @@ use crate::fixture::TestDev;
 ///
 /// `mach_seed` is sealed client-side under `session.param_key` using
 /// the canonical `part-init-seed-v1 ‖ session_id_le ‖ rsv0` AAD; the
-/// device decrypts it inside the handler.  `part_policy`,
-/// `pota_thumbprint`, and `sata_thumbprint` must be exactly the size
-/// pinned by the wire schema; `sapota_thumbprint` (when `Some`) must be
-/// `SATA_THUMBPRINT_LEN`.  Any size violation surfaces
-/// [`DdiError::InvalidParameter`] before the request reaches the
-/// device.
+/// device decrypts it inside the handler.  `part_policy` is shipped
+/// verbatim (the device validates it) but must fit the wire bound of
+/// [`PART_POLICY_MAX_LEN`]; a wrong-size `mach_seed` or oversized policy
+/// surfaces [`DdiError::InvalidParameter`] before the request reaches
+/// the device.
 pub fn part_init(
     dev: &TestDev,
     session: &SessionHandshake,
     mach_seed: &[u8],
     part_policy: &[u8],
-    pota_thumbprint: &[u8],
-    sata_thumbprint: &[u8],
-    sapota_thumbprint: Option<&[u8]>,
 ) -> Result<TborPartInitResp, DdiError> {
-    if mach_seed.len() != MACH_SEED_LEN
-        || part_policy.len() != PART_POLICY_LEN
-        || pota_thumbprint.len() != POTA_THUMBPRINT_LEN
-        || sata_thumbprint.len() != SATA_THUMBPRINT_LEN
-    {
+    if mach_seed.len() != MACH_SEED_LEN || part_policy.len() > PART_POLICY_MAX_LEN {
         return Err(DdiError::InvalidParameter);
-    }
-    if let Some(s) = sapota_thumbprint {
-        if s.len() != SATA_THUMBPRINT_LEN {
-            return Err(DdiError::InvalidParameter);
-        }
     }
 
     let envelope = encrypt_mach_seed_envelope(session, mach_seed)?;
-    let mut req = TborPartInitReq {
+    let req = TborPartInitReq {
         session_id: session.session_id,
         mach_seed_envelope: envelope,
-        ..Default::default()
+        part_policy: part_policy.to_vec(),
     };
-    req.part_policy = <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(part_policy)
-        .map_err(|_| DdiError::InvalidParameter)?;
-    req.pota_thumbprint.copy_from_slice(pota_thumbprint);
-    req.sata_thumbprint.copy_from_slice(sata_thumbprint);
-    if let Some(s) = sapota_thumbprint {
-        req.sapota_thumbprint = s.to_vec();
-    }
 
     dev.exec_op_tbor(&req, None, &mut None)
 }
