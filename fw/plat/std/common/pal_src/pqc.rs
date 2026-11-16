@@ -19,11 +19,10 @@
 //!
 //! # Randomness
 //!
-//! Entropy is drawn here and passed down, mirroring Uno: there CP1 draws
-//! it because the fastpath cores have no generator of their own. Signing
-//! is therefore hedged on both platforms, so neither reproduces a
-//! previous signature — tests must verify signatures rather than compare
-//! them.
+//! Key-generation seeds come from the PAL generator. The native crypto
+//! backend draws signing and encapsulation entropy internally. Signing is
+//! hedged unless deterministic signing is required; CNG rejects that optional
+//! variant explicitly, while OpenSSL and Uno hardware support it.
 //!
 //! The `cp` log is left untouched. It records cycle counts for hardware
 //! latency analysis and the host has no cycle counter; marks here would
@@ -395,9 +394,12 @@ mod tests {
     use tsra_crypto::HashAlgo;
     use tsra_crypto::Hasher;
     use tsra_crypto::ImportableKey;
+    #[cfg(target_os = "linux")]
     use tsra_crypto::MlDsaAlgo;
+    #[cfg(target_os = "linux")]
     use tsra_crypto::MlDsaPrivateKey;
     use tsra_crypto::MlDsaPublicKey;
+    #[cfg(target_os = "linux")]
     use tsra_crypto::Signer;
     use tsra_fw_hsm_pal_traits::HsmAlloc;
     use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -1084,6 +1086,7 @@ mod tests {
     /// whether the input is the message or its `μ`, in place too, and it
     /// verifies.
     #[tokio::test]
+    #[cfg(target_os = "linux")]
     async fn mldsa_deterministic_signing_repeats() {
         let (pal, io) = pal_and_io();
 
@@ -1159,6 +1162,59 @@ mod tests {
                 .expect("verify"),
                 "{param_set:?}: deterministic signature failed to verify"
             );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    async fn mldsa_deterministic_required_rejects_without_writing() {
+        let (pal, io) = pal_and_io();
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
+            let (mut seed, mut pk, mut sk) =
+                ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
+            pal.mldsa_gen_keypair(
+                &io,
+                param_set,
+                HsmMlSeedSrc::Random,
+                HsmMlDsaPct::None,
+                dma_mut(&mut seed),
+                Some((dma_mut(&mut sk), dma_mut(&mut pk))),
+            )
+            .await
+            .expect("generate key");
+            let buffer = pal.dma_alloc(&io, sk_len).expect("allocate buffer");
+            for (msg_type, message, ctx) in [
+                (HsmMlDsaMsgType::Pure, &b"message"[..], &b"ctx"[..]),
+                (HsmMlDsaMsgType::ExternalMu, &[1u8; 64][..], &b""[..]),
+            ] {
+                let mut sig = vec![0xA5; sig_len];
+                assert_eq!(
+                    pal.mldsa_sign(
+                        &io,
+                        param_set,
+                        HsmMlDsaPrivKey::Expanded(dma(&sk)),
+                        HsmMlDsaHedge::Deterministic,
+                        msg(msg_type, message, ctx),
+                        Some(dma_mut(&mut sig)),
+                    )
+                    .await,
+                    Err(HsmError::UnsupportedCmd),
+                );
+                assert!(sig.iter().all(|byte| *byte == 0xA5));
+                buffer.copy_from_slice(&sk);
+                assert_eq!(
+                    pal.mldsa_sign_in_place(
+                        &io,
+                        param_set,
+                        HsmMlDsaPrivKeyMut::Expanded(buffer),
+                        HsmMlDsaHedge::Deterministic,
+                        msg(msg_type, message, ctx),
+                    )
+                    .await,
+                    Err(HsmError::UnsupportedCmd),
+                );
+                assert_eq!(&buffer[..], &sk[..]);
+            }
         }
     }
 

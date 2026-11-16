@@ -32,10 +32,11 @@
 //!
 //! ## Randomness
 //!
-//! Entropy is a parameter, not something this layer draws. The PAL
-//! supplies it from the HSM's own generator, as CP1 does for the
-//! fastpath cores, which have none of their own.
+//! The PAL supplies key-generation seeds. The native crypto backend draws
+//! fresh signing and encapsulation entropy, unless deterministic signing is
+//! explicitly required and supported by that backend.
 
+use tsra_crypto::CryptoError;
 use tsra_crypto::DecapsulateOp;
 use tsra_crypto::EncapsulateOp;
 use tsra_crypto::ExportableKey;
@@ -126,7 +127,12 @@ impl StdPqc {
                 if deterministic {
                     algo = algo.deterministic();
                 }
-                Signer::sign_vec(&mut algo, &sk, &message).map_err(|_| HsmError::InvalidArg)
+                Signer::sign_vec(&mut algo, &sk, &message).map_err(|error| match error {
+                    CryptoError::MlDsaDeterministicUnsupported | CryptoError::PqcUnavailable => {
+                        HsmError::UnsupportedCmd
+                    }
+                    _ => HsmError::InvalidArg,
+                })
             })
             .await
     }

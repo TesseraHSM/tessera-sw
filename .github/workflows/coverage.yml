@@ -18,7 +18,7 @@ jobs:
 
   coverage_ubuntu:
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     defaults:
       run:

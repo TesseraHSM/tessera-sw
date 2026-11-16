@@ -42,6 +42,7 @@ fn keygen_matches_nist_vectors() {
 /// signature exactly. This covers both the deterministic groups, where FIPS
 /// 204 fixes `rnd` to zero, and the hedged groups, which carry their own.
 #[test]
+#[cfg(target_os = "linux")]
 fn signing_matches_nist_vectors() {
     for v in MLDSA_SIGGEN_TEST_VECTORS {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
@@ -82,6 +83,7 @@ fn verification_matches_nist_vectors() {
 /// NIST's external-`μ` signing vectors, reproduced exactly as for the pure
 /// interface: the engine signs the supplied `μ` without computing its own.
 #[test]
+#[cfg(target_os = "linux")]
 fn external_mu_signing_matches_nist_vectors() {
     for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
@@ -101,6 +103,7 @@ fn external_mu_signing_matches_nist_vectors() {
 /// `rnd`: the variant itself must supply FIPS 204's all-zero randomness, for
 /// the message and for an external `μ`.
 #[test]
+#[cfg(target_os = "linux")]
 fn deterministic_engine_matches_nist_deterministic_vectors() {
     for v in MLDSA_SIGGEN_TEST_VECTORS.iter().filter(|v| v.deterministic) {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
