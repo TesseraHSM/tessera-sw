@@ -167,6 +167,11 @@ public static class NativePqcProbe
             Check(BCryptSignHash(privateKey.Handle, padding, input, (uint)input.Length, signature, size, out written, flags), "BCryptSignHash externalMu=" + externalMu);
             Require(written == size, "Unexpected signature length");
             Check(BCryptVerifySignature(publicKey.Handle, padding, input, (uint)input.Length, signature, written, flags), "BCryptVerifySignature externalMu=" + externalMu);
+            byte[] repeated = new byte[size];
+            Check(BCryptSignHash(privateKey.Handle, padding, input, (uint)input.Length, repeated, size, out written, flags), "BCryptSignHash repeated input");
+            Require(written == size, "Unexpected repeated signature length");
+            Check(BCryptVerifySignature(publicKey.Handle, padding, input, (uint)input.Length, repeated, written, flags), "BCryptVerifySignature repeated input");
+            Console.WriteLine("OBSERVED: same key/input signatures equal=" + signature.SequenceEqual(repeated) + ", externalMu=" + externalMu);
             signature[0] ^= 1;
             int invalid = BCryptVerifySignature(publicKey.Handle, padding, input, (uint)input.Length, signature, written, flags);
             Require(invalid == unchecked((int)0xC000A000), "Tampered signature did not return STATUS_INVALID_SIGNATURE: 0x" + unchecked((uint)invalid).ToString("X8"));
@@ -191,6 +196,17 @@ public static class NativePqcProbe
             Require(ssWritten == ssLength && ctWritten == ctLength, "Unexpected KEM output lengths");
             Check(BCryptDecapsulate(privateKey.Handle, ct, ctLength, recovered, ssLength, out recoveredWritten, 0), "BCryptDecapsulate");
             Require(recoveredWritten == ssLength && ss.SequenceEqual(recovered), "KEM shared secrets differ");
+            byte[] repeatedSecret = new byte[ssLength], repeatedCt = new byte[ctLength];
+            try
+            {
+                Check(BCryptEncapsulate(publicKey.Handle, repeatedSecret, ssLength, out ssWritten, repeatedCt, ctLength, out ctWritten, 0), "BCryptEncapsulate repeated key");
+                Require(ssWritten == ssLength && ctWritten == ctLength, "Unexpected repeated KEM output lengths");
+                Console.WriteLine("OBSERVED: same public key encapsulations equal=" + ct.SequenceEqual(repeatedCt));
+            }
+            finally
+            {
+                Array.Clear(repeatedSecret, 0, repeatedSecret.Length);
+            }
             ct[0] ^= 1;
             Check(BCryptDecapsulate(privateKey.Handle, ct, ctLength, recovered, ssLength, out recoveredWritten, 0), "BCryptDecapsulate implicit rejection");
             Require(recoveredWritten == ssLength && !ss.SequenceEqual(recovered), "KEM implicit rejection failed");

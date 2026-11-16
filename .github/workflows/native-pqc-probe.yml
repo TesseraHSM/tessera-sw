@@ -14,6 +14,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Inspect installed CNG SDK declarations
+        shell: pwsh
+        run: |
+          $headers = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -File |
+            Where-Object { $_.Name -in @('bcrypt.h', 'ncrypt.h') }
+          if (-not $headers) { throw 'No CNG SDK headers found.' }
+          $headers | Select-Object FullName
+          $headers | Select-String -Pattern 'DETERMIN|ENTROP|EXTERNAL_MU|MLDSA|MLKEM|PQDSA|BCryptSignHash|BCryptEncapsulate|NCryptSignHash|NCryptEncapsulate' -Context 0,3
       - name: Probe native CNG PQC
         shell: pwsh
         run: ./.github/scripts/native-pqc-probe.ps1
