@@ -20,8 +20,12 @@ jobs:
           $headers = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -File |
             Where-Object { $_.Name -in @('bcrypt.h', 'ncrypt.h') }
           if (-not $headers) { throw 'No CNG SDK headers found.' }
-          $headers | Select-Object FullName
-          $headers | Select-String -Pattern 'DETERMIN|ENTROP|EXTERNAL_MU|MLDSA|MLKEM|PQDSA|BCryptSignHash|BCryptEncapsulate|NCryptSignHash|NCryptEncapsulate' -Context 0,3
+          $headers | ForEach-Object { Write-Host $_.FullName }
+          $headers | Select-String -Pattern 'DETERMIN|ENTROP|EXTERNAL_MU|MLDSA|MLKEM|PQDSA|BCryptSignHash|BCryptEncapsulate|NCryptSignHash|NCryptEncapsulate' -Context 0,3 |
+            ForEach-Object {
+              Write-Host "$($_.Path):$($_.LineNumber): $($_.Line)"
+              $_.Context.PostContext | ForEach-Object { Write-Host $_ }
+            }
       - name: Probe native CNG PQC
         shell: pwsh
         run: ./.github/scripts/native-pqc-probe.ps1
