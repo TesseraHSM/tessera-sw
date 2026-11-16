@@ -15,6 +15,7 @@
 //! [`HsmPartState::Unallocated`]; a non-zero `SetResource` allocates the
 //! partition and a `PfnEnable` IPC enables it.
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -30,6 +31,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MASKED_BK_BOOT_LEN;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
@@ -55,6 +57,13 @@ const P384_PRIV_LEN: usize = 48;
 const ENABLE_KEY_LEN: usize = ID_PUB_KEY_LEN + P384_PRIV_LEN;
 
 impl UnoHsmPal {
+    fn clear_bk3_prov_credential(&self, pid: HsmPartId) {
+        use zeroize::Zeroize;
+        if let Some(credential) = self.bk3_prov_credential.get(usize::from(u8::from(pid))) {
+            credential.borrow_mut().zeroize();
+        }
+    }
+
     /// Allocates partition `pid` with resource `mask`: assigns the key-vault
     /// tables, generates the random ID and ECC P-384 identity key, and
     /// provisions the masked boot key (mirrors the reference firmware's
@@ -490,6 +499,7 @@ impl UnoHsmPal {
     /// Best-effort and idempotent: keys are deleted only if present, so it is
     /// safe to call regardless of the current lifecycle state.
     async fn clear_enabled_state(&self, admin_io: &UnoHsmIo, pid: HsmPartId) {
+        self.clear_bk3_prov_credential(pid);
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
@@ -661,6 +671,7 @@ impl UnoHsmPal {
     /// [`part_disable`]: Self::part_disable
     /// [`part_alloc`]: Self::part_alloc
     pub(crate) async fn part_migrate(&self, pid: HsmPartId) -> HsmResult<()> {
+        self.clear_bk3_prov_credential(pid);
         let part = PartStore::partition(pid)?;
         // An unallocated partition has neither resources nor a vault table,
         // so there is nothing to reset.
@@ -781,6 +792,68 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
+    fn part_commit_bk3(
+        &self,
+        io: &UnoHsmIo,
+        secure: bool,
+        masked_boot: Option<&HsmDmaBuf>,
+    ) -> HsmResult<()> {
+        let part = PartStore::partition(io.pid())?;
+        if part.bk3_initialized() {
+            return Err(HsmError::Bk3AlreadyInitialized);
+        }
+        if let Some(boot) = masked_boot {
+            if boot.is_empty() || boot.len() > MASKED_BK_BOOT_LEN {
+                return Err(HsmError::InvalidArg);
+            }
+        } else if part.masked_bk_boot().is_empty() {
+            return Err(HsmError::InvalidArg);
+        }
+        if let Some(boot) = masked_boot {
+            part.set_masked_bk_boot(boot)?;
+        }
+        part.set_bk3_initialized(true);
+        part.set_fips_status(if secure { 1 } else { 2 });
+        Ok(())
+    }
+
+    async fn part_ensure_establish_cred_key(&self, io: &UnoHsmIo) -> HsmResult<()> {
+        let part = PartStore::partition(io.pid())?;
+        if part.ec_key_id().is_some() {
+            return Ok(());
+        }
+        self.alloc_scoped_async(io, async |alloc| {
+            let priv_key = alloc.dma_alloc(P384_PRIV_LEN)?;
+            let pub_key = alloc.dma_alloc(ID_PUB_KEY_LEN)?;
+            let (priv_len, pub_len) = self
+                .ecc_gen_keypair(
+                    io,
+                    alloc,
+                    HsmEccCurve::P384,
+                    Some((priv_key, pub_key)),
+                    HsmEccPct::KeyAgreement,
+                )
+                .await?;
+            if priv_len != P384_PRIV_LEN || pub_len != ID_PUB_KEY_LEN {
+                return Err(HsmError::EccInvalidKeyLength);
+            }
+            let attrs = HsmVaultKeyAttrs::new()
+                .with_internal(true)
+                .with_local(true)
+                .with_derive(true);
+            let blob = alloc.dma_alloc(ENABLE_KEY_LEN)?;
+            blob[..ID_PUB_KEY_LEN].copy_from_slice(pub_key);
+            blob[ID_PUB_KEY_LEN..].copy_from_slice(priv_key);
+            let kid = self
+                .vault_key_create(io, blob, HsmVaultKeyKind::EstablishCred, None, attrs)
+                .await?;
+            part.set_ec_pub_key(pub_key)?;
+            part.set_ec_key_id(Some(kid));
+            Ok(())
+        })
+        .await
+    }
+
     fn part_prop_get_u8(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {
@@ -934,6 +1007,19 @@ impl HsmPartitionManager for UnoHsmPal {
     ) -> HsmResult<&'a HsmDmaBuf> {
         let p = PartStore::partition(io.pid())?;
         match id {
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                let credential = self
+                    .bk3_prov_credential
+                    .get(usize::from(u8::from(io.pid())))
+                    .ok_or(HsmError::InvalidArg)?
+                    .borrow();
+                if *credential == [0; 32] {
+                    return Err(HsmError::PartPropNotFound);
+                }
+                let copy = tsra_fw_hsm_pal_traits::HsmAlloc::dma_alloc(self, io, 32)?;
+                copy.copy_from_slice(&*credential);
+                Ok(copy)
+            }
             // Identity / public keys — present once the backing key has
             // been provisioned (identity at SetResource, the others at
             // enable).
@@ -996,6 +1082,24 @@ impl HsmPartitionManager for UnoHsmPal {
     ) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                if data.len() != 32 {
+                    return Err(HsmError::InvalidArg);
+                }
+                let mut credential = self
+                    .bk3_prov_credential
+                    .get(usize::from(u8::from(io.pid())))
+                    .ok_or(HsmError::InvalidArg)?
+                    .borrow_mut();
+                if *credential != [0; 32] {
+                    return Err(HsmError::Bk3PinAlreadySet);
+                }
+                if data[..16] == [0; 16] || data[16..] == [0; 16] {
+                    return Err(HsmError::InvalidAppCredentials);
+                }
+                credential.copy_from_slice(data);
+                Ok(())
+            }
             HsmPartPropId::NONCE => p.set_nonce(data),
             HsmPartPropId::PSK_CO => p.set_psk_co(data),
             HsmPartPropId::PSK_CU => p.set_psk_cu(data),
@@ -1026,6 +1130,9 @@ impl HsmPartitionManager for UnoHsmPal {
     fn part_prop_clear(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                self.clear_bk3_prov_credential(io.pid());
+            }
             // Read-write vault-ref key ids reset to absent.
             HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
             HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),

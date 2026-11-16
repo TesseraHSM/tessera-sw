@@ -92,7 +92,7 @@ impl TryFrom<u16> for HsmPartId {
 }
 
 /// Persistent-store schema version stamped by this driver.
-pub const STORE_VERSION: u8 = 1;
+pub const STORE_VERSION: u8 = 2;
 
 // ── Field sizes (mirror the reference `HsmPartPersistentStore`) ──────────
 const ID_LEN: usize = 16;
@@ -122,7 +122,7 @@ const RESERVED3_LEN: usize = 626
     - POTA_THUMBPRINT_LEN
     - SATA_THUMBPRINT_LEN
     - SAPOTA_THUMBPRINT_LEN
-    - 4  // state
+    - 4  // fips_status + state
     - 4  // generation
     - RES_MASK_LEN
     - 10 * 2  // key handles (u16 + sentinel)
@@ -176,15 +176,15 @@ impl TryFrom<u8> for UnwrappingKeySlot {
     }
 }
 
-/// Bytes in each of a [`Shadow`]'s two runs of slot fields: `state ‖
-/// generation ‖ res_mask`, and the key handles followed by `valid_flags`.
+/// Bytes in each of a [`Shadow`]'s two runs of slot fields: `fips_status ‖
+/// state ‖ generation ‖ res_mask`, and the key handles followed by `valid_flags`.
 const SHADOW_RUN: usize = 24;
 
 /// Words in a [`Shadow`].
 const SHADOW_WORDS: usize = 2 * SHADOW_RUN / 4;
 
 /// Where each [`Shadow`] run starts in [`Storage`].
-const SHADOW_HEAD: usize = offset_of!(Storage, state);
+const SHADOW_HEAD: usize = offset_of!(Storage, fips_status);
 const SHADOW_TAIL: usize = offset_of!(Storage, id_key_id);
 
 /// A DTCM copy of a partition slot's small, read-mostly fields (lifecycle
@@ -403,7 +403,10 @@ struct Storage {
     // seven `[u8;2]` key handles — are placed last, before `reserved3`,
     // where misalignment is harmless. All fields are byte arrays (align 1)
     // so no implicit padding is introduced; accessors do the LE conversions.
-    state: [u8; 4],
+    // Mainline's status byte occupies the first byte of the old state
+    // word. Shrinking state keeps every other Uno field at its old offset.
+    fips_status: u8,
+    state: [u8; 3],
     generation: [u8; 4],
     res_mask: [u8; RES_MASK_LEN],
     ec_pub_key: [u8; PUB_KEY_LEN],
@@ -514,7 +517,8 @@ impl PartStore {
     /// `PartStateImpl::restore_res_mask`.
     pub fn rearm_unwrapping_key_required() {
         for idx in 0..NUM_PARTITIONS {
-            let part = Partition(idx);
+            let mut part = Partition(idx);
+            part.upgrade_bk3_schema();
             if part.res_mask() != 0 {
                 part.set_unwrapping_key_required(true);
             }
@@ -523,6 +527,31 @@ impl PartStore {
 }
 
 impl Partition {
+    /// Upgrade the preserved version-1 state word without moving keys or
+    /// claiming approval for an older, unclassified BK3.
+    pub fn upgrade_bk3_schema(&mut self) {
+        let slot = self.slot_mut();
+        if slot.version == 1 {
+            slot.state = [slot.fips_status, 0, 0];
+            slot.fips_status = 0;
+            slot.version = STORE_VERSION;
+        }
+    }
+
+    /// Persisted provisioning classification, unknown values fail closed.
+    pub fn fips_status(self) -> u8 {
+        match self.slot().fips_status {
+            1 => 1,
+            2 => 2,
+            _ => 0,
+        }
+    }
+
+    /// Set the provisioning classification after backing state is committed.
+    pub fn set_fips_status(mut self, status: u8) {
+        self.slot_mut().fips_status = status;
+    }
+
     /// Raw pointer to this partition's slot in GSRAM.
     #[inline]
     fn slot_ptr(self) -> *mut Storage {
@@ -755,6 +784,7 @@ impl Partition {
             self.clear_sapota_thumbprint();
             self.clear_sealed_bk3();
             self.set_bk3_initialized(false);
+            self.set_fips_status(0);
             let slot = self.slot_mut();
             slot.psk_co = [0u8; PSK_LEN];
             slot.psk_cu = [0u8; PSK_LEN];
@@ -1015,6 +1045,20 @@ impl Partition {
         slot.bk3_session_key.is_valid = false;
     }
 
+    /// Zeroize persistent BK3 state, matching mainline ClearBk3.
+    ///
+    /// Application credentials, vault keys, sessions, and launch identity
+    /// are deliberately untouched.
+    /// A subsequent InitBk3/SecureInitBk3 generates and commits a new boot key.
+    #[inline(never)]
+    pub fn clear_bk3_info(self) {
+        self.set_fips_status(0);
+        self.clear_masked_bk_boot();
+        self.clear_sealed_bk3();
+        self.clear_bk3_session();
+        self.set_bk3_initialized(false);
+    }
+
     /// Clears the sealed BK3 blob (marks absent).
     #[inline(never)]
     pub fn clear_sealed_bk3(mut self) {
@@ -1034,7 +1078,14 @@ impl Partition {
     /// Whether InitBk3 has already run for this partition (one-shot gate).
     #[inline(never)]
     pub fn bk3_initialized(self) -> bool {
+        // Admin LM restores the shared blobs/status, but not Uno's flag.
+        // A sealed blob also identifies provisioned pre-1.1 LM sources,
+        // whose approval status is deliberately restored as zero.
+        // An unclassified, unsealed legacy restore is indistinguishable
+        // from allocation; boot-key presence alone is not initialization.
         self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_BK3_INITIALIZED != 0
+            || matches!(self.fips_status(), 1 | 2)
+            || !self.sealed_bk3().is_empty()
     }
 
     /// Sets the one-shot InitBk3 gate.
@@ -1267,7 +1318,7 @@ impl Partition {
     /// Sets the partition lifecycle [`HsmPartState`].
     #[inline(never)]
     pub fn set_state(mut self, state: HsmPartState) {
-        self.slot_mut().state = [state as u8, 0, 0, 0];
+        self.slot_mut().state = [state as u8, 0, 0];
     }
 
     /// Reads the monotonic generation counter.

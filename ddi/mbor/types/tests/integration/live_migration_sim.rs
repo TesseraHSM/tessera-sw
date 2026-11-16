@@ -308,8 +308,15 @@ fn test_live_migration_sealed_bk3() {
             );
             info!("Live migration simulation completed successfully");
 
-            // Migration lands on a fresh partition: the host re-provisions the
-            // sealed BK3 it saved before migrating, exactly once.
+            // Erase resets the simulator rather than restoring BK_BOOT. This
+            // checks opaque sealed-blob persistence, not full key migration;
+            // the destination must be initialized before accepting a blob.
+            assert!(matches!(
+                helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec()),
+                Err(DdiError::DdiStatus(DdiStatus::Bk3NotSecurelyProvisioned))
+            ));
+            helper_init_bk3(dev, HARD_CODED_BK3.to_vec())
+                .expect("initialize reset simulator before restoring sealed BK3");
             let set_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
             assert!(
                 set_result.is_ok(),

@@ -201,3 +201,115 @@ fn test_secure_init_bk3_pin_already_set() {
         );
     });
 }
+
+#[test]
+fn test_secure_init_bk3_authentication_retry_and_establish() {
+    if !ddi_sock_server::autostarted() {
+        return;
+    }
+    ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
+        assert_eq!(bk3_state(dev), Bk3State::Fresh);
+        let before = helper_get_establish_cred_encryption_key(
+            dev,
+            None,
+            Some(DdiApiRev { major: 1, minor: 0 }),
+        )
+        .unwrap();
+        set_init_bk3_pin(dev, TEST_CRED_ID, TEST_CRED_PIN).unwrap();
+        let after = helper_get_establish_cred_encryption_key(
+            dev,
+            None,
+            Some(DdiApiRev { major: 1, minor: 0 }),
+        )
+        .unwrap();
+        assert_ne!(before.data.pub_key.der, after.data.pub_key.der);
+        assert_ne!(before.data.nonce, after.data.nonce);
+        let (payload, pk) =
+            build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &HARD_CODED_BK3)
+                .unwrap();
+        let mut bad_nonce = payload.clone();
+        bad_nonce.nonce[0] ^= 1;
+        assert!(matches!(
+            helper_secure_init_bk3(dev, bad_nonce, pk.clone()),
+            Err(DdiError::DdiStatus(DdiStatus::NonceMismatch))
+        ));
+        let mut bad_transport = payload.clone();
+        bad_transport.tag_transport[0] ^= 1;
+        bad_transport.tag_pin[0] ^= 1;
+        assert!(matches!(
+            helper_secure_init_bk3(dev, bad_transport, pk.clone()),
+            Err(DdiError::DdiStatus(DdiStatus::Bk3TransportTagMismatch))
+        ));
+        let mut bad_pin = payload.clone();
+        bad_pin.tag_pin[0] ^= 1;
+        assert!(matches!(
+            helper_secure_init_bk3(dev, bad_pin, pk.clone()),
+            Err(DdiError::DdiStatus(DdiStatus::Bk3PinTagMismatch))
+        ));
+        assert_eq!(bk3_state(dev), Bk3State::Fresh);
+        let resp = helper_secure_init_bk3(dev, payload.clone(), pk.clone()).unwrap();
+        assert!(resp.hdr.sess_id.is_none());
+        assert_eq!(bk3_state(dev), Bk3State::Unsealed);
+        assert!(matches!(
+            helper_secure_init_bk3(dev, payload, pk),
+            Err(DdiError::DdiStatus(DdiStatus::Bk3AlreadyInitialized))
+        ));
+        assert!(matches!(
+            helper_init_bk3(dev, HARD_CODED_BK3.to_vec()),
+            Err(DdiError::DdiStatus(DdiStatus::Bk3AlreadyInitialized))
+        ));
+        helper_set_sealed_bk3(dev, resp.data.masked_bk3.as_slice().to_vec()).unwrap();
+        // EstablishCredential uses MOBK and a third recreated tunnel key.
+        // The provisioning PIN must not have occupied the login slot.
+        helper_common_establish_credential_no_unwrap(dev, TEST_CRED_ID, TEST_CRED_PIN).unwrap();
+        assert!(matches!(
+            helper_get_establish_cred_encryption_key(
+                dev,
+                None,
+                Some(DdiApiRev { major: 1, minor: 0 })
+            ),
+            Err(DdiError::DdiStatus(DdiStatus::VaultAppLimitReached))
+        ));
+    });
+}
+
+#[test]
+fn test_secure_init_bk3_phase_two_bad_tag_is_retryable() {
+    if !ddi_sock_server::autostarted() {
+        return;
+    }
+    ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
+        let (credential, pk) =
+            encrypt_userid_pin_for_establish_cred(dev, TEST_CRED_ID, TEST_CRED_PIN);
+        let mut bad = credential.clone();
+        bad.tag[0] ^= 1;
+        assert!(matches!(
+            helper_set_init_bk3_pin(dev, bad, pk.clone()),
+            Err(DdiError::DdiStatus(DdiStatus::PinDecryptionFailed))
+        ));
+        // A tag failure must not rotate the nonce, consume the key, or
+        // occupy the one-shot PIN; the exact authenticated request succeeds.
+        helper_set_init_bk3_pin(dev, credential, pk).unwrap();
+    });
+}
+
+#[test]
+fn test_secure_init_bk3_null_pin_consumes_tunnel_without_storing_pin() {
+    if !ddi_sock_server::autostarted() {
+        return;
+    }
+    ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
+        assert!(matches!(
+            set_init_bk3_pin(dev, TEST_CRED_ID, [0; 16]),
+            Err(DdiError::DdiStatus(DdiStatus::InvalidAppCredentials))
+        ));
+        let (payload, pk) =
+            build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &HARD_CODED_BK3)
+                .unwrap();
+        assert!(matches!(
+            helper_secure_init_bk3(dev, payload, pk),
+            Err(DdiError::DdiStatus(DdiStatus::Bk3PinNotSet))
+        ));
+        set_init_bk3_pin(dev, TEST_CRED_ID, TEST_CRED_PIN).unwrap();
+    });
+}

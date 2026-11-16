@@ -11,6 +11,110 @@
 use super::*;
 
 #[test]
+fn clear_bk3_wipes_material_and_preserves_unrelated_partition_state() -> HsmResult<()> {
+    let p = Partition(59);
+    p.reset();
+    p.set_state(HsmPartState::Enabled);
+    p.set_masked_bk_boot(buf(&[0x71; MASKED_BK_BOOT_DATA_LEN]))?;
+    p.set_sealed_bk3(buf(&[0x72; SEALED_BK3_DATA_LEN]))?;
+    p.set_bk3_session(buf(&[0x73; 48]))?;
+    p.set_bk3_initialized(true);
+    p.set_fips_status(1);
+    p.set_credential(buf(&[0x74; 32]))?;
+    p.set_nonce(buf(&[0x75; 32]))?;
+    p.set_mk_key_id(Some(HsmKeyId::from(0x1234)));
+    p.set_vm_launch_guid(&[0x76; 16]);
+    for _ in 0..2 {
+        p.clear_bk3_info();
+        assert_eq!(p.fips_status(), 0);
+        assert!(!p.bk3_initialized());
+        assert!(p.masked_bk_boot().is_empty());
+        assert!(p.sealed_bk3().is_empty());
+        assert!(!p.bk3_session_valid());
+        assert_eq!(p.slot().masked_bk_boot.data, [0; MASKED_BK_BOOT_DATA_LEN]);
+        assert_eq!(p.slot().sealed_bk3.data, [0; SEALED_BK3_DATA_LEN]);
+        assert_eq!(p.slot().bk3_session_key.key, [0; BK3_KEY_LEN]);
+        assert_eq!(p.state()?, HsmPartState::Enabled);
+        assert!(p.credential_valid());
+        assert_eq!(p.slot().credential, [0x74; 32]);
+        assert_eq!(p.slot().nonce, [0x75; 32]);
+        assert_eq!(p.mk_key_id(), Some(HsmKeyId::from(0x1234)));
+        assert_eq!(p.slot().vm_launch_guid, [0x76; 16]);
+    }
+    Ok(())
+}
+
+#[test]
+fn migrated_bk3_is_initialized_without_uno_flag() -> HsmResult<()> {
+    let p = Partition(58);
+    for status in [0, 1, 2] {
+        p.reset();
+        p.set_masked_bk_boot(buf(&[0x71; 80]))?;
+        assert!(
+            !p.bk3_initialized(),
+            "allocation-time boot is not provisioning"
+        );
+        // Simulate Admin's shared-prefix restore, including a pre-1.1 source
+        // that carries a sealed blob but no provisioning classification.
+        if status == 0 {
+            p.set_sealed_bk3(buf(&[0x72; 64]))?;
+        }
+        p.set_fips_status(status);
+        assert_eq!(p.slot().valid_flags & FLAG_BK3_INITIALIZED, 0);
+        assert!(p.bk3_initialized());
+        p.clear_state(PartResetKind::Migrate);
+        assert!(p.bk3_initialized());
+        assert_eq!(p.fips_status(), status);
+        p.clear_state(PartResetKind::Disable);
+        assert!(!p.bk3_initialized());
+    }
+    Ok(())
+}
+
+#[test]
+fn bk3_schema_upgrade_preserves_version_one_partition() {
+    let mut p = Partition(60);
+    p.reset();
+    p.set_masked_bk_boot(buf(&[0x51; 80])).unwrap();
+    p.set_sealed_bk3(buf(&[0x52; 64])).unwrap();
+    p.set_ec_key_id(Some(HsmKeyId::from(0x1234)));
+    p.set_bk3_initialized(true);
+    // Recreate the old four-byte lifecycle word at the exact former offset.
+    let slot = p.slot_mut();
+    slot.version = 1;
+    slot.fips_status = HsmPartState::Enabled as u8;
+    slot.state = [0; 3];
+    p.upgrade_bk3_schema();
+    assert_eq!(p.state().unwrap(), HsmPartState::Enabled);
+    assert_eq!(p.fips_status(), 0);
+    assert!(p.bk3_initialized());
+    assert_eq!(p.ec_key_id(), Some(HsmKeyId::from(0x1234)));
+    assert_eq!(&p.masked_bk_boot()[..], &[0x51; 80]);
+    assert_eq!(&p.sealed_bk3()[..], &[0x52; 64]);
+    // Re-entering the boot upgrade must not revoke an already classified key.
+    p.set_fips_status(1);
+    p.upgrade_bk3_schema();
+    assert_eq!(p.fips_status(), 1);
+}
+
+#[test]
+fn bk3_status_survives_migrate_and_is_revoked_on_disable() {
+    let p = Partition(61);
+    p.reset();
+    p.set_masked_bk_boot(buf(&[0x53; 80])).unwrap();
+    p.set_bk3_initialized(true);
+    p.set_fips_status(1);
+    p.clear_state(PartResetKind::Migrate);
+    assert_eq!(p.fips_status(), 1);
+    assert!(p.bk3_initialized());
+    p.clear_state(PartResetKind::Disable);
+    assert_eq!(p.fips_status(), 0);
+    assert!(!p.bk3_initialized());
+    p.set_fips_status(u8::MAX);
+    assert_eq!(p.fips_status(), 0);
+}
+
+#[test]
 fn partition_lookup_rejects_wide_ids_without_aliasing() {
     assert!(PartStore::partition(HsmPartId::from(64u8)).is_ok());
     for id in [65u8, u8::MAX] {
@@ -403,6 +507,16 @@ fn shadowed_fields_follow_writes() {
 
     Partition(pid).set_state(HsmPartState::Enabled);
     assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
+    Partition(pid).set_fips_status(1);
+    assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
+    assert!(Partition(pid).bk3_initialized());
+    Partition(pid).set_fips_status(0);
+    assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
+    assert!(!Partition(pid).bk3_initialized());
+    Partition(pid).set_bk3_initialized(true);
+    assert!(Partition(pid).bk3_initialized());
+    Partition(pid).set_bk3_initialized(false);
+    assert!(!Partition(pid).bk3_initialized());
     Partition(pid).bump_generation();
     assert_eq!(Partition(pid).generation(), 8);
     Partition(pid).set_res_mask(1);

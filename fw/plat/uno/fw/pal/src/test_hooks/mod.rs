@@ -58,6 +58,8 @@ use core::pin::Pin;
 use core::task::Context;
 use core::task::Poll;
 
+#[cfg(feature = "fips_validation_hooks")]
+mod clear_bk3;
 #[cfg(feature = "tsra_test_hooks")]
 mod clear_user_credentials;
 mod common;

@@ -255,9 +255,14 @@ pub(crate) struct PartitionEntry {
     /// BK3 initialization state for the current partition incarnation.
     ///
     /// `false` on every enable; set to `true` by a successful
-    /// `part_mark_bk3_initialized`.  Acts as the authoritative
+    /// `part_commit_bk3`.  Acts as the authoritative
     /// one-shot gate for `InitBk3`.
     bk3_initialized: bool,
+
+    /// Volatile secure-BK3 provisioning ID/PIN; never a login credential.
+    bk3_prov_credential: [u8; 32],
+    bk3_prov_credential_set: bool,
+    fips_provisioning_status: u8,
 
     /// Security-domain initialization state for the current partition
     /// incarnation.
@@ -354,6 +359,9 @@ impl Default for PartitionEntry {
             masked_bk_boot_len: 0,
             vm_launch_guid: [0u8; VM_LAUNCH_GUID_LEN],
             bk3_initialized: false,
+            bk3_prov_credential: [0u8; 32],
+            bk3_prov_credential_set: false,
+            fips_provisioning_status: 0,
             sd_initialized: false,
             credential: [0u8; 32],
             credential_set: false,
@@ -465,6 +473,71 @@ pub enum PartCommand {
 // ---------------------------------------------------------------------------
 
 impl HsmPartitionManager for StdHsmPal {
+    fn part_commit_bk3(
+        &self,
+        io: &StdHsmIo,
+        secure: bool,
+        masked_boot: Option<&HsmDmaBuf>,
+    ) -> HsmResult<()> {
+        let entry = self
+            .table_mut()
+            .entries
+            .get_mut(usize::from(u8::from(io.pid())))
+            .ok_or(HsmError::InvalidArg)?;
+        if entry.bk3_initialized {
+            return Err(HsmError::Bk3AlreadyInitialized);
+        }
+        if let Some(boot) = masked_boot {
+            if boot.is_empty() || boot.len() > entry.masked_bk_boot.len() {
+                return Err(HsmError::InvalidArg);
+            }
+        } else if entry.masked_bk_boot_len == 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        if let Some(boot) = masked_boot {
+            entry.masked_bk_boot.fill(0);
+            entry.masked_bk_boot[..boot.len()].copy_from_slice(boot);
+            entry.masked_bk_boot_len = boot.len() as u32;
+        }
+        entry.bk3_initialized = true;
+        entry.fips_provisioning_status = if secure { 1 } else { 2 };
+        Ok(())
+    }
+
+    async fn part_ensure_establish_cred_key(&self, io: &StdHsmIo) -> HsmResult<()> {
+        let pid = u8::from(io.pid());
+        let idx = pid as usize;
+        if self
+            .table()
+            .entries
+            .get(idx)
+            .ok_or(HsmError::InvalidArg)?
+            .establish_cred_key_id
+            .is_some()
+        {
+            return Ok(());
+        }
+        let mut pub_key = [0u8; P384_PUB_KEY_LEN];
+        let attrs = HsmVaultKeyAttrs::new()
+            .with_internal(true)
+            .with_local(true)
+            .with_derive(true);
+        let kid = self
+            .create_internal_ecc384_key(
+                pid,
+                HsmVaultKeyKind::EstablishCred,
+                attrs,
+                HsmEccPct::KeyAgreement,
+                StdHsmPal::BYTE_ORDER,
+                &mut pub_key,
+            )
+            .await?;
+        let entry = &mut self.table_mut().entries[idx];
+        entry.establish_cred_pub_key = pub_key;
+        entry.establish_cred_key_id = Some(kid);
+        Ok(())
+    }
+
     // ─── Property API ──────────────────────────────────────────────────
     //
     // Forwarding shims to the inherent `prop_*` implementations on
@@ -913,6 +986,9 @@ impl StdHsmPal {
 
         entry.vm_launch_guid = STD_VM_LAUNCH_GUID;
         entry.bk3_initialized = false;
+        entry.fips_provisioning_status = 0;
+        entry.bk3_prov_credential.fill(0);
+        entry.bk3_prov_credential_set = false;
         entry.sd_initialized = false;
 
         entry.state = HsmPartState::Enabled;
@@ -1135,6 +1211,9 @@ impl StdHsmPal {
         // grouping.
         entry.vm_launch_guid.fill(0);
         entry.bk3_initialized = false;
+        entry.fips_provisioning_status = 0;
+        entry.bk3_prov_credential.fill(0);
+        entry.bk3_prov_credential_set = false;
         entry.sd_initialized = false;
 
         // Caller-presented secrets and per-session derived material.
@@ -1381,6 +1460,12 @@ impl PartitionEntry {
                 // constant time.
                 Ok(&self.credential)
             }
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                if !self.bk3_prov_credential_set {
+                    return Err(HsmError::PartPropNotFound);
+                }
+                Ok(&self.bk3_prov_credential)
+            }
             HsmPartPropId::NONCE => Ok(&self.nonce),
             HsmPartPropId::SEALED_BK3 => {
                 let n = self.sealed_bk3_len as usize;
@@ -1432,6 +1517,18 @@ impl PartitionEntry {
     /// Write a byte property; `data` length already validated.
     fn prop_set_bytes(&mut self, id: HsmPartPropId, data: &[u8]) -> HsmResult<()> {
         match id {
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                if self.bk3_prov_credential_set {
+                    return Err(HsmError::Bk3PinAlreadySet);
+                }
+                if data[..16] == [0; 16] || data[16..] == [0; 16] {
+                    return Err(HsmError::InvalidAppCredentials);
+                }
+                self.bk3_prov_credential.fill(0);
+                self.bk3_prov_credential.copy_from_slice(data);
+                self.bk3_prov_credential_set = true;
+                Ok(())
+            }
             HsmPartPropId::PSK_CO => {
                 if let Some(prev) = self.psk_co.as_mut() {
                     prev.fill(0);
@@ -1546,6 +1643,11 @@ impl PartitionEntry {
     /// props reach here (enforced by validate_clear).
     fn prop_clear(&mut self, id: HsmPartPropId) -> HsmResult<()> {
         match id {
+            HsmPartPropId::BK3_PROV_CREDENTIAL => {
+                self.bk3_prov_credential.fill(0);
+                self.bk3_prov_credential_set = false;
+                Ok(())
+            }
             // Scalar Rw + Abs.
             HsmPartPropId::MK_KEY_ID => {
                 self.mk_key_id = None;
@@ -1787,6 +1889,74 @@ impl StdHsmPal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bk3_commit_replaces_missing_boot_only_after_validation() -> HsmResult<()> {
+        for secure in [false, true] {
+            let pal = StdHsmPal::default();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, tx);
+            assert!(matches!(
+                pal.part_commit_bk3(&io, secure, None),
+                Err(HsmError::InvalidArg)
+            ));
+
+            let oversized = pal.dma_alloc(&io, MASKED_BK_BOOT_LEN + 1)?;
+            let (empty, _) = oversized.split_at(0);
+            for boot in [empty, &*oversized] {
+                assert!(matches!(
+                    pal.part_commit_bk3(&io, secure, Some(boot)),
+                    Err(HsmError::InvalidArg)
+                ));
+            }
+            assert_eq!(pal.table().entries[0].masked_bk_boot_len, 0);
+            assert!(!pal.table().entries[0].bk3_initialized);
+            assert_eq!(pal.table().entries[0].fips_provisioning_status, 0);
+
+            let boot = pal.dma_alloc(&io, 80)?;
+            boot.fill(0x77);
+            pal.part_commit_bk3(&io, secure, Some(boot))?;
+            assert_eq!(pal.table().entries[0].masked_bk_boot_len, 80);
+            assert_eq!(&pal.table().entries[0].masked_bk_boot[..80], &[0x77; 80]);
+            assert!(pal.table().entries[0].bk3_initialized);
+            assert_eq!(
+                pal.table().entries[0].fips_provisioning_status,
+                if secure { 1 } else { 2 }
+            );
+            assert!(matches!(
+                pal.part_commit_bk3(&io, secure, Some(boot)),
+                Err(HsmError::Bk3AlreadyInitialized)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bk3_pin_is_separate_write_once_and_zeroized_on_clear() {
+        let mut entry = fresh_entry();
+        let id = HsmPartPropId::BK3_PROV_CREDENTIAL;
+        assert!(matches!(
+            entry.prop_get_bytes(id),
+            Err(HsmError::PartPropNotFound)
+        ));
+        entry.prop_set_bytes(id, &[0x62; 32]).unwrap();
+        assert!(!entry.credential_set);
+        assert!(matches!(
+            entry.prop_set_bytes(id, &[0x63; 32]),
+            Err(HsmError::Bk3PinAlreadySet)
+        ));
+        entry.prop_clear(id).unwrap();
+        assert_eq!(entry.bk3_prov_credential, [0; 32]);
+        assert!(matches!(
+            entry.prop_set_bytes(id, &[0; 32]),
+            Err(HsmError::InvalidAppCredentials)
+        ));
+        entry.prop_set_bytes(id, &[0x64; 32]).unwrap();
+        StdHsmPal::clear_enabled_state(&mut entry);
+        assert_eq!(entry.bk3_prov_credential, [0; 32]);
+        assert!(!entry.bk3_prov_credential_set);
+        assert_eq!(entry.fips_provisioning_status, 0);
+    }
 
     #[test]
     fn partition_table_initialization_fits_small_stack() {
