@@ -231,32 +231,28 @@ pub(crate) struct PartitionEntry {
     /// `Masked_BK_BOOT` — `BK_BOOT` enveloped with a platform-derived
     /// `BKx` masking key.
     ///
-    /// Populated by the application layer (the DDI `InitBk3` handler);
-    /// the raw `BK_BOOT` is never stored — it is recovered on demand by
-    /// unmasking this blob.  Cleared on disable / free via
-    /// [`StdHsmPal::clear_enabled_state`].
+    /// Generated at allocation, or recreated by BK3 initialization after
+    /// ClearBk3. The raw `BK_BOOT` is recovered on demand by unmasking this
+    /// blob. Preserved across disable/enable; cleared on free or ClearBk3.
     masked_bk_boot: [u8; MASKED_BK_BOOT_LEN],
 
     /// Length of valid data in `masked_bk_boot` (0 = not yet
     /// populated).
     ///
-    /// Set by the application layer when it writes the masked envelope
-    /// into [`PartitionEntry::masked_bk_boot`]; reset to 0 on every
-    /// disable / free via [`StdHsmPal::clear_enabled_state`].
+    /// Reset to 0 on free or ClearBk3, not on NSSR.
     masked_bk_boot_len: u32,
 
     /// VM launch GUID, set during partition enable.
     ///
     /// On the std PAL this is a fixed constant
     /// ([`STD_VM_LAUNCH_GUID`]); on real hardware it is sourced from
-    /// the platform.  Zeroed on disable / free.
+    /// the platform. Preserved across NSSR and zeroed on free.
     vm_launch_guid: [u8; VM_LAUNCH_GUID_LEN],
 
     /// BK3 initialization state for the current partition incarnation.
     ///
-    /// `false` on every enable; set to `true` by a successful
-    /// `part_commit_bk3`.  Acts as the authoritative
-    /// one-shot gate for `InitBk3`.
+    /// Set by `part_commit_bk3` and preserved across disable/enable.
+    /// Cleared on free or ClearBk3; authoritative one-shot gate for init.
     bk3_initialized: bool,
 
     /// Volatile secure-BK3 provisioning ID/PIN; never a login credential.
@@ -984,9 +980,9 @@ impl StdHsmPal {
             return Err(HsmError::InternalError);
         }
 
-        entry.vm_launch_guid = STD_VM_LAUNCH_GUID;
-        entry.bk3_initialized = false;
-        entry.fips_provisioning_status = 0;
+        if state == HsmPartState::Allocated {
+            entry.vm_launch_guid = STD_VM_LAUNCH_GUID;
+        }
         entry.bk3_prov_credential.fill(0);
         entry.bk3_prov_credential_set = false;
         entry.sd_initialized = false;
@@ -996,6 +992,9 @@ impl StdHsmPal {
     }
 
     /// Disable a partition: clear internal keys, nonce, vault, sessions.
+    ///
+    /// Preserves persistent BK3 provisioning across NSSR, like mainline
+    /// `PartState::disable` / `migrate`; only volatile credentials are cleared.
     ///
     /// Transitions `Enabled → Disabled`.
     pub fn part_disable_internal(&self, pid: u8) -> HsmResult<()> {
@@ -1044,13 +1043,8 @@ impl StdHsmPal {
         // observe the partition was freed.
         entry.gen = entry.gen.wrapping_add(1);
 
-        // If enabled, clear internal keys/nonce/vault/sessions first.
-        if matches!(
-            entry.state,
-            HsmPartState::Enabled | HsmPartState::Initializing | HsmPartState::Initialized
-        ) {
-            Self::clear_enabled_state(entry);
-        }
+        // Also clear disabled entries: NSSR preserves their provisioning.
+        Self::clear_enabled_state(entry);
 
         // Zeroize identity material.
         entry.id.fill(0);
@@ -1064,6 +1058,11 @@ impl StdHsmPal {
         // enable/disable; it is cleared only here, on free.
         entry.masked_bk_boot[..entry.masked_bk_boot_len as usize].fill(0);
         entry.masked_bk_boot_len = 0;
+        entry.sealed_bk3[..entry.sealed_bk3_len as usize].fill(0);
+        entry.sealed_bk3_len = 0;
+        entry.vm_launch_guid.fill(0);
+        entry.bk3_initialized = false;
+        entry.fips_provisioning_status = 0;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;
@@ -1142,16 +1141,11 @@ impl StdHsmPal {
         entry.vault.create(&key_blob, kind, None, attrs)
     }
 
-    /// Clear all state associated with an enabled partition (internal keys,
-    /// nonce, vault keys, sessions, boot-key material, BK3 state).  Does
-    /// NOT change the state field.
+    /// Clear enable-time keys, credentials, nonce, vault and sessions.
     ///
-    /// This is the single clearing site shared by `part_disable_internal`
-    /// and `part_free_internal`; it mirrors the prior reference
-    /// firmware's `clear_partition_info` grouping so that
-    /// `Masked_BK_BOOT`, `sealed_bk3`, `vm_launch_guid`, and BK3 init
-    /// state are all zeroized together whenever the partition's
-    /// enabled lifecycle ends.
+    /// Like mainline `PartState::disable` / `migrate`, retain masked BK_BOOT,
+    /// sealed BK3, launch identity and BK3 classification. Full partition
+    /// teardown clears those in `part_free_internal`. Does not change state.
     fn clear_enabled_state(entry: &mut PartitionEntry) {
         // Drop a vault-backed key if present and best-effort delete its
         // backing slot.  Vault errors are ignored: the slot is about
@@ -1200,18 +1194,6 @@ impl StdHsmPal {
         entry.vault.clear();
         entry.session_table = SessionTable::new();
 
-        // Variable-length opaque blobs — zeroize only the valid
-        // prefix to keep `clear_enabled_state` proportional to
-        // touched bytes.
-        entry.sealed_bk3[..entry.sealed_bk3_len as usize].fill(0);
-        entry.sealed_bk3_len = 0;
-
-        // Boot-key + BK3-incarnation state — mirrors the prior
-        // reference firmware's `clear_partition_info` zeroize
-        // grouping.
-        entry.vm_launch_guid.fill(0);
-        entry.bk3_initialized = false;
-        entry.fips_provisioning_status = 0;
         entry.bk3_prov_credential.fill(0);
         entry.bk3_prov_credential_set = false;
         entry.sd_initialized = false;
@@ -1956,6 +1938,141 @@ mod tests {
         assert_eq!(entry.bk3_prov_credential, [0; 32]);
         assert!(!entry.bk3_prov_credential_set);
         assert_eq!(entry.fips_provisioning_status, 0);
+    }
+
+    #[tokio::test]
+    async fn bk3_provisioning_survives_nssr_without_volatile_credentials() -> HsmResult<()> {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        {
+            let entry = &mut pal.table_mut().entries[0];
+            entry.state = HsmPartState::Allocated;
+            entry.res_mask = 1;
+            entry.vault = KeyVault::new(1);
+        }
+        pal.part_enable_internal(0).await?;
+
+        let boot = [0x71; 80];
+        let sealed = [0x72; 64];
+        // Include fresh, unsealed, sealed and explicitly cleared BK3 states.
+        for (initialized, status, has_boot, has_sealed) in [
+            (false, 0, true, false),
+            (true, 0, true, true),
+            (true, 2, true, false),
+            (true, 1, true, false),
+            (true, 2, true, true),
+            (true, 1, true, true),
+            (false, 0, false, false),
+        ] {
+            {
+                let entry = &mut pal.table_mut().entries[0];
+                entry.masked_bk_boot.fill(0);
+                entry.masked_bk_boot_len = if has_boot {
+                    entry.masked_bk_boot[..boot.len()].copy_from_slice(&boot);
+                    boot.len() as u32
+                } else {
+                    0
+                };
+                entry.sealed_bk3.fill(0);
+                entry.sealed_bk3_len = if has_sealed {
+                    entry.sealed_bk3[..sealed.len()].copy_from_slice(&sealed);
+                    sealed.len() as u32
+                } else {
+                    0
+                };
+                entry.bk3_initialized = initialized;
+                entry.fips_provisioning_status = status;
+                entry.vm_launch_guid = [0x73; VM_LAUNCH_GUID_LEN];
+            }
+
+            for _ in 0..2 {
+                let (old_nonce, old_public_key) = {
+                    let entry = &mut pal.table_mut().entries[0];
+                    entry.credential = [0x74; 32];
+                    entry.credential_set = true;
+                    entry.bk3_prov_credential = [0x75; 32];
+                    entry.bk3_prov_credential_set = true;
+                    entry.bk3_session = [0x76; 48];
+                    entry.bk3_session_set = true;
+                    (entry.nonce, entry.establish_cred_pub_key)
+                };
+
+                pal.part_disable_internal(0)?;
+                {
+                    let entry = &pal.table().entries[0];
+                    assert_eq!(entry.state, HsmPartState::Disabled);
+                    assert_eq!(entry.credential, [0; 32]);
+                    assert!(!entry.credential_set);
+                    assert_eq!(entry.bk3_prov_credential, [0; 32]);
+                    assert!(!entry.bk3_prov_credential_set);
+                    assert_eq!(entry.bk3_session, [0; 48]);
+                    assert!(!entry.bk3_session_set);
+                    assert_eq!(entry.nonce, [0; NONCE_LEN]);
+                    assert!(entry.establish_cred_key_id.is_none());
+                    assert!(entry.session_enc_key_id.is_none());
+                }
+
+                pal.part_enable_internal(0).await?;
+                let entry = &pal.table().entries[0];
+                assert_eq!(entry.state, HsmPartState::Enabled);
+                assert_eq!(
+                    entry.masked_bk_boot_len as usize,
+                    if has_boot { boot.len() } else { 0 }
+                );
+                assert_eq!(
+                    entry.sealed_bk3_len as usize,
+                    if has_sealed { sealed.len() } else { 0 }
+                );
+                assert_eq!(
+                    &entry.masked_bk_boot[..entry.masked_bk_boot_len as usize],
+                    if has_boot { &boot[..] } else { &[] }
+                );
+                assert_eq!(
+                    &entry.sealed_bk3[..entry.sealed_bk3_len as usize],
+                    if has_sealed { &sealed[..] } else { &[] }
+                );
+                assert_eq!(entry.bk3_initialized, initialized);
+                assert_eq!(entry.fips_provisioning_status, status);
+                assert_eq!(entry.vm_launch_guid, [0x73; VM_LAUNCH_GUID_LEN]);
+                assert_ne!(entry.nonce, old_nonce);
+                assert_ne!(entry.establish_cred_pub_key, old_public_key);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bk3_free_wipes_provisioning_even_after_disable() -> HsmResult<()> {
+        for state in [
+            HsmPartState::Allocated,
+            HsmPartState::Enabled,
+            HsmPartState::Disabled,
+        ] {
+            let pal = StdHsmPal::default();
+            {
+                let entry = &mut pal.table_mut().entries[0];
+                entry.state = state;
+                entry.res_mask = 1;
+                entry.masked_bk_boot[..80].fill(0x71);
+                entry.masked_bk_boot_len = 80;
+                entry.sealed_bk3[..64].fill(0x72);
+                entry.sealed_bk3_len = 64;
+                entry.bk3_initialized = true;
+                entry.fips_provisioning_status = 1;
+                entry.vm_launch_guid = [0x73; VM_LAUNCH_GUID_LEN];
+            }
+            pal.part_free_internal(0)?;
+            let entry = &pal.table().entries[0];
+            assert_eq!(entry.state, HsmPartState::Unallocated);
+            assert_eq!(entry.masked_bk_boot, [0; MASKED_BK_BOOT_LEN]);
+            assert_eq!(entry.masked_bk_boot_len, 0);
+            assert_eq!(entry.sealed_bk3, [0; SEALED_BK3_SIZE]);
+            assert_eq!(entry.sealed_bk3_len, 0);
+            assert!(!entry.bk3_initialized);
+            assert_eq!(entry.fips_provisioning_status, 0);
+            assert_eq!(entry.vm_launch_guid, [0; VM_LAUNCH_GUID_LEN]);
+        }
+        Ok(())
     }
 
     #[test]
