@@ -51,6 +51,7 @@ mod gsram_alias;
 mod io;
 mod ipc;
 mod lock;
+mod mbor_ledger;
 #[allow(unsafe_code)]
 mod pal;
 mod part;

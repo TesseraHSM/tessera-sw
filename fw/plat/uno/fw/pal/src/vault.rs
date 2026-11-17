@@ -63,6 +63,8 @@ use zeroize::Zeroizing;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+use crate::mbor_ledger;
+use crate::mbor_ledger::Kind;
 
 #[inline]
 pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
@@ -142,7 +144,11 @@ impl HsmVault for UnoHsmPal {
         let app_id = u8::from(io.pid());
         let session = session_id.map(u16::from);
         let mut v = vault(io);
-        v.create(self, io, app_id, key, kind, session, attrs).await
+        let id = v
+            .create(self, io, app_id, key, kind, session, attrs)
+            .await?;
+        mbor_ledger::record(io, Kind::Key, u16::from(id), session);
+        Ok(id)
     }
 
     // Without `bulk_crypto` the engine path below is compiled out; see the
@@ -153,19 +159,32 @@ impl HsmVault for UnoHsmPal {
         // `UnoHsmPal::fp_bulk_lock`).
         let _guard = self.fp_bulk_lock.lock().await;
 
+        // MBOR undo of a key this IO created that has since been freed (and
+        // possibly reallocated) elsewhere: leave the ID alone.
+        if mbor_ledger::is_stale_own(io, Kind::Key, u16::from(key_id)) {
+            return Ok(());
+        }
+        let freed = || mbor_ledger::invalidate(io.pid(), Kind::Key, u16::from(key_id));
+
         // Disabled-aware classification: the undo-log commit deletes a
         // soft-deleted (disabled) key, which the live-entry lookups hide.
         let entry = vault(io).key_entry(key_id)?;
 
         // Non-bulk keys live entirely in the vault; delete directly.
         if !is_bulk_kind(entry.kind()) {
-            return vault(io).delete(self, io, key_id).await;
+            return vault(io)
+                .delete(self, io, key_id)
+                .await
+                .inspect(|_| freed());
         }
 
         // Without `bulk_crypto` a bulk key is an ordinary vault entry
         // holding its material; there is no engine to release it from.
         #[cfg(not(feature = "bulk_crypto"))]
-        return vault(io).delete(self, io, key_id).await;
+        return vault(io)
+            .delete(self, io, key_id)
+            .await
+            .inspect(|_| freed());
 
         // Bulk keys are mirrored in the fast-path engine and keep only their
         // 2-byte handle in the vault.
@@ -199,6 +218,7 @@ impl HsmVault for UnoHsmPal {
         // blocks both reuse of the dead handle and slot aliasing until the
         // partition is reset.
         vault(io).delete(self, io, key_id).await?;
+        freed();
         fp_slot_free(fp_id.vault_id(), fp_id.key_index());
         Ok(())
     }
@@ -238,7 +258,9 @@ impl HsmVault for UnoHsmPal {
         // Holding `fp_bulk_lock` keeps any bulk-key create from interleaving.
         let _guard = self.fp_bulk_lock.lock().await;
         let res_mask = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask());
-        vault(io).clear(self, io).await?;
+        let res = vault(io).clear(self, io).await;
+        mbor_ledger::invalidate_pid(io.pid());
+        res?;
         fp_slots_free_mask(res_mask);
         Ok(())
     }
@@ -287,9 +309,16 @@ pub(crate) async fn delete_session_keys(
     // reallocated while a still-present entry references it (aliasing).
     let sess = u16::from(session_id);
     let to_free = session_bulk_slots(io, sess)?;
+    // Whatever the outcome, some of the session's keys may be gone: mark
+    // them stale for MBOR undo. A surviving key then stays until the next
+    // session close deletes it.
     #[cfg(feature = "bulk_crypto")]
-    fp_delete_session_only(pal, io, sess).await?;
-    if let Err(e) = vault(io).delete_by_session(pal, io, sess).await {
+    fp_delete_session_only(pal, io, sess)
+        .await
+        .inspect_err(|_| mbor_ledger::invalidate_session_keys(io.pid(), sess))?;
+    let res = vault(io).delete_by_session(pal, io, sess).await;
+    mbor_ledger::invalidate_session_keys(io.pid(), sess);
+    if let Err(e) = res {
         // Partial eviction: release the slots whose entries are already gone
         // (a retry's pre-pass no longer sees them) and keep the rest reserved.
         // If the re-walk fails, keep every slot reserved.

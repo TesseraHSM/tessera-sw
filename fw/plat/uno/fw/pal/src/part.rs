@@ -293,6 +293,7 @@ impl UnoHsmPal {
         if let Ok(mut sessions) = SessionStore::partition(pid) {
             sessions.clear_all();
         }
+        crate::mbor_ledger::invalidate_pid(pid);
         // The masked boot key persists across enable/disable; it is wiped
         // only here, on free.
         part.clear_masked_bk_boot();
@@ -536,6 +537,7 @@ impl UnoHsmPal {
             // afterwards, for the deallocation case.
             sessions.mark_all_needs_renego();
         }
+        crate::mbor_ledger::invalidate_pid(pid);
         part.clear_state(PartResetKind::Disable);
     }
 
@@ -691,6 +693,7 @@ impl UnoHsmPal {
             if let Ok(mut sessions) = SessionStore::partition(pid) {
                 sessions.clear_all();
             }
+            crate::mbor_ledger::invalidate_pid(pid);
             part.clear_identity();
             return Ok(());
         }
@@ -709,6 +712,7 @@ impl UnoHsmPal {
         // established session IDs for reopen/close. Must run before
         // clear_state, which erases the Pending mask used to drop handshakes.
         SessionStore::partition(pid)?.mark_all_needs_renego();
+        crate::mbor_ledger::invalidate_pid(pid);
         part.clear_state(PartResetKind::Migrate);
         // The `vault.clear()` above also deleted the identity private key.
         // Zero the identity fields (id, `id_key_id`, cached public key)
@@ -812,11 +816,9 @@ impl HsmPartitionManager for UnoHsmPal {
             let part = PartStore::partition(io.pid())?;
             part.set_ec_pub_key(public)?;
             let blob = self.build_enable_key_blob(alloc, public, private)?;
-            let key = crate::vault::vault(io)
-                .create(
-                    self,
+            let key = self
+                .vault_key_create(
                     io,
-                    u8::from(io.pid()),
                     blob,
                     HsmVaultKeyKind::EstablishCred,
                     None,

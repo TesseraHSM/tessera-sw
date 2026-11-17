@@ -40,6 +40,8 @@ use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+use crate::mbor_ledger;
+use crate::mbor_ledger::Kind;
 
 /// API-revision portion of the session blob (bytes).
 const SESSION_API_REV_SIZE: usize = 8;
@@ -138,7 +140,10 @@ impl HsmSessionManager for UnoHsmPal {
         // If the slot allocation fails, remove the just-stored vault key so
         // it does not leak.
         match result {
-            Ok(sess_id) => Ok(sess_id),
+            Ok(sess_id) => {
+                mbor_ledger::record(io, Kind::Session, u16::from(sess_id), None);
+                Ok(sess_id)
+            }
             Err(e) => {
                 let mut v = crate::vault::vault(io);
                 let _ = v.delete(self, io, physical_id).await;
@@ -153,6 +158,12 @@ impl HsmSessionManager for UnoHsmPal {
         // deleted below) or observes the session as gone.
         let _guard = self.fp_bulk_lock.lock().await;
 
+        // MBOR undo of a session this IO opened that has since been closed
+        // (and possibly reopened) elsewhere: leave the ID alone.
+        if mbor_ledger::is_stale_own(io, Kind::Session, u16::from(id)) {
+            return Ok(());
+        }
+
         let mut table = SessionStore::partition(io.pid())?;
 
         // A renegotiating slot has no live vault state: the partition reset
@@ -165,6 +176,7 @@ impl HsmSessionManager for UnoHsmPal {
         // short-circuit on `needs_renegotiation`.
         if matches!(table.state(id), HsmSessionState::NeedsRenegotiation) {
             table.delete(id)?;
+            mbor_ledger::invalidate(io.pid(), Kind::Session, u16::from(id));
             return Ok(());
         }
 
@@ -182,6 +194,7 @@ impl HsmSessionManager for UnoHsmPal {
 
         // Free the logical session slot.
         table.delete(id)?;
+        mbor_ledger::invalidate(io.pid(), Kind::Session, u16::from(id));
         Ok(())
     }
 
@@ -197,6 +210,12 @@ impl HsmSessionManager for UnoHsmPal {
         // Hold the bulk-key lock for the same reason as `session_destroy`.
         let _guard = self.fp_bulk_lock.lock().await;
 
+        // As in `session_destroy`: skip a session freed since this IO's
+        // reopen.
+        if mbor_ledger::is_stale_own(io, Kind::Session, u16::from(id)) {
+            return Ok(());
+        }
+
         let mut table = SessionStore::partition(io.pid())?;
 
         // Resolve the physical vault key id the failed reopen installed
@@ -207,6 +226,7 @@ impl HsmSessionManager for UnoHsmPal {
             .delete(self, io, physical_id)
             .await?;
         table.rollback_recreation(id)?;
+        mbor_ledger::invalidate(io.pid(), Kind::Session, u16::from(id));
         Ok(())
     }
 
