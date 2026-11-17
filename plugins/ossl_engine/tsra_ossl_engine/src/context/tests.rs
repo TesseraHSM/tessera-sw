@@ -207,7 +207,6 @@ mod round_trips {
     use tsra_api::HsmEccPrivateKey;
     use tsra_api::HsmEncrypter;
     use tsra_api::HsmError;
-    use tsra_api::HsmGenericSecretKeyUnmaskAlgo;
     use tsra_api::HsmHmacAlgo;
     use tsra_api::HsmHmacKeyUnmaskAlgo;
     use tsra_api::HsmKeyClass;
@@ -218,6 +217,7 @@ mod round_trips {
     use tsra_api::HsmKeyPropsBuilder;
     use tsra_api::HsmKeyUnmaskOp;
     use tsra_api::HsmSession;
+    use tsra_api::HsmSharedSecretKeyUnmaskAlgo;
     use tsra_api::HsmSigner;
     use tsra_ossl_engine_core::cipher_method::AES_BLOCK;
     use tsra_ossl_engine_core::cipher_method::GCM_IV_LEN;
@@ -2238,7 +2238,7 @@ mod round_trips {
             .get(&engine)
             .ok_or(EngineError::NullParam("engine_data"))?;
         data.with_session(|session| {
-            let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+            let mut unmask = HsmSharedSecretKeyUnmaskAlgo::default();
             let k = HsmKeyManager::unmask_key(session, &mut unmask, &hmac_blob)
                 .map_err(|e| EngineError::wrap("unmask hmac blob", e))?;
             assert_eq!(k.kind(), HsmKeyKind::HmacSha384, "hmac kind follows md");
@@ -2246,7 +2246,7 @@ mod round_trips {
             assert!(k.can_sign() && k.can_verify(), "hmac usage flags");
             crate::context::delete_hsm_key(k, "hkdf test hmac props key");
 
-            let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+            let mut unmask = HsmSharedSecretKeyUnmaskAlgo::default();
             let k = HsmKeyManager::unmask_key(session, &mut unmask, &aes_blob)
                 .map_err(|e| EngineError::wrap("unmask aes blob", e))?;
             assert_eq!(k.kind(), HsmKeyKind::Aes);
@@ -2303,7 +2303,7 @@ mod round_trips {
         }
         data.with_session(|session| {
             for (blob, bits, kind, md, ktype) in &derived {
-                let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+                let mut unmask = HsmSharedSecretKeyUnmaskAlgo::default();
                 let k = HsmKeyManager::unmask_key(session, &mut unmask, blob)
                     .map_err(|e| EngineError::wrap("unmask matrix blob", e))?;
                 assert_eq!(k.kind(), *kind, "kind for {md}/{ktype}/{bits}");

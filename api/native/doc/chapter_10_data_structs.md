@@ -118,15 +118,15 @@ typedef uint32_t tsra_key_class;
 
 Possible values are defined by [TSRA_KEY_CLASS_XXX](#tsra_key_class_xxx)
 
-### tsra_key_type
+### tsra_key_kind
 
-Key type type
+Key type
 
 ```cpp
-typedef uint32_t tsra_key_type;
+typedef uint32_t tsra_key_kind;
 ```
 
-Possible values are defined by [TSRA_KEY_TYPE_XXX](#tsra_key_type_xxx)
+Possible values are defined by [TSRA_KEY_KIND_XXX](#tsra_key_kind_xxx)
 
 ### tsra_key_prop_id
 
@@ -254,22 +254,22 @@ Key class type values
 #define TSRA_KEY_CLASS_SECRET 3
 ```
 
-### TSRA_KEY_TYPE_XXX
+### TSRA_KEY_KIND_XXX
 
 Key type values
 
 ```cpp
-#define TSRA_KEY_TYPE_RSA 1
-#define TSRA_KEY_TYPE_EC 2
-#define TSRA_KEY_TYPE_AES 3
-#define TSRA_KEY_TYPE_AES_XTS 4
-#define TSRA_KEY_TYPE_AES_GCM 5
-#define TSRA_KEY_TYPE_GENERIC 6
-#define TSRA_KEY_TYPE_HMAC_SHA1 7
-#define TSRA_KEY_TYPE_HMAC_SHA256 8
-#define TSRA_KEY_TYPE_HMAC_SHA384 9
-#define TSRA_KEY_TYPE_HMAC_SHA512 10
-#define TSRA_KEY_TYPE_MASKING 11
+#define TSRA_KEY_KIND_RSA 1
+#define TSRA_KEY_KIND_ECC 2
+#define TSRA_KEY_KIND_AES 3
+#define TSRA_KEY_KIND_AES_XTS 4
+#define TSRA_KEY_KIND_SHARED_SECRET 5
+#define TSRA_KEY_KIND_HMAC_SHA256 7
+#define TSRA_KEY_KIND_HMAC_SHA384 8
+#define TSRA_KEY_KIND_HMAC_SHA512 9
+#define TSRA_KEY_KIND_AES_GCM 10
+#define TSRA_KEY_KIND_SEALING 11
+#define TSRA_KEY_KIND_RSA_CRT 12
 ```
 
 ### TSRA_KEY_PROP_ID_XXX

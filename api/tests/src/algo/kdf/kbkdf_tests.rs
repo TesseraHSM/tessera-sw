@@ -42,7 +42,7 @@ fn kbkdf_counter_algo(
 fn derive_ecdh_shared_secrets(
     session: &HsmSession,
     curve: HsmEccCurve,
-) -> (HsmGenericSecretKey, HsmGenericSecretKey) {
+) -> (HsmSharedSecretKey, HsmSharedSecretKey) {
     let (priv_key_a, pub_key_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true)
         .expect("Failed to generate key pair for party A");
 
@@ -61,7 +61,7 @@ fn derive_ecdh_shared_secrets(
 fn derive_aes_key_from_shared_secret(
     session: &HsmSession,
     kbkdf_algo: &mut HsmKbkdfAlgo,
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     bits: u32,
 ) -> HsmAesKey {
     let aes_key_props = HsmKeyPropsBuilder::default()

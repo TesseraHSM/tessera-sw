@@ -81,7 +81,7 @@ fn init_partition_and_session() -> (HsmPartition, HsmCredentials, HsmSession, Re
 // `crate::utils::key_helpers`.
 
 /// Derive an HMAC-SHA256 key from a shared secret via HKDF.
-fn hkdf_derive_hmac_key(session: &HsmSession, shared_secret: &HsmGenericSecretKey) -> HsmHmacKey {
+fn hkdf_derive_hmac_key(session: &HsmSession, shared_secret: &HsmSharedSecretKey) -> HsmHmacKey {
     let hmac_key_props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::HmacSha256)
@@ -1223,7 +1223,7 @@ fn test_stress_ecdh_derive_under_reset() {
                         .build()
                         .expect("Failed to build secret key props");
                     let mut algo = EcdhAlgo::new(&peer_der);
-                    let result: HsmResult<HsmGenericSecretKey> =
+                    let result: HsmResult<HsmSharedSecretKey> =
                         HsmKeyManager::derive_key(&session, &mut algo, &priv_key, secret_props);
                     if let Err(ref e) = result {
                         warn!("Worker {id} iteration {i}: ECDH derive error: {e:?}");
@@ -1296,7 +1296,7 @@ fn test_stress_hkdf_derive_under_reset() {
                         Some(b"stress_info"),
                     )
                     .expect("Failed to create HKDF algo");
-                    let result: HsmResult<HsmGenericSecretKey> = HsmKeyManager::derive_key(
+                    let result: HsmResult<HsmSharedSecretKey> = HsmKeyManager::derive_key(
                         &session,
                         &mut hkdf_algo,
                         &base_key,
@@ -1630,12 +1630,12 @@ fn test_stress_ecc_unmask_under_reset() {
 }
 
 // =========================================================================
-// Test: Generic secret unmask under continuous Reset
+// Test: Shared secret unmask under continuous Reset
 // =========================================================================
 
 /// Workers repeatedly unmask a shared secret (from ECDH) while Resets fire.
 #[api_test]
-fn test_stress_generic_secret_unmask_under_reset() {
+fn test_stress_shared_secret_unmask_under_reset() {
     if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -1663,15 +1663,15 @@ fn test_stress_generic_secret_unmask_under_reset() {
             thread::spawn(move || {
                 barrier.wait();
                 for i in 0..ITERATIONS_PER_WORKER {
-                    let mut unmask_algo = HsmGenericSecretKeyUnmaskAlgo::default();
-                    let result: HsmResult<HsmGenericSecretKey> =
+                    let mut unmask_algo = HsmSharedSecretKeyUnmaskAlgo::default();
+                    let result: HsmResult<HsmSharedSecretKey> =
                         HsmKeyManager::unmask_key(&session, &mut unmask_algo, &blob);
                     if let Err(ref e) = result {
-                        warn!("Worker {id} iteration {i}: generic secret unmask error: {e:?}");
+                        warn!("Worker {id} iteration {i}: shared secret unmask error: {e:?}");
                     }
                     assert!(
                         result.is_ok(),
-                        "Worker {id} iteration {i}: generic secret unmask failed: {:?}",
+                        "Worker {id} iteration {i}: shared secret unmask failed: {:?}",
                         result.err()
                     );
                     thread::sleep(Duration::from_millis(WORKER_ITER_SLEEP_MS));

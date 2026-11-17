@@ -60,4 +60,11 @@
 |            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
 |            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
 
+| 11/16/2026 | Renamed Rust `HsmGenericSecretKey` to `HsmSharedSecretKey` and |
+|            | `HsmGenericSecretKeyUnmaskAlgo` to `HsmSharedSecretKeyUnmaskAlgo` |
+|            | (source-breaking; update callers, no old-name aliases). C ABI, |
+|            | `TSRA_KEY_KIND_SHARED_SECRET = 5`, DDI formats, and key behavior |
+|            | are unchanged. The wrapper still carries AES/HMAC KDF outputs. |
+|            | A future HSM generic-secret type is not introduced here.       |
+
 \pagebreak

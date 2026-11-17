@@ -218,14 +218,14 @@ impl HsmKeyUnmaskOp for HsmAesKeyUnmaskAlgo {
     }
 }
 
-impl TryFrom<HsmGenericSecretKey> for HsmAesKey {
+impl TryFrom<HsmSharedSecretKey> for HsmAesKey {
     type Error = HsmError;
 
-    /// Converts a generic secret-key handle into a typed AES key wrapper.
+    /// Converts a shared secret-key handle into a typed AES key wrapper.
     ///
     /// This is a cheap conversion: it re-wraps the same underlying key handle
     /// (stored in shared state) after validating key kind and class.
-    fn try_from(key: HsmGenericSecretKey) -> Result<Self, Self::Error> {
+    fn try_from(key: HsmSharedSecretKey) -> Result<Self, Self::Error> {
         // Validate key properties before converting
         HsmAesKey::validate_props(&key.props())?;
 
@@ -709,14 +709,14 @@ impl HsmKeyUnmaskOp for HsmAesGcmKeyUnmaskAlgo {
     }
 }
 
-impl TryFrom<HsmGenericSecretKey> for HsmAesGcmKey {
+impl TryFrom<HsmSharedSecretKey> for HsmAesGcmKey {
     type Error = HsmError;
 
-    /// Converts a generic secret-key handle into a typed AES-GCM key wrapper.
+    /// Converts a shared secret-key handle into a typed AES-GCM key wrapper.
     ///
     /// This is a cheap conversion: it re-wraps the same underlying key handle
     /// (stored in shared state) after validating key kind and class.
-    fn try_from(key: HsmGenericSecretKey) -> Result<Self, Self::Error> {
+    fn try_from(key: HsmSharedSecretKey) -> Result<Self, Self::Error> {
         // Validate key properties before converting
         HsmAesGcmKey::validate_props(&key.props())?;
 

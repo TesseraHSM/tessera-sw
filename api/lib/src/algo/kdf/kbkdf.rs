@@ -4,8 +4,8 @@
 //! KBKDF (NIST SP 800-108 Counter Mode, HMAC PRF) key derivation implementation.
 //!
 //! This module provides an [`HsmKeyDeriveOp`] implementation that derives an HSM-managed
-//! secret key from an HSM-managed shared secret ([`HsmGenericSecretKey`]) using the
-//! SP 800-108 Counter Mode KDF. The result is returned as an [`HsmGenericSecretKey`]; the
+//! secret key from an HSM-managed shared secret ([`HsmSharedSecretKey`]) using the
+//! SP 800-108 Counter Mode KDF. The result is returned as an [`HsmSharedSecretKey`]; the
 //! concrete derived kind (AES or HMAC) is selected by the requested key properties.
 
 use super::*;
@@ -53,10 +53,10 @@ impl HsmKeyDeriveOp for HsmKbkdfAlgo {
     type Session = HsmSession;
 
     /// The type of base key used by this operation.
-    type BaseKey = HsmGenericSecretKey;
+    type BaseKey = HsmSharedSecretKey;
 
     /// The type of derived key produced by this operation.
-    type DerivedKey = HsmGenericSecretKey;
+    type DerivedKey = HsmSharedSecretKey;
 
     /// The error type returned by this operation.
     type Error = HsmError;
@@ -89,7 +89,7 @@ impl HsmKeyDeriveOp for HsmKbkdfAlgo {
 
         // Validate derived key properties early so callers get consistent failures
         // for unsupported key metadata (instead of leaking DDI-specific errors).
-        HsmGenericSecretKey::validate_props(&props)?;
+        HsmSharedSecretKey::validate_props(&props)?;
 
         let (handle, props) = ddi::kbkdf_derive(
             base_key,

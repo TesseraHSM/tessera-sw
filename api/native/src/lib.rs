@@ -452,12 +452,12 @@ impl TryFrom<TsraHandle> for api::HsmAesXtsKey {
     }
 }
 
-impl TryFrom<TsraHandle> for api::HsmGenericSecretKey {
+impl TryFrom<TsraHandle> for api::HsmSharedSecretKey {
     type Error = TsraStatus;
 
-    fn try_from(value: TsraHandle) -> Result<api::HsmGenericSecretKey, Self::Error> {
-        let key: &api::HsmGenericSecretKey =
-            HANDLE_TABLE.as_ref(value, HandleType::GenericSecretKey)?;
+    fn try_from(value: TsraHandle) -> Result<api::HsmSharedSecretKey, Self::Error> {
+        let key: &api::HsmSharedSecretKey =
+            HANDLE_TABLE.as_ref(value, HandleType::SharedSecretKey)?;
         Ok(key.clone())
     }
 }
