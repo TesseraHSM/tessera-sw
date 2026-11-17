@@ -118,7 +118,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked = [0xCDu8; 180];
         let report_data = [0xABu8; KEY_REPORT_DATA_LEN];
-        let frame = TborKeyReportReq::encode(&mut buf)
+        let frame = TborKeyReportReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -137,7 +137,7 @@ mod tests {
     fn response_round_trips_report() {
         let mut buf = [0u8; 1024];
         let report = [0x5Au8; 300];
-        let frame = TborKeyReportResp::encode(&mut buf, 0, false)
+        let frame = TborKeyReportResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .report(&report)
             .unwrap()

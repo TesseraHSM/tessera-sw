@@ -13,7 +13,7 @@
 //!    verifies `sig` over the transcript hash `T1` with the partition
 //!    identity key, recovers the KEM shared secret `Z`, and derives the
 //!    handshake secret
-//!    `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v2", Z ‖ PSK), "tsra-session-hs-v2" ‖ T1, 48)`.
+//!    `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v1", Z ‖ PSK), "tsra-session-hs-v1" ‖ T1, 48)`.
 //! 3. The resulting [`SessionHandshake`] produces the `SessionOpenFinish`
 //!    confirmation [`fin`](SessionHandshake::fin), the per-session
 //!    [`param_key`](SessionHandshake::param_key) and the
@@ -151,10 +151,12 @@ fn len16(len: usize) -> SessionExCryptoResult<[u8; 2]> {
 }
 
 /// Handshake transcript hash
-/// `T1 = SHA-384("TSRA-SESSION-v2" ‖ suite_id ‖ psk_id ‖ session_type
+/// `T1 = SHA-384("TSRA-SESSION-v1" ‖ BE16(api_major) ‖ BE16(api_minor)
+/// ‖ suite_id ‖ psk_id ‖ session_type
 /// ‖ pk_hsm ‖ len16 ‖ pk_init ‖ len16 ‖ enc)`, where `pk_hsm` is the
 /// partition identity key as a SEC1 point and lengths are big-endian.
 pub fn transcript_hash(
+    api_rev: (u16, u16),
     suite_id: u8,
     psk_id: u8,
     session_type: u8,
@@ -163,9 +165,11 @@ pub fn transcript_hash(
     enc: &[u8],
 ) -> SessionExCryptoResult<[u8; SESSION_HS_LEN]> {
     let mut data = Vec::with_capacity(
-        SESSION_TRANSCRIPT_LABEL.len() + 3 + pk_hsm_sec1.len() + 4 + pk_init.len() + enc.len(),
+        SESSION_TRANSCRIPT_LABEL.len() + 7 + pk_hsm_sec1.len() + 4 + pk_init.len() + enc.len(),
     );
     data.extend_from_slice(SESSION_TRANSCRIPT_LABEL);
+    data.extend_from_slice(&api_rev.0.to_be_bytes());
+    data.extend_from_slice(&api_rev.1.to_be_bytes());
     data.extend_from_slice(&[suite_id, psk_id, session_type]);
     data.extend_from_slice(pk_hsm_sec1);
     data.extend_from_slice(&len16(pk_init.len())?);
@@ -179,8 +183,8 @@ pub fn transcript_hash(
     Ok(t1)
 }
 
-/// `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v2", Z ‖ PSK),
-/// "tsra-session-hs-v2" ‖ T1, 48)`.
+/// `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v1", Z ‖ PSK),
+/// "tsra-session-hs-v1" ‖ T1, 48)`.
 pub fn handshake_secret(
     z: &[u8],
     psk: &[u8],
@@ -280,6 +284,7 @@ enum Ephemeral {
 /// Host side of one handshake, between `SessionOpenInit`'s request and
 /// its response.
 pub struct SessionInitiator {
+    api_rev: (u16, u16),
     suite: SessionSuite,
     eph: Ephemeral,
     pk_init: Vec<u8>,
@@ -287,7 +292,7 @@ pub struct SessionInitiator {
 
 impl SessionInitiator {
     /// Generate a fresh ephemeral for `suite`.
-    pub fn generate(suite: SessionSuite) -> SessionExCryptoResult<Self> {
+    pub fn generate(suite: SessionSuite, api_rev: (u16, u16)) -> SessionExCryptoResult<Self> {
         match suite {
             SessionSuite::EcdhP384 => {
                 let mut scalar = Zeroizing::new([0u8; P384_COORD_LEN]);
@@ -301,6 +306,7 @@ impl SessionInitiator {
                 let pk = sk.public_key().map_err(|_| SessionExCryptoError::Crypto)?;
                 let pk_init = ec_pub_to_sec1(&pk)?.to_vec();
                 Ok(Self {
+                    api_rev,
                     suite,
                     eph: Ephemeral::Ecdh(sk),
                     pk_init,
@@ -319,6 +325,7 @@ impl SessionInitiator {
                     return Err(SessionExCryptoError::Crypto);
                 }
                 Ok(Self {
+                    api_rev,
                     suite,
                     eph: Ephemeral::MlKem(sk),
                     pk_init,
@@ -361,6 +368,7 @@ impl SessionInitiator {
         }
         let pk_hsm_sec1 = ec_pub_to_sec1(pk_hsm)?;
         let t1 = transcript_hash(
+            self.api_rev,
             self.suite.id(),
             psk_id,
             session_type,
@@ -422,7 +430,7 @@ impl SessionHandshake {
     }
 
     /// The host confirmation for `SessionOpenFinish`:
-    /// `fin = HMAC-SHA-384(HKDF-Expand-Labeled(hs, "tsra-session-host-fin-v2", 48), T1)`.
+    /// `fin = HMAC-SHA-384(HKDF-Expand-Labeled(hs, "tsra-session-host-fin-v1", 48), T1)`.
     pub fn fin(&self) -> SessionExCryptoResult<[u8; MAC_FIN_LEN]> {
         let fin_key = hkdf_expand_labeled(self.hs.as_slice(), SESSION_HOST_FIN_LABEL, MAC_LEN)?;
         let key = HmacKey::from_bytes(&fin_key).map_err(|_| SessionExCryptoError::Crypto)?;
@@ -523,12 +531,43 @@ pub struct SessionTransportSeal {
     pub tag: [u8; SESSION_TRANSPORT_TAG_LEN],
 }
 
+/// Local authentication context for exactly one outstanding request.
+///
+/// Consumed when opening its response; never reconstructed from a response.
+pub struct SessionTransportRequest {
+    response_aad: [u8; 32],
+}
+
+/// Mirrors the firmware transport AAD: domain(16), request IV(12),
+/// session id(2, LE), session control(1), protocol(1: Uno=1, Duo=2).
+fn transport_aad(
+    iv: &[u8; SESSION_TRANSPORT_IV_LEN],
+    session_id: u16,
+    control: u8,
+    protocol: u8,
+    response: bool,
+) -> [u8; 32] {
+    let mut aad = [0; 32];
+    aad[..16].copy_from_slice(if response {
+        b"TSRA-RSP-AAD-V1\0"
+    } else {
+        b"TSRA-REQ-AAD-V1\0"
+    });
+    aad[16..28].copy_from_slice(iv);
+    aad[28..30].copy_from_slice(&session_id.to_le_bytes());
+    aad[30] = control;
+    aad[31] = protocol;
+    aad
+}
+
 /// Per-session transport encryption.
 ///
 /// Holds the VM→HSM and HSM→VM AES-256-GCM keys and nonce salts derived
 /// from the handshake secret. Every in-session request (including
 /// `SessionOpenFinish` and the close) is sealed with one, and its
-/// response opened with the other, with no AAD. Each direction's nonce is
+/// response opened with the other. Implicit 32-byte AAD binds each response
+/// to the original request IV and transport context without adding wire bytes.
+/// Each direction's nonce is
 /// `salt(4) ‖ be64(seq)`, where `seq` counts the sender's messages, so
 /// sealing draws no randomness. Requests take the next value of this
 /// value's VM→HSM counter, so concurrent senders sharing one session
@@ -538,7 +577,9 @@ pub struct SessionTransportSeal {
 /// [`open_response`](Self::open_response)); on Uno they trail the
 /// block-padded ciphertext in-band ([`seal_frame`](Self::seal_frame) /
 /// [`open_frame`](Self::open_frame)). Like the device, the receiver uses
-/// the IV it is given.
+/// the IV it is given, but authenticates the response against the locally
+/// retained request context. Responses may complete in any order. This does
+/// not prevent the device from executing a replayed request.
 /// The keys are zeroized when this value is dropped.
 pub struct SessionTransport {
     h2m: TransportDir,
@@ -568,10 +609,20 @@ impl SessionTransport {
 
     /// Encrypt a request payload in place with the VM→HSM key under the
     /// next VM→HSM nonce (Duo).
-    pub fn seal_request(&self, buf: &mut [u8]) -> SessionExCryptoResult<SessionTransportSeal> {
+    pub fn seal_request(
+        &self,
+        session_id: u16,
+        buf: &mut [u8],
+    ) -> SessionExCryptoResult<(SessionTransportSeal, SessionTransportRequest)> {
         let iv = self.h2m.nonce(self.next_h2m_seq()?);
-        let tag = gcm_encrypt(&self.h2m.key, &iv, buf)?;
-        Ok(SessionTransportSeal { iv, tag })
+        let aad = transport_aad(&iv, session_id, 0, 2, false);
+        let tag = gcm_encrypt(&self.h2m.key, &iv, &aad, buf)?;
+        Ok((
+            SessionTransportSeal { iv, tag },
+            SessionTransportRequest {
+                response_aad: transport_aad(&iv, session_id, 0, 2, true),
+            },
+        ))
     }
 
     /// Decrypt a response payload in place with the HSM→VM key (Duo).
@@ -580,17 +631,35 @@ impl SessionTransport {
     /// [`SessionExCryptoError::MacMismatch`] is returned.
     pub fn open_response(
         &self,
+        request: SessionTransportRequest,
         sealed: &SessionTransportSeal,
         buf: &mut [u8],
     ) -> SessionExCryptoResult<()> {
-        gcm_decrypt(&self.m2h.key, &sealed.iv, &sealed.tag, buf)
+        gcm_decrypt(
+            &self.m2h.key,
+            &sealed.iv,
+            &sealed.tag,
+            &request.response_aad,
+            buf,
+        )
     }
 
     /// Seal a request message into a Uno frame
     /// `ct ‖ iv(12) ‖ tag(16)`, where the plaintext is
     /// `msg ‖ 0^p ‖ p` padded to whole AES blocks and the IV is the next
     /// VM→HSM nonce.
-    pub fn seal_frame(&self, msg: &[u8]) -> SessionExCryptoResult<Vec<u8>> {
+    pub fn seal_frame(
+        &self,
+        session_id: u16,
+        control: SessionControlKind,
+        msg: &[u8],
+    ) -> SessionExCryptoResult<(Vec<u8>, SessionTransportRequest)> {
+        if !matches!(
+            control,
+            SessionControlKind::InSession | SessionControlKind::Close
+        ) {
+            return Err(SessionExCryptoError::InvalidInput);
+        }
         let frame_len = sealed_frame_len(msg.len());
         let pt_len = frame_len - SEALED_TRAILER_LEN;
         let mut frame = vec![0u8; frame_len];
@@ -601,8 +670,14 @@ impl SessionTransport {
         let iv = self.h2m.nonce(self.next_h2m_seq()?);
         let (iv_out, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
         iv_out.copy_from_slice(&iv);
-        tag.copy_from_slice(&gcm_encrypt(&self.h2m.key, &iv, pt)?);
-        Ok(frame)
+        let aad = transport_aad(&iv, session_id, control.into(), 1, false);
+        tag.copy_from_slice(&gcm_encrypt(&self.h2m.key, &iv, &aad, pt)?);
+        Ok((
+            frame,
+            SessionTransportRequest {
+                response_aad: transport_aad(&iv, session_id, control.into(), 1, true),
+            },
+        ))
     }
 
     /// Open a sealed Uno response frame in place with the HSM→VM key,
@@ -613,18 +688,23 @@ impl SessionTransport {
     /// [`SessionExCryptoError::MacMismatch`] (with `frame` cleared) if
     /// the frame is malformed, its tag does not verify or its padding is
     /// invalid.
-    pub fn open_frame(&self, frame: &mut Vec<u8>) -> SessionExCryptoResult<()> {
+    pub fn open_frame(
+        &self,
+        request: SessionTransportRequest,
+        frame: &mut Vec<u8>,
+    ) -> SessionExCryptoResult<()> {
         let Some(ct_len) = frame
             .len()
             .checked_sub(SEALED_TRAILER_LEN)
             .filter(|&n| n != 0 && n % SEALED_BLOCK_LEN == 0)
         else {
+            frame.fill(0);
             frame.clear();
             return Err(SessionExCryptoError::MacMismatch);
         };
         let (ct, trailer) = frame.split_at_mut(ct_len);
         let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
-        let opened = gcm_decrypt(&self.m2h.key, iv, tag, ct)
+        let opened = gcm_decrypt(&self.m2h.key, iv, tag, &request.response_aad, ct)
             .ok()
             .and_then(|()| unpad(ct));
         match opened {
@@ -668,7 +748,11 @@ impl TborOpReq for SealedFrameReq {
         self.session_ctrl
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError> {
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        _api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError> {
         let out = buf
             .get_mut(..self.frame.len())
             .ok_or(codec::EncodeError::BufferTooSmall)?;
@@ -687,6 +771,14 @@ impl TborResp for SealedFrameResp {
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError> {
         Ok(Self(buf.to_vec()))
     }
+
+    fn decode_response_for_api_rev(
+        buf: &[u8],
+        _api_rev: (u16, u16),
+    ) -> Result<Self, codec::DecodeError> {
+        // The caller validates the inner header after authenticating the frame.
+        Self::decode_response(buf)
+    }
 }
 
 impl TborRespSessionId for SealedFrameResp {
@@ -695,13 +787,15 @@ impl TborRespSessionId for SealedFrameResp {
     }
 }
 
-/// AES-256-GCM encrypt `buf` in place without AAD, returning the tag.
+/// AES-256-GCM encrypt `buf` in place, returning the tag.
 fn gcm_encrypt(
     key: &AesKey,
     iv: &[u8],
+    aad: &[u8],
     buf: &mut [u8],
 ) -> SessionExCryptoResult<[u8; SESSION_TRANSPORT_TAG_LEN]> {
-    let mut algo = AesGcmAlgo::for_encrypt(iv, None).map_err(|_| SessionExCryptoError::Crypto)?;
+    let mut algo =
+        AesGcmAlgo::for_encrypt(iv, Some(aad)).map_err(|_| SessionExCryptoError::Crypto)?;
     let plaintext = Zeroizing::new(buf.to_vec());
     algo.encrypt(key, &plaintext, Some(buf))
         .map_err(|_| SessionExCryptoError::Crypto)?;
@@ -710,11 +804,17 @@ fn gcm_encrypt(
         .map_err(|_| SessionExCryptoError::Crypto)
 }
 
-/// AES-256-GCM decrypt `buf` in place without AAD; on a tag mismatch
+/// AES-256-GCM decrypt `buf` in place; on a tag mismatch
 /// `buf` is zeroed.
-fn gcm_decrypt(key: &AesKey, iv: &[u8], tag: &[u8], buf: &mut [u8]) -> SessionExCryptoResult<()> {
+fn gcm_decrypt(
+    key: &AesKey,
+    iv: &[u8],
+    tag: &[u8],
+    aad: &[u8],
+    buf: &mut [u8],
+) -> SessionExCryptoResult<()> {
     let mut algo =
-        AesGcmAlgo::for_decrypt(iv, tag, None).map_err(|_| SessionExCryptoError::Crypto)?;
+        AesGcmAlgo::for_decrypt(iv, tag, Some(aad)).map_err(|_| SessionExCryptoError::Crypto)?;
     let ciphertext = buf.to_vec();
     if algo.decrypt(key, &ciphertext, Some(buf)).is_err() {
         buf.fill(0);
@@ -766,6 +866,7 @@ mod tests {
         suite: SessionSuite,
         sk_hsm: &EccPrivateKey,
         pk_init: &[u8],
+        api_rev: (u16, u16),
     ) -> (Vec<u8>, Vec<u8>, Zeroizing<[u8; SESSION_HS_LEN]>) {
         let (enc, z) = match suite {
             SessionSuite::EcdhP384 => {
@@ -792,7 +893,8 @@ mod tests {
         };
         let pk_hsm =
             ec_pub_to_sec1(&sk_hsm.public_key().expect("test crypto")).expect("test crypto");
-        let t1 = transcript_hash(suite.id(), 1, 0, &pk_hsm, pk_init, &enc).expect("test crypto");
+        let t1 = transcript_hash(api_rev, suite.id(), 1, 0, &pk_hsm, pk_init, &enc)
+            .expect("test crypto");
         let mut sig = vec![0u8; SIG_LEN];
         EccAlgo::default()
             .sign(sk_hsm, &t1, Some(&mut sig))
@@ -801,11 +903,11 @@ mod tests {
         (enc, sig, hs)
     }
 
-    fn handshake_agrees(suite: SessionSuite) {
+    fn handshake_agrees(suite: SessionSuite, api_rev: (u16, u16)) {
         let sk_hsm = EccPrivateKey::from_scalar(EccCurve::P384, &[0x17; 48]).expect("test crypto");
         let pk_hsm = sk_hsm.public_key().expect("test crypto");
-        let init = SessionInitiator::generate(suite).expect("test crypto");
-        let (enc, sig, hs) = device_open_init(suite, &sk_hsm, init.pk_init());
+        let init = SessionInitiator::generate(suite, api_rev).expect("test crypto");
+        let (enc, sig, hs) = device_open_init(suite, &sk_hsm, init.pk_init(), api_rev);
 
         let done = init
             .complete(1, 0, &pk_hsm, &PSK, &enc, &sig)
@@ -832,16 +934,27 @@ mod tests {
             init.complete(1, 0, &pk_hsm, &PSK, &enc[1..], &sig),
             Err(SessionExCryptoError::InvalidInput)
         ));
+        for changed in [(api_rev.0 ^ 1, api_rev.1), (api_rev.0, api_rev.1 ^ 1)] {
+            let (enc, sig, _) = device_open_init(suite, &sk_hsm, init.pk_init(), changed);
+            assert!(matches!(
+                init.complete(1, 0, &pk_hsm, &PSK, &enc, &sig),
+                Err(SessionExCryptoError::MacMismatch)
+            ));
+        }
     }
 
     #[test]
     fn ecdh_handshake_agrees_with_device() {
-        handshake_agrees(SessionSuite::EcdhP384);
+        for api_rev in [(1, 1), (2, 0)] {
+            handshake_agrees(SessionSuite::EcdhP384, api_rev);
+        }
     }
 
     #[test]
     fn mlkem_handshake_agrees_with_device() {
-        handshake_agrees(SessionSuite::MlKem1024);
+        for api_rev in [(1, 1), (2, 0)] {
+            handshake_agrees(SessionSuite::MlKem1024, api_rev);
+        }
     }
 
     #[test]
@@ -856,16 +969,19 @@ mod tests {
         let transport = SessionTransport::derive(&HS).expect("test crypto");
 
         let mut request = *b"tbor secure request";
-        let sealed = transport.seal_request(&mut request).expect("test crypto");
+        let (sealed, context) = transport
+            .seal_request(7, &mut request)
+            .expect("test crypto");
         assert_ne!(&request, b"tbor secure request");
         assert_eq!(sealed.iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, 0));
         let mut next = *b"x";
-        let next = transport.seal_request(&mut next).expect("test crypto");
+        let (next, _) = transport.seal_request(7, &mut next).expect("test crypto");
         assert_eq!(next.iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, 1));
         gcm_decrypt(
             &device_key(SESSION_TRANSPORT_H2M_LABEL),
             &sealed.iv,
             &sealed.tag,
+            &transport_aad(&sealed.iv, 7, 0, 2, false),
             &mut request,
         )
         .expect("test crypto");
@@ -873,10 +989,15 @@ mod tests {
 
         let mut response = *b"tbor response";
         let iv = [7; SESSION_TRANSPORT_IV_LEN];
-        let tag = gcm_encrypt(&device_key(SESSION_TRANSPORT_M2H_LABEL), &iv, &mut response)
-            .expect("test crypto");
+        let tag = gcm_encrypt(
+            &device_key(SESSION_TRANSPORT_M2H_LABEL),
+            &iv,
+            &context.response_aad,
+            &mut response,
+        )
+        .expect("test crypto");
         transport
-            .open_response(&SessionTransportSeal { iv, tag }, &mut response)
+            .open_response(context, &SessionTransportSeal { iv, tag }, &mut response)
             .expect("test crypto");
         assert_eq!(&response, b"tbor response");
     }
@@ -885,31 +1006,40 @@ mod tests {
     fn open_response_rejects_reflection_and_tampering() {
         let transport = SessionTransport::derive(&HS).expect("test crypto");
         let mut buf = *b"payload";
-        let sealed = transport.seal_request(&mut buf).expect("test crypto");
+        let (sealed, context) = transport.seal_request(7, &mut buf).expect("test crypto");
 
         // A reflected request is under the VM→HSM key.
         let mut reflected = buf;
         assert!(matches!(
-            transport.open_response(&sealed, &mut reflected),
+            transport.open_response(context, &sealed, &mut reflected),
             Err(SessionExCryptoError::MacMismatch)
         ));
         assert_eq!(reflected, [0; 7]);
 
-        let mut tampered = sealed;
+        let (mut tampered, context) = transport.seal_request(7, &mut buf).expect("test crypto");
         tampered.tag[0] ^= 1;
-        assert!(transport.open_response(&tampered, &mut buf).is_err());
+        assert!(
+            transport
+                .open_response(context, &tampered, &mut buf)
+                .is_err()
+        );
     }
 
     /// Seal `msg` as the device would: `ct ‖ iv ‖ tag` under the HSM→VM
     /// key and nonce `salt ‖ seq`.
-    fn device_seal_frame(msg: &[u8], seq: u64) -> Vec<u8> {
+    fn device_seal_frame(msg: &[u8], seq: u64, context: &SessionTransportRequest) -> Vec<u8> {
         let pt_len = sealed_frame_len(msg.len()) - SEALED_TRAILER_LEN;
         let mut frame = msg.to_vec();
         frame.resize(pt_len, 0);
         frame[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
         let iv = device_nonce(SESSION_TRANSPORT_M2H_LABEL, seq);
-        let tag = gcm_encrypt(&device_key(SESSION_TRANSPORT_M2H_LABEL), &iv, &mut frame)
-            .expect("test crypto");
+        let tag = gcm_encrypt(
+            &device_key(SESSION_TRANSPORT_M2H_LABEL),
+            &iv,
+            &context.response_aad,
+            &mut frame,
+        )
+        .expect("test crypto");
         frame.extend_from_slice(&iv);
         frame.extend_from_slice(&tag);
         frame
@@ -922,7 +1052,9 @@ mod tests {
             let seq = seq as u64;
             let msg: Vec<u8> = (0..len as u8).collect();
 
-            let frame = transport.seal_frame(&msg).expect("test crypto");
+            let (frame, context) = transport
+                .seal_frame(7, SessionControlKind::InSession, &msg)
+                .expect("test crypto");
             assert_eq!(frame.len(), sealed_frame_len(len));
             let ct_len = frame.len() - SEALED_TRAILER_LEN;
             assert_eq!(ct_len % SEALED_BLOCK_LEN, 0);
@@ -930,13 +1062,22 @@ mod tests {
             let mut pt = ct.to_vec();
             let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
             assert_eq!(iv, device_nonce(SESSION_TRANSPORT_H2M_LABEL, seq));
-            gcm_decrypt(&device_key(SESSION_TRANSPORT_H2M_LABEL), iv, tag, &mut pt)
-                .expect("test crypto");
+            let aad = transport_aad(&iv.try_into().expect("IV"), 7, 3, 1, false);
+            gcm_decrypt(
+                &device_key(SESSION_TRANSPORT_H2M_LABEL),
+                iv,
+                tag,
+                &aad,
+                &mut pt,
+            )
+            .expect("test crypto");
             assert_eq!(unpad(&pt), Some(len));
             assert_eq!(&pt[..len], msg.as_slice());
 
-            let mut frame = device_seal_frame(&msg, seq * 3);
-            transport.open_frame(&mut frame).expect("test crypto");
+            let mut frame = device_seal_frame(&msg, seq * 3, &context);
+            transport
+                .open_frame(context, &mut frame)
+                .expect("test crypto");
             assert_eq!(frame, msg);
         }
     }
@@ -944,21 +1085,148 @@ mod tests {
     #[test]
     fn open_frame_rejects_bad_frames() {
         let transport = SessionTransport::derive(&HS).expect("test crypto");
-        let good = device_seal_frame(b"response", 5);
-
-        let mut tampered = good.clone();
-        tampered[0] ^= 1;
-        let mut bad_iv = good.clone();
-        bad_iv[good.len() - SEALED_TRAILER_LEN + SESSION_TRANSPORT_IV_LEN - 1] ^= 1;
-        let mut short = good[..good.len() - 1].to_vec();
-        // A request frame is under the VM→HSM key.
-        let mut reflected = transport.seal_frame(b"response").expect("test crypto");
-        for frame in [&mut tampered, &mut bad_iv, &mut short, &mut reflected] {
+        for defect in 0..4 {
+            let (reflected, context) = transport
+                .seal_frame(7, SessionControlKind::InSession, b"response")
+                .expect("test crypto");
+            let mut frame = device_seal_frame(b"response", defect, &context);
+            match defect {
+                0 => frame[0] ^= 1,
+                1 => {
+                    let index = frame.len() - SEALED_TRAILER_LEN + SESSION_TRANSPORT_IV_LEN - 1;
+                    frame[index] ^= 1;
+                }
+                2 => {
+                    frame.pop();
+                }
+                _ => frame = reflected,
+            }
             assert!(matches!(
-                transport.open_frame(frame),
+                transport.open_frame(context, &mut frame),
                 Err(SessionExCryptoError::MacMismatch)
             ));
             assert!(frame.is_empty());
+        }
+    }
+
+    #[test]
+    fn duo_responses_complete_out_of_order_but_cannot_be_substituted() {
+        let transport = SessionTransport::derive(&HS).expect("transport");
+        let (_, first) = transport.seal_request(7, &mut [1; 16]).expect("first");
+        let (_, second) = transport.seal_request(7, &mut [1; 16]).expect("second");
+        let seal_response = |context: &SessionTransportRequest, seq| {
+            let mut response = [0x42; 16];
+            let iv = device_nonce(SESSION_TRANSPORT_M2H_LABEL, seq);
+            let tag = gcm_encrypt(
+                &device_key(SESSION_TRANSPORT_M2H_LABEL),
+                &iv,
+                &context.response_aad,
+                &mut response,
+            )
+            .expect("device seal");
+            (SessionTransportSeal { iv, tag }, response)
+        };
+        let (first_seal, mut first_response) = seal_response(&first, 10);
+        let (second_seal, mut second_response) = seal_response(&second, 11);
+        transport
+            .open_response(second, &second_seal, &mut second_response)
+            .expect("second completes first");
+        transport
+            .open_response(first, &first_seal, &mut first_response)
+            .expect("first completes second");
+        assert_eq!(first_response, [0x42; 16]);
+        assert_eq!(second_response, first_response);
+
+        let (_, old) = transport.seal_request(7, &mut [1; 16]).expect("old");
+        let (old_seal, mut old_response) = seal_response(&old, 12);
+        let (_, fresh) = transport.seal_request(7, &mut [1; 16]).expect("fresh");
+        assert!(
+            transport
+                .open_response(fresh, &old_seal, &mut old_response)
+                .is_err()
+        );
+        assert_eq!(old_response, [0; 16]);
+    }
+
+    #[test]
+    fn uno_responses_complete_out_of_order_but_cannot_be_substituted() {
+        let transport = SessionTransport::derive(&HS).expect("transport");
+        let (_, first) = transport
+            .seal_frame(7, SessionControlKind::InSession, b"request")
+            .expect("first");
+        let (_, second) = transport
+            .seal_frame(7, SessionControlKind::InSession, b"request")
+            .expect("second");
+        let mut first_response = device_seal_frame(b"response", 10, &first);
+        let mut second_response = device_seal_frame(b"response", 11, &second);
+        let mut replayed = first_response.clone();
+        transport
+            .open_frame(second, &mut second_response)
+            .expect("second completes first");
+        transport
+            .open_frame(first, &mut first_response)
+            .expect("first completes second");
+        assert_eq!(first_response, b"response");
+        assert_eq!(second_response, first_response);
+        let (_, fresh) = transport
+            .seal_frame(7, SessionControlKind::InSession, b"request")
+            .expect("fresh");
+        assert!(transport.open_frame(fresh, &mut replayed).is_err());
+        assert!(replayed.is_empty());
+    }
+
+    #[test]
+    fn duo_response_tampering_is_rejected_and_wiped() {
+        let transport = SessionTransport::derive(&HS).expect("transport");
+        for field in 0..3 {
+            let (_, context) = transport.seal_request(7, &mut [1; 16]).expect("request");
+            let mut response = [0x42; 16];
+            let iv = device_nonce(SESSION_TRANSPORT_M2H_LABEL, field);
+            let tag = gcm_encrypt(
+                &device_key(SESSION_TRANSPORT_M2H_LABEL),
+                &iv,
+                &context.response_aad,
+                &mut response,
+            )
+            .expect("device response");
+            let mut sealed = SessionTransportSeal { iv, tag };
+            match field {
+                0 => response[0] ^= 1,
+                1 => sealed.iv[0] ^= 1,
+                _ => sealed.tag[0] ^= 1,
+            }
+            assert!(
+                transport
+                    .open_response(context, &sealed, &mut response)
+                    .is_err()
+            );
+            assert_eq!(response, [0; 16]);
+        }
+    }
+
+    #[test]
+    fn request_aad_authenticates_metadata_and_direction() {
+        let transport = SessionTransport::derive(&HS).expect("transport");
+        let mut request = [1; 16];
+        let (sealed, _) = transport.seal_request(7, &mut request).expect("seal");
+        for aad in [
+            transport_aad(&sealed.iv, 8, 0, 2, false),
+            transport_aad(&sealed.iv, 7, 3, 2, false),
+            transport_aad(&sealed.iv, 7, 0, 1, false),
+            transport_aad(&sealed.iv, 7, 0, 2, true),
+        ] {
+            let mut altered = request;
+            assert!(
+                gcm_decrypt(
+                    &device_key(SESSION_TRANSPORT_H2M_LABEL),
+                    &sealed.iv,
+                    &sealed.tag,
+                    &aad,
+                    &mut altered
+                )
+                .is_err()
+            );
+            assert_eq!(altered, [0; 16]);
         }
     }
 

@@ -173,7 +173,7 @@ mod tests {
         ];
 
         let mut buf = [0u8; 2048];
-        let frame = TborDarcTmkImportReq::encode(&mut buf)
+        let frame = TborDarcTmkImportReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -202,7 +202,7 @@ mod tests {
     fn response_round_trips_masked_tmk() {
         let masked = [0xCDu8; MASKED_TMK_LEN];
         let mut buf = [0u8; 512];
-        let frame = TborDarcTmkImportResp::encode(&mut buf, 0, true)
+        let frame = TborDarcTmkImportResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_tmk(&masked)
             .unwrap()

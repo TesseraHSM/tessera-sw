@@ -33,7 +33,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 
 ### Data section
 
@@ -45,7 +45,7 @@ _Empty._
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pub_key` | `buffer` (260 B) | The RSA-2048 unwrapping public key in HSM wire format: `n_le(256) ‖ e_le(4)`. |
+| 12 | `pub_key` | `buffer` (260 B) | The RSA-2048 unwrapping public key in HSM wire format: `n_le(256) ‖ e_le(4)`. |
 
 ### Data section
 

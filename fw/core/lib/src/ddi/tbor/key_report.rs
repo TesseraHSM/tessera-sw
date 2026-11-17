@@ -295,7 +295,7 @@ async fn build_key_report<'a, P: HsmPal>(
 /// Encode the `KeyReport` response frame around the finished report.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_bytes: &[u8]) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborKeyReportResp::encode(buf, 0, false)?
+        let frame = TborKeyReportResp::encode_for_request(buf, 0, false)?
             .report(report_bytes)?
             .finish();
         Ok(frame.as_bytes().len())

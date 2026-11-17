@@ -12,7 +12,6 @@ pub use tsra_ddi_tbor_codec::ResponseView;
 pub use tsra_ddi_tbor_codec::TocEntry;
 pub use tsra_ddi_tbor_codec::MAX_DATA_SIZE;
 pub use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
-pub use tsra_ddi_tbor_codec::PROTOCOL_VERSION;
 pub use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
 pub use tsra_ddi_tbor_codec::RESP_HEADER_LEN;
 

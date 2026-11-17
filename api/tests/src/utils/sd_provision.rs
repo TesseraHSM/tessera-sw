@@ -469,6 +469,7 @@ pub(crate) fn finalized_co_partition() -> (HsmPartition, HsmApiRev, HsmSession) 
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
                 HsmSessionSuite::EcdhP384,
             )
@@ -481,6 +482,7 @@ pub(crate) fn finalized_co_partition() -> (HsmPartition, HsmApiRev, HsmSession) 
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
             HsmSessionSuite::EcdhP384,
         )
@@ -804,6 +806,7 @@ fn provision_backing_core(
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
                 HsmSessionSuite::EcdhP384,
             )
@@ -816,6 +819,7 @@ fn provision_backing_core(
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
             HsmSessionSuite::EcdhP384,
         )
@@ -994,6 +998,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
                 HsmSessionSuite::EcdhP384,
             )
@@ -1006,6 +1011,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
             HsmSessionSuite::EcdhP384,
         )

@@ -34,6 +34,11 @@ pub struct TsraSessionPsk {
 /// its in-session traffic under keys agreed during the handshake.
 ///
 /// @param[in] dev_handle Handle to the HSM partition
+/// @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the
+///            trusted root certificate's DER SubjectPublicKeyInfo, obtained
+///            independently of this connection. The verified PID path must
+///            contain a non-PID certificate with DICE TCB Info layer zero and
+///            Tessera EKU `1.3.6.1.4.1.311.102.1.50.1`.
 /// @param[in] psk PSK credential — slot plus optional PSK
 ///            (see `tsra_session_psk`)
 /// @param[in] suite Key-establishment suite (`tsra_session_suite`)
@@ -44,6 +49,8 @@ pub struct TsraSessionPsk {
 /// # Safety
 ///
 /// - `dev_handle` must be a valid partition handle.
+/// - `root_spki_thumbprint` must point to a valid `tsra_buffer` containing
+///   exactly 48 bytes.
 /// - `psk` must be a valid pointer to an `tsra_session_psk` whose `psk`
 ///   field is NULL or a valid `tsra_buffer` holding exactly `TSRA_PSK_LEN`
 ///   bytes.
@@ -53,12 +60,16 @@ pub struct TsraSessionPsk {
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_sess_ex_open(
     dev_handle: TsraHandle,
+    root_spki_thumbprint: *const TsraBuffer,
     psk: *const TsraSessionPsk,
     suite: TsraSessionSuite,
     sess_handle: *mut TsraHandle,
 ) -> TsraStatus {
     abi_boundary(|| {
         validate_ptr(sess_handle)?;
+        let root_spki_thumbprint: &[u8; 48] = <&[u8]>::try_from(deref_ptr(root_spki_thumbprint)?)?
+            .try_into()
+            .map_err(|_| TsraStatus::InvalidArgument)?;
 
         let psk = deref_ptr(psk)?;
         let psk_id = match psk.psk_id {
@@ -81,6 +92,7 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
         let partition = &api::HsmPartition::try_from(dev_handle)?;
         let session = Box::new(partition.open_session_ex(
             partition.api_rev(),
+            root_spki_thumbprint,
             session_psk,
             api::HsmSessionSuite::from(suite),
         )?);

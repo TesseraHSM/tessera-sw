@@ -8,7 +8,7 @@ use super::common::*;
 #[test]
 fn unknown_entry_type_decodes_as_unknown() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .none()?
         .finish()?
         .len();
@@ -32,13 +32,13 @@ fn unknown_entry_type_decodes_as_unknown() -> TestResult {
 #[test]
 fn header_length_constants_are_correct() -> TestResult {
     let mut req_buf = [0u8; 256];
-    let req = RequestEncoder::new(&mut req_buf, PROTOCOL_VERSION, OPCODE)
+    let req = RequestEncoder::new(&mut req_buf, (1, 1), OPCODE)
         .none()?
         .finish()?;
     assert_eq!(REQ_HEADER_LEN + TOC_ENTRY_LEN, req.len());
 
     let mut resp_buf = [0u8; 256];
-    let resp = ResponseEncoder::new(&mut resp_buf, PROTOCOL_VERSION, STATUS_OK, false)
+    let resp = ResponseEncoder::new(&mut resp_buf, (1, 1), STATUS_OK, false)
         .none()?
         .finish()?;
     assert_eq!(RESP_HEADER_LEN + TOC_ENTRY_LEN, resp.len());

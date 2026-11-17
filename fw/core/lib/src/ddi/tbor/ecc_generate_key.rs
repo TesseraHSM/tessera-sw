@@ -137,7 +137,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Build the response with the masked-key slot reserved and the
             // public key copied in; the masked private key is filled in place.
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborEccGenerateKeyResp::encode(buf, 0, false)?
+                Ok(TborEccGenerateKeyResp::encode_for_request(buf, 0, false)?
                     .masked_key_reserve(masked_len)?
                     .pub_key(&pub_key[..pub_len])?
                     .finish()

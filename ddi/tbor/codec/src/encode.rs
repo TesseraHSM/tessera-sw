@@ -51,18 +51,18 @@ pub type ResponseEncoder<'a> = Encoder<'a, Response>;
 
 impl<'a> RequestEncoder<'a> {
     /// Create a new request encoder writing into `buf`.
-    pub fn new(buf: &'a mut [u8], version: u8, opcode: u8) -> Self {
-        Self::with_header(buf, Request { version, opcode })
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), opcode: u8) -> Self {
+        Self::with_header(buf, Request { api_rev, opcode })
     }
 }
 
 impl<'a> ResponseEncoder<'a> {
     /// Create a new response encoder writing into `buf`.
-    pub fn new(buf: &'a mut [u8], version: u8, status: u32, fips_approved: bool) -> Self {
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), status: u32, fips_approved: bool) -> Self {
         Self::with_header(
             buf,
             Response {
-                version,
+                api_rev,
                 flags: if fips_approved {
                     Response::FIPS_APPROVED_FLAG
                 } else {

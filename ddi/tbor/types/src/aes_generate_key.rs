@@ -101,7 +101,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The 1-byte key-size discriminant must appear in the encoded frame.
         assert!(

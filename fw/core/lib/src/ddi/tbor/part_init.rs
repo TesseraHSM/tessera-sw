@@ -623,7 +623,7 @@ fn encode_response(
     pta_report_bytes: &[u8],
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartInitResp::encode(buf, 0, false)?
+        let frame = TborPartInitResp::encode_for_request(buf, 0, false)?
             .pta_csr(pta_csr_bytes)?
             .pta_report(pta_report_bytes)?
             .finish();

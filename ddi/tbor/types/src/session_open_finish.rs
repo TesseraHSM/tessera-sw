@@ -29,7 +29,7 @@ pub const SESSION_SEED_LEN: usize = SEED_LEN;
 /// secret `hs` from the handshake PRK.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HS_LABEL`.
-pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v2";
+pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v1";
 
 /// Length in bytes of the handshake secret `hs`.
 ///
@@ -39,7 +39,7 @@ pub const SESSION_HS_LEN: usize = 48;
 /// HKDF-Expand-Labeled label producing the 48 B `fin_key` from `hs`.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HOST_FIN_LABEL`.
-pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v2";
+pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v1";
 
 /// HKDF-Expand-Labeled label producing the per-session **param key** — a
 /// raw 32-byte AES-256 key consumed by the AEAD-envelope crate to
@@ -47,7 +47,7 @@ pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v2";
 /// carried by in-session commands such as `PskChange` / `PartInit`.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LABEL`.
-pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v2";
+pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v1";
 
 /// Length in bytes of the per-session `param_key`
 /// (TBOR per-parameter confidentiality).
@@ -59,13 +59,13 @@ pub const SESSION_PARAM_KEY_LEN: usize = 32;
 /// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_H2M_LABEL`.
-pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v2";
+pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
 
 /// HKDF-Expand-Labeled label producing the **HSM→VM** session transport
 /// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_M2H_LABEL`.
-pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
+pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
 
 /// Length in bytes of each directional AES-256-GCM session transport key.
 ///

@@ -147,7 +147,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked_tmk = [0x5Au8; MASKED_TMK_LEN];
         let wrapped = [0xA5u8; 240];
-        let frame = TborDarcKeyUnwrapReq::encode(&mut buf)
+        let frame = TborDarcKeyUnwrapReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -175,7 +175,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked = [0xABu8; 200];
         let pub_key = [0xCDu8; 136];
-        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, 0, true)
+        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .key_kind(14)
             .unwrap()

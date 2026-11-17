@@ -347,7 +347,7 @@ fn encode_response(
     pub_key: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcKeyUnwrapResp::encode(buf, 0, false)?
+        let frame = TborDarcKeyUnwrapResp::encode_for_request(buf, 0, false)?
             .key_kind(key_kind)?
             .masked_key(masked_key)?
             .pub_key(pub_key)?

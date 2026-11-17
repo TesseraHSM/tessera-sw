@@ -82,8 +82,9 @@ impl fmt::Display for RequestView<'_> {
 
         writeln!(
             f,
-            "Request v{} opcode=0x{:02X} toc_count={} ({} bytes)",
-            self.version(),
+            "Request API {}.{} opcode=0x{:02X} toc_count={} ({} bytes)",
+            self.api_rev().0,
+            self.api_rev().1,
             self.opcode(),
             self.toc_count(),
             self.len()
@@ -126,8 +127,9 @@ impl fmt::Display for ResponseView<'_> {
 
         writeln!(
             f,
-            "Response v{} status=0x{:08X} ({}){} toc_count={} ({} bytes)",
-            self.version(),
+            "Response API {}.{} status=0x{:08X} ({}){} toc_count={} ({} bytes)",
+            self.api_rev().0,
+            self.api_rev().1,
             self.status(),
             status_name,
             flags_str,

@@ -76,7 +76,7 @@ pub(crate) fn sd_restore_local_backup_ex(
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, None, cookie)
+        dev.exec_op_tbor(inner.api_rev(), &req, None, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)
     })

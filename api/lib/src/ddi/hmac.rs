@@ -98,7 +98,8 @@ fn hmac_sign_tbor(key: &HsmHmacKey, data: &[u8], signature: &mut [u8]) -> HsmRes
     };
     let mut cookie = None;
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = key.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -145,7 +146,8 @@ pub(crate) fn hmac_generate_key(
     };
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = session.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

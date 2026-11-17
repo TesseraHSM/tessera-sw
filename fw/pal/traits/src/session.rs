@@ -421,7 +421,9 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX)
     /// bytes.
     ///
-    /// The blob's trailing `2 × SESSION_TRANSPORT_SECRET_LEN` bytes are the
+    /// The blob starts with the selected API revision as
+    /// `LE16(major) || LE16(minor)`. Its trailing
+    /// `2 × SESSION_TRANSPORT_SECRET_LEN` bytes are the
     /// transport secrets `h2m ‖ m2h` (each `key ‖ salt`);
     /// [`session_transport_key`](Self::session_transport_key) serves the
     /// Pending slot from them, so `OpenSessionFinish` already travels on
@@ -476,6 +478,9 @@ pub trait HsmSessionManager: HsmIoTypes {
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// API revision authenticated during this Pending or Active session's Init.
+    fn session_api_revision(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<HsmApiRevision>;
+
     /// Promotes a [`Pending`](HsmSessionState::Pending) slot to
     /// [`Active`](HsmSessionState::Active), committing the derived
     /// session keys to the vault.
@@ -485,8 +490,9 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// verifies.  The Pending handshake state is zeroized and replaced
     /// by the session-key vault blob:
     ///
-    /// 212 B blob = `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
-    /// auth_binding(68) ‖ h2m(36) ‖ m2h(36)]`, identical for CO and CU.
+    /// 216 B blob = `[internal_format_tag(8) ‖ selected_api_rev(4) ‖
+    /// param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖ h2m(36) ‖
+    /// m2h(36)]`, identical for CO and CU.
     ///
     /// The transport secrets are the same ones the Pending slot served,
     /// so the HSM→VM sequence counter (see
@@ -501,8 +507,10 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// - `io` — caller's I/O context (partition scope).
     /// - `id` — Pending session slot to promote.
-    /// - `api_rev` — 8-byte API revision tag (same convention as
+    /// - `api_rev` — opaque 8-byte internal session-format tag (same convention as
     ///   [`session_create`](Self::session_create)).
+    /// - `selected_api_rev` — externally selected API revision authenticated
+    ///   during Init, distinct from the internal format tag.
     /// - `param_key` — 32-byte AES-256 key used by
     ///   [`tsra_fw_core_crypto_aead_envelope`] for per-parameter
     ///   authenticated encryption (and to unseal the `seed_envelope`
@@ -530,6 +538,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmSessId,
         api_rev: &[u8],
+        selected_api_rev: HsmApiRevision,
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,

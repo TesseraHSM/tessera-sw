@@ -317,7 +317,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `SdResealRemoteBackup` response around the resealed backup.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, pok: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdResealRemoteBackupResp::encode_for_request(buf, 0, false)?
             .dst_remote_backup(pok)?
             .finish();
         Ok(frame.as_bytes().len())

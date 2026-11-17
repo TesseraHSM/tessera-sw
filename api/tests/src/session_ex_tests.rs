@@ -13,6 +13,34 @@ use tsra_api::*;
 
 use crate::utils::partition_ex_helpers::*;
 
+#[test]
+fn open_session_ex_rejects_wrong_root_pin() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let pin = test_root_spki_sha384(&part);
+    let mut wrong_pin = pin;
+    wrong_pin[0] ^= 1;
+    assert!(matches!(
+        part.open_session_ex(
+            rev,
+            &wrong_pin,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionSuite::EcdhP384,
+        ),
+        Err(HsmError::InvalidSignature)
+    ));
+    part.open_session_ex(
+        rev,
+        &pin,
+        HsmSessionPsk::new(HsmPskId::CO),
+        HsmSessionSuite::EcdhP384,
+    )
+    .expect("correct root pin must still open");
+}
+
 /// Happy path: a CO session under the ECDH P-384 suite returns a
 /// live `HsmSession` over the public API.
 #[test]
@@ -30,6 +58,7 @@ fn open_session_ex_co_ecdh_p384() {
     let session = part
         .open_session_ex(
             rev,
+            &test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CO),
             HsmSessionSuite::EcdhP384,
         )
@@ -56,6 +85,7 @@ fn open_session_ex_cu_mlkem1024() {
     let session = part
         .open_session_ex(
             rev,
+            &test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CU),
             HsmSessionSuite::MlKem1024,
         )
@@ -88,6 +118,7 @@ fn change_psk_rotates_co_psk() {
         let session = part
             .open_session_ex(
                 rev,
+                &test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
                 HsmSessionSuite::EcdhP384,
             )
@@ -100,6 +131,7 @@ fn change_psk_rotates_co_psk() {
     // Reopening with the rotated secret must now succeed.
     part.open_session_ex(
         rev,
+        &test_root_spki_sha384(&part),
         HsmSessionPsk::with_psk(HsmPskId::CO, &new_psk),
         HsmSessionSuite::EcdhP384,
     )
@@ -108,6 +140,7 @@ fn change_psk_rotates_co_psk() {
     // Reopening with the (now stale) default CO PSK must be rejected.
     let stale = part.open_session_ex(
         rev,
+        &test_root_spki_sha384(&part),
         HsmSessionPsk::new(HsmPskId::CO),
         HsmSessionSuite::EcdhP384,
     );

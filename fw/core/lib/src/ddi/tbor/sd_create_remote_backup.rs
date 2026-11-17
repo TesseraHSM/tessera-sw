@@ -394,7 +394,7 @@ fn encode_response(
     sd_mk_backup: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdCreateRemoteBackupResp::encode_for_request(buf, 0, false)?
             .pok_remote_backup(pok)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk_backup)?

@@ -36,6 +36,7 @@ impl StdHsmPal {
         sqe: &SqeEntry,
     ) -> HsmResult<HsmRequest<'_>> {
         let sealed_id = sealed::sealed_session(sqe)?;
+        let control = sqe.session_ctrl();
         let sqe = sqe.view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -49,12 +50,13 @@ impl StdHsmPal {
             sqe.oob_prp(),
         )?;
         let len = sqe.src_len() as usize;
-        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+        let headroom = sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN);
+        let mut buf = self.dma_alloc_exchange(io, headroom + len.next_multiple_of(4))?;
         self.copy_mem_from_host(
             io,
             sqe.src_prp1(),
             sqe.src_prp2(),
-            &mut buf.buffer_mut()[..len],
+            &mut buf.buffer_mut()[headroom..headroom + len],
             true,
         )
         .await
@@ -67,7 +69,16 @@ impl StdHsmPal {
                 resp_capacity,
             });
         };
-        let len = sealed::sealed_open(self, io, id, &mut buf.buffer_mut()[..len]).await?;
+        let (len, binding) = sealed::sealed_open(
+            self,
+            io,
+            id,
+            control,
+            &mut buf.buffer_mut()[..headroom + len],
+        )
+        .await?;
+        io.transport_binding.set(Some(binding));
+        let buf = buf.skip_prefix(headroom)?;
         Ok(HsmRequest {
             buf,
             len,
@@ -83,7 +94,11 @@ impl StdHsmPal {
     ) -> HsmResult<()> {
         let resp = match sealed::sealed_session(&sqe)? {
             Some(id) => {
-                let frame = sealed::sealed_seal(self, io, id, resp).await?;
+                let binding = io
+                    .transport_binding
+                    .take()
+                    .ok_or(HsmError::SessionTransportError)?;
+                let frame = sealed::sealed_seal(self, io, id, binding, resp).await?;
                 let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
                 if let crate::io::StdCqe::Cmd(cqe) = &mut io.cqe {
                     cqe.view().set_dst_len(frame_len);

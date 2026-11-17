@@ -81,7 +81,7 @@ pub(crate) fn sd_create_peer_backup_ex(
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(inner.api_rev(), &req, oob_items, cookie)
             .map(|resp| resp.pok_peer_backup.to_vec())
             .map_err(HsmError::from)
     })

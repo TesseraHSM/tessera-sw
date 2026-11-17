@@ -13,6 +13,27 @@ use tsra_api::*;
 
 pub(crate) use crate::utils::partition::PARTITION_LOCK;
 
+/// Controlled test enrollment only: trust the root advertised by the test
+/// backend. Applications must provision this pin independently of the device.
+pub(crate) fn test_root_spki_sha384(part: &HsmPartition) -> [u8; 48] {
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    let pem = part.cert_chain(0).expect("test certificate chain");
+    let certificates = X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
+    let spki = certificates
+        .last()
+        .expect("test root certificate")
+        .subject_public_key_info_der()
+        .expect("test root SPKI");
+    Hasher::hash_vec(&mut HashAlgo::sha384(), spki)
+        .expect("test root hash")
+        .try_into()
+        .expect("SHA-384 length")
+}
+
 /// Open the backend's partition at its maximum supported revision and
 /// factory-reset it, so each test starts from byte-identical state (no
 /// inherited session slots or PSK rotations). Returns the partition and
@@ -38,6 +59,7 @@ pub(crate) fn new_co_session() -> HsmSession {
     let (part, rev) = new_partition();
     part.open_session_ex(
         rev,
+        &test_root_spki_sha384(&part),
         HsmSessionPsk::new(HsmPskId::CO),
         HsmSessionSuite::EcdhP384,
     )

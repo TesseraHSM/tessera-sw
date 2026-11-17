@@ -65,7 +65,7 @@ mod tests {
             digest: alloc::vec![0x22u8; 32],
         };
         let mut buf = [0u8; 512];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.windows(4).any(|w| w == [0x22u8; 4]),
             "encoded frame must carry the digest bytes",

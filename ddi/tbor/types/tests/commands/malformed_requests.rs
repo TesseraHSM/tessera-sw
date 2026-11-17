@@ -12,7 +12,6 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_codec::EncodeError;
 use tsra_ddi_tbor_codec::RequestEncoder;
 use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
-use tsra_ddi_tbor_codec::PROTOCOL_VERSION;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborHashReq;
@@ -148,8 +147,12 @@ impl TborOpReq for AllNoneReq {
         }
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let mut encoder = RequestEncoder::new(buf, PROTOCOL_VERSION, self.opcode);
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let mut encoder = RequestEncoder::new(buf, api_rev, self.opcode);
         for _ in 0..MAX_TOC_ENTRIES {
             encoder = encoder.none()?;
         }

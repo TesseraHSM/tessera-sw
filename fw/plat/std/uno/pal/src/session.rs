@@ -37,18 +37,21 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
 /// `SessionEx`-kind blob size (TBOR handshake sessions):
-/// `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖
-/// h2m(36) ‖ m2h(36)` = 212 B.  The SessionEx masking key is the 32 B
+/// `internal_format_tag(8) ‖ selected_api_rev(4) ‖ param_key(32) ‖
+/// masking_key(32) ‖ auth_binding(68) ‖ h2m(36) ‖ m2h(36)` = 216 B.
+/// The SessionEx masking key is the 32 B
 /// AES-256-GCM `key_masking::aead` key ([`SESSION_MASKING_KEY_LEN`]), not
 /// the legacy 80 B cbc key.
-pub(crate) const SESSION_EX_BLOB_SIZE: usize = SESSION_API_REV_SIZE
+pub(crate) const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_PARAM_OFF
     + SESSION_PARAM_KEY_LEN
     + SESSION_MASKING_KEY_LEN
     + SESSION_AUTH_BINDING_LEN
     + 2 * SESSION_TRANSPORT_SECRET_LEN;
 
+/// Offset of `param_key`, after the format tag and selected API revision.
+const SESSION_EX_PARAM_OFF: usize = SESSION_API_REV_SIZE + 4;
 /// Offset of `masking_key` in a `SessionEx` blob.
-const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
+const SESSION_EX_MASKING_OFF: usize = SESSION_EX_PARAM_OFF + SESSION_PARAM_KEY_LEN;
 /// Offset of `auth_binding` in a `SessionEx` blob.
 const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
 /// Offset of the `h2m ‖ m2h` transport secrets in a `SessionEx` blob.
@@ -216,11 +219,35 @@ impl HsmSessionManager for StdHsmPal {
         }
     }
 
+    fn session_api_revision(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<HsmApiRevision> {
+        let entry = self.active_part(io.pid())?;
+        let revision = match entry.session_table.state(id) {
+            HsmSessionState::Pending => entry
+                .session_table
+                .pending_state(id)?
+                .get(..4)
+                .ok_or(HsmError::InvalidArg)?,
+            HsmSessionState::Active => {
+                let blob = entry.vault.key(entry.session_table.physical_id(id)?)?;
+                if blob.len() != SESSION_EX_BLOB_SIZE {
+                    return Err(HsmError::InvalidPermissions);
+                }
+                &blob[SESSION_API_REV_SIZE..SESSION_EX_PARAM_OFF]
+            }
+            _ => return Err(HsmError::SessionNotFound),
+        };
+        Ok(HsmApiRevision::new(
+            u16::from_le_bytes([revision[0], revision[1]]),
+            u16::from_le_bytes([revision[2], revision[3]]),
+        ))
+    }
+
     async fn session_promote(
         &self,
         io: &StdHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
+        selected_api_rev: HsmApiRevision,
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
@@ -249,7 +276,11 @@ impl HsmSessionManager for StdHsmPal {
 
         let mut blob = Zeroizing::new([0u8; SESSION_EX_BLOB_SIZE]);
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
-        blob[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
+        blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + 2]
+            .copy_from_slice(&selected_api_rev.major.to_le_bytes());
+        blob[SESSION_API_REV_SIZE + 2..SESSION_EX_PARAM_OFF]
+            .copy_from_slice(&selected_api_rev.minor.to_le_bytes());
+        blob[SESSION_EX_PARAM_OFF..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
         blob[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
         blob[SESSION_EX_AUTH_OFF..SESSION_EX_KEYS_OFF].copy_from_slice(auth_binding);
         let (h2m, m2h) = blob[SESSION_EX_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
@@ -275,7 +306,7 @@ impl HsmSessionManager for StdHsmPal {
         if blob.len() != SESSION_EX_BLOB_SIZE {
             return Err(HsmError::InvalidPermissions);
         }
-        let key_bytes = &blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN];
+        let key_bytes = &blob[SESSION_EX_PARAM_OFF..SESSION_EX_MASKING_OFF];
         // SAFETY: same justification as `vault_key` — on the host,
         // any heap byte is reachable; branding the sub-slice as
         // `HsmDmaBuf` only satisfies the type system.
@@ -386,6 +417,38 @@ mod session_reopen_tests {
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
         (pal, io)
+    }
+
+    #[tokio::test]
+    async fn selected_api_revision_survives_pending_promotion() {
+        let (pal, io) = test_pal();
+        let selected = HsmApiRevision::new(0x1234, 0x5678);
+        let mut pending = [0x11; 4 + 2 * SESSION_TRANSPORT_SECRET_LEN];
+        pending[..2].copy_from_slice(&selected.major.to_le_bytes());
+        pending[2..4].copy_from_slice(&selected.minor.to_le_bytes());
+        let id = pal
+            .session_create_pending(&io, HsmSessionRole::CryptoOfficer, dma(&pending))
+            .await
+            .expect("pending session");
+        assert_eq!(pal.session_api_revision(&io, id), Ok(selected));
+        pal.session_promote(
+            &io,
+            id,
+            &[0x99; SESSION_API_REV_SIZE],
+            selected,
+            dma(&[0x22; SESSION_PARAM_KEY_LEN]),
+            dma(&[0x33; SESSION_MASKING_KEY_LEN]),
+            dma(&[0x44; SESSION_AUTH_BINDING_LEN]),
+            dma(&[0x11; SESSION_TRANSPORT_SECRET_LEN]),
+            dma(&[0x11; SESSION_TRANSPORT_SECRET_LEN]),
+        )
+        .await
+        .expect("promote");
+        assert_eq!(pal.session_api_revision(&io, id), Ok(selected));
+        assert_eq!(
+            pal.session_param_key(&io, id).expect("parameter key"),
+            &[0x22; SESSION_PARAM_KEY_LEN]
+        );
     }
 
     #[tokio::test]

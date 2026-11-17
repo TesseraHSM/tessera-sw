@@ -122,7 +122,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The maximum-length policy plus the sealing key and the two backups must
         // be carried in the data section.

@@ -99,7 +99,7 @@ pub(crate) async fn handle<P: HsmPal>(
     .await?;
 
     Ok(
-        TborAesXtsEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?
+        TborAesXtsEncryptDecryptResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
             .finish()
             .len(),
     )

@@ -120,7 +120,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 512];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame.windows(12).any(|w| w == [0x33u8; 12]));
         assert!(frame.windows(16).any(|w| w == [0x44u8; 16]));
     }

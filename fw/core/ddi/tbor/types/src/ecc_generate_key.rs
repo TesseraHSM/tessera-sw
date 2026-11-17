@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn request_round_trips_scope_and_curve() {
         let mut buf = [0u8; 256];
-        let frame = TborEccGenerateKeyReq::encode(&mut buf)
+        let frame = TborEccGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(5))
             .unwrap()
@@ -154,7 +154,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0xABu8; MASKED_ECC_KEY_MAX_LEN];
         let pub_key = [0xCDu8; ECC_PUB_KEY_MAX_LEN];
-        let frame = TborEccGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborEccGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

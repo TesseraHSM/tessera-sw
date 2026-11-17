@@ -290,7 +290,7 @@ fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &HsmDmaBuf) -> HsmResul
 /// Encode the `SdCreatePeerBackup` response around the peer backup.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, pok_peer: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdCreatePeerBackupResp::encode(buf, 0, false)?
+        let frame = TborSdCreatePeerBackupResp::encode_for_request(buf, 0, false)?
             .pok_peer_backup(pok_peer)?
             .finish();
         Ok(frame.as_bytes().len())

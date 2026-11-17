@@ -25,6 +25,7 @@ use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
 
 const SESSION_EX_LEN: u16 = (8
+    + 4
     + SESSION_PARAM_KEY_LEN
     + SESSION_MASKING_KEY_LEN
     + SESSION_AUTH_BINDING_LEN
@@ -103,8 +104,8 @@ pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 }
 /// # `SessionEx`
 ///
 /// Built by `session_promote` in `fw/plat/uno/fw/pal/src/session.rs`:
-/// `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖
-/// h2m(32) ‖ m2h(32)` = 204 bytes.
+/// `internal_format_tag(8) ‖ selected_api_rev(4) ‖ param_key(32) ‖
+/// masking_key(32) ‖ auth_binding(68) ‖ h2m(36) ‖ m2h(36)` = 216 bytes.
 ///
 /// **Do not derive this from `SESSION_MASKING_KEY_SIZE` (80).** That is
 /// the *legacy CBC* masking key used by the MBOR `Session` kind;
@@ -358,11 +359,12 @@ mod tests {
         const API_REV: usize = 8;
 
         let len = API_REV
+            + 4
             + SESSION_PARAM_KEY_LEN
             + SESSION_MASKING_KEY_LEN
             + SESSION_AUTH_BINDING_LEN
             + 2 * SESSION_TRANSPORT_SECRET_LEN;
-        assert_eq!(len, 212);
+        assert_eq!(len, 216);
         assert_eq!(
             key_len(HsmVaultKeyKind::SessionEx),
             Ok(KeyLen::Fixed(len as u16))
@@ -374,14 +376,14 @@ mod tests {
     #[test]
     fn session_ex_rejects_other_sizes() {
         let len = key_len(HsmVaultKeyKind::SessionEx).expect("SessionEx kind");
-        assert_eq!(len.check(212), Ok(212));
+        assert_eq!(len.check(216), Ok(216));
         // The retired PlainText / Authenticated sizes are rejected.
         assert!(len.check(140).is_err());
         assert!(len.check(236).is_err());
         assert!(len.check(211).is_err());
         assert!(len.check(213).is_err());
         let pending = key_len(HsmVaultKeyKind::SessionExPending).expect("Pending kind");
-        assert_eq!(pending.check(238), Ok(238));
+        assert_eq!(pending.check(242), Ok(242));
         assert_eq!(pending.check(SESSION_PENDING_BLOB_MAX), Ok(256));
         assert!(pending.check(SESSION_PENDING_BLOB_MAX + 1).is_err());
     }

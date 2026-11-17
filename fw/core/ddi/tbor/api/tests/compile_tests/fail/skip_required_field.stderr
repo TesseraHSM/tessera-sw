@@ -4,8 +4,8 @@ error[E0599]: no method named `required_c` found for struct `SkipReqEnc<'_, Skip
  6 |   #[tbor(opcode = 0x02)]
    |   ---------------------- method `required_c` not found for this struct
 ...
-16 |       let _ = SkipReq::encode(&mut buf).unwrap()
-   |               -                         -------- method `required_c` is available on `SkipReqEnc<'_, SkipReqS0>`
+16 |       let _ = SkipReq::encode(&mut buf, (1, 1)).unwrap()
+   |               -                                 -------- method `required_c` is available on `SkipReqEnc<'_, SkipReqS0>`
    |  _____________|
    | |
 17 | |         .required_a(1).unwrap()

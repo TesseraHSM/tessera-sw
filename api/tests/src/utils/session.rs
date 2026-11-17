@@ -166,6 +166,7 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CO),
             HsmSessionSuite::EcdhP384,
         )
@@ -177,6 +178,7 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
             HsmSessionSuite::EcdhP384,
         )

@@ -14,25 +14,25 @@ fn main() {
     let mut buf = [0u8; 64];
 
     // Set all fields.
-    let _ = OptReq::encode(&mut buf).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
         .required(1).unwrap()
         .opt_a(Some(2)).unwrap()
         .opt_b(Some(3)).unwrap()
         .finish();
 
     // Early finish — skip trailing optionals.
-    let _ = OptReq::encode(&mut buf).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
         .required(1).unwrap()
         .finish();
 
     // Skip intermediate optional, jump to opt_b.
-    let _ = OptReq::encode(&mut buf).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
         .required(1).unwrap()
         .opt_b(Some(3)).unwrap()
         .finish();
 
     // Set opt_a with None explicitly.
-    let _ = OptReq::encode(&mut buf).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
         .required(1).unwrap()
         .opt_a(None).unwrap()
         .opt_b(Some(3)).unwrap()

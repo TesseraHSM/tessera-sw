@@ -32,6 +32,7 @@ use tsra_fw_hsm_undo::UndoLog;
 
 use super::session_open_init::PENDING_AUTH_OFF;
 use super::session_open_init::PENDING_BLOB_LEN;
+use super::session_open_init::PENDING_HS_OFF;
 use super::session_open_init::PENDING_KEYS_OFF;
 use super::session_open_init::PENDING_SUITE_OFF;
 use super::session_open_init::PENDING_T1_OFF;
@@ -127,10 +128,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Promote Pending → Active ──────────────────────────────
         let api_rev = alloc.dma_alloc(SESSION_API_REV.len())?;
         api_rev.copy_from_slice(&SESSION_API_REV);
+        let selected_api_rev = pal.session_api_revision(io, sess_id)?;
         pal.session_promote(
             io,
             sess_id,
             api_rev,
+            selected_api_rev,
             param_key,
             masking_key,
             auth_binding,
@@ -176,7 +179,8 @@ fn load_pending_state<'a, P: HsmPal>(
     HsmSessionType::from_u8(blob[PENDING_TYPE_OFF])?;
     HsmSessionSuite::from_u8(blob[PENDING_SUITE_OFF])?;
 
-    let (hs, rest) = blob.split_at_mut(PENDING_T1_OFF);
+    let (_, blob) = blob.split_at_mut(PENDING_HS_OFF);
+    let (hs, rest) = blob.split_at_mut(PENDING_T1_OFF - PENDING_HS_OFF);
     let (t1, rest) = rest.split_at_mut(PENDING_AUTH_OFF - PENDING_T1_OFF);
     let (auth_binding, rest) = rest.split_at_mut(PENDING_TYPE_OFF - PENDING_AUTH_OFF);
     let (h2m, m2h) =
@@ -191,7 +195,7 @@ fn load_pending_state<'a, P: HsmPal>(
 }
 
 /// Verify the host's confirmation `fin = HMAC-SHA-384(fin_key, T1)`, with
-/// `fin_key = HKDF-Expand-Labeled(hs, "tsra-session-host-fin-v2", 48)`,
+/// `fin_key = HKDF-Expand-Labeled(hs, "tsra-session-host-fin-v1", 48)`,
 /// in constant time.
 ///
 /// # Errors
@@ -352,7 +356,7 @@ async fn derive_bk_session<'a, P: HsmPal>(
 /// into a fresh IO-scoped HsmDmaBuf.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, bmk_session: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSessionOpenFinishResp::encode(buf, 0, false)?
+        let frame = TborSessionOpenFinishResp::encode_for_request(buf, 0, false)?
             .bmk_session(bmk_session)?
             .finish();
         Ok(frame.as_bytes().len())

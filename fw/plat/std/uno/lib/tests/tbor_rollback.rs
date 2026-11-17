@@ -73,7 +73,7 @@ async fn check_tbor_rollback() {
         let fail_completion = attempt == 8;
         let mut request = HostPage([0; 4096]);
         let mut response = HostPage([0xA5; 4096]);
-        let request_len = types::TborSessionOpenInitReq::encode(&mut request.0)
+        let request_len = types::TborSessionOpenInitReq::encode(&mut request.0, (1, 1))
             .unwrap()
             .psk_id(types::PskId::CryptoUser)
             .unwrap()
@@ -92,7 +92,7 @@ async fn check_tbor_rollback() {
             0,
             SqeBuilder::new()
                 .cmd(CmdDword::new().with_op(OP_TBOR))
-                .buf_lens(request_len as u32, if short_response { 12 } else { 4096 })
+                .buf_lens(request_len as u32, if short_response { 16 } else { 4096 })
                 .src_prp1(request.0.as_ptr() as u64)
                 .dst_prp1(response.0.as_mut_ptr() as u64)
                 .session_flags(SessionFlags::new().with_ctrl(SESSION_CTRL_OPEN))
@@ -141,7 +141,7 @@ async fn check_tbor_rollback() {
                 .unwrap()
                 .fill(0xA5);
         }
-        types::TborSessionOpenInitReq::encode(&mut request.0)
+        types::TborSessionOpenInitReq::encode(&mut request.0, (1, 1))
             .unwrap()
             .psk_id(types::PskId::CryptoUser)
             .unwrap()
@@ -179,7 +179,7 @@ async fn check_tbor_rollback() {
                     HsmError::TborBufferTooSmall.0,
                     "attempt {attempt}"
                 );
-                assert_eq!(len, 12);
+                assert_eq!(len, 16);
                 assert!(!cqe.dw0().session_id_valid());
             } else {
                 let frame =

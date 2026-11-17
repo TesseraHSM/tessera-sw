@@ -89,7 +89,7 @@ mod tests {
             key_label: b"lbl".to_vec(),
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&ECC_CURVE_P384),
             "encoded frame must carry the curve discriminant",

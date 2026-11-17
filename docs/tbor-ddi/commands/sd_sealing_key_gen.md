@@ -47,15 +47,15 @@ rejected with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 (empty) data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Supports Ephemeral, Local, and SecurityDomain when its masking key is provisioned. Other scopes return `UnsupportedKeyScope`. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Supports Ephemeral, Local, and SecurityDomain when its masking key is provisioned. Other scopes return `UnsupportedKeyScope`. |
 
 ### Data section
 
@@ -63,16 +63,16 @@ _Empty — both fields are carried inline within their TOC entries._
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the data
+Wire layout: 12-byte header, followed by the TOC entries, then the data
 section carrying the masked key and public key.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_key` | `buffer` (276 B) | The sealing key's ECC-P384 private half, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖ tag(16)`. Not stored on-device. |
-| 16 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new sealing key. Not a SEC1 point encoding (no `0x04` prefix). |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_key` | `buffer` (276 B) | The sealing key's ECC-P384 private half, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖ tag(16)`. Not stored on-device. |
+| 20 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new sealing key. Not a SEC1 point encoding (no `0x04` prefix). |
 
 ### Data section
 

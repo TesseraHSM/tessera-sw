@@ -128,7 +128,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // The private key and peer input are consumed; only the
             // preexisting derived-secret scratch remains live.
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborEcdhDeriveResp::encode(buf, 0, false)?
+                Ok(TborEcdhDeriveResp::encode_for_request(buf, 0, false)?
                     .masked_secret_reserve(masked_len)?
                     .finish()
                     .as_bytes()

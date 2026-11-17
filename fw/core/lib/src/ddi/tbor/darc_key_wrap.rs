@@ -297,7 +297,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcKeyWrap` response around the wrapped key.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, wrapped_key: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcKeyWrapResp::encode(buf, 0, false)?
+        let frame = TborDarcKeyWrapResp::encode_for_request(buf, 0, false)?
             .wrapped_key(wrapped_key)?
             .finish();
         Ok(frame.as_bytes().len())

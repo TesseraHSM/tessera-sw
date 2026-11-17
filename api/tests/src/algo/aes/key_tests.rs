@@ -468,6 +468,7 @@ fn test_aes_unmask_rejects_key_from_another_session() {
     let other = other_partition
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&other_partition),
             HsmSessionPsk::new(HsmPskId::CU),
             HsmSessionSuite::EcdhP384,
         )

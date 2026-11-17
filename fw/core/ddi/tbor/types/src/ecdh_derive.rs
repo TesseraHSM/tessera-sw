@@ -108,7 +108,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0x11u8; MASKED_ECC_KEY_MIN_LEN];
         let peer = [0x22u8; 64];
-        let frame = TborEcdhDeriveReq::encode(&mut buf)
+        let frame = TborEcdhDeriveReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -130,7 +130,7 @@ mod tests {
     fn response_round_trips_masked_secret() {
         let mut buf = [0u8; 512];
         let masked = [0x33u8; MASKED_SECRET_MAX_LEN];
-        let frame = TborEcdhDeriveResp::encode(&mut buf, 0, true)
+        let frame = TborEcdhDeriveResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_secret(&masked)
             .unwrap()

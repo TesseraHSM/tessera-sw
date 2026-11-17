@@ -183,7 +183,7 @@ mod tests {
         ];
 
         let mut buf = [0u8; 2048];
-        let frame = TborPartFinalReq::encode(&mut buf)
+        let frame = TborPartFinalReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()

@@ -173,7 +173,7 @@ pub(crate) fn part_init_ex(
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, None, cookie)
+        dev.exec_op_tbor(inner.api_rev(), &req, None, cookie)
             .map(HsmPartInitExResult::from)
             .map_err(HsmError::from)
     })
@@ -242,7 +242,7 @@ pub(crate) fn part_final_ex(
     // See `part_init_ex`: thread the session's cookie explicitly since
     // this call also runs outside `with_session_cookie`'s scope.
     let resp = with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, Some(&oob), cookie)
+        dev.exec_op_tbor(inner.api_rev(), &req, Some(&oob), cookie)
     });
     let resp = resp.map_err(HsmError::from)?;
 
@@ -292,7 +292,7 @@ pub(crate) fn part_info(partition: &HsmPartition) -> HsmResult<HsmPartInfo> {
     let inner = partition.inner().read();
     let dev = inner.dev();
     let mut cookie = None;
-    dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut cookie)
+    dev.exec_op_tbor(inner.api_rev(), &TborPartInfoReq::new(), None, &mut cookie)
         .map(HsmPartInfo::from)
         .map_err(HsmError::from)
 }
@@ -313,9 +313,10 @@ pub(crate) fn part_info(partition: &HsmPartition) -> HsmResult<HsmPartInfo> {
 /// PID certificate is served earlier in [`fetch_cert_chain_checked`].
 pub(super) fn fetch_cert_chain_checked_tbor(
     dev: &HsmDev,
+    rev: HsmApiRev,
     slot_id: u8,
 ) -> HsmResult<(String, Vec<u8>)> {
-    let (count, thumbprint) = get_cert_chain_info_tbor(dev, slot_id)?;
+    let (count, thumbprint) = get_cert_chain_info_tbor(dev, rev, slot_id)?;
     if count == 0 {
         return Err(HsmError::InternalError);
     }
@@ -325,7 +326,7 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 
     // Firmware returns the chain root->leaf; reverse it to leaf->root.
     for cert_id in (0..count).rev() {
-        let der = get_cert_tbor(dev, slot_id, cert_id)?;
+        let der = get_cert_tbor(dev, rev, slot_id, cert_id)?;
         let pem = der_to_pem(&der).map_hsm_err(HsmError::InternalError)?;
         cert_chain.push_str(&pem);
         if cert_id == count - 1 {
@@ -333,7 +334,7 @@ pub(super) fn fetch_cert_chain_checked_tbor(
         }
     }
 
-    let (new_count, new_thumbprint) = get_cert_chain_info_tbor(dev, slot_id)?;
+    let (new_count, new_thumbprint) = get_cert_chain_info_tbor(dev, rev, slot_id)?;
     if new_count != count || new_thumbprint != thumbprint {
         return Err(HsmError::CertChainChanged);
     }
@@ -343,20 +344,39 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 
 /// TBOR `GetCertChainInfo` (opcode `0x1E`, out-of-session): returns the
 /// certificate count and chain thumbprint for `slot_id`.
-pub(super) fn get_cert_chain_info_tbor(dev: &HsmDev, slot_id: u8) -> HsmResult<(u8, Vec<u8>)> {
+pub(super) fn get_cert_chain_info_tbor(
+    dev: &HsmDev,
+    rev: HsmApiRev,
+    slot_id: u8,
+) -> HsmResult<(u8, Vec<u8>)> {
     let mut cookie = None;
     let resp = dev
-        .exec_op_tbor(&TborGetCertChainInfoReq::new(slot_id), None, &mut cookie)
+        .exec_op_tbor(
+            rev,
+            &TborGetCertChainInfoReq::new(slot_id),
+            None,
+            &mut cookie,
+        )
         .map_err(HsmError::from)?;
     Ok((resp.num_certs, resp.thumbprint.to_vec()))
 }
 
 /// TBOR `GetCertificate` (opcode `0x1F`, out-of-session): returns the
 /// DER-encoded certificate at `(slot_id, cert_id)`.
-pub(super) fn get_cert_tbor(dev: &HsmDev, slot_id: u8, cert_id: u8) -> HsmResult<Vec<u8>> {
+pub(super) fn get_cert_tbor(
+    dev: &HsmDev,
+    rev: HsmApiRev,
+    slot_id: u8,
+    cert_id: u8,
+) -> HsmResult<Vec<u8>> {
     let mut cookie = None;
     let resp = dev
-        .exec_op_tbor(&TborGetCertReq::new(slot_id, cert_id), None, &mut cookie)
+        .exec_op_tbor(
+            rev,
+            &TborGetCertReq::new(slot_id, cert_id),
+            None,
+            &mut cookie,
+        )
         .map_err(HsmError::from)?;
     Ok(resp.certificate)
 }

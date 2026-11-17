@@ -575,6 +575,10 @@ impl HsmPartition {
     /// # Arguments
     ///
     /// * `api_rev` - The negotiated API revision.
+    /// * `root_spki_thumbprint` - Required SHA-384 hash of the trusted root's
+    ///   DER SubjectPublicKeyInfo, provisioned independently of this connection.
+    ///   The PID path must reach this root and contain a non-PID certificate
+    ///   with DICE TCB Info layer zero and EKU `1.3.6.1.4.1.311.102.1.50.1`.
     /// * `psk` - PSK credential: the role slot plus an optional
     ///   caller-supplied PSK (`None` selects the partition default PSK).
     /// * `suite` - Key-establishment suite of the handshake.
@@ -582,10 +586,18 @@ impl HsmPartition {
     pub fn open_session_ex(
         &self,
         api_rev: HsmApiRev,
+        root_spki_thumbprint: &[u8; 48],
         psk: HsmSessionPsk<'_>,
         suite: HsmSessionSuite,
     ) -> HsmResult<HsmSession> {
-        let result = ddi::open_session_ex(self, api_rev, psk.psk_id as u8, psk.psk, suite)?;
+        let result = ddi::open_session_ex(
+            self,
+            api_rev,
+            root_spki_thumbprint,
+            psk.psk_id as u8,
+            psk.psk,
+            suite,
+        )?;
         Ok(HsmSession::new_ex(api_rev, self.clone(), result))
     }
 

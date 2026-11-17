@@ -9,7 +9,13 @@ use super::common::*;
 fn decode_error_display_strings_are_distinct_and_descriptive() {
     let cases: &[(DecodeError, &str)] = &[
         (DecodeError::BufferTooShort, "buffer too short"),
-        (DecodeError::UnsupportedVersion(0x02), "0x02"),
+        (
+            DecodeError::ApiRevisionMismatch {
+                expected: (1, 1),
+                actual: (2, 0),
+            },
+            "2.0",
+        ),
         (DecodeError::MessageTruncated, "truncated"),
         (DecodeError::OffsetLengthOutOfBounds, "out of bounds"),
         (DecodeError::InvalidFixedLength, "invalid length"),

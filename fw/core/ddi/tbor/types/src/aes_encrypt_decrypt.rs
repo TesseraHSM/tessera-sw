@@ -176,7 +176,7 @@ mod tests {
         let masked = [0x11u8; MASKED_AES_KEY_MIN_LEN];
         let msg = [0x22u8; 64];
         let iv = [0x33u8; AES_IV_LEN];
-        let frame = TborAesEncryptDecryptReq::encode(&mut buf)
+        let frame = TborAesEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -203,7 +203,7 @@ mod tests {
         let mut buf = [0u8; 1536];
         let masked = [0x11u8; MASKED_AES_KEY_MIN_LEN];
         let msg = [0x22u8; 32];
-        let frame = TborAesEncryptDecryptReq::encode(&mut buf)
+        let frame = TborAesEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -229,7 +229,7 @@ mod tests {
         let mut buf = [0u8; 1536];
         let msg = [0x44u8; 48];
         let iv = [0x55u8; AES_IV_LEN];
-        let frame = TborAesEncryptDecryptResp::encode(&mut buf, 0, true)
+        let frame = TborAesEncryptDecryptResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .msg(&msg)
             .unwrap()
@@ -248,7 +248,7 @@ mod tests {
         let mut buf_v = [0u8; 1536];
         let msg = [0x44u8; 48];
         let iv = [0x55u8; AES_IV_LEN];
-        let frame_v = TborAesEncryptDecryptResp::encode(&mut buf_v, 0, true)
+        let frame_v = TborAesEncryptDecryptResp::encode(&mut buf_v, (1, 1), 0, true)
             .unwrap()
             .msg(&msg)
             .unwrap()
@@ -258,7 +258,7 @@ mod tests {
         let len_v = frame_v.as_bytes().len();
 
         let mut buf_r = [0u8; 1536];
-        let frame_r = TborAesEncryptDecryptResp::encode(&mut buf_r, 0, true)
+        let frame_r = TborAesEncryptDecryptResp::encode(&mut buf_r, (1, 1), 0, true)
             .unwrap()
             .msg_reserve(48)
             .unwrap()
@@ -283,7 +283,7 @@ mod tests {
         // The reserve setter enforces the same length bound as the value
         // setter: the IV slot holds at most 16 bytes.
         let mut buf = [0u8; 1536];
-        let err = TborAesEncryptDecryptResp::encode(&mut buf, 0, true)
+        let err = TborAesEncryptDecryptResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .msg_reserve(48)
             .unwrap()
