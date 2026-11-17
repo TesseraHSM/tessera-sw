@@ -706,10 +706,8 @@ pub fn create_test_security_domain_with_policy(
 pub fn create_test_security_domain_with_custom_policy(
     ctx: &TestCtx,
     session: &SessionHandshake,
-    configure: impl FnOnce(&mut PartPolicy),
+    configure: impl FnOnce(&mut TestPolicy),
 ) -> SecurityDomainFixture {
-    use zerocopy::IntoBytes;
-
     let info = ctx
         .tbor(&TborPartInfoReq::new())
         .expect("PartInfo should succeed");
@@ -720,35 +718,9 @@ pub fn create_test_security_domain_with_custom_policy(
         .expect("PartInfo PID public key should have the expected length");
     let pota = CaKey::generate();
     let sata = CaKey::generate();
-    let mut policy =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&known_good_part_policy(pota.raw_pub()))
-            .expect("known-good partition policy should decode");
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata.raw_pub(),
-    );
-    assert_eq!(
-        info.pid.len(),
-        policy.backup_part_id.len(),
-        "PartInfo PID should have the expected length",
-    );
-    policy.backup_part_id.copy_from_slice(&info.pid);
-    let mut backup_part_pub = [0u8; POLICY_MAX_KEY_LEN];
-    assert_eq!(
-        info.pid_pub_key.len(),
-        backup_part_pub.len(),
-        "PartInfo PID public key should have the expected length",
-    );
-    backup_part_pub.copy_from_slice(&info.pid_pub_key);
-    policy.backup_part_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        backup_part_pub,
-    );
+    let mut policy = backup_test_policy(&pota, &sata, &info.pid, &pid_pub);
     configure(&mut policy);
-    let mut policy_bytes = [0u8; PART_POLICY_LEN];
-    policy_bytes.copy_from_slice(policy.as_bytes());
+    let policy = policy.encode();
 
     let init = ctx
         .part_init(session, &mach_seed(), &policy)

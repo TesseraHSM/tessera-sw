@@ -207,7 +207,7 @@ fn dummy_request(session_id: u16) -> TborDarcTmkImportReq {
     TborDarcTmkImportReq {
         session_id,
         masked_kex_key: [0; MASKED_KEX_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         sealed_tmk: [0; SEALED_TMK_LEN],
         remote_cert_chain: vec![CertDescriptor {
             index: 0,
@@ -448,18 +448,18 @@ fn mutate(
         | Scenario::PolicyInfo
         | Scenario::RawPolicy
         | Scenario::PolicyAndSealed => {
-            let mut bytes = req.policy.as_bytes().to_vec();
+            let mut bytes = req.policy.clone();
             match input.scenario {
-                Scenario::RawPolicy => bytes.copy_from_slice(&input.bytes::<PART_POLICY_LEN>()),
+                Scenario::RawPolicy => bytes = input.bytes::<PART_POLICY_MAX_LEN>().to_vec(),
                 Scenario::PolicyInfo => {
-                    req.policy.info[usize::from(input.offset) % POLICY_INFO_LEN] ^=
+                    // This fixture's full-length info is the final CBOR field.
+                    let start = bytes.len() - POLICY_INFO_MAX_LEN;
+                    bytes[start + usize::from(input.offset) % POLICY_INFO_MAX_LEN] ^=
                         input.mask.max(1);
-                    return Expected::Reject(TborStatus::InvalidArg);
                 }
                 _ => flip(&mut bytes, input.offset, input.mask),
             }
-            req.policy =
-                PartPolicy::try_read_from_bytes(&bytes).expect("policy has byte-valid fields");
+            req.policy = bytes;
             if input.scenario == Scenario::PolicyAndSealed {
                 flip(&mut req.sealed_tmk, input.offset, input.control);
             }
@@ -742,8 +742,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             ctx.part_init(
                 session.handshake(),
                 &common::mach_seed(),
-                &common::known_good_part_policy(pota.raw_pub()),
-                &common::pota_thumbprint(),
+                &common::known_good_part_policy(pota.spki_thumbprint()),
             )
             .expect("initialize without finalizing");
             Some(TborStatus::InvalidArg)

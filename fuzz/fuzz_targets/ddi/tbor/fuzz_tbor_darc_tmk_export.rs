@@ -414,7 +414,7 @@ fn early_case(ctx: &TestCtx, input: &FuzzInput<'_>) -> bool {
         session_id: session.session_id(),
         masked_sender_key: [0; MASKED_KEX_KEY_LEN],
         masked_tmk: [0; MASKED_TMK_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         target_cert_chain: vec![CertDescriptor {
             index: 0,
             length: 1u16.into(),
@@ -441,8 +441,7 @@ fn early_case(ctx: &TestCtx, input: &FuzzInput<'_>) -> bool {
             ctx.part_init(
                 session.as_ref().expect("live session").handshake(),
                 &common::mach_seed(),
-                &common::known_good_part_policy(pota.raw_pub()),
-                &common::pota_thumbprint(),
+                &common::known_good_part_policy(pota.spki_thumbprint()),
             )
             .expect("initializing partition");
             TborStatus::InvalidArg
@@ -474,10 +473,8 @@ fn mutate_request(
     let mut expected = Expected::Success;
     match input.scenario {
         Scenario::Policy => {
-            let mut bytes = req.policy.as_bytes().to_vec();
-            let len = bytes.len();
-            bytes[usize::from(input.offset) % len] ^= input.mask;
-            req.policy = PartPolicy::try_read_from_bytes(&bytes).expect("policy image layout");
+            let len = req.policy.len();
+            req.policy[usize::from(input.offset) % len] ^= input.mask;
             if input.mask != 0 {
                 expected = Expected::Reject(TborStatus::InvalidArg);
             }
@@ -586,7 +583,7 @@ fn mutate_request(
             expected = Expected::Reject(TborStatus::UnsupportedKeyType);
         }
         Scenario::Combined => {
-            req.policy.info[0] ^= 1;
+            *req.policy.last_mut().expect("nonempty policy") ^= 1;
             match input.controls % 3 {
                 0 => {
                     let last = req.masked_tmk.last_mut().expect("TMK tag");
@@ -633,7 +630,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             session_id: input.session_id,
             masked_sender_key: [0; MASKED_KEX_KEY_LEN],
             masked_tmk: [0; MASKED_TMK_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
             target_cert_chain: vec![CertDescriptor {
                 index: 0,
                 length: 1u16.into(),
@@ -654,16 +651,13 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         ctx,
         session.handshake(),
         |policy| {
-            policy.version.minor = input.controls;
-            for (i, byte) in policy.info.iter_mut().enumerate() {
-                *byte = input.byte(i);
+            if let Some(info) = policy.info.as_mut() {
+                for (i, byte) in info.iter_mut().enumerate() {
+                    *byte = input.byte(i);
+                }
             }
             if input.scenario != Scenario::NoDataAnchor {
-                policy.data_pub_key = PolicyPubKey::new(
-                    PolicyKeyKind::Ecc384,
-                    POLICY_MAX_KEY_LEN as u16,
-                    data.raw_pub(),
-                );
+                policy.data_spki_thumbprint = Some(data.spki_thumbprint());
             }
         },
     );
