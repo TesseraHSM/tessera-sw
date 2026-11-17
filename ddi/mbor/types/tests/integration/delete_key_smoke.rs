@@ -32,7 +32,6 @@ fn create_aes_key(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) -> u16 {
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes128,
-        None,
         key_props,
     )
     .expect("aes_generate should succeed")

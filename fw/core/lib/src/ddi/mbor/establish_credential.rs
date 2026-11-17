@@ -21,6 +21,7 @@ use tsra_fw_ddi_mbor_types::establish_credential::DdiEstablishCredentialResp;
 use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
 use tsra_fw_ddi_mbor_types::open_session::DdiEncryptedEstablishCredential;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
+use tsra_fw_hsm_byte_order as byte_order;
 
 use super::*;
 
@@ -373,30 +374,20 @@ async fn verify_pota_signature<P: HsmPal>(
     signer_pub_key_raw: &HsmDmaBuf,
     signature_raw: &HsmDmaBuf,
 ) -> HsmResult<()> {
-    // `part_id_pub_key` returns the raw `x ‖ y` form (96 B) in natural
-    // big-endian; prepend the SEC1 `0x04` uncompressed-point tag to build the
-    // `0x04 ‖ x_be ‖ y_be` form the host (and X.509 leaf) signs over.
-    let id_pub_key_len = {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        if pk.len() != P384_PUB_RAW_LEN {
-            return Err(HsmError::EccInvalidKeyLength);
-        }
-        pk.len()
-    };
-    let id_uncompressed = pal.dma_alloc(io, id_pub_key_len + 1)?;
+    let id_uncompressed = pal.dma_alloc(io, P384_PUB_RAW_LEN + 4)?.split_at_mut(3).1;
     id_uncompressed[0] = 0x04;
-    {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        id_uncompressed[1..].copy_from_slice(&pk[..id_pub_key_len]);
-    }
+    crate::part_state::part_id_pub_key(pal, io, id_uncompressed.split_at_mut(1).1).await?;
 
+    // `ecc_verify` consumes the digest in operand order.
     let digest = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
-    pal.hash(io, HsmHashAlgo::Sha384, id_uncompressed, digest, true)
-        .await?;
-    // The POTA signature was produced over the natural big-endian digest; the
-    // LE-native `ecc_verify` consumes the PKA-LE digest, which is the full byte
-    // reversal of the big-endian digest, so reverse it here.
-    digest[..HsmHashAlgo::Sha384.digest_len()].reverse();
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        id_uncompressed,
+        digest,
+        HsmDigestForm::Operand,
+    )
+    .await?;
 
     let verify_result = pal.dma_alloc(io, 4)?;
 
@@ -464,11 +455,10 @@ async fn derive_credential_keys<P: HsmPal>(
         .await?;
     }
 
-    // The ECDH secret is returned PKA-native little-endian; reverse it to the
-    // host's big-endian (openssl) order so the firmware HKDF matches the host,
-    // which runs the same HKDF over its openssl-BE secret. Byte-order
-    // conversion lives in the handler now, not the PAL.
-    secret[..HsmEccCurve::P384.secret_len()].reverse();
+    // The ECDH secret is returned in operand order; convert it to the
+    // host's big-endian (openssl) order so the firmware HKDF matches the
+    // host, which runs the same HKDF over its openssl-BE secret.
+    byte_order::int_to_be(P::BYTE_ORDER, &mut secret[..HsmEccCurve::P384.secret_len()]);
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;

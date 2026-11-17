@@ -46,7 +46,6 @@ use tsra_fw_hsm_bulk::XtsParams;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -64,7 +63,7 @@ use super::gcm_bcp::xor;
 use super::ghash::Ghash;
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
-use crate::gdma::sgl_xfer_len;
+use crate::gdma::raw_sgl_len;
 use crate::vault::bulk_vault_key;
 
 type Block = [u8; AES_BLOCK_SIZE];
@@ -301,7 +300,7 @@ struct GcmIo<'p> {
 impl UnoHsmPal {
     /// Services a host bulk IO on the BCP and writes its CQE.
     pub(crate) async fn bulk_bcp_crypt(&self, io: &mut UnoHsmIo) -> HsmResult<()> {
-        let sqe = BulkSqe::parse(io.sqe())?;
+        let sqe = BulkSqe::parse(&io.bulk_sqe().0)?;
         let host = HostIo {
             op: match sqe.dir {
                 BulkDir::Encrypt => BcpOp::Encrypt,
@@ -309,13 +308,13 @@ impl UnoHsmPal {
             },
             session_id: sqe.session_id,
             len: sqe.src_len as usize,
-            src: sgl_desc(io.sqe(), SRC_SGL_DW)?,
-            dst: sgl_desc(io.sqe(), DST_SGL_DW)?,
+            src: sgl_desc(&io.bulk_sqe().0, SRC_SGL_DW)?,
+            dst: sgl_desc(&io.bulk_sqe().0, DST_SGL_DW)?,
             if_sel: crate::pal::pfn_to_axi_id(u8::from(io.pid())).ok_or(HsmError::InvalidArg)?,
         };
         if host.len != 0 {
-            sgl_xfer_len(&host.src, host.len)?;
-            sgl_xfer_len(&host.dst, host.len)?;
+            raw_sgl_len(&host.src, host.len)?;
+            raw_sgl_len(&host.dst, host.len)?;
         }
         // The PAL stamps the SQ id when it completes the IO.
         let mut cqe = BulkCqe::success(&sqe, 0);
@@ -399,7 +398,7 @@ impl UnoHsmPal {
             return Err(BcpError::CMD_ERROR);
         }
         cqe.fips_approved = true;
-        cqe.write(io.cqe())
+        cqe.write(&mut io.bulk_cqe().0)
     }
 
     /// A GCM IO's work before its engine command: the IV, and when the
@@ -480,7 +479,7 @@ impl UnoHsmPal {
         }
         cqe.iv = g.iv;
         cqe.fips_approved = g.approved;
-        cqe.write(io.cqe())
+        cqe.write(&mut io.bulk_cqe().0)
     }
 
     /// Best effort: wipes the plaintext the engine may have written for a

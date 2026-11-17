@@ -70,6 +70,7 @@ pub struct TborDarcKeyUnwrapReq {
 
     /// The masked TMK envelope from `DarcTmkImport`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`.
@@ -89,10 +90,10 @@ pub struct TborDarcKeyUnwrapResp {
     pub key_kind: u8,
 
     /// The recovered EC private key, masked under the scope's masking key.
-    #[tbor(max_len = 312)]
+    #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The recovered key's wire public key (`x ‖ y`, wire-LE).
+    /// The recovered key's wire public key (`x ‖ y`, device byte order).
     #[tbor(max_len = 136)]
     pub pub_key: Vec<u8>,
 }

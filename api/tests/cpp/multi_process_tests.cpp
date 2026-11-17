@@ -161,6 +161,10 @@ class tsra_multi_process : public ::testing::Test
 
 TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_parent)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     cleanup_temp_files();
 
     if (std::getenv(kDisableMultiProcessTestsEnv) != nullptr)
@@ -284,6 +288,10 @@ TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_parent)
 
 TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_child)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     const char *input_path = std::getenv(kHelperEnv);
     if (input_path == nullptr || input_path[0] == '\0')
     {

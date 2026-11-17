@@ -174,7 +174,7 @@ fn import_private(
             .map_err(|e| EngineError::wrap("unwrap RSA key into HSM", e))?;
             // On any export failure the key is not yet retained in EngineData
             // and does not delete on drop, so delete it here to avoid leaking it
-            // on the HSM until engine teardown.
+            // on the HSM.
             let pub_der = match imported.pub_key_der_vec() {
                 Ok(v) => v,
                 Err(e) => {
@@ -196,7 +196,7 @@ fn import_private(
     })?;
 
     // Persist the blob before handing the key out, deleting the imported key on
-    // a write failure so it does not linger until engine teardown.
+    // a write failure so it does not linger on the HSM.
     if let Some(path) = &params.masked_key_path
         && let Err(e) = crate::keygen::write_masked_blob(path, &masked)
     {

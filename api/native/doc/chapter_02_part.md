@@ -1,5 +1,20 @@
 # Partition API
 
+## Runtime connection configuration
+
+The same SDK library connects to native hardware and socket servers.
+With `TSRA_DDI_ARGS` unset, it uses the platform device driver. To connect
+to a socket server, set
+`TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"` before calling
+the SDK. `transport=ioctl` explicitly selects the platform driver.
+Unknown keys, duplicate keys, empty values, and unsupported transports are
+rejected; invalid configuration reports no devices and is logged without
+panicking across the C API.
+
+A socket server may front hardware or a simulator. Selecting it does not
+change credentials, provisioning requirements, or retry behavior.
+`TSRA_TEST_ARGS` belongs to test runners and is never read by the SDK.
+
 ## tsra_part_get_list
 
 Allocates and returns the device list.
@@ -100,6 +115,13 @@ The caller selects an API revision within the range reported by
 [`tsra_part_get_info`](#tsra_part_get_info). All subsequent operations on
 this partition handle (including sessions opened from it) will use the
 selected revision.
+
+Uno devices support revisions 1.0–1.1. Duo devices support revision 2.0
+only; at 2.0 only security-domain sessions
+([`tsra_sess_ex_open`](#tsra_sess_ex_open)) are available, and their
+in-session traffic is encrypted end to end between the SDK and the device.
+Legacy credential operations ([`tsra_part_init`](#tsra_part_init),
+[`tsra_sess_open`](#tsra_sess_open)) are not supported at 2.0.
 
 ```cpp
 tsra_status tsra_part_open(
@@ -212,6 +234,10 @@ typedef enum tsra_pota_endorsement_source {
 
 Initialize a partition with credentials
 
+Not supported at API revision 2.0 (it fails with an error status); provision
+the partition with [`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init)
+instead.
+
 ```cpp
 tsra_status tsra_part_init(
     tsra_handle handle,
@@ -322,6 +348,12 @@ For this property, `prop.val` points to a `tsra_bool` (`uint8_t`) and `prop.len`
 bytes. A size query with `prop.len = 0` returns `TSRA_STATUS_BUFFER_TOO_SMALL` and
 sets `prop.len` to `sizeof(tsra_bool)`. On success, the API writes the current value and
 sets `prop.len` to `sizeof(tsra_bool)`. No session is required.
+
+`TSRA_PART_PROP_ID_BACKUP_MASKING_KEY` and
+`TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` are populated only by
+[`tsra_part_init`](#tsra_part_init). On a partition provisioned with
+[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init), including every
+partition at API revision 2.0, they return `TSRA_STATUS_PROPERTY_NOT_PRESENT`.
 
 ```cpp
 tsra_status tsra_part_get_prop(

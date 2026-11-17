@@ -1,0 +1,114 @@
+From google/pkcs11test (https://github.com/google/pkcs11test), Apache-2.0,
+at the revision pinned in run.sh. The changed lines make the cipher,
+signature, MAC and key-pair fixtures, and the five read/write-session tests
+that generate a secret key (the latch test and Tookan A3 to A5b), log in
+before generating their keys, so they run against this token's
+CKF_LOGIN_REQUIRED profile; the context lines below are upstream's. See
+README.md for the rationale and for how to regenerate this patch against a
+newer revision.
+
+diff --git a/hmac.cc b/hmac.cc
+index 43f42c3..f232c3b 100644
+--- a/hmac.cc
++++ b/hmac.cc
+@@ -82,7 +82,7 @@ map<string, vector<TestData> > kTestVectors = {
+ 
+ }  // namespace
+ 
+-class HmacTest : public ReadOnlySessionTest,
++class HmacTest : public ROUserSessionTest,
+                  public ::testing::WithParamInterface<string> {
+  public:
+   HmacTest()
+diff --git a/keypair.cc b/keypair.cc
+index 4edf034..fc533fb 100644
+--- a/keypair.cc
++++ b/keypair.cc
+@@ -32,7 +32,7 @@ namespace test {
+ 
+ namespace {
+ 
+-class KeyPairTest : public ReadWriteSessionTest {
++class KeyPairTest : public RWUserSessionTest {
+  public:
+   KeyPairTest()
+     : public_attrs_({CKA_ENCRYPT, CKA_TOKEN}),
+diff --git a/object.cc b/object.cc
+index 0bbf481..7eee692 100644
+--- a/object.cc
++++ b/object.cc
+@@ -251,7 +251,7 @@ TEST_F(ReadWriteSessionTest, CreateObjectInvalid) {
+              g_fns->C_CreateObject(session_, attr_value, 1, &object));
+ }
+ 
+-TEST_F(ReadWriteSessionTest, SetLatchingAttribute) {
++TEST_F(RWUserSessionTest, SetLatchingAttribute) {
+   // Start with an non-sensitive key object.
+   ObjectAttributes attrs;
+   SecretKey key(session_, attrs);
+diff --git a/pkcs11test.h b/pkcs11test.h
+index 9fac97a..aadc166 100644
+--- a/pkcs11test.h
++++ b/pkcs11test.h
+@@ -313,7 +313,7 @@ class KeyPair {
+ };
+ 
+ // Test fixture for tests involving a secret key.
+-class SecretKeyTest : public ReadOnlySessionTest,
++class SecretKeyTest : public ROUserSessionTest,
+                       public ::testing::WithParamInterface<std::string> {
+  public:
+   static const int kNumBlocks = 4;
+diff --git a/sign.cc b/sign.cc
+index 98eb5d3..d26f7af 100644
+--- a/sign.cc
++++ b/sign.cc
+@@ -35,7 +35,7 @@ namespace test {
+ 
+ namespace {
+ 
+-class SignTest : public ReadOnlySessionTest,
++class SignTest : public ROUserSessionTest,
+                  public ::testing::WithParamInterface<string> {
+  public:
+   SignTest()
+diff --git a/tookan.cc b/tookan.cc
+index f88bf3f..06d1462 100644
+--- a/tookan.cc
++++ b/tookan.cc
+@@ -88,7 +88,7 @@ TEST_F(RWEitherSessionTest, TookanAttackA2) {
+   }
+ }
+ 
+-TEST_F(ReadWriteSessionTest, TookanAttackA3) {
++TEST_F(RWUserSessionTest, TookanAttackA3) {
+   // Create a sensitive key.
+   vector<CK_ATTRIBUTE_TYPE> key_attrs = {CKA_SENSITIVE};
+   SecretKey key(session_, key_attrs);
+@@ -99,7 +99,7 @@ TEST_F(ReadWriteSessionTest, TookanAttackA3) {
+   EXPECT_CKR(CKR_ATTRIBUTE_SENSITIVE, rv);
+ }
+ 
+-TEST_F(ReadWriteSessionTest, TookanAttackA4) {
++TEST_F(RWUserSessionTest, TookanAttackA4) {
+   // Create a non-extractable key.
+   ObjectAttributes key_attrs;
+   CK_ATTRIBUTE extractable_attr = {CKA_EXTRACTABLE, (CK_VOID_PTR)&g_ck_false, sizeof(CK_BBOOL)};
+@@ -114,7 +114,7 @@ TEST_F(ReadWriteSessionTest, TookanAttackA4) {
+   EXPECT_CKR(CKR_ATTRIBUTE_SENSITIVE, rv);
+ }
+ 
+-TEST_F(ReadWriteSessionTest, TookanAttackA5a) {
++TEST_F(RWUserSessionTest, TookanAttackA5a) {
+   // Create a sensitive key.
+   vector<CK_ATTRIBUTE_TYPE> key_attrs = {CKA_SENSITIVE};
+   SecretKey key(session_, key_attrs);
+@@ -131,7 +131,7 @@ TEST_F(ReadWriteSessionTest, TookanAttackA5a) {
+   EXPECT_EQ(CK_TRUE, (CK_BBOOL)data[0]);
+ }
+ 
+-TEST_F(ReadWriteSessionTest, TookanAttackA5b) {
++TEST_F(RWUserSessionTest, TookanAttackA5b) {
+   // Create a non-extractable key.
+   ObjectAttributes key_attrs;
+   CK_ATTRIBUTE extractable_attr = {CKA_EXTRACTABLE, (CK_VOID_PTR)&g_ck_false, sizeof(CK_BBOOL)};

@@ -25,18 +25,15 @@ encoding, the device round trip and response decoding; not the host checks).
 ## Build
 
 ```sh
-# Against the device driver
 cargo build --release -p tsra_ddi_perf
-
-# Against the in-process emulator
-cargo build --release -p tsra_ddi_perf --features emu
 ```
 
 The binary is `target/release/tsra_ddi_perf`. With `cargo run`, pass the
-tool's arguments after `--`, e.g.
-`cargo run --release -p tsra_ddi_perf --features emu -- list`. Both builds
-write the same binary, so rebuild without `--features emu` before measuring
-a device.
+tool's arguments after `--`, e.g. `cargo run --release -p tsra_ddi_perf -- list`.
+It uses the device driver. To run against the in-process emulator (or the
+server named by `sock=` in `TSRA_TEST_ARGS`), build with `--features test-args`
+and set `TSRA_TEST_ARGS=transport=sock`; without the feature `TSRA_TEST_ARGS`
+is ignored.
 
 Every run first prints the device it uses, even with `--quiet`, e.g.
 `device: /dev/tsra0 (firmware <version>, driver <version>)`; an emulator

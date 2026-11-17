@@ -51,7 +51,6 @@ fn test_kbkdf_aes_derive_smoke() {
                     label,
                     context,
                     DdiKeyType::Aes256,
-                    None,
                     key_props,
                     None,
                 )
@@ -133,7 +132,6 @@ fn kbkdf_hmac_derive(
         Some(MborByteArray::from_slice("label".as_bytes()).unwrap()),
         Some(MborByteArray::from_slice("context".as_bytes()).unwrap()),
         key_type,
-        None,
         key_props,
         key_length,
     )

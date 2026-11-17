@@ -62,13 +62,13 @@ pub struct TborDarcKeyWrapReq<'a> {
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The local masked EC private key to export, up to
     /// [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (312 B).  Unmasked on-device;
     /// its masked-key kind must be one of `Ecc{256,384,521}Private`.
-    #[tbor(buffer, max_len = 312)]
+    #[tbor(align = 4, buffer, max_len = 312)]
     pub masked_key: &'a [u8],
 }
 

@@ -271,10 +271,10 @@ impl UnoHsmPal {
     /// Zero copy: a single engine submission reads `src[iv_len..]` and
     /// writes `dst[..len]` directly. The IV is staged in a 16-byte DMA block
     /// so the engine never reads it from a region that may be overwritten.
-    /// The engine accepts any length for CTR, but CFB and OFB require whole
-    /// blocks: a partial final CFB/OFB block (< 16 bytes) is run as a second
-    /// submission through a zero-padded 16-byte DMA block, chained from the
-    /// first. That tail is the only data copied.
+    /// The engine requires whole blocks for CTR, CFB and OFB: a partial final
+    /// block (< 16 bytes) is run as a second submission through a
+    /// zero-padded 16-byte DMA block, chained from the first. That tail is
+    /// the only data copied.
     ///
     /// The IV out is derived in software from blocks captured on the stack
     /// rather than relying on hardware IV write-back, which is only defined
@@ -296,7 +296,7 @@ impl UnoHsmPal {
         let full = data_len - data_len % AES_BLOCK_SIZE;
         // Bytes the engine cannot take in the main submission.
         let tail = match mode {
-            HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
+            HsmAesMode::Ctr | HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
             _ => 0,
         };
         let main = data_len - tail;
@@ -341,10 +341,14 @@ impl UnoHsmPal {
                     .await?;
             }
 
-            // Chaining value after the whole blocks: CFB uses the last
-            // ciphertext block, OFB the last keystream block.
+            // Chaining value after the whole blocks: CTR uses the advanced
+            // counter, CFB the last ciphertext block, OFB the last keystream
+            // block.
             let chain = match (mode, op) {
                 _ if full == 0 => iv_in,
+                (HsmAesMode::Ctr, _) => u128::from_be_bytes(iv_in)
+                    .wrapping_add((full / AES_BLOCK_SIZE) as u128)
+                    .to_be_bytes(),
                 (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(dst, full - AES_BLOCK_SIZE),
                 (HsmAesMode::Ofb, _) => {
                     xor_block(block_at(dst, full - AES_BLOCK_SIZE), last_full_in)
@@ -651,34 +655,48 @@ impl HsmAesGcm for UnoHsmPal {
             .await
     }
 
-    /// Not yet supported on Uno.
-    async fn gcm_encrypt_sgl(
+    /// AES-GCM encrypt host-to-host over out-of-band items.
+    ///
+    /// Resolves the `src`/`dst` OOB item indices to their SGL descriptors
+    /// and delegates to [`UnoHsmPal::gcm_encrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
+    async fn gcm_encrypt_oob(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
-        _tag: &mut HsmDmaBuf,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        src: usize,
+        dst: usize,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.gcm_encrypt_sgl_impl(io, key, iv, aad_len, len, &src, &dst, tag)
+            .await
     }
 
-    /// Not yet supported on Uno.
-    async fn gcm_decrypt_sgl(
+    /// AES-GCM decrypt host-to-host over out-of-band items.
+    ///
+    /// Resolves the `src`/`dst` OOB item indices to their SGL descriptors
+    /// and delegates to [`UnoHsmPal::gcm_decrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
+    async fn gcm_decrypt_oob(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _tag: &HsmDmaBuf,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        tag: &HsmDmaBuf,
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.gcm_decrypt_sgl_impl(io, key, iv, aad_len, len, tag, &src, &dst)
+            .await
     }
 }
 
@@ -853,23 +871,26 @@ impl HsmAesKw for UnoHsmPal {
     }
 }
 
-// AES-XTS is not yet supported on Uno.
+// AES-XTS runs on the CP AES core in both build configs; see [`super::xts`].
 impl HsmAesXts for UnoHsmPal {
-    async fn aes_xts_gen_key(&self, _io: &UnoHsmIo, _key: &mut [u8]) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+    async fn aes_xts_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
+        self.xts_gen_key_impl(io, key)
     }
 
-    async fn aes_xts_enc_dec_sgl(
+    async fn aes_xts_enc_dec_oob(
         &self,
-        _io: &UnoHsmIo,
-        _op: HsmAesOp,
-        _key: &HsmDmaBuf,
-        _tweak: &HsmDmaBuf,
-        _len: usize,
-        _dul: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        tweak: &HsmDmaBuf,
+        len: usize,
+        dul: usize,
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.xts_enc_dec_sgl_impl(io, aes_op(op), key, tweak, len, dul, &src, &dst)
+            .await
     }
 }

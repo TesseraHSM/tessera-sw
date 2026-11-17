@@ -27,13 +27,16 @@
 use core::cmp::Ordering;
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
 use tsra_fw_uno_drivers_upka::hash_size;
 use tsra_fw_uno_drivers_upka::hsm_point_size;
@@ -336,7 +339,7 @@ fn embedded_public_key<'a>(key: &DecodedEcKey<'a>) -> HsmResult<&'a [u8]> {
 /// wire coordinate must be zero.
 fn is_wire_point(curve: HsmEccCurve, xy: &[u8], wire_pub: &[u8]) -> bool {
     let raw = curve.priv_key_len();
-    let coord = curve.wire_coord_len();
+    let coord = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
     xy.len() == 2 * raw
         && wire_pub.len() == 2 * coord
         && xy
@@ -369,7 +372,8 @@ impl UnoHsmPal {
         embedded: &[u8],
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-            let pub_key = tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len())?;
+            let pub_key =
+                tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len(UnoHsmPal::BYTE_ORDER))?;
             self.ecc_priv_pub_key(io, priv_key, Some(&mut *pub_key))
                 .await?;
             if !is_wire_point(curve, embedded, pub_key) {
@@ -652,7 +656,7 @@ impl HsmEcc for UnoHsmPal {
         self.alloc_scoped_async(io, async |scope| {
             // The digest arrives PKA-native little-endian: it is a full BE->LE
             // byte reversal of the big-endian hash, which is what
-            // `hash(.., big_endian = false)` produces. pub_key and signature
+            // `hash(.., HsmDigestForm::Operand)` produces. pub_key and signature
             // likewise arrive LE via the host DDI serde. No byte-order
             // conversion is done below the PAL.
 
@@ -793,7 +797,7 @@ impl HsmEcc for UnoHsmPal {
         // The key must carry a well-formed public key, whatever `pct` selects.
         let embedded = embedded_public_key(&key)?;
         let (curve, scalar) = (key.curve, key.scalar);
-        let vault_len = curve.wire_coord_len();
+        let vault_len = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
         // SEC1 / RFC 5915 encodes the scalar as a fixed-width octet string for
         // the curve (P-256 32, P-384 48, P-521 66 bytes). Require exactly that
         // raw length — reject shorter (non-canonical) or overlong scalars,
@@ -837,7 +841,7 @@ impl HsmEcc for UnoHsmPal {
         if d.len() != curve.priv_key_len() {
             return Err(HsmError::InvalidArg);
         }
-        let vault_len = curve.wire_coord_len();
+        let vault_len = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
         // Require the scalar in `[1, n-1]`; reject `d == 0` or `d >= n`
         // (the curve order) in constant time, mirroring the DER path.
         if !ct_in_range(d, curve_order_be(curve)) {
@@ -866,7 +870,7 @@ impl HsmEcc for UnoHsmPal {
         // The vault stores the scalar little-endian (PKA-native),
         // zero-padded to `wire_coord_len`. Recover the canonical
         // big-endian COSE `d` by reversing the low `priv_key_len` bytes.
-        if vault.len() != curve.wire_coord_len() {
+        if vault.len() != curve.wire_coord_len(UnoHsmPal::BYTE_ORDER) {
             return Err(HsmError::InvalidArg);
         }
         let field = curve.priv_key_len();
@@ -921,7 +925,7 @@ impl HsmEcc for UnoHsmPal {
         if !ct_in_range_le(&priv_key[..raw_len], curve_order_be(curve)) {
             return Err(HsmError::InvalidArg);
         }
-        let wire_pub_len = curve.wire_pub_key_len();
+        let wire_pub_len = curve.wire_pub_key_len(UnoHsmPal::BYTE_ORDER);
         let Some(pub_out) = pub_out else {
             return Ok(wire_pub_len);
         };
@@ -929,7 +933,7 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let pka_curve = map_ecc_curve(curve)?;
-        let field = curve.wire_coord_len();
+        let field = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
         let (bx, by) = curve_base_point_le(pka_curve);
         let mont = mont_operand_size(pka_curve);
 
@@ -959,6 +963,25 @@ impl HsmEcc for UnoHsmPal {
                 })
                 .await?;
             Ok(wire_pub_len)
+        })
+        .await
+    }
+
+    async fn ecc_vault_pub_key(
+        &self,
+        io: &UnoHsmIo,
+        key_id: HsmKeyId,
+        pub_out: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            // Snapshot vault storage before the engine operation can yield.
+            let key = self.vault_key(io, key_id)?;
+            let private = scope.dma_alloc(key.len())?;
+            private.copy_from_slice(key);
+            self.ecc_priv_pub_key(io, private, Some(pub_out)).await
         })
         .await
     }
@@ -1013,8 +1036,10 @@ impl HsmEcc for UnoHsmPal {
         // `wire_priv_key_len_is_unambiguous` in the traits crate pins so a
         // colliding variant fails CI rather than mis-dispatching here.
         map_ecc_curve(curve)?;
-        let wire_pub_len = curve.wire_pub_key_len();
-        if priv_key.len() != curve.wire_priv_key_len() || pub_key.len() < wire_pub_len {
+        let wire_pub_len = curve.wire_pub_key_len(UnoHsmPal::BYTE_ORDER);
+        if priv_key.len() != curve.wire_priv_key_len(UnoHsmPal::BYTE_ORDER)
+            || pub_key.len() < wire_pub_len
+        {
             return Err(HsmError::InvalidArg);
         }
         // Pass an exact-sized sub-view: the PKA writes a fixed number of

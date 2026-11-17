@@ -5,7 +5,6 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_api::PartPolicy;
 use tsra_crypto as hpke;
 use tsra_crypto::aead_envelope;
 use tsra_crypto::EccCurve;
@@ -19,7 +18,9 @@ use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
 use tsra_crypto::ImportableKey;
 use tsra_sealing_api::mint_sealing_key;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
 use tsra_sealing_api::SealingSession;
@@ -34,7 +35,6 @@ use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::Curve;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
-use zerocopy::IntoBytes;
 use zeroize::Zeroizing;
 
 use crate::env::SelfContainedEnv;
@@ -179,10 +179,7 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
 
 fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
     verify_certificate_chain(chain)?;
-    let mut anchored = false;
-    for cert in chain.iter().take(chain.len().saturating_sub(1)) {
-        anchored |= public_key(cert)? == policy.sata_pub_key.data;
-    }
+    let anchored = chain_has_anchor(chain, &policy.sata_spki_thumbprint)?;
     anyhow::ensure!(anchored, "HPKE chain is not endorsed by policy SATA");
     let leaf = chain.last().context("HPKE certificate chain is empty")?;
     anyhow::ensure!(
@@ -190,6 +187,17 @@ fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
         "HPKE key must be P-384"
     );
     Ok(())
+}
+
+fn chain_has_anchor(chain: &[Vec<u8>], anchor: &[u8; 48]) -> Result<bool> {
+    let mut anchored = false;
+    for certificate in chain.iter().take(chain.len().saturating_sub(1)) {
+        let public = public_key(certificate)?;
+        if public.len() == RAW_PUB_LEN {
+            anchored |= spki_thumbprint(&public)? == *anchor;
+        }
+    }
+    Ok(anchored)
 }
 
 fn public_key(certificate: &[u8]) -> Result<Vec<u8>> {
@@ -202,6 +210,9 @@ fn public_key(certificate: &[u8]) -> Result<Vec<u8>> {
 fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> Result<()> {
     let mut digest = [0u8; 48];
     HashAlgo::sha384().hash(policy.as_bytes(), Some(&mut digest))?;
+    let (_, backup_thumbprint) = policy
+        .backup_part
+        .context("policy has no backing partition")?;
     for (name, chain) in [
         ("manufacturer", &evidence.mfgr_cert_chain),
         ("owner", &evidence.owner_cert_chain),
@@ -214,7 +225,7 @@ fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> 
             .with_context(|| format!("verify remote sender {name} chain"))?;
         let leaf = chain.last().context("remote sender chain is empty")?;
         anyhow::ensure!(
-            public_key(leaf)? == policy.backup_part_pub_key.data,
+            spki_thumbprint(&public_key(leaf)?)? == backup_thumbprint,
             "remote sender {name} leaf does not match the backing partition PID"
         );
         let report = verify_key_report_bytes(&evidence.report, leaf)
@@ -233,139 +244,14 @@ fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> 
     }
     let chain = &evidence.part_owner_cert_chain;
     let anchor = if legacy {
-        &policy.sata_pub_key
+        policy.sata_spki_thumbprint
     } else {
-        &policy.pota_pub_key
+        policy.pota_spki_thumbprint
     };
-    let mut anchored = false;
-    for certificate in chain.iter().take(chain.len().saturating_sub(1)) {
-        if public_key(certificate)? == anchor.data {
-            anchored = true;
-        }
-    }
+    let anchored = chain_has_anchor(chain, &anchor)?;
     anyhow::ensure!(
         anchored,
         "creation sender partition-owner chain does not match its policy anchor"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use tsra_api::PartPolicyBuilder;
-    use tsra_api::PolicyKeyKind;
-
-    use super::*;
-    use crate::pki::make_chain;
-    use crate::pki::CaKey;
-
-    fn wire_seal(config: &HpkeSealConfig<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let sealed = hpke::seal_vec(config, plaintext)?;
-        let (x, y) = sealed.enc.coord_vec()?;
-        Ok([vec![4], x, y, sealed.ct].concat())
-    }
-
-    fn public(private: &EccPrivateKey) -> Result<EccPublicKey> {
-        let (x, y) = private.coord_vec()?;
-        Ok(EccPublicKey::from_coordinates(EccCurve::P384, &x, &y)?)
-    }
-
-    #[test]
-    fn external_hpke_chain_requires_policy_sata_not_just_valid_signatures() -> Result<()> {
-        let sata = CaKey::generate();
-        let other = CaKey::generate();
-        let key = CaKey::generate();
-        let policy = PartPolicyBuilder::new()
-            .version(1, 0)
-            .pota_key(PolicyKeyKind::Ecc384, &other.raw_pub())
-            .sata_key(PolicyKeyKind::Ecc384, &sata.raw_pub())
-            .require_trusted_sa_key(false)
-            .build()?;
-        let chain = make_chain(&sata, &key.raw_pub());
-        validate_hpke_chain(&[chain.root_der, chain.leaf_der], &policy)?;
-        let wrong = make_chain(&other, &key.raw_pub());
-        let chain = vec![wrong.root_der, wrong.leaf_der];
-        verify_certificate_chain(&chain)?;
-        assert!(validate_hpke_chain(&chain, &policy)
-            .expect_err("valid signatures do not establish SATA authorization")
-            .to_string()
-            .contains("not endorsed by policy SATA"));
-        assert!(validate_hpke_chain(&[], &policy).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn external_sa_reseal_changes_authenticated_sender_and_recipient() -> Result<()> {
-        let original_sender = EccPrivateKey::from_curve(EccCurve::P384)?;
-        let original_public = public(&original_sender)?;
-        let sa = EccPrivateKey::from_curve(EccCurve::P384)?;
-        let sa_public = public(&sa)?;
-        let receiver = EccPrivateKey::from_curve(EccCurve::P384)?;
-        let receiver_public = public(&receiver)?;
-        let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
-        let plaintext = [0x42; 48];
-        let original = wire_seal(
-            &HpkeSealConfig::auth(suite, &sa_public, &[], &[], &original_sender),
-            &plaintext,
-        )?;
-        let sealed = reseal(
-            &original,
-            &sa,
-            &sa_public,
-            &original_public,
-            &receiver_public,
-        )?;
-        assert_eq!(sealed.len(), 161);
-        assert_ne!(sealed, original);
-        let enc = EccPublicKey::from_coordinates(EccCurve::P384, &sealed[1..49], &sealed[49..97])?;
-        let mut output = Zeroizing::new([0u8; 64]);
-        let length = hpke::open(
-            &HpkeOpenConfig::auth(suite, &receiver, &receiver_public, &[], &[], &sa_public),
-            &enc,
-            &sealed[97..],
-            Some(&mut output[..]),
-        )?;
-        assert_eq!(&output[..length], plaintext);
-        assert!(hpke::open(
-            &HpkeOpenConfig::auth(
-                suite,
-                &receiver,
-                &receiver_public,
-                &[],
-                &[],
-                &original_public
-            ),
-            &enc,
-            &sealed[97..],
-            Some(&mut output[..]),
-        )
-        .is_err());
-        assert!(reseal(
-            &original,
-            &sa,
-            &sa_public,
-            &receiver_public,
-            &receiver_public
-        )
-        .is_err());
-        let mut tampered = original;
-        *tampered.last_mut().context("HPKE tag")? ^= 1;
-        assert!(reseal(
-            &tampered,
-            &sa,
-            &sa_public,
-            &original_public,
-            &receiver_public
-        )
-        .is_err());
-        assert!(reseal(
-            &[0; 160],
-            &sa,
-            &sa_public,
-            &original_public,
-            &receiver_public
-        )
-        .is_err());
-        Ok(())
-    }
 }

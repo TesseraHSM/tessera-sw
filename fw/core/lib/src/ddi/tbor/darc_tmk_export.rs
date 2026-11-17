@@ -12,7 +12,7 @@
 //!
 //! It is `SdCreateRemoteBackup`'s **seal front-end** narrowed to a single
 //! DATA-anchored certificate chain (the export-side mirror of the
-//! `POTAPubKey`-anchored sender chain `DarcTmkImport` verifies).
+//! `pota_spki_thumbprint`-anchored sender chain `DarcTmkImport` verifies).
 //!
 //! Flow:
 //!
@@ -20,7 +20,7 @@
 //!    `Initialized` partition whose security domain is initialized.
 //! 2. Bind the caller-supplied [`PartPolicy`] to the partition's fixed
 //!    `policy_hash`, then validate `target_cert_chain` anchored to the
-//!    policy `DATAPubKey`, recovering the terminal certificate's public
+//!    policy `data_spki_thumbprint`, recovering the terminal certificate's public
 //!    key as `RcvrPub`.
 //! 3. Unmask `masked_sender_key` → `SndrPriv` (must be a
 //!    [`DarcKex`](HsmVaultKeyKind::DarcKex) key) and derive `SndrPub`.
@@ -43,17 +43,15 @@ use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_crypto_x509_chain::validate_chain;
+use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkExportResp;
 use tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
-use tsra_fw_hsm_oob::copy_oob;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -85,28 +83,25 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 ///
 /// The chain travels out of band; it must carry `1..=MAX_CERTS`
 /// certificates and be cryptographically anchored to the policy
-/// `DATAPubKey`.  On success `rcvr_pub` is the SEC1-uncompressed
+/// `data_spki_thumbprint`.  On success `rcvr_pub` is the SEC1-uncompressed
 /// (`0x04 ‖ X ‖ Y`) receiver public key.
 async fn recover_target_pub<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    oob: &OobPtr,
     req_buf: &HsmDmaBuf,
     rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // The re-supplied policy must match the one bound at `PartInit`; only
-    // then is its `DATAPubKey` a trustworthy anchor.
+    // then is its `data_spki_thumbprint` a trustworthy anchor.
     let req = TborDarcTmkExportReq::decode(req_buf)?;
     let policy = req.policy();
     verify_policy_hash(pal, io, alloc, policy).await?;
 
     let part_policy = super::policy::from_bytes(policy)?;
-    let data = &part_policy.data_pub_key;
-    if data.kind() != PolicyKeyKind::Ecc384 || data.len() != POLICY_MAX_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let anchor = &data.data[..POLICY_MAX_KEY_LEN];
+    let anchor = part_policy
+        .data_spki_thumbprint
+        .ok_or(HsmError::InvalidArg)?;
 
     let cert_descriptors = req.target_cert_chain();
     if cert_descriptors.is_empty() || cert_descriptors.len() > MAX_CERTS {
@@ -122,8 +117,8 @@ async fn recover_target_pub<P: HsmPal>(
         alloc,
         cert_descriptors,
         Some(anchor),
-        &mut rcvr_pub[1..1 + POLICY_MAX_KEY_LEN],
-        async |index, buf| copy_oob(pal, io, oob, index, buf).await,
+        &mut rcvr_pub[1..1 + P384_POINT_LEN],
+        async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
     rcvr_pub[0] = SEC1_UNCOMPRESSED;
@@ -140,7 +135,6 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Both ids are `Copy`, so they outlive the view.
@@ -171,7 +165,6 @@ pub(crate) async fn handle<P: HsmPal>(
 
     // The target certificate chain is mandatory side-band data carried in
     // the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the fixed-size output seal in the IO scope so it survives
     // the crypto scratch allocator's reset.
@@ -182,7 +175,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // ── Phase 1: policy binding + DATA-anchored target chain ──
         let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-        recover_target_pub(pal, io, alloc, &oob, cmd_buf.request(), pk_r).await?;
+        recover_target_pub(pal, io, alloc, cmd_buf.request(), pk_r).await?;
 
         // ── Phase 2: recover SndrPriv + TMK, then HPKE-Auth seal the TMK
         // to RcvrPub.  The masked inputs are copied into crypto scratch so
@@ -232,14 +225,13 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 // Sender public key (`SndrPub`) in SEC1 BE, derived
                 // on-device from the recovered private key.  The PAL emits
-                // wire-LE `X ‖ Y`; reversing each coordinate in place yields
-                // SEC1 `0x04 ‖ X_be ‖ Y_be`.
+                // operand-order `X ‖ Y`; converting each coordinate in place
+                // yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
                 let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
                 pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
                     .await?;
                 pk_s[0] = SEC1_UNCOMPRESSED;
-                pk_s[1..1 + coord].reverse();
-                pk_s[1 + coord..1 + 2 * coord].reverse();
+                byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_s[1..])?;
 
                 // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
                 let cfg = HpkeSealConfig::auth(

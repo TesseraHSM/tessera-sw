@@ -70,17 +70,30 @@ const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSh
 /// Authenticated: param+masking+mac_tx+mac_rx).  The `suite_id` byte
 /// lets `session_open_finish` recover the negotiated cryptographic
 /// suite without trusting any client-side state.
-pub(super) const PENDING_BLOB_LEN: usize = DEFAULT_HPKE_SUITE.nh()
+pub(super) const PENDING_BASE_LEN: usize = DEFAULT_HPKE_SUITE.nh()
     + DEFAULT_HPKE_SUITE.npk()
     + DEFAULT_HPKE_SUITE.npk()
     + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN
     + 1
     + 1;
 
-/// Compile-time guard: the Pending blob must fit inside the PAL
+/// Length of the Pending blob as stored on platform `P`.
+///
+/// With secure sessions (Duo) it ends with the transport keys `h2m ‖ m2h`
+/// (see [`HsmSessionManager::session_create_pending`]), so
+/// `SessionOpenFinish` can already travel on the secure channel.
+pub(super) const fn pending_blob_len<P: HsmPalFeatures>() -> usize {
+    if P::IO_PROTOCOL.secure_session() {
+        PENDING_BASE_LEN + 2 * SESSION_TRANSPORT_KEY_LEN
+    } else {
+        PENDING_BASE_LEN
+    }
+}
+
+/// Compile-time guard: the largest Pending blob must fit inside the PAL
 /// budget.  If the HPKE suite sizes grow past the budget, this
 /// assertion fires at build time rather than at runtime.
-const _: () = assert!(PENDING_BLOB_LEN <= SESSION_PENDING_BLOB_MAX);
+const _: () = assert!(PENDING_BASE_LEN + 2 * SESSION_TRANSPORT_KEY_LEN <= SESSION_PENDING_BLOB_MAX);
 
 /// Handle a TBOR `SessionOpenInit` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
@@ -105,8 +118,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let psk = load_psk(pal, io, alloc, psk_id)?;
         let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
         let key_id = crate::part_state::part_id_key_id(pal, io)?;
+        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc).await?;
         let sk_hsm = pal.vault_key(io, key_id)?;
-        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
 
         // ── HPKE info = SESSION_HPKE_INFO ‖ psk_id ‖ session_type
         //                                   ‖ suite_id
@@ -220,28 +233,18 @@ fn load_psk<'a, P: HsmPal>(
 /// SEC1-uncompressed encoding (`0x04 ‖ X_be ‖ Y_be`) of the partition
 /// identity public key, in a freshly-allocated scoped buffer.
 ///
-/// The PAL stores the partition identity public key as raw
-/// `X_be ‖ Y_be` (matching OpenSSL's natural EC point representation
-/// and the form used for cert generation); concatenating with the
-/// SEC1 `0x04` prefix yields the RFC 9180 §7.1.1 wire encoding
-/// directly.
-///
-/// Using the PAL's queried coordinate length (rather than a hard-coded
-/// suite-derived constant) future-proofs against PAL impls that return
-/// a different size; an HPKE-suite mismatch would surface at
-/// `send_export` time, not here.
-fn load_pk_hsm_sec1<'a, P: HsmPal>(
+/// The public point is derived from the vault-held identity private key.
+async fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
-    let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
+    let pk_hsm = alloc
+        .dma_alloc(HsmEccCurve::P384.pub_key_len() + 4)?
+        .split_at_mut(3)
+        .1;
     pk_hsm[0] = 0x04;
-    {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        pk_hsm[1..1 + xy_len].copy_from_slice(&pk[..xy_len]);
-    }
+    crate::part_state::part_id_pub_key(pal, io, pk_hsm.split_at_mut(1).1).await?;
     Ok(pk_hsm)
 }
 
@@ -315,7 +318,8 @@ async fn hpke_auth_psk_export<'a, P: HsmPal>(
 }
 
 /// Pack `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`
-/// into a Pending blob and hand it to `session_create_pending`.
+/// (plus `h2m ‖ m2h` with secure sessions) into a Pending blob and hand it
+/// to `session_create_pending`.
 #[allow(clippy::too_many_arguments)]
 async fn create_pending_slot<P: HsmPal>(
     pal: &P,
@@ -332,7 +336,7 @@ async fn create_pending_slot<P: HsmPal>(
 ) -> HsmResult<HsmSessId> {
     let nh = hpke_suite.nh();
     let npk = hpke_suite.npk();
-    let pending_blob = alloc.dma_alloc(PENDING_BLOB_LEN)?;
+    let pending_blob = alloc.dma_alloc(pending_blob_len::<P>())?;
     let mut off = 0;
     pending_blob[off..off + nh].copy_from_slice(exported);
     off += nh;
@@ -344,6 +348,28 @@ async fn create_pending_slot<P: HsmPal>(
     off += auth_binding.len();
     pending_blob[off] = session_type.to_u8();
     pending_blob[off + 1] = suite.to_u8();
+    if P::IO_PROTOCOL.secure_session() {
+        let keys = &mut pending_blob[PENDING_BASE_LEN..];
+        let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
+        super::session_open_finish::hkdf_expand_labeled_into(
+            pal,
+            io,
+            alloc,
+            exported,
+            SESSION_TRANSPORT_H2M_LABEL,
+            h2m,
+        )
+        .await?;
+        super::session_open_finish::hkdf_expand_labeled_into(
+            pal,
+            io,
+            alloc,
+            exported,
+            SESSION_TRANSPORT_M2H_LABEL,
+            m2h,
+        )
+        .await?;
+    }
     pal.session_create_pending(io, role, pending_blob).await
 }
 

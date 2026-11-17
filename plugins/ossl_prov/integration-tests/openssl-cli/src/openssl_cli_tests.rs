@@ -12,8 +12,11 @@
 
 #![cfg(feature = "integration")]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_DDI_ARGS`.
 use std::path::PathBuf;
 
+use ddi_sock_server as _;
 use serial_test::serial;
 
 const CLEANUP: &str = "true";

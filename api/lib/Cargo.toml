@@ -31,12 +31,8 @@ x509.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 zeroize.workspace = true
 
-[features]
-default = []
-emu = ["tsra_ddi/emu"]
-sock = ["tsra_ddi/sock"]
-# Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
-trace-io = ["tsra_ddi/trace-io"]
+[dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 
 [lints]
 workspace = true

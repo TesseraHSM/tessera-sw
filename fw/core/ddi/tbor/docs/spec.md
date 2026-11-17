@@ -2,7 +2,7 @@
 
 ## Version
 
-0.4 (wire version `0x01`)
+0.5 (wire version `0x01`)
 
 ## Table of Contents
 
@@ -421,7 +421,11 @@ A receiver MUST verify that `Offset + Length` does not exceed the actual size of
 
 Data in the variable-length data section is **not** required to be aligned to any particular boundary by default. Implementations that operate on architectures requiring aligned memory access MUST perform appropriate byte-level reads (e.g., `memcpy` into an aligned buffer) rather than assuming natural alignment of referenced data.
 
-To support aligned access, a sender MAY insert a `padding` TOC entry (Entry Type `9`) immediately before a data-bearing TOC entry. The padding entry references zero-filled bytes in the variable-length data section whose purpose is to advance the data offset so that the subsequent entry's data begins at a naturally aligned boundary relative to the start of the data section. The padding length is between 0 and N−1 bytes, where N is the desired alignment. A receiver MUST ignore the content of padding entries.
+To support aligned access, a sender MAY insert a `padding` TOC entry (Entry Type `9`) immediately before a data-bearing TOC entry. The padding entry references zero-filled bytes in the variable-length data section whose purpose is to advance the data offset so that the subsequent entry's data begins at a multiple of N bytes from the **start of the message** (byte 0 of the header), where N is the desired alignment. The padding length is between 0 and N−1 bytes. A receiver MUST ignore the content of padding entries.
+
+Alignment is measured from the start of the message, not the start of the variable-length data section: the data section starts at `8 + 4 × TOC Count`, which is only 8-byte aligned when the TOC Count is even. An aligned field therefore starts at `8 + 4 × TOC Count + Offset ≡ 0 (mod N)`.
+
+The message itself carries no alignment guarantee. A field aligned to N bytes within the message is aligned to N bytes in memory only if the buffer holding the message starts at an address aligned to at least N bytes. A receiver that relies on in-memory alignment SHOULD place incoming messages at such an address.
 
 Multiple TOC entries MAY reference overlapping regions of the variable-length data section, though this is NOT RECOMMENDED and the behavior is application-defined.
 
@@ -489,7 +493,11 @@ A schema field may be declared optional. When an optional field is absent from a
 
 ### Alignment Padding
 
-A schema field may request alignment to a power-of-two boundary within the variable-length data section. When alignment is specified, a `padding` TOC entry (Entry Type `9`) is inserted immediately before the field's TOC entry. The padding entry references zero-filled bytes that advance the data offset to the requested alignment boundary. Padding entries are always present (even with zero length) to maintain a fixed TOC count.
+A schema field may request alignment to a power-of-two boundary, measured from the start of the message (see [Data Alignment](#data-alignment)). When alignment is specified, a `padding` TOC entry (Entry Type `9`) is inserted immediately before the field's TOC entry. The padding entry references zero-filled bytes that advance the data offset to the requested alignment boundary. Padding entries are always present (even with zero length) to maintain a fixed TOC count.
+
+A receiver MUST reject a message in which a present aligned field does not start on its boundary, or in which the TOC entry before an aligned field is not a `padding` entry. Alignment is not supported inside field groups, because a group cannot know where the message starts.
+
+Every masked key (the AEAD masked-key envelope) is declared with 4-byte alignment. The envelope's header and IV are 24 bytes and its metadata is 192 bytes, so a 4-aligned envelope puts both the metadata (the AES-GCM additional data) and the ciphertext on 4-byte boundaries. Firmware guarantees only that messages start on a 4-byte boundary, so 4 is the largest alignment that is also guaranteed in device memory. A response field that firmware writes in place over a request's masked key (for example the `MlDsaSign` signature) carries the same alignment so that both occupy the same offset.
 
 Alignment is requested **explicitly** via a fixed power-of-two boundary annotation on the field. Typed-slice fields (see [Typed Slices](#typed-slices)) are **not** auto-aligned: their element type is required to be `Unaligned` (alignment 1), so the borrow is sound at any offset and no padding entry is inserted.
 
@@ -657,3 +665,4 @@ Total message: 20 bytes, no variable-length data section.
 | 0.2     | —          | Added well-known status codes, security considerations, data alignment rules, and worked examples. Expanded protocol rules (pipelining, unknown TOC types, malformed message handling, maximum message size). Clarified endianness convention and FIPS_APPROVED flag semantics. |
 | 0.3     | —          | Added Entry Type 8 (`none`) for optional fields. Added Entry Type 9 (`padding`) for data alignment. Added Schema Features section describing optional fields, alignment, fixed arrays, length constraints, field groups, and dispatch traits. |
 | 0.4     | —          | Unreleased framing alignment under wire version 1: equal 8-byte headers, TOC count at byte 2 in both directions, and paired command TOC footprints with trailing `none` slots. |
+| 0.5     | —          | Unreleased under wire version 1: field alignment is measured from the start of the message rather than the data section; receivers reject misaligned fields; masked keys are 4-byte aligned. |

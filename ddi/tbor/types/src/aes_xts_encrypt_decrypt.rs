@@ -58,7 +58,7 @@ pub struct TborAesXtsEncryptDecryptReq {
     pub tweak: alloc::vec::Vec<u8>,
 
     /// The masked XTS key.
-    #[tbor(min_len = 296, max_len = 296)]
+    #[tbor(align = 4, min_len = 296, max_len = 296)]
     pub masked_key: alloc::vec::Vec<u8>,
 }
 

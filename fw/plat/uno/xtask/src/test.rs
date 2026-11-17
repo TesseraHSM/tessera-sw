@@ -20,6 +20,7 @@ use crate::XtaskCtx;
 /// default to `test = false`; a crate listed here enables its lib tests and
 /// keeps them free of hardware access.
 const HOST_TESTED: &[&str] = &[
+    "tsra_fw_uno_aes_sgl",
     "tsra_fw_uno_drivers_pqc",
     "tsra_fw_uno_drivers_soc",
     "tsra_fw_uno_drivers_iic",

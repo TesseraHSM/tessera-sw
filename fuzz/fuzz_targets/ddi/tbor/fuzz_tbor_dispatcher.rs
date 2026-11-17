@@ -124,12 +124,16 @@ fuzz_target!(|input: FuzzInput| {
                 Err(err @ tsra_ddi_interface::DdiError::DriverError(_)) => {
                     panic!("Crash Detected: {err}")
                 }
-                Err(
-                    tsra_ddi_interface::DdiError::TborStatus(_)
-                    | tsra_ddi_interface::DdiError::TborEncodeError,
-                ) => {}
+                Err(tsra_ddi_interface::DdiError::TborEncodeError) => {}
+                Err(err) if req.session_id != session.session_id => {
+                    assertions::assert_session_rejects(
+                        &err,
+                        TborStatus::FileHandleSessionIdDoesNotMatch,
+                    );
+                }
+                Err(tsra_ddi_interface::DdiError::TborStatus(_)) => {}
                 Err(err) => {
-                    panic!("invalid EccGenerateKey request returned an unexpected error: {err}")
+                    panic!("invalid EccGenerateKey request returned an unexpected error: {err:?}")
                 }
                 Ok(_) => panic!("invalid EccGenerateKey request unexpectedly succeeded"),
             }

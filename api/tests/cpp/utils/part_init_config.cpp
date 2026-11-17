@@ -391,40 +391,13 @@ void make_part_init_config(tsra_handle part_handle, PartInitConfig &config)
     }
 }
 
-// Emu needs a process-unique cache because each nextest process owns an
-// independent emulator with its own random BK_BOOT. Hardware/socket builds
-// keep a shared persistent cache for reuse across processes.
+// Shared persistent cache for hardware and external socket servers. Runners that
+// own a short-lived simulated HSM set `TSRA_MOBK_PATH` to a matching cache.
 static const std::string &default_mobk_path()
 {
-#ifdef TSRA_FEATURE_EMU
-    struct MobkPath
-    {
-        std::string path;
-        MobkPath()
-        {
-            auto nanos = std::chrono::system_clock::now().time_since_epoch().count();
-#ifdef _WIN32
-            auto pid = static_cast<unsigned long long>(GetCurrentProcessId());
-#else
-            auto pid = static_cast<unsigned long long>(getpid());
-#endif
-            path = (std::filesystem::temp_directory_path() /
-                    ("tsra-mobk-" + std::to_string(pid) + "-" + std::to_string(nanos) + ".bin"))
-                       .string();
-        }
-        ~MobkPath()
-        {
-            std::error_code ec;
-            std::filesystem::remove(path, ec);
-        }
-    };
-    static const MobkPath mobk_path;
-    return mobk_path.path;
-#else
     static const std::string mobk_path =
         (std::filesystem::temp_directory_path() / "mobk.bin").string();
     return mobk_path;
-#endif
 }
 
 std::string get_mobk_path()

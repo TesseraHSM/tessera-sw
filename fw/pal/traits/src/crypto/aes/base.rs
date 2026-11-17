@@ -140,7 +140,10 @@ pub trait HsmAes: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `mode` — confidentiality mode.
-    /// - `key` — AES key (16 / 24 / 32 bytes).
+    /// - `key` — AES key (16 / 24 / 32 bytes). Must start at a 4-byte
+    ///   aligned address, as the AES engine reads key material in 32-bit
+    ///   words. Buffers from the PAL allocator are 4-byte aligned; a
+    ///   sub-slice of one must start at a multiple of 4 bytes.
     /// - `input` — `[IV | data]`; see [`HsmAesMode::data_len`].
     /// - `output` — follows the query/alloc/use convention: `None`
     ///   validates the request and returns the required output length
@@ -151,8 +154,8 @@ pub trait HsmAes: HsmIoTypes {
     ///
     /// - `Ok(len)` — required (`None`) or written (`Some`) output length,
     ///   always `input.len()`; when written, `output[..len]` is populated.
-    /// - `Err(HsmError::InvalidArg)` — key, IV, alignment or buffer-size
-    ///   violation; `output` is not modified.
+    /// - `Err(HsmError::InvalidArg)` — key (length or alignment), IV or
+    ///   buffer-size violation; `output` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_enc_dec(
         &self,
@@ -169,13 +172,14 @@ pub trait HsmAes: HsmIoTypes {
     ///
     /// `buf` holds `[IV | data]` on entry and `[data | IV out]` on return,
     /// so a request buffer can be turned into a response without a second
-    /// allocation.
+    /// allocation. `key` has the same length and 4-byte alignment
+    /// requirements as in [`aes_enc_dec`](Self::aes_enc_dec).
     ///
     /// # Returns
     ///
     /// - `Ok(())` — `buf` overwritten with the result.
-    /// - `Err(HsmError::InvalidArg)` — key, IV or alignment violation;
-    ///   `buf` is not modified.
+    /// - `Err(HsmError::InvalidArg)` — key (length or alignment) or IV
+    ///   violation; `buf` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_enc_dec_in_place(
         &self,

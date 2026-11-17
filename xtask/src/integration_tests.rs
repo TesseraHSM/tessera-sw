@@ -32,13 +32,16 @@ pub enum Suite {
 /// for the test harnesses if they aren't already set.
 ///
 /// The provider stack itself is **not** built here — callers must build it
-/// into `target/debug` (`cargo build -p tsra_ossl_provider --features emu`)
+/// into `target/debug` (`cargo build -p tsra_ossl_provider`)
 /// beforehand.  Keeping the build out means a partial run (`--suite nginx`)
 /// doesn't recompile the world.
 ///
-/// The nginx suite needs the fork-safe `sock` transport: build the provider
-/// with `--features sock`, start `ddi_sock_server tcp://127.0.0.1:PORT`, and
-/// set `TSRA_DDI_SOCK` to the same endpoint (see `provider-matrix.yml`).
+/// CLI and CAPI runners translate `transport=sock` in `TSRA_TEST_ARGS`
+/// into normal runtime connection settings for the unchanged provider.
+/// The nginx suite uses `TSRA_DDI_ARGS` directly and needs
+/// a sock server that survives `fork()`: start `ddi_sock_server
+/// tcp://127.0.0.1:PORT` and add `sock=` with the same endpoint to
+/// `TSRA_DDI_ARGS` (see `provider-matrix.yml`).
 #[derive(Parser)]
 #[clap(about = "Run Integration Tests")]
 pub struct IntegrationTest {
@@ -153,6 +156,9 @@ impl Xtask for IntegrationTest {
                 );
             }
 
+            // All suites run against the sock transport: cli/capi auto-start
+            // an in-process sock server; nginx sets `sock=` in `TSRA_DDI_ARGS` to the
+            // external server described above.
             let run_pkg = |pkg: &str, skip_clean: bool, ctx: XtaskCtx| -> anyhow::Result<()> {
                 let test = crate::nextest::Nextest {
                     features: Some("integration".to_string()),
@@ -163,6 +169,8 @@ impl Xtask for IntegrationTest {
                     exclude: vec![],
                     test: None,
                     filter: vec![],
+                    transport: Some("sock".to_string()),
+                    api_rev: None,
                 };
 
                 if self.coverage {

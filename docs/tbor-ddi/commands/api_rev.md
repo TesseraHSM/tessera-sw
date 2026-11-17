@@ -10,9 +10,17 @@ Licensed under the MIT License.
 
 ## Description
 
-Returns the inclusive range of TBOR wire-protocol versions the firmware
-supports.  Used by the host to pick a compatible version for subsequent
-requests on this connection.
+Returns the inclusive range of SDK API revisions (`major.minor`) the
+device supports.  The host uses it to select the API revision for the
+session it opens next.
+
+The range is a per-platform constant supplied by the firmware PAL
+(`HsmPal::API_REV_MIN` / `HsmPal::API_REV_MAX`):
+
+| Platform | Minimum | Maximum |
+|---|---|---|
+| Uno | 1.0 | 1.1 |
+| Duo | 2.0 | 2.0 |
 
 ## Request
 
@@ -27,14 +35,14 @@ Wire layout: 8-byte header, followed by the TOC entries, then the
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `min_protocol_version` | `uint8` (inline) | Lowest TBOR wire-protocol version the firmware speaks. |
-| 12 | `max_protocol_version` | `uint8` (inline) | Highest TBOR wire-protocol version the firmware speaks. |
+| 8 | `min_major` | `uint16` (inline) | Major number of the lowest supported API revision. |
+| 12 | `min_minor` | `uint16` (inline) | Minor number of the lowest supported API revision. |
+| 16 | `max_major` | `uint16` (inline) | Major number of the highest supported API revision. |
+| 20 | `max_minor` | `uint16` (inline) | Minor number of the highest supported API revision. |
 
 ### Data section
 
-_Empty — both fields are carried inline within their TOC entries._
-
-The firmware currently returns `min = max = 1`, matching the version-1 framing.
+_Empty — all fields are carried inline within their TOC entries._
 
 ## Errors
 

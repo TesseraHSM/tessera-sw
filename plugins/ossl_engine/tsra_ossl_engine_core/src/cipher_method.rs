@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Engine-supplied AES-CBC `EVP_CIPHER`s for HSM-backed keys.
+//! Engine-supplied AES-CBC, AES-256-GCM and AES-256-XTS `EVP_CIPHER`s for
+//! HSM-backed keys.
 //!
 //! OpenSSL 1.1.x has no opaque symmetric keys, so an HSM AES key is attached
 //! to a cipher context with [`TSRA_CTRL_SET_KEY_URI`] (usage in
@@ -9,13 +10,14 @@
 //! across inits that keep the cipher until a raw-key init or another attach
 //! replaces it.
 //!
-//! Each cipher is a copy of the built-in AES-CBC cipher with
-//! `init`/`do_cipher`/`ctrl`/`cleanup` overridden. An attached key runs raw
-//! CBC on the HSM while the EVP layer still buffers and pads; a raw key runs
-//! the built-in unchanged, so the engine stays usable as the process default.
-//! The key lives in a side table keyed by the context address. The framework
-//! never frees engine ciphers: [`release_aes_cbc_ciphers`] does, from the
-//! destroy hook.
+//! Each cipher is a copy of the built-in one with
+//! `init`/`do_cipher`/`ctrl`/`cleanup` overridden. An attached key runs on the
+//! HSM: raw CBC while the EVP layer still buffers and pads, GCM as one shot
+//! (see the `gcm` module), or XTS one data unit per update (see the `xts`
+//! module). A raw key runs the built-in unchanged, so the engine stays usable
+//! as the process default. The key lives in a side table keyed by the context
+//! address. The framework never frees engine ciphers: [`release_aes_ciphers`]
+//! does, from the destroy hook.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -42,27 +44,36 @@ use crate::error::ossl_check;
 use crate::error::ossl_ok;
 use crate::error::result_to_int;
 
-/// `EVP_CIPHER_CTX_ctrl` type that attaches an HSM AES key to an AES-CBC
-/// context: `ptr` is a NUL-terminated `tsra://<masked-key-file>;type=aes`
-/// URI and `arg` must be 0. "AZ" (0x415A) in the high half keeps it clear of
-/// OpenSSL's own `EVP_CTRL_*` values.
+mod gcm;
+mod xts;
+
+pub use gcm::AesGcmKey;
+pub use gcm::GCM_IV_LEN;
+pub use gcm::GCM_MAX_INPUT;
+pub use gcm::GCM_TAG_LEN;
+pub use xts::AesXtsKey;
+pub use xts::XTS_MAX_DATA_UNIT;
+pub use xts::XTS_TWEAK_LEN;
+
+/// `EVP_CIPHER_CTX_ctrl` type that attaches an HSM AES key to an AES-CBC,
+/// AES-GCM or AES-XTS context: `ptr` is a NUL-terminated
+/// `tsra://<masked-key-file>;type=<aes|aes-gcm|aes-xts>` URI and `arg` must be
+/// 0. "AZ" (0x415A) in the high half keeps it clear of OpenSSL's own
+/// `EVP_CTRL_*` values.
 pub const TSRA_CTRL_SET_KEY_URI: c_int = 0x415A_0001;
 
 /// AES block (and CBC IV) size in bytes.
 pub const AES_BLOCK: usize = 16;
 
-/// Most bytes one [`AesCbcKey::cbc`] call gets: the device's per-request AES
-/// limit, so a retried request restarts from its own IV. Also bounds the input
-/// copy.
-pub const HSM_CBC_REQUEST: usize = 1024;
+/// Most bytes one [`AesCbcKey::cbc`] call gets; bounds the input copy.
+pub const CBC_COPY_CHUNK: usize = 64 * 1024;
 
 /// An HSM AES key attached to a cipher context (and its copies). Dropping the
 /// last reference releases the key.
 pub trait AesCbcKey: Send + Sync {
-    /// Raw AES-CBC (no padding) over `input` (whole blocks, at most
-    /// [`HSM_CBC_REQUEST`] bytes) into `output` (same length). `iv` is the
-    /// chaining value, updated in place to the one the next call continues
-    /// from.
+    /// Raw AES-CBC (no padding) over `input` (whole blocks) into `output`
+    /// (same length). `iv` is the chaining value, updated in place to the one
+    /// the next call continues from.
     fn cbc(
         &self,
         encrypt: bool,
@@ -73,11 +84,19 @@ pub trait AesCbcKey: Send + Sync {
 }
 
 /// Caller-supplied loader for [`TSRA_CTRL_SET_KEY_URI`]. Implement on a
-/// marker type and pass it to [`register_aes_cbc_ciphers`].
-pub trait AesCbcKeyLoader {
-    /// Load the AES key named by `uri` for a cipher of `key_bits`; a key of any
-    /// other size is an error. `engine` is the ENGINE the cipher belongs to.
-    fn load_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesCbcKey>>;
+/// marker type and pass it to [`register_aes_ciphers`].
+pub trait AesKeyLoader {
+    /// Load the AES-CBC key named by `uri` for a cipher of `key_bits`; a key of
+    /// any other size is an error. `engine` is the ENGINE the cipher belongs
+    /// to.
+    fn load_cbc_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesCbcKey>>;
+
+    /// As [`AesKeyLoader::load_cbc_key`], for an AES-GCM cipher.
+    fn load_gcm_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesGcmKey>>;
+
+    /// As [`AesKeyLoader::load_cbc_key`], for an AES-XTS cipher; `key_bits`
+    /// counts both halves of the key.
+    fn load_xts_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesXtsKey>>;
 }
 
 /// The key a context runs with.
@@ -85,8 +104,12 @@ pub trait AesCbcKeyLoader {
 enum CtxKey {
     /// A raw key, set up by the built-in init: the built-in cipher runs.
     Software,
-    /// An HSM key attached with [`TSRA_CTRL_SET_KEY_URI`].
-    Hsm(Arc<dyn AesCbcKey>),
+    /// An HSM key attached to an AES-CBC context.
+    HsmCbc(Arc<dyn AesCbcKey>),
+    /// An HSM key attached to an AES-GCM context, with its message state.
+    HsmGcm(gcm::GcmState),
+    /// An HSM key attached to an AES-XTS context, with its tweak.
+    HsmXts(xts::XtsState),
 }
 
 /// Side table: `EVP_CIPHER_CTX` address → its key. Entries are created by
@@ -98,11 +121,18 @@ fn ctx_keys() -> &'static Mutex<HashMap<usize, CtxKey>> {
     CTX_KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const GCM_NID: c_int = ffi::NID_aes_256_gcm as c_int;
+
+/// The AES-256-XTS NID as the cipher callbacks receive it.
+const XTS_NID: c_int = ffi::NID_aes_256_xts as c_int;
+
 /// The NIDs these ciphers serve.
-static NIDS: [c_int; 3] = [
+static NIDS: [c_int; 5] = [
     ffi::NID_aes_128_cbc as c_int,
     ffi::NID_aes_192_cbc as c_int,
     ffi::NID_aes_256_cbc as c_int,
+    GCM_NID,
+    XTS_NID,
 ];
 
 /// One of our cipher copies.
@@ -122,23 +152,23 @@ fn ciphers() -> &'static Mutex<HashMap<usize, CipherEntry>> {
     CIPHERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The built-in AES-CBC cipher for `nid`, which our copy for `nid` delegates
-/// to. Resolved without a lock: it runs for every AES-CBC operation in the
-/// process when the engine is the default.
+/// The built-in AES cipher for `nid`, which our copy for `nid` delegates to.
+/// Resolved without a lock: it runs for every AES operation in the process
+/// when the engine is the default.
 #[allow(unsafe_code)]
 fn builtin_cipher(nid: c_int) -> EngineResult<*const ffi::EVP_CIPHER> {
     let accessor: unsafe extern "C" fn() -> *const ffi::EVP_CIPHER = match u32::try_from(nid) {
         Ok(ffi::NID_aes_128_cbc) => ffi::EVP_aes_128_cbc,
         Ok(ffi::NID_aes_192_cbc) => ffi::EVP_aes_192_cbc,
         Ok(ffi::NID_aes_256_cbc) => ffi::EVP_aes_256_cbc,
-        _ => return Err(EngineError::Other(format!("not an AES-CBC NID: {nid}"))),
+        Ok(ffi::NID_aes_256_gcm) => ffi::EVP_aes_256_gcm,
+        Ok(ffi::NID_aes_256_xts) => ffi::EVP_aes_256_xts,
+        _ => return Err(EngineError::Other(format!("not an engine AES NID: {nid}"))),
     };
-    // SAFETY: the EVP_aes_*_cbc accessors return process-lifetime constants.
+    // SAFETY: the EVP_aes_* accessors return process-lifetime constants.
     let cipher = unsafe { accessor() };
     if cipher.is_null() {
-        return Err(EngineError::Other(format!(
-            "built-in AES-CBC {nid} missing"
-        )));
+        return Err(EngineError::Other(format!("built-in AES {nid} missing")));
     }
     Ok(cipher)
 }
@@ -181,14 +211,15 @@ unsafe fn init_inner(
     iv: *const c_uchar,
     enc: c_int,
 ) -> EngineResult<()> {
-    // OpenSSL calls init only with a key (the ciphers do not set
-    // EVP_CIPH_ALWAYS_CALL_INIT).
+    // OpenSSL calls the CBC init only with a key (no
+    // EVP_CIPH_ALWAYS_CALL_INIT); GCM's and XTS's handle key-less inits
+    // themselves.
     if key.is_null() {
         return Err(EngineError::NullParam("cipher key"));
     }
     // SAFETY: builtin_for returns a valid built-in cipher.
     let init = unsafe { ffi::EVP_CIPHER_meth_get_init(builtin_for(ctx)?) }
-        .ok_or(EngineError::Other("built-in AES-CBC init missing".into()))?;
+        .ok_or(EngineError::Other("built-in AES init missing".into()))?;
     // SAFETY: delegating the arguments OpenSSL passed us to the built-in, whose
     // cipher data layout our copy shares.
     let rc = unsafe { init(ctx, key, iv, enc) };
@@ -245,8 +276,8 @@ unsafe fn do_cipher_inner(
             ossl_check(rc, "AES-CBC failed")
         }
         // SAFETY: as this function's contract.
-        Some(CtxKey::Hsm(key)) => unsafe { hsm_cbc(ctx, key.as_ref(), out, input, inl) },
-        None => Err(EngineError::Other(
+        Some(CtxKey::HsmCbc(key)) => unsafe { hsm_cbc(ctx, key.as_ref(), out, input, inl) },
+        Some(CtxKey::HsmGcm(_) | CtxKey::HsmXts(_)) | None => Err(EngineError::Other(
             "no key set on this AES-CBC context (attach an HSM key with \
              TSRA_CTRL_SET_KEY_URI or initialize it with a key)"
                 .into(),
@@ -254,9 +285,9 @@ unsafe fn do_cipher_inner(
     }
 }
 
-/// Run `inl` bytes through the HSM key, one [`HSM_CBC_REQUEST`]-sized request
-/// at a time, chaining the IV through the context's IV buffer as the built-in
-/// does. The IV is written back only once every request succeeded.
+/// Run `inl` bytes through the HSM key, chaining the IV through the context's
+/// IV buffer as the built-in does. The IV is written back only once every call
+/// succeeded.
 ///
 /// # Safety
 /// As [`c_do_cipher`].
@@ -289,15 +320,14 @@ unsafe fn hsm_cbc(
     }
     // SAFETY: ivp holds AES_BLOCK bytes (see above); this reads a copy.
     let mut iv = unsafe { ivp.cast::<[u8; AES_BLOCK]>().read_unaligned() };
-    // Each request's input is copied before its output is written, as OpenSSL
-    // may run in place (out == input). It may be plaintext, so the copy is
-    // scrubbed on drop.
-    let mut request = Zeroizing::new([0u8; HSM_CBC_REQUEST]);
-    for start in (0..inl).step_by(HSM_CBC_REQUEST) {
-        let len = HSM_CBC_REQUEST.min(inl.saturating_sub(start));
-        let data = &mut request[..len];
+    // Copied first: OpenSSL may run in place (out == input), and a retried
+    // call re-reads its input. Scrubbed on drop, as it may be plaintext.
+    let mut copy = Zeroizing::new(vec![0u8; inl.min(CBC_COPY_CHUNK)]);
+    for start in (0..inl).step_by(CBC_COPY_CHUNK) {
+        let len = CBC_COPY_CHUNK.min(inl.saturating_sub(start));
+        let data = &mut copy[..len];
         // SAFETY: input and out hold inl bytes and start + len <= inl; the
-        // input slice is gone before the output slice over the same request
+        // input slice is gone before the output slice over the same bytes
         // (when in place) is created.
         let output = unsafe {
             data.copy_from_slice(std::slice::from_raw_parts(input.add(start), len));
@@ -310,14 +340,16 @@ unsafe fn hsm_cbc(
     Ok(())
 }
 
-/// `ctrl` override: [`TSRA_CTRL_SET_KEY_URI`] attaches an HSM key, the copy
-/// control duplicates a context's key, anything else goes to the built-in.
+/// `ctrl` override: [`TSRA_CTRL_SET_KEY_URI`] attaches an HSM key, an HSM
+/// GCM key takes its own controls (see [`gcm::hsm_ctrl`]), the copy control
+/// duplicates a context's key, anything else but a NULL tag goes to the
+/// built-in.
 ///
 /// # Safety
 /// Called only by `EVP_CIPHER_CTX_ctrl`/`EVP_CIPHER_CTX_copy`; arguments per
 /// that contract (for the key URI: `ptr` is NULL or a NUL-terminated string).
 #[allow(unsafe_code)]
-unsafe extern "C" fn c_ctrl<L: AesCbcKeyLoader>(
+unsafe extern "C" fn c_ctrl<L: AesKeyLoader>(
     ctx: *mut ffi::EVP_CIPHER_CTX,
     typ: c_int,
     arg: c_int,
@@ -338,7 +370,7 @@ unsafe extern "C" fn c_ctrl<L: AesCbcKeyLoader>(
 /// # Safety
 /// As [`c_ctrl`].
 #[allow(unsafe_code)]
-unsafe fn ctrl_inner<L: AesCbcKeyLoader>(
+unsafe fn ctrl_inner<L: AesKeyLoader>(
     ctx: *mut ffi::EVP_CIPHER_CTX,
     typ: c_int,
     arg: c_int,
@@ -348,6 +380,20 @@ unsafe fn ctrl_inner<L: AesCbcKeyLoader>(
         // SAFETY: as this function's contract.
         unsafe { attach_key::<L>(ctx, arg, ptr) }?;
         return Ok(RetCode::Success.into());
+    }
+    // SAFETY: as this function's contract.
+    if let Some(rc) = unsafe { gcm::hsm_ctrl(ctx, typ, arg, ptr) }? {
+        return Ok(rc);
+    }
+    // The built-in GCM copies a tag through ptr without a NULL check.
+    let tag_ctrl = matches!(
+        u32::try_from(typ),
+        Ok(ffi::EVP_CTRL_AEAD_SET_TAG | ffi::EVP_CTRL_AEAD_GET_TAG)
+    );
+    // SAFETY: ctx is the live context OpenSSL passed the callback.
+    let gcm = unsafe { ffi::EVP_CIPHER_CTX_nid(ctx) } == GCM_NID;
+    if gcm && tag_ctrl && ptr.is_null() {
+        return Err(EngineError::NullParam("AES-GCM tag"));
     }
     let copy = typ == ffi::EVP_CTRL_COPY as c_int;
     // SAFETY: builtin_for returns a valid built-in cipher.
@@ -367,15 +413,15 @@ unsafe fn ctrl_inner<L: AesCbcKeyLoader>(
     Ok(rc)
 }
 
-/// [`TSRA_CTRL_SET_KEY_URI`]: load the key `ptr` names for this cipher's
-/// size and attach it to `ctx`, replacing a raw key (whose schedule is wiped)
-/// or an attached key. A failed attach leaves the context unchanged.
+/// [`TSRA_CTRL_SET_KEY_URI`]: load the key `ptr` names for this cipher's mode
+/// and size and attach it to `ctx`, replacing a raw key (whose schedule is
+/// wiped) or an attached key. A refused key leaves the context unchanged.
 ///
 /// # Safety
 /// `ctx` is a live context of one of our ciphers; `ptr` is NULL or a
 /// NUL-terminated string.
 #[allow(unsafe_code)]
-unsafe fn attach_key<L: AesCbcKeyLoader>(
+unsafe fn attach_key<L: AesKeyLoader>(
     ctx: *mut ffi::EVP_CIPHER_CTX,
     arg: c_int,
     ptr: *mut c_void,
@@ -399,7 +445,7 @@ unsafe fn attach_key<L: AesCbcKeyLoader>(
         .get(&(cipher as usize))
         .copied()
         .ok_or(EngineError::Other(
-            "cipher context is not an tsra AES-CBC context".into(),
+            "cipher context is not a tsra AES context".into(),
         ))?;
     let engine_ptr = NonNull::new(entry.engine as *mut ffi::ENGINE)
         .ok_or(EngineError::Other("cipher has no ENGINE".into()))?;
@@ -412,33 +458,55 @@ unsafe fn attach_key<L: AesCbcKeyLoader>(
         .ok()
         .and_then(|bytes| bytes.checked_mul(u8::BITS))
         .ok_or(EngineError::Other("invalid cipher key length".into()))?;
-    let key = L::load_key(&engine, uri, key_bits)?;
+    let key = match entry.nid {
+        GCM_NID => {
+            // SAFETY: ctx is a live context of our AES-GCM cipher.
+            unsafe { gcm::check_iv_len(ctx) }?;
+            CtxKey::HsmGcm(gcm::GcmState::new(L::load_gcm_key(&engine, uri, key_bits)?))
+        }
+        XTS_NID => CtxKey::HsmXts(xts::XtsState::new(L::load_xts_key(&engine, uri, key_bits)?)),
+        _ => CtxKey::HsmCbc(L::load_cbc_key(&engine, uri, key_bits)?),
+    };
     // SAFETY: ctx is the live context.
-    unsafe { wipe_cipher_data(ctx) };
+    unsafe { reset_cipher_data(ctx) }?;
     // A replaced key is released outside the lock.
-    let replaced = ctx_keys().lock().insert(ctx as usize, CtxKey::Hsm(key));
+    let replaced = ctx_keys().lock().insert(ctx as usize, key);
     drop(replaced);
     Ok(())
 }
 
-/// Scrub the built-in's cipher data (a raw key's schedule) before an HSM key
-/// takes over the context.
+/// Reset the cipher data as a fresh init would, scrubbing a raw key's schedule
+/// before an HSM key takes over.
 ///
 /// # Safety
-/// `ctx` is a live cipher context.
+/// `ctx` is a live cipher context of one of our ciphers.
 #[allow(unsafe_code)]
-unsafe fn wipe_cipher_data(ctx: *mut ffi::EVP_CIPHER_CTX) {
-    // SAFETY: ctx is live; its cipher data, when present, is the cipher's
-    // ctx_size bytes.
+unsafe fn reset_cipher_data(ctx: *mut ffi::EVP_CIPHER_CTX) -> EngineResult<()> {
+    let builtin = builtin_for(ctx)?;
+    // SAFETY: ctx is live and builtin is its built-in cipher, whose cipher
+    // data layout ours shares; the data, when present, is ctx_size bytes.
     unsafe {
+        if let Some(cleanup) = ffi::EVP_CIPHER_meth_get_cleanup(builtin) {
+            ossl_check(cleanup(ctx), "built-in AES cleanup failed")?;
+        }
         let data = ffi::EVP_CIPHER_CTX_get_cipher_data(ctx);
-        let size = ffi::EVP_CIPHER_impl_ctx_size(ffi::EVP_CIPHER_CTX_cipher(ctx));
+        let size = ffi::EVP_CIPHER_impl_ctx_size(builtin);
         if !data.is_null()
             && let Ok(size) = usize::try_from(size)
         {
             ffi::OPENSSL_cleanse(data, size);
         }
+        if ffi::EVP_CIPHER_flags(builtin) & ffi::EVP_CIPH_CTRL_INIT as c_ulong != 0 {
+            let ctrl = ffi::EVP_CIPHER_meth_get_ctrl(builtin)
+                .ok_or(EngineError::Other("built-in AES ctrl missing".into()))?;
+            let init = ffi::EVP_CTRL_INIT as c_int;
+            ossl_check(
+                ctrl(ctx, init, 0, std::ptr::null_mut()),
+                "built-in AES ctrl init failed",
+            )?;
+        }
     }
+    Ok(())
 }
 
 /// `EVP_CTRL_COPY`: give the copy `out` the key of `ctx`.
@@ -483,12 +551,11 @@ unsafe extern "C" fn c_cleanup(ctx: *mut ffi::EVP_CIPHER_CTX) -> c_int {
     )
 }
 
-/// Build our copy of the built-in `builtin` cipher (same sizes, flags and
-/// ASN.1 handlers) with our overrides and `EVP_CIPH_CUSTOM_COPY` installed.
+/// A copy of the built-in `nid` cipher with our overrides and
+/// `EVP_CIPH_CUSTOM_COPY`.
 #[allow(unsafe_code)]
-fn new_cipher<L: AesCbcKeyLoader>(
-    builtin: *const ffi::EVP_CIPHER,
-) -> EngineResult<*mut ffi::EVP_CIPHER> {
+fn new_cipher<L: AesKeyLoader>(nid: c_int) -> EngineResult<*mut ffi::EVP_CIPHER> {
+    let builtin = builtin_cipher(nid)?;
     // SAFETY: builtin is a valid built-in cipher; meth_dup copies every field.
     let cipher = unsafe { ffi::EVP_CIPHER_meth_dup(builtin) };
     if cipher.is_null() {
@@ -500,8 +567,22 @@ fn new_cipher<L: AesCbcKeyLoader>(
         let flags = ffi::EVP_CIPHER_flags(builtin) | ffi::EVP_CIPH_CUSTOM_COPY as c_ulong;
         [
             ffi::EVP_CIPHER_meth_set_flags(cipher, flags),
-            ffi::EVP_CIPHER_meth_set_init(cipher, Some(c_init)),
-            ffi::EVP_CIPHER_meth_set_do_cipher(cipher, Some(c_do_cipher)),
+            ffi::EVP_CIPHER_meth_set_init(
+                cipher,
+                Some(match nid {
+                    GCM_NID => gcm::c_init,
+                    XTS_NID => xts::c_init,
+                    _ => c_init,
+                }),
+            ),
+            ffi::EVP_CIPHER_meth_set_do_cipher(
+                cipher,
+                Some(match nid {
+                    GCM_NID => gcm::c_do_cipher,
+                    XTS_NID => xts::c_do_cipher,
+                    _ => c_do_cipher,
+                }),
+            ),
             ffi::EVP_CIPHER_meth_set_ctrl(cipher, Some(c_ctrl::<L>)),
             ffi::EVP_CIPHER_meth_set_cleanup(cipher, Some(c_cleanup)),
         ]
@@ -554,21 +635,21 @@ unsafe extern "C" fn c_ciphers(
     )
 }
 
-/// Create `engine`'s AES-128/192/256-CBC ciphers with `L` loading HSM keys,
-/// and install them with `ENGINE_set_ciphers`. Pair with
-/// [`release_aes_cbc_ciphers`] in the engine's destroy hook. A second
+/// Create `engine`'s AES-128/192/256-CBC, AES-256-GCM and AES-256-XTS ciphers
+/// with `L` loading HSM keys, and install them with `ENGINE_set_ciphers`. Pair
+/// with [`release_aes_ciphers`] in the engine's destroy hook. A second
 /// registration on the same ENGINE is refused: its contexts may still use the
 /// first one's ciphers.
 #[allow(unsafe_code)]
-pub fn register_aes_cbc_ciphers<L: AesCbcKeyLoader>(engine: &Engine) -> EngineResult<()> {
+pub fn register_aes_ciphers<L: AesKeyLoader>(engine: &Engine) -> EngineResult<()> {
     let e = engine.as_ptr() as usize;
     if ciphers().lock().values().any(|v| v.engine == e) {
         return Err(EngineError::Other(
-            "AES-CBC ciphers are already registered on this ENGINE".into(),
+            "AES ciphers are already registered on this ENGINE".into(),
         ));
     }
     for nid in NIDS {
-        let cipher = new_cipher::<L>(builtin_cipher(nid)?)?;
+        let cipher = new_cipher::<L>(nid)?;
         ciphers().lock().insert(
             cipher as usize,
             CipherEntry {
@@ -590,7 +671,7 @@ pub fn register_aes_cbc_ciphers<L: AesCbcKeyLoader>(engine: &Engine) -> EngineRe
 /// which runs once every context's functional reference on the ENGINE is gone
 /// (or, in tests, once their contexts are freed).
 #[allow(unsafe_code)]
-pub unsafe fn release_aes_cbc_ciphers(engine: &Engine) {
+pub unsafe fn release_aes_ciphers(engine: &Engine) {
     let e = engine.as_ptr() as usize;
     let mut table = ciphers().lock();
     let mine: Vec<usize> = table
@@ -619,18 +700,22 @@ mod tests {
 
     thread_local! {
         /// Keys released (dropped) on this test thread.
-        static RELEASED: Cell<usize> = const { Cell::new(0) };
+        pub(super) static RELEASED: Cell<usize> = const { Cell::new(0) };
         /// The key size the loader was last asked for on this thread.
-        static LAST_BITS: Cell<u32> = const { Cell::new(0) };
+        pub(super) static LAST_BITS: Cell<u32> = const { Cell::new(0) };
         /// The longest input one `cbc` call got on this thread.
         static LONGEST_INPUT: Cell<usize> = const { Cell::new(0) };
+        /// AES-GCM key calls on this test thread.
+        pub(super) static GCM_CALLS: Cell<usize> = const { Cell::new(0) };
+        /// AES-XTS key calls on this test thread.
+        pub(super) static XTS_CALLS: Cell<usize> = const { Cell::new(0) };
     }
 
     /// OpenSSL's success return code.
-    const OK: c_int = RetCode::Success as c_int;
+    pub(super) const OK: c_int = RetCode::Success as c_int;
 
     /// The URI [`ToyLoader`] knows; any other is an unknown key.
-    const TOY_URI: &str = "toy";
+    pub(super) const TOY_URI: &str = "toy";
 
     /// CBC with an identity block cipher: enough to check the dispatch, the
     /// chaining and the EVP layer's padding without an HSM.
@@ -655,10 +740,51 @@ mod tests {
     }
 
     /// `len` bytes of a repeating 0..=255 pattern.
-    fn pattern(len: usize) -> Vec<u8> {
+    pub(super) fn pattern(len: usize) -> Vec<u8> {
         (0..len)
             .map(|i| u8::try_from(i & usize::from(u8::MAX)).unwrap())
             .collect()
+    }
+
+    /// Toy GCM data transform: XOR with the repeated IV.
+    pub(super) fn toy_gcm_xor(iv: &[u8; GCM_IV_LEN], input: &[u8], output: &mut [u8]) {
+        for ((o, b), v) in output.iter_mut().zip(input).zip(iv.iter().cycle()) {
+            *o = b ^ v;
+        }
+    }
+
+    /// Enough to tell a changed IV, AAD, ciphertext or tag apart.
+    pub(super) fn toy_gcm_tag(
+        iv: &[u8; GCM_IV_LEN],
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> [u8; GCM_TAG_LEN] {
+        let mut tag = [0u8; GCM_TAG_LEN];
+        tag[..GCM_IV_LEN].copy_from_slice(iv);
+        for part in [aad, ciphertext] {
+            for (i, b) in (0..GCM_TAG_LEN).cycle().zip(part) {
+                tag[i] ^= b;
+            }
+            tag.rotate_left(1);
+        }
+        tag
+    }
+
+    /// Toy XTS data unit transform: XOR with the repeated tweak and a byte
+    /// step whose direction makes a decryption undo an encryption only.
+    pub(super) fn toy_xts(
+        encrypt: bool,
+        tweak: &[u8; XTS_TWEAK_LEN],
+        input: &[u8],
+        output: &mut [u8],
+    ) {
+        for ((o, b), t) in output.iter_mut().zip(input).zip(tweak.iter().cycle()) {
+            *o = if encrypt {
+                (b ^ t).wrapping_add(1)
+            } else {
+                b.wrapping_sub(1) ^ t
+            };
+        }
     }
 
     /// A key running [`toy_cbc`] that records its input sizes and release.
@@ -684,32 +810,118 @@ mod tests {
         }
     }
 
-    /// Loads a [`ToyKey`] for [`TOY_URI`], recording the size asked for.
+    struct ToyGcmKey;
+
+    impl Drop for ToyGcmKey {
+        fn drop(&mut self) {
+            RELEASED.with(|c| c.set(c.get().saturating_add(1)));
+        }
+    }
+
+    impl AesGcmKey for ToyGcmKey {
+        fn encrypt(
+            &self,
+            iv: &[u8; GCM_IV_LEN],
+            aad: &[u8],
+            input: &[u8],
+            output: &mut [u8],
+        ) -> EngineResult<[u8; GCM_TAG_LEN]> {
+            GCM_CALLS.with(|c| c.set(c.get().saturating_add(1)));
+            toy_gcm_xor(iv, input, output);
+            Ok(toy_gcm_tag(iv, aad, output))
+        }
+
+        fn decrypt(
+            &self,
+            iv: &[u8; GCM_IV_LEN],
+            aad: &[u8],
+            tag: &[u8; GCM_TAG_LEN],
+            input: &[u8],
+            output: &mut [u8],
+        ) -> EngineResult<()> {
+            GCM_CALLS.with(|c| c.set(c.get().saturating_add(1)));
+            if *tag != toy_gcm_tag(iv, aad, input) {
+                return Err("toy GCM tag mismatch".into());
+            }
+            toy_gcm_xor(iv, input, output);
+            Ok(())
+        }
+    }
+
+    /// A key running [`toy_xts`] that records its calls and release.
+    struct ToyXtsKey;
+
+    impl Drop for ToyXtsKey {
+        fn drop(&mut self) {
+            RELEASED.with(|c| c.set(c.get().saturating_add(1)));
+        }
+    }
+
+    impl AesXtsKey for ToyXtsKey {
+        fn xts(
+            &self,
+            encrypt: bool,
+            tweak: &[u8; XTS_TWEAK_LEN],
+            input: &[u8],
+            output: &mut [u8],
+        ) -> EngineResult<()> {
+            XTS_CALLS.with(|c| c.set(c.get().saturating_add(1)));
+            toy_xts(encrypt, tweak, input, output);
+            Ok(())
+        }
+    }
+
+    /// Loads a [`ToyKey`], [`ToyGcmKey`] or [`ToyXtsKey`] for [`TOY_URI`].
     struct ToyLoader;
 
-    impl AesCbcKeyLoader for ToyLoader {
-        fn load_key(
-            _engine: &Engine,
-            uri: &str,
-            key_bits: u32,
-        ) -> EngineResult<Arc<dyn AesCbcKey>> {
+    impl ToyLoader {
+        fn check(uri: &str, key_bits: u32) -> EngineResult<()> {
             LAST_BITS.with(|c| c.set(key_bits));
             if uri != TOY_URI {
                 return Err(EngineError::Other(format!("no such key: {uri}")));
             }
+            Ok(())
+        }
+    }
+
+    impl AesKeyLoader for ToyLoader {
+        fn load_cbc_key(
+            _engine: &Engine,
+            uri: &str,
+            key_bits: u32,
+        ) -> EngineResult<Arc<dyn AesCbcKey>> {
+            Self::check(uri, key_bits)?;
             Ok(Arc::new(ToyKey))
+        }
+
+        fn load_gcm_key(
+            _engine: &Engine,
+            uri: &str,
+            key_bits: u32,
+        ) -> EngineResult<Arc<dyn AesGcmKey>> {
+            Self::check(uri, key_bits)?;
+            Ok(Arc::new(ToyGcmKey))
+        }
+
+        fn load_xts_key(
+            _engine: &Engine,
+            uri: &str,
+            key_bits: u32,
+        ) -> EngineResult<Arc<dyn AesXtsKey>> {
+            Self::check(uri, key_bits)?;
+            Ok(Arc::new(ToyXtsKey))
         }
     }
 
     /// A fresh ENGINE with our ciphers registered; free with [`teardown`].
     #[allow(unsafe_code)]
-    fn engine_with_ciphers() -> (Engine, *mut ffi::ENGINE) {
+    pub(super) fn engine_with_ciphers() -> (Engine, *mut ffi::ENGINE) {
         // SAFETY: ENGINE_new returns a fresh structural ref (freed by teardown).
         unsafe {
             let raw = ffi::ENGINE_new();
             assert!(!raw.is_null());
             let engine = Engine::from_ptr(NonNull::new(raw).unwrap());
-            register_aes_cbc_ciphers::<ToyLoader>(&engine).unwrap();
+            register_aes_ciphers::<ToyLoader>(&engine).unwrap();
             (engine, raw)
         }
     }
@@ -717,11 +929,11 @@ mod tests {
     /// Free the ciphers and the ENGINE from [`engine_with_ciphers`], once the
     /// test's contexts are freed.
     #[allow(unsafe_code)]
-    fn teardown(engine: &Engine, raw: *mut ffi::ENGINE) {
+    pub(super) fn teardown(engine: &Engine, raw: *mut ffi::ENGINE) {
         // SAFETY: the test freed every context it created; raw is the
         // ENGINE_new ref from engine_with_ciphers.
         unsafe {
-            release_aes_cbc_ciphers(engine);
+            release_aes_ciphers(engine);
             ffi::ENGINE_free(raw);
             ffi::ERR_clear_error();
         }
@@ -729,24 +941,31 @@ mod tests {
 
     /// The ENGINE `raw`'s cipher for `nid`.
     #[allow(unsafe_code)]
-    fn our_cipher(raw: *mut ffi::ENGINE, nid: c_int) -> *const ffi::EVP_CIPHER {
+    pub(super) fn our_cipher(raw: *mut ffi::ENGINE, nid: c_int) -> *const ffi::EVP_CIPHER {
         // SAFETY: raw is a live ENGINE with our cipher callback installed.
         let cipher = unsafe { ffi::ENGINE_get_cipher(raw, nid) };
         assert!(!cipher.is_null());
         cipher
     }
 
-    /// A raw key of the right length for `nid`.
+    /// A raw key of the right length for `nid`; its halves differ, as the
+    /// built-in AES-XTS demands.
     #[allow(unsafe_code)]
-    fn raw_key(nid: c_int) -> Vec<u8> {
+    pub(super) fn raw_key(nid: c_int) -> Vec<u8> {
         // SAFETY: builtin_cipher returns a valid cipher.
         let len = unsafe { ffi::EVP_CIPHER_key_length(builtin_cipher(nid).unwrap()) };
-        vec![7u8; usize::try_from(len).unwrap()]
+        pattern(usize::try_from(len).unwrap())
+    }
+
+    /// The AES-CBC NIDs among [`NIDS`].
+    fn cbc_nids() -> impl Iterator<Item = c_int> {
+        NIDS.into_iter()
+            .filter(|&nid| nid != GCM_NID && nid != XTS_NID)
     }
 
     /// A fresh cipher context, initialized with `init`; free with [`free`].
     #[allow(unsafe_code)]
-    fn new_ctx() -> *mut ffi::EVP_CIPHER_CTX {
+    pub(super) fn new_ctx() -> *mut ffi::EVP_CIPHER_CTX {
         // SAFETY: plain allocation.
         let ctx = unsafe { ffi::EVP_CIPHER_CTX_new() };
         assert!(!ctx.is_null());
@@ -755,7 +974,7 @@ mod tests {
 
     /// Free a context from [`new_ctx`].
     #[allow(unsafe_code)]
-    fn free(ctx: *mut ffi::EVP_CIPHER_CTX) {
+    pub(super) fn free(ctx: *mut ffi::EVP_CIPHER_CTX) {
         // SAFETY: ctx is a live context, not used afterwards.
         unsafe { ffi::EVP_CIPHER_CTX_free(ctx) };
     }
@@ -763,7 +982,7 @@ mod tests {
     /// `EVP_CipherInit_ex` on `ctx` with `engine` (NULL for a built-in) and
     /// optional key and IV; true on success.
     #[allow(unsafe_code)]
-    fn init(
+    pub(super) fn init(
         ctx: *mut ffi::EVP_CIPHER_CTX,
         cipher: *const ffi::EVP_CIPHER,
         engine: *mut ffi::ENGINE,
@@ -780,7 +999,7 @@ mod tests {
     /// [`TSRA_CTRL_SET_KEY_URI`] on `ctx` with `uri` (NULL for `None`) and
     /// `arg`; true on success.
     #[allow(unsafe_code)]
-    fn attach(ctx: *mut ffi::EVP_CIPHER_CTX, uri: Option<&str>, arg: c_int) -> bool {
+    pub(super) fn attach(ctx: *mut ffi::EVP_CIPHER_CTX, uri: Option<&str>, arg: c_int) -> bool {
         let uri = uri.map(|u| CString::new(u).unwrap());
         let ptr = uri
             .as_ref()
@@ -884,9 +1103,9 @@ mod tests {
                 (key_len, iv_len, block, custom_copy)
             );
         }
-        assert!(register_aes_cbc_ciphers::<ToyLoader>(&engine).is_err());
+        assert!(register_aes_ciphers::<ToyLoader>(&engine).is_err());
         // SAFETY: no context was created on these ciphers.
-        unsafe { release_aes_cbc_ciphers(&engine) };
+        unsafe { release_aes_ciphers(&engine) };
         let mut cipher: *const ffi::EVP_CIPHER = null();
         // SAFETY: calling our callback directly with valid out-params (the
         // ENGINE is still alive, so its address cannot be reused meanwhile).
@@ -903,7 +1122,7 @@ mod tests {
     fn raw_key_runs_the_builtin() {
         let (engine, raw) = engine_with_ciphers();
         let iv = [9u8; AES_BLOCK];
-        for nid in NIDS {
+        for nid in cbc_nids() {
             let (builtin, ours, key) = (
                 builtin_cipher(nid).unwrap(),
                 our_cipher(raw, nid),
@@ -932,7 +1151,7 @@ mod tests {
         let iv = [3u8; AES_BLOCK];
         let msg = pattern(37);
         let expected = toy_encrypt(&iv, &msg);
-        for nid in NIDS {
+        for nid in cbc_nids() {
             let bits = u32::try_from(raw_key(nid).len())
                 .unwrap()
                 .checked_mul(u8::BITS);
@@ -949,22 +1168,22 @@ mod tests {
         teardown(&engine, raw);
     }
 
-    // A long update reaches the key one HSM request at a time, with the IV
-    // chained across the requests.
+    // A long update reaches the key in bounded calls, with the IV chained
+    // across them.
     #[test]
-    fn long_input_is_split_per_hsm_request() {
+    fn long_input_is_copied_in_bounded_calls() {
         let (engine, raw) = engine_with_ciphers();
         let iv = [4u8; AES_BLOCK];
-        let msg = pattern(HSM_CBC_REQUEST.saturating_mul(3).saturating_add(37));
+        let msg = pattern(CBC_COPY_CHUNK.saturating_mul(3).saturating_add(37));
         let expected = toy_encrypt(&iv, &msg);
-        for chunk in [HSM_CBC_REQUEST.saturating_add(5), msg.len()] {
+        for chunk in [CBC_COPY_CHUNK.saturating_add(5), msg.len()] {
             LONGEST_INPUT.with(|c| c.set(0));
             let ctx = hsm_ctx(raw, NIDS[2], true, &iv);
             assert_eq!(run(ctx, &msg, chunk).unwrap(), expected, "chunk {chunk}");
             free(ctx);
             assert_eq!(
                 LONGEST_INPUT.with(Cell::get),
-                HSM_CBC_REQUEST,
+                CBC_COPY_CHUNK,
                 "chunk {chunk}"
             );
         }

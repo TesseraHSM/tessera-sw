@@ -191,16 +191,11 @@ fuzz_target!(|input: FuzzInput| {
 
         // Generate a POTA trust anchor and embed its public key in the policy.
         let pota = CaKey::generate();
-        let policy = common::known_good_part_policy(pota.raw_pub());
+        let policy = common::known_good_part_policy(pota.spki_thumbprint());
 
         // PartInit: transition the partition to HsmPartState::Initializing.
         let init = ctx
-            .part_init(
-                &session,
-                &common::mach_seed(),
-                &policy,
-                &common::pota_thumbprint(),
-            )
+            .part_init(&session, &common::mach_seed(), &policy)
             .expect("PartInit should succeed");
 
         // Build the valid PTA chain anchored to the POTA key, then apply
@@ -247,8 +242,7 @@ fuzz_target!(|input: FuzzInput| {
                 panic!("PartFinal should succeed for a valid chain with an empty backup: {err}")
             }
             Err(DdiError::TborStatus(_) | DdiError::TborEncodeError) => {}
-            Err(DdiError::InvalidParameter)
-                if cert_slices.iter().any(|cert| cert.is_empty()) => {}
+            Err(DdiError::InvalidParameter) if cert_slices.iter().any(|cert| cert.is_empty()) => {}
             Err(err) => panic!("PartFinal returned an unexpected error: {err}"),
         }
 

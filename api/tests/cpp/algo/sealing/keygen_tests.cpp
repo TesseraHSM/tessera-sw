@@ -122,6 +122,10 @@ tsra_algo sealing_algo()
 // A NULL output handle pointer is rejected before anything else.
 TEST_F(tsra_sealing_keygen, key_gen_null_key_handle)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     SealingProps props;
     auto algo = sealing_algo();
     auto prop_list = props.list();
@@ -134,6 +138,10 @@ TEST_F(tsra_sealing_keygen, key_gen_null_key_handle)
 // A NULL algorithm pointer is rejected.
 TEST_F(tsra_sealing_keygen, key_gen_null_algo)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     SealingProps props;
     auto prop_list = props.list();
     tsra_handle key_handle = 0;
@@ -147,6 +155,10 @@ TEST_F(tsra_sealing_keygen, key_gen_null_algo)
 // A NULL property-list pointer is rejected.
 TEST_F(tsra_sealing_keygen, key_gen_null_prop_list)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     auto algo = sealing_algo();
     tsra_handle key_handle = 0;
 
@@ -165,6 +177,10 @@ TEST_F(tsra_sealing_keygen, key_gen_null_prop_list)
 // non-NULL `params` (with non-zero `len`) is rejected up front.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_algo_params_present)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -202,6 +218,10 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_algo_params_present)
 // A non-`Sealing` key kind is rejected by the sealing property guard.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_kind)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -236,6 +256,10 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_kind)
 // always produces a 384-bit scalar, so the props must match.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_bits)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -270,6 +294,10 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_bits)
 // only permitted usage for a sealing key.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_missing_derive)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -310,6 +338,10 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_missing_derive)
 // skip.
 TEST_F(tsra_sealing_keygen, key_gen_valid_props_pass_host_guards)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -351,6 +383,10 @@ TEST_F(tsra_sealing_keygen, key_gen_valid_props_pass_host_guards)
 // is built with the platform host crypto (OpenSSL on Linux, BCrypt on Windows).
 TEST_F(tsra_sealing_keygen, key_gen_roundtrip_generates_usable_sealing_key)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -454,6 +490,10 @@ TEST_F(tsra_sealing_keygen, key_gen_roundtrip_generates_usable_sealing_key)
 // distinct public keys.
 TEST_F(tsra_sealing_keygen, key_gen_roundtrip_yields_distinct_keys)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)

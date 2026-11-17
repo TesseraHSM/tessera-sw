@@ -8,8 +8,12 @@ pub type HsmResult<T> = Result<T, HsmError>;
 
 pub mod resiliency {
     pub const MAX_RETRIES: u32 = 3;
-    pub const BACKOFF_BASE_MS: u64 = 10;
-    pub const BACKOFF_JITTER_MS: u64 = 1;
+    pub fn backoff_base_ms() -> u64 {
+        10
+    }
+    pub fn backoff_jitter_ms() -> u64 {
+        1
+    }
 
     pub fn is_io_abort_error<T>(_result: &crate::HsmResult<T>) -> bool {
         false

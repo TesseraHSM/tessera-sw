@@ -413,12 +413,13 @@ fn build_case(input: &Input<'_>, session_id: u16, public: &RsaPublicKey) -> Case
                 257,
                 271,
                 272,
-                3071,
                 3072,
-                3073,
                 4096,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN - 1,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN + 1,
                 tsra_ddi_tbor_codec::MAX_DATA_SIZE + 1,
-            ][usize::from(input.byte(18) % 12)];
+            ][usize::from(input.byte(18) % 13)];
             blob = input.bytes(len);
             // Long arbitrary payloads retain a provably invalid RSA segment.
             if len > RSA_SEGMENT_LEN {
@@ -551,7 +552,11 @@ fn expected(case: &Case, input: &Input<'_>, active: u16) -> Expected {
     } else {
         match req.scope {
             common::KEY_SCOPE_SESSION => None,
-            common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL if input.byte(5) % 3 != 0 => None,
+            common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL
+                if !input.byte(5).is_multiple_of(3) =>
+            {
+                None
+            }
             common::KEY_SCOPE_SECURITY_DOMAIN if input.byte(5) % 3 == 2 => None,
             _ => Some(TborStatus::UnsupportedKeyScope),
         }
@@ -663,7 +668,14 @@ fn run(input: &Input<'_>) {
                     1
                 };
                 for _ in 0..repeats {
-                    ctx.expect_fw_reject(&case.req, status);
+                    if matches!(
+                        status,
+                        TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+                    ) {
+                        ctx.expect_session_reject(&case.req, status);
+                    } else {
+                        ctx.expect_fw_reject(&case.req, status);
+                    }
                 }
                 if session.is_some() {
                     let mut probe = build_case(&Input(&[]), active, &public);

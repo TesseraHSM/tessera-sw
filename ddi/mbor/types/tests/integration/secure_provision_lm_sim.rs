@@ -15,7 +15,6 @@
 //!    with FIPS status preserved and a re-seal rejected
 //!    (`test_secure_provision_lm_completed_survives`).
 
-#![cfg(not(feature = "emu"))]
 #![cfg(test)]
 
 use test_with_tracing::test;

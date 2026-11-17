@@ -10,8 +10,6 @@ version = "0.1.0"
 name = "x509-gen"
 path = "src/main.rs"
 
-[dependencies]
-
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl.workspace = true
 

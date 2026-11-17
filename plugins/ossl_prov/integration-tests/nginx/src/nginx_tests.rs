@@ -19,10 +19,9 @@
 //! conflicts and ordering issues.
 //!
 //! NGINX opens the HSM in its master process and then forks workers, so the
-//! provider must use the fork-safe `sock` transport (emu's runtime threads
-//! don't survive `fork()`).  Build it with `--features sock`, run
-//! `ddi_sock_server tcp://127.0.0.1:PORT`, and set `TSRA_DDI_SOCK` to that
-//! endpoint.
+//! provider must use the fork-safe `sock` transport against an external
+//! server.  Run `ddi_sock_server tcp://127.0.0.1:PORT`, and set
+//! `TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:PORT"`.
 
 /// Entry point for the NGINX test runner.
 ///
@@ -181,7 +180,7 @@ mod integration {
              \n\
              Build the provider first:\n\
              \n\
-                 cargo build -p tsra_ossl_provider --features sock,provider\n",
+                 cargo build -p tsra_ossl_provider --features provider\n",
             provider_so.display(),
         );
 

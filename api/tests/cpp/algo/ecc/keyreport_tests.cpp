@@ -197,7 +197,6 @@ TEST_F(tsra_ecc_keyattest, public_key_fails)
     });
 }
 
-#if !SESSION_EX_TESTS
 /// Verifies that key attestation rejects zero-length report data.
 ///
 /// The device requires `report_data` to be exactly `MAX_REPORT_DATA_SIZE`
@@ -205,6 +204,10 @@ TEST_F(tsra_ecc_keyattest, public_key_fails)
 /// as `TSRA_STATUS_DDI_CMD_FAILURE`.
 TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -241,6 +244,10 @@ TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails)
 /// (128) bytes of report data is accepted by the device.
 TEST_F(tsra_ecc_keyattest, one_byte_report_data_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -271,8 +278,6 @@ TEST_F(tsra_ecc_keyattest, one_byte_report_data_fails)
         ASSERT_EQ(attest_err, TSRA_STATUS_DDI_CMD_FAILURE);
     });
 }
-
-#endif
 
 /// Verifies that key attestation succeeds with the maximum supported report data length.
 TEST_F(tsra_ecc_keyattest, max_length_report_data_succeeds)
@@ -662,13 +667,16 @@ TEST_F(tsra_ecc_keyattest, invalid_report_data_size_query_fails)
     });
 }
 
-#if !SESSION_EX_TESTS
 /// Verifies that zero-length report data fails key attestation across all supported curves.
 ///
 /// See `zero_length_report_data_fails`: only exactly `MAX_REPORT_DATA_SIZE`
 /// (128) bytes of report data is accepted by the device.
 TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails_for_all_curves)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     std::vector<KeyAttestTestParams> test_cases = {
         { TSRA_ECC_CURVE_P256, "P256" },
         { TSRA_ECC_CURVE_P384, "P384" },
@@ -716,6 +724,10 @@ TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails_for_all_curves)
 /// exactly 128 bytes succeeds.
 TEST_F(tsra_ecc_keyattest, boundary_report_data_lengths_for_all_curves)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     std::vector<KeyAttestTestParams> curve_cases = {
         { TSRA_ECC_CURVE_P256, "P256" },
         { TSRA_ECC_CURVE_P384, "P384" },
@@ -782,10 +794,13 @@ TEST_F(tsra_ecc_keyattest, boundary_report_data_lengths_for_all_curves)
     }
 }
 
-#else
 /// Verifies EX rejects report data whose length differs from the TBOR field size.
 TEST_F(tsra_ecc_keyattest, rejects_noncanonical_report_data_lengths)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -813,7 +828,6 @@ TEST_F(tsra_ecc_keyattest, rejects_noncanonical_report_data_lengths)
         }
     });
 }
-#endif
 
 /// Verifies that two different ECC private keys produce different key attestation reports.
 TEST_F(tsra_ecc_keyattest, different_keys_produce_different_key_reports)

@@ -10,6 +10,7 @@
 #include "handle/part_list_handle.hpp"
 #include "utils/auto_ctx.hpp"
 #include "utils/auto_key.hpp"
+#include "utils/utils.hpp"
 
 class tsra_handle_mgmt : public ::testing::Test
 {
@@ -19,6 +20,10 @@ class tsra_handle_mgmt : public ::testing::Test
 
 TEST_F(tsra_handle_mgmt, free_sha_context_on_error)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Init SHA context
         auto_ctx sha_ctx;
@@ -42,6 +47,10 @@ TEST_F(tsra_handle_mgmt, free_sha_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_sign_context_on_error)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Generate ECC key pair
         auto_key priv_key;
@@ -77,6 +86,10 @@ TEST_F(tsra_handle_mgmt, free_sign_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_verify_context_on_error)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Generate ECC key pair
         auto_key priv_key;
@@ -112,6 +125,10 @@ TEST_F(tsra_handle_mgmt, free_verify_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_encrypt_context_on_error)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Generate AES key
         auto key = generate_aes_key(session, 128);
@@ -143,6 +160,10 @@ TEST_F(tsra_handle_mgmt, free_encrypt_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_decrypt_context_on_error)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Generate AES key
         auto key = generate_aes_key(session, 128);
@@ -174,6 +195,10 @@ TEST_F(tsra_handle_mgmt, free_decrypt_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_handle_invalid)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_handle bad_handle = 0xDEADBEEF;
     auto err = tsra_free_ctx_handle(bad_handle);
     ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
@@ -181,6 +206,10 @@ TEST_F(tsra_handle_mgmt, free_handle_invalid)
 
 TEST_F(tsra_handle_mgmt, free_handle_double_free)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto_ctx sha_ctx;
         tsra_algo algo = { TSRA_ALGO_ID_SHA256, nullptr, 0 };
@@ -200,6 +229,10 @@ TEST_F(tsra_handle_mgmt, free_handle_double_free)
 
 TEST_F(tsra_handle_mgmt, free_handle_multiple_contexts)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         // Create multiple contexts
         tsra_algo algo256 = { TSRA_ALGO_ID_SHA256, nullptr, 0 };

@@ -5,16 +5,15 @@
 //!
 //! `PartInit` is a CO-session command that derives the partition's
 //! deterministic PTA keypair and records the merged security-domain
-//! configuration params.  It persists the caller-asserted unified
-//! `PartPolicy` (partition + security-domain fields) plus the POTA /
-//! SATA / optional SAPOTA thumbprints, and returns the PTA CSR and the
+//! configuration params.  It persists the caller-asserted partition
+//! policy (a CBOR document naming the POTA / SATA / optional SAPOTA
+//! trust anchors by key thumbprint), and returns the PTA CSR and the
 //! COSE_Sign1 PTA key-attestation report.  The security-domain local
 //! masking keys are derived later by a future part-final command.  See
 //! `tsra_fw_ddi_tbor_types::part_init` for the full wire schema.
 
 use alloc::vec::Vec;
 
-use crate::policy::PartPolicy;
 use crate::tbor;
 
 /// TBOR opcode for `PartInit`.
@@ -32,17 +31,8 @@ pub const PART_INIT_MACH_SEED_AAD_LEN: usize = 32;
 /// Maximum on-the-wire length of the `mach_seed_envelope`.
 pub const MACH_SEED_ENVELOPE_MAX_LEN: usize = 160;
 
-/// Wire-pinned unified `PartPolicy` byte length.
-pub use crate::policy::PART_POLICY_LEN;
-
-/// Length of the SHA-384 POTA thumbprint (48 B).
-pub const POTA_THUMBPRINT_LEN: usize = 48;
-
-/// Length of the SHA-384 SATA thumbprint (48 B).
-pub const SATA_THUMBPRINT_LEN: usize = 48;
-
-/// Length of the SHA-384 SAPOTA thumbprint (48 B).
-pub const SAPOTA_THUMBPRINT_LEN: usize = 48;
+/// Maximum on-the-wire length of the partition policy document.
+pub use crate::policy::PART_POLICY_MAX_LEN;
 
 /// Maximum on-the-wire length of the PTA CSR (`pta_csr` response field).
 pub const PTA_CSR_MAX_LEN: usize = 512;
@@ -56,7 +46,7 @@ pub const PTA_REPORT_MAX_LEN: usize = 1024;
 /// wrong length produces a host-side encode error before the request
 /// reaches the device.
 #[tbor(opcode = TBOR_OP_PART_INIT, session_ctrl = in_session)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TborPartInitReq {
     /// CO session id this request is bound to.  Cross-checked
     /// against the SQE-carried session id by the dispatcher.
@@ -72,35 +62,10 @@ pub struct TborPartInitReq {
     #[tbor(max_len = 160)]
     pub mach_seed_envelope: Vec<u8>,
 
-    /// Caller-asserted unified [`PartPolicy`], encoded as its 584-byte
-    /// alignment-1 little-endian image pinned by the FW schema.
-    pub part_policy: PartPolicy,
-
-    /// SHA-384 thumbprint of the POTA certificate the partition is
-    /// being provisioned under.
-    pub pota_thumbprint: [u8; POTA_THUMBPRINT_LEN],
-
-    /// SHA-384 thumbprint of the SATA certificate bound to the
-    /// security domain.
-    pub sata_thumbprint: [u8; SATA_THUMBPRINT_LEN],
-
-    /// Optional SHA-384 thumbprint of the SAPOTA certificate.  Empty
-    /// when the security domain has no SAPOTA binding.
-    #[tbor(max_len = 48)]
-    pub sapota_thumbprint: Vec<u8>,
-}
-
-impl Default for TborPartInitReq {
-    fn default() -> Self {
-        Self {
-            session_id: 0,
-            mach_seed_envelope: Vec::new(),
-            part_policy: PartPolicy::zeroed(),
-            pota_thumbprint: [0u8; POTA_THUMBPRINT_LEN],
-            sata_thumbprint: [0u8; SATA_THUMBPRINT_LEN],
-            sapota_thumbprint: Vec::new(),
-        }
-    }
+    /// Caller-asserted partition policy: a deterministic CBOR document
+    /// of at most [`PART_POLICY_MAX_LEN`] bytes.
+    #[tbor(max_len = 384)]
+    pub part_policy: Vec<u8>,
 }
 
 /// Host-facing TBOR `PartInit` response.

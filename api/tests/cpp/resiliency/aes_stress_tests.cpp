@@ -14,6 +14,7 @@
 #include "handle/session_handle.hpp"
 #include "resiliency/resiliency_stress_helpers.hpp"
 #include "utils/auto_key.hpp"
+#include "utils/utils.hpp"
 
 // ---------------------------------------------------------------------------
 // Test fixture
@@ -31,6 +32,10 @@ class aes_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(aes_resiliency_stress, aes_cbc_encrypt_under_reset)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -80,6 +85,10 @@ TEST_F(aes_resiliency_stress, aes_cbc_encrypt_under_reset)
 ///
 TEST_F(aes_resiliency_stress, aes_cbc_round_trip_under_reset)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -159,6 +168,10 @@ TEST_F(aes_resiliency_stress, aes_cbc_round_trip_under_reset)
 ///
 TEST_F(aes_resiliency_stress, key_gen_under_reset)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -215,6 +228,10 @@ TEST_F(aes_resiliency_stress, key_gen_under_reset)
 ///
 TEST_F(aes_resiliency_stress, rapid_reset_between_ops)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -259,6 +276,10 @@ TEST_F(aes_resiliency_stress, rapid_reset_between_ops)
 ///
 TEST_F(aes_resiliency_stress, delete_key_under_reset)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);

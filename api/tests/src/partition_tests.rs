@@ -167,12 +167,19 @@ fn test_open_partition_with_unsupported_api_rev_below_min_fails() {
             .api_rev_range
             .expect("API rev range should be present")
             .min();
-        // Only test if min revision is greater than 0.0, otherwise there's no
-        // revision below the minimum.
-        if min_rev.major == 0 && min_rev.minor == 0 {
-            continue;
-        }
-        let below_min = HsmApiRev { major: 0, minor: 0 };
+        // The revision just below the minimum, e.g. any 1.x on a 2.0-only
+        // device. A 0.0 minimum has none.
+        let below_min = match (min_rev.major, min_rev.minor) {
+            (0, 0) => continue,
+            (major, 0) => HsmApiRev {
+                major: major - 1,
+                minor: u32::MAX,
+            },
+            (major, minor) => HsmApiRev {
+                major,
+                minor: minor - 1,
+            },
+        };
         let result = HsmPartitionManager::open_partition(&part_info.path, below_min);
         assert_eq!(result.unwrap_err(), HsmError::UnsupportedApiRevision);
     }
@@ -243,6 +250,9 @@ fn test_partition_properties() {
 
 #[api_test]
 fn test_partition_init() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -262,6 +272,9 @@ fn test_partition_init() {
 /// replace a MOBK that was validated by a successful credential establishment.
 #[api_test]
 fn test_partition_init_already_established() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -319,38 +332,43 @@ fn test_partition_init_already_established() {
 
 /// A fresh handle must recover through its MOBK callback after an
 /// already-established init supplied a blob the device did not validate.
-#[partition_test]
-fn test_partition_init_mobk_callback(part: HsmPartition, creds: HsmCredentials) {
-    if use_tpm() {
+#[test]
+fn test_partition_init_mobk_callback() {
+    if crate::utils::session::api_rev_at_least(1, 1) || use_tpm() {
         return;
     }
-    let mobk = part.mobk_vec();
-    assert!(!mobk.is_empty(), "MOBK missing after first init");
-    let second = HsmPartitionManager::open_partition(&part.path(), test_api_rev())
-        .expect("Failed to open the partition again");
-    let (_, pota_endorsement) = make_init_params(&second);
-    let (mut config, _ctx) = make_resiliency_config();
-    config.mobk_callback = Some(Box::new(CachedMobkCallback(mobk.clone())));
-    second
-        .init(
-            creds,
-            None,
-            None,
-            HsmOwnerBackupKeyConfig::new(
-                HsmOwnerBackupKeySource::Caller,
-                HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
-            ),
-            pota_endorsement,
-            Some(config),
-        )
-        .expect("Second init failed");
-    assert!(second.mobk_vec().is_empty());
+    // Not `#[partition_test]`: its fixture would init the partition before
+    // this mode check, and `#[api_test]` already holds `PARTITION_LOCK`.
+    crate::utils::api::init();
+    with_partition(|part, creds| {
+        let mobk = part.mobk_vec();
+        assert!(!mobk.is_empty(), "MOBK missing after first init");
+        let second = HsmPartitionManager::open_partition(&part.path(), test_api_rev())
+            .expect("Failed to open the partition again");
+        let (_, pota_endorsement) = make_init_params(&second);
+        let (mut config, _ctx) = make_resiliency_config();
+        config.mobk_callback = Some(Box::new(CachedMobkCallback(mobk.clone())));
+        second
+            .init(
+                creds,
+                None,
+                None,
+                HsmOwnerBackupKeyConfig::new(
+                    HsmOwnerBackupKeySource::Caller,
+                    HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
+                ),
+                pota_endorsement,
+                Some(config),
+            )
+            .expect("Second init failed");
+        assert!(second.mobk_vec().is_empty());
 
-    part.reset().expect("Partition reset failed");
-    let _session = second
-        .open_session(test_api_rev(), &creds, None)
-        .expect("Partition recovery through the MOBK callback failed");
-    assert_eq!(second.mobk_vec(), mobk);
+        part.reset().expect("Partition reset failed");
+        let _session = second
+            .open_session(test_api_rev(), &creds, None)
+            .expect("Partition recovery through the MOBK callback failed");
+        assert_eq!(second.mobk_vec(), mobk);
+    });
 }
 
 #[api_test]
@@ -522,6 +540,9 @@ fn test_init_tpm_obk_source_with_obk_provided_fails() {
 
 #[api_test]
 fn test_init_tpm_pota_source_with_endorsement_provided_fails() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -610,6 +631,9 @@ fn test_init_caller_source_with_empty_endorsement_fails() {
 
 #[api_test]
 fn test_init_caller_source_with_null_endorsement_fails() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -638,6 +662,9 @@ fn test_init_caller_source_with_null_endorsement_fails() {
 
 #[api_test]
 fn test_init_invalid_pota_source_fails() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -667,6 +694,9 @@ fn test_init_invalid_pota_source_fails() {
 
 #[api_test]
 fn test_init_with_resiliency_config() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -728,6 +758,9 @@ fn test_init_with_resiliency_caller_pota_null_callback_fails() {
 
 #[api_test]
 fn test_double_init_with_resiliency() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {

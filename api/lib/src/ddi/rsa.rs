@@ -79,8 +79,7 @@ pub(crate) fn get_rsa_unwrapping_key_raw_no_res(
 
 /// Performs RSA-AES key unwrapping using the specified RSA private key.
 ///
-/// V1 sessions use MBOR. V2 sessions use TBOR for plain AES keys; TBOR
-/// AES-GCM and AES-XTS bulk-key imports are not supported.
+/// V1 sessions use MBOR. V2 sessions use TBOR for AES-family and HMAC keys.
 ///
 /// # Arguments
 ///
@@ -110,7 +109,7 @@ pub(crate) fn rsa_aes_unwrap_key(
 /// For use under the barrier lock or by callers already inside a
 /// resiliency retry loop (e.g. [`aes_xts_unwrap_key`] which has its
 /// own `#[resiliency_key_op]`). The session selects MBOR or TBOR; TBOR
-/// supports symmetric AES keys only. MBOR failures after a successful DDI call
+/// supports AES-family and HMAC keys. MBOR failures after a successful DDI call
 /// clean up the resident handle via [`HsmKeyIdGuard`]. A successful TBOR
 /// unwrap returns an unpinned masked key and creates no resident handle.
 pub(crate) fn rsa_aes_unwrap_key_raw_no_res(
@@ -168,13 +167,14 @@ fn rsa_aes_unwrap_key_mbor(
     Ok((guard.release(), dev_key_props))
 }
 
-/// Performs one TBOR RSA-AES unwrap of a symmetric AES key.
+/// Performs one TBOR RSA-AES unwrap of a symmetric AES or HMAC key.
 ///
 /// TBOR `UnwrapKey` decodes raw AES material into `Aes128`, `Aes192`, or
 /// `Aes256`. An AES-GCM key is a plain AES-256 key on TBOR (consumed by
 /// `AesGcmEncryptDecrypt`), so it is imported as `Aes256` and retagged.
 /// An AES-XTS key is a single wrapped 64-byte `K1 ‖ K2` (PKCS#11
 /// `CKK_AES_XTS`) imported as `AesXts512`.
+/// HMAC keys are imported as the corresponding variable-length HMAC kind.
 /// The returned masked metadata and empty public-key field are validated
 /// before returning an unpinned handle.
 fn rsa_aes_unwrap_key_tbor(
@@ -193,6 +193,9 @@ fn rsa_aes_unwrap_key_tbor(
         (HsmKeyKind::Aes, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
         (HsmKeyKind::AesGcm, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
         (HsmKeyKind::AesXts, 512) => (KEY_CLASS_AES_XTS512, KEY_KIND_AES_XTS512),
+        (HsmKeyKind::HmacSha256, 256) => (KEY_CLASS_HMAC_SHA256, KEY_KIND_VAR_LEN_HMAC_SHA256),
+        (HsmKeyKind::HmacSha384, 384) => (KEY_CLASS_HMAC_SHA384, KEY_KIND_VAR_LEN_HMAC_SHA384),
+        (HsmKeyKind::HmacSha512, 512) => (KEY_CLASS_HMAC_SHA512, KEY_KIND_VAR_LEN_HMAC_SHA512),
         _ => return Err(HsmError::InvalidKeyProps),
     };
     let unwrapping_modulus_len = unwrapping_key.size();
@@ -201,7 +204,8 @@ fn rsa_aes_unwrap_key_tbor(
     }
 
     let mut wrapped_blob = wrapped_key.to_vec();
-    wrapped_blob[..unwrapping_modulus_len].reverse();
+    WireOrder::of(&unwrapping_key.session())
+        .convert_in_place(&mut wrapped_blob[..unwrapping_modulus_len]);
 
     let scope = key_props.tbor_scope();
     let req = TborUnwrapKeyReq {
@@ -464,7 +468,7 @@ fn rsa_mod_exp_mbor(
 /// Performs RSA modular exponentiation with a masked key over TBOR.
 ///
 /// RSA operands are converted between the host's big-endian representation
-/// and the TBOR wire's little-endian representation.
+/// and the session's [`WireOrder`].
 fn rsa_mod_exp_tbor(
     key: &HsmRsaPrivateKey,
     op: DdiRsaOpType,
@@ -477,12 +481,16 @@ fn rsa_mod_exp_tbor(
         _ => return Err(HsmError::InvalidArgument),
     };
 
-    // Host RSA operands are big-endian; the TBOR wire uses little-endian.
+    // Host RSA operands are big-endian; the TBOR wire uses the session's
+    // order.
+    let order = WireOrder::of(&key.session());
+    let mut y = input.to_vec();
+    order.convert_in_place(&mut y);
     let req = TborRsaModExpReq {
         session_id: key.session().ex_session_id()?,
         masked_key: key.masked_key_vec()?,
         op_type,
-        y: input.iter().rev().copied().collect(),
+        y,
     };
     let mut cookie = None;
     let resp = key.with_dev(|dev| {
@@ -496,9 +504,9 @@ fn rsa_mod_exp_tbor(
     if output.len() < resp.x.len() {
         return Err(HsmError::BufferTooSmall);
     }
-    for (dst, src) in output[..resp.x.len()].iter_mut().zip(resp.x.iter().rev()) {
-        *dst = *src;
-    }
+    let x = &mut output[..resp.x.len()];
+    x.copy_from_slice(&resp.x);
+    order.convert_in_place(x);
     Ok(resp.x.len())
 }
 
@@ -527,7 +535,7 @@ fn get_rsa_unwrapping_key_tbor(
     if resp.pub_key.len() != modulus_len + 4 {
         return Err(HsmError::InvalidKeyProps);
     }
-    let crypto_key = hsm_wire_pub_to_crypto(&resp.pub_key)?;
+    let crypto_key = hsm_wire_pub_to_crypto(WireOrder::of(session), &resp.pub_key)?;
     let pub_key_der = crypto_key.to_vec().map_hsm_err(HsmError::InternalError)?;
     priv_key_props.set_flags(
         priv_key_props.flags()
@@ -572,9 +580,10 @@ fn rsa_aes_unwrap_key_pair_tbor(
     }
 
     // The host wrapper emits the OAEP ciphertext big-endian; TBOR consumes
-    // only that leading RSA segment in little-endian order.
+    // that leading RSA segment in the session's wire order.
+    let order = WireOrder::of(&unwrapping_key.session());
     let mut wrapped_blob = wrapped_key.to_vec();
-    wrapped_blob[..unwrapping_modulus_len].reverse();
+    order.convert_in_place(&mut wrapped_blob[..unwrapping_modulus_len]);
 
     let scope = priv_key_props.tbor_scope();
     let req = TborUnwrapKeyReq {
@@ -596,7 +605,7 @@ fn rsa_aes_unwrap_key_pair_tbor(
         return Err(HsmError::InvalidKeyProps);
     }
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
-    let pub_key_der = tbor_wire_pub_key_to_der(&priv_key_props, &resp.pub_key)?;
+    let pub_key_der = tbor_wire_pub_key_to_der(order, &priv_key_props, &resp.pub_key)?;
     let (dev_priv_key_props, dev_pub_key_props) =
         HsmMaskedKey::to_key_pair_props(&resp.masked_key, &pub_key_der)?;
 
@@ -623,16 +632,18 @@ fn map_tbor_key_pair_unwrap_error(kind: HsmKeyKind, error: DdiError) -> HsmError
     }
 }
 
-/// Converts `n_le || e_le` RSA wire bytes to the crypto crate's representation.
-fn hsm_wire_pub_to_crypto(wire: &[u8]) -> HsmResult<crypto::RsaPublicKey> {
+/// Converts `n ‖ e` RSA wire bytes (each in `order`; `e` is 4 bytes) to
+/// the crypto crate's representation.
+fn hsm_wire_pub_to_crypto(order: WireOrder, wire: &[u8]) -> HsmResult<crypto::RsaPublicKey> {
     if wire.len() <= 4 {
         return Err(HsmError::InternalError);
     }
 
     let modulus_len = wire.len() - 4;
-    let mut big_endian = Vec::with_capacity(wire.len());
-    big_endian.extend(wire[..modulus_len].iter().rev());
-    big_endian.extend(wire[modulus_len..].iter().rev());
+    let mut big_endian = wire.to_vec();
+    let (n, e) = big_endian.split_at_mut(modulus_len);
+    order.convert_in_place(n);
+    order.convert_in_place(e);
     crypto::RsaPublicKey::from_hsm_bytes(&big_endian).map_hsm_err(HsmError::InternalError)
 }
 
@@ -654,6 +665,11 @@ fn tbor_unwrap_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
             Ok(KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
         }
         HsmKeyKind::Ecc if props.can_derive() && !props.can_sign() => Ok(KEY_USAGE_DERIVE),
+        HsmKeyKind::HmacSha256 | HsmKeyKind::HmacSha384 | HsmKeyKind::HmacSha512
+            if props.can_sign() && props.can_verify() =>
+        {
+            Ok(KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
+        }
         _ => Err(HsmError::InvalidKeyProps),
     }
 }
@@ -692,7 +708,11 @@ fn tbor_key_class_and_kind(props: &HsmKeyProps) -> HsmResult<(u8, u8)> {
 
 /// Validates and converts a TBOR RSA/ECC wire public key (as returned by
 /// `UnwrapKey` and `GetPublicKey`) to DER.
-pub(crate) fn tbor_wire_pub_key_to_der(props: &HsmKeyProps, wire: &[u8]) -> HsmResult<Vec<u8>> {
+pub(crate) fn tbor_wire_pub_key_to_der(
+    order: WireOrder,
+    props: &HsmKeyProps,
+    wire: &[u8],
+) -> HsmResult<Vec<u8>> {
     match props.kind() {
         HsmKeyKind::Rsa | HsmKeyKind::RsaCrt => {
             let expected_modulus_len =
@@ -700,12 +720,12 @@ pub(crate) fn tbor_wire_pub_key_to_der(props: &HsmKeyProps, wire: &[u8]) -> HsmR
             if wire.len().saturating_sub(4) != expected_modulus_len {
                 return Err(HsmError::InvalidKeyProps);
             }
-            let crypto_key = hsm_wire_pub_to_crypto(wire)?;
+            let crypto_key = hsm_wire_pub_to_crypto(order, wire)?;
             crypto_key.to_vec().map_hsm_err(HsmError::InternalError)
         }
         HsmKeyKind::Ecc => {
             let curve = props.ecc_curve().ok_or(HsmError::InvalidKeyProps)?;
-            ecc_wire_pub_key_to_der(curve, wire)
+            ecc_wire_pub_key_to_der(order, curve, wire)
         }
         _ => Err(HsmError::InvalidKeyProps),
     }

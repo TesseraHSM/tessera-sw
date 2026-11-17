@@ -65,33 +65,85 @@ pub fn pack_t0(buf: &mut [u8], a: &Poly) {
     }
 }
 
-pub fn unpack_t0(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..416];
-    for i in 0..N / 8 {
-        let off = 13 * i;
-        a[8 * i] = (buf[off] as i32) | ((buf[off + 1] as i32 & 0x1F) << 8);
-        a[8 * i + 1] = ((buf[off + 1] as i32) >> 5)
-            | ((buf[off + 2] as i32) << 3)
-            | ((buf[off + 3] as i32 & 0x03) << 11);
-        a[8 * i + 2] = ((buf[off + 3] as i32) >> 2) | ((buf[off + 4] as i32 & 0x7F) << 6);
-        a[8 * i + 3] = ((buf[off + 4] as i32) >> 7)
-            | ((buf[off + 5] as i32) << 1)
-            | ((buf[off + 6] as i32 & 0x0F) << 9);
-        a[8 * i + 4] = ((buf[off + 6] as i32) >> 4)
-            | ((buf[off + 7] as i32) << 4)
-            | ((buf[off + 8] as i32 & 0x01) << 12);
-        a[8 * i + 5] = ((buf[off + 8] as i32) >> 1) | ((buf[off + 9] as i32 & 0x3F) << 7);
-        a[8 * i + 6] = ((buf[off + 9] as i32) >> 6)
-            | ((buf[off + 10] as i32) << 2)
-            | ((buf[off + 11] as i32 & 0x07) << 10);
-        a[8 * i + 7] = ((buf[off + 11] as i32) >> 3) | ((buf[off + 12] as i32) << 5);
-
-        // Convert from [0, 2^d) to centered [-(2^(d-1)-1), 2^(d-1)]
-        for j in 0..8 {
-            a[8 * i + j] = (1 << (D - 1)) - a[8 * i + j];
+/// Unpack 256 `d`-bit fields, little-endian as FIPS 204's BitPack writes
+/// them, as `bias - field`: the form of `t0` (13 bits, bias 2^12), and of
+/// `s1`/`s2` for both values of eta (3 or 4 bits, bias eta).
+///
+/// Signing reads these straight out of the secret key where it lies, in
+/// PSRAM, which charges about 35 cycles an access whether the access is a
+/// byte or a word. Taking the stream a word at a time is a quarter of the
+/// accesses the byte-wise unpackers made, and one routine for all three
+/// shapes is smaller than any one of them was.
+#[inline(never)]
+pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
+    // The stream is 8d words. It is first copied into the top of `a` --
+    // from PSRAM a burst of eight words at a time, where a lone word load
+    // costs 35 cycles -- and unpacked from there downwards into `a`, which
+    // overtakes no word before reading it: coefficient i is written only
+    // after the ceil(d*(i+1)/32) words holding it have been read, and the
+    // stream starts 8d words from the end.
+    let words = 8 * d as usize;
+    let top = N - words;
+    let src = &buf[..4 * words];
+    #[cfg(target_arch = "arm")]
+    let staged = (src.as_ptr() as usize).is_multiple_of(4) && {
+        // SAFETY: `a[top..]` holds `words` words, a multiple of eight, and
+        // `src` is word aligned and as long.
+        unsafe { crate::spill::burst(a.as_mut_ptr().add(top), src.as_ptr().cast(), words) };
+        true
+    };
+    #[cfg(not(target_arch = "arm"))]
+    let staged = false;
+    if !staged {
+        for (k, w) in src.as_chunks::<4>().0.iter().enumerate() {
+            a[top + k] = i32::from_le_bytes(*w);
         }
+    }
+
+    // The secret key's s1 and s2, eta - f in 3 or 4 bits, and t0, 2^12 - f
+    // in 13: eight fields to every d bytes, each group a word load or a few
+    // (asm/dsa_unpack_key.S), not a test a coefficient for the word running
+    // out.
+    #[cfg(target_arch = "arm")]
+    if d <= 4 || d == 13 {
+        extern "C" {
+            fn pqc_ml_dsa_unpack_eta(r: *mut i32, s: *const u8, eta: i32, d: u32);
+            fn pqc_ml_dsa_unpack_t0(r: *mut i32, s: *const u8);
+        }
+        // SAFETY: `a` is 256 coefficients with the 8d-word stream staged at
+        // its end, which the routines read from there, as they may.
+        unsafe {
+            let a = a.as_mut_ptr();
+            let s = a.add(top).cast();
+            if d == 13 {
+                debug_assert_eq!(bias, 1 << 12);
+                pqc_ml_dsa_unpack_t0(a, s);
+            } else {
+                pqc_ml_dsa_unpack_eta(a, s, bias, d);
+            }
+        }
+        return;
+    }
+
+    let mask = (1u32 << d) - 1;
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut next = top;
+    for i in 0..N {
+        let t = if bits >= d {
+            let t = acc & mask;
+            acc >>= d;
+            bits -= d;
+            t
+        } else {
+            let w = a[next] as u32;
+            next += 1;
+            let t = (acc | (w << bits)) & mask;
+            acc = w >> (d - bits);
+            bits += 32 - d;
+            t
+        };
+        a[i] = bias - t as i32;
     }
 }
 
@@ -101,14 +153,6 @@ pub fn pack_eta(buf: &mut [u8], a: &Poly, eta: u8) {
     match eta {
         2 => pack_eta2(buf, a),
         4 => pack_eta4(buf, a),
-        _ => {}
-    }
-}
-
-pub fn unpack_eta(a: &mut Poly, buf: &[u8], eta: u8) {
-    match eta {
-        2 => unpack_eta2(a, buf),
-        4 => unpack_eta4(a, buf),
         _ => {}
     }
 }
@@ -129,25 +173,6 @@ fn pack_eta2(buf: &mut [u8], a: &Poly) {
     }
 }
 
-fn unpack_eta2(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..96];
-    for i in 0..N / 8 {
-        a[8 * i] = (buf[3 * i] & 0x07) as i32;
-        a[8 * i + 1] = ((buf[3 * i] >> 3) & 0x07) as i32;
-        a[8 * i + 2] = ((buf[3 * i] >> 6) | ((buf[3 * i + 1] & 0x01) << 2)) as i32;
-        a[8 * i + 3] = ((buf[3 * i + 1] >> 1) & 0x07) as i32;
-        a[8 * i + 4] = ((buf[3 * i + 1] >> 4) & 0x07) as i32;
-        a[8 * i + 5] = ((buf[3 * i + 1] >> 7) | ((buf[3 * i + 2] & 0x03) << 1)) as i32;
-        a[8 * i + 6] = ((buf[3 * i + 2] >> 2) & 0x07) as i32;
-        a[8 * i + 7] = ((buf[3 * i + 2] >> 5) & 0x07) as i32;
-        for j in 0..8 {
-            a[8 * i + j] = 2 - a[8 * i + j]; // map [0,4] -> [2,-2]
-        }
-    }
-}
-
 // eta=4: 4 bits per coefficient, pack 2 coefficients per byte
 fn pack_eta4(buf: &mut [u8], a: &Poly) {
     // Narrow to the exact encoded length once, so the byte accesses
@@ -157,18 +182,6 @@ fn pack_eta4(buf: &mut [u8], a: &Poly) {
         let t0 = (4 - a[2 * i]) as u8;
         let t1 = (4 - a[2 * i + 1]) as u8;
         buf[i] = t0 | (t1 << 4);
-    }
-}
-
-fn unpack_eta4(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..128];
-    for i in 0..N / 2 {
-        a[2 * i] = (buf[i] & 0x0F) as i32;
-        a[2 * i + 1] = (buf[i] >> 4) as i32;
-        a[2 * i] = 4 - a[2 * i];
-        a[2 * i + 1] = 4 - a[2 * i + 1];
     }
 }
 
@@ -182,12 +195,10 @@ pub fn pack_z(buf: &mut [u8], a: &Poly, gamma1: u32) {
     }
 }
 
+/// BitUnpack of z, gamma1 - field: the same encoding as the signer's y, so
+/// the same unpacker.
 pub fn unpack_z(a: &mut Poly, buf: &[u8], gamma1: u32) {
-    match gamma1 {
-        131072 => unpack_z17(a, buf),
-        524288 => unpack_z19(a, buf),
-        _ => {}
-    }
+    super::sampling::unpack_gamma1(a, buf, gamma1);
 }
 
 // gamma1 = 2^17: 18 bits per coefficient, stored as gamma1 - coeff
@@ -213,30 +224,6 @@ fn pack_z17(buf: &mut [u8], a: &Poly) {
     }
 }
 
-fn unpack_z17(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..576];
-    for i in 0..N / 4 {
-        let off = 9 * i;
-        a[4 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x03) as i32) << 16);
-        a[4 * i + 1] = ((buf[off + 2] as i32) >> 2)
-            | ((buf[off + 3] as i32) << 6)
-            | (((buf[off + 4] & 0x0F) as i32) << 14);
-        a[4 * i + 2] = ((buf[off + 4] as i32) >> 4)
-            | ((buf[off + 5] as i32) << 4)
-            | (((buf[off + 6] & 0x3F) as i32) << 12);
-        a[4 * i + 3] = ((buf[off + 6] as i32) >> 6)
-            | ((buf[off + 7] as i32) << 2)
-            | ((buf[off + 8] as i32) << 10);
-        for j in 0..4 {
-            a[4 * i + j] = (1 << 17) - a[4 * i + j];
-        }
-    }
-}
-
 // gamma1 = 2^19: 20 bits per coefficient
 fn pack_z19(buf: &mut [u8], a: &Poly) {
     // Narrow to the exact encoded length once, so the byte accesses
@@ -251,23 +238,6 @@ fn pack_z19(buf: &mut [u8], a: &Poly) {
         buf[off + 2] = ((t0 >> 16) | (t1 << 4)) as u8;
         buf[off + 3] = (t1 >> 4) as u8;
         buf[off + 4] = (t1 >> 12) as u8;
-    }
-}
-
-fn unpack_z19(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..640];
-    for i in 0..N / 2 {
-        let off = 5 * i;
-        a[2 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x0F) as i32) << 16);
-        a[2 * i + 1] = ((buf[off + 2] as i32) >> 4)
-            | ((buf[off + 3] as i32) << 4)
-            | ((buf[off + 4] as i32) << 12);
-        a[2 * i] = (1 << 19) - a[2 * i];
-        a[2 * i + 1] = (1 << 19) - a[2 * i + 1];
     }
 }
 

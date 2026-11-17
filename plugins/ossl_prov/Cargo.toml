@@ -6,8 +6,6 @@ edition = "2024"
 name = "tsra_ossl_provider"
 version = "0.1.0"
 
-[dependencies]
-
 [target.'cfg(target_os = "linux")'.build-dependencies]
 cmake.workspace = true
 tsra_api_native.workspace = true
@@ -17,6 +15,4 @@ workspace = true
 
 [features]
 default = []
-emu = []
 provider = []
-sock = []

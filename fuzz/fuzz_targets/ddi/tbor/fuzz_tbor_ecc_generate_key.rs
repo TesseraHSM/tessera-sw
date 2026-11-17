@@ -366,7 +366,14 @@ fuzz_target!(|input: FuzzInput| {
         let req = input.request(session_id, lifecycle);
         let expected = expected_rejection(&req, session_id, lifecycle);
         if let Some(status) = expected {
-            ctx.expect_fw_reject(&req, status);
+            if matches!(
+                status,
+                TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+            ) {
+                ctx.expect_session_reject(&req, status);
+            } else {
+                ctx.expect_fw_reject(&req, status);
+            }
         } else {
             let resp = ctx.tbor(&req).expect("valid ECC generation must succeed");
             let curve = check_response(&req, &resp);

@@ -1,0 +1,48 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# pkcs11-check baseline for the nightly full run (run.sh --full): "<tag>
+# <node id>" for every test of the fast profile that passes but stays off
+# include-list.txt, and every known crash. The full run fails on a new crash
+# and on a pass that is neither listed nor here. Tags:
+#
+#   rng: tests of the generator that pass only on the patched helper's host bytes
+#   presence-only: claim key persistence but only find the object again;
+#     key survival is the GoogleTest suite's job
+#   tool: check pkcs11-check's own tables, not the module
+#   environment: depend on host tools (p11-kit) the gate does not pin
+#   timing: benchmarks and timing ratios: meaningless or flaky on shared runners
+#   import-refused: set up a plaintext key, which C_CreateObject refuses, and
+#     pass on that refusal without reaching what they test
+#   crash: known crashes (none at present)
+
+rng testcases/test_access_levels.py::TestPublicSessionVisibility::test_public_session_can_generate_random
+rng testcases/test_benchmark.py::test_bench_rng
+rng testcases/test_buffers.py::TestRandomBufferSizes::test_16_bytes
+rng testcases/test_buffers.py::TestRandomBufferSizes::test_1_byte
+rng testcases/test_buffers.py::TestRandomBufferSizes::test_256_bytes
+rng testcases/test_buffers.py::TestRandomBufferSizes::test_4096_bytes
+rng testcases/test_errors.py::TestSessionEdgeCases::test_large_random_generation
+rng testcases/test_errors.py::TestSessionEdgeCases::test_small_random_generation
+rng testcases/test_large_objects.py::TestLargeRandomGeneration::test_generate_100kb_random
+rng testcases/test_large_objects.py::TestLargeRandomGeneration::test_generate_1kb_random_is_unique
+rng testcases/test_session_state_machine.py::TestLoginTypeSpecificity::test_generate_random_without_login
+rng testcases/test_stress.py::TestRapidOperations::test_rapid_random_1000
+rng testcases/test_surface_audit.py::TestFunctionRobustness::test_random_with_zero_bits
+presence-only testcases/test_object_visibility.py::TestTokenObjectPersistence::test_token_object_survives_session_close
+presence-only testcases/test_ro_session.py::TestSessionObjectLifecycle::test_token_object_persists_after_close
+presence-only testcases/test_session_state_machine.py::TestSessionCloseEffects::test_token_object_survives_session_close
+tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_full_compat_includes_all
+tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_full_compat_no_session
+tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_session_universal_in_tuple
+tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_token_universal_in_tuple
+tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_universal_codes_in_tuple
+tool testcases/test_mech_coverage.py::TestMechanismRegistryCoverage::test_advertised_mechanisms_have_registry_coverage
+environment testcases/test_interop_openssl.py::TestP11KitProxy::test_load_module_via_p11kit
+environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_list_modules
+environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_proxy_exists
+timing testcases/security/test_padding_oracle.py::TestTimingBasic::test_aes_cbc_pad_decrypt_timing_sanity
+timing testcases/test_benchmark.py::test_bench_aes256_cbc_encrypt
+timing testcases/test_benchmark.py::test_bench_aes_keygen
+timing testcases/test_benchmark.py::test_bench_sha256_digest
+import-refused testcases/test_surface_audit.py::TestMechanismLimitProbing::test_hmac_short_key

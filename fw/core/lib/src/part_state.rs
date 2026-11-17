@@ -163,8 +163,8 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
 /// mechanism (it writes the discriminant directly), so the undo log can
 /// restore any prior state through it.  This wrapper accepts only the two
 /// caller-facing transitions — `Enabled → Initializing` (`PartInit`,
-/// which additionally requires the four write-once provisioning fields —
-/// PTA key, UPS key, policy hash, POTA thumbprint — to be present) and
+/// which additionally requires the three write-once provisioning fields —
+/// PTA key, UPS key, policy hash — to be present) and
 /// `Initializing → Initialized` (`PartFinal`).  A same-state write is a
 /// no-op; any other pair is rejected with [`HsmError::InvalidArg`].
 pub fn part_set_state<P: HsmPartitionManager>(
@@ -177,8 +177,7 @@ pub fn part_set_state<P: HsmPartitionManager>(
         (HsmPartState::Enabled, HsmPartState::Initializing) => {
             let provisioned = prop_present(part_pta_key_id(pal, io))?
                 && prop_present(part_ups_key_id(pal, io))?
-                && prop_present(part_policy_hash(pal, io))?
-                && prop_present(part_pota_thumbprint(pal, io))?;
+                && prop_present(part_policy_hash(pal, io))?;
             if !provisioned {
                 return Err(HsmError::InvalidArg);
             }
@@ -981,69 +980,6 @@ pub const fn part_policy_hash_prop_id() -> HsmPartPropId {
     HsmPartPropId::POLICY_HASH
 }
 
-/// POTA thumbprint (48 B).  Set by `PartInit`.
-///
-/// Wraps [`HsmPartPropId::POTA_THUMBPRINT`] (`FixedBytes { len: 48 }`,
-/// `AbsentUntilSet`).
-pub fn part_pota_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::POTA_THUMBPRINT)
-}
-
-/// Write the POTA thumbprint.
-///
-/// `data` must be exactly 48 bytes.
-pub fn part_set_pota_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::POTA_THUMBPRINT, data)
-}
-
-/// [`HsmPartPropId`] backing [`part_pota_thumbprint`] /
-/// [`part_set_pota_thumbprint`].
-#[inline]
-pub const fn part_pota_thumbprint_prop_id() -> HsmPartPropId {
-    HsmPartPropId::POTA_THUMBPRINT
-}
-
-/// Read the SATA (Sealing Authority Trust Anchor) thumbprint.
-pub fn part_sata_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::SATA_THUMBPRINT)
-}
-
-/// Write the SATA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sata_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::SATA_THUMBPRINT, data)
-}
-
-/// Read the SAPOTA (Sealing Authority's POTA) thumbprint.
-pub fn part_sapota_thumbprint<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::SAPOTA_THUMBPRINT)
-}
-
-/// Write the SAPOTA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sapota_thumbprint<P: HsmPartitionManager>(
-    pal: &P,
-    io: &P::Io,
-    data: &HsmDmaBuf,
-) -> HsmResult<()> {
-    pal.part_prop_set_bytes(io, HsmPartPropId::SAPOTA_THUMBPRINT, data)
-}
-
 /// Whether the PSK selected by `psk_id` is still the well-known
 /// default value.
 ///
@@ -1108,12 +1044,9 @@ pub fn part_is_credential_set<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> Hs
 
 // ─── Public keys, BKS2, BK3 session (Phase A property additions) ─────
 
-/// Raw ECC-P384 public key (x ∥ y, 96 B) for the partition identity key.
-pub fn part_id_pub_key<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::PART_ID_ECC_PUB_KEY)
+/// Derive the partition identity public key as big-endian P-384 `x || y`.
+pub async fn part_id_pub_key<P: HsmPal>(pal: &P, io: &P::Io, out: &mut HsmDmaBuf) -> HsmResult<()> {
+    key_id_pub_key(pal, io, part_id_key_id(pal, io)?, out).await
 }
 
 /// Raw ECC-P384 public key (x ∥ y, 96 B) for the session encryption key.
@@ -1132,49 +1065,30 @@ pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
     pal.part_prop_get_bytes(io, HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY)
 }
 
-/// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) of the Partition
-/// Trust Anchor.
-pub fn part_pta_pub_key<'a, P: HsmPartitionManager>(
-    pal: &'a P,
-    io: &P::Io,
-) -> HsmResult<&'a HsmDmaBuf> {
-    pal.part_prop_get_bytes(io, HsmPartPropId::PTA_ECC_PUB_KEY)
-}
-
-/// Validates a host-supplied SEC1-uncompressed P-384 PTA key (`0x04 ‖ x
-/// ‖ y`, 97 B) and returns a view of the 96-byte raw `x ‖ y`
-/// coordinates (the constant `0x04` prefix is dropped before storage).
-fn pta_sec1_to_raw(sec1: &HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
-    const PTA_SEC1_LEN: usize = 97;
-    if sec1.len() != PTA_SEC1_LEN || sec1[0] != 0x04 {
-        return Err(HsmError::InvalidArg);
-    }
-    Ok(sec1.split_at(1).1)
-}
-
-/// Store the PTA public key from its host-supplied SEC1 form: validates
-/// the `0x04` prefix and persists the 96-byte raw coordinates.
-pub fn part_set_pta_pub_key<P: HsmPartitionManager>(
+/// Derive the Partition Trust Anchor public key as big-endian P-384 `x || y`.
+pub async fn part_pta_pub_key<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    sec1: &HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let raw = pta_sec1_to_raw(sec1)?;
-    pal.part_prop_set_bytes(io, HsmPartPropId::PTA_ECC_PUB_KEY, raw)
+    key_id_pub_key(pal, io, part_pta_key_id(pal, io)?, out).await
 }
 
-/// Bind both halves of the Partition Trust Anchor — the vault key id
-/// and the public key — in a single composite write.  `pub_sec1` is the
-/// host-supplied SEC1 form; its raw coordinates are stored.
-pub fn part_set_pta_key<P: HsmPartitionManager>(
+pub(crate) async fn key_id_pub_key<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     key_id: HsmKeyId,
-    pub_sec1: &HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let raw = pta_sec1_to_raw(pub_sec1)?;
-    part_set_pta_key_id(pal, io, key_id)?;
-    pal.part_prop_set_bytes(io, HsmPartPropId::PTA_ECC_PUB_KEY, raw)
+    if out.len() != HsmEccCurve::P384.pub_key_len() {
+        return Err(HsmError::EccInvalidKeyLength);
+    }
+    let len = pal.ecc_vault_pub_key(io, key_id, out).await?;
+    if len != out.len() {
+        return Err(HsmError::InternalError);
+    }
+    tsra_fw_hsm_byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, out)?;
+    Ok(())
 }
 
 /// BK3 session key (48 B). **Sensitive.**

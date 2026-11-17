@@ -14,7 +14,6 @@ pub fn helper_hkdf_derive(
     info: Option<MborByteArray<256>>,
     // info: Option<tsra_ddi_mbor_codec::MborByteArray<256>>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     key_length: Option<u8>,
 ) -> Result<DdiHkdfDeriveCmdResp, DdiError> {
@@ -30,7 +29,7 @@ pub fn helper_hkdf_derive(
             salt,
             info,
             key_type,
-            key_tag,
+            key_tag: None,
             key_properties: key_properties
                 .try_into()
                 .map_err(|_| DdiError::InvalidParameter)?,

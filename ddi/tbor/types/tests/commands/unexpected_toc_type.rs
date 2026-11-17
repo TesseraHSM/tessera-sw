@@ -12,15 +12,19 @@ use tsra_ddi_tbor_types::TborResp;
 
 #[test]
 fn wrong_toc_entry_type_yields_unexpected_toc_type() {
-    // TborApiRevResp expects two Uint8 TOC entries. Encode the
+    // TborApiRevResp expects four Uint16 TOC entries. Encode the
     // first slot as a SessionId (a wrong type) instead — status is 0
     // so the FwError gate does not short-circuit the schema decoder.
     let mut buf = [0u8; 64];
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .session_id(0xAAAA)
         .expect("encode session_id")
-        .uint8(0x02)
-        .expect("encode uint8")
+        .uint16(0)
+        .expect("encode uint16")
+        .uint16(1)
+        .expect("encode uint16")
+        .uint16(1)
+        .expect("encode uint16")
         .finish()
         .expect("finish");
 

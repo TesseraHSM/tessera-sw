@@ -60,7 +60,7 @@ pub struct TborMlDsaSignReq {
     /// The masked ML-DSA secret key (from `MlDsaGenerateKey`).  164 B:
     /// the wire ships seed-only keys.  See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`](crate::MASKED_MLDSA_KEY_MAX_LEN).
-    #[tbor(max_len = 5160)]
+    #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// The message representative `μ` to sign, exactly
@@ -78,8 +78,9 @@ pub struct TborMlDsaSignReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborMlDsaSignResp {
-    /// ML-DSA signature bytes.  Up to 4627 B for ML-DSA-87.
-    #[tbor(max_len = 4627)]
+    /// ML-DSA signature bytes.  Up to 4627 B for ML-DSA-87.  Aligned like
+    /// the request's `masked_key`, which the signature overwrites in place.
+    #[tbor(align = 4, max_len = 4627)]
     pub signature: Vec<u8>,
 }
 
@@ -92,7 +93,7 @@ mod tests {
     use crate::mldsa_generate_key::MLDSA_MU_LEN;
 
     /// The worst-case sign request, ML-DSA-87's masked key and `μ`, written
-    /// directly after the paired TOC.
+    /// after the paired TOC and the masked key's alignment padding.
     #[test]
     fn max_sized_request_encodes_mu_and_hedge() {
         let req = TborMlDsaSignReq {
@@ -109,7 +110,7 @@ mod tests {
                 .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
             "encoded frame must carry mu",
         );
-        // header(8) + 4 TOC entries * 4 + data(5160 + 64).
-        assert_eq!(frame.len(), 5248);
+        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5252);
     }
 }

@@ -56,7 +56,6 @@ fn test_masked_key_aes_gen(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         key_size,
-        Some(1),
         key_props,
     );
 
@@ -99,7 +98,6 @@ fn test_masked_key_aes_gen(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         key_id,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -141,7 +139,6 @@ fn test_unmask_session_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -176,16 +173,6 @@ fn test_unmask_session_key() {
                 let data = resp.unwrap().data;
                 data.key_id
             };
-
-            // Check if this key is session key
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_id,
-            );
-            // Should fail
-            assert!(resp.is_err());
 
             // Close session and reopen
             let session_id = {
@@ -246,117 +233,6 @@ fn test_unmask_session_key() {
     );
 }
 
-// Create named key, delete the key
-// Unmask the key, should still be named key
-#[cfg(not(feature = "emu"))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_unmask_named_key() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            const KEY_TAG: u16 = 0x1234;
-            let key_props =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
-
-            // Create a named key
-            let resp = helper_aes_generate(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                DdiAesKeySize::Aes128,
-                Some(KEY_TAG),
-                key_props,
-            );
-
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
-
-            let key_id = data.key_id;
-
-            let masked_key = data.masked_key;
-            assert!(!masked_key.is_empty());
-
-            // Delete the key
-            {
-                let resp = helper_delete_key(
-                    dev,
-                    Some(session_id),
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                    key_id,
-                );
-                assert!(resp.is_ok(), "resp {:?}", resp);
-            }
-
-            // Close session and open session with new seed
-            let session_id = {
-                let resp = helper_close_session(
-                    dev,
-                    Some(session_id),
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                );
-                assert!(resp.is_ok(), "resp {:?}", resp);
-
-                let new_session_seed = [42u8; 48];
-                let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
-                    dev,
-                    TEST_CRED_ID,
-                    TEST_CRED_PIN,
-                    new_session_seed,
-                );
-
-                let resp = helper_open_session(
-                    dev,
-                    None,
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                    encrypted_credential.clone(),
-                    pub_key.clone(),
-                );
-
-                assert!(resp.is_ok(), "resp {:?}", resp);
-
-                let resp = resp.unwrap();
-
-                assert!(resp.hdr.sess_id.is_some());
-                assert_eq!(resp.hdr.op, DdiOp::OpenSession);
-                assert_eq!(resp.hdr.status, DdiStatus::Success);
-
-                resp.data.sess_id
-            };
-
-            // Import/unmask the key
-            let resp = helper_unmask_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                masked_key,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-
-            // Check if this key is named key
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                KEY_TAG,
-            );
-            // Should pass
-            assert!(resp.is_ok());
-
-            // Key should still be there
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                KEY_TAG,
-            );
-            // Should pass
-            assert!(resp.is_ok());
-        },
-    );
-}
-
 // Create session key
 // Confirm unmasking into different session fails
 #[test]
@@ -374,7 +250,6 @@ fn test_unmask_session_key_different_session() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -447,7 +322,7 @@ fn test_unmask_session_key_different_session() {
 
 /// Helper: generate a bulk key, extract and compare attributes after unmask.
 ///
-/// 1. Generate an AES bulk key with the given size, availability, and optional key tag.
+/// 1. Generate an AES bulk key with the given size and availability.
 /// 2. Extract metadata/attributes from the original masked key blob.
 /// 3. Delete the original key.
 /// 4. Unmask the key from the masked blob.
@@ -458,7 +333,6 @@ fn unmask_bulk_key_and_verify_attributes(
     session_id: u16,
     aes_key_size: DdiAesKeySize,
     availability: DdiKeyAvailability,
-    key_tag: Option<u16>,
 ) {
     let key_props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, availability);
 
@@ -467,7 +341,6 @@ fn unmask_bulk_key_and_verify_attributes(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         aes_key_size,
-        key_tag,
         key_props,
     );
     assert!(resp.is_ok(), "Failed to generate key: {:?}", resp);
@@ -532,10 +405,6 @@ fn unmask_bulk_key_and_verify_attributes(
         original_metadata.key_length, unmasked_metadata.key_length,
         "key_length mismatch after unmask"
     );
-    assert_eq!(
-        original_metadata.key_tag, unmasked_metadata.key_tag,
-        "key_tag mismatch after unmask"
-    );
 
     // Clean up the unmasked key
     let resp = helper_delete_key(
@@ -559,7 +428,6 @@ fn test_unmask_xts_bulk_key_preserves_attributes() {
                 session_id,
                 DdiAesKeySize::AesXtsBulk256,
                 DdiKeyAvailability::App,
-                Some(0x5001),
             );
         },
     );
@@ -578,7 +446,6 @@ fn test_unmask_xts_bulk_session_key_preserves_attributes() {
                 session_id,
                 DdiAesKeySize::AesXtsBulk256,
                 DdiKeyAvailability::Session,
-                None,
             );
         },
     );
@@ -596,7 +463,6 @@ fn test_unmask_gcm_bulk_key_preserves_attributes() {
                 session_id,
                 DdiAesKeySize::AesGcmBulk256,
                 DdiKeyAvailability::App,
-                Some(0x5002),
             );
         },
     );
@@ -615,7 +481,6 @@ fn test_unmask_gcm_bulk_session_key_preserves_attributes() {
                 session_id,
                 DdiAesKeySize::AesGcmBulk256,
                 DdiKeyAvailability::Session,
-                None,
             );
         },
     );

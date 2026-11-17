@@ -41,7 +41,6 @@
 
 #![allow(unsafe_code)]
 
-use tsra_fw_hsm_io::Sqe;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -141,9 +140,7 @@ impl UnoHsmPal {
         let Some(bound) = bound else {
             return Ok(());
         };
-        let sqe = Sqe::try_from(io.sqe())?;
-        let current = sqe.session_flags().id_valid().then(|| sqe.session_id());
-        if current == Some(bound) {
+        if io.sqe().session_id() == Some(bound) {
             Ok(())
         } else {
             Err(HsmError::KeyNotFound)

@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlKemPubKeyMut;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -76,12 +77,12 @@ pub(crate) async fn handle<P: HsmPal>(
         // lengths are distinct, the same property `MlDsaVerify` relies on, and
         // the reason neither command needs a key kind on the wire.
         let param_set =
-            HsmMlKemParamSet::from_pub_key_len(req.pub_key.len()).ok_or(HsmError::InvalidArg)?;
+            HsmMlKemParamSet::from_pk_len(req.pub_key.len()).ok_or(HsmError::InvalidArg)?;
         let kind = mlkem_seed_kind(param_set);
-        let ct_len = param_set.ciphertext_len();
+        let ct_len = param_set.ct_len();
         let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlKemEncapsulateReq::TOC_COUNT * 4;
         if (req.pub_key.as_ptr() as usize).checked_sub(base) != Some(data_start) {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
 
         let svn = part_state::part_mfgr_svn(pal);
@@ -90,8 +91,17 @@ pub(crate) async fn handle<P: HsmPal>(
         let attrs = shared_secret_attrs(HsmKeyScope(scope));
 
         let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
-        pal.mlkem_encaps_in_place(io, param_set, req.pub_key, shared_secret)
+        let lens = pal
+            .mlkem_encaps_in_place(
+                io,
+                param_set,
+                HsmMlKemPubKeyMut::Encoded(req.pub_key),
+                shared_secret,
+            )
             .await?;
+        if lens != (ct_len, SHARED_SECRET_LEN) {
+            return Err(HsmError::InternalError);
+        }
 
         async {
             let masked_len = masked_blob_len(AeadAlg::AesGcm256, SHARED_SECRET_LEN);

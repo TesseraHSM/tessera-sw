@@ -9,7 +9,8 @@
 //! their respective modules. Demo signers are stored on disk; production
 //! services should use HSM-backed or external authority signers.
 //!
-//! Peer-cloning demo (build with `--features emu` for separate emulators):
+//! Peer-cloning demo (set `TSRA_DDI_ARGS="transport=sock;sock=ENDPOINT"` for
+//! each process, pointing at its own `ddi_sock_server`):
 //! ```text
 //! root_svc create --name primary --state-dir primary-state --listen 127.0.0.1:8080
 //! root_svc clone --name secondary --state-dir secondary-state --primary http://127.0.0.1:8080
@@ -77,8 +78,9 @@
 //! Remote recovery uses the root's stored original backup, not the leaf's
 //! local SD backups or upload copy. The leaf restores its partition-local MK
 //! and mints a fresh receiver. Root verifies both original and recovering
-//! leaf evidence against the bound policy and their respective pinned PTAs, then SATA-endorses
-//! their PID chains for the HSM reseal operation. BKS3 never leaves the HSM.
+//! leaf evidence against the bound policy and their respective pinned PTAs;
+//! firmware anchors both POTA/PTA/PID chains to the policy POTA during the
+//! HSM reseal operation. BKS3 never leaves the HSM.
 //! The root-held receiver becomes the resealed backup's authenticated sender.
 //! Its v2 report attests the root policy, which the leaf verifies against its
 //! saved root policy. Firmware authenticates that key using leaf SATA and
@@ -115,12 +117,6 @@
 //! and orchestration. Shared
 //! JSON, filesystem, PKI and display helpers live in `tsra_sealing_common`,
 //! not in the transport-independent `tsra_sealing_api`.
-//!
-//! Build both apps before the cross-application process tests:
-//! ```text
-//! cargo build --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc
-//! cargo nextest run --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc -p tsra_sealing_common
-//! ```
 
 use anyhow::Result;
 use clap::Parser;
@@ -135,16 +131,9 @@ mod env;
 mod leaf;
 mod peer;
 mod remote;
-#[cfg(all(test, feature = "emu"))]
-mod state_tests;
-
 /// Run the root-service command line.
 pub fn run_root() -> Result<()> {
     let args = cli::Cli::parse();
-    anyhow::ensure!(
-        !args.require_emu || cfg!(feature = "emu"),
-        "this operation requires an emulator build"
-    );
     match args.command {
         cli::Command::Create(args) => commands::create(&args),
         cli::Command::RestoreLocal(args) => commands::restore_local(&args),

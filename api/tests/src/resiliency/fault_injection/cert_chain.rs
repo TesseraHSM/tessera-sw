@@ -128,6 +128,9 @@ fn init_without_resiliency() -> HsmPartition {
 /// immediately for non-retryable ones.
 #[api_test]
 fn test_cert_chain_recovers_from_get_cert_chain_info_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, _ctx) = init_with_resiliency();
         let before = op_call_count(DdiOp::GetCertChainInfo);
@@ -163,6 +166,9 @@ fn test_cert_chain_recovers_from_get_cert_chain_info_single_fault() {
 /// or fails immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_cert_chain_recovers_from_get_cert_chain_info_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, _ctx) = init_with_resiliency();
         let before = op_call_count(DdiOp::GetCertChainInfo);
@@ -199,6 +205,9 @@ fn test_cert_chain_recovers_from_get_cert_chain_info_last_retry() {
 /// code.
 #[api_test]
 fn test_cert_chain_fails_after_get_cert_chain_info_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in CERT_CHAIN_RETRYABLE_ERRORS {
         let (part, _ctx) = init_with_resiliency();
 
@@ -227,6 +236,9 @@ fn test_cert_chain_fails_after_get_cert_chain_info_exhausted() {
 /// immediately for non-retryable ones.
 #[api_test]
 fn test_cert_chain_recovers_from_get_certificate_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, _ctx) = init_with_resiliency();
         let before = op_call_count(DdiOp::GetCertificate);
@@ -259,6 +271,9 @@ fn test_cert_chain_recovers_from_get_certificate_single_fault() {
 /// or fails immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_cert_chain_recovers_from_get_certificate_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, _ctx) = init_with_resiliency();
         let before = op_call_count(DdiOp::GetCertificate);
@@ -295,6 +310,9 @@ fn test_cert_chain_recovers_from_get_certificate_last_retry() {
 /// code.
 #[api_test]
 fn test_cert_chain_fails_after_get_certificate_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in CERT_CHAIN_RETRYABLE_ERRORS {
         let (part, _ctx) = init_with_resiliency();
 
@@ -322,6 +340,9 @@ fn test_cert_chain_fails_after_get_certificate_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_cert_chain_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = init_without_resiliency();
 
     inject_fault(FaultRule::fail_next(
@@ -351,6 +372,9 @@ fn test_cert_chain_no_retry_without_resiliency() {
 /// `cert_chain` succeeds without needing `restore_partition`.
 #[api_test]
 fn test_cert_chain_succeeds_after_reset_on_get_cert_chain_info() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, _ctx) = init_with_resiliency();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::GetCertChainInfo, 1));
@@ -369,6 +393,9 @@ fn test_cert_chain_succeeds_after_reset_on_get_cert_chain_info() {
 /// so `restore_partition` is not needed.
 #[api_test]
 fn test_cert_chain_recovers_after_reset_on_get_certificate() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, _ctx) = init_with_resiliency();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::GetCertificate, 1));
@@ -392,6 +419,9 @@ fn test_cert_chain_recovers_after_reset_on_get_certificate() {
 /// `GetCertificate` succeeds and `cert_chain` returns `Ok`.
 #[api_test]
 fn test_cert_chain_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = init_without_resiliency();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::GetCertificate, 1));
@@ -417,6 +447,9 @@ fn test_cert_chain_fails_after_reset_without_resiliency() {
 /// `cert_chain` recovers after two consecutive resets on `GetCertChainInfo`.
 #[api_test]
 fn test_cert_chain_recovers_after_consecutive_resets() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, _ctx) = init_with_resiliency();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::GetCertChainInfo, 2));

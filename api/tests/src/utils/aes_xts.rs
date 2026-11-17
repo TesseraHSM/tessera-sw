@@ -32,7 +32,7 @@ pub(crate) fn build_xts_wrapped_blob(
     key1_plain: &[u8],
     key2_plain: &[u8],
 ) -> Vec<u8> {
-    if cfg!(feature = "session-ex-tests") {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         let key_plain = [key1_plain, key2_plain].concat();
         // AES-256 KEK; the KEK size is independent of the wrapped key size.
         let mut wrap_algo = HsmRsaAesWrapAlgo::new(hash, 32);

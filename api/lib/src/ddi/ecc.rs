@@ -140,7 +140,7 @@ fn ecc_generate_key_tbor(
     })?;
 
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
-    let pub_key_der = ecc_wire_pub_key_to_der(curve, &resp.pub_key)?;
+    let pub_key_der = ecc_wire_pub_key_to_der(WireOrder::of(session), curve, &resp.pub_key)?;
     Ok((ddi::HsmKeyHandle::Unpinned, resp.masked_key, pub_key_der))
 }
 
@@ -195,48 +195,27 @@ pub(crate) fn ecc_public_props_for(dev_pub: &HsmKeyProps, priv_props: &HsmKeyPro
 
 /// Builds a DER `SubjectPublicKeyInfo` from the TBOR wire public key.
 ///
-/// The wire form is `x ‖ y` affine coordinates, little-endian per
-/// coordinate and zero-padded above the curve's byte length (P-521 pads
-/// 66 -> 68). DER SPKI expects big-endian coordinates of exactly the
-/// curve's component length, so each half is reversed and its leading
-/// zero padding removed.
-pub(crate) fn ecc_wire_pub_key_to_der(curve: HsmEccCurve, wire: &[u8]) -> HsmResult<Vec<u8>> {
-    // TBOR public keys are exactly two word-aligned wire coordinates
-    // (x ‖ y): 64 / 96 / 136 B for P-256 / P-384 / P-521.
-    let coord = curve.component_size();
-    let half = coord.next_multiple_of(4);
-    if wire.len() != half * 2 {
-        return Err(HsmError::InternalError);
-    }
-
-    let mut x = wire[..half].to_vec();
-    let mut y = wire[half..].to_vec();
-    x.reverse();
-    y.reverse();
-    let x = strip_leading_zero_pad(&x, coord)?;
-    let y = strip_leading_zero_pad(&y, coord)?;
+/// The wire form is `x ‖ y` affine coordinates in the session's
+/// [`WireOrder`]; DER SPKI expects big-endian coordinates of exactly the
+/// curve's component length.
+pub(crate) fn ecc_wire_pub_key_to_der(
+    order: WireOrder,
+    curve: HsmEccCurve,
+    wire: &[u8],
+) -> HsmResult<Vec<u8>> {
+    let (x, y) = order.pair_to_be(wire, curve.component_size())?;
 
     let crypto_curve = match curve {
         HsmEccCurve::P256 => EccCurve::P256,
         HsmEccCurve::P384 => EccCurve::P384,
         HsmEccCurve::P521 => EccCurve::P521,
     };
-    let der = DerEccPublicKey::new(crypto_curve, x, y).map_err(|_| HsmError::InternalError)?;
+    let der = DerEccPublicKey::new(crypto_curve, &x, &y).map_err(|_| HsmError::InternalError)?;
     let der_len = der.to_der(None).map_err(|_| HsmError::InternalError)?;
     let mut out = vec![0u8; der_len];
     der.to_der(Some(&mut out))
         .map_err(|_| HsmError::InternalError)?;
     Ok(out)
-}
-
-/// Removes leading zero padding from a big-endian coordinate down to
-/// `coord` bytes, rejecting any non-zero byte in the padding region.
-fn strip_leading_zero_pad(be: &[u8], coord: usize) -> HsmResult<&[u8]> {
-    let pad = be.len() - coord;
-    if be[..pad].iter().any(|&byte| byte != 0) {
-        return Err(HsmError::InternalError);
-    }
-    Ok(&be[pad..])
 }
 
 /// Performs an ECC signature operation using a pre-computed hash.
@@ -321,8 +300,8 @@ fn ecc_sign_mbor(
 }
 
 /// Signs a pre-computed digest over TBOR `EccSign` using the caller-held
-/// masked key (unmask-on-use). The digest is sent in wire little-endian
-/// order and the returned `r ‖ s` is converted back to big-endian.
+/// masked key (unmask-on-use). The digest is sent in the session's
+/// [`WireOrder`] and the returned `r ‖ s` is converted back to big-endian.
 fn ecc_sign_tbor(
     key: &HsmEccPrivateKey,
     curve: HsmEccCurve,
@@ -340,10 +319,11 @@ pub(crate) fn ecc_sign_masked_tbor(
     hash: &[u8],
     sig: &mut [u8],
 ) -> HsmResult<usize> {
-    // Firmware reads the digest as a little-endian integer; the host holds
-    // it big-endian.
+    // Firmware reads the digest as an integer in its native order; the
+    // host holds it big-endian.
+    let order = WireOrder::of(session);
     let mut digest = hash.to_vec();
-    digest.reverse();
+    order.convert_in_place(&mut digest);
 
     let req = TborEccSignReq {
         session_id: session.ex_session_id()?,
@@ -356,34 +336,27 @@ pub(crate) fn ecc_sign_masked_tbor(
             .map_err(HsmError::from)
     })?;
 
-    tbor_sig_to_be(curve, &resp.signature, sig)
+    tbor_sig_to_be(order, curve, &resp.signature, sig)
 }
 
-/// Converts the TBOR wire signature (`r ‖ s`, each component little-endian
-/// and zero-padded to the wire coordinate length) into big-endian `r ‖ s`
-/// of the curve's component length, matching the MBOR signature format.
-fn tbor_sig_to_be(curve: HsmEccCurve, wire_sig: &[u8], out: &mut [u8]) -> HsmResult<usize> {
-    // TBOR signatures are exactly two word-aligned wire coordinates (r ‖ s)
-    // of the curve's padded component length.
+/// Converts the TBOR wire signature (`r ‖ s` in `order`, each component
+/// sized to the wire coordinate length) into big-endian `r ‖ s` of the
+/// curve's component length, matching the MBOR signature format.
+fn tbor_sig_to_be(
+    order: WireOrder,
+    curve: HsmEccCurve,
+    wire_sig: &[u8],
+    out: &mut [u8],
+) -> HsmResult<usize> {
     let coord = curve.component_size();
-    let half = coord.next_multiple_of(4);
-    if wire_sig.len() != half * 2 {
-        return Err(HsmError::InternalError);
-    }
     let sig_len = coord * 2;
     if out.len() < sig_len {
         return Err(HsmError::BufferTooSmall);
     }
 
-    let mut r = wire_sig[..half].to_vec();
-    let mut s = wire_sig[half..].to_vec();
-    r.reverse();
-    s.reverse();
-    let r = strip_leading_zero_pad(&r, coord)?;
-    let s = strip_leading_zero_pad(&s, coord)?;
-
-    out[..coord].copy_from_slice(r);
-    out[coord..sig_len].copy_from_slice(s);
+    let (r, s) = order.pair_to_be(wire_sig, coord)?;
+    out[..coord].copy_from_slice(&r);
+    out[coord..sig_len].copy_from_slice(&s);
     Ok(sig_len)
 }
 
@@ -480,7 +453,8 @@ fn ecdh_derive_tbor(
     derived_key_props: HsmKeyProps,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
     let masked = base_key.masked_key_vec()?;
-    let peer_pub_key = ecc_der_pub_key_to_wire(curve, peer_pub_der)?;
+    let order = WireOrder::of(&base_key.session());
+    let peer_pub_key = ecc_der_pub_key_to_wire(order, curve, peer_pub_der)?;
 
     // The caller-supplied label round-trips into the derived-secret's masked
     // metadata (parity with the MBOR path, which carries it via
@@ -515,25 +489,11 @@ fn ecdh_derive_tbor(
     Ok((ddi::HsmKeyHandle::Unpinned, dev_key_props))
 }
 
-/// Converts a DER SPKI peer public key into the TBOR wire form: `x ‖ y`,
-/// little-endian per coordinate, zero-padded to the 4-byte-aligned wire
-/// coordinate length (P-521: 66 -> 68).
-fn ecc_der_pub_key_to_wire(curve: HsmEccCurve, der: &[u8]) -> HsmResult<Vec<u8>> {
+/// Converts a DER SPKI peer public key into the TBOR wire form: `x ‖ y`
+/// in `order`, each coordinate sized to the wire coordinate length.
+fn ecc_der_pub_key_to_wire(order: WireOrder, curve: HsmEccCurve, der: &[u8]) -> HsmResult<Vec<u8>> {
     let pub_key = DerEccPublicKey::from_der(der).map_err(|_| HsmError::InvalidKey)?;
-    let wire_coord = curve.component_size().next_multiple_of(4);
-    let mut wire = Vec::with_capacity(wire_coord * 2);
-    for be in [pub_key.x(), pub_key.y()] {
-        if be.len() > wire_coord {
-            return Err(HsmError::InternalError);
-        }
-        // Reverse the big-endian coordinate to little-endian, then zero-pad
-        // the high bytes up to the wire coordinate length.
-        let mut le = be.to_vec();
-        le.reverse();
-        le.resize(wire_coord, 0);
-        wire.extend_from_slice(&le);
-    }
-    Ok(wire)
+    order.pair_from_be(pub_key.x(), pub_key.y(), curve.component_size())
 }
 
 /// Generates a key report (attestation) for the specified ECC private key.

@@ -75,7 +75,7 @@ pub struct TborHmacGenerateKeyResp {
     /// The freshly generated HMAC key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  `232 + key_length.next_multiple_of(16)` B (264 … 360 B
     /// for a 32 … 128-byte key); not stored on-device.
-    #[tbor(max_len = 360)]
+    #[tbor(align = 4, max_len = 360)]
     pub masked_key: Vec<u8>,
 }
 

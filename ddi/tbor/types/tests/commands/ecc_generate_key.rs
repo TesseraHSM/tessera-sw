@@ -14,6 +14,7 @@
 //! tests, which build on this command.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -49,7 +50,7 @@ fn wire_pub_len(curve: u8) -> usize {
     match curve {
         ECC_CURVE_P256 => 64,
         ECC_CURVE_P384 => 96,
-        ECC_CURVE_P521 => 136,
+        ECC_CURVE_P521 => 2 * wire_coord_len(66),
         _ => unreachable!(),
     }
 }

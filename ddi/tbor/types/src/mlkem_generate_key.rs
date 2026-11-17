@@ -81,7 +81,7 @@ pub struct TborMlKemGenerateKeyResp {
     /// masking key. The plaintext contains the 64-byte `(d ‖ z)` seed
     /// followed by the expanded decapsulation key. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(max_len = 3464)]
+    #[tbor(align = 4, max_len = 3464)]
     pub masked_key: Vec<u8>,
 
     /// The ML-KEM public / encapsulation key bytes.

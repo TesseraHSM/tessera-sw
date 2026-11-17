@@ -39,7 +39,6 @@ fn test_attest_ecc_key_smoke() {
             let (private_key_id, pub_key_der, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );

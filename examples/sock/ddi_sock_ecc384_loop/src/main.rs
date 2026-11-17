@@ -3,7 +3,7 @@
 
 //! Generate, sign, and verify session-scoped P-384 keys over the socket DDI.
 //!
-//! Build with `cargo build -p tsra_ddi_sock_ecc384_loop --features sock`.
+//! Build with `cargo build -p tsra_ddi_sock_ecc384_loop`.
 //! Run as `tsra_ddi_sock_ecc384_loop [ENDPOINT] [COUNT]`; the default endpoint
 //! is `vsock://4:1234`. Unix socket paths are also supported.
 //! Use only a disposable test partition: this tool rotates the default CO PSK
@@ -37,12 +37,12 @@ mod unix {
     }
 
     fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>> {
-        std::env::set_var("TSRA_DDI_SOCK", endpoint);
+        std::env::set_var("TSRA_DDI_ARGS", format!("transport=sock;sock={}", endpoint));
 
         let info = HsmPartitionManager::partition_info_list()
             .into_iter()
-            .next()
-            .ok_or("no HSM partition found through the socket transport")?;
+            .find(|info| info.path == endpoint)
+            .ok_or("the socket endpoint was not discovered")?;
         let rev = info
             .api_rev_range
             .ok_or("the HSM did not report a supported API revision")?

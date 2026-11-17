@@ -33,7 +33,7 @@
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
 
-use crate::types::ENGINES;
+use crate::types::CORES;
 
 /// Base of the shared status block in the global SoC map.
 ///
@@ -113,7 +113,7 @@ pub fn write_sentinel(value: u32) {
 pub fn read_status(core: usize) -> FpStatus {
     let block = (BLOCK_BASE + CORE_BLOCK_OFFSET + core * CORE_BLOCK_SIZE) as *const u32;
 
-    // SAFETY: as above; `core` is bounded by the caller to `ENGINES`, which
+    // SAFETY: as above; `core` is bounded by the caller to `CORES`, which
     // keeps the read inside the reserved block.
     unsafe {
         FpStatus {
@@ -130,6 +130,6 @@ pub fn read_status(core: usize) -> FpStatus {
 }
 
 /// Read every core's published status.
-pub fn read_all() -> [FpStatus; ENGINES] {
+pub fn read_all() -> [FpStatus; CORES] {
     core::array::from_fn(read_status)
 }

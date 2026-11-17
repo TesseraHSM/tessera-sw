@@ -1,0 +1,22 @@
+From google/pkcs11test (https://github.com/google/pkcs11test), Apache-2.0,
+at the revision pinned in run.sh. The default key of pkcs11test's SecretKey
+helper becomes AES-256 instead of 3DES, the one secret-key type this token
+generates, so the latch and Tookan tests built on it run against real keys;
+callers that name a mechanism are unchanged. The context lines below are
+upstream's. See README.md.
+
+diff --git a/pkcs11test.h b/pkcs11test.h
+index 9fac97a..88109ad 100644
+--- a/pkcs11test.h
++++ b/pkcs11test.h
+@@ -238,8 +238,8 @@ class SecretKey {
+  public:
+   // Create a secret key with the given list of (boolean) attributes set to true.
+   SecretKey(CK_SESSION_HANDLE session, const ObjectAttributes& attrs,
+-            CK_MECHANISM_TYPE keygen_mechanism = CKM_DES3_KEY_GEN,
+-            int keylen = -1)
++            CK_MECHANISM_TYPE keygen_mechanism = CKM_AES_KEY_GEN,
++            int keylen = 32)
+     : session_(session), attrs_(attrs), key_(INVALID_OBJECT_HANDLE) {
+     CK_ULONG len = keylen;
+     if (keylen > 0) {

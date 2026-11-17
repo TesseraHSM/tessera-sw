@@ -26,8 +26,6 @@ use tsra_ddi_mbor_types::DdiKeyType;
 use tsra_ddi_mbor_types::DdiKeyUsage;
 use tsra_ddi_mbor_types::DdiStatus;
 
-const KEY_TAG: u16 = 0x5453;
-
 #[test]
 fn test_raw_key_import_invalid_session() {
     ddi_dev_test(
@@ -40,8 +38,7 @@ fn test_raw_key_import_invalid_session() {
 
             let key = [0x5au8; 32];
             let properties = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-            let resp =
-                helper_raw_key_import(dev, Some(5), &key, DdiKeyType::Secret256, None, properties);
+            let resp = helper_raw_key_import(dev, Some(5), &key, DdiKeyType::Secret256, properties);
 
             assert!(matches!(
                 resp,
@@ -71,7 +68,6 @@ fn test_raw_key_import_secret256() {
                 &key,
                 DdiKeyType::Secret256,
                 DdiKeyUsage::Derive,
-                None,
             );
         },
     );
@@ -95,7 +91,6 @@ fn test_raw_key_import_secret384() {
                 &key,
                 DdiKeyType::Secret384,
                 DdiKeyUsage::Derive,
-                None,
             );
         },
     );
@@ -119,7 +114,6 @@ fn test_raw_key_import_secret521() {
                 &key,
                 DdiKeyType::Secret521,
                 DdiKeyUsage::Derive,
-                None,
             );
         },
     );
@@ -143,7 +137,6 @@ fn test_raw_key_import_hmacsha256() {
                 &key,
                 DdiKeyType::HmacSha256,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -167,7 +160,6 @@ fn test_raw_key_import_hmacsha384() {
                 &key,
                 DdiKeyType::HmacSha384,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -191,7 +183,6 @@ fn test_raw_key_import_hmacsha512() {
                 &key,
                 DdiKeyType::HmacSha512,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -217,7 +208,6 @@ fn test_raw_key_import_var_hmacsha256() {
                 &key,
                 DdiKeyType::VarHmac256,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -243,7 +233,6 @@ fn test_raw_key_import_var_hmacsha384() {
                 &key,
                 DdiKeyType::VarHmac384,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -269,7 +258,6 @@ fn test_raw_key_import_var_hmacsha512() {
                 &key,
                 DdiKeyType::VarHmac512,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -291,7 +279,6 @@ fn test_raw_key_import_invalid_key_availability() {
                 DdiKeyType::Secret256,
                 DdiKeyUsage::Derive,
                 DdiKeyAvailability::Session,
-                None,
                 DdiStatus::InvalidArg,
             );
         },
@@ -314,7 +301,6 @@ fn test_raw_key_import_invalid_key_type_aes_bulk_key() {
                 DdiKeyType::AesGcmBulk256Unapproved,
                 DdiKeyUsage::EncryptDecrypt,
                 DdiKeyAvailability::App,
-                None,
                 DdiStatus::InvalidKeyType,
             );
         },
@@ -337,7 +323,6 @@ fn test_raw_key_import_invalid_key_type_rsa3kprivate() {
                 DdiKeyType::Rsa3kPrivate,
                 DdiKeyUsage::Unwrap,
                 DdiKeyAvailability::App,
-                None,
                 DdiStatus::InvalidKeyType,
             );
         },
@@ -361,7 +346,6 @@ fn test_raw_key_import_unwrapping_key() {
                 Some(session_id),
                 &key,
                 DdiKeyType::Rsa2kPrivate,
-                None,
                 properties,
             )
             .unwrap()
@@ -387,7 +371,6 @@ fn test_raw_key_import_invalid_key_usage() {
                 dev,
                 session_id,
                 DdiKeyUsage::SignVerify,
-                None,
                 DdiStatus::InvalidPermissions,
             );
         },
@@ -408,7 +391,6 @@ fn test_raw_key_import_rsa2k_decrypt_unsupported_key_usage() {
                 dev,
                 session_id,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
                 DdiStatus::InvalidPermissions,
             );
         },
@@ -431,7 +413,6 @@ fn test_raw_key_import_invalid_key_type_rsa4kprivate() {
                 DdiKeyType::Rsa4kPrivate,
                 DdiKeyUsage::Unwrap,
                 DdiKeyAvailability::App,
-                None,
                 DdiStatus::InvalidKeyType,
             );
         },
@@ -454,7 +435,6 @@ fn test_raw_key_import_aes256_unsupported_key() {
                 DdiKeyType::Aes256,
                 DdiKeyUsage::EncryptDecrypt,
                 DdiKeyAvailability::App,
-                None,
                 DdiStatus::InvalidKeyType,
             );
         },
@@ -482,7 +462,6 @@ fn test_raw_key_import_multiple_keys_and_validate() {
                 &key1,
                 DdiKeyType::Secret256,
                 DdiKeyUsage::Derive,
-                None,
             );
             import_and_verify(
                 dev,
@@ -490,7 +469,6 @@ fn test_raw_key_import_multiple_keys_and_validate() {
                 &key2,
                 DdiKeyType::Secret256,
                 DdiKeyUsage::Derive,
-                None,
             );
         },
     );
@@ -508,8 +486,7 @@ fn test_raw_key_import_no_session() {
 
             let key = [0x5au8; 32];
             let properties = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-            let resp =
-                helper_raw_key_import(dev, None, &key, DdiKeyType::Secret256, None, properties);
+            let resp = helper_raw_key_import(dev, None, &key, DdiKeyType::Secret256, properties);
 
             assert!(
                 matches!(
@@ -519,35 +496,6 @@ fn test_raw_key_import_no_session() {
                 "Expected FileHandleSessionIdDoesNotMatch error, got {:?}",
                 resp
             );
-        },
-    );
-}
-
-#[test]
-fn test_raw_key_import_rejects_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            if !require_physical_device(dev) || !require_raw_key_import(dev, session_id) {
-                return;
-            }
-
-            let key = [0x5au8; 32];
-            let properties = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-            let resp = helper_raw_key_import(
-                dev,
-                Some(session_id),
-                &key,
-                DdiKeyType::Secret256,
-                Some(KEY_TAG),
-                properties,
-            );
-
-            assert!(matches!(
-                resp,
-                Err(DdiError::DdiStatus(DdiStatus::InvalidArg))
-            ));
         },
     );
 }
@@ -568,7 +516,6 @@ fn test_raw_key_import_fixed_hmac_rejects_derive() {
                 DdiKeyType::HmacSha256,
                 DdiKeyUsage::Derive,
                 DdiKeyAvailability::App,
-                None,
                 DdiStatus::InvalidPermissions,
             );
         },
@@ -592,7 +539,6 @@ fn test_raw_key_import_fixed_hmac_readback_normalizes_type_and_preserves_bytes()
                 &key,
                 DdiKeyType::HmacSha256,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -616,7 +562,6 @@ fn test_raw_key_import_fixed_hmac_masked_key_round_trip_normalizes_type() {
                 Some(session_id),
                 &key,
                 DdiKeyType::HmacSha256,
-                None,
                 properties,
             )
             .unwrap()
@@ -627,7 +572,6 @@ fn test_raw_key_import_fixed_hmac_masked_key_round_trip_normalizes_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 imported.key_id,
-                false,
                 imported.masked_key,
             )
             .unwrap();
@@ -666,8 +610,7 @@ fn test_raw_key_import_fixed_hmac_rejects_noncanonical_lengths() {
                 (DdiKeyType::HmacSha512, 65),
             ] {
                 let key = vec![0x5au8; invalid_len];
-                let resp =
-                    helper_raw_key_import(dev, Some(session_id), &key, key_type, None, properties);
+                let resp = helper_raw_key_import(dev, Some(session_id), &key, key_type, properties);
                 assert!(
                     matches!(resp, Err(DdiError::DdiStatus(DdiStatus::InvalidArg))),
                     "{key_type:?} must reject {invalid_len}-byte input: {resp:?}",
@@ -694,7 +637,6 @@ fn test_raw_key_import_var_hmac_readback_preserves_type_and_bytes() {
                 &key,
                 DdiKeyType::VarHmac256,
                 DdiKeyUsage::SignVerify,
-                None,
             );
         },
     );
@@ -717,7 +659,6 @@ fn test_raw_key_import_rsa2k_rejects_replacement() {
                 Some(session_id),
                 &key,
                 DdiKeyType::Rsa2kPrivate,
-                None,
                 properties,
             )
             .unwrap();
@@ -728,7 +669,6 @@ fn test_raw_key_import_rsa2k_rejects_replacement() {
                 Some(session_id),
                 &key,
                 DdiKeyType::Rsa2kPrivate,
-                None,
                 properties,
             );
             assert!(matches!(

@@ -23,24 +23,12 @@ use tsra_crypto::testvectors::ecc::ECDH_P384_TEST_VECTORS;
 use tsra_crypto::testvectors::ecc::ECDH_P521_TEST_VECTORS;
 use tsra_crypto::testvectors::ecc::EccNistTestVector;
 
+use super::key_tests::get_rsa_unwrapping_key_pair;
 use super::*;
 
 // =======================================================
 // API-level common helpers
 // =======================================================
-
-/// Hashes input data using the API-level HSM hash operation.
-fn api_hash_data(session: &HsmSession, mut hash_algo: HsmHashAlgo, data: &[u8]) -> Vec<u8> {
-    HsmHasher::hash_vec(session, &mut hash_algo, data).expect("Failed to hash data")
-}
-
-/// Signs a precomputed digest using an HSM ECC private key.
-fn api_sign_hash(priv_key: &HsmEccPrivateKey, hash: &[u8]) -> Vec<u8> {
-    let mut sign_algo = HsmEccSignAlgo::default();
-
-    HsmSigner::sign_vec(&mut sign_algo, priv_key, hash)
-        .expect("API ECDSA signature generation failed")
-}
 
 /// Verifies an ECDSA signature against a precomputed digest using an HSM ECC public key.
 fn api_verify_hash_signature(
@@ -65,30 +53,6 @@ fn api_expected_digest_len(curve: HsmEccCurve) -> usize {
 // =======================================================
 // API-level RSA-AES unwrap helpers for ECC key-pair import
 // =======================================================
-
-/// Generates an RSA key pair for RSA-AES wrapping and unwrapping tests.
-fn generate_rsa_keypair(session: &HsmSession) -> (HsmRsaPrivateKey, HsmRsaPublicKey) {
-    let mut algo = HsmRsaKeyUnwrappingKeyGenAlgo::default();
-
-    let priv_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Rsa)
-        .bits(2048)
-        .can_unwrap(true)
-        .build()
-        .expect("Failed to build RSA private key props");
-
-    let pub_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Rsa)
-        .bits(2048)
-        .can_wrap(true)
-        .build()
-        .expect("Failed to build RSA public key props");
-
-    HsmKeyManager::generate_key_pair(session, &mut algo, priv_props, pub_props)
-        .expect("RSA key generation failed")
-}
 
 /// Wraps ECC private-key DER bytes using the RSA-AES wrapping algorithm.
 fn wrap_ecc_key_pair_rsa(rsa_pub: &HsmRsaPublicKey, ecc_private_key_der: &[u8]) -> Vec<u8> {
@@ -162,7 +126,7 @@ fn run_api_ecdsa_sign_verify_nist_messages(
     let (priv_key, pub_key) = generate_ecc_key_pair(session, curve);
 
     for (i, vector) in vectors.iter().enumerate() {
-        let digest = api_hash_data(session, hash_algo, vector.msg);
+        let digest = hash_data(session, hash_algo, vector.msg);
 
         assert_eq!(
             digest.len(),
@@ -170,7 +134,7 @@ fn run_api_ecdsa_sign_verify_nist_messages(
             "[{label}] API digest length mismatch at vector {i}"
         );
 
-        let signature = api_sign_hash(&priv_key, &digest);
+        let signature = sign_hash(&priv_key, &digest);
 
         assert_eq!(
             signature.len(),
@@ -199,8 +163,8 @@ fn run_api_ecdsa_modified_digest_fails(
     let (priv_key, pub_key) = generate_ecc_key_pair(session, curve);
 
     for (i, vector) in vectors.iter().enumerate() {
-        let digest = api_hash_data(session, hash_algo, vector.msg);
-        let signature = api_sign_hash(&priv_key, &digest);
+        let digest = hash_data(session, hash_algo, vector.msg);
+        let signature = sign_hash(&priv_key, &digest);
 
         let mut modified_digest = digest.clone();
         modified_digest[0] ^= 0x01;
@@ -228,8 +192,8 @@ fn run_api_ecdsa_tampered_signature_fails(
     let (priv_key, pub_key) = generate_ecc_key_pair(session, curve);
 
     for (i, vector) in vectors.iter().enumerate() {
-        let digest = api_hash_data(session, hash_algo, vector.msg);
-        let mut signature = api_sign_hash(&priv_key, &digest);
+        let digest = hash_data(session, hash_algo, vector.msg);
+        let mut signature = sign_hash(&priv_key, &digest);
 
         signature[0] ^= 0xFF;
 
@@ -259,7 +223,7 @@ fn run_api_ecc_unwrap_key_pair_sign_verify<T>(
     get_private_key_der: fn(&T) -> &[u8],
     label: &str,
 ) {
-    let (rsa_priv, rsa_pub) = generate_rsa_keypair(session);
+    let (rsa_priv, rsa_pub) = get_rsa_unwrapping_key_pair(session);
 
     for (i, vector) in vectors.iter().enumerate() {
         let private_key_der = get_private_key_der(vector);
@@ -268,7 +232,7 @@ fn run_api_ecc_unwrap_key_pair_sign_verify<T>(
             unwrap_ecc_key_pair_from_der(&rsa_priv, &rsa_pub, private_key_der, curve);
 
         let msg = b"API ECC unwrap sign/verify using NIST ECC key material";
-        let digest = api_hash_data(session, hash_algo, msg);
+        let digest = hash_data(session, hash_algo, msg);
 
         assert_eq!(
             digest.len(),
@@ -276,7 +240,7 @@ fn run_api_ecc_unwrap_key_pair_sign_verify<T>(
             "[{label}] API digest length mismatch at vector {i}"
         );
 
-        let signature = api_sign_hash(&ecc_priv, &digest);
+        let signature = sign_hash(&ecc_priv, &digest);
 
         assert_eq!(
             signature.len(),

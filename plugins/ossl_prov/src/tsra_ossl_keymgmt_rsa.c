@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include <openssl/asn1.h>
+#include <openssl/bn.h>
 #include <openssl/core_dispatch.h>
 #include <openssl/core_names.h>
 #include <openssl/err.h>
@@ -404,6 +406,8 @@ static void tsra_ossl_keymgmt_free(TSRA_RSA_KEY *rsa_key)
         tsra_key_delete(rsa_key->key.priv);
     }
 
+    BN_free(rsa_key->pub_n);
+    BN_free(rsa_key->pub_e);
     OPENSSL_free(rsa_key);
 }
 
@@ -709,6 +713,65 @@ static int tsra_ossl_keymgmt_has(const TSRA_RSA_KEY *rsa_key, int selection)
     return has_selection ? OSSL_SUCCESS : OSSL_FAILURE;
 }
 
+/* Parse a DER SEQUENCE of exactly two elements. */
+static ASN1_SEQUENCE_ANY *tsra_ossl_keymgmt_d2i_pair(const unsigned char *der, long len)
+{
+    ASN1_SEQUENCE_ANY *seq = d2i_ASN1_SEQUENCE_ANY(NULL, &der, len);
+
+    if (seq != NULL && sk_ASN1_TYPE_num(seq) != 2)
+    {
+        sk_ASN1_TYPE_pop_free(seq, ASN1_TYPE_free);
+        seq = NULL;
+    }
+
+    return seq;
+}
+
+/* Modulus and public exponent of a key, from the HSM unless imported. */
+static int tsra_ossl_keymgmt_get_pub(const TSRA_RSA_KEY *rsa_key, BIGNUM **n, BIGNUM **e)
+{
+    uint8_t spki_buf[2048];
+    struct tsra_key_prop prop = { .id = TSRA_KEY_PROP_ID_PUB_KEY_INFO,
+                                  .val = spki_buf,
+                                  .len = sizeof(spki_buf) };
+    ASN1_SEQUENCE_ANY *spki = NULL;
+    ASN1_SEQUENCE_ANY *pub = NULL;
+
+    if (rsa_key->pub_n != NULL && rsa_key->pub_e != NULL)
+    {
+        *n = BN_dup(rsa_key->pub_n);
+        *e = BN_dup(rsa_key->pub_e);
+        return *n != NULL && *e != NULL;
+    }
+
+    if (rsa_key->key.pub == 0 || tsra_key_get_prop(rsa_key->key.pub, &prop) != TSRA_STATUS_SUCCESS)
+    {
+        return OSSL_FAILURE;
+    }
+
+    /* SubjectPublicKeyInfo: algorithm, BIT STRING holding RSAPublicKey { n, e } */
+    spki = tsra_ossl_keymgmt_d2i_pair(spki_buf, (long)prop.len);
+
+    if (spki != NULL && ASN1_TYPE_get(sk_ASN1_TYPE_value(spki, 1)) == V_ASN1_BIT_STRING)
+    {
+        const ASN1_BIT_STRING *bits = sk_ASN1_TYPE_value(spki, 1)->value.bit_string;
+
+        pub = tsra_ossl_keymgmt_d2i_pair(bits->data, bits->length);
+    }
+
+    if (pub != NULL && ASN1_TYPE_get(sk_ASN1_TYPE_value(pub, 0)) == V_ASN1_INTEGER &&
+        ASN1_TYPE_get(sk_ASN1_TYPE_value(pub, 1)) == V_ASN1_INTEGER)
+    {
+        *n = ASN1_INTEGER_to_BN(sk_ASN1_TYPE_value(pub, 0)->value.integer, NULL);
+        *e = ASN1_INTEGER_to_BN(sk_ASN1_TYPE_value(pub, 1)->value.integer, NULL);
+    }
+
+    sk_ASN1_TYPE_pop_free(pub, ASN1_TYPE_free);
+    sk_ASN1_TYPE_pop_free(spki, ASN1_TYPE_free);
+
+    return *n != NULL && *e != NULL;
+}
+
 static int tsra_ossl_keymgmt_match(
     const TSRA_RSA_KEY *rsa_key1,
     const TSRA_RSA_KEY *rsa_key2,
@@ -722,15 +785,30 @@ static int tsra_ossl_keymgmt_match(
 
     if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0)
     {
-        if (rsa_key1->key.pub != rsa_key2->key.pub)
+        BIGNUM *n1 = NULL, *e1 = NULL, *n2 = NULL, *e2 = NULL;
+        int ok;
+
+        if (rsa_key1->key.pub != 0 && rsa_key1->key.pub == rsa_key2->key.pub)
         {
-            return OSSL_FAILURE;
+            return OSSL_SUCCESS;
         }
+
+        ok = tsra_ossl_keymgmt_get_pub(rsa_key1, &n1, &e1) &&
+             tsra_ossl_keymgmt_get_pub(rsa_key2, &n2, &e2) && BN_cmp(n1, n2) == 0 &&
+             BN_cmp(e1, e2) == 0;
+
+        BN_free(n1);
+        BN_free(e1);
+        BN_free(n2);
+        BN_free(e2);
+
+        return ok ? OSSL_SUCCESS : OSSL_FAILURE;
     }
 
+    /* Reached only without the public key selected, as in OpenSSL's RSA keymgmt. */
     if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0)
     {
-        if (rsa_key1->key.priv != rsa_key2->key.priv)
+        if (rsa_key1->key.priv == 0 || rsa_key1->key.priv != rsa_key2->key.priv)
         {
             return OSSL_FAILURE;
         }
@@ -767,28 +845,31 @@ static void *tsra_ossl_keymgmt_load(const void *reference, size_t reference_sz)
 static int tsra_ossl_keymgmt_import(void *keydata, int selection, const OSSL_PARAM params[])
 {
     TSRA_RSA_KEY *rsa_key = keydata;
+    const OSSL_PARAM *n, *e;
 
-    if (rsa_key == NULL || params == NULL)
+    if (rsa_key == NULL || params == NULL || (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0)
     {
         return OSSL_FAILURE;
     }
 
-    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)
+    /* A software private key stays with its own provider. */
+    if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_D) != NULL)
     {
-        const OSSL_PARAM *p;
-
-        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_BITS);
-        if (p != NULL)
-        {
-            if (!OSSL_PARAM_get_uint32(p, &rsa_key->genctx.pubkey_bits))
-            {
-                ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
-                return OSSL_FAILURE;
-            }
-        }
-
-        rsa_key->has_public = true;
+        return OSSL_FAILURE;
     }
+
+    n = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_N);
+    e = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_E);
+
+    if (n == NULL || e == NULL || !OSSL_PARAM_get_BN(n, &rsa_key->pub_n) ||
+        !OSSL_PARAM_get_BN(e, &rsa_key->pub_e))
+    {
+        ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+        return OSSL_FAILURE;
+    }
+
+    rsa_key->genctx.pubkey_bits = (uint32_t)BN_num_bits(rsa_key->pub_n);
+    rsa_key->has_public = true;
 
     return OSSL_SUCCESS;
 }
@@ -805,7 +886,8 @@ static int tsra_ossl_keymgmt_export(
 
 static const OSSL_PARAM *tsra_ossl_keymgmt_import_types(int selection)
 {
-    static const OSSL_PARAM import_types[] = { OSSL_PARAM_uint32(OSSL_PKEY_PARAM_RSA_BITS, NULL),
+    static const OSSL_PARAM import_types[] = { OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_N, NULL, 0),
+                                               OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_E, NULL, 0),
                                                OSSL_PARAM_END };
 
     if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)

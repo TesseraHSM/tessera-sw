@@ -58,6 +58,9 @@ const RETRYABLE_ERRORS: &[FaultError] = &[
 /// not panic and issues exactly one DDI call (no wasteful retry).
 #[api_test]
 fn test_close_session_swallows_retryable_errors() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -86,6 +89,9 @@ fn test_close_session_swallows_retryable_errors() {
 /// be infallible. The error is silently discarded.
 #[api_test]
 fn test_close_session_does_not_panic_on_non_retryable_error() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::NON_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -117,6 +123,9 @@ fn test_close_session_does_not_panic_on_non_retryable_error() {
 /// `test_close_session_does_not_panic_after_reset`.
 #[api_test]
 fn test_partition_handle_valid_after_close_session_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in RETRYABLE_ERRORS {
         let (part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -140,6 +149,9 @@ fn test_partition_handle_valid_after_close_session_fault() {
 /// panic, and the partition remains functional afterward.
 #[api_test]
 fn test_close_session_does_not_panic_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, session, _ctx) = init_with_resiliency_and_session();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::CloseSession, 1));

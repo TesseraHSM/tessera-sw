@@ -65,7 +65,6 @@ fn test_aes_generate_no_session() {
                 None,
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -92,7 +91,6 @@ fn test_aes_generate_invalid_session() {
                 Some(20),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -118,39 +116,10 @@ fn test_aes_generate_invalid_key_usage() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
             assert!(resp.is_err(), "resp {:?}", resp);
-        },
-    );
-}
-
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_aes_generate_session_only_key_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let key_props =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::Session);
-
-            let resp = helper_aes_generate(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                DdiAesKeySize::Aes128,
-                Some(0x9876),
-                key_props,
-            );
-
-            assert!(resp.is_err(), "resp {:?}", resp);
-            assert!(matches!(
-                resp.unwrap_err(),
-                DdiError::DdiStatus(DdiStatus::InvalidArg)
-            ));
         },
     );
 }
@@ -169,7 +138,6 @@ fn test_aes_generate_session_only_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -192,7 +160,6 @@ fn test_aes_generate() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -222,7 +189,6 @@ fn test_aes_generate_and_unmask() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -314,7 +280,6 @@ fn test_aes_generate_and_unmask_tampered() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 

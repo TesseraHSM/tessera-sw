@@ -33,7 +33,6 @@ fn test_ecc_sign_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             )
             .unwrap();

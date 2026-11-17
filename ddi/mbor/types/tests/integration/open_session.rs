@@ -396,9 +396,13 @@ fn test_open_session_multiple() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_open_session_multiple_get_key() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         setup,
         common_cleanup,

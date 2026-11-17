@@ -26,7 +26,6 @@ fn test_hmac_invalid_key_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 

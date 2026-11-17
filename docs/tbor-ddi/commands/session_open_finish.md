@@ -43,23 +43,23 @@ the full HKDF schedule.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 8-byte header, followed by the TOC entries, then the
 data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
-| 8  | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
-| 12 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
+| 8 | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
+| 12 | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
+| 16 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
 
 ### Data section
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 16 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
-| 64 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
+| 20 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
+| 68 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
 
 ## Response
 
@@ -76,7 +76,7 @@ data section.
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 12 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
+| 20 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
 
 ## `seed_envelope` format
 
@@ -96,6 +96,12 @@ Opening ignores the four-byte suffix. The HSM AEAD-opens this envelope
 Pending slot and returns `SessionAuthFailure`.  The recovered 32-byte
 `seed` is the input to `BK_SESSION` derivation for the response's
 `bmk_session` envelope below.
+
+On transports that seal session traffic with keys derived from the
+Pending slot (Duo), the slot is kept until the sealed `SessionAuthFailure`
+reply has been sent and is destroyed immediately afterwards. A competing
+finish cannot exploit this window: it must itself authenticate under
+transport keys derived from the slot's `exported` secret.
 
 ## `bmk_session` envelope
 
@@ -192,7 +198,7 @@ input.
 |---|---|
 | `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
 | `SessionNotPending` | Slot is not in `Pending` state |
-| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed |
+| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed (on Duo, after the sealed reply is sent) |
 | `PartitionNotProvisioned` | Identity key not present |
 
 A late `SessionOpenFinish` arriving against an evicted-and-reused slot

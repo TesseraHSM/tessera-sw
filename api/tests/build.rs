@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(target_os = "windows")]
 use std::env;
 #[cfg(target_os = "windows")]
 use std::path::Path;
@@ -21,9 +22,6 @@ fn main() {
     println!("cargo:rerun-if-changed=.");
     // Instruct Cargo to re-run this build script if any of the following env
     // vars changed since they impact the CMake configuration.
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMU");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOCK");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SESSION_EX_TESTS");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
     println!("cargo:rerun-if-env-changed=ProgramFiles(x86)");
     println!("cargo:rerun-if-env-changed=ProgramFiles");
@@ -37,23 +35,7 @@ fn main() {
 }
 
 fn try_main() -> anyhow::Result<()> {
-    let mut features = Vec::new();
-    if env::var("CARGO_FEATURE_EMU").is_ok() {
-        features.push("emu");
-    }
-    if env::var("CARGO_FEATURE_SOCK").is_ok() {
-        features.push("sock");
-    }
     let mut config = cmake::Config::new("cpp");
-    config.define("TEST_FEATURES", features.join(" "));
-    config.define(
-        "SESSION_EX_TESTS",
-        if env::var("CARGO_FEATURE_SESSION_EX_TESTS").is_ok() {
-            "ON"
-        } else {
-            "OFF"
-        },
-    );
 
     // On Windows, use get_vs_gen helper method to select the appropriate CMake
     // generator unless CMAKE_GENERATOR is already set. Tried Ninja but it was

@@ -337,7 +337,6 @@ pub struct GcmRequest<'a> {
 }
 
 /// Cipher of a [`HostRequest`].
-#[derive(Debug)]
 pub enum HostCipher<'a> {
     /// AES-256-GCM over `[padded_AAD | text]`, as in [`GcmRequest`], except
     /// that the text may be empty: an AAD-only command yields the tag over
@@ -374,7 +373,6 @@ pub enum HostCipher<'a> {
 ///
 /// The caller validates the descriptors' shape; the engine bounds its
 /// accesses by them and by `len`.
-#[derive(Debug)]
 pub struct HostRequest<'a> {
     pub op: BcpOp,
     pub cipher: HostCipher<'a>,

@@ -9,12 +9,12 @@ use anyhow::Context;
 use anyhow::Result;
 use jzon::JsonValue;
 use tsra_api::HsmPartition;
-use tsra_api::PartPolicy;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_sealing_api::device_cert_chain;
+use tsra_sealing_api::spki_thumbprint;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_report::verify_certificate_chain;
-use zerocopy::IntoBytes;
 
 use super::evidence;
 use super::http::Client;
@@ -30,8 +30,6 @@ pub struct PeerEnv {
     pub sata: Vec<u8>,
     pub manufacturer: Vec<Vec<u8>>,
     pub store: FileStore,
-    pota_thumbprint: [u8; 48],
-    sata_thumbprint: [u8; 48],
 }
 
 impl PeerEnv {
@@ -41,15 +39,13 @@ impl PeerEnv {
             "invalid peer state version"
         );
         let bytes = wire::blob(record, "policy")?;
-        let policy = PartPolicy::ref_from_wire(&bytes)
-            .context("invalid peer policy")?
-            .clone();
+        let policy = PartPolicy::from_bytes(&bytes).context("invalid peer policy")?;
         anyhow::ensure!(
             policy.flags.allow_peer_cloning(),
             "peer cloning is disabled"
         );
         anyhow::ensure!(
-            policy.sapota_pub_key.is_empty(),
+            policy.sapota_spki_thumbprint.is_none(),
             "demo peer does not support SAPOTA"
         );
         let primary = record["primary"]
@@ -59,13 +55,13 @@ impl PeerEnv {
         Client::new(&primary)?;
         let pota = wire::blob(record, "pota")?;
         let sata = wire::blob(record, "sata")?;
-        for (certificate, public) in [
-            (&pota, &policy.pota_pub_key.data),
-            (&sata, &policy.sata_pub_key.data),
+        for (certificate, thumbprint) in [
+            (&pota, &policy.pota_spki_thumbprint),
+            (&sata, &policy.sata_spki_thumbprint),
         ] {
             verify_certificate_chain(std::slice::from_ref(certificate))?;
             anyhow::ensure!(
-                evidence::cert_public(certificate)? == *public,
+                spki_thumbprint(&evidence::cert_public(certificate)?)? == *thumbprint,
                 "authority certificate does not match policy"
             );
         }
@@ -75,8 +71,6 @@ impl PeerEnv {
             seed: wire::blob(record, "seed")?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid peer machine seed"))?,
-            pota_thumbprint: pki::thumbprint(&pota),
-            sata_thumbprint: pki::thumbprint(&sata),
             pota,
             sata,
             manufacturer: Vec::new(),
@@ -119,15 +113,6 @@ impl SecurityDomainEnv for PeerEnv {
     type Store = FileStore;
     fn policy(&self) -> &PartPolicy {
         &self.policy
-    }
-    fn pota_thumbprint(&self) -> &[u8] {
-        &self.pota_thumbprint
-    }
-    fn sata_thumbprint(&self) -> &[u8] {
-        &self.sata_thumbprint
-    }
-    fn sapota_thumbprint(&self) -> Option<&[u8]> {
-        None
     }
     fn mfgr_cert_chain(&self) -> &[Vec<u8>] {
         &self.manufacturer

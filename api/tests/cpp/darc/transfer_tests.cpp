@@ -38,9 +38,8 @@ constexpr uint32_t kMaskedTmkLen = 264;
 constexpr uint32_t kSealedTmkLen = 145;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 
-// Raw P-384 public-key width and per-coordinate width.
+// Raw P-384 public-key width.
 constexpr size_t kRawPubLen = 96;
-constexpr size_t kCoordLen = 48;
 
 // `KeyScope::Local` discriminant (mirror of `KEY_SCOPE_LOCAL`).
 constexpr uint8_t kKeyScopeLocal = 0b011;
@@ -54,9 +53,8 @@ struct KexKey
     std::vector<uint8_t> pub_raw; // kRawPubLen (big-endian X ‖ Y)
 };
 
-/// Mint an `tsra_darc_kex_key_gen` key and convert its device
-/// little-endian `x ‖ y` public key into the raw big-endian `X ‖ Y` a
-/// certificate leaf carries (reversing each P-384 coordinate).
+/// Mint an `tsra_darc_kex_key_gen` key; its public key is already the raw
+/// big-endian `X ‖ Y` a certificate leaf carries.
 KexKey mint_kex(tsra_handle session)
 {
     KexKey key;
@@ -72,10 +70,6 @@ KexKey mint_kex(tsra_handle session)
     }
     key.masked.resize(masked_buf.len);
     key.pub_raw.resize(pub_buf.len);
-    // Device wire order is little-endian per coordinate; a leaf carries raw
-    // big-endian, so reverse each 48-byte coordinate.
-    std::reverse(key.pub_raw.begin(), key.pub_raw.begin() + kCoordLen);
-    std::reverse(key.pub_raw.begin() + kCoordLen, key.pub_raw.begin() + 2 * kCoordLen);
     return key;
 }
 
@@ -138,6 +132,10 @@ class tsra_darc_transfer_test : public ::testing::Test
 // TMK from one endpoint to another.
 TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -213,6 +211,10 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 // non-zero envelopes of the pinned wire lengths, and each mint is fresh.
 TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -269,6 +271,10 @@ TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 // key verifies against the original public key.
 TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -357,6 +363,10 @@ TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 // rather than accepting it blindly.
 TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -405,6 +415,10 @@ TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 // verifies, surfacing as `INVALID_ARGUMENT`.
 TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
