@@ -28,8 +28,9 @@ use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::TestPolicy;
-use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::policy::TestBackupPart;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
@@ -170,12 +171,16 @@ impl EccCurve {
     /// Raw (unpadded) coordinate length in bytes; also the length of an
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).1
+        match self {
+            Self::P256 => 32,
+            Self::P384 => 48,
+            Self::P521 => 66,
+        }
     }
 
-    /// Wire coordinate length in bytes, including padding (P-521: 66 -> 68 bytes).
+    /// Device coordinate width, including Uno's P-521 padding.
     pub fn wire_coord_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).0
+        wire_coord_len(self.coord_len())
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
@@ -189,17 +194,13 @@ impl EccCurve {
 
     /// Wire `r ‖ s` length, each component padded to the coordinate width.
     pub fn wire_sig_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).0 * 2
+        self.wire_coord_len() * 2
     }
 
     /// Wire `x ‖ y` public-key length, each coordinate padded to the wire
-    /// coordinate width (P-521: 66 -> 68 bytes).
+    /// coordinate width (P-521: 68 bytes on Uno, 66 on Duo).
     pub fn wire_pub_key_len(self) -> usize {
-        match self {
-            Self::P256 => 64,
-            Self::P384 => 96,
-            Self::P521 => 136,
-        }
+        self.wire_coord_len() * 2
     }
 }
 
@@ -638,8 +639,8 @@ pub fn import_darc_tmk(
         })
         .expect("DarcKexKeyGen");
     let mut recipient_be = kex.pub_key;
-    recipient_be[..COORD_LEN].reverse();
-    recipient_be[COORD_LEN..].reverse();
+    dev_rev_in_place(&mut recipient_be[..COORD_LEN]);
+    dev_rev_in_place(&mut recipient_be[COORD_LEN..]);
     let recipient = EccPublicKey::from_hsm_bytes(&recipient_be).expect("recipient public key");
     let sender = EccPrivateKey::from_curve(tsra_crypto::EccCurve::P384).expect("sender key");
     let (x, y) = sender.coord_vec().expect("sender public coordinates");
@@ -744,20 +745,9 @@ pub fn create_test_security_domain_with_custom_policy(
         })
         .expect("sealing-key report generation should succeed");
 
-    let mut receiver_pub = [0u8; RAW_PUB_LEN];
-    let coord_len = EccCurve::P384.coord_len();
-    for (dst, src) in receiver_pub[..coord_len]
-        .iter_mut()
-        .zip(sealing_key.pub_key[..coord_len].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in receiver_pub[coord_len..]
-        .iter_mut()
-        .zip(sealing_key.pub_key[coord_len..].iter().rev())
-    {
-        *dst = *src;
-    }
+    let mut receiver_pub = sealing_key.pub_key;
+    dev_rev_in_place(&mut receiver_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut receiver_pub[COORD_LEN..]);
     let receiver = make_chain(&sata, &receiver_pub);
     let mfgr = make_chain(&CaKey::generate(), &pid_pub);
     let owner = make_chain(&CaKey::generate(), &pid_pub);

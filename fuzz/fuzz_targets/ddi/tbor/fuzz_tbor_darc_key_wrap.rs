@@ -371,7 +371,7 @@ fn mutate(req: &mut TborDarcKeyWrapReq, input: &FuzzInput<'_>) {
     }
 }
 
-/// Convert padded wire-LE public coordinates to raw host big-endian coordinates.
+/// Convert device-order public coordinates to raw host big-endian coordinates.
 fn public_be(curve: common::EccCurve, wire: &[u8]) -> Vec<u8> {
     assert_eq!(wire.len(), curve.wire_pub_key_len());
     let mut result = Vec::with_capacity(2 * curve.coord_len());
@@ -380,7 +380,7 @@ fn public_be(curve: common::EccCurve, wire: &[u8]) -> Vec<u8> {
             coordinate[curve.coord_len()..].iter().all(|&b| b == 0),
             "wire public padding"
         );
-        result.extend(coordinate[..curve.coord_len()].iter().rev().copied());
+        result.extend(dev_rev(&coordinate[..curve.coord_len()]));
     }
     result
 }
@@ -530,13 +530,13 @@ fn assert_success(
                 component[input.curve.coord_len()..].iter().all(|&b| b == 0),
                 "signature padding"
             );
-            raw_signature.extend(component[..input.curve.coord_len()].iter().rev().copied());
+            raw_signature.extend(dev_rev(&component[..input.curve.coord_len()]));
         }
         let public_coordinates = public_be(input.curve, original_public);
         let (x, y) = public_coordinates.split_at(input.curve.coord_len());
         let public =
             EccPublicKey::from_coordinates(host_curve(input.curve), x, y).expect("host public key");
-        let digest_be: Vec<_> = digest.iter().rev().copied().collect();
+        let digest_be = dev_rev(&digest);
         assert!(
             Verifier::verify(&mut EccAlgo::default(), &public, &digest_be, &raw_signature)
                 .expect("host signature verification"),

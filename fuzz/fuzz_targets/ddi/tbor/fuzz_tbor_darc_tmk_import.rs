@@ -216,12 +216,12 @@ fn dummy_request(session_id: u16) -> TborDarcTmkImportReq {
     }
 }
 
-/// Recover a host public key from independently reversed wire-LE coordinates.
+/// Recover a host public key from device-order coordinates.
 fn receiver_public(wire: &[u8]) -> EccPublicKey {
     assert_eq!(wire.len(), RAW_PUB_LEN);
     let mut be = wire.to_vec();
-    be[..common::COORD_LEN].reverse();
-    be[common::COORD_LEN..].reverse();
+    dev_rev_in_place(&mut be[..common::COORD_LEN]);
+    dev_rev_in_place(&mut be[common::COORD_LEN..]);
     EccPublicKey::from_hsm_bytes(&be).expect("authentic receiver point")
 }
 
@@ -652,12 +652,8 @@ fn assert_plaintext(
         })
         .expect("imported TMK must unwrap host-known material");
     assert_eq!(resp.key_kind, KEY_KIND_ECC256_PRIVATE);
-    let expected_pub = x
-        .iter()
-        .rev()
-        .chain(y.iter().rev())
-        .copied()
-        .collect::<Vec<_>>();
+    let mut expected_pub = dev_rev(&x);
+    expected_pub.extend(dev_rev(&y));
     assert!(
         resp.pub_key == expected_pub,
         "recovered public key mismatch"

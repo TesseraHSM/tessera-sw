@@ -155,11 +155,11 @@ enum Expected {
     Reject(TborStatus),
 }
 
-/// Convert independently reversed wire coordinates to host big-endian points.
+/// Convert device-order coordinates to host big-endian points.
 fn host_public(wire: &[u8; RAW_PUB_LEN]) -> EccPublicKey {
     let mut raw = *wire;
-    raw[..common::COORD_LEN].reverse();
-    raw[common::COORD_LEN..].reverse();
+    dev_rev_in_place(&mut raw[..common::COORD_LEN]);
+    dev_rev_in_place(&mut raw[common::COORD_LEN..]);
     EccPublicKey::from_hsm_bytes(&raw).expect("generated P-384 public point")
 }
 

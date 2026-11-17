@@ -198,10 +198,9 @@ impl HostKey {
         let (x, y) = key.coord_vec().expect("public coordinates");
         let mut wire_pub = Vec::with_capacity(curve.wire_pub_key_len());
         for coordinate in [&x, &y] {
-            let mut le = coordinate.clone();
-            le.reverse();
-            le.resize(curve.wire_pub_key_len() / 2, 0);
-            wire_pub.extend_from_slice(&le);
+            let mut wire = dev_rev(coordinate);
+            wire.resize(curve.wire_coord_len(), 0);
+            wire_pub.extend_from_slice(&wire);
         }
         Self {
             curve,

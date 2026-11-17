@@ -154,9 +154,7 @@ fn imported_material(class: u8, size: usize) -> &'static Material {
             let mut public = vec![0; width * 2];
             for (dest, source) in public.chunks_mut(width).zip([x, y]) {
                 assert!(source.len() <= width);
-                for (dst, src) in dest.iter_mut().zip(source.iter().rev()) {
-                    *dst = *src;
-                }
+                dest[..source.len()].copy_from_slice(&dev_rev(&source));
             }
             Material {
                 der: key.to_vec().expect("host ECC DER"),
@@ -167,13 +165,12 @@ fn imported_material(class: u8, size: usize) -> &'static Material {
         RSA[size].get_or_init(|| {
             let key = RsaPrivateKey::generate([256, 384, 512][size]).expect("host RSA fixture");
             let public_key = key.public_key().expect("host RSA public key");
-            let mut public = public_key.n_vec().expect("host RSA modulus");
-            public.reverse();
-            let mut exponent = public_key.e_vec().expect("host RSA exponent");
+            let mut public = dev_rev(&public_key.n_vec().expect("host RSA modulus"));
+            let exponent = public_key.e_vec().expect("host RSA exponent");
             assert!(exponent.len() <= 4);
-            exponent.reverse();
-            exponent.resize(4, 0);
-            public.extend(exponent);
+            let mut padded_exponent = [0; 4];
+            padded_exponent[4 - exponent.len()..].copy_from_slice(&exponent);
+            public.extend(dev_rev(&padded_exponent));
             Material {
                 der: key.to_vec().expect("host RSA DER"),
                 public,
@@ -198,12 +195,8 @@ fn import_key(ctx: &TestCtx, session_id: u16, input: &Input<'_>, scope: u8) -> K
         .pub_key;
     assert_eq!(wire.len(), UNWRAPPING_PUB_KEY_LEN);
     let modulus_len = UNWRAPPING_PUB_KEY_LEN - 4;
-    let public_be: Vec<_> = wire[..modulus_len]
-        .iter()
-        .rev()
-        .chain(wire[modulus_len..].iter().rev())
-        .copied()
-        .collect();
+    let mut public_be = dev_rev(&wire[..modulus_len]);
+    public_be.extend(dev_rev(&wire[modulus_len..]));
     let public = RsaPublicKey::from_hsm_bytes(&public_be).expect("unwrapping public key");
     let kek_bytes = input.bytes(32);
     let kek = AesKey::from_bytes(&kek_bytes).expect("host KEK");
@@ -214,7 +207,7 @@ fn import_key(ctx: &TestCtx, session_id: u16, input: &Input<'_>, scope: u8) -> K
     )
     .expect("RSA-OAEP fixture");
     assert_eq!(wrapped.len(), modulus_len);
-    wrapped.reverse();
+    dev_rev_in_place(&mut wrapped);
     wrapped.extend(
         Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, &material.der)
             .expect("AES-KWP fixture"),
