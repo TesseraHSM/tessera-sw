@@ -5,7 +5,7 @@
 //!
 //! Bring-up instrumentation for the FP↔HSM shared memory path.  The FP
 //! cores have no console, so this is how they report: each publishes a
-//! small block in GSRAM that the HSM reads back and logs over UART.
+//! small block in PSRAM that the HSM reads back and logs over UART.
 //!
 //! The layout mirrors `shared_status.rs` in the FP firmware
 //! (`fw/plat/uno/pqc/app/src/`) and the two must be kept in step.
@@ -37,16 +37,14 @@ use crate::types::CORES;
 
 /// Base of the shared status block in the global SoC map.
 ///
-/// **PSRAM, not GSRAM.**  GSRAM was the obvious choice — it is where the
-/// HSM's DMA scratch lives, so operands would need no copy — but an FP core
-/// faults on it, both at its global address and at the `0xE046_0000`
-/// aperture the legacy FP memory map names.  That map defines a GSRAM base
-/// and then never uses it anywhere, which fits: FP appears never to have
-/// been able to reach GSRAM.
+/// In PSRAM: 32 KB at `0xA3E0_0000` globally and at `0x0001_0000` in an FP
+/// core's local view, where this block is `0x0001_0C80`.
 ///
-/// PSRAM is reachable from both sides: the legacy fastpath used it
-/// routinely, and the legacy CP firmware maps it at `0xA3E0_0000` (32 KB).
-/// An FP core addresses this same block core-locally as `0x0001_7C00`.
+/// An FP core reaches GSRAM at its global addresses, but only the ranges
+/// the SP's memory fence opens to the fastpath initiator (`QMGR_FP`), such
+/// as the IO DMA heap and the `0x611D_0000` window. This block first sat at
+/// `0x6100_8000`, which the fence keeps to the SP, Admin and HSM, so every
+/// FP core faulted on it.
 ///
 /// Sits just after the mailboxes and before FP0's operand slot; the tail of
 /// PSRAM this used to occupy is now covered by FP2's slot.
@@ -103,7 +101,7 @@ impl FpStatus {
 
 /// Leave `value` for the FP cores to echo back.
 pub fn write_sentinel(value: u32) {
-    // SAFETY: a reserved word in the GSRAM aperture (see the layout above),
+    // SAFETY: a reserved word in PSRAM (see the layout above),
     // outside every region the linker knows about, so nothing aliases it.
     // Volatile because the FP cores observe the write.
     unsafe { write_volatile(BLOCK_BASE as *mut u32, value) };

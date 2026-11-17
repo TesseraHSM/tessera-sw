@@ -370,6 +370,15 @@ const IO_DMA_BASE: usize = 0x6102_0D60;
 const IO_DMA_SLOT_SIZE: usize = 0x4000;
 const IO_DMA_SIZE: usize = IO_DMA_SLOT_SIZE * 34;
 
+/// The SP's memory fence entry that lets this core read the IO DMA heap:
+/// GSRAM `0x6100_F000`..`0x610B_8000`, open to the fastpath initiator
+/// (`QMGR_FP`). The key vault directly above is closed to this core, so the
+/// heap must stay inside.
+const IO_FENCE_START: usize = 0x6100_F000;
+const IO_FENCE_END: usize = 0x610B_8000;
+
+const _: () = assert!(IO_FENCE_START <= IO_DMA_BASE && IO_DMA_BASE + IO_DMA_SIZE <= IO_FENCE_END);
+
 /// `len` bytes at `addr` in the IO DMA heap as a shared slice, if the whole
 /// range lies in one slot of it. The HSM keeps the buffer in place until
 /// this core answers.
@@ -382,9 +391,9 @@ pub fn io_dma_range(addr: usize, len: usize) -> Option<&'static [u8]> {
     if first / IO_DMA_SLOT_SIZE != (first + len - 1) / IO_DMA_SLOT_SIZE {
         return None;
     }
-    // SAFETY: the range is inside the shared IO DMA heap, which is mapped
-    // and readable by this core, and nothing writes the message while the
-    // request is outstanding.
+    // SAFETY: the range is inside the IO DMA heap, which the SP's fence
+    // opens to this core (see `IO_FENCE_START`), and nothing writes the
+    // message while the request is outstanding.
     Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
 }
 
