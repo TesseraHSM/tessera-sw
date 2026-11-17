@@ -12,7 +12,6 @@ use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_aes_generate;
-use tsra_ddi_mbor_test_helpers::helper_attest_key_cmd;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
 use tsra_ddi_mbor_test_helpers::helper_get_unwrapping_key;
@@ -76,7 +75,7 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
             return;
         }
     };
-    let cmdreq_data = input.cmdreq_data;
+    let mut cmdreq_data = input.cmdreq_data;
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let mut key_id = cmdreq_data.key_id;
 
@@ -119,8 +118,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                     rev,
                     input.key_size as u16,
                 ) {
-                    Some(id) => id,
-                    None => {
+                    Ok(id) => id,
+                    Err(err) => {
+                        check_driver_error::<()>(Err(err));
                         cleanup_with_session(&dev, Some(sess_id));
                         return;
                     }
@@ -172,9 +172,17 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
         };
     }
 
-    let report_data = cmdreq_data.report_data.data_take();
-
-    let resp = helper_attest_key_cmd(&dev, Some(sess_id), rev, report_data, key_id);
+    cmdreq_data.key_id = key_id;
+    let req = DdiAttestKeyCmdReq {
+        hdr: DdiReqHdr {
+            op: DdiOp::AttestKey,
+            sess_id: Some(sess_id),
+            rev,
+        },
+        data: cmdreq_data,
+        ext: None,
+    };
+    let resp = dev.exec_op_mbor(&req, &mut None);
 
     check_driver_error(resp);
 

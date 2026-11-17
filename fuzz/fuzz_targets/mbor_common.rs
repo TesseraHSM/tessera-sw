@@ -148,22 +148,23 @@ pub fn import_rsa_key(
     availability: DdiKeyAvailability,
     rev: Option<DdiApiRev>,
     bits: u16,
-) -> Option<u16> {
-    let unwrapping = helper_get_unwrapping_key(dev, Some(session), rev).ok()?;
-    let key = RsaPrivateKey::generate(usize::from(bits) / 8).ok()?;
-    let wrapped = wrap_data(unwrapping.data.pub_key.der.as_slice(), &key.to_vec().ok()?).ok()?;
+) -> Result<u16, DdiError> {
+    let unwrapping = helper_get_unwrapping_key(dev, Some(session), rev)?;
+    let key = RsaPrivateKey::generate(usize::from(bits) / 8).expect("Failed to generate RSA key");
+    let key_bytes = key.to_vec().expect("Failed to export RSA key");
+    let wrapped = wrap_data(unwrapping.data.pub_key.der.as_slice(), &key_bytes)
+        .expect("Failed to wrap RSA key");
     helper_rsa_unwrap(
         dev,
         Some(session),
         rev,
         unwrapping.data.key_id,
-        MborByteArray::from_slice(&wrapped).ok()?,
+        MborByteArray::from_slice(&wrapped).expect("Wrapped RSA key exceeds request capacity"),
         DdiKeyClass::Rsa,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
         helper_key_properties(DdiKeyUsage::SignVerify, availability),
     )
-    .ok()
     .map(|resp| resp.data.key_id)
 }
 
@@ -192,7 +193,8 @@ pub fn create_secret_key(
             .map_err(|_| DdiError::InvalidParameter)?,
         secret_type,
         properties,
-    );
+    )
+    .inspect_err(check_driver_failure);
     helper_delete_key(dev, Some(session), rev, first.data.private_key_id)?;
     helper_delete_key(dev, Some(session), rev, second.data.private_key_id)?;
     result.map(|resp| resp.data.key_id)
@@ -227,16 +229,32 @@ pub fn helper_create_hmac_key(
         key_type,
         helper_key_properties(DdiKeyUsage::SignVerify, availability),
         length,
-    );
+    )
+    .inspect_err(check_driver_failure);
     helper_delete_key(dev, Some(session), rev, secret)?;
     result.map(|resp| resp.data.key_id)
 }
 
 pub fn check_driver_error<T>(result: Result<T, DdiError>) {
-    if let Err(err @ (DdiError::DriverError(_) | DdiError::DdiError(_) | DdiError::IoError(_))) =
-        result
-    {
-        panic!("Crash Detected: {err}");
+    if let Err(err) = result {
+        check_driver_failure(&err);
+    }
+}
+
+fn check_driver_failure(err: &DdiError) {
+    match err {
+        DdiError::DriverError(_)
+        | DdiError::DdiError(_)
+        | DdiError::IoError(_)
+        | DdiError::DeviceNotFound
+        | DdiError::DeviceNotReady
+        | DdiError::DeviceInfoIoctlInvalidData
+        | DdiError::ResetDeviceError(_) => panic!("Crash Detected: {err:?}"),
+        #[cfg(target_os = "linux")]
+        DdiError::NixError(_) => panic!("Crash Detected: {err:?}"),
+        #[cfg(target_os = "windows")]
+        DdiError::WinError(_) => panic!("Crash Detected: {err:?}"),
+        _ => {}
     }
 }
 
