@@ -522,7 +522,11 @@ async fn check_typed_reports() {
                 }),
                 ReportKind::Darc => ReportParams::Darc(transfer),
                 ReportKind::SdBackup => ReportParams::SdBackup {
-                    transfer,
+                    transfer: tsra_fw_core_crypto_key_report::SdBackupReportParams {
+                        source_pid_spki_thumbprint: transfer.source_pid_key_id,
+                        recipient_spki_thumbprint: transfer.recipient_key_id,
+                        envelope_hash: transfer.envelope_hash,
+                    },
                     policy_hash: &fields[144..192],
                 },
             };
@@ -597,9 +601,9 @@ async fn check_typed_reports() {
 
     pal.alloc_scoped_async(&io, async |alloc| {
         let params = ReportParams::SdBackup {
-            transfer: TransferReportParams {
-                source_pid_key_id: &fields[..48],
-                recipient_key_id: &fields[48..96],
+            transfer: tsra_fw_core_crypto_key_report::SdBackupReportParams {
+                source_pid_spki_thumbprint: &fields[..48],
+                recipient_spki_thumbprint: &fields[48..96],
                 envelope_hash: &fields[96..144],
             },
             policy_hash: &fields[144..191],
@@ -631,6 +635,9 @@ fn p384_transfer_reports_bind_encryption_identity_kind_and_policy() {
 }
 
 async fn check_transfer_bindings() {
+    use tsra_crypto::EccCurve;
+    use tsra_crypto::EccPublicKey;
+    use tsra_crypto::ExportableKey;
     use tsra_crypto::HashAlgo;
     use tsra_crypto::HashOpContext;
     use tsra_crypto::Hasher;
@@ -638,6 +645,7 @@ async fn check_transfer_bindings() {
     use tsra_fw_core_crypto_key_report::transfer::open_transfer;
     use tsra_fw_core_crypto_key_report::transfer::p384_key_id;
     use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
+    use tsra_fw_core_crypto_key_report::transfer::sd_spki_thumbprint;
     use tsra_fw_core_crypto_key_report::transfer::seal_transfer;
     use tsra_fw_core_crypto_key_report::transfer::transfer_envelope_hash;
     use tsra_fw_core_crypto_key_report::transfer::transfer_report_params;
@@ -715,6 +723,25 @@ async fn check_transfer_bindings() {
     }
     let source_id: &[u8; 48] = ids[..48].as_ref().try_into().expect("source ID");
     let recipient_id: &[u8; 48] = ids[48..].as_ref().try_into().expect("recipient ID");
+    let sd_ids = pal.dma_alloc(&io, 96).expect("SD SPKI thumbprints");
+    let (sd_source, sd_recipient) = sd_ids.split_at_mut(48);
+    for (public, thumbprint) in [(source_public, sd_source), (recipient_public, sd_recipient)] {
+        pal.alloc_scoped_async(&io, async |alloc| {
+            sd_spki_thumbprint(&pal, &io, public, thumbprint, alloc).await
+        })
+        .await
+        .expect("derive SD SPKI thumbprint");
+        let spki = EccPublicKey::from_coordinates(EccCurve::P384, &public[1..49], &public[49..])
+            .expect("public key")
+            .to_vec()
+            .expect("DER SPKI");
+        let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent SPKI hash");
+        hash.update(&spki).expect("SPKI bytes");
+        let mut expected = [0; 48];
+        hash.finish(Some(&mut expected)).expect("SPKI thumbprint");
+        assert_eq!(&**thumbprint, expected);
+    }
+    assert_ne!(&**ids, &**sd_ids);
     let policy = [0x55; 48];
     let wrong_policy = [0x66; 48];
     let encoded_report = pal.dma_alloc(&io, KEY_REPORT_MAX_LEN).expect("report");
@@ -750,8 +777,14 @@ async fn check_transfer_bindings() {
             recipient_key_id: recipient_id,
         },
         TransferHeader::SdBackup {
-            source_pid_key_id: source_id,
-            recipient_key_id: recipient_id,
+            source_pid_spki_thumbprint: sd_ids[..48]
+                .as_ref()
+                .try_into()
+                .expect("source SPKI thumbprint"),
+            recipient_spki_thumbprint: sd_ids[48..]
+                .as_ref()
+                .try_into()
+                .expect("recipient SPKI thumbprint"),
             policy_hash: &policy,
         },
     ] {
@@ -889,8 +922,13 @@ async fn check_transfer_bindings() {
                     let digest = alloc.dma_alloc(48)?;
                     transfer_envelope_hash(&pal, &io, envelope, digest, alloc).await?;
                     let mut params = transfer_report_params(envelope, digest)?;
-                    let transfer = match &mut params {
-                        ReportParams::Darc(transfer) => transfer,
+                    match &mut params {
+                        ReportParams::Darc(transfer) => match bad_claim {
+                            0 => transfer.source_pid_key_id = &ids[48..],
+                            1 => transfer.recipient_key_id = &ids[..48],
+                            2 => transfer.envelope_hash = &ids[..48],
+                            _ => {}
+                        },
                         ReportParams::SdBackup {
                             transfer,
                             policy_hash,
@@ -898,15 +936,14 @@ async fn check_transfer_bindings() {
                             if bad_claim == 3 {
                                 *policy_hash = &ids[..48];
                             }
-                            transfer
+                            match bad_claim {
+                                0 => transfer.source_pid_spki_thumbprint = &sd_ids[48..],
+                                1 => transfer.recipient_spki_thumbprint = &sd_ids[..48],
+                                2 => transfer.envelope_hash = &sd_ids[..48],
+                                _ => {}
+                            }
                         }
                         ReportParams::PublicKey(_) => unreachable!("operation envelope"),
-                    };
-                    match bad_claim {
-                        0 => transfer.source_pid_key_id = &ids[48..],
-                        1 => transfer.recipient_key_id = &ids[..48],
-                        2 => transfer.envelope_hash = &ids[..48],
-                        _ => {}
                     }
                     report(
                         &pal,

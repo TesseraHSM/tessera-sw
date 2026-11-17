@@ -8,11 +8,14 @@ use anyhow::Result;
 use minicbor::Decoder;
 use minicbor::Encoder;
 use tsra_crypto::EccCurve;
+use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::EcdsaAlgo;
+use tsra_crypto::ExportableKey;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
+use tsra_crypto::ImportableKey;
 use tsra_crypto::Signer;
 use tsra_crypto::VerifyOp;
 
@@ -23,8 +26,8 @@ pub const SD_ENVELOPE_LEN: usize = 322;
 const PREFIX: &[u8] = b"TSRA-XFER\x01\x02\x00\x11\x00\x02\x00\x02";
 
 pub struct SdTransferReport<'a> {
-    pub source_pid_key_id: &'a [u8],
-    pub recipient_key_id: &'a [u8],
+    pub source_pid_spki_thumbprint: &'a [u8],
+    pub recipient_spki_thumbprint: &'a [u8],
     pub envelope_hash: &'a [u8],
     pub policy_hash: &'a [u8],
     payload: &'a [u8],
@@ -37,17 +40,30 @@ pub fn sha384(bytes: &[u8]) -> Result<[u8; 48]> {
     Ok(digest)
 }
 
-pub fn p384_key_id(raw: &[u8]) -> Result<[u8; 48]> {
+pub fn p384_spki_from_raw(raw: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(raw.len() == 96, "signer/recipient must be raw P-384 X||Y");
-    EccPublicKey::from_coordinates(EccCurve::P384, &raw[..48], &raw[48..])?;
-    sha384(&[b"TSRA-P384-KEY-v1".as_slice(), &[4], raw].concat())
+    Ok(EccPublicKey::from_coordinates(EccCurve::P384, &raw[..48], &raw[48..])?.to_vec()?)
+}
+
+pub fn p384_raw_from_spki(spki: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(spki.len() == 120, "expected canonical P-384 DER SPKI");
+    let public = EccPublicKey::from_bytes(spki)?;
+    anyhow::ensure!(public.curve() == EccCurve::P384, "expected P-384");
+    let (x, y) = public.coord_vec()?;
+    let raw = [x, y].concat();
+    anyhow::ensure!(p384_spki_from_raw(&raw)? == spki, "noncanonical P-384 SPKI");
+    Ok(raw)
+}
+
+pub fn sd_spki_thumbprint(raw: &[u8]) -> Result<[u8; 48]> {
+    sha384(&p384_spki_from_raw(raw)?)
 }
 
 pub fn sd_header(signer: &[u8], recipient: &[u8], policy: &[u8]) -> Result<Vec<u8>> {
     Ok([
         PREFIX,
-        &p384_key_id(signer)?,
-        &p384_key_id(recipient)?,
+        &sd_spki_thumbprint(signer)?,
+        &sd_spki_thumbprint(recipient)?,
         &sha384(policy)?,
     ]
     .concat())
@@ -112,8 +128,8 @@ pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
         "missing operation claims or trailing data"
     );
     let report = SdTransferReport {
-        source_pid_key_id: source.context("missing source ID")?,
-        recipient_key_id: recipient.context("missing recipient ID")?,
+        source_pid_spki_thumbprint: source.context("missing source ID")?,
+        recipient_spki_thumbprint: recipient.context("missing recipient ID")?,
         envelope_hash: envelope_hash.context("missing envelope hash")?,
         policy_hash: policy_hash.context("missing SD policy hash")?,
         payload,
@@ -121,8 +137,8 @@ pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
     };
     anyhow::ensure!(
         [
-            report.source_pid_key_id,
-            report.recipient_key_id,
+            report.source_pid_spki_thumbprint,
+            report.recipient_spki_thumbprint,
             report.envelope_hash,
             report.policy_hash
         ]
@@ -150,7 +166,7 @@ pub fn verify_sd_report_signature<'a>(
 ) -> Result<SdTransferReport<'a>> {
     let report = parse_sd_transfer_report(bytes)?;
     anyhow::ensure!(
-        report.source_pid_key_id == p384_key_id(signer)?,
+        report.source_pid_spki_thumbprint == sd_spki_thumbprint(signer)?,
         "operation signer mismatch"
     );
     let key = EccPublicKey::from_coordinates(EccCurve::P384, &signer[..48], &signer[48..])?;
@@ -177,8 +193,8 @@ pub fn verify_sd_transfer_report<'a>(
     validate_sd_envelope(envelope)?;
     let report = verify_sd_report_signature(bytes, signer)?;
     anyhow::ensure!(
-        report.source_pid_key_id == &envelope[17..65]
-            && report.recipient_key_id == &envelope[65..113],
+        report.source_pid_spki_thumbprint == &envelope[17..65]
+            && report.recipient_spki_thumbprint == &envelope[65..113],
         "operation/header key IDs mismatch"
     );
     anyhow::ensure!(
@@ -187,7 +203,7 @@ pub fn verify_sd_transfer_report<'a>(
     );
     if let Some(recipient) = recipient {
         anyhow::ensure!(
-            report.recipient_key_id == p384_key_id(recipient)?,
+            report.recipient_spki_thumbprint == sd_spki_thumbprint(recipient)?,
             "operation recipient mismatch"
         );
     }
@@ -221,9 +237,9 @@ pub fn sign_software_sd_transfer(
         .u8(8)?
         .u8(2)?
         .u8(9)?
-        .bytes(&p384_key_id(signer)?)?
+        .bytes(&sd_spki_thumbprint(signer)?)?
         .u8(10)?
-        .bytes(&p384_key_id(recipient)?)?
+        .bytes(&sd_spki_thumbprint(recipient)?)?
         .u8(11)?
         .bytes(&sha384(
             &[b"TSRA-XFER-HASH-v1".as_slice(), envelope].concat(),

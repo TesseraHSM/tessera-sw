@@ -248,7 +248,14 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
     match kind {
         ReportKind::Darc => Ok(ReportView::Darc(transfer)),
         ReportKind::SdBackup => Ok(ReportView::SdBackup {
-            transfer,
+            transfer: crate::SdBackupReportView {
+                source_pid_spki_thumbprint: transfer.source_pid_key_id,
+                recipient_spki_thumbprint: transfer.recipient_key_id,
+                envelope_hash: transfer.envelope_hash,
+                protected_header: transfer.protected_header,
+                payload: transfer.payload,
+                signature: transfer.signature,
+            },
             policy_hash: &payload[policy.0..policy.1],
         }),
         ReportKind::PublicKey => Err(HsmError::InvalidArg),
@@ -322,7 +329,12 @@ where
             payload: view.payload,
             signature: view.signature,
         },
-        ReportView::Darc(transfer) | ReportView::SdBackup { transfer, .. } => CoseReportView {
+        ReportView::Darc(transfer) => CoseReportView {
+            protected_header: transfer.protected_header,
+            payload: transfer.payload,
+            signature: transfer.signature,
+        },
+        ReportView::SdBackup { transfer, .. } => CoseReportView {
             protected_header: transfer.protected_header,
             payload: transfer.payload,
             signature: transfer.signature,

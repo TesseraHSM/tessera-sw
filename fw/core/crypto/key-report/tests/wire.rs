@@ -517,20 +517,28 @@ fn unified_parser_distinguishes_operation_reports_and_requires_sd_policy() {
         let bytes = operation_report(&transfer_fields(kind));
         let view = parse_report(dma_view(&bytes)).expect("operation report");
         assert_eq!(view.kind(), kind);
-        let transfer = match view {
-            ReportView::Darc(transfer) => transfer,
+        let (source, recipient, digest) = match view {
+            ReportView::Darc(transfer) => (
+                transfer.source_pid_key_id,
+                transfer.recipient_key_id,
+                transfer.envelope_hash,
+            ),
             ReportView::SdBackup {
                 transfer,
                 policy_hash,
             } => {
                 assert_eq!(&**policy_hash, &[0x44; POLICY_HASH_LEN]);
-                transfer
+                (
+                    transfer.source_pid_spki_thumbprint,
+                    transfer.recipient_spki_thumbprint,
+                    transfer.envelope_hash,
+                )
             }
             ReportView::PublicKey(_) => panic!("operation decoded as public key"),
         };
-        assert_eq!(&**transfer.source_pid_key_id, &[0x11; 48]);
-        assert_eq!(&**transfer.recipient_key_id, &[0x22; 48]);
-        assert_eq!(&**transfer.envelope_hash, &[0x33; 48]);
+        assert_eq!(&**source, &[0x11; 48]);
+        assert_eq!(&**recipient, &[0x22; 48]);
+        assert_eq!(&**digest, &[0x33; 48]);
         assert!(parse_key_report(dma_view(&bytes)).is_err());
     }
 }
@@ -659,8 +667,8 @@ fn transfer_envelopes_use_canonical_operation_specific_headers() {
             recipient_key_id: &recipient,
         },
         TransferHeader::SdBackup {
-            source_pid_key_id: &source,
-            recipient_key_id: &recipient,
+            source_pid_spki_thumbprint: &source,
+            recipient_spki_thumbprint: &recipient,
             policy_hash: &policy,
         },
     ] {
@@ -702,8 +710,8 @@ fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
             recipient_key_id: &id,
         },
         TransferHeader::SdBackup {
-            source_pid_key_id: &id,
-            recipient_key_id: &id,
+            source_pid_spki_thumbprint: &id,
+            recipient_spki_thumbprint: &id,
             policy_hash: &id,
         },
     ] {

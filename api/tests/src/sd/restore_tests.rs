@@ -23,7 +23,7 @@ use crate::utils::sd_provision::CaKey;
 use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
-use crate::utils::sd_provision::sec1_pub;
+use crate::utils::sd_provision::spki_pub;
 
 /// Happy path: create a remote backup on one incarnation, then restore it
 /// on a rebooted (factory-reset, same-seed) incarnation; the restore
@@ -42,7 +42,7 @@ fn sd_restore_remote_backup_roundtrip() {
     let (session1, policy, pid_pub, local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session1);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
-    let sender_pid = sec1_pub(&pid_pub);
+    let sender_pid = spki_pub(&pid_pub);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session1.sd_create_remote_backup(&policy, rcvr_chain, ev)
@@ -103,7 +103,7 @@ fn sd_restore_remote_backup_roundtrip() {
         .is_err(),
         "a valid report cannot authorize a different recipient",
     );
-    let wrong_pid = sec1_pub(&CaKey::generate().raw_pub());
+    let wrong_pid = spki_pub(&CaKey::generate().raw_pub());
     assert!(
         restore(
             &masked,
@@ -114,7 +114,7 @@ fn sd_restore_remote_backup_roundtrip() {
         .is_err(),
         "the supplied PID must verify the operation signature",
     );
-    for len in [0, 96, 98] {
+    for len in [0, 96, 97, 119, 121] {
         let malformed_pid = vec![0; len];
         assert!(
             matches!(
@@ -126,12 +126,12 @@ fn sd_restore_remote_backup_roundtrip() {
                 ),
                 Err(HsmError::InvalidArgument)
             ),
-            "the signer PID must be exactly 97 bytes",
+            "the signer PID must be canonical P-384 DER SPKI",
         );
     }
-    for prefix in [0, 2, 3] {
-        let mut malformed_pid = sender_pid;
-        malformed_pid[0] = prefix;
+    for offset in [0, 1, 8, 17, 22, 23] {
+        let mut malformed_pid = sender_pid.clone();
+        malformed_pid[offset] ^= 1;
         assert!(matches!(
             restore(
                 &masked,
@@ -202,7 +202,7 @@ fn sd_restore_remote_backup_is_one_shot() {
         session.sd_restore_remote_backup(
             &policy,
             &masked,
-            &sec1_pub(&pid_pub),
+            &spki_pub(&pid_pub),
             ev,
             &created.pok_remote_backup,
             &created.sd_mk_backup,

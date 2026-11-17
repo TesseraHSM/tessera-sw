@@ -83,7 +83,7 @@
 //! HSM reseal operation. BKS3 never leaves the HSM.
 //! The root's local PID signs a v2 SdBackup report binding the outgoing envelope,
 //! recipient and requested leaf policy, never the root-local policy. The leaf
-//! verifies that report and authenticates the supplied SEC1 root PID through
+//! verifies that report and authenticates the supplied DER-SPKI root PID through
 //! SAPOTA. SATA recipient authorization remains required during creation;
 //! there is no SATA sender authorization or sender sealing-key attestation.
 //! Root's original backup and receiver key remain unchanged.

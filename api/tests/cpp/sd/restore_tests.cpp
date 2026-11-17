@@ -259,7 +259,10 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
         tsra_buffer policy_buf{ dev2.policy.data(), static_cast<uint32_t>(dev2.policy.size()) };
         tsra_buffer remote_buf{ remote_backup.data(), static_cast<uint32_t>(remote_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
-        std::vector<uint8_t> sender_pid{ 0x04 };
+        std::vector<uint8_t> sender_pid{
+            0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
+            0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04,
+        };
         sender_pid.insert(sender_pid.end(), dev1.pid_pub.begin(), dev1.pid_pub.end());
         tsra_buffer pid_buf{ sender_pid.data(), static_cast<uint32_t>(sender_pid.size()) };
         tsra_sd_restore_remote_backup_params params{
@@ -291,14 +294,14 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
         EXPECT_EQ(
             restore_fill(dev2.session, &params, pok_local, sd_mk),
             TSRA_STATUS_INVALID_ARGUMENT
-        ) << "raw coordinate pairs must not be accepted as SEC1";
+        ) << "raw coordinate pairs must not be accepted as DER SPKI";
         pid_buf = { sender_pid.data(), static_cast<uint32_t>(sender_pid.size()) };
         sender_pid[0] = 0x02;
         EXPECT_EQ(
             restore_fill(dev2.session, &params, pok_local, sd_mk),
             TSRA_STATUS_INVALID_ARGUMENT
-        ) << "the sender PID must use the uncompressed SEC1 prefix";
-        sender_pid[0] = 0x04;
+        ) << "the sender PID must use canonical DER SPKI";
+        sender_pid[0] = 0x30;
         ASSERT_EQ(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS);
 
         // Refreshed device-local backups: 276-byte local pok backup and

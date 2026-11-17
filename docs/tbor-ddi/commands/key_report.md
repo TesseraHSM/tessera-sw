@@ -146,8 +146,8 @@ The signed payload is a definite-length CBOR map with these integer keys:
 | 6 | VM launch ID | `PublicKey` |
 | 7 | SHA-384 policy hash | Required for `SdBackup`; optional for `PublicKey` |
 | 8 | `report_kind`: `PublicKey` (0), `Darc` (1), `SdBackup` (2) | All |
-| 9 | SHA-384 source PID key ID | `Darc`, `SdBackup` |
-| 10 | SHA-384 recipient key ID | `Darc`, `SdBackup` |
+| 9 | `source_pid_key_id` for `Darc`; `source_pid_spki_thumbprint` for `SdBackup` | `Darc`, `SdBackup` |
+| 10 | `recipient_key_id` for `Darc`; `recipient_spki_thumbprint` for `SdBackup` | `Darc`, `SdBackup` |
 | 11 | SHA-384 transfer-envelope hash | `Darc`, `SdBackup` |
 
 Unknown, duplicate, missing, wrong-kind, or incorrectly sized fields are
@@ -184,12 +184,22 @@ are unsigned; suite IDs use network byte order.
 | 65 | Recipient key ID | 48 |
 | 113 | Transferred SD policy hash, `SdBackup` only | 48 |
 
-Both identifiers are
+For `Darc`, both identifiers remain
 `SHA-384(ASCII("TSRA-P384-KEY-v1") || SEC1_public_key)`.
+For `SdBackup`, the fields at offsets 17 and 65 are
+`source_pid_spki_thumbprint` and `recipient_spki_thumbprint`, respectively.
+Each is `SHA-384(canonical_DER_SPKI(public_key))`, using the same canonical
+SPKI representation as policy trust-anchor thumbprints. The source is the
+PID signing key; the recipient is the HPKE encryption key, not its PID.
+CBOR labels, header offsets, and 48-byte field lengths are unchanged.
+This SD-only convention does not change DARC identifiers or APIs.
+
 The SEC1 public key and encapsulation are exactly 97 bytes:
 `0x04 || X_be[48] || Y_be[48]`.
-The curve-specific domain identifies the key algorithm; the header/report
-field identifies its source-PID or recipient role.
+For DARC, the curve-specific domain identifies the key algorithm. For SD,
+canonical SPKI encodes `id-ecPublicKey` and `secp384r1` with that uncompressed
+point (120 bytes total). Header/report fields identify source or recipient
+roles; a matching thumbprint alone does not grant authorization.
 
 HPKE uses **Base** mode with the fixed suite above. The complete canonical
 header is passed verbatim as both HPKE `info` and AEAD AAD. DARC encrypts

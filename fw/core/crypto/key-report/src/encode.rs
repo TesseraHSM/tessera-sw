@@ -156,7 +156,12 @@ where
             if policy_hash.len() != POLICY_HASH_LEN {
                 return Err(HsmError::InvalidArg);
             }
-            build_transfer_report(pal, io, alloc, transfer, Some(policy_hash), priv_key, out).await
+            let transfer = TransferReportParams {
+                source_pid_key_id: transfer.source_pid_spki_thumbprint,
+                recipient_key_id: transfer.recipient_spki_thumbprint,
+                envelope_hash: transfer.envelope_hash,
+            };
+            build_transfer_report(pal, io, alloc, &transfer, Some(policy_hash), priv_key, out).await
         }
     }
 }

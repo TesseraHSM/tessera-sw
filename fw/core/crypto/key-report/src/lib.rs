@@ -55,5 +55,7 @@ pub use encode::KeyReportParams;
 pub use report::ReportKind;
 pub use report::ReportParams;
 pub use report::ReportView;
+pub use report::SdBackupReportParams;
+pub use report::SdBackupReportView;
 pub use report::TransferReportParams;
 pub use report::TransferReportView;

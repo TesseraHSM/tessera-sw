@@ -36,6 +36,12 @@ const ECC_P384_SPKI_PREFIX: [u8; 24] = [
     0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04,
 ];
 
+pub(super) fn p384_spki_point(spki: &[u8]) -> HsmResult<&[u8]> {
+    spki.strip_prefix(&ECC_P384_SPKI_PREFIX)
+        .filter(|point| point.len() == ECC_P384_RAW_LEN)
+        .ok_or(HsmError::InvalidArgument)
+}
+
 /// Encoding of a public key supplied to [`PartPolicyBuilder`] or
 /// [`policy_key_thumbprint`].
 ///

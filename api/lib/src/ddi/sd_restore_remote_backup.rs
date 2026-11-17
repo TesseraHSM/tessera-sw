@@ -43,8 +43,8 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the backup, exactly
 ///   [`MASKED_SEALING_KEY_LEN`] bytes.
-/// * `sender_pid_pub_key` - 97-byte SEC1 uncompressed P-384 point of the
-///   report signer (`0x04 || X_be || Y_be`).
+/// * `sender_pid_pub_key` - DER SPKI of the report signer. Currently only
+///   canonical uncompressed P-384 SPKI (120 bytes) is accepted.
 /// * `sender_evidence` - Required SdBackup report and optional identity chains.
 ///   Trusted-SA policy requires SAPOTA-authorized PID chains; otherwise
 ///   verification checks integrity, not authenticated SA identity.
@@ -58,7 +58,7 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 ///
 /// Returns [`HsmError::InvalidArgument`] for a wrong-length
 /// `masked_sealing_key`, `src_remote_backup`, or `prev_sd_mk_backup`, an
-/// invalid sender SEC1 length/prefix or malformed `policy`, and surfaces
+/// invalid or unsupported sender SPKI or malformed `policy`, and surfaces
 /// DDI/device failures from the round-trip.
 pub(crate) fn sd_restore_remote_backup_ex(
     partition: &HsmPartition,
@@ -82,12 +82,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
-    let sender_pid_pub_key: [u8; 97] = sender_pid_pub_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    if sender_pid_pub_key[0] != 4 {
-        return Err(HsmError::InvalidArgument);
-    }
+    super::part_policy::p384_spki_point(sender_pid_pub_key)?;
 
     let mut oob: Vec<&[u8]> = Vec::new();
 
@@ -99,7 +94,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
         session_id,
         masked_sealing_key,
         policy,
-        sender_pid_pub_key,
+        sender_pid_pub_key: sender_pid_pub_key.to_vec(),
         sender_mfgr_cert_chain: sender.mfgr,
         sender_owner_cert_chain: sender.owner,
         sender_part_owner_cert_chain: sender.part_owner,

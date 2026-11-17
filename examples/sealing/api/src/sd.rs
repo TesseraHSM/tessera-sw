@@ -65,7 +65,7 @@ pub struct RemoteRecovery {
     pub masked_receiver_key: Vec<u8>,
     /// SDMK backup paired with the original remote backup.
     pub sd_mk_backup: Vec<u8>,
-    /// Actual operation signer's PID, SEC1 uncompressed P-384 (97 bytes).
+    /// Actual operation signer's PID as DER SPKI (currently P-384).
     pub sender_pid_pub_key: Vec<u8>,
     /// SATA-endorsed HSM receiver HPKE chain for the external-SA flow.
     pub receiver_cert_chain: Vec<Vec<u8>>,
@@ -92,10 +92,7 @@ impl RemoteRecovery {
             !evidence.report.is_empty(),
             "remote recovery requires an operation report"
         );
-        anyhow::ensure!(
-            self.sender_pid_pub_key.len() == 97 && self.sender_pid_pub_key.first() == Some(&4),
-            "remote recovery requires a SEC1 uncompressed P-384 signer key"
-        );
+        crate::policy::validate_pid_spki(&self.sender_pid_pub_key)?;
         Ok(())
     }
 

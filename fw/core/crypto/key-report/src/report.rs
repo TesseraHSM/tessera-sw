@@ -35,6 +35,16 @@ pub struct TransferReportParams<'a> {
     pub envelope_hash: &'a HsmDmaBuf,
 }
 
+/// Firmware-derived canonical SPKI thumbprints for an SD transfer.
+pub struct SdBackupReportParams<'a> {
+    /// SHA-384 of the source PID's canonical DER SPKI.
+    pub source_pid_spki_thumbprint: &'a HsmDmaBuf,
+    /// SHA-384 of the recipient encryption key's canonical DER SPKI.
+    pub recipient_spki_thumbprint: &'a HsmDmaBuf,
+    /// SHA-384 digest of the complete transfer envelope.
+    pub envelope_hash: &'a HsmDmaBuf,
+}
+
 /// Inputs for the versioned, discriminated report format.
 pub enum ReportParams<'a> {
     /// Public-key attestation; only this variant allows caller report data.
@@ -44,7 +54,7 @@ pub enum ReportParams<'a> {
     /// Security-domain backup export or reseal.
     SdBackup {
         /// Transfer identifiers and envelope digest.
-        transfer: TransferReportParams<'a>,
+        transfer: SdBackupReportParams<'a>,
         /// SHA-384 policy digest enforced by the exporting command.
         policy_hash: &'a HsmDmaBuf,
     },
@@ -56,6 +66,22 @@ pub struct TransferReportView<'a> {
     pub source_pid_key_id: &'a HsmDmaBuf,
     /// SHA-384 identifier of the recipient public key.
     pub recipient_key_id: &'a HsmDmaBuf,
+    /// SHA-384 digest of the complete transfer envelope.
+    pub envelope_hash: &'a HsmDmaBuf,
+    /// Signed COSE protected header.
+    pub protected_header: &'a HsmDmaBuf,
+    /// Encoded signed payload.
+    pub payload: &'a HsmDmaBuf,
+    /// ES384 signature in big-endian `r || s` form.
+    pub signature: &'a HsmDmaBuf,
+}
+
+/// Zero-copy SD report claims, including canonical SPKI thumbprints.
+pub struct SdBackupReportView<'a> {
+    /// SHA-384 of the exporting PID's canonical DER SPKI.
+    pub source_pid_spki_thumbprint: &'a HsmDmaBuf,
+    /// SHA-384 of the recipient encryption key's canonical DER SPKI.
+    pub recipient_spki_thumbprint: &'a HsmDmaBuf,
     /// SHA-384 digest of the complete transfer envelope.
     pub envelope_hash: &'a HsmDmaBuf,
     /// Signed COSE protected header.
@@ -78,7 +104,7 @@ pub enum ReportView<'a> {
     /// Security-domain backup export or reseal.
     SdBackup {
         /// Transfer identifiers and envelope digest.
-        transfer: TransferReportView<'a>,
+        transfer: SdBackupReportView<'a>,
         /// Required SHA-384 policy digest.
         policy_hash: &'a HsmDmaBuf,
     },

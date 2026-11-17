@@ -194,7 +194,7 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
     )?;
     verify_sd_report_signature(
         &remote.backup.evidence.report,
-        &remote.sender_pid_pub_key[1..],
+        &tsra_sealing_report::p384_raw_from_spki(&remote.sender_pid_pub_key)?,
     )?;
     write_operation_report(output, &remote.backup.evidence.report)?;
     writeln!(
@@ -243,13 +243,13 @@ fn write_operation_report(output: &mut impl Write, bytes: &[u8]) -> Result<()> {
     writeln!(output, "  Format: COSE_Sign1 v2 / SdBackup / ES384")?;
     writeln!(
         output,
-        "  Source PID key ID: {}",
-        hex::encode(report.source_pid_key_id)
+        "  Source PID SPKI thumbprint: {}",
+        hex::encode(report.source_pid_spki_thumbprint)
     )?;
     writeln!(
         output,
-        "  Recipient key ID:  {}",
-        hex::encode(report.recipient_key_id)
+        "  Recipient SPKI thumbprint:  {}",
+        hex::encode(report.recipient_spki_thumbprint)
     )?;
     writeln!(
         output,

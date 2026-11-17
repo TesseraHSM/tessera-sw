@@ -7,6 +7,7 @@ use tsra_fw_core_crypto_key_report::report;
 use tsra_fw_core_crypto_key_report::transfer::*;
 use tsra_fw_core_crypto_key_report::ReportKind;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
+use tsra_fw_core_crypto_x509_chain::p384_point_from_spki;
 use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_core_evidence::verify_evidence_signer;
 use tsra_fw_core_evidence::EvidenceRefs;
@@ -52,14 +53,14 @@ pub(super) async fn seal_backup<P: HsmPal>(
     byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut public[1..])?;
     let ids = alloc.dma_alloc(96)?;
     let (source, destination) = ids.split_at_mut(48);
-    p384_key_id(pal, io, public, source, alloc).await?;
-    p384_key_id(pal, io, recipient, destination, alloc).await?;
+    sd_spki_thumbprint(pal, io, public, source, alloc).await?;
+    sd_spki_thumbprint(pal, io, recipient, destination, alloc).await?;
     let source: &[u8] = source;
     let destination: &[u8] = destination;
     let hash: &[u8] = policy_hash;
     let header = TransferHeader::SdBackup {
-        source_pid_key_id: source.try_into().map_err(|_| HsmError::InternalError)?,
-        recipient_key_id: destination
+        source_pid_spki_thumbprint: source.try_into().map_err(|_| HsmError::InternalError)?,
+        recipient_spki_thumbprint: destination
             .try_into()
             .map_err(|_| HsmError::InternalError)?,
         policy_hash: hash.try_into().map_err(|_| HsmError::InternalError)?,
@@ -85,17 +86,15 @@ pub(super) async fn source<'a, P: HsmPal>(
     if let Some(anchor) = anchor {
         verify_evidence_signer(pal, io, evidence, anchor, signer).await?;
         if let Some(public) = pid_public {
-            let actual: &[u8] = signer;
-            if public != actual {
+            let actual: &[u8] = &signer[1..];
+            if p384_point_from_spki(public)? != actual {
                 return Err(HsmError::InvalidArg);
             }
         }
     } else {
         let public = pid_public.ok_or(HsmError::InvalidArg)?;
-        if public.len() != 97 || public[0] != 4 {
-            return Err(HsmError::InvalidArg);
-        }
-        signer.copy_from_slice(public);
+        signer[0] = 4;
+        signer[1..].copy_from_slice(p384_point_from_spki(public)?);
     }
     let len = evidence.report.length.get() as usize;
     if len == 0 || len > KEY_REPORT_MAX_LEN {

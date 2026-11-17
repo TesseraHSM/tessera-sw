@@ -187,7 +187,7 @@ impl LeafEnv {
             Some(&public),
         )?;
         anyhow::ensure!(
-            pid.as_slice() == &backup.sender_pid_pub_key[1..],
+            pid.as_slice() == tsra_sealing_report::p384_raw_from_spki(&backup.sender_pid_pub_key)?,
             "reseal signer PID mismatch"
         );
         anyhow::ensure!(

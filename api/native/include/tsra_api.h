@@ -1398,8 +1398,8 @@ struct tsra_sd_restore_remote_backup_params
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
-     Report signer PID public key: 97-byte SEC1 uncompressed P-384,
-     `0x04 || X_be[48] || Y_be[48]`.
+     Report signer PID public key as DER SPKI. Currently only canonical
+     uncompressed P-384 SPKI (120 bytes) is supported.
      */
     const struct tsra_buffer *sender_pid_pub_key;
     /*

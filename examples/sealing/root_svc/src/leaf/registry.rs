@@ -326,7 +326,7 @@ impl Registration {
             pok_remote_backup: hex::encode(resealed.backup),
             sd_mk_backup: saved["sd_mk_backup"].clone(),
             sender: jzon::object! {
-                pid_pub_key: hex::encode([&[4][..], pid.as_slice()].concat()),
+                pid_pub_key: hex::encode(tsra_sealing_report::p384_spki_from_raw(&pid)?),
                 evidence: wire::encode_evidence(&sender_evidence),
             },
         })

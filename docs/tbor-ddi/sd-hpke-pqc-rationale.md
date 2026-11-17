@@ -167,7 +167,7 @@ The current profile is:
 ```text
 suite = DHKEM(P-384, HKDF-SHA384) / HKDF-SHA384 / AES-256-GCM
 
-key_id(pk) = SHA-384("TSRA-P384-KEY-v1" || SEC1_P384(pk))
+spki_thumbprint(pk) = SHA-384(canonical_DER_SPKI(pk))
 policy_hash = SHA-384(exact validated deterministic-CBOR SD policy)
 
 header =
@@ -177,8 +177,8 @@ header =
     || kem_id_be16             // 0x0011
     || kdf_id_be16             // 0x0002
     || aead_id_be16            // 0x0002
-    || source_pid_key_id[48]
-    || recipient_key_id[48]
+    || source_pid_spki_thumbprint[48]
+    || recipient_spki_thumbprint[48]
     || policy_hash[48]
 
 enc, ciphertext_and_tag = HPKE.Base.Seal(
@@ -188,10 +188,12 @@ envelope = header[161] || enc[97] || ciphertext_and_tag[64]
 envelope_hash = SHA-384("TSRA-XFER-HASH-v1" || envelope)
 ```
 
-`SEC1_P384(pk)` is `0x04 || X_be[48] || Y_be[48]`.
-Transfer identifiers hash this encoding, **not DER SPKI**; policy trust
-anchor thumbprints continue to hash DER SPKI. These are different
-identifier namespaces and must not be interchanged.
+Both SD key thumbprints use canonical DER SubjectPublicKeyInfo, matching
+the policy trust-anchor fingerprint convention. For the current profile,
+SPKI encodes `id-ecPublicKey`, the `secp384r1` named curve, and an uncompressed
+`0x04 || X_be[48] || Y_be[48]` point (120 bytes total). The HPKE encapsulation
+remains the 97-byte SEC1 point. A matching fingerprint identifies a key;
+it does not confer another role's authorization or replace chain validation.
 
 The header authenticates the operation, source, recipient, policy, and
 suite selection. Binding the whole envelope also covers the KEM
@@ -218,8 +220,8 @@ using ES384. Its signed payload contains:
 | 0 | Report version: 2 |
 | 7 | Transferred SD policy hash |
 | 8 | Report kind: `SdBackup` (2) |
-| 9 | Source PID key ID |
-| 10 | Recipient key ID |
+| 9 | `source_pid_spki_thumbprint`: SHA-384 of the source PID's canonical DER SPKI |
+| 10 | `recipient_spki_thumbprint`: SHA-384 of the recipient encryption key's canonical DER SPKI |
 | 11 | Complete envelope hash |
 
 The new report format has not been deployed, so the existing revision 2
@@ -252,10 +254,10 @@ Before decapsulation, an opening command must establish all of:
 authorized source PID, or explicitly selected signature-only SA mode
 AND valid PID signature on an SdBackup report
 AND report.kind == envelope.kind == SdBackup
-AND key_id(actual signer PID) == header.source_pid_key_id
-AND report.source_pid_key_id == header.source_pid_key_id
-AND key_id(public key derived from actual recipient private key)
-      == header.recipient_key_id == report.recipient_key_id
+AND spki_thumbprint(actual signer PID) == header.source_pid_spki_thumbprint
+AND report.source_pid_spki_thumbprint == header.source_pid_spki_thumbprint
+AND spki_thumbprint(public key derived from actual recipient private key)
+      == header.recipient_spki_thumbprint == report.recipient_spki_thumbprint
 AND recomputed_hash(complete envelope) == report.envelope_hash
 AND SHA-384(requested SD policy) == header.policy_hash == report.policy_hash
 ```
@@ -353,7 +355,7 @@ a signed history of every prior hop.
 
 | Item | Existing | New |
 |---|---|---|
-| Sender key input | Required SATA-anchored `sender_cert_chain` yielding the sealing key | Removes that chain; adds `sender_pid_pub_key`, a 97-byte SEC1 uncompressed P-384 point |
+| Sender key input | Required SATA-anchored `sender_cert_chain` yielding the sealing key | Removes that chain; adds `sender_pid_pub_key` as DER SPKI |
 | `sender_evidence` report | Optional sealing-key `PublicKey` attestation; required under trusted-SA policy | **Mandatory `SdBackup` operation report**, in both policy modes |
 | Source identity checks | SATA always, plus SAPOTA when trusted-SA is set | SAPOTA PID chains only when trusted-SA is set; no SATA sender check |
 | Encrypted input | 161-byte Auth artifact | 322-byte Base envelope |
@@ -364,9 +366,14 @@ be SAPOTA-authorized, share the PID leaf, and match the explicitly supplied
 PID public key. The report must validate under that PID and bind the target
 SD policy, exact envelope, and actual unmasked recipient.
 
-The sender key uses `0x04 || X_be[48] || Y_be[48]`, the same SEC1 form
-used by transfer key identifiers. Raw 96-byte coordinate pairs and compressed
-point prefixes are not accepted for this field.
+The sender key is carried as a length-delimited DER SPKI, not a thumbprint.
+The current profile accepts only canonical uncompressed P-384 SPKI
+(120 bytes); raw coordinates, bare SEC1 points, other algorithms,
+noncanonical encodings, and trailing data are rejected. SPKI identifies
+the algorithm and parameters, allowing future profiles to extend the
+accepted algorithms and size bound without replacing the field's framing.
+This does not itself enable PQ signatures. The actual key is required to
+verify the signature; its thumbprint binds that key to the report and header.
 
 When the flag is **clear**, source certificate chains are ignored, but
 the report is **not optional**. Firmware checks the supplied key's
@@ -560,10 +567,11 @@ The architectural invariant for a future ML-KEM or hybrid SD profile is:
 recipient authorization, policy binding, or operation-kind separation.**
 Completing that migration also requires:
 
-1. Defining and validating suite/version selection, algorithm-tagged
-   public-key identifiers, larger public keys/encapsulations/envelopes,
-   and corresponding host/firmware storage limits. The present P-384
-   sizes and domain label cannot simply be reused for another algorithm.
+1. Defining and validating suite/version selection, canonical SPKI
+   profiles for new key algorithms, larger public keys/encapsulations/envelopes,
+   and corresponding host/firmware storage limits. SPKI thumbprints retain
+   their 48-byte representation, but the current P-384 key-size bounds
+   and crypto implementations do not support another algorithm automatically.
 2. Migrating recipient key generation, masking, certification and
    `PublicKey` attestation alongside encryption.
 3. Choosing a PQ-safe signature and identity/trust-anchor migration

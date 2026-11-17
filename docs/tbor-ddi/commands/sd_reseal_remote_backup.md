@@ -24,6 +24,13 @@ Both input bindings and the outgoing report use the **request's SD policy
 hash**, never the SA-local hash. Firmware signs the fresh outgoing report
 with its actual SA PID.
 
+The signed `source_pid_spki_thumbprint` (CBOR key 9) and
+`recipient_spki_thumbprint` (key 10) are 48-byte SHA-384 hashes of the keys'
+canonical DER SPKI, also carried in the envelope header. The source
+thumbprint identifies the PID signing key; the recipient thumbprint
+identifies the encryption key. A reseal replaces both with the SA's PID
+thumbprint and the new destination key's thumbprint.
+
 ## Required source and destination validation
 
 **Both incoming report signatures are verified.** Certificate-chain
