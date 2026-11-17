@@ -150,7 +150,7 @@ pub fn import_rsa_key(
     bits: u16,
 ) -> Option<u16> {
     let unwrapping = helper_get_unwrapping_key(dev, Some(session), rev).ok()?;
-    let key = RsaPrivateKey::generate(bits as usize).ok()?;
+    let key = RsaPrivateKey::generate(usize::from(bits) / 8).ok()?;
     let wrapped = wrap_data(unwrapping.data.pub_key.der.as_slice(), &key.to_vec().ok()?).ok()?;
     helper_rsa_unwrap(
         dev,
