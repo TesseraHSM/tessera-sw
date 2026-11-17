@@ -25,6 +25,32 @@ macro_rules! requests {
         }
 
         impl TestDdiReqs {
+            pub fn header(
+                self,
+                session: Option<u16>,
+                rev: Option<DdiApiRev>,
+                seed: u64,
+                valid_header: bool,
+            ) -> arbitrary::Result<DdiReqHdr> {
+                if !valid_header {
+                    let mut bytes = [0; 32];
+                    StdRng::seed_from_u64(seed).fill_bytes(&mut bytes);
+                    return DdiReqHdr::arbitrary(&mut Unstructured::new(&bytes));
+                }
+
+                let op = match self {
+                    $(Self::$op => DdiOp::$op),+
+                };
+                Ok(DdiReqHdr {
+                    op,
+                    sess_id: match SessionControlKind::from(op) {
+                        SessionControlKind::NoSession | SessionControlKind::Open => None,
+                        SessionControlKind::Close | SessionControlKind::InSession => session,
+                    },
+                    rev: if op == DdiOp::GetApiRev { None } else { rev },
+                })
+            }
+
             pub fn encode(self, mut header: DdiReqHdr, seed: u64, valid_header: bool)
                 -> Result<Vec<u8>, String>
             {

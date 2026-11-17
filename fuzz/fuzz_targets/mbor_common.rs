@@ -211,9 +211,9 @@ pub fn helper_create_hmac_key(
         HmacKeyType::Hmac256 => (DdiKeyType::HmacSha256, None),
         HmacKeyType::Hmac384 => (DdiKeyType::HmacSha384, None),
         HmacKeyType::Hmac512 => (DdiKeyType::HmacSha512, None),
-        HmacKeyType::VarHmac256(len) => (DdiKeyType::VarHmac256, Some(len)),
-        HmacKeyType::VarHmac384(len) => (DdiKeyType::VarHmac384, Some(len)),
-        HmacKeyType::VarHmac512(len) => (DdiKeyType::VarHmac512, Some(len)),
+        HmacKeyType::VarHmac256(len) => (DdiKeyType::VarHmac256, Some(32 + len % 33)),
+        HmacKeyType::VarHmac384(len) => (DdiKeyType::VarHmac384, Some(48 + len % 81)),
+        HmacKeyType::VarHmac512(len) => (DdiKeyType::VarHmac512, Some(64 + len % 65)),
     };
     let secret = create_secret_key(dev, session, rev, curve, availability)?;
     let result = helper_hkdf_derive(
@@ -233,7 +233,9 @@ pub fn helper_create_hmac_key(
 }
 
 pub fn check_driver_error<T>(result: Result<T, DdiError>) {
-    if let Err(err @ DdiError::DriverError(_)) = result {
+    if let Err(err @ (DdiError::DriverError(_) | DdiError::DdiError(_) | DdiError::IoError(_))) =
+        result
+    {
         panic!("Crash Detected: {err}");
     }
 }
@@ -248,20 +250,14 @@ pub fn fuzz_cmd_reqs(requests: Vec<TestDdiReqs>, seed: u64, valid_header: bool) 
     helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
     let session = helper_common_open_session(&mut dev).expect("Failed to open session");
     for (index, request) in requests.into_iter().enumerate() {
-        let header = DdiReqHdr {
-            op: DdiOp::GetApiRev,
-            sess_id: Some(session),
-            rev: REV,
+        let seed = seed.wrapping_add(index as u64);
+        let Ok(header) = request.header(Some(session), REV, seed, valid_header) else {
+            continue;
         };
-        check_driver_error(request.execute(
-            &dev,
-            header,
-            seed.wrapping_add(index as u64),
-            valid_header,
-        ));
+        check_driver_error(request.execute(&dev, header, seed, valid_header));
     }
     // A fuzzed request may already have closed this session.
-    let _ = helper_close_session(&dev, Some(session), REV);
+    check_driver_error(helper_close_session(&dev, Some(session), REV));
 }
 
 #[derive(Arbitrary, Debug)]
@@ -282,23 +278,20 @@ pub fn fuzz_app_ops(ops: Vec<TestAppOps>) {
     let mut session = None;
     for op in ops {
         match op {
-            TestAppOps::Open => {
-                if let Ok(id) = helper_common_open_session(&mut dev) {
-                    session = Some(id);
-                }
-            }
+            TestAppOps::Open => match helper_common_open_session(&mut dev) {
+                Ok(id) => session = Some(id),
+                Err(err) => check_driver_error::<()>(Err(err)),
+            },
             TestAppOps::Close => {
                 check_driver_error(helper_close_session(&dev, session.take(), REV));
             }
             TestAppOps::Request(request, seed) => {
-                let header = DdiReqHdr {
-                    op: DdiOp::GetApiRev,
-                    sess_id: session,
-                    rev: REV,
+                let Ok(header) = request.header(session, REV, seed, true) else {
+                    continue;
                 };
                 check_driver_error(request.execute(&dev, header, seed, true));
             }
         }
     }
-    let _ = helper_close_session(&dev, session, REV);
+    check_driver_error(helper_close_session(&dev, session, REV));
 }

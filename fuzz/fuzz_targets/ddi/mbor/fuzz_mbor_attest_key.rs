@@ -164,9 +164,7 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
 
     let resp = helper_attest_key_cmd(&dev, Some(sess_id), rev, report_data, key_id);
 
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
+    check_driver_error(resp);
 
     if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {
         helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");

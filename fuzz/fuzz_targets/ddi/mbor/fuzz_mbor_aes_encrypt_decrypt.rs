@@ -81,9 +81,7 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
         cmdreq_data.iv,
     );
 
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
+    check_driver_error(resp);
 
     if input.use_valid_key_id {
         helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");
