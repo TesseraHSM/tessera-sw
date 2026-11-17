@@ -268,7 +268,7 @@ pub enum HsmError {
     /// partition PSK is still the well-known compiled-in default.
     /// The only in-session commands permitted in this state are
     /// session tear-down (`CloseSession`) and the PSK rotation
-    /// itself (`ChangePsk`); rotate the PSK once and retry.
+    /// itself (`ChangePsk`); rotate, close, and reopen with the new PSK.
     DefaultPskMustRotate = 0x087000E6,
 
     /// `OpenSessionInit` rejected the caller-supplied `suite_id`
@@ -281,6 +281,10 @@ pub enum HsmError {
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
     PctValidationMlKemGenKeyFailed = 0x087000E9,
+
+    /// The CU session authenticated with the public default PSK, which
+    /// has since been rotated. Close and reopen with the new credential.
+    DefaultPskChanged = 0x087000EA,
 
     /// X.509 DER parsing failed (malformed structure, bad tag/length,
     /// or unsupported field encoding).

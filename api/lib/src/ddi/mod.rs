@@ -212,6 +212,10 @@ impl From<DdiError> for HsmError {
             DdiError::TborStatus(TborStatus::SdPeerCloningNotAllowed) => {
                 HsmError::SdPeerCloningNotAllowed
             }
+            DdiError::TborStatus(TborStatus::DefaultPskMustRotate) => {
+                HsmError::DefaultPskMustRotate
+            }
+            DdiError::TborStatus(TborStatus::DefaultPskChanged) => HsmError::DefaultPskChanged,
             // Map the firmware's contract-level `InvalidArg` to the same
             // `InvalidArgument` the host guards return, so callers see a
             // consistent argument-rejection error across transports.
@@ -436,6 +440,19 @@ impl From<HsmKeyFlags> for DdiTargetKeyMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_errors_preserve_the_reopen_instruction() {
+        for (status, error) in [
+            (
+                TborStatus::DefaultPskMustRotate,
+                HsmError::DefaultPskMustRotate,
+            ),
+            (TborStatus::DefaultPskChanged, HsmError::DefaultPskChanged),
+        ] {
+            assert_eq!(HsmError::from(DdiError::TborStatus(status)), error);
+        }
+    }
 
     #[test]
     fn masked_key_authentication_failure_is_not_a_generic_command_failure() {

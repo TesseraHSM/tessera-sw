@@ -268,6 +268,7 @@ pub enum TborStatus {
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
     PctValidationMlKemGenKeyFailed = 0x087000E9,
+    DefaultPskChanged = 0x087000EA,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,

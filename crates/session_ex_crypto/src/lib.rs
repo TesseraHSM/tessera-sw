@@ -85,8 +85,6 @@ pub enum SessionExCryptoError {
 pub enum SessionSuite {
     /// Ephemeral ECDH P-384 ([`SESSION_SUITE_ECDH_P384_ECDSA_P384`]).
     EcdhP384,
-    /// ML-KEM-1024 ([`SESSION_SUITE_MLKEM1024_ECDSA_P384`]).
-    MlKem1024,
 }
 
 impl SessionSuite {
@@ -94,7 +92,6 @@ impl SessionSuite {
     pub const fn id(self) -> u8 {
         match self {
             Self::EcdhP384 => SESSION_SUITE_ECDH_P384_ECDSA_P384,
-            Self::MlKem1024 => SESSION_SUITE_MLKEM1024_ECDSA_P384,
         }
     }
 
@@ -102,7 +99,6 @@ impl SessionSuite {
     pub const fn enc_len(self) -> usize {
         match self {
             Self::EcdhP384 => SESSION_P384_SEC1_LEN,
-            Self::MlKem1024 => SESSION_MLKEM1024_CT_LEN,
         }
     }
 }
@@ -275,18 +271,12 @@ impl TransportDir {
     }
 }
 
-/// The per-handshake ephemeral key.
-enum Ephemeral {
-    Ecdh(EccPrivateKey),
-    MlKem(MlKemPrivateKey),
-}
-
 /// Host side of one handshake, between `SessionOpenInit`'s request and
 /// its response.
 pub struct SessionInitiator {
     api_rev: (u16, u16),
     suite: SessionSuite,
-    eph: Ephemeral,
+    eph: EccPrivateKey,
     pk_init: Vec<u8>,
 }
 
@@ -308,26 +298,7 @@ impl SessionInitiator {
                 Ok(Self {
                     api_rev,
                     suite,
-                    eph: Ephemeral::Ecdh(sk),
-                    pk_init,
-                })
-            }
-            SessionSuite::MlKem1024 => {
-                let mut seed = Zeroizing::new([0u8; MLKEM_SEED_LEN]);
-                Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| SessionExCryptoError::Crypto)?;
-                let sk = MlKemPrivateKey::from_seed(MlKemVariant::MlKem1024, seed.as_slice())
-                    .map_err(|_| SessionExCryptoError::Crypto)?;
-                let pk_init = sk
-                    .public_key()
-                    .and_then(|pk| pk.to_vec())
-                    .map_err(|_| SessionExCryptoError::Crypto)?;
-                if pk_init.len() != SESSION_MLKEM1024_PK_LEN {
-                    return Err(SessionExCryptoError::Crypto);
-                }
-                Ok(Self {
-                    api_rev,
-                    suite,
-                    eph: Ephemeral::MlKem(sk),
+                    eph: sk,
                     pk_init,
                 })
             }
@@ -388,23 +359,12 @@ impl SessionInitiator {
 
     /// KEM shared secret `Z` for `enc`.
     fn shared_secret(&self, enc: &[u8]) -> SessionExCryptoResult<Zeroizing<Vec<u8>>> {
-        match &self.eph {
-            Ephemeral::Ecdh(sk) => {
-                let peer = ec_pub_from_sec1(enc)?;
-                EcdhAlgo::new(&peer)
-                    .derive(sk, P384_COORD_LEN)
-                    .and_then(|z| z.to_vec())
-                    .map(Zeroizing::new)
-                    .map_err(|_| SessionExCryptoError::Crypto)
-            }
-            Ephemeral::MlKem(sk) => {
-                let mut z = Zeroizing::new(vec![0u8; MLKEM_SHARED_SECRET_LEN]);
-                MlKemAlgo::new()
-                    .decapsulate(sk, enc, Some(z.as_mut_slice()))
-                    .map_err(|_| SessionExCryptoError::Crypto)?;
-                Ok(z)
-            }
-        }
+        let peer = ec_pub_from_sec1(enc)?;
+        EcdhAlgo::new(&peer)
+            .derive(&self.eph, P384_COORD_LEN)
+            .and_then(|z| z.to_vec())
+            .map(Zeroizing::new)
+            .map_err(|_| SessionExCryptoError::Crypto)
     }
 }
 
@@ -881,15 +841,6 @@ mod tests {
                     ec_pub_to_sec1(&eph.public_key().expect("test crypto")).expect("test crypto");
                 (enc.to_vec(), z)
             }
-            SessionSuite::MlKem1024 => {
-                let ek = MlKemPublicKey::from_bytes(pk_init).expect("test crypto");
-                let mut ct = vec![0u8; SESSION_MLKEM1024_CT_LEN];
-                let mut z = vec![0u8; MLKEM_SHARED_SECRET_LEN];
-                MlKemAlgo::new()
-                    .encapsulate(&ek, Some(&mut ct), Some(&mut z))
-                    .expect("test crypto");
-                (ct, z)
-            }
         };
         let pk_hsm =
             ec_pub_to_sec1(&sk_hsm.public_key().expect("test crypto")).expect("test crypto");
@@ -947,13 +898,6 @@ mod tests {
     fn ecdh_handshake_agrees_with_device() {
         for api_rev in [(1, 1), (2, 0)] {
             handshake_agrees(SessionSuite::EcdhP384, api_rev);
-        }
-    }
-
-    #[test]
-    fn mlkem_handshake_agrees_with_device() {
-        for api_rev in [(1, 1), (2, 0)] {
-            handshake_agrees(SessionSuite::MlKem1024, api_rev);
         }
     }
 

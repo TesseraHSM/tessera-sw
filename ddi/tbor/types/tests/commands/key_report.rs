@@ -848,7 +848,7 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     let err = pending_ctx
         .session_open_finish(pending)
         .expect_err("stale pending handshake must fail");
-    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
     let mut request = TborKeyReportReq {
         session_id: old.session_id(),
         masked_key,
@@ -857,7 +857,7 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     };
     request.auth_envelope = seal_key_report_auth(&old.handshake().param_key, &request)
         .expect("authenticate with the old credential's session key");
-    old_ctx.expect_fw_reject(&request, TborStatus::SessionAuthFailure);
+    old_ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
 
     request.session_id = cu.session_id;
     request.auth_envelope =
@@ -909,7 +909,7 @@ fn key_report_concurrent_cu_rotations_have_one_winner() {
     let winner = results.iter().position(Result::is_ok).expect("one winner");
     assert_fw_rejects(
         results[1 - winner].as_ref().expect_err("stale rotation"),
-        TborStatus::SessionAuthFailure,
+        TborStatus::DefaultPskChanged,
     );
     first.close().expect("close first CU");
     second.close().expect("close second CU");

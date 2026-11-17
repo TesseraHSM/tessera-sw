@@ -22,14 +22,12 @@ use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MAC_FIN_LEN;
 use tsra_ddi_tbor_types::SEED_ENVELOPE_LEN;
-use tsra_ddi_tbor_types::SESSION_MLKEM1024_PK_LEN;
 use tsra_ddi_tbor_types::SESSION_P384_SEC1_LEN;
 use tsra_ddi_tbor_types::SESSION_SUITE_ECDH_P384_ECDSA_P384;
-use tsra_ddi_tbor_types::SESSION_SUITE_MLKEM1024_ECDSA_P384;
 use tsra_session_ex_crypto::SessionInitiator;
 
 /// Every key-establishment suite the host supports.
-const SUITES: [SessionSuite; 2] = [SessionSuite::EcdhP384, SessionSuite::MlKem1024];
+const SUITES: [SessionSuite; 1] = [SessionSuite::EcdhP384];
 
 /// A raw `SessionOpenInit` request for a CU session.
 fn raw_init_req(session_type: u8, suite_id: u8, pk_init: Vec<u8>) -> TborSessionOpenInitReq {
@@ -117,11 +115,10 @@ fn open_session_invalid_session_type_byte() {
 /// Rejects unsupported session-suite identifiers.
 #[test]
 fn open_session_unsupported_suite_id() {
-    // Only 0x01 (ECDH P-384) and 0x02 (ML-KEM-1024) are defined; every
-    // other byte must be rejected by `HsmSessionSuite::from_u8` before
-    // any KEM work happens.
+    // Only 0x01 (ECDH P-384) is supported, including rejection of the
+    // removed 0x02 suite before any key-agreement work happens.
     let ctx = TestCtx::new();
-    for bad in [0x00u8, 0x03, 0xff] {
+    for bad in [0x00u8, 0x02, 0x03, 0xff] {
         let req = raw_init_req(
             SessionType::Encrypted.to_u8(),
             bad,
@@ -139,20 +136,8 @@ fn open_session_pk_init_length_mismatch_rejected() {
         .expect("generate ECDH ephemeral")
         .pk_init()
         .to_vec();
-    let mlkem_pk = SessionInitiator::generate(SessionSuite::MlKem1024, (1, 1))
-        .expect("generate ML-KEM ephemeral")
-        .pk_init()
-        .to_vec();
-    assert_eq!(mlkem_pk.len(), SESSION_MLKEM1024_PK_LEN);
-    for (suite_id, pk_init) in [
-        (SESSION_SUITE_ECDH_P384_ECDSA_P384, mlkem_pk),
-        (SESSION_SUITE_MLKEM1024_ECDSA_P384, ecdh_pk.clone()),
-        (
-            SESSION_SUITE_ECDH_P384_ECDSA_P384,
-            ecdh_pk[..SESSION_P384_SEC1_LEN - 1].to_vec(),
-        ),
-    ] {
-        let req = raw_init_req(SessionType::Encrypted.to_u8(), suite_id, pk_init);
+    for len in [0, 1, SESSION_P384_SEC1_LEN - 1] {
+        let req = raw_ecdh_init_req(ecdh_pk[..len].to_vec());
         ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
     }
 }

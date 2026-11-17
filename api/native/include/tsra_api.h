@@ -115,6 +115,14 @@ enum tsra_status
      Authentication of a masked key's AES-GCM envelope failed.
      */
     TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED = -78,
+    /*
+     Bootstrap sessions must rotate the public default PSK before use.
+     */
+    TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE = -79,
+    /*
+     The CU default PSK changed; close and reopen with the new credential.
+     */
+    TSRA_STATUS_DEFAULT_PSK_CHANGED = -80,
     TSRA_STATUS_PANIC = INT32_MIN,
 };
 #ifndef __cplusplus
@@ -608,7 +616,7 @@ typedef uint32_t tsra_part_prop_id;
  by the caller when opening a session via `open_session_ex`.
 
  Every such session encrypts its in-session traffic; the suite picks
- how the session keys are agreed. Both suites authenticate the HSM with
+ how the session keys are agreed. The suite authenticates the HSM with
  its partition identity key (ECDSA P-384 over the handshake transcript)
  and the caller with the role PSK. The discriminant is the wire
  `suite_id`.
@@ -622,10 +630,6 @@ enum tsra_session_suite
      Ephemeral ECDH P-384 key agreement.
      */
     TSRA_SESSION_SUITE_ECDH_P384 = 1,
-    /*
-     ML-KEM-1024 key encapsulation (post-quantum).
-     */
-    TSRA_SESSION_SUITE_ML_KEM1024 = 2,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_session_suite;

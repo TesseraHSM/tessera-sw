@@ -127,7 +127,10 @@ impl BulkStatus {
             HsmError::KeyStructuralValidationFailed => {
                 field_err(gcm_err::INVALID_KEY, xts_err::SAME_KEYS_PASSED)
             }
-            HsmError::SessionNotFound => field_err(
+            HsmError::SessionNotFound
+            | HsmError::DefaultPskMustRotate
+            | HsmError::DefaultPskChanged
+            | HsmError::SessionAuthFailure => field_err(
                 gcm_err::INVALID_SESSION_ID,
                 xts_err::INVALID_KEY1_SESSION_ID,
             ),

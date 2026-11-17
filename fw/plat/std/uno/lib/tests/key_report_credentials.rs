@@ -7,7 +7,13 @@ use std::time::Duration;
 
 use tsra_crypto::*;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
+use tsra_fw_ddi_tbor_types::TborPskChangeReq;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_DATA_LEN;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::GcmParams;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_io::sealed::SessionTransportBinding;
 use tsra_fw_hsm_io::CmdDword;
@@ -22,12 +28,16 @@ use tsra_fw_hsm_pal_std_uno::HsmPartId;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
+use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
+use tsra_fw_hsm_pal_traits::APP_ID_LEN;
+use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
 use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
@@ -46,15 +56,16 @@ const H2M_SALT: [u8; SESSION_TRANSPORT_SALT_LEN] = [0x5a; SESSION_TRANSPORT_SALT
 #[repr(align(4096))]
 struct HostPage([u8; 4096]);
 
-/// Installs an Active CO session whose VM→HSM transport key and salt are
+/// Installs an Active session whose VM→HSM transport key and salt are
 /// [`H2M_KEY`] and [`H2M_SALT`], returning its id.
 async fn install_session(
     pal: &StdHsmPal,
     io: &<StdHsmPal as tsra_fw_hsm_pal_traits::HsmIoTypes>::Io,
+    role: HsmSessionRole,
 ) -> HsmSessId {
     let blank = pal.dma_alloc(io, 1).expect("handshake state");
     let id = pal
-        .session_create_pending(io, HsmSessionRole::CryptoOfficer, blank)
+        .session_create_pending(io, role, blank)
         .await
         .expect("pending session");
     let key = |fill: u8, len: usize| {
@@ -68,6 +79,20 @@ async fn install_session(
     let (h2m_key, h2m_salt) = h2m.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
     h2m_key.copy_from_slice(&H2M_KEY);
     h2m_salt.copy_from_slice(&H2M_SALT);
+    let psk = tsra_fw_hsm_core::part_state::part_psk(
+        pal,
+        io,
+        u8::from(role == HsmSessionRole::CryptoUser),
+    )
+    .expect("current partition credential");
+    let binding = pal
+        .dma_alloc(io, SESSION_AUTH_BINDING_LEN)
+        .expect("binding");
+    binding[..4].copy_from_slice(&u32::from(role == HsmSessionRole::CryptoUser).to_le_bytes());
+    binding[4..4 + APP_ID_LEN].copy_from_slice(&psk[..APP_ID_LEN]);
+    HashAlgo::sha384()
+        .hash(psk, Some(&mut binding[4 + APP_ID_LEN..]))
+        .expect("credential digest");
     pal.session_promote(
         io,
         id,
@@ -75,7 +100,7 @@ async fn install_session(
         HsmApiRevision::new(1, 1),
         key(0x22, 32),
         key(0x33, 32),
-        key(0, SESSION_AUTH_BINDING_LEN),
+        binding,
         h2m,
         key(0x44, SESSION_TRANSPORT_SECRET_LEN),
     )
@@ -143,7 +168,7 @@ async fn check_credential_guard() {
     .await
     .expect("control IO");
     let control_io = hsm.pal().poll_io().await.expect("poll control IO");
-    let session = install_session(hsm.pal(), &control_io).await;
+    let session = install_session(hsm.pal(), &control_io, HsmSessionRole::CryptoOfficer).await;
     let credential_guard = hsm
         .pal()
         .partition_lock(&control_io)
@@ -209,6 +234,193 @@ async fn check_credential_guard() {
         .first_chunk_mut::<CQE_DWORDS>()
         .expect("command CQE");
     assert_eq!(Cqe::from(cqe).status(), 0);
+    hsm.pal()
+        .drop_io(control_io)
+        .await
+        .expect("drop control IO");
+}
+
+#[test]
+fn psk_change_failed_completion_restores_default_and_allows_same_session_retry() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(check_psk_change_rollback());
+        })
+        .expect("test thread")
+        .join()
+        .expect("test result");
+}
+
+async fn check_psk_change_rollback() {
+    let (tx, rx) = async_channel::bounded(1);
+    let hsm = Hsm::new(StdHsmPal::new(rx, tokio::runtime::Handle::current()));
+    hsm.pal()
+        .part_alloc_internal(0, 1)
+        .await
+        .expect("partition");
+    hsm.pal().part_enable_internal(0).await.expect("enable");
+    let (reply_tx, _) = tokio::sync::oneshot::channel();
+    tx.send(HsmIoRequest::cmd(
+        HsmPartId::from(0u8),
+        0,
+        0,
+        [0; SQE_DWORDS],
+        reply_tx,
+    ))
+    .await
+    .expect("control IO");
+    let control_io = hsm.pal().poll_io().await.expect("control IO");
+    let session = install_session(hsm.pal(), &control_io, HsmSessionRole::CryptoUser).await;
+    assert_bulk_rejected(&hsm, &tx, session, HsmError::DefaultPskMustRotate).await;
+    let aad = tsra_fw_ddi_tbor_types::build_psk_change_aad(u16::from(session));
+    let key = AesKey::from_bytes(&[0x22; 32]).expect("parameter key");
+    let alg = aead_envelope::AeadAlg::AesGcm256;
+    let mut envelope = [0; tsra_fw_ddi_tbor_types::PSK_CHANGE_ENVELOPE_LEN];
+    aead_envelope::seal(
+        alg,
+        &key,
+        &vec![0x55; alg.iv_len()],
+        &aad,
+        &[0xA5; 32],
+        Some(&mut envelope),
+    )
+    .expect("PSK envelope");
+
+    for fail_completion in [true, false] {
+        let mut msg = [0; 512];
+        let msg_len = TborPskChangeReq::encode(&mut msg, (1, 1))
+            .expect("encode")
+            .session_id(u16::from(session).into())
+            .expect("session id")
+            .psk_envelope(&envelope)
+            .expect("PSK envelope")
+            .finish()
+            .len();
+        let mut request = HostPage([0; 4096]);
+        let mut response = HostPage([0; 4096]);
+        let len = seal_frame(
+            &msg[..msg_len],
+            session,
+            u64::from(!fail_completion),
+            &mut request.0,
+        );
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            SqeBuilder::new()
+                .cmd(CmdDword::new().with_op(OP_TBOR))
+                .buf_lens(len as u32, 4096)
+                .src_prp1(request.0.as_ptr() as u64)
+                .dst_prp1(response.0.as_mut_ptr() as u64)
+                .session_flags(
+                    SessionFlags::new()
+                        .with_ctrl(SESSION_CTRL_IN_SESSION)
+                        .with_id_valid(true),
+                )
+                .session_id(u16::from(session))
+                .build(),
+            reply_tx,
+        ))
+        .await
+        .expect("rotation IO");
+        let io = hsm.pal().poll_io().await.expect("rotation IO");
+        let reply_rx = if fail_completion {
+            drop(reply_rx);
+            None
+        } else {
+            Some(reply_rx)
+        };
+        hsm.handle_io(io).await;
+        if let Some(reply_rx) = reply_rx {
+            let mut raw = reply_rx.await.expect("rotation completion");
+            let cqe = Cqe::try_from(&mut raw[..CQE_DWORDS]).expect("CQE");
+            assert_eq!(cqe.status(), 0);
+        }
+        let expected = if fail_completion {
+            &DEFAULT_PSK_CU
+        } else {
+            &[0xA5; 32]
+        };
+        assert_eq!(
+            tsra_fw_hsm_core::part_state::part_psk(hsm.pal(), &control_io, 1)
+                .expect("partition CU PSK"),
+            expected.as_slice()
+        );
+        assert_bulk_rejected(
+            &hsm,
+            &tx,
+            session,
+            if fail_completion {
+                HsmError::DefaultPskMustRotate
+            } else {
+                HsmError::DefaultPskChanged
+            },
+        )
+        .await;
+    }
+
+    async fn assert_bulk_rejected(
+        hsm: &Hsm<StdHsmPal>,
+        tx: &async_channel::Sender<HsmIoRequest>,
+        session: HsmSessId,
+        error: HsmError,
+    ) {
+        let sqe = BulkSqe {
+            dir: BulkDir::Encrypt,
+            cid: 0,
+            session_id: u16::from(session),
+            short_app_id: 0,
+            src_len: 0,
+            src_addr: 0,
+            dst_len: 0,
+            dst_addr: 0,
+            params: BulkParams::Gcm(GcmParams {
+                key_id: u32::MAX,
+                aad_len: 0,
+                aligned_aad_len: 0,
+                tag: [0; 16],
+                iv: [0; 12],
+                tail: None,
+            }),
+        }
+        .encode();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(HsmIoRequest {
+            pid: HsmPartId::from(0u8),
+            qid: 1,
+            qidx: 0,
+            kind: HsmIoKind::Bulk,
+            sqe,
+            tx: reply_tx,
+        })
+        .await
+        .expect("bulk IO");
+        let io = hsm.pal().poll_io().await.expect("bulk IO");
+        hsm.handle_io(io).await;
+        let cqe = reply_rx.await.expect("bulk completion");
+        assert_eq!(
+            cqe,
+            BulkCqe::error(&sqe, 1, error).encode(),
+            "bulk credential policy must distinguish restricted sessions from current credentials"
+        );
+    }
+    hsm.pal()
+        .session_destroy(&control_io, session)
+        .await
+        .expect("destroy session");
+    let session = install_session(hsm.pal(), &control_io, HsmSessionRole::CryptoUser).await;
+    assert_bulk_rejected(&hsm, &tx, session, HsmError::KeyNotFound).await;
+    hsm.pal()
+        .session_destroy(&control_io, session)
+        .await
+        .expect("destroy current-credential session");
     hsm.pal()
         .drop_io(control_io)
         .await

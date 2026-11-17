@@ -4,7 +4,7 @@
 //! TBOR `SessionOpenInit` handler — Phase 1 of session establishment.
 //!
 //! Validates the request, encapsulates to the VM's ephemeral KEM key
-//! (ECDH P-384 or ML-KEM-1024), hashes the handshake transcript `T1`,
+//! (ECDH P-384), hashes the handshake transcript `T1`,
 //! signs it with the partition identity key, derives the handshake
 //! secret `hs` from the KEM secret and the role's PSK, reserves a
 //! `Pending` session slot holding `hs`, `T1` and the transport keys, and
@@ -122,7 +122,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let pk_hsm = load_pk_hsm_sec1(pal, io, alloc).await?;
 
         // ── KEM encapsulation to the VM's ephemeral key ────────────
-        let (enc, z) = encapsulate(pal, io, alloc, suite, pk_init).await?;
+        let (enc, z) = ecdh_encapsulate(pal, io, alloc, pk_init).await?;
 
         // ── Transcript, signature and handshake secret ─────────────
         let major = api_rev.0.to_be_bytes();
@@ -237,34 +237,6 @@ async fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pk_hsm[0] = 0x04;
     crate::part_state::part_id_pub_key(pal, io, pk_hsm.split_at_mut(1).1).await?;
     Ok(pk_hsm)
-}
-
-/// Encapsulate to `pk_init`, returning `(enc, Z)`.
-///
-/// * ECDH P-384: a fresh ephemeral keypair; `enc` is its SEC1 public
-///   point and `Z` the 48 B big-endian x-coordinate of the shared point.
-/// * ML-KEM-1024: `enc` is the 1568 B ciphertext and `Z` the 32 B shared
-///   secret.
-async fn encapsulate<'a, P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
-    suite: HsmSessionSuite,
-    pk_init: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
-    match suite {
-        HsmSessionSuite::EcdhP384EcdsaP384 => ecdh_encapsulate(pal, io, alloc, pk_init).await,
-        HsmSessionSuite::MlKem1024EcdsaP384 => {
-            let param = HsmMlKemParamSet::MlKem1024;
-            let pk_init = HsmMlKemPubKey::Encoded(pk_init);
-            let (ct_len, ss_len) = pal.mlkem_encaps(io, param, pk_init, None).await?;
-            let enc = alloc.dma_alloc(ct_len)?;
-            let z = alloc.dma_alloc(ss_len)?;
-            pal.mlkem_encaps(io, param, pk_init, Some((&mut *enc, &mut *z)))
-                .await?;
-            Ok((enc, z))
-        }
-    }
 }
 
 /// Ephemeral ECDH P-384 against the SEC1 point `pk_init`.

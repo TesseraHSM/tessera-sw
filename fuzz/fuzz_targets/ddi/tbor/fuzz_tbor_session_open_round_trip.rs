@@ -23,8 +23,6 @@ struct FuzzInput {
     /// Run a genuine handshake instead of a raw `SessionOpenInit`.
     valid_open_init: bool,
     valid_role: FuzzRole,
-    /// Key-establishment suite of the genuine handshake.
-    ml_kem: bool,
     /// Flip `fin[index % 48]` by `xor` before `SessionOpenFinish`;
     /// `xor == 0` keeps the genuine confirmation.
     fin_tamper: (u8, u8),
@@ -48,11 +46,7 @@ fuzz_target!(|input: FuzzInput| {
 
 /// A genuine handshake whose confirmation is optionally tampered with.
 fn round_trip(ctx: &TestCtx, input: &FuzzInput) {
-    let suite = if input.ml_kem {
-        SessionSuite::MlKem1024
-    } else {
-        SessionSuite::EcdhP384
-    };
+    let suite = SessionSuite::EcdhP384;
     let pending = ctx
         .session_open_init_with_options(SessionOpenInitOptions::new(
             input.valid_role.psk_id(),
@@ -91,7 +85,11 @@ fn raw_open_init(ctx: &TestCtx, input: &FuzzInput) {
         psk_id: input.psk_id,
         session_type: input.session_type,
         suite_id: input.suite_id,
-        pk_init: input.pk_init.clone(),
+        pk_init: input.pk_init[..input
+            .pk_init
+            .len()
+            .min(tsra_ddi_tbor_types::PK_INIT_MAX_LEN)]
+            .to_vec(),
     };
     let result = ctx.tbor(&req);
     assert!(

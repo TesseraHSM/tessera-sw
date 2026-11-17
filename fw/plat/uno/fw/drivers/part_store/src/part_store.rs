@@ -126,7 +126,7 @@ const RESERVED3_LEN: usize = 626
     - CREDENTIAL_LEN
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
-    - 2  // session_meta (pending_mask + psk_change_mask)
+    - 2  // session_meta (pending_mask + reserved)
     - 2; // transport_epoch
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
@@ -423,9 +423,8 @@ struct Storage {
     // the DMA-target public keys above stay 4-aligned.
     valid_flags: u8,
     // Volatile TBOR session slot metadata: byte 0 = pending_mask
-    // (bit N set while slot N's handshake is in flight), byte 1 =
-    // psk_change_mask (bit N set once slot N has consumed its one
-    // allowed PSK change). Owned by the session_store driver.
+    // (bit N set while slot N's handshake is in flight), byte 1 is
+    // reserved. Owned by the session_store driver.
     session_meta: [u8; 2],
     // Little-endian TBOR session transport epoch: the top 16 bits of every
     // HSM→VM sequence number. Bumped on every warm / fw-update boot, which
@@ -1670,8 +1669,8 @@ impl Partition {
         &mut self.slot_mut().session_table
     }
 
-    /// Borrows the 2-byte volatile session metadata (`pending_mask`,
-    /// `psk_change_mask`) for the TBOR session slots.
+    /// Borrows the volatile Pending mask and one reserved byte for the
+    /// TBOR session slots.
     #[inline(never)]
     pub fn session_meta(self) -> &'static [u8; 2] {
         &self.slot().session_meta

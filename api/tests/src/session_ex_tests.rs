@@ -73,9 +73,9 @@ fn open_session_ex_co_ecdh_p384() {
     );
 }
 
-/// Happy path: a CU session under the ML-KEM-1024 suite.
+/// Happy path: a CU session under the ECDH P-384 suite.
 #[test]
-fn open_session_ex_cu_mlkem1024() {
+fn open_session_ex_cu_ecdh_p384() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -87,9 +87,9 @@ fn open_session_ex_cu_mlkem1024() {
             rev,
             &test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionSuite::MlKem1024,
+            HsmSessionSuite::EcdhP384,
         )
-        .expect("CU/ML-KEM-1024 open_session_ex should succeed against emu");
+        .expect("CU/ECDH-P384 open_session_ex should succeed against emu");
 
     let sess_rev = session.api_rev();
     assert_eq!(
@@ -97,6 +97,22 @@ fn open_session_ex_cu_mlkem1024() {
         (rev.major, rev.minor),
         "session must echo the negotiated api revision"
     );
+}
+
+#[test]
+fn open_session_ex_removed_suite_rejected() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let result = part.open_session_ex(
+        rev,
+        &test_root_spki_sha384(&part),
+        HsmSessionPsk::new(HsmPskId::CU),
+        HsmSessionSuite(0x02),
+    );
+    assert!(matches!(result, Err(HsmError::InvalidArgument)));
 }
 
 /// PSK-rotation round trip: after rotating the CO PSK from the default,
@@ -107,6 +123,7 @@ fn change_psk_rotates_co_psk() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
+
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
 
@@ -148,4 +165,38 @@ fn change_psk_rotates_co_psk() {
         stale.is_err(),
         "the default CO PSK must be rejected after rotation",
     );
+}
+
+#[test]
+fn session_ex_cu_bootstrap_requires_reopen_after_rotation() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let pin = test_root_spki_sha384(&part);
+    let psk = [0xA5; PSK_LEN];
+    let bootstrap = part
+        .open_session_ex(
+            rev,
+            &pin,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("bootstrap CU session");
+    bootstrap.change_psk(&psk).expect("initial rotation");
+    assert_eq!(
+        bootstrap.change_psk(&[0xB6; PSK_LEN]),
+        Err(HsmError::DefaultPskChanged)
+    );
+    drop(bootstrap);
+    let session = part
+        .open_session_ex(
+            rev,
+            &pin,
+            HsmSessionPsk::with_psk(HsmPskId::CU, &psk),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("reopen with rotated PSK");
+    assert_eq!(session.change_psk(&psk), Err(HsmError::InvalidArgument));
 }

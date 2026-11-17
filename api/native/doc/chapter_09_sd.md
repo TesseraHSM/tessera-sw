@@ -162,6 +162,15 @@ session, before the default is rotated via
 [`tsra_sess_ex_psk_change`](#tsra_sess_ex_psk_change). After rotation,
 point `psk` at the rotated 32-byte secret.
 
+CU sessions opened with the default PSK are bootstrap-only. Before rotation,
+normal session commands return `TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE`; only PSK
+change and close are permitted. Once any session rotates the partition CU PSK,
+all default-authenticated CU sessions, including the rotating session, return
+`TSRA_STATUS_DEFAULT_PSK_CHANGED` except when closing. Close and explicitly
+open a new session with the rotated credential. The SDK does not automatically
+upgrade or reopen the old session. The same changed-default status can be
+returned if rotation occurs between Init and Finish during session open.
+
 ```cpp
 struct tsra_session_psk {
     uint8_t psk_id;

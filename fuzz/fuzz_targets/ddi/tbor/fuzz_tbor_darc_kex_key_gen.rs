@@ -127,7 +127,7 @@ fn prepare_fixture<'ctx>(
         let (psk_id, suite) = if crypto_officer {
             (CO_PSK_ID, SessionSuite::EcdhP384)
         } else {
-            (CU_PSK_ID, SessionSuite::MlKem1024)
+            (CU_PSK_ID, SessionSuite::EcdhP384)
         };
         ctx.open_session(psk_id, suite)
             .expect("default-PSK session should open")

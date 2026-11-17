@@ -371,12 +371,24 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
     ctx.psk_change(&session, &second_cu_psk)
         .expect("rotate CU PSK a second time");
 
+    ctx.session_close(session.session_id)
+        .expect("close stale CU session");
+    let pending = ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&second_cu_psk),
+        )
+        .expect("reopen with second CU PSK");
+    let session = ctx
+        .session_open_finish(pending)
+        .expect("finish new CU session");
     let after = get_unwrapping_key(&ctx, session.session_id);
 
     assert_eq!(
         before, after,
         "CU PSK rotation must not change the partition unwrapping key",
     );
+    ctx.session_close(session.session_id)
+        .expect("close CU session");
 }
 
 /// Preserves the same partition unwrapping key across CO -> CU -> CO sessions.

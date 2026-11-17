@@ -231,7 +231,7 @@ pub enum HsmPotaEndorsementSource {
 /// by the caller when opening a session via `open_session_ex`.
 ///
 /// Every such session encrypts its in-session traffic; the suite picks
-/// how the session keys are agreed. Both suites authenticate the HSM with
+/// how the session keys are agreed. The suite authenticates the HSM with
 /// its partition identity key (ECDSA P-384 over the handshake transcript)
 /// and the caller with the role PSK. The discriminant is the wire
 /// `suite_id`.
@@ -241,9 +241,6 @@ pub enum HsmPotaEndorsementSource {
 pub enum HsmSessionSuite {
     /// Ephemeral ECDH P-384 key agreement.
     EcdhP384 = 1,
-
-    /// ML-KEM-1024 key encapsulation (post-quantum).
-    MlKem1024 = 2,
 }
 
 /// Length, in bytes, of a partition PSK (Pre-Shared Key). This module is

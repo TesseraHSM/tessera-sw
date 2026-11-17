@@ -267,6 +267,37 @@ TEST_F(tsra_sess_ex, open_invalid_psk_id)
     });
 }
 
+TEST_F(tsra_sess_ex, open_removed_suite_rejected)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        TestRootPin root(part_handle);
+        tsra_session_psk psk{ 1, nullptr };
+        tsra_handle session = 0;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &psk,
+                static_cast<tsra_session_suite>(0x02),
+                &session
+            ),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(session, 0);
+    });
+}
+
 // A caller-supplied PSK buffer of the wrong length (not `PSK_LEN`) is rejected.
 TEST_F(tsra_sess_ex, open_wrong_length_psk)
 {
@@ -667,6 +698,60 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
                 tsra_sess_close(sess_handle);
             }
         }
+    });
+}
+
+TEST_F(tsra_sess_ex, cu_bootstrap_requires_reopen_after_psk_rotation)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        TestRootPin root(part_handle);
+        tsra_session_psk credential{ 1, nullptr };
+        tsra_handle session = 0;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &credential,
+                TSRA_SESSION_SUITE_ECDH_P384,
+                &session
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        auto session_guard = scope_guard::make_scope_exit([&session] {
+            if (session != 0)
+            {
+                tsra_sess_close(session);
+            }
+        });
+        std::vector<uint8_t> psk(32, 0xA5);
+        tsra_buffer psk_buffer{ psk.data(), static_cast<uint32_t>(psk.size()) };
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_DEFAULT_PSK_CHANGED);
+        ASSERT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+        session = 0;
+        credential.psk = &psk_buffer;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &credential,
+                TSRA_SESSION_SUITE_ECDH_P384,
+                &session
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
 

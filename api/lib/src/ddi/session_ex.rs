@@ -62,7 +62,6 @@ impl TryFrom<HsmSessionSuite> for SessionSuite {
     fn try_from(suite: HsmSessionSuite) -> Result<Self, Self::Error> {
         match suite {
             HsmSessionSuite::EcdhP384 => Ok(SessionSuite::EcdhP384),
-            HsmSessionSuite::MlKem1024 => Ok(SessionSuite::MlKem1024),
             _ => Err(HsmError::InvalidArgument),
         }
     }
@@ -356,6 +355,9 @@ fn open_session_ex_finish(
 /// `psk_envelope`. The firmware rotates the PSK slot implied by the
 /// session role (CO session → CO slot, CU session → CU slot); the
 /// request carries no slot-selection field.
+///
+/// A default-authenticated CU session must close and reopen with the new
+/// credential after rotation; further work returns [`HsmError::DefaultPskChanged`].
 ///
 /// # Arguments
 ///
