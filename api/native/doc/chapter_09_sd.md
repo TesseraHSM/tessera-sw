@@ -5,14 +5,26 @@ its security domain. A security-domain session (opened with
 [`tsra_sess_ex_open`](#tsra_sess_ex_open)) is required to issue the
 provisioning command in this chapter.
 
-All policy-taking Rust APIs accept `&PartPolicy`, including partition
-init/final and remote/peer backup operations. Policy remains an explicit
-per-call input; partition and session opening are unchanged. Native C
-params continue to carry the serialized 484-byte policy in an
-`tsra_buffer`. The native wrappers parse that image into `PartPolicy`
-after validating output capacity, preserving size probes and returning
-`TSRA_STATUS_INVALID_ARGUMENT` for a wrong-length policy once outputs
-are sufficiently sized. The C ABI and DDI wire format are unchanged.
+### Partition policy
+
+Partition init/final, the security-domain backup operations, and the DARC
+TMK export/import take the partition policy as an opaque byte buffer
+(`&[u8]` in Rust, `tsra_buffer*` in C). Policy remains an explicit
+per-call input; partition and session opening are unchanged.
+
+The policy is a deterministic CBOR document of at most 384 bytes
+(`PART_POLICY_MAX_LEN`); the schema is specified in
+`docs/tbor-ddi/part_policy.md`. Public keys are named by thumbprint: the
+SHA-384 of the key's DER SubjectPublicKeyInfo. Callers may encode the
+document themselves or use the
+[partition policy builder](#partition-policy-builder) (`PartPolicyBuilder`
+in Rust).
+
+The host checks only the length: an empty policy or one longer than
+384 bytes is rejected with `TSRA_STATUS_INVALID_ARGUMENT` once the output
+buffers are sufficiently sized, so size probes still report
+`TSRA_STATUS_BUFFER_TOO_SMALL`. Firmware decodes and validates the
+document and rejects a malformed or non-canonical policy.
 
 ### Masked sealing-key metadata
 
@@ -128,10 +140,10 @@ struct tsra_session_psk {
 Provision a partition's security domain over a security-domain session.
 
 Initializes the partition from the caller-supplied machine seed
-(`mach_seed`) and unified partition policy (`part_policy`), together with
-the partition-owner (`pota_thumbprint`), security-administrator
-(`sata_thumbprint`), and optional secondary-owner (`sapota_thumbprint`)
-trust-anchor thumbprints. On success it returns the partition's
+(`mach_seed`) and partition policy (`part_policy`). The policy names the
+partition-owner (POTA), security-administrator (SATA), and optional
+secondary-owner (SAPOTA) trust anchors by public-key thumbprint. On
+success it returns the partition's
 certificate-signing request (`pta_csr`) and attestation report
 (`pta_report`).
 
@@ -182,26 +194,19 @@ the C struct layouts, even though the function signatures are unchanged.
 
 Provisioning input buffers for
 [`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init). Each field points
-to an [tsra_buffer](#tsra_buffer); `sapota_thumbprint` is optional and
-may be NULL to omit it.
+to an [tsra_buffer](#tsra_buffer).
 
 ```cpp
 struct tsra_sess_ex_part_init_params {
     const struct tsra_buffer *part_policy;
     const struct tsra_buffer *mach_seed;
-    const struct tsra_buffer *pota_thumbprint;
-    const struct tsra_buffer *sata_thumbprint;
-    const struct tsra_buffer *sapota_thumbprint;
 };
 ```
 
- | Field             | Name                             | Description                              |
- | ----------------- | -------------------------------- | ---------------------------------------- |
- | part_policy       | [tsra_buffer*](#tsra_buffer) | unified partition policy image (see [Partition policy builder](#partition-policy-builder)) |
- | mach_seed         | [tsra_buffer*](#tsra_buffer) | machine seed plaintext                   |
- | pota_thumbprint   | [tsra_buffer*](#tsra_buffer) | POTA public-key thumbprint               |
- | sata_thumbprint   | [tsra_buffer*](#tsra_buffer) | SATA public-key thumbprint               |
- | sapota_thumbprint | [tsra_buffer*](#tsra_buffer) | optional SAPOTA thumbprint (may be NULL) |
+ | Field       | Name                         | Description                                                    |
+ | ----------- | ---------------------------- | -------------------------------------------------------------- |
+ | part_policy | [tsra_buffer*](#tsra_buffer) | partition policy CBOR document, 1-384 B (see [Partition policy](#partition-policy)) |
+ | mach_seed   | [tsra_buffer*](#tsra_buffer) | machine seed plaintext                                         |
 
 ## tsra_sess_ex_part_final
 
@@ -209,7 +214,7 @@ Finalize a partition's security domain over a security-domain session.
 
 Completes provisioning started by
 [`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init): re-supplies the
-unified partition policy and the PTA certificate chain (root to leaf),
+partition policy and the PTA certificate chain (root to leaf),
 optionally restoring a prior `local_mk` backup, and returns the current
 `local_mk` backup envelope the firmware produced.
 
@@ -283,43 +288,50 @@ struct tsra_sess_ex_part_final_params {
 
  | Field                | Name                             | Description                                     |
  | -------------------- | -------------------------------- | ----------------------------------------------- |
- | part_policy          | [tsra_buffer*](#tsra_buffer)     | unified partition policy (must match part_init) |
+ | part_policy          | [tsra_buffer*](#tsra_buffer)     | partition policy (must match part_init)         |
  | pta_cert_chain       | [tsra_buffer*](#tsra_buffer)     | array of DER PTA certificates (root to leaf)    |
  | pta_cert_chain_len   | uint32_t                         | number of certificates in the chain             |
  | prev_local_mk_backup | [tsra_buffer*](#tsra_buffer)     | optional prior local_mk backup (may be NULL)    |
 
 ## Partition policy builder
 
-The `part_policy` image consumed by
-[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init) and
-[`tsra_sess_ex_part_final`](#tsra_sess_ex_part_final) is a fixed-size
-binary layout. Rather than assemble it by hand, callers may use the
-opaque partition-policy builder to set named, typed fields and then
-serialize the canonical image. The on-wire format is unchanged — the
-builder is a pure convenience that emits exactly the bytes the init /
-final entry points already accept.
+The builder assembles the [partition policy](#partition-policy) from typed
+fields and emits the deterministic CBOR document. The Rust SDK exposes the
+same builder as `PartPolicyBuilder`, plus `policy_key_thumbprint`.
 
 Typical use:
 
 1. [`tsra_part_policy_builder_new`](#tsra_part_policy_builder_new)
-   allocates a builder (its version defaults to `major = 1, minor = 0`,
-   with every other field zeroed).
-2. Set both required POTA and SATA keys with the
-   `tsra_part_policy_builder_set_*` setters, plus any optional fields.
-3. [`tsra_part_policy_build`](#tsra_part_policy_build) serializes the
-   image into a caller-provided [tsra_buffer](#tsra_buffer); it
-   follows the same two-call size-probe contract as other output buffers
-   (an undersized buffer is rejected with
-   `TSRA_STATUS_BUFFER_TOO_SMALL` and `len` set to the required size).
+   allocates an empty builder.
+2. Set the required POTA and SATA keys, and any optional fields, with the
+   `tsra_part_policy_builder_set_*` setters.
+3. [`tsra_part_policy_build`](#tsra_part_policy_build) writes the document
+   into a caller-provided [tsra_buffer](#tsra_buffer), following the
+   two-call size-probe contract.
 4. [`tsra_part_policy_builder_free`](#tsra_part_policy_builder_free)
    releases the builder.
 
-The serialized image may then be passed as the `part_policy` buffer to
-`tsra_sess_ex_part_init` / `tsra_sess_ex_part_final`.
+The document always carries version 1.
+
+### tsra_policy_key_format
+
+Encoding of the key passed to a key setter or to
+[`tsra_policy_key_thumbprint`](#tsra_policy_key_thumbprint). Every format
+resolves to the same 48-byte SPKI thumbprint stored in the policy.
+
+| Value                               | Key bytes                                     |
+|-------------------------------------|-----------------------------------------------|
+| `TSRA_POLICY_KEY_FORMAT_THUMBPRINT` | precomputed thumbprint, exactly 48 bytes      |
+| `TSRA_POLICY_KEY_FORMAT_SPKI_DER`   | DER SubjectPublicKeyInfo of any algorithm     |
+| `TSRA_POLICY_KEY_FORMAT_ECC_P384`   | raw P-384 point `X \|\| Y`, exactly 96 bytes |
+
+`SPKI_DER` is hashed as given and must be one DER SEQUENCE with no trailing
+bytes; it covers algorithms without a dedicated raw format (for example
+ML-DSA or composite keys).
 
 ### tsra_part_policy_builder_new
 
-Allocate a new partition-policy builder.
+Allocate a new, empty partition-policy builder.
 
 ```cpp
 tsra_status tsra_part_policy_builder_new(
@@ -347,33 +359,25 @@ void tsra_part_policy_builder_free(
     );
 ```
 
-### tsra_part_policy_builder_set_* 
+### tsra_part_policy_builder_set_*
 
-Set individual policy fields. Each returns `TSRA_STATUS_SUCCESS`, or
-`TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle or buffer. `kind` is the
-public-key kind discriminant (`0` = ECC P-384).
+Set individual policy fields. A setter returns
+`TSRA_STATUS_INVALID_ARGUMENT` only for a NULL or misaligned handle or
+buffer, or an unknown key `format`. Invalid field values are recorded and
+reported by `tsra_part_policy_build`; the first such error is kept.
 
-Both POTA and SATA keys are mandatory: call
-`tsra_part_policy_builder_set_pota_key` and
-`tsra_part_policy_builder_set_sata_key` before building. If either key
-is unset, `tsra_part_policy_build` returns
-`TSRA_STATUS_INVALID_ARGUMENT`, including for size probes.
-SAPOTA and backing-partition keys remain optional.
+| Setter                  | Policy field                  | Rule                          |
+|-------------------------|-------------------------------|-------------------------------|
+| `set_pota_key`          | `pota_spki_thumbprint`        | required                      |
+| `set_sata_key`          | `sata_spki_thumbprint`        | required                      |
+| `set_sapota_key`        | `sapota_spki_thumbprint`      | optional                      |
+| `set_backup_part_id`    | `backup_part_id`              | exactly 16 bytes; paired      |
+| `set_backup_part_key`   | `backup_part_spki_thumbprint` | paired with `backup_part_id`  |
+| `set_data_key`          | `data_spki_thumbprint`        | optional                      |
+| `set_info`              | `info`                        | at most 64 bytes; empty omits |
+| `set_flags`             | `flags`                       | reserved bits must be zero    |
 
-Fixed-size fields reject input that does not satisfy their length
-requirement rather than truncating or padding it: if a key, `info`, or
-backing-partition id violates its slot's length rule, the setter still
-returns `TSRA_STATUS_SUCCESS`, but the subsequent
-`tsra_part_policy_build` fails with `TSRA_STATUS_INVALID_ARGUMENT`.
-A *known* key kind must be exactly the length that kind requires — an
-ECC P-384 (`kind = 0`) key is `X || Y`, i.e. exactly 96 bytes — because
-the firmware rejects every other length; a shorter key that merely fits
-the slot is therefore rejected too. `info` and the backing-partition id
-must not exceed their respective slots (truncating key material would
-silently yield a *different* key).
-
-The `flags` byte passed to `tsra_part_policy_builder_set_flags` is a
-bitfield:
+The `flags` byte is a bitfield:
 
 | Bit   | Meaning                  |
 |-------|--------------------------|
@@ -382,28 +386,23 @@ bitfield:
 | 2     | `allow_peer_cloning`     |
 | 3 – 7 | reserved (must be zero)  |
 
-The major version must be 1; any minor version is accepted. Setting an
-unsupported major version or any reserved flag bit still returns
-`TSRA_STATUS_SUCCESS` from the setter, but
-`tsra_part_policy_build` rejects the policy with
-`TSRA_STATUS_INVALID_ARGUMENT`, including during size probes.
-
 ```cpp
-tsra_status tsra_part_policy_builder_set_version(
-    struct tsra_part_policy_builder *builder, uint8_t major, uint8_t minor);
 tsra_status tsra_part_policy_builder_set_pota_key(
-    struct tsra_part_policy_builder *builder, uint16_t kind,
+    struct tsra_part_policy_builder *builder, tsra_policy_key_format format,
     const struct tsra_buffer *key);
 tsra_status tsra_part_policy_builder_set_sata_key(
-    struct tsra_part_policy_builder *builder, uint16_t kind,
+    struct tsra_part_policy_builder *builder, tsra_policy_key_format format,
     const struct tsra_buffer *key);
 tsra_status tsra_part_policy_builder_set_sapota_key(
-    struct tsra_part_policy_builder *builder, uint16_t kind,
+    struct tsra_part_policy_builder *builder, tsra_policy_key_format format,
     const struct tsra_buffer *key);
 tsra_status tsra_part_policy_builder_set_backup_part_id(
     struct tsra_part_policy_builder *builder, const struct tsra_buffer *id);
-tsra_status tsra_part_policy_builder_set_backup_part_pub_key(
-    struct tsra_part_policy_builder *builder, uint16_t kind,
+tsra_status tsra_part_policy_builder_set_backup_part_key(
+    struct tsra_part_policy_builder *builder, tsra_policy_key_format format,
+    const struct tsra_buffer *key);
+tsra_status tsra_part_policy_builder_set_data_key(
+    struct tsra_part_policy_builder *builder, tsra_policy_key_format format,
     const struct tsra_buffer *key);
 tsra_status tsra_part_policy_builder_set_info(
     struct tsra_part_policy_builder *builder, const struct tsra_buffer *info);
@@ -413,7 +412,7 @@ tsra_status tsra_part_policy_builder_set_flags(
 
 ### tsra_part_policy_build
 
-Serialize the policy into its canonical wire image.
+Serialize the policy into its deterministic CBOR document.
 
 ```cpp
 tsra_status tsra_part_policy_build(
@@ -424,13 +423,31 @@ tsra_status tsra_part_policy_build(
 
 **Returns**
 
-`TSRA_STATUS_SUCCESS` on success, `TSRA_STATUS_INVALID_ARGUMENT` on a
-NULL or misaligned handle or buffer, or `TSRA_STATUS_BUFFER_TOO_SMALL` if
+`TSRA_STATUS_SUCCESS` on success, or `TSRA_STATUS_BUFFER_TOO_SMALL` if
 `out` is too small (with `out.len` set to the required size).
-Missing a required POTA or SATA key, or a previously recorded setter
-validation error, also returns `TSRA_STATUS_INVALID_ARGUMENT`.
-An unsupported major version or reserved flag bit also returns
-`TSRA_STATUS_INVALID_ARGUMENT`.
+`TSRA_STATUS_INVALID_ARGUMENT` is returned, including during size probes,
+on a NULL or misaligned handle or buffer, a missing POTA or SATA key, an
+unpaired backup id or key, a recorded setter error, or reserved flag bits.
+
+### tsra_policy_key_thumbprint
+
+Compute the 48-byte SPKI thumbprint of a key, the value the policy stores
+for it.
+
+```cpp
+tsra_status tsra_policy_key_thumbprint(
+    tsra_policy_key_format format,
+    const struct tsra_buffer *key,
+    struct tsra_buffer *out
+    );
+```
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, `TSRA_STATUS_INVALID_ARGUMENT` on a
+NULL buffer, unknown `format` or malformed `key`, or
+`TSRA_STATUS_BUFFER_TOO_SMALL` if `out` is too small (with `out.len` set
+to 48).
 
 ## tsra_sess_ex_psk_change
 
@@ -466,7 +483,7 @@ Create a new security domain and its remote backup over a security-domain
 session.
 
 Creates a security domain under the calling session's partition from the
-unified partition policy, using the sender's masked SD-sealing key (from
+partition policy, using the sender's masked SD-sealing key (from
 `tsra_key_gen`), the receiver key certificate chain (spec `RcvrCertChain`),
 and — when the policy requires it — the receiver's attestation evidence, and
 returns the three backups the firmware produces: the remote
@@ -475,13 +492,16 @@ partition-owner-key backup (276 bytes), and the security-domain masking-key
 backup (260 bytes).
 
 The `receiver_cert_chain` is always validated and anchored to the policy SATA
-key; its leaf is the recipient public key (`RcvrPub`) the remote backup is
+key thumbprint; its leaf is the recipient public key (`RcvrPub`) the remote backup is
 sealed to. The `receiver_evidence` attestation is verified only
 when the policy sets `require_trusted_sa_key`: its partition-owner chain is
-anchored to the policy SAPOTA key and its report must attest the same
+anchored to the policy SAPOTA key thumbprint and its report must attest the same
 `RcvrPub` recovered from `receiver_cert_chain`, otherwise the create is
 rejected with `TSRA_STATUS_INVALID_ARGUMENT`. When the flag is clear the
-evidence is ignored (pass empty chains and an empty report).
+evidence is ignored (pass empty chains and an empty report). The host does
+not decode the policy: it forwards the evidence whenever any of it is
+non-empty, and firmware rejects the create if the flag is set and the
+evidence is missing.
 
 The inputs are grouped into an
 [`tsra_sd_create_remote_backup_params`](#tsra_sd_create_remote_backup_params)
@@ -534,7 +554,7 @@ struct tsra_sd_create_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (584 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | partition policy CBOR document (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | sender's masked SD-sealing key (276 B)             |
  | receiver_cert_chain | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | receiver key chain (spec `RcvrCertChain`), SATA-anchored; always required |
  | receiver_evidence  | [tsra_sd_evidence*](#tsra_sd_evidence) | receiver attestation evidence; verified only when policy sets `require_trusted_sa_key` |
@@ -548,7 +568,7 @@ HPKE-opens the source remote backup with the receiver's masked SD-sealing
 key (authenticated by the source sender in `src_evidence`) and reseals the
 recovered backup to the destination receiver (`dest_evidence`), returning the
 resealed remote backup (161 bytes). Both evidences' partition-owner chains
-must anchor to the POTA key of the client policy in `params`.
+must anchor to the POTA key thumbprint of the client policy in `params`.
 
 The inputs are grouped into an
 [`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
@@ -593,7 +613,7 @@ struct tsra_sd_reseal_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)           |
  | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (sender) attestation evidence               |
  | dest_evidence      | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (receiver) attestation evidence        |
@@ -611,13 +631,15 @@ returns the refreshed device-local backups: the local partition-owner-key
 backup (276 bytes) and the security-domain masking-key backup (260 bytes).
 
 The `sender_cert_chain` is always validated and anchored to the policy SATA
-key; its leaf is the sender public key (`SndrPub`) that sealed the remote
+key thumbprint; its leaf is the sender public key (`SndrPub`) that sealed the remote
 backup. The `sender_evidence` attestation is verified only when
 the policy sets `require_trusted_sa_key`: its partition-owner chain is
-anchored to the policy SAPOTA key and its v2 report must attest the same
+anchored to the policy SAPOTA key thumbprint and its v2 report must attest the same
 `SndrPub` recovered from `sender_cert_chain`, otherwise the restore is
 rejected with `TSRA_STATUS_INVALID_ARGUMENT`. When the flag is clear the
-evidence is ignored (pass empty chains and an empty report).
+evidence is ignored (pass empty chains and an empty report). As with
+create, the host forwards the evidence whenever any of it is non-empty and
+firmware rejects the restore if the flag is set and the evidence is missing.
 
 The trusted sealing authority may have a different partition policy from the
 restored SD. Its report's policy hash is **not** required to equal the
@@ -677,7 +699,7 @@ struct tsra_sd_restore_remote_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (584 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | partition policy CBOR document (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (276 B)           |
  | sender_cert_chain  | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | sender key chain (spec `SndrCertChain`), SATA-anchored; always required |
  | sender_evidence    | [tsra_sd_evidence*](#tsra_sd_evidence) | sender attestation evidence; verified only when policy sets `require_trusted_sa_key` |
@@ -693,7 +715,8 @@ Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
 destination peer named by `dst_evidence` (authenticated by the sender's
 masked SD-sealing key), returning the peer backup (161 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
-The `dst_evidence` partition-owner chain must anchor to the policy POTA key.
+The `dst_evidence` partition-owner chain must anchor to the policy POTA
+key thumbprint.
 
 The inputs are grouped into an
 [`tsra_sd_create_peer_backup_params`](#tsra_sd_create_peer_backup_params)
@@ -737,7 +760,7 @@ struct tsra_sd_create_peer_backup_params {
 
  | Field              | Name                                       | Description                                        |
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)             |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | sender's masked SD-sealing key (276 B)             |
  | dst_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (peer) attestation evidence            |
  | pok_local_backup   | [tsra_buffer*](#tsra_buffer)               | device-local partition-owner-key backup (276 B)    |
@@ -753,7 +776,8 @@ security-domain masking key from `prev_sd_mk_backup`, and returns the
 refreshed device-local backups: the local partition-owner-key backup
 (276 bytes) and the security-domain masking-key backup (260 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
-The `src_evidence` partition-owner chain must anchor to the policy POTA key.
+The `src_evidence` partition-owner chain must anchor to the policy POTA
+key thumbprint.
 
 The inputs are grouped into an
 [`tsra_sd_restore_peer_backup_params`](#tsra_sd_restore_peer_backup_params)
@@ -802,7 +826,7 @@ struct tsra_sd_restore_peer_backup_params {
 
  | Field              | Name                                       | Description                                         |
  | ------------------ | ------------------------------------------ | --------------------------------------------------- |
- | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)              |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | partition policy CBOR document (1-384 B)              |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)            |
  | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (peer) attestation evidence                  |
  | pok_peer_backup    | [tsra_buffer*](#tsra_buffer)               | peer backup to restore (161 B)                      |

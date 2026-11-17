@@ -20,7 +20,6 @@
 use alloc::vec::Vec;
 
 use crate::darc_kex_key_gen::MASKED_KEX_KEY_LEN;
-use crate::policy::PartPolicy;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -57,9 +56,10 @@ pub struct TborDarcTmkImportReq {
     #[tbor(align = 4)]
     pub masked_kex_key: [u8; MASKED_KEX_KEY_LEN],
 
-    /// Unified [`PartPolicy`] whose `POTAPubKey` anchors
-    /// `remote_cert_chain`.  Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy whose `POTAPubKey` anchors
+    /// `remote_cert_chain`.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 
     /// HPKE-Auth seal of the 32-byte TMK, exactly [`SEALED_TMK_LEN`]
     /// (145 B): `enc(97) ‖ ct(48)`.
@@ -98,7 +98,7 @@ mod tests {
         let req = TborDarcTmkImportReq {
             session_id: 9,
             masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
             sealed_tmk: [0xABu8; SEALED_TMK_LEN],
             remote_cert_chain: alloc::vec![
                 CertDescriptor {
@@ -115,10 +115,10 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy plus the masked key and sealed TMK must be
+        // The maximum-length policy plus the masked key and sealed TMK must be
         // carried in the data section.
         assert!(
-            frame.len() > 584 + MASKED_KEX_KEY_LEN + SEALED_TMK_LEN,
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN + MASKED_KEX_KEY_LEN + SEALED_TMK_LEN,
             "encoded frame must carry the policy, masked key, and sealed TMK",
         );
     }

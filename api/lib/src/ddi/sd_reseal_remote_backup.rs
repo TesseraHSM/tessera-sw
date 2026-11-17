@@ -31,7 +31,7 @@ use super::*;
 /// * `src_evidence` - Source (sender) attestation evidence, transmitted
 ///   out of band.
 /// * `dest_evidence` - Destination (receiver) attestation evidence.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `src_remote_backup` - The source remote backup to reseal, exactly
 ///   [`POK_REMOTE_BACKUP_LEN`] bytes.
 ///
@@ -56,7 +56,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     let src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN] = src_remote_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Both parties' evidence share one OOB list; push the source first,
     // then the destination, so descriptor indices stay contiguous.

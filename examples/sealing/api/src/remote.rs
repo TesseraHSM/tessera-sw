@@ -8,16 +8,15 @@
 use anyhow::Context;
 use anyhow::Result;
 use tsra_api::HsmCert;
-use tsra_api::PartPolicy;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::IntoBytes;
 
 use crate::load_partition_recovery;
 use crate::mint_sealing_key;
 use crate::Error;
 use crate::Evidence;
+use crate::PartPolicy;
 use crate::PartitionState;
 use crate::RemoteBackup;
 use crate::SealingKey;
@@ -106,7 +105,7 @@ pub fn reseal_remote_backup(
         .with_hsm_evidence(|src| {
             destination.with_hsm_evidence(|dst| {
                 session.session.sd_reseal_remote_backup(
-                    policy,
+                    policy.as_bytes(),
                     masked_receiver,
                     src,
                     dst,
@@ -219,7 +218,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             .collect();
         let result = backup.sender_evidence.with_hsm_evidence(|evidence| {
             session.session.sd_restore_remote_backup(
-                self.env().policy(),
+                self.env().policy().as_bytes(),
                 &prepared.receiver.masked,
                 &certs,
                 evidence,

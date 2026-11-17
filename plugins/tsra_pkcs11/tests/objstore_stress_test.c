@@ -15,11 +15,15 @@
  * If the counter-first allocation or the cross-process flock were wrong, two
  * creates would collide on a handle number and overwrite one another, so the
  * final count would be short — this asserts none are lost and every record is
- * intact (find decodes each one).
+ * intact (find decodes each one). Every other object is private, sealed with
+ * the fake device cipher (store_fakes.h), and no two sealed records may share
+ * a key: each write seals with a key of its own.
  */
 
+#include "store_fakes.h"
 #include "tsra_pkcs11_objstore.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,20 +36,55 @@
 static CK_BBOOL ck_false = CK_FALSE;
 static CK_BBOOL ck_true = CK_TRUE;
 
-/* Create one public token DATA object with a per-worker/index unique label. */
+/* Create one token DATA object with a per-worker/index unique label; every
+ * other one is private. */
 static CK_RV create_one(tsra_pkcs11_objstore *s, CK_SLOT_ID slot, int worker, int idx)
 {
+    CK_BBOOL priv = ((idx % 2) != 0) ? CK_TRUE : CK_FALSE;
     char label[32];
     int n = snprintf(label, sizeof(label), "w%d-obj%d", worker, idx);
     CK_OBJECT_CLASS cls = CKO_DATA;
     CK_ATTRIBUTE tmpl[] = {
         { CKA_CLASS, &cls, sizeof(cls) },
         { CKA_TOKEN, &ck_true, sizeof(CK_BBOOL) },
-        { CKA_PRIVATE, &ck_false, sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, priv ? &ck_true : &ck_false, sizeof(CK_BBOOL) },
         { CKA_LABEL, label, (CK_ULONG)n },
     };
     CK_OBJECT_HANDLE h = 0;
-    return s->ops->create(s->ctx, slot, CK_FALSE, tmpl, 4, &h);
+    return s->ops->create(s->ctx, slot, CK_TRUE, tmpl, 4, &h);
+}
+
+/* The keys of every sealed record in `dir`, FAKE_KEY_LEN bytes each; returns
+ * how many it found. */
+static size_t sealed_keys(const char *dir, unsigned char (*out)[FAKE_KEY_LEN], size_t max)
+{
+    DIR *d = opendir(dir);
+    size_t n = 0;
+    struct dirent *e;
+    while ((d != NULL) && ((e = readdir(d)) != NULL) && (n < max))
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        unsigned char buf[512];
+        FILE *f = fopen(path, "rb");
+        size_t len = (f != NULL) ? fread(buf, 1, sizeof(buf), f) : 0;
+        if (f != NULL)
+        {
+            fclose(f);
+        }
+        uint16_t version = 0;
+        bool sealed = false;
+        if ((tsra_pkcs11_record_peek(buf, len, &version, &sealed) == CKR_OK) && sealed &&
+            (len > REC_KEY_AT + FAKE_KEY_LEN))
+        {
+            memcpy(out[n++], buf + REC_KEY_AT, FAKE_KEY_LEN);
+        }
+    }
+    if (d != NULL)
+    {
+        closedir(d);
+    }
+    return n;
 }
 
 int main(void)
@@ -65,7 +104,7 @@ int main(void)
     /* Ensure the store (and, via the first creator, the token dir) exists before
      * forking, so all workers contend on the same directory and lock. */
     tsra_pkcs11_objstore seed;
-    if (tsra_pkcs11_objstore_file_create(&seed, &cfg) != CKR_OK)
+    if (tsra_pkcs11_objstore_file_create(&seed, &cfg, &FAKE_CIPHER) != CKR_OK)
     {
         fprintf(stderr, "seed store create failed\n");
         return 1;
@@ -78,7 +117,7 @@ int main(void)
         if (pid == 0)
         {
             tsra_pkcs11_objstore s;
-            if (tsra_pkcs11_objstore_file_create(&s, &cfg) != CKR_OK)
+            if (tsra_pkcs11_objstore_file_create(&s, &cfg, &FAKE_CIPHER) != CKR_OK)
             {
                 _exit(2);
             }
@@ -108,7 +147,7 @@ int main(void)
 
     /* Enumerate everything the workers created. */
     tsra_pkcs11_objstore s;
-    if (tsra_pkcs11_objstore_file_create(&s, &cfg) != CKR_OK)
+    if (tsra_pkcs11_objstore_file_create(&s, &cfg, &FAKE_CIPHER) != CKR_OK)
     {
         fprintf(stderr, "final store create failed\n");
         return 1;
@@ -117,7 +156,7 @@ int main(void)
     CK_ATTRIBUTE q[] = { { CKA_CLASS, &cls, sizeof(cls) } };
     void *cur = NULL;
     CK_ULONG total = 0;
-    if (s.ops->find_init(s.ctx, SLOT, CK_FALSE, q, 1, &cur) == CKR_OK)
+    if (s.ops->find_init(s.ctx, SLOT, CK_TRUE, q, 1, &cur) == CKR_OK)
     {
         for (;;)
         {
@@ -134,14 +173,29 @@ int main(void)
     s.ops->teardown(s.ctx);
 
     int expected = N_WORKERS * PER_WORKER;
-    int ok = workers_ok && total == (CK_ULONG)expected;
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/slot-%lu", root, (unsigned long)SLOT);
+    unsigned char keys[N_WORKERS * PER_WORKER][FAKE_KEY_LEN];
+    size_t sealed = sealed_keys(dir, keys, N_WORKERS * PER_WORKER);
+    int unique = (sealed == (size_t)(N_WORKERS * (PER_WORKER / 2)));
+    for (size_t i = 0; i < sealed; i++)
+    {
+        for (size_t j = i + 1; j < sealed; j++)
+        {
+            unique = unique && (memcmp(keys[i], keys[j], FAKE_KEY_LEN) != 0);
+        }
+    }
+    int ok = workers_ok && unique && total == (CK_ULONG)expected;
     printf(
-        "STRESS %s (%d workers ok: %s, %lu of %d objects found)\n",
+        "STRESS %s (%d workers ok: %s, %lu of %d objects found, %zu sealed with distinct "
+        "keys: %s)\n",
         ok ? "OK" : "FAIL",
         N_WORKERS,
         workers_ok ? "yes" : "no",
         (unsigned long)total,
-        expected
+        expected,
+        sealed,
+        unique ? "yes" : "no"
     );
     return ok ? 0 : 1;
 }
