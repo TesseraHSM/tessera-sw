@@ -14,8 +14,9 @@ The actual unmasked receiver key must match the envelope's recipient.
 Signature, report kind, source PID ID, recipient ID, whole-envelope digest,
 and **target SD policy hash** are checked before HPKE decapsulation.
 
-**SATA sender authorization is removed.** `sender_pid_pub_key` is the raw
-96-byte big-endian P-384 `X || Y` of the operation signer.
+**SATA sender authorization is removed.** `sender_pid_pub_key` is the
+97-byte SEC1 uncompressed P-384 point `0x04 || X_be[48] || Y_be[48]`
+of the operation signer. Other lengths and point prefixes are rejected.
 
 When `require_trusted_sa_key` is set, source PID identity chains must be
 SAPOTA-authorized and match that supplied PID key. Manufacturer and
@@ -33,7 +34,7 @@ nevertheless bind the transferred SD policy.
 | `session_id` | Inline session ID | Active CO session |
 | `masked_sealing_key` | 280 B, aligned to 4 B | Actual recipient key |
 | `policy` | 1-384 B | Bound SD policy |
-| `sender_pid_pub_key` | 96 B | Report signer `X || Y`, big-endian |
+| `sender_pid_pub_key` | 97 B | Report signer, SEC1 uncompressed P-384 |
 | `sender_evidence` | Three chain descriptor lists and report descriptor | Required `SdBackup` report; optional/required SAPOTA PID chains as above |
 | `src_remote_backup` | 322 B | Canonical Base envelope |
 | `prev_sd_mk_backup` | 264 B | Previous SDMK backup |

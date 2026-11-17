@@ -4,7 +4,7 @@ The `sock` feature runs the existing root and leaf sealing workflows against
 host-native firmware in `ddi_sock_server`. TBOR OOB certificate/report bytes are
 serialized in index order and reconstructed as server-owned SGL descriptors.
 SD transfers use P-384 HPKE Base (KEM `0x0011`, KDF `0x0002`, AEAD `0x0002`)
-with a 322-byte envelope and a mandatory v3 COSE_Sign1/ES384 SdBackup report.
+with a 322-byte envelope and a mandatory v2 COSE_Sign1/ES384 SdBackup report.
 The 161-byte header is both HPKE info and AAD; reports bind source PID,
 recipient, complete envelope hash and transferred SD policy hash. Source
 evidence carries PID chains and the operation report, not a sealing-key
@@ -19,7 +19,7 @@ there is no success fallback or automatic conversion of old recovery files.
 software authority, using HPKE Base and its actual software report signer.
 This flow requires `require_trusted_sa_key=false`: its signature-only report
 asserts neither trusted authority identity nor hardware provenance. Trusted-SA
-leaf restore additionally authenticates the supplied raw root PID through SAPOTA.
+leaf restore additionally authenticates the supplied SEC1 root PID through SAPOTA.
 
 This is an unauthenticated, unencrypted development transport. Keep both DDI and
 HTTP listeners on loopback in a trusted environment. Client and server must be

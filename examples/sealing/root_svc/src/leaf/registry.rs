@@ -326,7 +326,7 @@ impl Registration {
             pok_remote_backup: hex::encode(resealed.backup),
             sd_mk_backup: saved["sd_mk_backup"].clone(),
             sender: jzon::object! {
-                pid_pub_key: hex::encode(pid),
+                pid_pub_key: hex::encode([&[4][..], pid.as_slice()].concat()),
                 evidence: wire::encode_evidence(&sender_evidence),
             },
         })

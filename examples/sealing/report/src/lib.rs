@@ -3,7 +3,7 @@
 
 //! Host-side decoding and signature verification of sealing reports.
 //!
-//! Supports PublicKey COSE_Sign1 v1/v2/v3 and mandatory v3 SdBackup operation
+//! Supports PublicKey COSE_Sign1 v1/v2 and mandatory v2 SdBackup operation
 //! reports, canonical P-384 HPKE Base envelopes and software-authority signing.
 //! Decoding validates the encoding, not the signature, certificate chains,
 //! policy binding, or trustworthiness of the claims. All byte fields borrow
@@ -78,7 +78,7 @@ pub struct KeyFlags {
 /// [`verify_key_report_bytes`] to check their signature.
 pub struct KeyReport<'a> {
     payload: &'a [u8],
-    /// PublicKey report version: 1, 2, or discriminated version 3.
+    /// PublicKey report version: 1 or 2, optionally discriminated in v2.
     pub version: u16,
     /// Padded COSE_Key field.
     pub public_key: &'a [u8],
@@ -178,9 +178,7 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
         policy_hash,
         signature,
     };
-    let expected_version = if kind.is_some() {
-        3
-    } else if report.policy_hash.is_some() {
+    let expected_version = if kind.is_some() || report.policy_hash.is_some() {
         2
     } else {
         1

@@ -335,7 +335,8 @@ pub struct TsraSdRestoreRemoteBackupParams {
     /// Receiver's masked SD-sealing key (from `tsra_key_gen`) that
     /// unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
     pub masked_sealing_key: *const TsraBuffer,
-    /// Report signer PID public key: exactly 96-byte big-endian X || Y.
+    /// Report signer PID public key: 97-byte SEC1 uncompressed P-384,
+    /// `0x04 || X_be[48] || Y_be[48]`.
     pub sender_pid_pub_key: *const TsraBuffer,
     /// Mandatory source SdBackup report. Identity chains are required only
     /// for trusted-SA policy, where SAPOTA must authorize this same PID.

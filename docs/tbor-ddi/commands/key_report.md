@@ -122,16 +122,22 @@ Carries the variable-length COSE_Sign1 `report`.
 
 ## Discriminated report schema
 
-The report library also supports version 3, with a signed `report_kind`
-discriminator. Existing `KeyReport` commands continue to emit the legacy
-public-key format until command and host consumers are migrated together.
-Version 3 does not change the COSE_Sign1 wrapper or ES384 signature format.
+Report version 2 supports a signed `report_kind` discriminator. Existing
+`KeyReport` commands continue to emit public-key reports without that
+discriminator. Operation reports use version 2 with an explicit kind;
+there is no report-version bump. The COSE_Sign1 wrapper and ES384 signature
+format are unchanged.
+
+For public-key reports without a discriminator, v1 omits the policy hash
+and v2 requires it. With an explicit `PublicKey` discriminator, v2 permits
+the policy hash to be absent. Operation reports require their discriminator
+and exact kind-specific fields; a public-key report cannot substitute for one.
 
 The signed payload is a definite-length CBOR map with these integer keys:
 
 | Map key | Field | Required kinds |
 |---|---|---|
-| 0 | `version` (3) | All |
+| 0 | `version` (2) | All |
 | 1 | Fixed-width encoded public key | `PublicKey` |
 | 2 | Encoded public-key length | `PublicKey` |
 | 3 | Key capability/provenance flags | `PublicKey` |

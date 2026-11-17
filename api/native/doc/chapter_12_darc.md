@@ -91,7 +91,7 @@ Seal a DARC TMK to an authenticated target.
 
 Validates `target_cert_chain` against the `data_spki_thumbprint` anchored in the
 supplied unified partition policy, then HPKE Base seals the TMK to the
-target's KEX key and signs a v3 `Darc` operation report with the source PID.
+target's KEX key and signs a v2 `Darc` operation report with the source PID.
 The canonical 113-byte header binds the source PID and recipient key IDs
 and is used as both HPKE `info` and AEAD AAD. The report binds the same IDs
 and a SHA-384 digest of the entire encrypted envelope.

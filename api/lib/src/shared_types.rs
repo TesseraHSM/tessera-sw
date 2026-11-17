@@ -45,7 +45,7 @@ pub struct HsmPartFinalExResult {
 pub struct HsmDarcTmkExportResult {
     /// Canonical P-384 HPKE Base envelope, excluding its report.
     pub sealed_tmk: Vec<u8>,
-    /// Version-3 `Darc` report binding the exporter, recipient, and envelope.
+    /// Version-2 `Darc` report binding the exporter, recipient, and envelope.
     pub report: Vec<u8>,
 }
 

@@ -115,7 +115,7 @@ where
     build_key_report(pal, io, alloc, (params, None), priv_key, out).await
 }
 
-/// Build a v3 report whose signed kind determines its required fields.
+/// Build a v2 report whose signed kind determines its required fields.
 ///
 /// Query mode (`out = None`) validates inputs and returns the encoded size
 /// without signing. Only exporting command handlers may supply operation
@@ -189,8 +189,7 @@ where
 /// Encode the inner COSE_Key into `cose_key` scratch and build the
 /// payload codec struct describing it.
 ///
-/// A discriminator selects v3. Legacy reports select v1/v2 according to
-/// the presence of the policy hash.
+/// A discriminator or policy hash selects v2; otherwise use legacy v1.
 fn build_payload_struct<'a>(
     params: &'a KeyReportParams<'a>,
     cose_key: &'a HsmDmaBuf,
@@ -198,9 +197,7 @@ fn build_payload_struct<'a>(
     kind: Option<ReportKind>,
 ) -> KeyReportPayload<'a> {
     let policy_hash = params.policy_hash.map(|d| &**d);
-    let version = if kind.is_some() {
-        REPORT_VERSION_V3
-    } else if policy_hash.is_some() {
+    let version = if kind.is_some() || policy_hash.is_some() {
         REPORT_VERSION_V2
     } else {
         REPORT_VERSION
@@ -298,7 +295,7 @@ where
         ReportKind::Darc
     };
     let payload_struct = TransferReportPayload {
-        version: REPORT_VERSION_V3,
+        version: REPORT_VERSION_V2,
         policy_hash: policy_hash.map(|p| &**p),
         report_kind: kind as u8,
         source_pid_key_id: transfer.source_pid_key_id,

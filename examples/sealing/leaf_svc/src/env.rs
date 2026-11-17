@@ -169,6 +169,7 @@ impl LeafEnv {
         backup: &tsra_sealing_api::ResealedBackup,
         recipient: &Evidence,
     ) -> Result<()> {
+        backup.validate()?;
         evidence::verify_peer(recipient, &self.policy)?;
         let (_, public) = evidence::verify_attested_key(
             recipient,
@@ -186,8 +187,8 @@ impl LeafEnv {
             Some(&public),
         )?;
         anyhow::ensure!(
-            pid.as_slice() == backup.sender_pid_pub_key,
-            "reseal raw signer PID mismatch"
+            pid.as_slice() == &backup.sender_pid_pub_key[1..],
+            "reseal signer PID mismatch"
         );
         anyhow::ensure!(
             backup.sender_evidence.part_owner_cert_chain.first() == Some(&self.sapota),

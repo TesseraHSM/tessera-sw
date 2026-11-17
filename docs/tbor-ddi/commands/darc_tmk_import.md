@@ -73,7 +73,7 @@ carrying the policy document, fixed-length key buffers and the packed cert-descr
 | 16 | `masked_kex_key` | `buffer` (280 B) | The receiver's masked `DarcKex` private key from `DarcKexKeyGen`. |
 | 20 | `policy` | `buffer` (1-384 B) | The unified `PartPolicy` whose `pota_spki_thumbprint` anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
 | 24 | `sealed_tmk` | `buffer` (258 B) | Canonical DARC header (113 B), encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 28 | `report` | `buffer` (1..=896 B) | Required PID-signed v3 `Darc` operation report accompanying `sealed_tmk`. |
+| 28 | `report` | `buffer` (1..=896 B) | Required PID-signed v2 `Darc` operation report accompanying `sealed_tmk`. |
 | 32 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=3]`, 3 B each) | POTA-anchored source PID chain, root first; DER bytes travel **out of band**. |
 
 ### Data section

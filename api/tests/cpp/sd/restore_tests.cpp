@@ -259,7 +259,9 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
         tsra_buffer policy_buf{ dev2.policy.data(), static_cast<uint32_t>(dev2.policy.size()) };
         tsra_buffer remote_buf{ remote_backup.data(), static_cast<uint32_t>(remote_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
-        tsra_buffer pid_buf{ dev1.pid_pub.data(), static_cast<uint32_t>(dev1.pid_pub.size()) };
+        std::vector<uint8_t> sender_pid{ 0x04 };
+        sender_pid.insert(sender_pid.end(), dev1.pid_pub.begin(), dev1.pid_pub.end());
+        tsra_buffer pid_buf{ sender_pid.data(), static_cast<uint32_t>(sender_pid.size()) };
         tsra_sd_restore_remote_backup_params params{
             &policy_buf, &masked_buf, &pid_buf, &evidence.get(), &remote_buf, &prev_mk_buf,
         };
@@ -285,6 +287,18 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
         signature_only.owner_cert_chain = { nullptr, 0 };
         signature_only.part_owner_cert_chain = { nullptr, 0 };
         params.sender_evidence = &signature_only;
+        pid_buf = { dev1.pid_pub.data(), static_cast<uint32_t>(dev1.pid_pub.size()) };
+        EXPECT_EQ(
+            restore_fill(dev2.session, &params, pok_local, sd_mk),
+            TSRA_STATUS_INVALID_ARGUMENT
+        ) << "raw coordinate pairs must not be accepted as SEC1";
+        pid_buf = { sender_pid.data(), static_cast<uint32_t>(sender_pid.size()) };
+        sender_pid[0] = 0x02;
+        EXPECT_EQ(
+            restore_fill(dev2.session, &params, pok_local, sd_mk),
+            TSRA_STATUS_INVALID_ARGUMENT
+        ) << "the sender PID must use the uncompressed SEC1 prefix";
+        sender_pid[0] = 0x04;
         ASSERT_EQ(restore_fill(dev2.session, &params, pok_local, sd_mk), TSRA_STATUS_SUCCESS);
 
         // Refreshed device-local backups: 276-byte local pok backup and

@@ -166,6 +166,9 @@ fn create_remote_backup_trusted(sata: &CaKey, sapota: &CaKey, pota: &CaKey) -> R
 
 /// Assemble a `SdRestoreRemoteBackup` request from a captured backup.
 fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRemoteBackupReq {
+    let mut sender_pid_pub_key = [0; 97];
+    sender_pid_pub_key[0] = 4;
+    sender_pid_pub_key[1..].copy_from_slice(&backup.pid_pub);
     TborSdRestoreRemoteBackupReq {
         session_id,
         masked_sealing_key: backup
@@ -174,7 +177,7 @@ fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRe
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
         policy: backup.policy.clone(),
-        sender_pid_pub_key: backup.pid_pub,
+        sender_pid_pub_key,
         sender_mfgr_cert_chain: backup.evidence.mfgr.clone(),
         sender_owner_cert_chain: backup.evidence.owner.clone(),
         sender_part_owner_cert_chain: backup.evidence.part_owner.clone(),
@@ -330,7 +333,7 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
         policy: Vec::new(),
-        sender_pid_pub_key: [0u8; RAW_PUB_LEN],
+        sender_pid_pub_key: [0u8; 97],
         sender_mfgr_cert_chain: Vec::new(),
         sender_owner_cert_chain: Vec::new(),
         sender_part_owner_cert_chain: Vec::new(),
@@ -666,6 +669,13 @@ fn sd_restore_remote_backup_signature_only_requires_bound_operation_report_and_a
     wrong_signer.sender_pid_pub_key.fill(0);
     assert!(ctx.tbor_oob(&wrong_signer, &backup.evidence.oob()).is_err());
 
+    for prefix in [0, 2, 3] {
+        let mut req = valid.clone();
+        req.sender_pid_pub_key[0] = prefix;
+        ctx.expect_fw_reject_oob(&req, &backup.evidence.oob(), TborStatus::InvalidArg);
+        assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    }
+
     let (other_receiver, _, _) = masked_key_report_and_pub(&ctx, sid);
     let mut wrong_recipient = valid.clone();
     wrong_recipient.masked_sealing_key = other_receiver.try_into().expect("masked recipient size");
@@ -711,7 +721,7 @@ fn sd_restore_remote_backup_trusted_sa_requires_authorized_pid_and_allows_retry(
         .is_err());
 
     let mut mismatched_pid = valid.clone();
-    mismatched_pid.sender_pid_pub_key[0] ^= 1;
+    mismatched_pid.sender_pid_pub_key[1] ^= 1;
     assert!(ctx
         .tbor_oob(&mismatched_pid, &backup.evidence.oob())
         .is_err());

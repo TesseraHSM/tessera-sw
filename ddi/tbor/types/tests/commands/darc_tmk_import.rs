@@ -12,7 +12,7 @@
 //! a partition and initializes its security domain (`SdCreateRemoteBackup`,
 //! which provisions the SDMK), mints a DARC key-exchange key
 //! (`DarcKexKeyGen`), then — entirely on the host with `tsra_crypto` —
-//! seals a TMK and independently builds a signed v3 operation-report
+//! seals a TMK and independently builds a signed v2 operation-report
 //! fixture under a synthetic POTA-authorized PID, then imports it.
 //!
 //! Coverage:
@@ -157,7 +157,7 @@ fn key_id(key: &impl EccKeyOp) -> [u8; 48] {
     sha384(&input)
 }
 
-/// Independent host-side HPKE Base and canonical v3 COSE operation fixture.
+/// Independent host-side HPKE Base and canonical v2 COSE operation fixture.
 fn seal_tmk(
     pk_r: &EccPublicKey,
     sk_s: &EccPrivateKey,
@@ -187,7 +187,7 @@ fn seal_tmk(
         .expect("map")
         .u8(0)
         .expect("version field")
-        .u8(3)
+        .u8(2)
         .expect("version")
         .u8(8)
         .expect("kind field")

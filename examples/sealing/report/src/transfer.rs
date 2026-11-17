@@ -98,7 +98,7 @@ pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
         anyhow::ensure!(seen & (1 << label) == 0, "duplicate operation claim");
         seen |= 1 << label;
         match label {
-            0 => anyhow::ensure!(claims.u16()? == 3, "operation report must be v3"),
+            0 => anyhow::ensure!(claims.u16()? == 2, "operation report must be v2"),
             7 => policy_hash = Some(claims.bytes()?),
             8 => anyhow::ensure!(claims.u8()? == 2, "expected SdBackup report"),
             9 => source = Some(claims.bytes()?),
@@ -215,7 +215,7 @@ pub fn sign_software_sd_transfer(
     payload
         .map(6)?
         .u8(0)?
-        .u16(3)?
+        .u16(2)?
         .u8(7)?
         .bytes(&sha384(policy)?)?
         .u8(8)?

@@ -70,8 +70,8 @@ pub(crate) struct CoseSign1<'a> {
     pub signature: &'a [u8],
 }
 
-/// Public-key payload. v1/v2 retain their original wire format; v3 adds
-/// the signed `PublicKey` discriminator at key 8.
+/// Public-key payload. v2 permits the signed `PublicKey` discriminator at
+/// key 8; reports without it retain their original wire format.
 #[derive(Encode, CborLen)]
 #[cbor(map)]
 pub(crate) struct KeyReportPayload<'a> {
@@ -102,11 +102,11 @@ pub(crate) struct KeyReportPayload<'a> {
     #[cbor(with = "minicbor::bytes")]
     pub vm_launch_id: &'a [u8],
     /// Optional SHA-384 digest of the PartPolicy (v2 only; map key 7).
-    /// Present iff the report is v2; omitted from the wire map when `None`.
+    /// Required for v2 public-key reports without a discriminator.
     #[n(7)]
     #[cbor(with = "minicbor::bytes")]
     pub policy_hash: Option<&'a [u8]>,
-    /// Signed discriminator (v3 only); absent in legacy key reports.
+    /// Signed discriminator (v2 only); absent in legacy key reports.
     #[n(8)]
     pub report_kind: Option<u8>,
 }

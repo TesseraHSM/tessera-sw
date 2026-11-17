@@ -39,6 +39,7 @@ use crate::utils::partition_ex_helpers::new_partition;
 
 const SEC1_PUB_LEN: usize = 97;
 pub(crate) const RAW_PUB_LEN: usize = 96;
+
 pub(crate) const SEALING_KEY_BITS: u32 = 384;
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
@@ -67,6 +68,13 @@ pub(crate) const ROTATED_CO_PSK: [u8; PSK_LEN] = [
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
+
+pub(crate) fn sec1_pub(raw: &[u8; RAW_PUB_LEN]) -> [u8; SEC1_PUB_LEN] {
+    let mut point = [0; SEC1_PUB_LEN];
+    point[0] = 4;
+    point[1..].copy_from_slice(raw);
+    point
+}
 
 /// A synthetic P-384 CA key (the policy POTA trust anchor) that signs
 /// certificates and exposes its public key.

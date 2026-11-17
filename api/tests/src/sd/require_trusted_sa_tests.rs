@@ -8,7 +8,7 @@
 //! When the backing-partition policy sets `require_trusted_sa_key`, the
 //! firmware validates the SATA recipient certificate chain on create and
 //! SAPOTA-authorized PID chains on restore. Restore always consumes the
-//! producer's v3 SdBackup operation report, bound to the supplied signer PID.
+//! producer's v2 SdBackup operation report, bound to the supplied signer PID.
 //! The sealing authority may have a different policy from the restored SD.
 //! These tests cover both happy paths and fail-closed rejections.
 
@@ -25,6 +25,7 @@ use crate::utils::sd_provision::finalized_backing_session_trusted;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 use crate::utils::sd_provision::provision_backing_trusted;
+use crate::utils::sd_provision::sec1_pub;
 
 /// Happy path: under a `require_trusted_sa_key` policy, a create whose
 /// SAPOTA-anchored evidence report attests the same `RcvrPub` carried by
@@ -140,7 +141,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
             session2.sd_restore_remote_backup(
                 &policy,
                 &masked,
-                &pid_pub,
+                &sec1_pub(&pid_pub),
                 ev,
                 &created.pok_remote_backup,
                 &created.sd_mk_backup,
@@ -175,7 +176,7 @@ fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
         provision_backing_trusted(&sata, &sapota, &pota, None, None);
 
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let wrong_sndr_pub = CaKey::generate().raw_pub();
+    let wrong_sndr_pub = sec1_pub(&CaKey::generate().raw_pub());
     let evidence = build_receiver_evidence_trusted(&pid_pub, &rcvr_pub, &sata, &sapota, &report);
     let created = evidence
         .with_create_backup(|chain, ev| session.sd_create_remote_backup(&policy, chain, ev))
@@ -286,7 +287,7 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
         destination.sd_restore_remote_backup(
             policy,
             &source_key,
-            &authority_pid,
+            &sec1_pub(&authority_pid),
             &evidence,
             &resealed.backup,
             &created.sd_mk_backup,

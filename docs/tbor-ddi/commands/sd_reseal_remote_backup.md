@@ -24,6 +24,30 @@ Both input bindings and the outgoing report use the **request's SD policy
 hash**, never the SA-local hash. Firmware signs the fresh outgoing report
 with its actual SA PID.
 
+## Required source and destination validation
+
+**Both incoming report signatures are verified.** Certificate-chain
+validation alone is not sufficient.
+
+| Evidence | Signature verification | Required signed claims and bindings |
+|---|---|---|
+| `src_evidence` | Verify the `SdBackup` operation report's ES384 signature using the source PID certified by its identity chains. | Require the `SdBackup` kind and bind the source PID, complete input-envelope hash, request SD policy hash, and actual input recipient derived from `masked_sealing_key`. A `PublicKey` attestation cannot substitute for this operation report. |
+| `dest_evidence` | Verify the `PublicKey` attestation report's ES384 signature using the destination PID certified by its identity chains. | Require a P-384 SD-sealing public key marked Generated and not Imported, with a policy hash matching the request SD policy. This attested key becomes the output HPKE recipient. |
+
+For each side, the partition-owner chain must anchor to the **request SD
+policy's POTA**. Manufacturer and partition-owner chains are mandatory;
+every supplied chain, including the optional owner chain, must certify the
+same PID for that side. Source and destination need not have the same PID.
+These checks are mandatory regardless of `require_trusted_sa_key`; the
+conditional SAPOTA checks of remote restore do not apply to reseal.
+
+Both report signatures and their required bindings must pass **before
+HPKE decapsulation of the source envelope**. The receiver key may already
+have been unmasked to derive the actual input recipient. After successful
+opening, the SA encrypts BKS3 to the attested destination key and signs a
+**new `SdBackup` report with its own PID**, binding that PID, destination
+key, complete output envelope, and the same request SD policy hash.
+
 ## Request fields, in wire order
 
 | Field | Shape | Meaning |

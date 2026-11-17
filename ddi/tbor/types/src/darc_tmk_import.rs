@@ -68,7 +68,7 @@ pub struct TborDarcTmkImportReq {
     /// Canonical HPKE Base envelope of the 32-byte TMK, exactly 258 bytes.
     pub sealed_tmk: [u8; SEALED_TMK_LEN],
 
-    /// PID-signed version-3 `Darc` report binding this envelope.
+    /// PID-signed version-2 `Darc` report binding this envelope.
     #[tbor(min_len = 1, max_len = 896)]
     pub report: Vec<u8>,
 
