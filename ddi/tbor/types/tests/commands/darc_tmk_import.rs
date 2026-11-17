@@ -155,6 +155,7 @@ fn seal_tmk(pk_r: &EccPublicKey, sk_s: &EccPrivateKey, tmk: &[u8]) -> [u8; SEALE
     out
 }
 
+/// A valid authenticated TMK import succeeds and produces fresh masked envelopes.
 #[test]
 fn darc_tmk_import_roundtrip() {
     let ready = sd_initialized_session();
@@ -343,6 +344,7 @@ fn dummy_req(session_id: u16) -> TborDarcTmkImportReq {
     }
 }
 
+/// Import is rejected before the partition is finalized.
 #[test]
 fn darc_tmk_import_rejects_before_finalize() {
     // A rotated CO session but no PartInit/PartFinal → the partition is
@@ -353,6 +355,7 @@ fn darc_tmk_import_rejects_before_finalize() {
     ctx.expect_fw_reject(&dummy_req(session.session_id), TborStatus::InvalidArg);
 }
 
+/// Crypto-User sessions cannot import a DARC TMK.
 #[test]
 fn darc_tmk_import_rejected_on_cu_session() {
     // DarcTmkImport is Crypto-Officer-only: the handler's role gate
@@ -365,6 +368,7 @@ fn darc_tmk_import_rejected_on_cu_session() {
     );
 }
 
+/// A default-PSK CO session cannot import a DARC TMK.
 #[test]
 fn darc_tmk_import_rejected_on_default_psk() {
     // A CO session on the still-default PSK is rejected by the
@@ -385,4 +389,367 @@ fn darc_tmk_import_rejects_bad_masked_key_layout() {
     let ready = sd_initialized_session();
     let (req, _chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
     assert_masked_key_layout_rejected(&ready.ctx, &req);
+}
+
+/// A finalized partition without an initialized security domain cannot
+/// import a TMK because the SDMK required for output masking is absent.
+#[test]
+fn darc_tmk_import_rejects_before_sd_init() {
+    let ctx = TestCtx::new();
+    let session = crate::commands::sd_sealing_key_gen::finalized_co_session(&ctx);
+
+    ctx.expect_fw_reject(&dummy_req(session.session_id), TborStatus::InvalidArg);
+}
+
+/// An unallocated session identifier must not authorize the import.
+/// Do not treat session ID zero as invalid: valid CO sessions may use zero.
+#[test]
+fn darc_tmk_import_rejects_max_session_id() {
+    let ready = sd_initialized_session();
+
+    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    req.session_id = u16::MAX;
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &chain.der_items()).is_err(),
+        "unallocated session ID must be rejected",
+    );
+}
+
+/// Altering the authenticated masked KEX envelope must prevent the
+/// receiver private key from being recovered.
+#[test]
+fn darc_tmk_import_rejects_corrupted_masked_kex_key() {
+    let ready = sd_initialized_session();
+
+    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    let last = req.masked_kex_key.len() - 1;
+    req.masked_kex_key[last] ^= 0x80;
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &chain.der_items()).is_err(),
+        "corrupted masked KEX key must be rejected",
+    );
+}
+
+/// A zero-filled buffer is not a valid masked DARC KEX key.
+#[test]
+fn darc_tmk_import_rejects_zeroed_masked_kex_key() {
+    let ready = sd_initialized_session();
+
+    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    req.masked_kex_key.fill(0);
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &chain.der_items()).is_err(),
+        "zeroed masked KEX key must be rejected",
+    );
+}
+
+/// Tampering with the encapsulated HPKE public key must not allow an
+/// unauthenticated TMK to be imported.
+#[test]
+fn darc_tmk_import_rejects_tampered_hpke_encapsulation() {
+    let ready = sd_initialized_session();
+
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    for offset in [0usize, 1, COORD_LEN, 2 * COORD_LEN] {
+        let mut bad = req.clone();
+        bad.sealed_tmk[offset] ^= 0x01;
+
+        assert!(
+            ready.ctx.tbor_oob(&bad, &chain.der_items()).is_err(),
+            "tampered encapsulation at offset {offset} must fail",
+        );
+    }
+}
+
+/// A sealed TMK is cryptographically bound to the receiver key.
+/// Replacing the masked receiver key with another valid DARC KEX key
+/// must make HPKE opening fail.
+#[test]
+fn darc_tmk_import_rejects_different_receiver_key() {
+    let ready = sd_initialized_session();
+
+    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    let other = ready
+        .ctx
+        .tbor(&TborDarcKexKeyGenReq {
+            session_id: ready.session.session_id,
+            scope: SCOPE_LOCAL,
+        })
+        .expect("generate another receiver KEX key");
+
+    req.masked_kex_key = other
+        .masked_key
+        .as_slice()
+        .try_into()
+        .expect("masked KEX key length");
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &chain.der_items()).is_err(),
+        "TMK sealed to one receiver must fail with another receiver",
+    );
+}
+
+/// Both sender chains are trusted by the same POTA, but only the
+/// original sender's private key authenticated the HPKE seal.
+/// A different trusted sender must not be able to import it.
+#[test]
+fn darc_tmk_import_rejects_sender_key_mismatch() {
+    let ready = sd_initialized_session();
+
+    let (req, _original_chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    let (_other_req, other_chain) = build_valid_import(&ready, &ready.pota, &[0xA5; TMK_LEN]);
+
+    let other_der = other_chain.der_items();
+
+    let mut bad = req.clone();
+    for (descriptor, cert) in bad.remote_cert_chain.iter_mut().zip(other_der.iter()) {
+        descriptor.length = (cert.len() as u16).into();
+    }
+
+    assert!(
+        ready.ctx.tbor_oob(&bad, &other_der).is_err(),
+        "a different trusted sender must not authenticate the seal",
+    );
+}
+
+/// The import requires a sender certificate chain.
+#[test]
+fn darc_tmk_import_rejects_empty_cert_chain() {
+    let ready = sd_initialized_session();
+
+    let (mut req, _chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    req.remote_cert_chain.clear();
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &[]).is_err(),
+        "empty certificate chain must be rejected",
+    );
+}
+
+/// A certificate descriptor must reference an actual OOB data block.
+#[test]
+fn darc_tmk_import_rejects_invalid_cert_index() {
+    let ready = sd_initialized_session();
+
+    let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    req.remote_cert_chain[0].index = u8::MAX;
+
+    assert!(
+        ready.ctx.tbor_oob(&req, &chain.der_items()).is_err(),
+        "out-of-range certificate index must be rejected",
+    );
+}
+
+/// The claimed DER certificate length must agree with the actual OOB
+/// certificate bytes.
+#[test]
+fn darc_tmk_import_rejects_cert_length_mismatch() {
+    let ready = sd_initialized_session();
+
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    for cert_index in 0..req.remote_cert_chain.len() {
+        let mut bad = req.clone();
+
+        let original: u16 = bad.remote_cert_chain[cert_index].length.into();
+
+        bad.remote_cert_chain[cert_index].length = original.saturating_sub(1).into();
+
+        assert!(
+            ready.ctx.tbor_oob(&bad, &chain.der_items()).is_err(),
+            "certificate {cert_index} length mismatch must fail",
+        );
+    }
+}
+
+/// A failed authenticated import must not corrupt the session or
+/// prevent a subsequent valid import.
+#[test]
+fn darc_tmk_import_recovers_after_failed_import() {
+    let ready = sd_initialized_session();
+
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+
+    let der = chain.der_items();
+
+    let mut bad = req.clone();
+    bad.sealed_tmk[SEALED_TMK_LEN - 1] ^= 0xFF;
+
+    assert!(
+        ready.ctx.tbor_oob(&bad, &der).is_err(),
+        "tampered import must fail",
+    );
+
+    let recovered = ready
+        .ctx
+        .tbor_oob(&req, &der)
+        .expect("valid import must succeed after failed import");
+
+    assert_eq!(recovered.masked_tmk.len(), MASKED_TMK_LEN);
+    assert!(recovered.masked_tmk.iter().any(|&b| b != 0));
+}
+
+/// Verify that the import command accepts varied valid TMK values,
+/// not just a single repeated-byte fixture.
+#[test]
+fn darc_tmk_import_accepts_multiple_tmk_patterns() {
+    let ready = sd_initialized_session();
+
+    let mut ascending = [0u8; TMK_LEN];
+    for (index, byte) in ascending.iter_mut().enumerate() {
+        *byte = index as u8;
+    }
+
+    let mut descending = [0u8; TMK_LEN];
+    for (index, byte) in descending.iter_mut().enumerate() {
+        *byte = (TMK_LEN - 1 - index) as u8;
+    }
+
+    let patterns = [
+        [0x00u8; TMK_LEN],
+        [0xFFu8; TMK_LEN],
+        [0xAAu8; TMK_LEN],
+        [0x55u8; TMK_LEN],
+        ascending,
+        descending,
+    ];
+
+    for (index, pattern) in patterns.iter().enumerate() {
+        let (req, chain) = build_valid_import(&ready, &ready.pota, pattern);
+
+        let resp = ready
+            .ctx
+            .tbor_oob(&req, &chain.der_items())
+            .unwrap_or_else(|e| panic!("TMK pattern {index} import failed: {e:?}"));
+
+        assert_eq!(resp.masked_tmk.len(), MASKED_TMK_LEN, "pattern {index}",);
+
+        assert!(
+            resp.masked_tmk.iter().any(|&b| b != 0),
+            "pattern {index}: masked output must not be zero",
+        );
+    }
+}
+
+/// Missing OOB certificate material must reject an otherwise valid import.
+#[test]
+fn darc_tmk_import_rejects_missing_oob_certificate() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+
+    for missing_index in 0..der.len() {
+        let mut incomplete = chain.der_items().to_vec();
+        incomplete.remove(missing_index);
+        assert!(
+            ready.ctx.tbor_oob(&req, &incomplete).is_err(),
+            "missing OOB certificate {missing_index} must be rejected",
+        );
+    }
+}
+
+/// Zero-length certificate descriptors must not authenticate a sender chain.
+#[test]
+fn darc_tmk_import_rejects_zero_length_cert_descriptors() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+
+    for index in 0..req.remote_cert_chain.len() {
+        let mut bad = req.clone();
+        bad.remote_cert_chain[index].length = 0u16.into();
+        assert!(
+            ready.ctx.tbor_oob(&bad, &der).is_err(),
+            "zero-length certificate descriptor {index} must be rejected",
+        );
+    }
+}
+
+/// Oversized certificate descriptors must not read beyond their OOB payloads.
+#[test]
+fn darc_tmk_import_rejects_oversized_cert_descriptors() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+
+    for index in 0..req.remote_cert_chain.len() {
+        let mut bad = req.clone();
+        let original: u16 = bad.remote_cert_chain[index].length.into();
+        bad.remote_cert_chain[index].length = original.checked_add(1).expect("DER size").into();
+        assert!(
+            ready.ctx.tbor_oob(&bad, &der).is_err(),
+            "oversized certificate descriptor {index} must be rejected",
+        );
+    }
+}
+
+/// Corrupting either sender certificate must prevent authenticated import.
+#[test]
+fn darc_tmk_import_rejects_corrupted_certificate_der() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+
+    for index in 0..der.len() {
+        let mut damaged: Vec<Vec<u8>> = der.iter().map(|cert| cert.to_vec()).collect();
+        damaged[index][0] = 0; // Invalidate the outer DER SEQUENCE tag.
+        let damaged_refs: Vec<&[u8]> = damaged.iter().map(Vec::as_slice).collect();
+        assert!(
+            ready.ctx.tbor_oob(&req, &damaged_refs).is_err(),
+            "corrupted DER certificate {index} must be rejected",
+        );
+    }
+}
+
+/// Any mutated HPKE ciphertext or authentication tag must fail import.
+#[test]
+fn darc_tmk_import_rejects_ciphertext_and_tag_mutations() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+    let ciphertext_start = 1 + 2 * COORD_LEN;
+
+    for offset in [
+        ciphertext_start,
+        ciphertext_start + TMK_LEN / 2,
+        ciphertext_start + TMK_LEN - 1,
+        SEALED_TMK_LEN - 16,
+        SEALED_TMK_LEN - 1,
+    ] {
+        let mut bad = req.clone();
+        bad.sealed_tmk[offset] ^= 0x01;
+        assert!(
+            ready.ctx.tbor_oob(&bad, &der).is_err(),
+            "HPKE ciphertext/tag mutation at offset {offset} must be rejected",
+        );
+    }
+}
+
+/// A malformed certificate attempt must not prevent a later valid import.
+#[test]
+fn darc_tmk_import_recovers_after_bad_certificate() {
+    let ready = sd_initialized_session();
+    let (req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
+    let der = chain.der_items();
+    let mut bad = req.clone();
+    bad.remote_cert_chain[0].index = u8::MAX;
+
+    assert!(ready.ctx.tbor_oob(&bad, &der).is_err());
+    let response = ready
+        .ctx
+        .tbor_oob(&req, &der)
+        .expect("valid import must succeed after bad certificate descriptor");
+    assert_eq!(response.masked_tmk.len(), MASKED_TMK_LEN);
+    assert!(response.masked_tmk.iter().any(|&b| b != 0));
 }
