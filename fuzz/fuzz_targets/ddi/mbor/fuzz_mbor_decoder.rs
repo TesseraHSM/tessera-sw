@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Checking decoder for potential crashes by feeding random input data]
+// Checking decoder for potential crashes by feeding random input data
 #![no_main]
 
 // Imports
@@ -35,7 +35,7 @@ struct FuzzInput {
     ///
     /// If `use_rand_data` is set to `false`, this will instead be used to
     /// generate a valid, but random, DDI request object to pass into
-    /// `decode_hdr()`. By using an actual DDI requets object instead of a fully
+    /// `decode_hdr()`. By using an actual DDI request object instead of a fully
     /// random buffer (`rand_data`), we make it easier for the fuzzer to explore
     /// the "valid header" execution space, which could allow the fuzzer to
     /// discover more behavior deeper within the API/DDI code.
@@ -65,7 +65,7 @@ fuzz_target!(|input: FuzzInput| -> Corpus {
     let encode_result: Result<Vec<u8>, String> =
         get_rand_ddi_request(input.request_header, input.request_seed);
 
-    // it's possible that the randomly-generated request object didn't produced
+    // it's possible that the randomly-generated request object didn't produce
     // an encoding error (one example: perhaps an invalid length was specified
     // for an `MborByteArray`). If that's the case, we'll return early
     if encode_result.is_err() {

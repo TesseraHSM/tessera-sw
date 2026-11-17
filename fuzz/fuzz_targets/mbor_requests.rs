@@ -91,9 +91,10 @@ macro_rules! requests {
                         if valid_header {
                             header.op = DdiOp::$op;
                         }
+                        let mut resp = None;
                         dev.exec_op_mbor(
                             &$command { hdr: header, data, ext: None },
-                            &mut None,
+                            &mut resp,
                         ).map(|_| ())
                     }),+
                 }
