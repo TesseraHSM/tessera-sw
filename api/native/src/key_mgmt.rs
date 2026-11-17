@@ -159,8 +159,8 @@ pub unsafe extern "C" fn tsra_key_delete(key_handle: TsraHandle) -> TsraStatus {
                 let key: Box<HsmRsaPublicKey> = HANDLE_TABLE.free_handle(key_handle, key_type)?;
                 key.delete_key()?;
             }
-            HandleType::GenericSecretKey => {
-                let key: Box<HsmGenericSecretKey> =
+            HandleType::SharedSecretKey => {
+                let key: Box<HsmSharedSecretKey> =
                     HANDLE_TABLE.free_handle(key_handle, key_type)?;
                 key.delete_key()?;
             }
@@ -384,7 +384,7 @@ pub unsafe extern "C" fn tsra_key_unmask(
             TsraKeyKind::Aes => aes_unmask_key(&session, masked_key_buf)?,
             TsraKeyKind::AesGcm => aes_gcm_unmask_key(&session, masked_key_buf)?,
             TsraKeyKind::AesXts => aes_xts_unmask_key(&session, masked_key_buf)?,
-            TsraKeyKind::SharedSecret => secret_unmask_key(&session, masked_key_buf)?,
+            TsraKeyKind::SharedSecret => shared_secret_unmask_key(&session, masked_key_buf)?,
             TsraKeyKind::HmacSha256 | TsraKeyKind::HmacSha384 | TsraKeyKind::HmacSha512 => {
                 hmac_unmask_key(&session, masked_key_buf)?
             }

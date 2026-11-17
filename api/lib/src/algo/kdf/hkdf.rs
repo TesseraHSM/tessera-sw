@@ -4,8 +4,9 @@
 //! HKDF (HMAC-based Extract-and-Expand Key Derivation Function) implementation.
 //!
 //! This module provides an [`HsmKeyDeriveOp`] implementation that derives an HSM-managed
-//! symmetric key (currently [`HsmAesKey`]) from an HSM-managed shared secret
-//! ([`HsmSharedSecretKey`]) using HKDF.
+//! AES or HMAC key from an HSM-managed shared secret ([`HsmSharedSecretKey`]) using HKDF.
+//! The result is returned as an [`HsmSharedSecretKey`] whose properties identify the
+//! concrete derived kind, for conversion to [`HsmAesKey`] or [`HsmHmacKey`].
 
 use super::*;
 
@@ -52,10 +53,10 @@ impl HsmKeyDeriveOp for HsmHkdfAlgo {
     type Session = HsmSession;
 
     /// The type of base key used by this operation.
-    type BaseKey = HsmGenericSecretKey;
+    type BaseKey = HsmSharedSecretKey;
 
     /// The type of derived key produced by this operation.
-    type DerivedKey = HsmGenericSecretKey;
+    type DerivedKey = HsmSharedSecretKey;
 
     /// The error type returned by this operation.
     type Error = HsmError;
@@ -88,7 +89,7 @@ impl HsmKeyDeriveOp for HsmHkdfAlgo {
 
         // Validate derived key properties early so callers get consistent failures
         // for unsupported key metadata (instead of leaking DDI-specific errors).
-        HsmGenericSecretKey::validate_props(&props)?;
+        HsmSharedSecretKey::validate_props(&props)?;
 
         let (handle, props) = ddi::hkdf_derive(
             base_key,

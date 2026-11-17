@@ -32,7 +32,7 @@ pub(crate) fn ecdh_derive_shared_secret(
     session: &HsmSession,
     private_key: &HsmEccPrivateKey,
     peer_public_key: &HsmEccPublicKey,
-) -> HsmResult<HsmGenericSecretKey> {
+) -> HsmResult<HsmSharedSecretKey> {
     // Get the peer public key in DER format.
     let pub_key_der = peer_public_key.pub_key_der_vec()?;
 
@@ -47,7 +47,7 @@ pub(crate) fn ecdh_derive_shared_secret_from_der(
     session: &HsmSession,
     private_key: &HsmEccPrivateKey,
     peer_public_key_der: &[u8],
-) -> HsmResult<HsmGenericSecretKey> {
+) -> HsmResult<HsmSharedSecretKey> {
     // Create an ECDH algorithm instance bound to the peer public key.
     let mut ecdh_algo = EcdhAlgo::new(peer_public_key_der);
 
@@ -75,13 +75,13 @@ pub(crate) fn ecdh_derive_shared_secret_from_der(
 /// Perform ECDH key agreement with caller-provided derived key properties.
 ///
 /// This helper is used to validate that derived key property validation is enforced
-/// (fail-fast) for `HsmGenericSecretKey`.
+/// (fail-fast) for `HsmSharedSecretKey`.
 pub(crate) fn ecdh_derive_shared_secret_with_props(
     session: &HsmSession,
     private_key: &HsmEccPrivateKey,
     peer_public_key: &HsmEccPublicKey,
     derived_key_props: HsmKeyProps,
-) -> HsmResult<HsmGenericSecretKey> {
+) -> HsmResult<HsmSharedSecretKey> {
     let pub_key_der = peer_public_key.pub_key_der_vec()?;
     let mut ecdh_algo = EcdhAlgo::new(&pub_key_der);
     HsmKeyManager::derive_key(session, &mut ecdh_algo, private_key, derived_key_props)
@@ -91,7 +91,7 @@ pub(crate) fn ecdh_derive_shared_secret_with_props(
 fn derive_pair(
     session: &HsmSession,
     curve: HsmEccCurve,
-) -> (HsmGenericSecretKey, HsmGenericSecretKey) {
+) -> (HsmSharedSecretKey, HsmSharedSecretKey) {
     let (priv_a, pub_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
     let (priv_b, pub_b) = generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
 
@@ -102,7 +102,7 @@ fn derive_pair(
 }
 
 /// Extracts the masked key material into a buffer for inspection.
-fn extract(secret: &HsmGenericSecretKey) -> Vec<u8> {
+fn extract(secret: &HsmSharedSecretKey) -> Vec<u8> {
     let len = secret.masked_key(None).unwrap();
     let mut buf = vec![0u8; len];
     secret.masked_key(Some(&mut buf)).unwrap();

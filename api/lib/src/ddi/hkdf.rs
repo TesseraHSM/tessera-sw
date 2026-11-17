@@ -44,7 +44,7 @@ use super::*;
 /// - The underlying DDI HKDF command fails.
 #[resiliency_key_op(key = "shared_secret")]
 pub(crate) fn hkdf_derive(
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     hash_algo: HsmHashAlgo,
     salt: Option<&[u8]>,
     info: Option<&[u8]>,
@@ -66,7 +66,7 @@ pub(crate) fn hkdf_derive(
 /// Derives a key via MBOR `HkdfDerive` using the device-resident shared
 /// secret id.
 fn hkdf_derive_mbor(
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     hash_algo: HsmHashAlgo,
     salt: Option<&[u8]>,
     info: Option<&[u8]>,
@@ -112,7 +112,7 @@ fn hkdf_derive_mbor(
 /// Derives a key via TBOR `HkdfDerive` using the caller-held masked ECDH
 /// shared secret (unmask-on-use); the derived key is returned non-resident.
 fn hkdf_derive_tbor(
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     hash_algo: HsmHashAlgo,
     salt: Option<&[u8]>,
     info: Option<&[u8]>,
