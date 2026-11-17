@@ -16,6 +16,10 @@
 // harness spawns inherit its endpoint via `TSRA_DDI_ARGS`.
 use ddi_sock_server as _;
 
+#[cfg(feature = "integration")]
+#[path = "../../generic_secret.rs"]
+mod generic_secret;
+
 /// Entry point for the C++ test runner.
 ///
 /// When built without the `integration` feature the binary is a no-op so that
@@ -522,18 +526,44 @@ tsra-api-revision = 1.0
     ) -> Result<(), Failed> {
         /// Serializes gtest processes that share this runner's auto-started
         /// HSM: resiliency trials reset the partition under other trials.
-        static OWNED_HSM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static OWNED_HSM: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
         let test_name = test_name.replace("::", ".");
 
-        let _guard = ddi_sock_server::autostarted()
-            .then(|| OWNED_HSM.lock().unwrap_or_else(|e| e.into_inner()));
+        let _guard = ddi_sock_server::autostarted().then(|| OWNED_HSM.lock());
 
         // Remove derived key files from previous tests.  BMK and MUK are
         // session-specific — stale files from a prior provider init cause
         // the next init to fail.
         let _ = fs::remove_file(keymat_dir.join("bmk.bin"));
         let _ = fs::remove_file(keymat_dir.join("muk.bin"));
+
+        let generic_secret = test_name
+            .starts_with("kbkdf.")
+            .then(|| keymat_dir.join("generic_secret.bin"));
+        if let Some(fixture) = &generic_secret {
+            let initialized = Command::new(find_openssl_bin())
+                .args([
+                    "dgst",
+                    "-propquery",
+                    "?provider=tsra",
+                    "-sha256",
+                    "/dev/null",
+                ])
+                .current_dir(keymat_dir)
+                .env("OPENSSL_CONF", keymat_dir.join("openssl.cnf"))
+                .env("LD_LIBRARY_PATH", ld_library_path)
+                .env("TSRA_CREDENTIALS_ID", &credentials.id)
+                .env("TSRA_CREDENTIALS_PIN", &credentials.pin)
+                .output()
+                .expect("Initialize provider for generic-secret fixture");
+            assert!(
+                initialized.status.success(),
+                "Provider fixture initialization failed: {}",
+                String::from_utf8_lossy(&initialized.stderr)
+            );
+            super::generic_secret::write_fixture(&credentials.id, &credentials.pin, 32, fixture);
+        }
 
         let mut cmd = Command::new(path);
         cmd.arg(format!("--gtest_filter={}", test_name))
@@ -544,6 +574,9 @@ tsra-api-revision = 1.0
             .env("TSRA_CREDENTIALS_PIN", &credentials.pin)
             .env("PROVIDER_PATH", provider_path)
             .env("TSRA_RESILIENCY_STORAGE_DIR", resiliency_dir);
+        if let Some(fixture) = &generic_secret {
+            cmd.env("TSRA_TEST_GENERIC_SECRET", fixture);
+        }
 
         // Automatically enable resiliency for resiliency test suites;
         // forward the parent's value for all other tests.
@@ -554,6 +587,9 @@ tsra-api-revision = 1.0
         }
 
         let success = cmd.status().expect("Failed to run test").success();
+        if let Some(fixture) = generic_secret {
+            fs::remove_file(fixture).expect("Remove generic-secret fixture");
+        }
 
         if success {
             Ok(())

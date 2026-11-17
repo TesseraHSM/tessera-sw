@@ -4,6 +4,9 @@
 
 Generate symmetric key.
 
+`TSRA_KEY_KIND_GENERIC_SECRET` cannot be generated. It is an import-only
+key type; use RSA-AES unwrap and restore it using `tsra_key_unmask`.
+
 ```cpp
 tsra_status tsra_key_gen(
     tsra_handle sess_handle,
@@ -124,6 +127,26 @@ tsra_status tsra_key_unwrap(
  | [in] key_props      | [const tsra_key_prop_list*](#tsra_key_prop_list)     | key properties               |
  | [out] key_handle    | [tsra_handle *](#tsra_handle)                        | key handle for unwrapped key |
 
+### Generic Secret Wrapped Key Format
+
+Set CLASS to `TSRA_KEY_CLASS_SECRET`, KIND to `TSRA_KEY_KIND_GENERIC_SECRET`,
+and BIT_LEN to a multiple of 8 from 128 through 1024 (16-128 bytes).
+DERIVE must be true; SIGN, VERIFY, ENCRYPT, DECRYPT, WRAP, and UNWRAP
+must be false, and EC_CURVE must be absent. The recovered plaintext is
+the raw secret bytes, not ASN.1. Its actual length must match BIT_LEN.
+The key is imported (`LOCAL` is false) and is usable only as a KBKDF base key.
+
+Use the existing `TSRA_ALGO_ID_RSA_AES_KEY_WRAP` algorithm:
+`RSA-OAEP(KEK) || AES-KWP(secret)`. Both legacy and EX sessions support
+generic-secret import and authenticated unmasking with matching firmware.
+KBKDF itself remains legacy/MBOR-only.
+
+The 16-128 byte range and import-only policy are TSRA restrictions, not
+PKCS#11 requirements. PKCS#11 generic secrets have no universal numeric
+size range and may also be generated or derived. TSRA ECDH results remain
+the distinct `TSRA_KEY_KIND_SHARED_SECRET` type and cannot be relabeled
+as generic secrets.
+
 **AES-XTS wrapped key format**
 
 For `TSRA_KEY_KIND_AES_XTS` (512 bits) the `wrapped_key` format depends on the
@@ -198,6 +221,10 @@ tsra_status tsra_key_unmask(
   blob supplied to another session, fails with
   `TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED`.
 
+Requesting `TSRA_KEY_KIND_SHARED_SECRET` for an authenticated AES or HMAC blob
+returns `TSRA_STATUS_INVALID_KEY_PROPS`. Restore these keys using their
+corresponding AES or HMAC key kinds instead.
+
 **Returns**
 
 `TSRA_STATUS_SUCCESS` on successful reconstruction, error code otherwise.
@@ -260,6 +287,18 @@ tsra_status tsra_key_derive(
  | [in] base_key    | [tsra_handle](#tsra_handle)                          | base key handle            |
  | [in] key_props   | [const tsra_key_prop_list*](#tsra_key_prop_list)     | key properties             |
  | [out] key_handle | [tsra_handle *](#tsra_handle)                        | key handle for derived key |
+
+**Output key properties**
+
+HKDF and KBKDF support AES and HMAC outputs. Each key type validates its
+properties before DDI dispatch: AES requires 128, 192, or 256 bits and both
+ENCRYPT and DECRYPT; HMAC requires the size matching its SHA variant and both
+SIGN and VERIFY. Other operation permissions and ECC_CURVE must be absent,
+and CLASS must be `TSRA_KEY_CLASS_SECRET`.
+
+Invalid output properties, including unsupported output key kinds and invalid
+sizes, return `TSRA_STATUS_INVALID_KEY_PROPS` before transport-specific checks.
+This replaces the previous DDI-dependent errors for those cases.
 
 **Returns**
 

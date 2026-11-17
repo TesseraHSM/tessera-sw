@@ -137,6 +137,7 @@ pub enum DdiKeyType {
     VarHmac256 = 30,
     VarHmac384 = 31,
     VarHmac512 = 32,
+    GenericSecret = 33,
     RsaUnwrap = 0xffff,
 }
 
@@ -152,6 +153,7 @@ pub enum DdiKeyClass {
     AesGcmBulk = 5,
     AesGcmBulkUnapproved = 6,
     Ecc = 7,
+    GenericSecret = 8,
 }
 
 #[open_enum]

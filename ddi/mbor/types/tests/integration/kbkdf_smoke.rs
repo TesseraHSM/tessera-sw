@@ -3,8 +3,7 @@
 
 //! KBKDF (SP 800-108 counter-mode HMAC) derivation smoke tests.
 //!
-//! - **AES output** (both backends): generate two ECC key pairs,
-//!   ECDH them into a shared secret, derive an `Aes256` key from each
+//! - **AES output**: import identical generic secrets, derive an `Aes256` key from each
 //!   secret, then encrypt with one and decrypt with the other and
 //!   confirm the message round-trips — proving the derived AES key is
 //!   usable and the derivation is deterministic.
@@ -33,7 +32,7 @@ fn test_kbkdf_aes_derive_smoke() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret1, secret2) = create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret1, secret2) = import_generic_secrets(session_id, dev, 32);
             let rev = Some(DdiApiRev { major: 1, minor: 0 });
             let label = Some(MborByteArray::from_slice("label".as_bytes()).unwrap());
             let context = Some(MborByteArray::from_slice("context".as_bytes()).unwrap());
@@ -113,7 +112,7 @@ fn test_kbkdf_aes_derive_smoke() {
     );
 }
 
-/// Run an ECDH → KBKDF derivation into a sign/verify HMAC-family key
+/// Run an imported generic secret through KBKDF into a sign/verify HMAC-family key
 /// (`HmacSha*` or `VarHmac*`) and return the result.
 fn kbkdf_hmac_derive(
     dev: &mut <DdiTest as Ddi>::Dev,
@@ -121,7 +120,7 @@ fn kbkdf_hmac_derive(
     key_type: DdiKeyType,
     key_length: Option<u8>,
 ) -> Result<DdiKbkdfCounterHmacDeriveCmdResp, DdiError> {
-    let (secret_key_id, _) = create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+    let (secret_key_id, _) = import_generic_secrets(session_id, dev, 32);
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session);
     helper_kbkdf_derive(
         dev,

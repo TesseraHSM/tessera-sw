@@ -57,7 +57,7 @@ RSA genpkey (keyEncipherment)  ──> masked_key.bin ──> pkeyutl -encrypt /
 - **RSA Encrypt & Decrypt** require a key imported with `keyEncipherment`. A `digitalSignature` key cannot be used for encryption.
 - **ECDH** requires an EC key generated with `keyAgreement`. A `digitalSignature` EC key cannot be used for ECDH.
 - **HKDF** requires a masked key file as input (`tsra.ikm_file`). In practice this is the output of an ECDH derive (`shared_masked.bin`). There is no other way to provide the input keying material from the CLI besides using a masked key file.
-- **KBKDF** (SP 800-108 Counter Mode) works like HKDF: it requires a masked key file as input (`tsra.ikm_file`, typically an ECDH derive output) and derives AES or HMAC keys. The standard `salt` / `info` parameters map to the SP 800-108 label / context, and at least one of them must be provided.
+- **KBKDF** (SP 800-108 Counter Mode) requires an imported `GenericSecret` masked blob as input (`tsra.ikm_file`) and derives AES or HMAC keys. Import the 16-128 byte secret through the SDK's RSA-AES unwrap API; ECDH shared secrets are rejected. The standard `salt` / `info` parameters map to the SP 800-108 label / context, and at least one of them must be provided. KBKDF remains MBOR-only.
 - **HMAC** requires a masked HMAC key derived via HKDF or KBKDF with `derived_key_type:hmac`. The KDF `digest` parameter determines the HMAC key kind baked into the masked blob (SHA256 → HMAC-SHA256, SHA384 → HMAC-SHA384, SHA512 → HMAC-SHA512). When using the key, the MAC digest must match — e.g., a key derived with `digest:SHA384` can only be used with `-macopt digest:SHA384`. The `derived_key_bits` should match the hash output size (256, 384, or 512).
 - **AES** (CBC / GCM / XTS) uses opaque symmetric `EVP_SKEY` keys generated inside the HSM, selected by the `tsra.key_kind` skey option rather than `tsra.key_usage`. Requires OpenSSL 3.5+. See [AES Symmetric Encryption](#aes-symmetric-encryption).
 
@@ -578,7 +578,7 @@ openssl pkeyutl -derive ${PROV} \
 
 Derive AES or HMAC keys from a masked key file using HKDF (RFC 5869). The input keying material (IKM) must be a masked key blob — typically the output of an ECDH derive. The output is also a masked key blob.
 
-**Requires:** A masked key file as IKM, produced by ECDH derive or another HKDF derivation.
+**Requires:** An ECDH shared-secret masked key file as IKM.
 
 ```bash
 # Derive an AES-256 key from an ECDH shared secret
@@ -637,17 +637,22 @@ Using a mismatched digest when consuming the key (e.g., deriving with `SHA384` b
 
 ### KBKDF Key Derivation
 
-Derive AES or HMAC keys from a masked key file using KBKDF (NIST SP 800-108 Counter Mode with an HMAC PRF). Like HKDF, the input keying material (IKM) must be a masked key blob — typically the output of an ECDH derive — and the output is also a masked key blob. The standard `salt` / `info` parameters map to the SP 800-108 **label** and **context**; at least one of them must be provided.
+Derive AES or HMAC keys from an imported generic-secret masked blob using KBKDF (NIST SP 800-108 Counter Mode with an HMAC PRF). The output is also a masked key blob. The standard `salt` / `info` parameters map to the SP 800-108 **label** and **context**; at least one of them must be provided.
 
-**Requires:** A masked key file as IKM, produced by ECDH derive or another KDF derivation.
+**Requires:** Import 16-128 bytes with `HsmGenericSecretKeyRsaAesKeyUnwrapAlgo`
+or native `tsra_key_unwrap` with `TSRA_KEY_KIND_GENERIC_SECRET`, then save
+its masked blob. The CLI consumes this blob; it does not generate or
+import generic-secret plaintext. ECDH and other KDF outputs are not valid
+KBKDF inputs. This import-only restriction is TSRA policy, not a PKCS#11
+restriction. Supporting MBOR firmware is required; EX KBKDF remains unsupported.
 
 ```bash
-# Derive an AES-256 key from an ECDH shared secret (label only)
+# Derive an AES-256 key from an imported generic secret (label only)
 openssl kdf ${PROV} \
     -keylen 4096 \
     -kdfopt digest:SHA256 \
     -kdfopt mode:counter \
-    -kdfopt tsra.ikm_file:./shared_masked.bin \
+    -kdfopt tsra.ikm_file:./generic_masked.bin \
     -kdfopt output_file:./aes_masked.bin \
     -kdfopt derived_key_type:aes \
     -kdfopt derived_key_bits:256 \
@@ -655,11 +660,11 @@ openssl kdf ${PROV} \
     -binary -out /dev/null \
     KBKDF
 
-# Derive an HMAC key with label and context
+# Derive an HMAC key from the imported generic secret with label and context
 openssl kdf ${PROV} \
     -keylen 4096 \
     -kdfopt digest:SHA384 \
-    -kdfopt tsra.ikm_file:./shared_masked.bin \
+    -kdfopt tsra.ikm_file:./generic_masked.bin \
     -kdfopt output_file:./hmac_masked.bin \
     -kdfopt derived_key_type:hmac \
     -kdfopt derived_key_bits:384 \

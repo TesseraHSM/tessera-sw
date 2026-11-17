@@ -30,6 +30,25 @@ fn derive_hmac_key_with_props(
 // test case section
 // ============================================================
 
+#[test]
+fn test_hmac_key_validation_requires_sign_and_verify() {
+    for (can_sign, can_verify) in [(false, false), (true, false), (false, true)] {
+        let props = HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(HsmKeyKind::HmacSha256)
+            .bits(256)
+            .can_sign(can_sign)
+            .can_verify(can_verify)
+            .build()
+            .expect("Build HMAC key properties");
+
+        assert_eq!(
+            HsmHmacKey::validate_props(&props),
+            Err(HsmError::InvalidKeyProps)
+        );
+    }
+}
+
 /// HMAC derived key must be a secret key.
 #[session_test]
 fn test_hmac_derived_key_prop_class_rejected(session: HsmSession) {

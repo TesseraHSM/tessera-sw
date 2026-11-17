@@ -34,3 +34,13 @@ pub(crate) fn shared_secret_unmask_key(
 
     Ok(handle)
 }
+
+/// Restores an imported generic secret from its masked blob.
+pub(crate) fn generic_secret_unmask_key(
+    session: &HsmSession,
+    masked_key: &[u8],
+) -> Result<TsraHandle, TsraStatus> {
+    let mut unmask_algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let key = HsmKeyManager::unmask_key(session, &mut unmask_algo, masked_key)?;
+    Ok(HANDLE_TABLE.alloc_handle(HandleType::GenericSecretKey, Box::new(key)))
+}

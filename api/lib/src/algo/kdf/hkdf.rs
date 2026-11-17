@@ -83,13 +83,19 @@ impl HsmKeyDeriveOp for HsmHkdfAlgo {
         props: HsmKeyProps,
     ) -> Result<Self::DerivedKey, Self::Error> {
         //check if base key can be used for derivation
-        if !base_key.can_derive() {
+        if base_key.kind() != HsmKeyKind::SharedSecret || !base_key.can_derive() {
             Err(HsmError::InvalidKey)?;
         }
 
         // Validate derived key properties early so callers get consistent failures
         // for unsupported key metadata (instead of leaking DDI-specific errors).
-        HsmSharedSecretKey::validate_props(&props)?;
+        match props.kind() {
+            HsmKeyKind::Aes => HsmAesKey::validate_props(&props)?,
+            HsmKeyKind::HmacSha256 | HsmKeyKind::HmacSha384 | HsmKeyKind::HmacSha512 => {
+                HsmHmacKey::validate_props(&props)?
+            }
+            _ => return Err(HsmError::InvalidKeyProps),
+        }
 
         let (handle, props) = ddi::hkdf_derive(
             base_key,

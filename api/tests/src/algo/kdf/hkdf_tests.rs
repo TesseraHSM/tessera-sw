@@ -417,7 +417,7 @@ fn run_hkdf_invalid_aes_key_size_test(session: &HsmSession, curve: HsmEccCurve) 
     match result {
         Err(e) => {
             assert!(
-                matches!(e, HsmError::InvalidArgument),
+                matches!(e, HsmError::InvalidKeyProps),
                 "unexpected error: {:?}",
                 e
             );
@@ -784,7 +784,7 @@ fn test_hkdf_invalid_aes_key_size_fails(session: HsmSession) {
         Ok(_) => panic!("HKDF derive should fail for invalid AES key size"),
         Err(err) => err,
     };
-    assert_eq!(err, HsmError::InvalidArgument);
+    assert_eq!(err, HsmError::InvalidKeyProps);
 }
 
 /// Verifies HKDF rejects unsupported derived key kinds

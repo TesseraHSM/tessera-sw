@@ -40,7 +40,7 @@ impl HsmAesKey {
     ///   reject signing/verifying/derivation and key wrap/unwrap usage flags.
     /// - Key material must not be extractable.
     /// - Key size must be one of 128/192/256 bits.
-    fn validate_props(props: &HsmKeyProps) -> HsmResult<()> {
+    pub(crate) fn validate_props(props: &HsmKeyProps) -> HsmResult<()> {
         let supported_flags = HsmKeyFlags::ENCRYPT | HsmKeyFlags::DECRYPT; //AES Keys can be used for both encrypt and decrypt
 
         // AES keys require both encrypt and decrypt permissions.

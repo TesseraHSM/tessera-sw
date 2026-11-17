@@ -1021,6 +1021,35 @@ pub fn rsa_verify_local_openssl(
     Verifier::verify(&mut algo, &pkey, digest, signature).is_ok()
 }
 
+/// Imports identical generic-secret material into two resident keys for KBKDF.
+#[allow(dead_code)]
+pub fn import_generic_secrets(
+    sess_id: u16,
+    dev: &mut <DdiTest as Ddi>::Dev,
+    key_len: usize,
+) -> (u16, u16) {
+    let (unwrapping_id, public_der, _) = get_unwrapping_key(dev, sess_id);
+    let material = Rng::rand_vec(key_len).expect("Generic-secret material");
+    let wrapped = wrap_data(public_der, &material);
+    let import = || {
+        helper_rsa_unwrap(
+            dev,
+            Some(sess_id),
+            Some(DdiApiRev { major: 1, minor: 0 }),
+            unwrapping_id,
+            MborByteArray::from_slice(&wrapped).expect("Wrapped generic secret"),
+            DdiKeyClass::GenericSecret,
+            DdiRsaCryptoPadding::Oaep,
+            DdiHashAlgorithm::Sha256,
+            helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
+        )
+        .expect("Import generic secret")
+        .data
+        .key_id
+    };
+    (import(), import())
+}
+
 // Returns: secret key id 1, secret key id 2
 #[allow(dead_code)]
 pub fn create_ecdh_secrets(
@@ -1199,7 +1228,7 @@ pub fn create_hmac_key(
     resp.unwrap().data.key_id
 }
 
-// Uses Ecc generate, ECDH, KDF to create an HMAC key
+// Uses wrapped generic-secret import and KBKDF to create an HMAC key.
 #[allow(dead_code)]
 pub fn create_hmac_key_kbkdf(
     sess_id: u16,
@@ -1207,56 +1236,7 @@ pub fn create_hmac_key_kbkdf(
     dev: &mut <DdiTest as Ddi>::Dev,
     target_key_len: Option<u8>,
 ) -> u16 {
-    // Generate ECC Key Pair 1
-
-    let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-
-    let resp = helper_ecc_generate_key_pair(
-        dev,
-        Some(sess_id),
-        Some(DdiApiRev { major: 1, minor: 0 }),
-        DdiEccCurve::P256,
-        key_props,
-    );
-
-    assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
-    let private_key_id1 = resp.data.private_key_id;
-
-    // Generate ECC Key Pair 2
-
-    let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-
-    let resp = helper_ecc_generate_key_pair(
-        dev,
-        Some(sess_id),
-        Some(DdiApiRev { major: 1, minor: 0 }),
-        DdiEccCurve::P256,
-        key_props,
-    );
-
-    assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
-
-    let pub_key2 = resp.data.pub_key;
-    let mut der2 = [0u8; 192];
-    der2[..pub_key2.der.len()].clone_from_slice(&pub_key2.der.data()[..pub_key2.der.len()]);
-
-    // Perform Ecdh exchange for private key 1, public key 2
-
-    let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-    let resp = helper_ecdh_key_exchange(
-        dev,
-        Some(sess_id),
-        Some(DdiApiRev { major: 1, minor: 0 }),
-        private_key_id1,
-        MborByteArray::new(der2, pub_key2.der.len()).expect("failed to create byte array"),
-        DdiKeyType::Secret256,
-        key_props,
-    );
-
-    assert!(resp.is_ok(), "resp {:?}", resp);
-    let secret_key_id1 = resp.unwrap().data.key_id;
+    let (secret_key_id1, _) = import_generic_secrets(sess_id, dev, 32);
 
     // Use KBKDF to derive HMAC key
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session);
@@ -1267,7 +1247,7 @@ pub fn create_hmac_key_kbkdf(
         Some(DdiApiRev { major: 1, minor: 0 }),
         secret_key_id1,
         DdiHashAlgorithm::Sha256,
-        None,
+        Some(MborByteArray::from_slice(b"hmac").expect("KBKDF label")),
         None,
         target_key_type,
         key_props,

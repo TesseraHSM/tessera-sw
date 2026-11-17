@@ -46,6 +46,10 @@ validates against the class:
 - `Ecc` → PKCS#8 DER ECC private key; `sign`+`verify` or `derive`.
 - `HmacSha256` / `HmacSha384` / `HmacSha512` → raw variable-length HMAC
   key stored as the matching `VarLenHmacSha*` vault kind; `sign`+`verify`.
+- `GenericSecret` → raw 16-128-byte secret stored as vault kind `65`;
+  `derive` only. It is import-only and distinct from ECDH shared secrets.
+  TBOR supports its import and authenticated verification, but does not
+  currently provide a KBKDF command.
 
 `sign`+`verify` and `encrypt`+`decrypt` are matched pairs and exactly one
 usage group may be set; any invalid pairing, multi-usage request, or usage
@@ -83,7 +87,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 |---|---|---|---|
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain. |
-| 16 | `key_class` | `uint8` (inline) | Class of the wrapped key (`KeyClass` discriminant): `0` = Aes, `1` = Rsa, `2` = RsaCrt, `3` = Ecc, `4` = HmacSha256, `5` = HmacSha384, `6` = HmacSha512. |
+| 16 | `key_class` | `uint8` (inline) | Class of the wrapped key (`KeyClass` discriminant): `0` = Aes, `1` = Rsa, `2` = RsaCrt, `3` = Ecc, `4` = HmacSha256, `5` = HmacSha384, `6` = HmacSha512, `7` = AesXts512, `8` = GenericSecret. |
 | 20 | `key_usage` | `uint64` (offset/len) | Requested usage permissions (`KeyUsage` bitfield): `0x01` = encrypt, `0x02` = decrypt, `0x04` = sign, `0x08` = verify, `0x10` = derive, `0x20` = wrap, `0x40` = unwrap. Validated against `key_class`. |
 | 24 | `oaep_hash_algo` | `uint8` (inline) | OAEP hash used to wrap the KEK (`HashAlgo` discriminant): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512. |
 | 28 | `wrapped_blob` | `buffer` (≤ 3072 B) | The RSA-AES-wrapped key: `RSA-OAEP(KEK) ‖ AES-KWP(key)`. The leading modulus-sized (256 B for RSA-2048) OAEP ciphertext is in device byte order. |

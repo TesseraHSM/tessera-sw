@@ -268,6 +268,45 @@ fn test_shared_secret_unmask_p521(session: HsmSession) {
     test_shared_secret_unmask_common(&session, HsmEccCurve::P521);
 }
 
+#[session_test]
+fn test_shared_secret_unmask_rejects_kdf_output_kinds(session: HsmSession) {
+    let shared_secret = derive_shared_secret_for_unmask_test(&session, HsmEccCurve::P256);
+
+    for (kind, bits) in [
+        (HsmKeyKind::Aes, 256),
+        (HsmKeyKind::HmacSha256, 256),
+        (HsmKeyKind::HmacSha384, 384),
+        (HsmKeyKind::HmacSha512, 512),
+    ] {
+        let is_aes = kind == HsmKeyKind::Aes;
+        let props = HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(kind)
+            .bits(bits)
+            .can_encrypt(is_aes)
+            .can_decrypt(is_aes)
+            .can_sign(!is_aes)
+            .can_verify(!is_aes)
+            .is_session(true)
+            .build()
+            .expect("Build derived key properties");
+        let mut hkdf =
+            HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("Create HKDF algorithm");
+        let derived = HsmKeyManager::derive_key(&session, &mut hkdf, &shared_secret, props)
+            .expect("Derive AES or HMAC key");
+        let masked = derived.masked_key_vec().expect("Get masked derived key");
+        let mut unmask = HsmSharedSecretKeyUnmaskAlgo::default();
+
+        assert!(
+            matches!(
+                HsmKeyManager::unmask_key(&session, &mut unmask, &masked),
+                Err(HsmError::InvalidKeyProps)
+            ),
+            "{kind:?} must not be unmasked as a shared secret"
+        );
+    }
+}
+
 /// Verifies unmask fails for malformed blob
 #[session_test]
 fn test_unmask_malformed_blob(session: HsmSession) {

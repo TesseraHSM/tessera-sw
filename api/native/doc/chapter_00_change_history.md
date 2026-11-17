@@ -67,4 +67,12 @@
 |            | are unchanged. The wrapper still carries AES/HMAC KDF outputs. |
 |            | A future HSM generic-secret type is not introduced here.       |
 
+| 11/17/2026 | Added import-only `TSRA_KEY_KIND_GENERIC_SECRET = 13` /       |
+|            | `HsmGenericSecretKey` (16-128 bytes, derive-only). RSA-AES    |
+|            | import and unmask support MBOR and TBOR. KBKDF now requires |
+|            | an imported generic secret and rejects ECDH shared secrets. |
+|            | ECDH produces SharedSecret; HKDF keeps SharedSecret inputs. |
+|            | KBKDF remains MBOR-only. Matching firmware is required;     |
+|            | existing key identifiers and C function signatures remain. |
+
 \pagebreak

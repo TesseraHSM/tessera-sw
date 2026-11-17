@@ -11,13 +11,97 @@ use tsra_ddi_mbor_types::*;
 use super::common::*;
 
 #[test]
+fn test_kbkdf_rejects_non_generic_sources() {
+    ddi_dev_test(common_setup, common_cleanup, |dev, _, _, session_id| {
+        let revision = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut sources = Vec::new();
+        for secret_type in [
+            DdiKeyType::Secret256,
+            DdiKeyType::Secret384,
+            DdiKeyType::Secret521,
+        ] {
+            let (key_id, _) = create_ecdh_secrets(session_id, dev, secret_type);
+            sources.push(key_id);
+        }
+        for (key_type, usage) in [
+            (DdiKeyType::Aes256, DdiKeyUsage::EncryptDecrypt),
+            (DdiKeyType::HmacSha256, DdiKeyUsage::SignVerify),
+        ] {
+            let key = helper_hkdf_derive(
+                dev,
+                Some(session_id),
+                revision,
+                sources[0],
+                DdiHashAlgorithm::Sha256,
+                None,
+                None,
+                key_type,
+                helper_key_properties(usage, DdiKeyAvailability::App),
+                None,
+            )
+            .expect("Non-generic source key");
+            sources.push(key.data.key_id);
+        }
+        sources.push(get_unwrapping_key(dev, session_id).0);
+        for key_id in sources {
+            let err = helper_kbkdf_derive(
+                dev,
+                Some(session_id),
+                Some(DdiApiRev { major: 1, minor: 0 }),
+                key_id,
+                DdiHashAlgorithm::Sha256,
+                Some(MborByteArray::from_slice(b"label").expect("KBKDF label")),
+                None,
+                DdiKeyType::Aes256,
+                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
+                None,
+            )
+            .expect_err("Only generic secrets may be used by KBKDF");
+            assert!(matches!(
+                err,
+                DdiError::DdiStatus(DdiStatus::InvalidKeyType)
+            ));
+        }
+    });
+}
+
+#[test]
+fn test_generic_secret_import_rejects_non_derive_usage() {
+    ddi_dev_test(common_setup, common_cleanup, |dev, _, _, session_id| {
+        let (unwrapping_id, public_der, _) = get_unwrapping_key(dev, session_id);
+        let wrapped = wrap_data(public_der, &[0x5a; 32]);
+        for usage in [
+            DdiKeyUsage::SignVerify,
+            DdiKeyUsage::EncryptDecrypt,
+            DdiKeyUsage::Unwrap,
+        ] {
+            let err = helper_rsa_unwrap(
+                dev,
+                Some(session_id),
+                Some(DdiApiRev { major: 1, minor: 0 }),
+                unwrapping_id,
+                MborByteArray::from_slice(&wrapped).expect("Wrapped generic secret"),
+                DdiKeyClass::GenericSecret,
+                DdiRsaCryptoPadding::Oaep,
+                DdiHashAlgorithm::Sha256,
+                helper_key_properties(usage, DdiKeyAvailability::App),
+            )
+            .expect_err("Imported generic secrets must be derive-only");
+            assert!(matches!(
+                err,
+                DdiError::DdiStatus(DdiStatus::InvalidPermissions)
+            ));
+        }
+    });
+}
+
+#[test]
 fn test_secret_kbkdf_no_session() {
     ddi_dev_test(
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -54,8 +138,7 @@ fn test_secret_kbkdf_invalid_session() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -144,8 +227,7 @@ fn test_secret_kbkdf_invalid_output_key_type() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -183,8 +265,7 @@ fn test_secret_kbkdf_invalid_secret521_output_key_type() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -222,8 +303,7 @@ fn test_secret_kbkdf_invalid_output_key_usage() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -260,8 +340,7 @@ fn test_secret_kbkdf_different_label_len() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let context = None;
@@ -370,8 +449,7 @@ fn test_secret_kbkdf_different_context_len() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            let (secret_key_id1, _secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, _secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let label = None;
@@ -488,8 +566,7 @@ fn test_secret_kbkdf_helper(
     key_properties: DdiKeyProperties,
     session_id: u16,
 ) -> (u16, u16) {
-    let (secret_key_id1, secret_key_id2) =
-        create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
     let label = {
         if let Some(label_vec) = label {
@@ -759,9 +836,9 @@ fn test_secret_kbkdf_aes_gcm_helper(
     label_vec: Vec<u8>,
     key_type: DdiKeyType,
     key_properties: DdiKeyProperties,
-    secret_key_type: DdiKeyType,
+    key_len: usize,
 ) {
-    let (secret_key_id1, secret_key_id2) = create_ecdh_secrets(session_id, dev, secret_key_type);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, key_len);
 
     let label = {
         let mut label_array = [0u8; 256];
@@ -886,9 +963,9 @@ fn test_secret_kbkdf_aes_xts_helper(
     label_vec: Vec<u8>,
     key_type: DdiKeyType,
     key_properties: DdiKeyProperties,
-    secret_key_type: DdiKeyType,
+    key_len: usize,
 ) {
-    let (secret_key_id1, secret_key_id2) = create_ecdh_secrets(session_id, dev, secret_key_type);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, key_len);
 
     let label = {
         let mut label_array = [0u8; 256];
@@ -1039,7 +1116,7 @@ fn test_secret_kbkdf_aes_gcm_unapproved_secret256() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret256,
+                32,
             );
         },
     );
@@ -1069,7 +1146,7 @@ fn test_secret_kbkdf_aes_gcm_unapproved_secret384() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret384,
+                48,
             );
         },
     );
@@ -1099,7 +1176,7 @@ fn test_secret_kbkdf_aes_gcm_unapproved_secret521() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret521,
+                66,
             );
         },
     );
@@ -1129,7 +1206,7 @@ fn test_secret_kbkdf_aes_gcm_approved_secret256() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret256,
+                32,
             );
         },
     );
@@ -1159,7 +1236,7 @@ fn test_secret_kbkdf_aes_gcm_approved_secret384() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret384,
+                48,
             );
         },
     );
@@ -1189,7 +1266,7 @@ fn test_secret_kbkdf_aes_gcm_approved_secret521() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret521,
+                66,
             );
         },
     );
@@ -1219,7 +1296,7 @@ fn test_secret_kbkdf_aes_xts_secret256() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret256,
+                32,
             );
         },
     );
@@ -1249,7 +1326,7 @@ fn test_secret_kbkdf_aes_xts_secret384() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret384,
+                48,
             );
         },
     );
@@ -1279,7 +1356,7 @@ fn test_secret_kbkdf_aes_xts_secret521() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret521,
+                66,
             );
         },
     );
@@ -1300,8 +1377,7 @@ fn test_secret_kbkdf_aes_hmac_helper(
     hmac_key_type: DdiKeyType,
     session_id: u16,
 ) -> Vec<u8> {
-    let (secret_key_id1, secret_key_id2) =
-        create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
     let label = {
         if let Some(label_vec) = label {
@@ -1597,8 +1673,7 @@ fn test_secret_kbkdf_and_unmask() {
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
-            let (secret_key_id1, secret_key_id2) =
-                create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
             let label = {
                 if let Some(label_vec) = label {

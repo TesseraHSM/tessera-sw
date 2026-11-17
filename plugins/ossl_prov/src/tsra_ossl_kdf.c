@@ -921,7 +921,7 @@ const OSSL_DISPATCH tsra_ossl_hkdf_functions[] = {
  * SP 800-108-specific inputs (label/context) and the algorithm id differ.
  *
  * Key Design Decisions:
- * - IKM (the key-derivation key) comes from a masked key file (e.g. ECDH output)
+ * - IKM is an imported GenericSecret masked blob, never an ECDH shared secret
  * - Output is a masked key blob written to a file (not raw bytes)
  * - Only Counter Mode with an HMAC PRF is supported
  *
@@ -1039,10 +1039,10 @@ static int kbkdf_load_and_unmask_ikm(TSRA_KBKDF_CTX *ctx)
     masked_buf.ptr = masked_key_data;
     masked_buf.len = (uint32_t)masked_key_size;
 
-    /* Unmask the shared secret key */
+    /* Unmask an imported generic secret, not ECDH output. */
     status = tsra_key_unmask(
         ctx->provctx->session,
-        TSRA_KEY_KIND_SHARED_SECRET,
+        TSRA_KEY_KIND_GENERIC_SECRET,
         &masked_buf,
         &ctx->ikm_handle
     );

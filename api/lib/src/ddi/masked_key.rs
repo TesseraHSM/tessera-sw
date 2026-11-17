@@ -52,6 +52,7 @@ enum TborMaskedKeyKind {
     VarLenHmacSha384,
     VarLenHmacSha512,
     AesXts512,
+    GenericSecret,
 }
 
 impl TryFrom<u8> for TborMaskedKeyKind {
@@ -79,6 +80,7 @@ impl TryFrom<u8> for TborMaskedKeyKind {
             KEY_KIND_VAR_LEN_HMAC_SHA384 => Self::VarLenHmacSha384,
             KEY_KIND_VAR_LEN_HMAC_SHA512 => Self::VarLenHmacSha512,
             KEY_KIND_AES_XTS512 => Self::AesXts512,
+            KEY_KIND_GENERIC_SECRET => Self::GenericSecret,
             _ => return Err(HsmError::MaskedKeyDecodeFailed),
         })
     }
@@ -108,6 +110,7 @@ impl TborMaskedKeyKind {
             Self::VarLenHmacSha384 => (HsmKeyKind::HmacSha384, 384, None),
             Self::VarLenHmacSha512 => (HsmKeyKind::HmacSha512, 512, None),
             Self::AesXts512 => (HsmKeyKind::AesXts, 512, None),
+            Self::GenericSecret => (HsmKeyKind::GenericSecret, 0, None),
         }
     }
 
@@ -376,12 +379,22 @@ impl HsmMaskedKey {
         metadata.validate()?;
 
         let tbor_kind = TborMaskedKeyKind::try_from(metadata.key_kind)?;
-        let (kind, bits, curve) = tbor_kind.key_metadata();
+        let (kind, mut bits, curve) = tbor_kind.key_metadata();
         let payload_len = envelope
             .payload
             .len()
             .checked_sub(usize::from(metadata.data_pad_len))
             .ok_or(HsmError::MaskedKeyDecodeFailed)?;
+        if matches!(tbor_kind, TborMaskedKeyKind::GenericSecret) {
+            let key_bits = u32::try_from(payload_len)
+                .ok()
+                .and_then(|len| len.checked_mul(8))
+                .filter(|bits| {
+                    (HsmGenericSecretKey::MIN_BITS..=HsmGenericSecretKey::MAX_BITS).contains(bits)
+                })
+                .ok_or(HsmError::MaskedKeyDecodeFailed)?;
+            bits = u16::try_from(key_bits).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
+        }
         if !tbor_kind.payload_len_valid(bits, payload_len) {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
@@ -666,6 +679,15 @@ impl TryFrom<DdiMaskedKeyMetadata> for HsmMaskedKeyMetadata {
             DdiKeyType::VarHmac256 => (HsmKeyKind::HmacSha256, var_hmac_bits()?, None),
             DdiKeyType::VarHmac384 => (HsmKeyKind::HmacSha384, var_hmac_bits()?, None),
             DdiKeyType::VarHmac512 => (HsmKeyKind::HmacSha512, var_hmac_bits()?, None),
+            DdiKeyType::GenericSecret => {
+                let bits = var_hmac_bits()?;
+                if !(HsmGenericSecretKey::MIN_BITS..=HsmGenericSecretKey::MAX_BITS)
+                    .contains(&u32::from(bits))
+                {
+                    return Err(HsmError::MaskedKeyDecodeFailed);
+                }
+                (HsmKeyKind::GenericSecret, bits, None)
+            }
             _ => return Err(HsmError::InternalError),
         };
 

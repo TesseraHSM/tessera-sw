@@ -48,6 +48,8 @@ pub const KEY_CLASS_HMAC_SHA384: u8 = 5;
 pub const KEY_CLASS_HMAC_SHA512: u8 = 6;
 /// `KeyClass` discriminant for a raw 64-byte AES-256-XTS key (`K1 ‖ K2`).
 pub const KEY_CLASS_AES_XTS512: u8 = 7;
+/// `KeyClass` discriminant for an imported generic secret.
+pub const KEY_CLASS_GENERIC_SECRET: u8 = 8;
 
 /// `HsmVaultKeyKind::Rsa2kPrivate` response discriminant.
 pub const KEY_KIND_RSA2K_PRIVATE: u8 = 4;
@@ -87,6 +89,8 @@ pub const KEY_KIND_VAR_LEN_HMAC_SHA384: u8 = 33;
 pub const KEY_KIND_VAR_LEN_HMAC_SHA512: u8 = 34;
 /// `HsmVaultKeyKind::AesXts512` response discriminant.
 pub const KEY_KIND_AES_XTS512: u8 = 64;
+/// `HsmVaultKeyKind::GenericSecret` response discriminant.
+pub const KEY_KIND_GENERIC_SECRET: u8 = 65;
 
 /// `KeyUsage` bit: key may encrypt.
 pub const KEY_USAGE_ENCRYPT: u64 = 1 << 0;

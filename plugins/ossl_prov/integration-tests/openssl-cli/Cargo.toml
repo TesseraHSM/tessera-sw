@@ -14,6 +14,7 @@ integration = []
 ddi_sock_server = { features = ["autostart"], workspace = true }
 lit = { workspace = true }
 serial_test = { workspace = true }
+tsra_api.workspace = true
 
 [lints]
 workspace = true

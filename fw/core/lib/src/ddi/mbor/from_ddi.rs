@@ -102,6 +102,7 @@ pub(crate) fn vault_kind_from_ddi(key_type: DdiKeyType) -> HsmResult<HsmVaultKey
         DdiKeyType::VarHmac256 => Ok(HsmVaultKeyKind::VarLenHmacSha256),
         DdiKeyType::VarHmac384 => Ok(HsmVaultKeyKind::VarLenHmacSha384),
         DdiKeyType::VarHmac512 => Ok(HsmVaultKeyKind::VarLenHmacSha512),
+        DdiKeyType::GenericSecret => Ok(HsmVaultKeyKind::GenericSecret),
         _ => Err(HsmError::InvalidKeyType),
     }
 }

@@ -1385,6 +1385,9 @@ struct tsra_algo algo = {
 
 HKDF derivation implements the KDF as specified in [RFC 5869](https://datatracker.ietf.org/doc/html/rfc5869).
 
+The base key must be an ECDH `TSRA_KEY_KIND_SHARED_SECRET` with DERIVE
+permission. Imported generic secrets are not HKDF inputs in TSRA.
+
 The `hmac_algo_id` selects SHA-1, SHA-256, SHA-384, or SHA-512 as the HKDF
 PRF, independently of the derived key type. SHA-1 is supported with both
 legacy and EX sessions; EX requires firmware with TBOR HKDF-SHA1 support.
@@ -1419,6 +1422,22 @@ struct tsra_algo algo = {
 
 SP 800-108 KDF Counter mode derivation implements the KDF as specified in
 [NIST SP 800-108](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-108r1-upd1.pdf).
+
+The base key must be an imported `TSRA_KEY_KIND_GENERIC_SECRET` with DERIVE
+permission. ECDH shared secrets and all other key types are rejected.
+Import the key using RSA-AES unwrap; it cannot be generated or derived by
+the HSM. AES and HMAC outputs are unchanged.
+
+This is a TSRA policy, not a PKCS#11 prohibition on ECDH-derived KBKDF
+inputs. See PKCS#11 3.2 sections 6.8 and 6.42. Existing applications using
+ECDH -> KBKDF must migrate to an imported generic secret (or use
+ECDH -> HKDF when that is the required protocol).
+KBKDF is supported only with legacy/MBOR sessions and supporting firmware;
+EX sessions return `TSRA_STATUS_UNSUPPORTED_KEY_OPERATION`.
+
+The existing structured counter-mode framing, including an output bit
+length, is unchanged. Software NIST CAVP tests also cover the
+no-length-field variant; that variant is not exposed by this API.
 
 |                            |                                                                          |
 | -------------------------- | ------------------------------------------------------------------------ |

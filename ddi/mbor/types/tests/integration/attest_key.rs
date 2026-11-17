@@ -807,8 +807,8 @@ fn test_attest_kbkdf_derived_aes_key() {
                 return;
             }
 
-            // Derive an AES-256 key on-device via ECDH + KBKDF.
-            let (secret_key_id, _) = create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+            // Derive an AES-256 key from an imported generic secret.
+            let (secret_key_id, _) = import_generic_secrets(session_id, dev, 32);
             let key_props =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
             let resp = helper_kbkdf_derive(

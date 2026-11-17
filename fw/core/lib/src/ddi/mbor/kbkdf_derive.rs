@@ -3,16 +3,16 @@
 
 //! DDI KbkdfCounterHmacDerive command handler.
 //!
-//! Within an open session, derive key material from an existing ECDH
-//! shared secret via the SP 800-108 Counter Mode KDF with an HMAC
+//! Within an open session, derive key material from an imported generic
+//! secret via the SP 800-108 Counter Mode KDF with an HMAC
 //! PRF, persist the result in the partition vault — optionally
 //! session-scoped so it is torn down by
 //! [`CloseSession`](super::close_session) — and return the assigned
 //! `key_id` plus an (empty placeholder) masked-key envelope the host
 //! may re-import on a future session.
 //!
-//! The input key must be an ECDH shared secret (`Secret256` /
-//! `Secret384` / `Secret521`) with the `derive` permission.  The
+//! The input key must be an imported `GenericSecret` with the `derive`
+//! permission. The
 //! requested output `key_type` selects the vault kind: AES outputs
 //! are stored as AES keys, while every HMAC output (fixed `HmacSha*`
 //! or `VarHmac*`) is stored as a variable-length HMAC key.  See
@@ -47,9 +47,11 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let input_key_id = HsmKeyId::from(body.key_id);
 
-    // The KDK must be an ECDH shared secret carrying `derive`.
-    super::kdf::validate_input_secret(pal.vault_key_kind(io, input_key_id)?)?;
-    if !pal.vault_key_attrs(io, input_key_id)?.derive() {
+    if pal.vault_key_kind(io, input_key_id)? != HsmVaultKeyKind::GenericSecret {
+        return Err(HsmError::InvalidKeyType);
+    }
+    let input_attrs = pal.vault_key_attrs(io, input_key_id)?;
+    if !input_attrs.derive() || input_attrs.local() {
         return Err(HsmError::InvalidPermissions);
     }
 

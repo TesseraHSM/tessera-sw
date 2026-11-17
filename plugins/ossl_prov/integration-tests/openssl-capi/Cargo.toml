@@ -16,6 +16,8 @@ cmake.workspace = true
 [dev-dependencies]
 ddi_sock_server = { features = ["autostart"], workspace = true }
 libtest-mimic.workspace = true
+parking_lot.workspace = true
+tsra_api.workspace = true
 
 [lints]
 workspace = true

@@ -872,6 +872,9 @@ pub enum DdiKeyClass {
 
     /// ECC
     Ecc = 7,
+
+    /// Imported generic secret for KBKDF.
+    GenericSecret = 8,
 }
 
 /// DDI Key Type
@@ -976,6 +979,9 @@ pub enum DdiKeyType {
 
     /// HMAC 512 Key with variable length
     VarHmac512 = 32,
+
+    /// Imported variable-length generic secret.
+    GenericSecret = 33,
 
     /// Internal key type
     RsaUnwrap = 0xffff,

@@ -124,7 +124,7 @@ pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 }
 /// `SessionOpenFinish` as `TborStatus::InvalidArg`, long after the
 /// handshake crypto had succeeded. `session_ex_range_is_derived_from_pal_layout`
 /// pins the range to the PAL constants so it cannot drift back.
-static KIND_LEN: [KeyLen; 65] = [
+static KIND_LEN: [KeyLen; 66] = [
     /* 0  Free                         */ KeyLen::Invalid,
     /* 1  Rsa2kPublic                  */ KeyLen::Fixed(260),
     /* 2  Rsa3kPublic                  */ KeyLen::Fixed(388),
@@ -198,6 +198,11 @@ static KIND_LEN: [KeyLen; 65] = [
     /* 62 MlKem768Public               */ KeyLen::Fixed(1184),
     /* 63 MlKem1024Public              */ KeyLen::Fixed(1568),
     /* 64 AesXts512                    */ KeyLen::Fixed(64),
+    /* 65 GenericSecret                */
+    KeyLen::Variable {
+        min: tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MIN_LEN as u16,
+        max: tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MAX_LEN as u16,
+    },
 ];
 
 /// Resolves the length contract for `kind` in O(1).
@@ -426,6 +431,17 @@ mod tests {
         assert_eq!(var.check(64), Ok(64));
         assert_eq!(var.check(31), Err(HsmError::InvalidArg));
         assert_eq!(var.check(65), Err(HsmError::InvalidArg));
+    }
+
+    #[test]
+    fn generic_secret_checks_variable_import_lengths() {
+        let length = key_len(HsmVaultKeyKind::GenericSecret).expect("Generic-secret length");
+        for bytes in [16, 17, 20, 32, 48, 64, 127, 128] {
+            assert_eq!(length.check(bytes), Ok(bytes as u16));
+        }
+        for bytes in [0, 15, 129, usize::MAX] {
+            assert!(length.check(bytes).is_err());
+        }
     }
 
     #[test]

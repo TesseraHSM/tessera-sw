@@ -98,6 +98,8 @@ pub enum KeyClass {
     /// A raw 64-byte AES-256-XTS key `K1 ‖ K2` with `K1 != K2`
     /// (`AesXts512`).
     AesXts512 = 7,
+    /// Raw imported generic-secret material for KBKDF.
+    GenericSecret = 8,
 }
 
 /// `UnwrapKey` request schema.

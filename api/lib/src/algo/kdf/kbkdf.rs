@@ -4,7 +4,7 @@
 //! KBKDF (NIST SP 800-108 Counter Mode, HMAC PRF) key derivation implementation.
 //!
 //! This module provides an [`HsmKeyDeriveOp`] implementation that derives an HSM-managed
-//! secret key from an HSM-managed shared secret ([`HsmSharedSecretKey`]) using the
+//! secret key from an imported generic secret ([`HsmGenericSecretKey`]) using the
 //! SP 800-108 Counter Mode KDF. The result is returned as an [`HsmSharedSecretKey`]; the
 //! concrete derived kind (AES or HMAC) is selected by the requested key properties.
 
@@ -53,7 +53,7 @@ impl HsmKeyDeriveOp for HsmKbkdfAlgo {
     type Session = HsmSession;
 
     /// The type of base key used by this operation.
-    type BaseKey = HsmSharedSecretKey;
+    type BaseKey = HsmGenericSecretKey;
 
     /// The type of derived key produced by this operation.
     type DerivedKey = HsmSharedSecretKey;
@@ -83,13 +83,19 @@ impl HsmKeyDeriveOp for HsmKbkdfAlgo {
         props: HsmKeyProps,
     ) -> Result<Self::DerivedKey, Self::Error> {
         //check if base key can be used for derivation
-        if !base_key.can_derive() {
+        if base_key.kind() != HsmKeyKind::GenericSecret || !base_key.can_derive() {
             Err(HsmError::InvalidKey)?;
         }
 
         // Validate derived key properties early so callers get consistent failures
         // for unsupported key metadata (instead of leaking DDI-specific errors).
-        HsmSharedSecretKey::validate_props(&props)?;
+        match props.kind() {
+            HsmKeyKind::Aes => HsmAesKey::validate_props(&props)?,
+            HsmKeyKind::HmacSha256 | HsmKeyKind::HmacSha384 | HsmKeyKind::HmacSha512 => {
+                HsmHmacKey::validate_props(&props)?
+            }
+            _ => return Err(HsmError::InvalidKeyProps),
+        }
 
         let (handle, props) = ddi::kbkdf_derive(
             base_key,

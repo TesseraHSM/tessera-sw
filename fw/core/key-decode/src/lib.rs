@@ -57,6 +57,8 @@ pub enum KeyClass {
     HmacSha512,
     /// A raw 64-byte AES-256-XTS key `K1 ‖ K2` (`AesXts512`).
     AesXts512,
+    /// Raw imported generic-secret material for KBKDF.
+    GenericSecret,
 }
 
 /// A decoded key in vault-ready form, for the caller to persist.
@@ -113,6 +115,19 @@ pub async fn decode<'p, P: HsmPal>(
         KeyClass::HmacSha384 => hmac::decode(material, HsmVaultKeyKind::VarLenHmacSha384),
         KeyClass::HmacSha512 => hmac::decode(material, HsmVaultKeyKind::VarLenHmacSha512),
         KeyClass::AesXts512 => aes::decode_xts(material),
+        KeyClass::GenericSecret => {
+            if !(tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MIN_LEN
+                ..=tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MAX_LEN)
+                .contains(&material.len())
+            {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::InvalidKeyLength);
+            }
+            Ok(DecodedKey {
+                kind: HsmVaultKeyKind::GenericSecret,
+                material,
+                pub_key: None,
+            })
+        }
     }
 }
 

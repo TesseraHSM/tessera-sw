@@ -167,12 +167,24 @@ pub(crate) fn for_rsa(metadata: &DdiTargetKeyMetadata, local: bool) -> HsmResult
 /// keys as `is_generated` (matching the reference firmware / simulator);
 /// only imported / unwrapped keys are non-`local`.
 ///
-/// Derived secrets are HKDF / KBKDF inputs, so the only valid usage
+/// Derived secrets are HKDF inputs, so the only valid usage
 /// is `derive` (PKCS#11 `CKA_DERIVE`).  Any other usage is rejected
 /// with [`HsmError::InvalidPermissions`].
 pub(crate) fn for_ecdh_secret(metadata: &DdiTargetKeyMetadata) -> HsmResult<HsmVaultKeyAttrs> {
+    for_derivation_secret(metadata, true)
+}
+
+/// Build derive-only attributes for an imported generic secret.
+pub(crate) fn for_generic_secret(metadata: &DdiTargetKeyMetadata) -> HsmResult<HsmVaultKeyAttrs> {
+    for_derivation_secret(metadata, false)
+}
+
+fn for_derivation_secret(
+    metadata: &DdiTargetKeyMetadata,
+    local: bool,
+) -> HsmResult<HsmVaultKeyAttrs> {
     validate_pairs(metadata)?;
-    let mut attrs = HsmVaultKeyAttrs::new().with_local(true);
+    let mut attrs = HsmVaultKeyAttrs::new().with_local(local);
 
     let sign_verify = metadata.sign() && metadata.verify();
     let encrypt_decrypt = metadata.encrypt() && metadata.decrypt();

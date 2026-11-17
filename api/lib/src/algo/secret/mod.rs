@@ -6,6 +6,7 @@
 //! This module defines the HSM-managed shared-secret wrapper used by ECDH and KDF
 //! operations. It also carries AES/HMAC derivation outputs before conversion to
 //! their concrete key wrappers.
+//! Imported generic secrets are distinct keys used only as KBKDF inputs.
 
 mod key;
 

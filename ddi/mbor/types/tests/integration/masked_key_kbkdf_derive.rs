@@ -195,7 +195,7 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret256() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret256,
+                32,
             );
         },
     );
@@ -230,7 +230,7 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret384() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret384,
+                48,
             );
         },
     );
@@ -265,7 +265,7 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret521() {
                 label_vec,
                 key_type,
                 key_properties,
-                DdiKeyType::Secret521,
+                66,
             );
         },
     );
@@ -285,8 +285,7 @@ fn test_secret_kbkdf_helper(
     key_properties: DdiKeyProperties,
     session_id: u16,
 ) {
-    let (secret_key_id1, secret_key_id2) =
-        create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, 32);
 
     let label = {
         if let Some(label_vec) = label {
@@ -416,9 +415,9 @@ fn test_secret_kbkdf_aes_gcm_helper(
     label_vec: Vec<u8>,
     key_type: DdiKeyType,
     key_properties: DdiKeyProperties,
-    secret_key_type: DdiKeyType,
+    key_len: usize,
 ) {
-    let (secret_key_id1, secret_key_id2) = create_ecdh_secrets(session_id, dev, secret_key_type);
+    let (secret_key_id1, secret_key_id2) = import_generic_secrets(session_id, dev, key_len);
 
     let label = {
         let mut label_array = [0u8; 256];

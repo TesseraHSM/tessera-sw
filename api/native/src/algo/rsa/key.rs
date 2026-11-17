@@ -183,6 +183,16 @@ pub(crate) fn rsa_unwrap_key(
             )?;
             HANDLE_TABLE.alloc_handle(HandleType::HmacKey, Box::new(unwrapped_key))
         }
+        HsmKeyKind::GenericSecret => {
+            let mut unwrap_algo = HsmGenericSecretKeyRsaAesKeyUnwrapAlgo::new(hash_algo);
+            let unwrapped_key = HsmKeyManager::unwrap_key(
+                &mut unwrap_algo,
+                &unwrapping_key,
+                wrapped_key,
+                key_props,
+            )?;
+            HANDLE_TABLE.alloc_handle(HandleType::GenericSecretKey, Box::new(unwrapped_key))
+        }
         _ => return Err(TsraStatus::UnsupportedKeyKind),
     };
 

@@ -19,6 +19,9 @@ use std::path::PathBuf;
 use ddi_sock_server as _;
 use serial_test::serial;
 
+#[path = "../../generic_secret.rs"]
+mod generic_secret;
+
 const CLEANUP: &str = "true";
 
 /// Build an absolute path to a testfiles subdirectory anchored at the
@@ -262,7 +265,33 @@ fn test_hkdf_key_derivation() {
 #[test]
 #[serial]
 fn test_kbkdf_key_derivation() {
-    let curves = vec!["256".to_string(), "384".to_string(), "521".to_string()];
+    let initialized = std::process::Command::new("/bin/bash")
+        .args([
+            "-ec",
+            "source \"$1\"; \"$OPENSSL_BIN\" dgst -propquery \"$PROPQUERY\" -sha256 /dev/null",
+            "kbkdf-fixture",
+            &search_path("testfiles/env.sh"),
+        ])
+        .status()
+        .expect("Initialize provider for generic-secret fixture");
+    assert!(
+        initialized.success(),
+        "Provider fixture initialization failed"
+    );
+    let key_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("Workspace root")
+        .join("target/test-keymat/cli");
+    let credential = |name: &str, file: &str| {
+        std::env::var(name).unwrap_or_else(|_| {
+            let bytes = std::fs::read(key_dir.join(file)).expect("Read fixture credential");
+            assert_eq!(bytes.len(), 16, "Fixture credential length");
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        })
+    };
+    let id = credential("TSRA_CREDENTIALS_ID", "credentials_id.bin");
+    let pin = credential("TSRA_CREDENTIALS_PIN", "credentials_pin.bin");
     let dgst_algos = vec![
         "1".to_string(),
         "256".to_string(),
@@ -271,7 +300,9 @@ fn test_kbkdf_key_derivation() {
     ];
     let test_withcontext = [true, false];
 
-    for curve in &curves {
+    for key_bytes in [20, 32, 48, 64] {
+        let fixture = key_dir.join(format!("generic_secret_{key_bytes}.bin"));
+        generic_secret::write_fixture(&id, &pin, key_bytes, &fixture);
         for dgst in &dgst_algos {
             for withcontext_bool in test_withcontext {
                 lit::run::tests(lit::event_handler::Default::default(), |config| {
@@ -280,7 +311,10 @@ fn test_kbkdf_key_derivation() {
                     config
                         .constants
                         .insert("bash".to_owned(), "/bin/bash".to_string());
-                    config.constants.insert("curve".to_owned(), curve.clone());
+                    config.constants.insert(
+                        "ikm".to_owned(),
+                        fixture.to_str().expect("Fixture path").to_owned(),
+                    );
                     config.constants.insert("dgst".to_owned(), dgst.clone());
                     config
                         .constants
@@ -292,6 +326,7 @@ fn test_kbkdf_key_derivation() {
                 .expect("Lit test failed");
             }
         }
+        std::fs::remove_file(fixture).expect("Remove generic-secret fixture");
     }
 }
 

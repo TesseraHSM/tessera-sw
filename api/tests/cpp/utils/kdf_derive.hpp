@@ -75,7 +75,14 @@ void build_kbkdf_counter_algo(
     tsra_buffer *context
 );
 
-void run_kbkdf_counter_matrix_for_curve(tsra_handle session, tsra_ecc_curve curve);
+void import_generic_secrets(
+    tsra_handle session,
+    size_t key_bytes,
+    auto_key &secret_a,
+    auto_key &secret_b
+);
+
+void run_kbkdf_counter_matrix_for_key_len(tsra_handle session, size_t key_bytes);
 
 void kbkdf_derive_fails_common(
     tsra_handle session,

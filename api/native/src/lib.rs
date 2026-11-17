@@ -152,6 +152,7 @@ impl TryFrom<u32> for TsraKeyKind {
             10 => Ok(TsraKeyKind::AesGcm),
             11 => Ok(TsraKeyKind::Sealing),
             12 => Ok(TsraKeyKind::RsaCrt),
+            13 => Ok(TsraKeyKind::GenericSecret),
             _ => Err(TsraStatus::InvalidArgument),
         }
     }
@@ -458,6 +459,16 @@ impl TryFrom<TsraHandle> for api::HsmSharedSecretKey {
     fn try_from(value: TsraHandle) -> Result<api::HsmSharedSecretKey, Self::Error> {
         let key: &api::HsmSharedSecretKey =
             HANDLE_TABLE.as_ref(value, HandleType::SharedSecretKey)?;
+        Ok(key.clone())
+    }
+}
+
+impl TryFrom<TsraHandle> for api::HsmGenericSecretKey {
+    type Error = TsraStatus;
+
+    fn try_from(value: TsraHandle) -> Result<Self, Self::Error> {
+        let key: &api::HsmGenericSecretKey =
+            HANDLE_TABLE.as_ref(value, HandleType::GenericSecretKey)?;
         Ok(key.clone())
     }
 }

@@ -474,6 +474,10 @@ enum tsra_key_kind
      RSA CRT
      */
     TSRA_KEY_KIND_RSA_CRT = 12,
+    /*
+     Imported generic secret used as a KBKDF base key.
+     */
+    TSRA_KEY_KIND_GENERIC_SECRET = 13,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_key_kind;

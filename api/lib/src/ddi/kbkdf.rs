@@ -5,7 +5,7 @@
 //!
 //! This module constructs and dispatches low-level DDI KBKDF requests. It is used by the
 //! higher-level KBKDF algorithm implementation to derive an HSM-managed symmetric key from an
-//! HSM-managed shared secret using the SP 800-108 Counter Mode KDF with an HMAC PRF.
+//! imported generic secret using the SP 800-108 Counter Mode KDF with an HMAC PRF.
 
 use resiliency_macro::resiliency_key_op;
 
@@ -13,7 +13,7 @@ use super::*;
 
 /// Derives a new key using KBKDF (SP 800-108 Counter Mode) at the DDI layer.
 ///
-/// This function builds a `DdiKbkdfCounterHmacDerive` request using the provided shared secret
+/// This function builds a `DdiKbkdfCounterHmacDerive` request using the provided generic secret
 /// key handle as input keying material, and the KBKDF parameters (`hash_algo`, optional `label`,
 /// optional `context`).
 ///
@@ -22,7 +22,7 @@ use super::*;
 ///
 /// # Arguments
 ///
-/// * `shared_secret` - Base key (IKM) for KBKDF; also provides the session ID and API revision.
+/// * `generic_secret` - Imported base key for KBKDF; also provides the session ID and API revision.
 /// * `hash_algo` - Hash algorithm used by the HMAC PRF.
 /// * `label` - Optional KBKDF label. If `None`, the label input is omitted.
 /// * `context` - Optional KBKDF context string. If `None`, the context input is omitted.
@@ -45,24 +45,24 @@ use super::*;
 ///
 /// Note: the underlying PRF requires at least one of `label` / `context` to be present; deriving
 /// with both absent is rejected by the device.
-#[resiliency_key_op(key = "shared_secret")]
+#[resiliency_key_op(key = "generic_secret")]
 pub(crate) fn kbkdf_derive(
-    shared_secret: &HsmSharedSecretKey,
+    generic_secret: &HsmGenericSecretKey,
     hash_algo: HsmHashAlgo,
     label: Option<&[u8]>,
     context: Option<&[u8]>,
     derived_key_props: HsmKeyProps,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
-    if shared_secret.session().is_ex() {
-        kbkdf_derive_tbor(shared_secret, hash_algo, label, context, derived_key_props)
+    if generic_secret.session().is_ex() {
+        kbkdf_derive_tbor(generic_secret, hash_algo, label, context, derived_key_props)
     } else {
-        kbkdf_derive_mbor(shared_secret, hash_algo, label, context, derived_key_props)
+        kbkdf_derive_mbor(generic_secret, hash_algo, label, context, derived_key_props)
     }
 }
 
-/// Executes KBKDF using a legacy resident shared-secret key.
+/// Executes KBKDF using a legacy resident generic-secret key.
 fn kbkdf_derive_mbor(
-    shared_secret: &HsmSharedSecretKey,
+    generic_secret: &HsmGenericSecretKey,
     hash_algo: HsmHashAlgo,
     label: Option<&[u8]>,
     context: Option<&[u8]>,
@@ -73,9 +73,9 @@ fn kbkdf_derive_mbor(
     derived_key_props.ensure_scope_supported(false)?;
     // Build the DDI KBKDF counter-mode derive key command request.
     let req = DdiKbkdfCounterHmacDeriveCmdReq {
-        hdr: build_ddi_req_hdr_sess(DdiOp::KbkdfCounterHmacDerive, &shared_secret.session()),
+        hdr: build_ddi_req_hdr_sess(DdiOp::KbkdfCounterHmacDerive, &generic_secret.session()),
         data: DdiKbkdfCounterHmacDeriveReq {
-            key_id: ddi::get_key_id(shared_secret.handle())?,
+            key_id: ddi::get_key_id(generic_secret.handle())?,
             hash_algorithm: hash_algo.into(),
             label: label
                 .map(|label| MborByteArray::from_slice(label).map_hsm_err(HsmError::InternalError))
@@ -91,9 +91,9 @@ fn kbkdf_derive_mbor(
         ext: None,
     };
     let resp =
-        shared_secret.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))?;
+        generic_secret.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))?;
 
-    let session = shared_secret.session();
+    let session = generic_secret.session();
     let key_id = HsmKeyIdGuard::new(
         &session,
         to_key_handle(resp.data.key_id, resp.data.bulk_key_id),
@@ -110,7 +110,7 @@ fn kbkdf_derive_mbor(
 
 /// Placeholder for KBKDF, which has no command in the current TBOR types.
 fn kbkdf_derive_tbor(
-    _shared_secret: &HsmSharedSecretKey,
+    _generic_secret: &HsmGenericSecretKey,
     _hash_algo: HsmHashAlgo,
     _label: Option<&[u8]>,
     _context: Option<&[u8]>,

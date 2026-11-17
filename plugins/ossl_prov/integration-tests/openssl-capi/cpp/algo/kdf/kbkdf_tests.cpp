@@ -4,9 +4,9 @@
 /// @file kbkdf_tests.cpp
 ///
 /// KBKDF (SP 800-108 Counter Mode Key-Based Key Derivation Function) tests via
-/// the OpenSSL EVP KDF API.  The tsra provider's KBKDF implementation takes a
-/// masked key blob as IKM (key-derivation key), which is obtained from an ECDH
-/// derivation.  The derived output is also a masked key blob.
+/// the OpenSSL EVP KDF API.  The tsra provider's KBKDF implementation takes an
+/// imported generic-secret masked blob as IKM (key-derivation key).
+/// The derived output is also a masked key blob.
 ///
 /// The provider maps the standard OSSL_KDF_PARAM_SALT/INFO parameters to the
 /// SP 800-108 Label/Context inputs; at least one of them must be supplied.
@@ -37,16 +37,24 @@ class kbkdf : public ::testing::Test
     ProviderCtx prov_;
 };
 
+static std::string generic_secret_file()
+{
+    const char *path = std::getenv("TSRA_TEST_GENERIC_SECRET");
+    if (path == nullptr)
+    {
+        throw std::runtime_error("TSRA_TEST_GENERIC_SECRET is not set");
+    }
+    return path;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Derive an AES-256 key from an ECDH shared secret via KBKDF (counter mode).
+/// Derive an AES-256 key from an imported generic secret via KBKDF.
 TEST_F(kbkdf, derive_aes256)
 {
-    std::string ecdh_file = derive_masked_key_file(prov_.libctx());
-    ASSERT_FALSE(ecdh_file.empty()) << "ECDH derivation failed";
-    TempFileGuard ecdh_guard(ecdh_file.c_str());
+    std::string generic_file = generic_secret_file();
 
     char output_path[] = "/tmp/tsra_test_kbkdf_out_XXXXXX";
     int fd = mkstemp(output_path);
@@ -67,14 +75,13 @@ TEST_F(kbkdf, derive_aes256)
     uint32_t derived_bits = 256;
     // SP 800-108 Label (mapped from OSSL_KDF_PARAM_SALT). At least one of
     // Label/Context is required.
-    unsigned char label[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                             0x08, 0x09, 0x0a, 0x0b, 0x0c};
+    unsigned char label[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                              0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c };
 
     OSSL_PARAM params[] = {
         OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
         OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_MODE, mode, 0),
-        OSSL_PARAM_utf8_string("tsra.ikm_file",
-                               const_cast<char *>(ecdh_file.c_str()), 0),
+        OSSL_PARAM_utf8_string("tsra.ikm_file", const_cast<char *>(generic_file.c_str()), 0),
         OSSL_PARAM_utf8_string("output_file", output_path, 0),
         OSSL_PARAM_utf8_string("derived_key_type", derived_type, 0),
         OSSL_PARAM_uint32("derived_key_bits", &derived_bits),
@@ -83,8 +90,7 @@ TEST_F(kbkdf, derive_aes256)
     };
 
     unsigned char dummy[4096];
-    ASSERT_EQ(EVP_KDF_derive(kctx.get(), dummy, sizeof(dummy), params), 1)
-        << "KBKDF derive failed";
+    ASSERT_EQ(EVP_KDF_derive(kctx.get(), dummy, sizeof(dummy), params), 1) << "KBKDF derive failed";
 
     struct stat st = {};
     ASSERT_EQ(::stat(output_path, &st), 0) << "Output file not created";
@@ -94,9 +100,7 @@ TEST_F(kbkdf, derive_aes256)
 /// Derive with explicit label and context parameters.
 TEST_F(kbkdf, derive_with_label_and_context)
 {
-    std::string ecdh_file = derive_masked_key_file(prov_.libctx());
-    ASSERT_FALSE(ecdh_file.empty());
-    TempFileGuard ecdh_guard(ecdh_file.c_str());
+    std::string generic_file = generic_secret_file();
 
     char output_path[] = "/tmp/tsra_test_kbkdf_lc_XXXXXX";
     int fd = mkstemp(output_path);
@@ -114,15 +118,13 @@ TEST_F(kbkdf, derive_with_label_and_context)
     char derived_type[] = "aes";
     uint32_t derived_bits = 256;
     // Label (mapped from salt) and Context (mapped from info).
-    unsigned char label[] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                             0x08, 0x09, 0x0a, 0x0b, 0x0c};
-    unsigned char context[] = {0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
-                               0xf8, 0xf9};
+    unsigned char label[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                              0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c };
+    unsigned char context[] = { 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9 };
 
     OSSL_PARAM params[] = {
         OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
-        OSSL_PARAM_utf8_string("tsra.ikm_file",
-                               const_cast<char *>(ecdh_file.c_str()), 0),
+        OSSL_PARAM_utf8_string("tsra.ikm_file", const_cast<char *>(generic_file.c_str()), 0),
         OSSL_PARAM_utf8_string("output_file", output_path, 0),
         OSSL_PARAM_utf8_string("derived_key_type", derived_type, 0),
         OSSL_PARAM_uint32("derived_key_bits", &derived_bits),
@@ -143,17 +145,15 @@ TEST_F(kbkdf, derive_with_label_and_context)
 /// Different label values produce different derived keys.
 TEST_F(kbkdf, different_label_different_output)
 {
-    std::string ecdh_file = derive_masked_key_file(prov_.libctx());
-    ASSERT_FALSE(ecdh_file.empty());
-    TempFileGuard ecdh_guard(ecdh_file.c_str());
+    std::string generic_file = generic_secret_file();
 
-    auto derive_to_file = [&](unsigned char *label, size_t label_len,
-                              const char *path) -> bool
-    {
+    auto derive_to_file = [&](unsigned char *label, size_t label_len, const char *path) -> bool {
         EvpKdfPtr kdf(EVP_KDF_fetch(prov_.libctx(), "KBKDF", ProviderCtx::propquery()));
-        if (!kdf) return false;
+        if (!kdf)
+            return false;
         EvpKdfCtxPtr kctx(EVP_KDF_CTX_new(kdf.get()));
-        if (!kctx) return false;
+        if (!kctx)
+            return false;
 
         char digest[] = "SHA256";
         char derived_type[] = "aes";
@@ -161,8 +161,7 @@ TEST_F(kbkdf, different_label_different_output)
 
         OSSL_PARAM params[] = {
             OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
-            OSSL_PARAM_utf8_string("tsra.ikm_file",
-                                   const_cast<char *>(ecdh_file.c_str()), 0),
+            OSSL_PARAM_utf8_string("tsra.ikm_file", const_cast<char *>(generic_file.c_str()), 0),
             OSSL_PARAM_utf8_string("output_file", const_cast<char *>(path), 0),
             OSSL_PARAM_utf8_string("derived_key_type", derived_type, 0),
             OSSL_PARAM_uint32("derived_key_bits", &derived_bits),
@@ -187,17 +186,17 @@ TEST_F(kbkdf, different_label_different_output)
     TempFileGuard guard_a(path_a);
     TempFileGuard guard_b(path_b);
 
-    unsigned char label_a[] = {0x01, 0x02, 0x03, 0x04};
-    unsigned char label_b[] = {0x05, 0x06, 0x07, 0x08};
+    unsigned char label_a[] = { 0x01, 0x02, 0x03, 0x04 };
+    unsigned char label_b[] = { 0x05, 0x06, 0x07, 0x08 };
 
     ASSERT_TRUE(derive_to_file(label_a, sizeof(label_a), path_a));
     ASSERT_TRUE(derive_to_file(label_b, sizeof(label_b), path_b));
 
     // Read both files and compare
-    auto read_file = [](const char *path) -> std::vector<unsigned char>
-    {
+    auto read_file = [](const char *path) -> std::vector<unsigned char> {
         FILE *f = std::fopen(path, "rb");
-        if (!f) return {};
+        if (!f)
+            return {};
         std::fseek(f, 0, SEEK_END);
         long sz = std::ftell(f);
         std::fseek(f, 0, SEEK_SET);
@@ -218,9 +217,7 @@ TEST_F(kbkdf, different_label_different_output)
 /// least one of them, and the provider rejects the request before the HSM call.
 TEST_F(kbkdf, missing_label_and_context_fails)
 {
-    std::string ecdh_file = derive_masked_key_file(prov_.libctx());
-    ASSERT_FALSE(ecdh_file.empty());
-    TempFileGuard ecdh_guard(ecdh_file.c_str());
+    std::string generic_file = generic_secret_file();
 
     EvpKdfPtr kdf(EVP_KDF_fetch(prov_.libctx(), "KBKDF", ProviderCtx::propquery()));
     ASSERT_NE(kdf, nullptr);
@@ -233,8 +230,7 @@ TEST_F(kbkdf, missing_label_and_context_fails)
 
     OSSL_PARAM params[] = {
         OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
-        OSSL_PARAM_utf8_string("tsra.ikm_file",
-                               const_cast<char *>(ecdh_file.c_str()), 0),
+        OSSL_PARAM_utf8_string("tsra.ikm_file", const_cast<char *>(generic_file.c_str()), 0),
         OSSL_PARAM_utf8_string("derived_key_type", derived_type, 0),
         OSSL_PARAM_uint32("derived_key_bits", &derived_bits),
         OSSL_PARAM_END,
@@ -243,4 +239,33 @@ TEST_F(kbkdf, missing_label_and_context_fails)
     unsigned char dummy[4096];
     EXPECT_EQ(EVP_KDF_derive(kctx.get(), dummy, sizeof(dummy), params), 0)
         << "KBKDF derive without label or context should fail";
+}
+
+TEST_F(kbkdf, rejects_ecdh_shared_secret)
+{
+    std::string ecdh_file = derive_masked_key_file(prov_.libctx());
+    ASSERT_FALSE(ecdh_file.empty()) << "ECDH derivation failed";
+    TempFileGuard ecdh_guard(ecdh_file.c_str());
+
+    EvpKdfPtr kdf(EVP_KDF_fetch(prov_.libctx(), "KBKDF", ProviderCtx::propquery()));
+    ASSERT_NE(kdf, nullptr);
+    EvpKdfCtxPtr kctx(EVP_KDF_CTX_new(kdf.get()));
+    ASSERT_NE(kctx, nullptr);
+
+    char digest[] = "SHA256";
+    char derived_type[] = "aes";
+    uint32_t derived_bits = 256;
+    unsigned char label[] = { 0x01, 0x02, 0x03, 0x04 };
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
+        OSSL_PARAM_utf8_string("tsra.ikm_file", const_cast<char *>(ecdh_file.c_str()), 0),
+        OSSL_PARAM_utf8_string("derived_key_type", derived_type, 0),
+        OSSL_PARAM_uint32("derived_key_bits", &derived_bits),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_SALT, label, sizeof(label)),
+        OSSL_PARAM_END,
+    };
+
+    unsigned char output[4096];
+    EXPECT_EQ(EVP_KDF_derive(kctx.get(), output, sizeof(output), params), 0)
+        << "KBKDF must reject an ECDH shared secret";
 }

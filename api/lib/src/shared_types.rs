@@ -147,6 +147,9 @@ pub enum HsmKeyKind {
 
     /// RSA CRT
     RsaCrt = 12,
+
+    /// Imported generic secret used as a KBKDF base key.
+    GenericSecret = 13,
 }
 
 /// Elliptic Curve Cryptography (ECC) curve identifier.

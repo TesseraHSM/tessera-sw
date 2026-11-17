@@ -31,11 +31,16 @@ impl HsmHmacKey {
     /// - `kind` must be one of [`HsmKeyKind::HmacSha256`], [`HsmKeyKind::HmacSha384`],
     ///   or [`HsmKeyKind::HmacSha512`]
     /// - `ecc_curve` must be `None`
-    /// - `bits` must be non-zero
+    /// - `bits` must match the selected HMAC kind (256, 384, or 512)
+    /// - both `SIGN` and `VERIFY` must be set
     /// - usage flags must be limited to `SIGN | VERIFY` (and the global `SESSION` flag
     ///   permitted by [`HsmKeyProps::check_supported_flags`])
     pub fn validate_props(props: &HsmKeyProps) -> HsmResult<()> {
         let supported_flags = HsmKeyFlags::SIGN | HsmKeyFlags::VERIFY;
+
+        if !props.can_sign() || !props.can_verify() {
+            Err(HsmError::InvalidKeyProps)?;
+        }
 
         // Kind/class: ensure we're validating a secret HMAC key.
         if props.class() != HsmKeyClass::Secret {
@@ -140,9 +145,6 @@ impl HsmKeyUnwrapOp for HsmHmacKeyRsaAesKeyUnwrapAlgo {
         key_props: HsmKeyProps,
     ) -> Result<Self::Key, Self::Error> {
         HsmHmacKey::validate_props(&key_props)?;
-        if !key_props.can_sign() || !key_props.can_verify() {
-            return Err(HsmError::InvalidKeyProps);
-        }
 
         // Ensure the unwrapping key supports the required session type for RSA-AES unwrapping.
         if !unwrapping_key.can_unwrap() || !unwrapping_key.session().is_ex() {

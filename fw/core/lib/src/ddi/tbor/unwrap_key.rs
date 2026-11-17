@@ -73,6 +73,7 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
         KeyClass::HmacSha384 => Ok(DecodeKeyClass::HmacSha384),
         KeyClass::HmacSha512 => Ok(DecodeKeyClass::HmacSha512),
         KeyClass::AesXts512 => Ok(DecodeKeyClass::AesXts512),
+        KeyClass::GenericSecret => Ok(DecodeKeyClass::GenericSecret),
         _ => Err(HsmError::UnsupportedCmd),
     }
 }
@@ -127,7 +128,7 @@ fn attrs_for_class(
         }
         // ECC private key: sign / verify or derive (ECDH).
         KeyClass::Ecc if sign_verify => base.with_sign(true).with_verify(true),
-        KeyClass::Ecc if derive => base.with_derive(true),
+        KeyClass::Ecc | KeyClass::GenericSecret if derive => base.with_derive(true),
         // HMAC key: sign / verify (MAC compute / verify).
         KeyClass::HmacSha256 | KeyClass::HmacSha384 | KeyClass::HmacSha512 if sign_verify => {
             base.with_sign(true).with_verify(true)
@@ -140,7 +141,8 @@ fn attrs_for_class(
         | KeyClass::Ecc
         | KeyClass::HmacSha256
         | KeyClass::HmacSha384
-        | KeyClass::HmacSha512 => return Err(HsmError::InvalidPermissions),
+        | KeyClass::HmacSha512
+        | KeyClass::GenericSecret => return Err(HsmError::InvalidPermissions),
         // Unrecognized class discriminant.
         _ => return Err(HsmError::UnsupportedCmd),
     };

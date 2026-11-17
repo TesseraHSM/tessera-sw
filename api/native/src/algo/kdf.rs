@@ -250,9 +250,9 @@ pub(crate) fn kbkdf_counter_derive_key(
         Some(context_slice)
     };
 
-    // Get the base secret key
-    let base_secret: &HsmSharedSecretKey =
-        HANDLE_TABLE.as_ref(base_key_handle, HandleType::SharedSecretKey)?;
+    // Get the imported generic-secret key.
+    let base_secret: &HsmGenericSecretKey =
+        HANDLE_TABLE.as_ref(base_key_handle, HandleType::GenericSecretKey)?;
 
     // Create KBKDF algorithm
     let mut kbkdf_algo = HsmKbkdfAlgo::new(hash_algo, label, context)?;

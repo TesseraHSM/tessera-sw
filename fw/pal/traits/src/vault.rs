@@ -81,6 +81,7 @@ use super::*;
 /// | 58–60 | ML-KEM private keys | `MlKem512Private` .. `MlKem1024Private` |
 /// | 61–63 | ML-KEM public keys | `MlKem512Public` .. `MlKem1024Public` |
 /// | 64 | AES-256-XTS key (`K1 ‖ K2`) | `AesXts512` |
+/// | 65 | Imported generic secret for KBKDF | `GenericSecret` |
 #[repr(u8)]
 #[open_enum]
 #[derive(Clone, Copy, Debug)]
@@ -320,7 +321,15 @@ pub enum HsmVaultKeyKind {
 
     // AES-256-XTS key, `K1 || K2` (TBOR; distinct from the MBOR bulk kind)
     AesXts512 = 64,
+
+    /// Imported generic secret, used only for KBKDF.
+    GenericSecret = 65,
 }
+
+/// Minimum generic-secret length in bytes (TSRA policy).
+pub const HSM_GENERIC_SECRET_MIN_LEN: usize = 16;
+/// Maximum generic-secret length in bytes (TSRA policy).
+pub const HSM_GENERIC_SECRET_MAX_LEN: usize = 128;
 
 /// Key scope: the lifecycle / visibility domain a vault key belongs
 /// to.

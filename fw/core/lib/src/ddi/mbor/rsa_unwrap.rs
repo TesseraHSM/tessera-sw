@@ -179,6 +179,11 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     // (and, as always, never set `internal`).  AES, RSA (plain / CRT), and
     // ECC are supported; the AES bulk variants are handled above.
     let (key_class, import_attrs) = match body.wrapped_blob_key_class {
+        DdiKeyClass::GenericSecret => {
+            let attrs = super::key_attrs::for_generic_secret(&body.key_properties.key_metadata)?;
+            super::key_attrs::check_session_key_tag(attrs, body.key_tag)?;
+            (KeyClass::GenericSecret, attrs)
+        }
         DdiKeyClass::Aes => {
             let attrs = super::key_attrs::for_aes(&body.key_properties.key_metadata, false)?;
             super::key_attrs::check_session_key_tag(attrs, body.key_tag)?;
@@ -338,6 +343,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
 /// can produce; an unexpected kind here is an internal invariant break.
 fn ddi_key_type(kind: HsmVaultKeyKind) -> HsmResult<DdiKeyType> {
     match kind {
+        HsmVaultKeyKind::GenericSecret => Ok(DdiKeyType::GenericSecret),
         HsmVaultKeyKind::Aes128 => Ok(DdiKeyType::Aes128),
         HsmVaultKeyKind::Aes192 => Ok(DdiKeyType::Aes192),
         HsmVaultKeyKind::Aes256 => Ok(DdiKeyType::Aes256),

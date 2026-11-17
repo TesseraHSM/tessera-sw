@@ -196,6 +196,7 @@ fn rsa_aes_unwrap_key_tbor(
         (HsmKeyKind::HmacSha256, 256) => (KEY_CLASS_HMAC_SHA256, KEY_KIND_VAR_LEN_HMAC_SHA256),
         (HsmKeyKind::HmacSha384, 384) => (KEY_CLASS_HMAC_SHA384, KEY_KIND_VAR_LEN_HMAC_SHA384),
         (HsmKeyKind::HmacSha512, 512) => (KEY_CLASS_HMAC_SHA512, KEY_KIND_VAR_LEN_HMAC_SHA512),
+        (HsmKeyKind::GenericSecret, _) => (KEY_CLASS_GENERIC_SECRET, KEY_KIND_GENERIC_SECRET),
         _ => return Err(HsmError::InvalidKeyProps),
     };
     let unwrapping_modulus_len = unwrapping_key.size();
@@ -665,6 +666,7 @@ fn tbor_unwrap_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
             Ok(KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
         }
         HsmKeyKind::Ecc if props.can_derive() && !props.can_sign() => Ok(KEY_USAGE_DERIVE),
+        HsmKeyKind::GenericSecret if props.can_derive() => Ok(KEY_USAGE_DERIVE),
         HsmKeyKind::HmacSha256 | HsmKeyKind::HmacSha384 | HsmKeyKind::HmacSha512
             if props.can_sign() && props.can_verify() =>
         {
@@ -743,6 +745,7 @@ impl TryFrom<HsmKeyKind> for DdiKeyClass {
             HsmKeyKind::Rsa => Ok(DdiKeyClass::Rsa),
             HsmKeyKind::RsaCrt => Ok(DdiKeyClass::RsaCrt),
             HsmKeyKind::Ecc => Ok(DdiKeyClass::Ecc),
+            HsmKeyKind::GenericSecret => Ok(DdiKeyClass::GenericSecret),
             _ => Err(HsmError::UnsupportedKeyKind),
         }
     }

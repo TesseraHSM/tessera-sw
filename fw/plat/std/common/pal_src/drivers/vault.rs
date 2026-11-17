@@ -134,7 +134,8 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         // Variable-length HMAC — size depends on actual key.
         HsmVaultKeyKind::VarLenHmacSha256
         | HsmVaultKeyKind::VarLenHmacSha384
-        | HsmVaultKeyKind::VarLenHmacSha512 => return None,
+        | HsmVaultKeyKind::VarLenHmacSha512
+        | HsmVaultKeyKind::GenericSecret => return None,
         HsmVaultKeyKind::Free => return None,
         _ => return None,
     })
@@ -168,6 +169,7 @@ fn fw_storage_cost(kind: HsmVaultKeyKind, actual_len: usize) -> Option<usize> {
             HsmVaultKeyKind::VarLenHmacSha256
                 | HsmVaultKeyKind::VarLenHmacSha384
                 | HsmVaultKeyKind::VarLenHmacSha512
+                | HsmVaultKeyKind::GenericSecret
                 | HsmVaultKeyKind::SessionEx
         ) =>
         {
@@ -261,6 +263,13 @@ impl KeyVault {
             return Err(HsmError::InvalidArg);
         }
 
+        if kind == HsmVaultKeyKind::GenericSecret
+            && !(tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MIN_LEN
+                ..=tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MAX_LEN)
+                .contains(&key.len())
+        {
+            return Err(HsmError::InvalidKeyLength);
+        }
         let cost = fw_storage_cost(kind, key.len()).ok_or(HsmError::InvalidKeyType)?;
 
         for (table_idx, table) in self.tables.iter_mut().enumerate() {
@@ -360,6 +369,9 @@ impl KeyVault {
 
     /// Return the firmware raw key size for a given kind.
     pub fn key_len(kind: HsmVaultKeyKind) -> HsmResult<u16> {
+        if kind == HsmVaultKeyKind::GenericSecret {
+            return Ok(tsra_fw_hsm_pal_traits::HSM_GENERIC_SECRET_MAX_LEN as u16);
+        }
         fw_key_size(kind)
             .map(|s| s as u16)
             .ok_or(HsmError::InvalidKeyType)

@@ -192,7 +192,7 @@ TEST_F(tsra_hkdf, hkdf_derive_aes_gcm_key_fails)
     });
 }
 
-/// Test that deriving a key with SharedSecret kind fails with InvalidArgument
+/// Test that deriving a key with SharedSecret kind fails with InvalidKeyProps
 TEST_F(tsra_hkdf, hkdf_derive_unsupported_key_kind_fails)
 {
     part_list_.for_each_session([](tsra_handle session) {
@@ -206,7 +206,7 @@ TEST_F(tsra_hkdf, hkdf_derive_unsupported_key_kind_fails)
             session,
             TSRA_ALGO_ID_HMAC_SHA256,
             props,
-            TSRA_STATUS_INVALID_ARGUMENT
+            TSRA_STATUS_INVALID_KEY_PROPS
         );
     });
 }
@@ -401,7 +401,7 @@ TEST_F(tsra_hkdf, hkdf_rejects_invalid_aes_key_size)
             session,
             TSRA_ALGO_ID_HMAC_SHA256,
             props,
-            TSRA_STATUS_INVALID_ARGUMENT
+            TSRA_STATUS_INVALID_KEY_PROPS
         );
     });
 }
@@ -456,7 +456,7 @@ TEST_F(tsra_hkdf, hkdf_rejects_too_small_aes_key_size)
             session,
             TSRA_ALGO_ID_HMAC_SHA256,
             props,
-            TSRA_STATUS_INVALID_ARGUMENT
+            TSRA_STATUS_INVALID_KEY_PROPS
         );
     });
 }
@@ -628,7 +628,7 @@ TEST_F(tsra_hkdf, hkdf_rejects_oversized_aes_key_size)
             session,
             TSRA_ALGO_ID_HMAC_SHA256,
             props,
-            TSRA_STATUS_INVALID_ARGUMENT
+            TSRA_STATUS_INVALID_KEY_PROPS
         );
     });
 }

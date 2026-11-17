@@ -5,11 +5,9 @@
 //! ([`hkdf_derive`](super::hkdf_derive) and
 //! [`kbkdf_derive`](super::kbkdf_derive)).
 //!
-//! Both commands take the same shape — an input ECDH shared-secret
-//! key (the IKM / KDK), an output `key_type` + optional `key_length`,
-//! and target key properties — so the input validation and the
-//! output target resolution are factored here to keep the two
-//! handlers byte-for-byte consistent.
+//! HKDF takes an ECDH shared secret; KBKDF takes an imported generic secret.
+//! Both commands share output target resolution (`key_type` and optional
+//! `key_length`).
 //!
 //! ## Output storage policy
 //!
@@ -69,7 +67,7 @@ pub(crate) struct KdfTarget {
 
 /// Reject an input key whose kind is not an ECDH shared secret.
 ///
-/// HKDF / KBKDF derive from an ECDH shared secret (`Secret256` /
+/// HKDF derives from an ECDH shared secret (`Secret256` /
 /// `Secret384` / `Secret521`); any other vault kind is rejected with
 /// [`HsmError::InvalidKeyType`] — matching the reference firmware's
 /// `ecdh_key(..)` lookup and the sim's input-kind check.

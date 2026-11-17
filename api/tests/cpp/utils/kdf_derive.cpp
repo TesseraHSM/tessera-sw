@@ -4,7 +4,9 @@
 #include <string>
 
 #include "kdf_derive.hpp"
+#include "key_import.hpp"
 #include "rng.hpp"
+#include "rsa_keygen.hpp"
 
 const uint32_t AES_KEY_SIZES[] = { 128, 192, 256 };
 
@@ -421,16 +423,60 @@ void build_kbkdf_counter_algo(
     kbkdf_algo.len = sizeof(kbkdf_params);
 }
 
-// Runs the full KBKDF (SP 800-108 Counter Mode) matrix test for a given curve:
+void import_generic_secrets(
+    tsra_handle session,
+    size_t key_bytes,
+    auto_key &secret_a,
+    auto_key &secret_b
+)
+{
+    auto_key private_key;
+    auto_key public_key;
+    ASSERT_EQ(
+        generate_rsa_unwrapping_keypair(session, private_key.get_ptr(), public_key.get_ptr()),
+        TSRA_STATUS_SUCCESS
+    );
+    auto material = test_iv(key_bytes);
+    std::vector<uint8_t> wrapped;
+    ASSERT_EQ(rsa_aes_wrap_bytes(public_key.get(), material, 256, wrapped), TSRA_STATUS_SUCCESS);
+    tsra_buffer wrapped_buf = { .ptr = wrapped.data(),
+                                .len = static_cast<uint32_t>(wrapped.size()) };
+    tsra_algo_rsa_pkcs_oaep_params oaep = {};
+    oaep.hash_algo_id = TSRA_ALGO_ID_SHA256;
+    oaep.mgf1_hash_algo_id = TSRA_MGF1_ID_SHA256;
+    tsra_algo_rsa_aes_key_wrap_params params = {};
+    params.aes_key_bits = 256;
+    params.oaep_params = &oaep;
+    tsra_algo algo = { .id = TSRA_ALGO_ID_RSA_AES_KEY_WRAP,
+                       .params = &params,
+                       .len = sizeof(params) };
+    key_props props = {};
+    props.key_class = TSRA_KEY_CLASS_SECRET;
+    props.key_kind = TSRA_KEY_KIND_GENERIC_SECRET;
+    props.key_size_bits = static_cast<uint32_t>(key_bytes * 8);
+    props.derive = 1;
+    std::vector<tsra_key_prop> prop_vec;
+    auto prop_list = build_key_prop_list(props, prop_vec);
+    ASSERT_EQ(
+        tsra_key_unwrap(&algo, private_key.get(), &wrapped_buf, &prop_list, secret_a.get_ptr()),
+        TSRA_STATUS_SUCCESS
+    );
+    ASSERT_EQ(
+        tsra_key_unwrap(&algo, private_key.get(), &wrapped_buf, &prop_list, secret_b.get_ptr()),
+        TSRA_STATUS_SUCCESS
+    );
+}
+
+// Runs the full KBKDF (SP 800-108 Counter Mode) matrix test for an imported key length:
 //   1. Iterates hash algorithms × AES key sizes using a fixed label.
 //   2. Tests label+context derivation with SHA-256/AES-256.
 //   3. Tests mismatched context between parties (negative).
 // SP 800-108 requires at least one of label/context, so every positive case sets a label.
-void run_kbkdf_counter_matrix_for_curve(tsra_handle session, tsra_ecc_curve curve)
+void run_kbkdf_counter_matrix_for_key_len(tsra_handle session, size_t key_bytes)
 {
     auto_key shared_secret_a;
     auto_key shared_secret_b;
-    derive_ecdh_shared_secrets(session, curve, shared_secret_a, shared_secret_b);
+    import_generic_secrets(session, key_bytes, shared_secret_a, shared_secret_b);
 
     const char *label_str = "kbkdf-label";
     tsra_buffer label_buf = { .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(label_str)),
@@ -637,7 +683,7 @@ void kbkdf_derive_fails_common(
 {
     auto_key secret_a;
     auto_key secret_b;
-    derive_ecdh_shared_secrets(session, TSRA_ECC_CURVE_P256, secret_a, secret_b);
+    import_generic_secrets(session, 32, secret_a, secret_b);
 
     // These negative cases all fail during parameter/property validation, before the device
     // KDF call, so label/context need not be supplied here.
