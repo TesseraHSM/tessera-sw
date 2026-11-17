@@ -72,7 +72,8 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
     let sess_id = match helper_common_open_session(&mut dev) {
         Ok(id) => id,
         Err(err) => {
-            panic!("Could not open session: {}", err);
+            check_driver_error::<()>(Err(err));
+            return;
         }
     };
     let cmdreq_data = input.cmdreq_data;
@@ -93,7 +94,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 match key_resp {
                     Ok(resp) => resp.data.private_key_id,
                     Err(err) => {
-                        panic!("Could not generate ECC key pair: {}", err);
+                        check_driver_error::<()>(Err(err));
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -102,7 +105,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 match resp {
                     Ok(resp) => resp.data.key_id,
                     Err(err) => {
-                        panic!("Could not get unwrapping key: {}", err);
+                        check_driver_error::<()>(Err(err));
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -116,7 +121,8 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 ) {
                     Some(id) => id,
                     None => {
-                        panic!("Could not get rsa key ID");
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -128,7 +134,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 match resp {
                     Ok(resp) => resp.data.key_id,
                     Err(err) => {
-                        panic!("Could not generate AES key: {}", err);
+                        check_driver_error::<()>(Err(err));
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -144,7 +152,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 ) {
                     Ok(id) => id,
                     Err(err) => {
-                        panic!("Could not create HMAC key: {}", err);
+                        check_driver_error::<()>(Err(err));
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -153,7 +163,9 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 {
                     Ok(id) => id,
                     Err(err) => {
-                        panic!("Could not generate secret key: {}", err);
+                        check_driver_error::<()>(Err(err));
+                        cleanup_with_session(&dev, Some(sess_id));
+                        return;
                     }
                 }
             }
@@ -167,7 +179,7 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
     check_driver_error(resp);
 
     if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {
-        helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");
+        check_driver_error(helper_delete_key(&dev, Some(sess_id), rev, key_id));
     }
 
     cleanup_with_session(&dev, Some(sess_id));

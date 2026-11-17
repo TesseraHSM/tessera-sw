@@ -66,7 +66,9 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
         key_id = match key_resp {
             Ok(resp) => resp.data.key_id,
             Err(err) => {
-                panic!("Could not generate AES key: {}", err);
+                check_driver_error::<()>(Err(err));
+                cleanup_with_session(&dev, Some(sess_id));
+                return;
             }
         };
     }

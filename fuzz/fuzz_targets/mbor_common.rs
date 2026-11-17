@@ -249,12 +249,13 @@ pub fn fuzz_cmd_reqs(requests: Vec<TestDdiReqs>, seed: u64, valid_header: bool) 
     cleanup(&ddi, &path, None);
     helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
     let session = helper_common_open_session(&mut dev).expect("Failed to open session");
+    let mut buffers = RequestBuffers::default();
     for (index, request) in requests.into_iter().enumerate() {
         let seed = seed.wrapping_add(index as u64);
         let Ok(header) = request.header(Some(session), REV, seed, valid_header) else {
             continue;
         };
-        check_driver_error(request.execute(&dev, header, seed, valid_header));
+        check_driver_error(request.execute(&dev, header, seed, valid_header, &mut buffers));
     }
     // A fuzzed request may already have closed this session.
     check_driver_error(helper_close_session(&dev, Some(session), REV));
@@ -276,6 +277,7 @@ pub fn fuzz_app_ops(ops: Vec<TestAppOps>) {
     cleanup(&ddi, &path, None);
     helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
     let mut session = None;
+    let mut buffers = RequestBuffers::default();
     for op in ops {
         match op {
             TestAppOps::Open => match helper_common_open_session(&mut dev) {
@@ -289,7 +291,7 @@ pub fn fuzz_app_ops(ops: Vec<TestAppOps>) {
                 let Ok(header) = request.header(session, REV, seed, true) else {
                     continue;
                 };
-                check_driver_error(request.execute(&dev, header, seed, true));
+                check_driver_error(request.execute(&dev, header, seed, true, &mut buffers));
             }
         }
     }

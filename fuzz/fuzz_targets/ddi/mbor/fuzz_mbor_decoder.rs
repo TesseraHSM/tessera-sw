@@ -14,6 +14,7 @@ use tsra_ddi_mbor_types::DdiReqHdr;
 
 #[path = "../../mbor_common.rs"]
 mod common;
+use crate::common::RequestBuffers;
 use crate::common::get_rand_ddi_request;
 
 /// A struct containing several fields to adjust the manner in which this fuzz
@@ -62,8 +63,9 @@ fuzz_target!(|input: FuzzInput| -> Corpus {
     // otherwise, we'll create a valid request header and data object to send
     // through `decode_hdr()`. Randomly generate a DDI request object with the
     // header and the random seed
-    let encode_result: Result<Vec<u8>, String> =
-        get_rand_ddi_request(input.request_header, input.request_seed);
+    let mut buffers = RequestBuffers::default();
+    let encode_result =
+        get_rand_ddi_request(input.request_header, input.request_seed, &mut buffers);
 
     // it's possible that the randomly-generated request object didn't produce
     // an encoding error (one example: perhaps an invalid length was specified
@@ -74,8 +76,8 @@ fuzz_target!(|input: FuzzInput| -> Corpus {
 
     // otherwise, if encoding succeeded, extract the encoded data and pass it
     // through the decoder
-    let data: Vec<u8> = encode_result.unwrap();
-    let mut decoder = DdiDecoder::new(data.as_slice(), true);
+    let data = encode_result.unwrap();
+    let mut decoder = DdiDecoder::new(data, true);
     let _result_hdr = decoder.decode_hdr::<DdiReqHdr>();
     Corpus::Keep
 });

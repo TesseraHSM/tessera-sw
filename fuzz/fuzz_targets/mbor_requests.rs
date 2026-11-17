@@ -17,6 +17,22 @@ use tsra_ddi::DdiError;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_mbor_types::*;
 
+const REQUEST_BUFFER_SIZE: usize = 16 * 1024;
+
+pub struct RequestBuffers {
+    input: [u8; REQUEST_BUFFER_SIZE],
+    output: [u8; REQUEST_BUFFER_SIZE],
+}
+
+impl Default for RequestBuffers {
+    fn default() -> Self {
+        Self {
+            input: [0; REQUEST_BUFFER_SIZE],
+            output: [0; REQUEST_BUFFER_SIZE],
+        }
+    }
+}
+
 macro_rules! requests {
     ($($op:ident => ($request:ty, $command:ident)),+ $(,)?) => {
         #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -51,12 +67,16 @@ macro_rules! requests {
                 })
             }
 
-            pub fn encode(self, mut header: DdiReqHdr, seed: u64, valid_header: bool)
-                -> Result<Vec<u8>, String>
+            pub fn encode(
+                self,
+                mut header: DdiReqHdr,
+                seed: u64,
+                valid_header: bool,
+                buffers: &mut RequestBuffers,
+            ) -> Result<&[u8], String>
             {
-                let mut bytes = vec![0; 16384];
-                StdRng::seed_from_u64(seed).fill_bytes(&mut bytes);
-                let mut input = Unstructured::new(&bytes);
+                StdRng::seed_from_u64(seed).fill_bytes(&mut buffers.input);
+                let mut input = Unstructured::new(&buffers.input);
                 match self {
                     $(Self::$op => {
                         let data = <$request>::arbitrary(&mut input)
@@ -64,11 +84,9 @@ macro_rules! requests {
                         if valid_header {
                             header.op = DdiOp::$op;
                         }
-                        let mut out = vec![0; 16384];
-                        let len = DdiEncoder::encode_parts(header, data, &mut out, true)
+                        let len = DdiEncoder::encode_parts(header, data, &mut buffers.output, true)
                             .map_err(|err| format!("{err:?}"))?;
-                        out.truncate(len);
-                        Ok(out)
+                        Ok(&buffers.output[..len])
                     }),+
                 }
             }
@@ -79,10 +97,10 @@ macro_rules! requests {
                 mut header: DdiReqHdr,
                 seed: u64,
                 valid_header: bool,
+                buffers: &mut RequestBuffers,
             ) -> Result<(), DdiError> {
-                let mut bytes = vec![0; 16384];
-                StdRng::seed_from_u64(seed).fill_bytes(&mut bytes);
-                let mut input = Unstructured::new(&bytes);
+                StdRng::seed_from_u64(seed).fill_bytes(&mut buffers.input);
+                let mut input = Unstructured::new(&buffers.input);
                 match self {
                     $(Self::$op => {
                         let Ok(data) = <$request>::arbitrary(&mut input) else {
@@ -138,10 +156,14 @@ pub fn generate_random_testddireqs_list(count: usize, seed: u64) -> Vec<TestDdiR
         .collect()
 }
 
-pub fn get_rand_ddi_request(header: DdiReqHdr, seed: u64) -> Result<Vec<u8>, String> {
+pub fn get_rand_ddi_request(
+    header: DdiReqHdr,
+    seed: u64,
+    buffers: &mut RequestBuffers,
+) -> Result<&[u8], String> {
     let request = generate_random_testddireqs_list(1, seed)
         .into_iter()
         .next()
         .ok_or("Failed to select request")?;
-    request.encode(header, seed, false)
+    request.encode(header, seed, false, buffers)
 }
