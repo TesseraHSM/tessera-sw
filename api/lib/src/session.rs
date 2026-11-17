@@ -399,7 +399,7 @@ impl HsmSession {
     /// session.
     ///
     /// Verifies the mandatory `SdBackup` report against raw big-endian
-    /// `sender_pid_pub_key` (97-byte SEC1 uncompressed P-384), the actual recipient, envelope,
+    /// `sender_pid_pub_key` (DER SPKI; currently canonical P-384), the actual recipient, envelope,
     /// and target SD policy before Base-opening with `masked_sealing_key`.
     /// SAPOTA authenticates the source PID only when trusted-SA policy is set;
     /// otherwise verification establishes signature integrity, not SA identity.

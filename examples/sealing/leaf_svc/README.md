@@ -19,7 +19,7 @@ there is no success fallback or automatic conversion of old recovery files.
 software authority, using HPKE Base and its actual software report signer.
 This flow requires `require_trusted_sa_key=false`: its signature-only report
 asserts neither trusted authority identity nor hardware provenance. Trusted-SA
-leaf restore additionally authenticates the supplied SEC1 root PID through SAPOTA.
+leaf restore additionally authenticates the supplied DER-SPKI root PID through SAPOTA.
 
 This is an unauthenticated, unencrypted development transport. Keep both DDI and
 HTTP listeners on loopback in a trusted environment. Client and server must be

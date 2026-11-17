@@ -667,9 +667,16 @@ Recovers the security-domain masking key from `prev_sd_mk_backup`, and
 returns the refreshed device-local backups: the local partition-owner-key
 backup (280 bytes) and the security-domain masking-key backup (264 bytes).
 
-`sender_pid_pub_key` is the report signer's 97-byte SEC1 uncompressed P-384
-point `0x04 || X_be[48] || Y_be[48]`; other lengths and point prefixes
-are rejected. SATA sender authorization is removed. Under `require_trusted_sa_key`,
+`sender_pid_pub_key` carries the report signer's DER SubjectPublicKeyInfo.
+The current profile accepts only canonical uncompressed P-384 SPKI
+(120 bytes); bare SEC1 points, unsupported algorithms, noncanonical
+encodings, and trailing data are rejected. Its SHA-384 SPKI thumbprint
+must match the report's `source_pid_spki_thumbprint` (CBOR key 9).
+The `recipient_spki_thumbprint` (key 10) similarly binds the actual
+receiving encryption key, not the recipient's PID. Both thumbprints
+also appear in the SD envelope header; their size remains 48 bytes.
+
+SATA sender authorization is removed. Under `require_trusted_sa_key`,
 the source PID chains in `sender_evidence` must anchor to SAPOTA and match
 this supplied key. Otherwise chains may be empty and are ignored, but
 `sender_evidence.report` remains required. This establishes signature
@@ -730,7 +737,7 @@ struct tsra_sd_restore_remote_backup_params {
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
  | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (280 B)           |
- | sender_pid_pub_key | [tsra_buffer*](#tsra_buffer) | report signer PID, 97-byte SEC1 uncompressed P-384 point |
+ | sender_pid_pub_key | [tsra_buffer*](#tsra_buffer) | report signer DER SPKI; currently canonical P-384 (120 B) |
  | sender_evidence | [tsra_sd_evidence*](#tsra_sd_evidence) | mandatory `SdBackup` report; SAPOTA PID chains required only under trusted-SA policy |
  | src_remote_backup  | [tsra_buffer*](#tsra_buffer)           | remote backup to restore (322 B)                   |
  | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)           | previous security-domain masking-key backup (264 B)|

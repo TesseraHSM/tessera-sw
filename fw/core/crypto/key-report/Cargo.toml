@@ -15,6 +15,7 @@ test = false
 bitfield-struct.workspace = true
 minicbor = { features = ["derive"], workspace = true }
 tsra_fw_core_crypto_hpke.workspace = true
+tsra_fw_core_crypto_x509_chain.workspace = true
 tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 

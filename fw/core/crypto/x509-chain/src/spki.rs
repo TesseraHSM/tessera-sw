@@ -33,6 +33,20 @@ const P384_SPKI_PREFIX: [u8; 24] = [
 /// Byte length of a canonical P-384 SPKI.
 pub const P384_SPKI_LEN: usize = P384_SPKI_PREFIX.len() + P384_POINT_LEN;
 
+/// Extract big-endian `X || Y` from canonical uncompressed P-384 DER SPKI.
+///
+/// Rejects other algorithms, encodings, lengths, and trailing data. Curve
+/// membership must be validated during cryptographic use.
+pub fn p384_point_from_spki(spki: &[u8]) -> HsmResult<&[u8]> {
+    let point = spki
+        .strip_prefix(&P384_SPKI_PREFIX)
+        .ok_or(HsmError::InvalidArg)?;
+    if point.len() != P384_POINT_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(point)
+}
+
 /// Compute the thumbprint of a P-384 public key.
 ///
 /// # Parameters

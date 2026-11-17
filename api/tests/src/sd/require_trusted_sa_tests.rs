@@ -25,7 +25,7 @@ use crate::utils::sd_provision::finalized_backing_session_trusted;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 use crate::utils::sd_provision::provision_backing_trusted;
-use crate::utils::sd_provision::sec1_pub;
+use crate::utils::sd_provision::spki_pub;
 
 /// Happy path: under a `require_trusted_sa_key` policy, a create whose
 /// SAPOTA-anchored evidence report attests the same `RcvrPub` carried by
@@ -141,7 +141,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
             session2.sd_restore_remote_backup(
                 &policy,
                 &masked,
-                &sec1_pub(&pid_pub),
+                &spki_pub(&pid_pub),
                 ev,
                 &created.pok_remote_backup,
                 &created.sd_mk_backup,
@@ -176,7 +176,7 @@ fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
         provision_backing_trusted(&sata, &sapota, &pota, None, None);
 
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let wrong_sndr_pub = sec1_pub(&CaKey::generate().raw_pub());
+    let wrong_sndr_pub = spki_pub(&CaKey::generate().raw_pub());
     let evidence = build_receiver_evidence_trusted(&pid_pub, &rcvr_pub, &sata, &sapota, &report);
     let created = evidence
         .with_create_backup(|chain, ev| session.sd_create_remote_backup(&policy, chain, ev))
@@ -287,7 +287,7 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
         destination.sd_restore_remote_backup(
             policy,
             &source_key,
-            &sec1_pub(&authority_pid),
+            &spki_pub(&authority_pid),
             &evidence,
             &resealed.backup,
             &created.sd_mk_backup,

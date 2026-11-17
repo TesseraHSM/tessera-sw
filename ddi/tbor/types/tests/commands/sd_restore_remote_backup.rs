@@ -22,6 +22,9 @@
 //! * One-shot — restore onto an already-initialized SD → `SdAlreadyInitialized`.
 //! * Restore before finalize → `InvalidArg`.
 
+use tsra_crypto::EccCurve;
+use tsra_crypto::EccPublicKey;
+use tsra_crypto::ExportableKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
@@ -166,9 +169,14 @@ fn create_remote_backup_trusted(sata: &CaKey, sapota: &CaKey, pota: &CaKey) -> R
 
 /// Assemble a `SdRestoreRemoteBackup` request from a captured backup.
 fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRemoteBackupReq {
-    let mut sender_pid_pub_key = [0; 97];
-    sender_pid_pub_key[0] = 4;
-    sender_pid_pub_key[1..].copy_from_slice(&backup.pid_pub);
+    let sender_pid_pub_key = EccPublicKey::from_coordinates(
+        EccCurve::P384,
+        &backup.pid_pub[..48],
+        &backup.pid_pub[48..],
+    )
+    .expect("PID key")
+    .to_vec()
+    .expect("DER SPKI");
     TborSdRestoreRemoteBackupReq {
         session_id,
         masked_sealing_key: backup
@@ -333,7 +341,7 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
         policy: Vec::new(),
-        sender_pid_pub_key: [0u8; 97],
+        sender_pid_pub_key: vec![0u8; 120],
         sender_mfgr_cert_chain: Vec::new(),
         sender_owner_cert_chain: Vec::new(),
         sender_part_owner_cert_chain: Vec::new(),
@@ -416,11 +424,20 @@ fn sd_restore_remote_backup_signature_only_requires_bound_operation_report_and_a
     wrong_signer.sender_pid_pub_key.fill(0);
     assert!(ctx.tbor_oob(&wrong_signer, &backup.evidence.oob()).is_err());
 
-    for prefix in [0, 2, 3] {
+    for offset in [0, 1, 8, 17, 22, 23] {
         let mut req = valid.clone();
-        req.sender_pid_pub_key[0] = prefix;
+        req.sender_pid_pub_key[offset] ^= 1;
         ctx.expect_fw_reject_oob(&req, &backup.evidence.oob(), TborStatus::InvalidArg);
         assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    }
+    for public in [
+        backup.pid_pub.to_vec(),
+        [&[4][..], backup.pid_pub.as_slice()].concat(),
+        valid.sender_pid_pub_key[..119].to_vec(),
+    ] {
+        let mut req = valid.clone();
+        req.sender_pid_pub_key = public;
+        ctx.expect_fw_reject_oob(&req, &backup.evidence.oob(), TborStatus::InvalidArg);
     }
 
     let (other_receiver, _, _) = masked_key_report_and_pub(&ctx, sid);
@@ -468,7 +485,7 @@ fn sd_restore_remote_backup_trusted_sa_requires_authorized_pid_and_allows_retry(
         .is_err());
 
     let mut mismatched_pid = valid.clone();
-    mismatched_pid.sender_pid_pub_key[1] ^= 1;
+    mismatched_pid.sender_pid_pub_key[24] ^= 1;
     assert!(ctx
         .tbor_oob(&mismatched_pid, &backup.evidence.oob())
         .is_err());

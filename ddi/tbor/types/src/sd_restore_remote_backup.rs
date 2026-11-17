@@ -51,8 +51,10 @@ pub struct TborSdRestoreRemoteBackupReq {
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
-    /// Operation report signer PID: 97-byte SEC1 uncompressed P-384 point.
-    pub sender_pid_pub_key: [u8; 97],
+    /// Operation report signer PID as DER SPKI. Currently only canonical
+    /// uncompressed P-384 (120 bytes) is supported.
+    #[tbor(max_len = 120)]
+    pub sender_pid_pub_key: Vec<u8>,
 
     /// Sender manufacturer certificate-chain descriptors.  Flattened from
     /// the firmware `sender_evidence` field group (first of its four TOC
@@ -110,7 +112,7 @@ mod tests {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
             policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
-            sender_pid_pub_key: [0; 97],
+            sender_pid_pub_key: alloc::vec![0; 120],
             sender_mfgr_cert_chain: Vec::new(),
             sender_owner_cert_chain: Vec::new(),
             sender_part_owner_cert_chain: Vec::new(),
