@@ -83,18 +83,13 @@ pub enum SessionKind {
 pub enum SuiteId {
     /// Ephemeral ECDH P-384, transcript signed with ECDSA P-384.
     EcdhP384EcdsaP384 = 0x01,
-
-    /// ML-KEM-1024, transcript signed with ECDSA P-384.
-    MlKem1024EcdsaP384 = 0x02,
 }
 
-/// Largest `pk_init`: the ML-KEM-1024 encapsulation key.  An ECDH P-384
-/// `pk_init` is a 97 B SEC1 uncompressed point.
-pub const PK_INIT_MAX_LEN: usize = 1568;
+/// Largest `pk_init`: a 97 B SEC1 uncompressed P-384 point.
+pub const PK_INIT_MAX_LEN: usize = 97;
 
-/// Largest `enc`: the ML-KEM-1024 ciphertext.  An ECDH P-384 `enc` is the
-/// HSM's 97 B SEC1 uncompressed ephemeral point.
-pub const ENC_MAX_LEN: usize = 1568;
+/// Largest `enc`: the HSM's 97 B SEC1 uncompressed P-384 ephemeral point.
+pub const ENC_MAX_LEN: usize = 97;
 
 /// Length of the transcript signature: raw big-endian ECDSA P-384 `r ‖ s`.
 pub const SIG_LEN: usize = 96;
@@ -128,10 +123,9 @@ pub struct TborSessionOpenInitReq<'a> {
     #[tbor(U8)]
     pub suite_id: SuiteId,
 
-    /// The VM's per-handshake ephemeral KEM public key; its length must
-    /// match the suite (97 B SEC1 point for ECDH P-384, 1568 B
-    /// encapsulation key for ML-KEM-1024).
-    #[tbor(align = 4, buffer, max_len = 1568)]
+    /// The VM's per-handshake ephemeral ECDH P-384 public key, encoded
+    /// as a 97 B SEC1 uncompressed point.
+    #[tbor(align = 4, buffer, max_len = 97)]
     pub pk_init: &'a [u8],
 }
 
@@ -147,9 +141,8 @@ pub struct TborSessionOpenInitResp<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// KEM encapsulation for `pk_init`: the HSM's 97 B SEC1 ephemeral
-    /// point (ECDH P-384) or the 1568 B ciphertext (ML-KEM-1024).
-    #[tbor(align = 4, buffer, max_len = 1568)]
+    /// The HSM's 97 B SEC1 uncompressed ephemeral P-384 point.
+    #[tbor(align = 4, buffer, max_len = 97)]
     pub enc: &'a [u8],
 
     /// Partition-identity ECDSA P-384 signature over the transcript hash

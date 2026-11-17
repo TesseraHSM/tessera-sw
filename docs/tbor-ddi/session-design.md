@@ -186,6 +186,12 @@ else who knows those defaults. The default-PSK dispatcher gate permits only
 calling role's credential is rotated. Establishment and discovery remain
 available to support bootstrap.
 
+CU bootstrap status belongs to the credential captured at authentication, not
+the partition's current default/non-default state. After one session rotates
+the partition CU PSK, every default-authenticated CU session (including the
+winner) becomes close-only and receives `DefaultPskChanged` for further work.
+A fresh session using the rotated credential is required.
+
 The application selects the suite explicitly. An unsupported suite or a
 nonzero `session_type` is rejected; there is no plaintext-role fallback.
 
@@ -262,9 +268,11 @@ LE32(role_is_CU) || AppId(16) || SHA-384(PSK)(48)
 ```
 
 It is internal credential-derived state, not a public authentication token.
-The implementation revalidates it in Finish, PSK rotation, and KeyReport.
-Do not infer that every ordinary command performs the same credential-hash
-check, or that rotating a PSK universally destroys all already-open sessions.
+The implementation revalidates it in Finish, PSK rotation, KeyReport, and
+every ordinary CU command, including bulk work. CU sessions established
+with the default credential stay bootstrap-only after rotation; close
+remains available. Rotation does not universally destroy all open sessions
+or apply the CU ordinary-command policy to CO sessions.
 
 The vault mapping, rather than only the reusable logical slot number, also
 supports ownership/cleanup of session-associated vault objects.
@@ -293,14 +301,12 @@ length in `ExpandLabel` is in **bytes**. This encoding is not TLS
 | `suite_id` | KEM / key agreement | `pk_init` | `enc` | `Z` | Transcript authentication |
 |---|---|---|---|---|---|
 | `0x01` | Ephemeral-ephemeral ECDH P-384 | 97-byte SEC1 point | 97-byte device ephemeral SEC1 point | 48-byte big-endian shared x-coordinate | ECDSA P-384 with PID key |
-| `0x02` | ML-KEM-1024 | 1568-byte encapsulation key | 1568-byte ciphertext | 32-byte shared secret | ECDSA P-384 with PID key |
 
 P-384 points are `0x04 || X_be(48) || Y_be(48)`. ECDSA signatures on the wire
 are fixed-size `r_be(48) || s_be(48)`, not ASN.1 DER signatures.
 
-The ML-KEM suite is an alternative to the ECDH suite, not a combined
-ECDH-plus-ML-KEM hybrid. Its authentication remains ECDSA; it must not be
-advertised as a fully post-quantum-authenticated channel.
+ECDH P-384 is the only supported session suite. Other suite identifiers
+are rejected with `UnsupportedSessionSuite`.
 
 #### 5.2.1 ECDH P-384 shared-secret derivation
 
@@ -338,35 +344,6 @@ not the point at infinity. Invalid public-key encodings or unsuccessful
 key-agreement operations must be rejected. The raw shared x-coordinate
 enters the HKDF extraction below; there is no additional protocol-level
 hash or KEM extraction between this `Z` and `Z || PSK`.
-
-#### 5.2.2 ML-KEM-1024 shared-secret derivation
-
-The host generates a fresh ML-KEM-1024 encapsulation/decapsulation key pair.
-The device encapsulates to the host's public key:
-
-```text
-Host:
-    (ek_host, dk_host) = ML-KEM-1024.KeyGen()
-    pk_init = ek_host                                      # 1568 bytes
-
-Device:
-    (enc, Z_device) = ML-KEM-1024.Encaps(ek_host)
-    len(enc) = 1568
-    len(Z_device) = 32
-
-Host, after verifying the device transcript signature:
-    Z_host = ML-KEM-1024.Decaps(dk_host, enc)                # 32 bytes
-```
-
-The key-generation and encapsulation operations use fresh cryptographic
-randomness. The host retains `dk_host` only as handshake secret material;
-it never sends it to the device.
-
-The standard ML-KEM operations define their internal hashing and
-encapsulation checks. The protocol feeds the resulting 32-byte `Z`
-directly into `Z || PSK`; it does not concatenate an ECDH secret with it.
-Decapsulation alone is not peer authentication: the PID signature
-authenticates `enc`, and Finish confirms agreement on the derived keys.
 
 ### 5.3 Signed transcript
 
@@ -412,7 +389,7 @@ With `Lp = len(pk_init)` and `Le = len(enc)`, its layout is:
 | `121 + Lp` | 2 | `BE16(Le)`. |
 | `123 + Lp` | `Le` | Device encapsulation output `enc`. |
 
-`M1` is 317 bytes for ECDH P-384 and 3259 bytes for ML-KEM-1024.
+`M1` is 317 bytes for ECDH P-384.
 The two-byte lengths encode byte counts, not bit counts.
 
 #### 5.3.2 Device ECDSA signing
@@ -522,8 +499,8 @@ IKM = Z || PSK
 PRK = HMAC-SHA-384(key = salt_extract, message = IKM)        # 48 bytes
 ```
 
-The input length is 80 bytes for ECDH (`48 + 32`) and 64 bytes for ML-KEM
-(`32 + 32`). The salt is a domain separator, not secret randomness or the
+The input length is 80 bytes for ECDH (`48 + 32`).
+The salt is a domain separator, not secret randomness or the
 four-byte transport nonce salt. Freshness comes from the key-establishment
 operation. The entire 32-byte role PSK is included, including its public
 application-ID portion; only its secret portion contributes secret entropy.
@@ -1178,17 +1155,24 @@ Its 32-byte AAD is:
 "psk-change-v1"(13) || LE16(session_id) || zeros(17)
 ```
 
-The firmware atomically consumes a **one-attempt** PSK-change budget before
-performing the envelope and persistence work. If subsequent processing fails,
-that budget is deliberately not restored; a new session is required to retry.
-An undo entry restores the prior credential if the guarded rotation fails
-later. Either public default PSK is rejected as a replacement.
+There is no per-session PSK-change bitmap or attempt budget. Under the partition
+credential lock, rotation revalidates the session's authenticated credential
+against the partition's current PSK. Exactly one concurrent bootstrap rotation
+can commit. An undo entry restores the prior credential if the guarded rotation
+or completion fails, and a valid retry may use the same session. Either public
+default PSK and a replacement equal to the current PSK are rejected.
+
+After rotation, an old default-authenticated CU session receives
+`DefaultPskChanged` on every session command except close. This includes the
+winning session and a Pending session attempting Finish after rotation.
+Non-default sessions attempting rotation with a stale credential receive
+`SessionAuthFailure`.
 
 Credential-sensitive Finish, PskChange, and KeyReport work takes the partition
 credential lock through the post-completion walk and validates the captured
-credential binding at the relevant handler. This is narrower than a universal
-per-command credential-revocation mechanism. Applications must not assume all
-existing sessions have been globally invalidated by one rotation.
+credential binding at the relevant handler. CU commands also validate their
+session's credential before dispatch. This does not cancel already-running
+operations or define universal per-command revocation for CO sessions.
 
 ### 9.2 Close versus flush
 
@@ -1292,7 +1276,7 @@ transport replay tracking:
 | Operation | Additional protection | Limit of the statement |
 |---|---|---|
 | Open | Fresh host KEM key, device encapsulation, signed transcript, and derived keys | Not a general anti-replay cache for all commands. |
-| PskChange | Session-specific parameter envelope and atomic one-attempt budget | Does not define global revocation of every live session. |
+| PskChange | Session-specific parameter envelope, partition credential lock, and stale-credential checks | No universal replay cache, cancellation of running work, or global CO-session revocation. |
 | PartInit | Session-specific `param_key` and operation/session-bound machine-seed AAD, plus partition-state checks | Cross-session envelope binding is not blanket exactly-once execution. |
 | SD restore | Authoritative atomic SD-initialization claim at commit | One-shot protection is scoped to the current initialized state/partition incarnation, not an eternal transport replay history. |
 
@@ -1315,7 +1299,7 @@ transport replay tracking:
 | GCM nonce reuse | Checked sender counters, separated directions, independent response IV, Uno retained epoch | Host rollback/key cloning and unsupported lifecycle resets must not rewind a counter under a retained key. |
 | Exposure of host channel keys revealing masked private keys | Independent random device-only session masking key and boot-key wrapping hierarchy | Host still has authority to request whatever operations its role permits. |
 | Later compromise of only long-term PSK or PID signing key | Ephemeral KEM-derived `Z` supplies an intended forward-secrecy argument for captured sessions | Requires suitable KEM security and erasure/non-retention of ephemeral/shared/channel secrets; not a claim about compromised endpoint memory or every temporary copy. |
-| Post-quantum security | ML-KEM-1024 option for key establishment | ECDSA-P384 authentication is not post-quantum; this is not a fully PQ-authenticated protocol or an ECDH/ML-KEM hybrid. |
+| Post-quantum security | Not provided by the current suite | ECDH-P384 key agreement and ECDSA-P384 authentication are not post-quantum. |
 | Fresh firmware attestation | Certificate-path profile and signed handshake prove specified identity assertions | No fresh measured-boot challenge/evidence policy is evaluated by open. |
 | Credential rotation races | Credential binding validation at sensitive handlers and partition lock through completion processing | Not universal immediate revocation of all Active channels. |
 | Establishment flooding, packet loss, or forged outer failure status | Bounded session resources, validation, cleanup, and backend ownership policies | Availability and rate limiting remain platform/deployment concerns. |
@@ -1394,7 +1378,7 @@ host/device interoperability.
 |---|---|
 | Root/profile authentication | SDK path/thumbprint/profile regressions, including malformed extensions and root-profile substitution with a matching SPKI. |
 | X.509 portability | Verified-path and DER-extension tests for platform implementations. |
-| Handshake agreement | Both suites agree with device-side primitives on Uno 1.1 and Duo 2.0; changed major/minor revision or other transcript/signature inputs fail. |
+| Handshake agreement | ECDH P-384 agrees with device-side primitives on Uno 1.1 and Duo 2.0; changed major/minor revision or other transcript/signature inputs fail. |
 | Transport correlation | Identical-request stale-response substitution fails; reverse-order completions succeed on Uno and Duo. |
 | Integrity failure | Altered response ciphertext, IV, tag, invalid Uno frames/padding, and reflected requests are rejected; host output is discarded/wiped. |
 | Firmware integration | Duo per-IO contexts remain distinct when replies are sent in reverse order; Uno rejects a changed outer session-control value. |

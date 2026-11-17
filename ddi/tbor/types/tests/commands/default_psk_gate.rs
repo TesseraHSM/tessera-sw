@@ -8,12 +8,15 @@
 //! compiled-in default (`DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`).
 //!
 //! Out-of-session opcodes such as `ApiRev`, `SessionOpenInit`, and
-//! `SessionOpenFinish` are never gated. In-session opcodes on the
-//! bootstrap allow-list, such as `PskChange` and `SessionClose`, are
-//! always permitted.
+//! `SessionOpenFinish` bypass the ordinary-command gate, but Finish
+//! still rejects obsolete credentials. `PskChange` is permitted only
+//! while the session's credential remains current; `SessionClose`
+//! remains permitted after expiration.
 //!
 //! Coverage in this file:
 //!
+//! * Every ordinary CU opcode has an independently named test checking
+//!   `DefaultPskMustRotate` before rotation and `DefaultPskChanged` after.
 //! * `ApiRev` bypasses the gate while PSKs are default.
 //! * Supported CO and CU session-open flows work with default PSKs.
 //! * `SessionClose` bypasses the gate for both roles.
@@ -41,6 +44,9 @@ use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
+use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborSessionCloseReq;
+use tsra_ddi_tbor_types::TborSessionCloseResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
@@ -48,6 +54,171 @@ use tsra_ddi_tbor_types::PSK_LEN;
 
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
+
+struct SessionCommandProbe<const OP: u8>(u16);
+
+impl<const OP: u8> TborOpReq for SessionCommandProbe<OP> {
+    const OPCODE: u8 = OP;
+    type OpResp = TborSessionCloseResp;
+
+    fn get_session_id(&self) -> Option<u16> {
+        Some(self.0)
+    }
+
+    fn session_ctrl(&self) -> tsra_ddi_tbor_types::SessionControlKind {
+        tsra_ddi_tbor_types::SessionControlKind::InSession
+    }
+
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], tsra_ddi_tbor_types::codec::EncodeError> {
+        // The gate must reject the session before command-specific decoding.
+        let len = TborSessionCloseReq { session_id: self.0 }
+            .encode_request(buf, api_rev)?
+            .len();
+        buf[5] = OP;
+        Ok(&buf[..len])
+    }
+}
+
+macro_rules! bootstrap_command_test {
+    ($name:ident, $request:ty) => {
+        #[test]
+        fn $name() {
+            let ctx = TestCtx::new();
+            let session = ctx
+                .open_session(CU, SessionSuite::EcdhP384)
+                .expect("bootstrap CU");
+            let request =
+                SessionCommandProbe::<{ <$request as TborOpReq>::OPCODE }>(session.session_id());
+            ctx.expect_fw_reject(&request, TborStatus::DefaultPskMustRotate);
+            ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
+                .expect("rotate CU PSK");
+            ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
+            session.close().expect("close expired bootstrap session");
+        }
+    };
+}
+
+use tsra_ddi_tbor_types as types;
+
+bootstrap_command_test!(cu_bootstrap_blocks_part_init, types::TborPartInitReq);
+bootstrap_command_test!(cu_bootstrap_blocks_part_final, types::TborPartFinalReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_sealing_key_gen,
+    types::TborSdSealingKeyGenReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_create_remote_backup,
+    types::TborSdCreateRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_reseal_remote_backup,
+    types::TborSdResealRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_remote_backup,
+    types::TborSdRestoreRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_local_backup,
+    types::TborSdRestoreLocalBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_create_peer_backup,
+    types::TborSdCreatePeerBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_peer_backup,
+    types::TborSdRestorePeerBackupReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_key_report, types::TborKeyReportReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_hmac_generate_key,
+    types::TborHmacGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_hmac, types::TborHmacReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_get_unwrapping_key,
+    types::TborGetUnwrappingKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_unwrap_key, types::TborUnwrapKeyReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_generate_key,
+    types::TborAesGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_encrypt_decrypt,
+    types::TborAesEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_ecc_generate_key,
+    types::TborEccGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_ecc_sign, types::TborEccSignReq);
+bootstrap_command_test!(cu_bootstrap_blocks_ecdh_derive, types::TborEcdhDeriveReq);
+bootstrap_command_test!(cu_bootstrap_blocks_rsa_mod_exp, types::TborRsaModExpReq);
+bootstrap_command_test!(cu_bootstrap_blocks_hash, types::TborHashReq);
+bootstrap_command_test!(cu_bootstrap_blocks_hkdf_derive, types::TborHkdfDeriveReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_concat_kdf_derive,
+    types::TborConcatKdfDeriveReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_kex_key_gen,
+    types::TborDarcKexKeyGenReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_tmk_import,
+    types::TborDarcTmkImportReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_key_unwrap,
+    types::TborDarcKeyUnwrapReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_darc_tmk_gen, types::TborDarcTmkGenReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_tmk_export,
+    types::TborDarcTmkExportReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_darc_key_wrap, types::TborDarcKeyWrapReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mldsa_generate_key,
+    types::TborMlDsaGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_mldsa_sign, types::TborMlDsaSignReq);
+bootstrap_command_test!(cu_bootstrap_blocks_mldsa_verify, types::TborMlDsaVerifyReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_generate_key,
+    types::TborMlKemGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_encapsulate,
+    types::TborMlKemEncapsulateReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_decapsulate,
+    types::TborMlKemDecapsulateReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_gcm_encrypt_decrypt,
+    types::TborAesGcmEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_xts_encrypt_decrypt,
+    types::TborAesXtsEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_xts_generate_key,
+    types::TborAesXtsGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_get_public_key,
+    types::TborGetPublicKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_verify_key, types::TborVerifyKeyReq);
 
 /// First non-default CO PSK used by rotation tests.
 const GATE_ROTATED_PSK_A: [u8; PSK_LEN] = [

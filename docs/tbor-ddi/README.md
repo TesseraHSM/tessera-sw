@@ -222,18 +222,29 @@ only in-session commands permitted are:
 | `0x06` | `PskChange` | The rotation itself |
 
 Any other in-session opcode returns `DefaultPskMustRotate`
-(`0x087000E6`).  The gate is **per role**: rotating the CO PSK
-unlocks CO sessions but does not affect CU; rotating the CU PSK is a
-separate operation.  Out-of-session opcodes (`ApiRev`,
+(`0x087000E6`). The gate is **per role**: rotating the CO PSK
+does not rotate the CU credential. CU bootstrap sessions remain restricted
+for their entire lifetime: after any session rotates the partition CU PSK,
+every default-authenticated CU session, including the winner, receives
+`DefaultPskChanged` (`0x087000E8`) except when closing. No existing bootstrap
+session gains normal privileges. Out-of-session opcodes (`ApiRev`,
 `SessionOpenInit`, `SessionOpenFinish`, `PartInfo`, `GetCertChainInfo`,
-`GetCertificate`) are never gated so a client can always open the
-bootstrap session.
+`GetCertificate`) remain available. A default-authenticated Pending CU
+handshake whose credential changes before Finish is rejected with
+`DefaultPskChanged`; a fresh handshake using an obsolete PSK fails
+authentication.
 
 **Bootstrap sequence (mandatory on first provisioning):**
 
 1. Open a session for the role under the default PSK.
 2. Issue `PskChange` as the first in-session command.
-3. (Optional) `SessionClose`; subsequent sessions are unrestricted.
+3. Close the bootstrap session.
+4. Open a fresh session with the rotated credential before normal use.
+
+The CU PSK is shared across the partition's seven CU slots. Rotation uses
+the partition credential transaction lock, not a per-session changed bitmap.
+Exactly one concurrent bootstrap rotation commits. Failed attempts do not
+burn a session budget, and failed completion rolls back the credential.
 
 Disabling a partition erases its configured CO and CU PSKs. Re-enabling
 installs the public defaults again, so each role must repeat this bootstrap
@@ -257,7 +268,7 @@ KEM exchange plus the role PSK, followed by encrypted host confirmation.
 
 The SDK first authenticates the PID certificate path against the caller's
 required root SPKI thumbprint and the DICE layer-zero/Tessera-EKU profile. The
-[session design](./session-design.md) specifies that validation, both suites,
+[session design](./session-design.md) specifies that validation, the ECDH P-384 suite,
 the exact transcript/key schedule, and the distinction between provenance and
 persistent unit identity.
 

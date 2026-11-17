@@ -20,6 +20,18 @@ a new value supplied encrypted under the session's `param_key`.
 | Crypto Officer (slot 0) | `psk_id = 0` (CO) |
 | Crypto User (slot 1..=7) | `psk_id = 1` (CU) |
 
+The PSK belongs to the partition, not the calling session slot. CU sessions
+authenticated with the public default are bootstrap-only: they may change the
+PSK or close while the partition still uses that default. Once one rotation
+commits, all such sessions, including the winner, receive `DefaultPskChanged`
+on subsequent commands except close. They must close and reopen using the
+rotated PSK. Session privileges are never upgraded by changing the partition
+credential.
+
+Uno bulk operations enforce the same credential restriction before key
+lookup. Bulk CQEs use their existing invalid-session status because the
+bulk wire format cannot carry the detailed TBOR status.
+
 If the CU PSK is lost or compromised, recovery is **out of scope** for
 this command — operators must use an admin-side reset path (factory
 reset, partition re-create) rather than a cross-role override from a
@@ -88,24 +100,28 @@ Built by the host with [`aead_envelope::seal`](
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an Active slot in the calling partition (slot free, destroyed, or still Pending) |
 | `TborInvalidFixedLength` | `psk_envelope` is not exactly 104 B (rejected at decode before the handler runs) |
-| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32 |
+| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length ≠ 32; replacement equals either public default or the current PSK |
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout) |
-| `InvalidPermissions` | A `PskChange` has already succeeded on this session (one-rotation-per-session bound) |
+| `DefaultPskChanged` | The CU session authenticated with the default PSK, but the partition CU PSK has since changed; close and reopen |
+| `SessionAuthFailure` | A non-bootstrap session authenticated with an obsolete credential |
 | `InternalError` | Session vault blob shorter than expected; indicates internal corruption |
 
 ## Replay model
 
-* **Cross-session replay** is structurally impossible: `param_key` is
-  HPKE-derived per session, so an envelope captured from session *A*
+* **Cross-session replay** fails authentication: `param_key` is
+  derived per session, so an envelope captured from session *A*
   cannot decrypt under session *B*'s key (the AEAD tag fails before
   any plaintext is produced).
-* **Intra-session replay** is bounded to **one successful change per
-  session**: the handler atomically marks the session as "change
-  used" on success.  A second `PskChange` on the same session is
-  rejected with `InvalidPermissions`.  The flag resets whenever the
-  slot is rebound to fresh key material — closing and re-opening the
-  session, letting it expire, or a successful renegotiation
-  (`session_recreate` / `session_promote`).
+* **Partition serialization:** credential validation, rotation, and completion
+  commit or rollback are covered by the partition credential lock. Of
+  concurrent valid bootstrap rotations, only one commits; the others receive
+  `DefaultPskChanged`.
+* **Stale credentials:** an actual rotation makes the old session credential
+  binding stale. A replay cannot rotate again while that credential differs
+  from the partition's current PSK. No-op replacements are rejected.
+* **Retry:** there is no per-session attempt budget or changed bitmap.
+  Malformed requests and rolled-back rotations leave the prior credential
+  intact, so a valid request may retry on the same session.
 
 ## Default PSKs
 

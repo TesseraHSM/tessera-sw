@@ -136,7 +136,6 @@ impl HsmSessionType {
 /// | `suite_id` | Variant | KEM | Signature |
 /// |---|---|---|---|
 /// | `0x01` | [`EcdhP384EcdsaP384`](Self::EcdhP384EcdsaP384) | ephemeral ECDH P-384 | ECDSA P-384 (partition identity) |
-/// | `0x02` | [`MlKem1024EcdsaP384`](Self::MlKem1024EcdsaP384) | ML-KEM-1024 | ECDSA P-384 (partition identity) |
 ///
 /// Any other value is rejected by `OpenSessionInit` with
 /// [`HsmError::UnsupportedSessionSuite`].
@@ -147,10 +146,6 @@ pub enum HsmSessionSuite {
     /// uncompressed points (97 B); the shared secret is the 48 B
     /// big-endian x-coordinate.
     EcdhP384EcdsaP384 = 0x01,
-
-    /// ML-KEM-1024 (FIPS 203).  `pk_init` is the 1568 B encapsulation
-    /// key, `enc` the 1568 B ciphertext; the shared secret is 32 B.
-    MlKem1024EcdsaP384 = 0x02,
 }
 
 impl HsmSessionSuite {
@@ -168,7 +163,6 @@ impl HsmSessionSuite {
     pub const fn from_u8(v: u8) -> HsmResult<Self> {
         match v {
             0x01 => Ok(Self::EcdhP384EcdsaP384),
-            0x02 => Ok(Self::MlKem1024EcdsaP384),
             _ => Err(HsmError::UnsupportedSessionSuite),
         }
     }
@@ -178,7 +172,6 @@ impl HsmSessionSuite {
     pub const fn pk_init_len(self) -> usize {
         match self {
             Self::EcdhP384EcdsaP384 => SESSION_P384_SEC1_LEN,
-            Self::MlKem1024EcdsaP384 => SESSION_MLKEM1024_PK_LEN,
         }
     }
 }
@@ -659,33 +652,4 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
     fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
-
-    /// Atomically reserves the session's one-shot "PSK change"
-    /// budget.  Each session may successfully consume this budget at
-    /// most once.
-    ///
-    /// The budget is bound to one logical session for the slot's
-    /// lifetime and reset whenever the slot is re-allocated
-    /// (`session_destroy`, `session_create`, `session_create_pending`
-    /// reuse) or rebound to new key material via re-keying
-    /// (`session_recreate`, `session_promote`).
-    ///
-    /// Used by the TBOR `ChangePsk` handler to bound intra-session
-    /// rotation replay.
-    ///
-    /// # Parameters
-    ///
-    /// - `io` — caller's I/O context (partition scope).
-    /// - `id` — Active session slot.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` — budget consumed; the call site may proceed.  No
-    ///   second `Ok(())` will be returned for this session.
-    /// - `Err(HsmError::InvalidPermissions)` — budget already
-    ///   consumed by a prior successful call.
-    /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
-    ///   live Active session in the caller's partition (slot free,
-    ///   destroyed, or still Pending).
-    fn session_try_consume_psk_change(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }

@@ -26,9 +26,8 @@ an independently provisioned root SPKI thumbprint before trusting that signature
 | `suite_id` | KEM | `pk_init` | `enc` | Authentication |
 |---|---|---|---|---|
 | `0x01` | Ephemeral ECDH P-384 | 97-byte uncompressed SEC1 point | 97-byte device ephemeral SEC1 point | ECDSA P-384 with PID key |
-| `0x02` | ML-KEM-1024 | 1568-byte encapsulation key | 1568-byte ciphertext | ECDSA P-384 with PID key |
 
-Both suites use HKDF-SHA-384, HMAC-SHA-384 Finish confirmation, and
+The suite uses HKDF-SHA-384, HMAC-SHA-384 Finish confirmation, and
 AES-256-GCM transport. The selected suite and API revision remain pinned for
 the session lifetime.
 
@@ -41,8 +40,8 @@ at byte 28.
 |---|---|---|---|
 | 12 | `psk_id` | `uint8` (inline) | `0` = Crypto Officer; `1` = Crypto User. |
 | 16 | `session_type` | `uint8` (inline) | `0` = Encrypted; all other values are rejected. |
-| 20 | `suite_id` | `uint8` (inline) | `0x01` or `0x02`. |
-| 24 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97 or 1568. |
+| 20 | `suite_id` | `uint8` (inline) | `0x01`; all other identifiers are unsupported. |
+| 24 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97. |
 
 ## Response
 
@@ -52,7 +51,7 @@ request footprint; variable-length data begins at byte 28.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | `session_id` | `session_id` (inline) | Reserved Pending slot: CO 0, CU 1..=7. |
-| 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97 or 1568. |
+| 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97. |
 | 20 | `sig` | `buffer` (ref) | Data-relative offset `len(enc)`; 96-byte raw ECDSA signature. |
 | 24 | Reserved | `none` | Paired TOC placeholder. |
 

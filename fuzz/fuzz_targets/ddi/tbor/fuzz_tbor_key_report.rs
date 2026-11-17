@@ -593,7 +593,7 @@ fn run_case(ctx: &TestCtx, path: &str, input: &FuzzInput) {
         _ => input.cu,
     };
     let (psk_id, suite, psk) = if cu {
-        (CU_PSK_ID, SessionSuite::MlKem1024, &ROTATED_CU_PSK)
+        (CU_PSK_ID, SessionSuite::EcdhP384, &ROTATED_CU_PSK)
     } else {
         (CO_PSK_ID, SessionSuite::EcdhP384, &ROTATED_CO_PSK)
     };

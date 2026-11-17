@@ -390,11 +390,6 @@ impl HsmSessionManager for StdHsmPal {
         let entry = self.active_part_mut(io.pid())?;
         entry.session_table.next_m2h_seq(id)
     }
-
-    fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
-        let entry = self.active_part_mut(io.pid())?;
-        entry.session_table.try_consume_psk_change(id)
-    }
 }
 
 #[cfg(test)]

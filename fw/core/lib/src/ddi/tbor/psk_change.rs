@@ -11,15 +11,14 @@
 //!
 //! ## Replay model
 //!
-//! Cross-session replay is structurally impossible: `param_key` is
-//! HPKE-derived per session, so an envelope captured from session A
+//! Cross-session replay fails authentication: `param_key` is
+//! derived per session, so an envelope captured from session A
 //! cannot decrypt under session B's key (the AEAD tag fails before
 //! any plaintext is produced).
 //!
-//! Intra-session replay is bounded to **one successful change per
-//! session**: the handler marks the session as "change used" on
-//! success; a second `PskChange` on the same session is rejected
-//! with `InvalidPermissions`.
+//! Rotation is serialized by the partition credential lock. After an
+//! actual change, sessions authenticated with the old credential cannot
+//! rotate again. Failed attempts do not consume a per-session budget.
 
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_ddi_tbor_types::build_psk_change_aad;
@@ -70,14 +69,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // load-bearing validation for a correctly-sized but crafted
         // envelope.
 
-        // Reserve the session's one-shot PSK-change budget **before** any
-        // crypto work, so replayed-after-success envelopes are rejected
-        // cheaply.  A successful return here means no further `PskChange`
-        // can succeed on this session; if the subsequent crypto/persist
-        // steps fail, the session is "burned" — the caller must
-        // renegotiate to retry.  Cross-session replay is already
-        // structurally impossible (HPKE-derived per-session `param_key`).
-        pal.session_try_consume_psk_change(io, sess_id)?;
         let auth_binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
         let param_key = alloc.dma_alloc(SESSION_PARAM_KEY_LEN)?;
         param_key.copy_from_slice(pal.session_param_key(io, sess_id)?);
@@ -86,8 +77,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // Record the prior PSK *before* overwriting it, so any later failure
         // — the crypto below, the response DMA, or the CQE post — restores it
         // via the dispatcher's undo walk.  The rotation is therefore
-        // all-or-nothing as the host observes it.  (The budget burn above is
-        // intentionally *not* reverted: one attempt per session.)
+        // all-or-nothing as the host observes it.
         let prior = crate::part_state::part_psk(pal, io, target_psk_id)?;
         let psk_prop = crate::part_state::part_psk_prop_id(target_psk_id)?;
         undo.push_prop_restore_bytes(psk_prop, prior)?;
@@ -125,7 +115,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // the calling role, so a CO session cannot install the CU default
         // (or vice versa).  Constant-time compare — the candidate is a
         // secret and the defaults are public constants.
-        if is_default_psk(aead_view.payload) {
+        if is_default_psk(aead_view.payload)
+            || aead_view.payload == crate::part_state::part_psk(pal, io, target_psk_id)?
+        {
             return Err(HsmError::InvalidArg);
         }
 

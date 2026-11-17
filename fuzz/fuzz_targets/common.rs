@@ -128,7 +128,7 @@ pub enum EncoderTOCBuilders {
 pub enum FuzzRole {
     /// `psk_id = 0`, ECDH-P384 suite
     Co,
-    /// `psk_id = 1`, ML-KEM-1024 suite
+    /// `psk_id = 1`, ECDH-P384 suite
     Cu,
 }
 
@@ -143,7 +143,7 @@ impl FuzzRole {
     pub fn suite(&self) -> SessionSuite {
         match self {
             FuzzRole::Co => SessionSuite::EcdhP384,
-            FuzzRole::Cu => SessionSuite::MlKem1024,
+            FuzzRole::Cu => SessionSuite::EcdhP384,
         }
     }
 }

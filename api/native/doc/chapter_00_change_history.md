@@ -60,7 +60,7 @@
 |            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
 |            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
 | 11/13/2026 | Replaced `tsra_session_ex_type` with `tsra_session_suite`        |
-|            | (`ECDH_P384`, `ML_KEM1024`); every security-domain session is    |
+|            | (`ECDH_P384`); every security-domain session is                 |
 |            | encrypted on every device model                                  |
 
 | Unreleased | `tsra_sess_ex_open` requires a 48-byte trusted-root SPKI SHA-384 |

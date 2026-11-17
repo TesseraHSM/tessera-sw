@@ -47,7 +47,7 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
                     // secondary session as CU so Phase 1 can reach Phase 2.
                     let secondary = TestCtx::new_with_path(path);
                     let pending =
-                        match secondary.session_open_init(CU_PSK_ID, SessionSuite::MlKem1024) {
+                        match secondary.session_open_init(CU_PSK_ID, SessionSuite::EcdhP384) {
                             Ok(pending) => pending,
                             Err(DdiError::TborStatus(status))
                                 if status == TborStatus::VaultSessionLimitReached =>

@@ -185,7 +185,11 @@ impl<P: HsmPal> Hsm<P> {
     /// core records the failure in it. The SQ id is stamped by
     /// [`complete_io`](HsmIoController::complete_io).
     async fn handle_bulk_io(&self, mut io: P::Io) {
-        if let Err(e) = self.pal().bulk_crypt(&mut io).await {
+        let result = match crate::session::validate_bulk_session(self.pal(), &io).await {
+            Ok(()) => self.pal().bulk_crypt(&mut io).await,
+            Err(err) => Err(err),
+        };
+        if let Err(e) = result {
             debug!("core", "bulk IO failed: {:?}", e);
             io.cqe().set_err(e);
         }

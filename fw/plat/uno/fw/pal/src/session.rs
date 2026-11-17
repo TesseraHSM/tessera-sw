@@ -13,12 +13,12 @@
 //! a session-scoped [`HsmVaultKeyKind::SessionExPending`] key, and
 //! `session_promote` replaces it with the committed
 //! [`HsmVaultKeyKind::SessionEx`] key. The session store's `pending_mask`
-//! / `psk_change_mask` (the Uno `session_meta` region) track slot state;
+//! (the Uno `session_meta` region) tracks in-flight handshakes;
 //! Pending eviction within a role's slot range is lowest-index-first.
 //!
 //! The vault-touching methods are `async` (the Uno vault drives GDMA);
-//! the read-only probes (`session_pending_state`, `session_param_key`,
-//! `session_try_consume_psk_change`) are synchronous.
+//! the read-only probes (`session_pending_state`, `session_param_key`)
+//! are synchronous.
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
@@ -445,11 +445,6 @@ impl HsmSessionManager for UnoHsmPal {
             _ => return Err(HsmError::InternalError),
         };
         Ok(blob.split_at(offset).1.split_at(size).0)
-    }
-
-    fn session_try_consume_psk_change(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
-        let mut table = SessionStore::partition(io.pid())?;
-        table.try_consume_psk_change(id)
     }
 
     fn session_auth_binding(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {

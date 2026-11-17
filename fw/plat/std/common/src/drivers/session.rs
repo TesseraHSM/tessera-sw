@@ -73,10 +73,6 @@ pub struct SessionTable {
     /// state (in-flight session-establishment handshake; no vault
     /// entry yet).
     pending_mask: u8,
-    /// Per-slot "PSK rotation already used" bitmask — bit N is set
-    /// after a successful `ChangePsk` on session N.  Cleared
-    /// by `delete` and `promote`.
-    psk_change_mask: u8,
     /// Logical → physical mapping: `phys_ids[slot]` is the vault key ID
     /// for session slot `slot` once Active.  Only valid when
     /// `alloc_mask` is set AND `pending_mask` is clear.
@@ -146,7 +142,6 @@ impl SessionTable {
             alloc_mask: 0,
             renego_mask: 0,
             pending_mask: 0,
-            psk_change_mask: 0,
             phys_ids: [0; MAX_SESSIONS],
             pending_blobs: core::array::from_fn(|_| PendingBlob::default()),
             pending_seqs: [0u64; MAX_SESSIONS],
@@ -181,7 +176,6 @@ impl SessionTable {
         self.alloc_mask = mask;
         self.renego_mask = mask;
         self.pending_mask = 0;
-        self.psk_change_mask = 0;
         self.phys_ids = [0; MAX_SESSIONS];
         for blob in &mut self.pending_blobs {
             blob.clear();
@@ -242,7 +236,6 @@ impl SessionTable {
         self.alloc_mask &= mask;
         self.renego_mask &= mask;
         self.pending_mask &= mask;
-        self.psk_change_mask &= mask;
         self.phys_ids[slot] = 0;
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
@@ -288,8 +281,6 @@ impl SessionTable {
         self.validate_recreation(id)?;
         let slot = u16::from(id) as usize;
         self.renego_mask &= !(1u8 << slot);
-        // Fresh key material → fresh one-shot PSK-change budget.
-        self.psk_change_mask &= !(1u8 << slot);
         self.phys_ids[slot] = u16::from(new_physical);
         Ok(id)
     }
@@ -444,40 +435,10 @@ impl SessionTable {
             return Err(HsmError::SessionNotPending);
         }
         self.pending_mask &= !(1u8 << slot);
-        self.psk_change_mask &= !(1u8 << slot);
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
         self.phys_ids[slot] = u16::from(physical_id);
         Ok(())
-    }
-
-    /// Atomically reserves the slot's one-shot "PSK change" budget.
-    /// Returns `Ok(())` on the first call for a given slot lifetime
-    /// and `Err(InvalidPermissions)` thereafter.  Pending or
-    /// unallocated slots report `SessionNotFound` (matches the
-    /// convention used by [`physical_id`](Self::physical_id)).
-    pub fn try_consume_psk_change(&mut self, id: HsmSessId) -> HsmResult<()> {
-        let slot = self.active_slot(id)?;
-        if (self.pending_mask & (1 << slot)) != 0 {
-            return Err(HsmError::SessionNotFound);
-        }
-        let bit = 1u8 << slot;
-        if (self.psk_change_mask & bit) != 0 {
-            return Err(HsmError::InvalidPermissions);
-        }
-        self.psk_change_mask |= bit;
-        Ok(())
-    }
-
-    /// Test-only inspector for the per-slot "PSK change consumed"
-    /// bit.  Pending or unallocated slots report `SessionNotFound`.
-    #[cfg(test)]
-    pub fn psk_change_used(&self, id: HsmSessId) -> HsmResult<bool> {
-        let slot = self.active_slot(id)?;
-        if (self.pending_mask & (1 << slot)) != 0 {
-            return Err(HsmError::SessionNotFound);
-        }
-        Ok((self.psk_change_mask & (1 << slot)) != 0)
     }
 }
 
@@ -930,102 +891,6 @@ mod tests {
         let id = table.create(HsmKeyId::from(0x123)).unwrap();
         let err = table.pending_state(id).unwrap_err();
         assert_eq!(err, HsmError::SessionNotPending);
-    }
-
-    #[test]
-    fn psk_change_flag_defaults_to_unused() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        assert!(!table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn try_consume_psk_change_succeeds_once() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        assert!(table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn try_consume_psk_change_rejects_second_call() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        let err = table.try_consume_psk_change(id).unwrap_err();
-        assert_eq!(err, HsmError::InvalidPermissions);
-        // Flag must remain set after the rejection.
-        assert!(table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_cleared_by_delete() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        table.delete(id).unwrap();
-        // Re-allocating the same slot must observe a fresh (false) flag.
-        let id2 = table.create(HsmKeyId::from(0x200)).unwrap();
-        assert_eq!(u16::from(id2), u16::from(id));
-        assert!(!table.psk_change_used(id2).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_cleared_by_promote() {
-        let mut table = SessionTable::new();
-        let id = table
-            .create_pending(HsmSessionRole::CryptoUser, b"hs")
-            .unwrap();
-        // Force the flag on (it shouldn't normally be touched on a
-        // Pending slot, but the invariant must hold across promote).
-        table.psk_change_mask |= 1 << u16::from(id) as usize;
-        table.promote(id, HsmKeyId::from(0xABCD)).unwrap();
-        assert!(!table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_cleared_by_recreate() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        table.set_needs_renego(id);
-        table.recreate(id, HsmKeyId::from(0x200)).unwrap();
-        // Renegotiation rebinds the slot to fresh key material, so
-        // the one-shot budget MUST reset.
-        assert!(!table.psk_change_used(id).unwrap());
-        table.try_consume_psk_change(id).unwrap();
-    }
-
-    #[test]
-    fn psk_change_flag_independent_across_slots() {
-        let mut table = SessionTable::new();
-        let id0 = table.create(HsmKeyId::from(0x100)).unwrap();
-        let id1 = table.create(HsmKeyId::from(0x101)).unwrap();
-        table.try_consume_psk_change(id0).unwrap();
-        assert!(table.psk_change_used(id0).unwrap());
-        assert!(!table.psk_change_used(id1).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_on_unallocated_slot_errors() {
-        let table = SessionTable::new();
-        let err = table.psk_change_used(HsmSessId::from(3)).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
-    }
-
-    #[test]
-    fn psk_change_ops_on_pending_slot_error() {
-        let mut table = SessionTable::new();
-        let id = table
-            .create_pending(HsmSessionRole::CryptoUser, b"hs")
-            .unwrap();
-        // Both the read and the consume path report SessionNotFound
-        // on a Pending slot (matches `physical_id`'s convention —
-        // the slot has no Active vault entry to operate on).
-        let err = table.try_consume_psk_change(id).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
-        let err = table.psk_change_used(id).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
     }
 
     #[test]

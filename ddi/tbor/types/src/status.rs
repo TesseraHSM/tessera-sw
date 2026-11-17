@@ -262,6 +262,7 @@ pub enum TborStatus {
     DropIoFailure = 0x087000E5,
     DefaultPskMustRotate = 0x087000E6,
     UnsupportedSessionSuite = 0x087000E7,
+    DefaultPskChanged = 0x087000E8,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,

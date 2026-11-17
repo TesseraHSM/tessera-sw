@@ -35,7 +35,6 @@ fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(1u16))
         .unwrap();
-    table.try_consume_psk_change(active).unwrap();
 
     table.mark_all_needs_renego();
     part.clear_state(PartResetKind::Migrate);
@@ -64,7 +63,6 @@ fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     assert_eq!(table.recreate(active, new_key).unwrap(), active);
     assert!(matches!(table.state(active), HsmSessionState::Active));
     assert_eq!(table.physical_id(active).unwrap(), new_key);
-    table.try_consume_psk_change(active).unwrap();
     assert_eq!(table.create(HsmKeyId::from(3u16)).unwrap(), pending);
 }
 
@@ -212,9 +210,8 @@ fn clear_all_releases_active_pending_and_renegotiating_slots() {
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(2u16))
         .unwrap();
-    table.try_consume_psk_change(active).unwrap();
 
-    // Full teardown must clear both masks, even if some slots already
+    // Full teardown must clear the masks, even if some slots already
     // needed renegotiation before resources were removed.
     table.clear_all();
 

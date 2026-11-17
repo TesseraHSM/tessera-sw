@@ -12,8 +12,8 @@
 //! * Happy paths (CO + CU), with an explicit reopen under the
 //!   rotated PSK to prove the rotation took effect.
 //! * Reopen with the old (default) PSK fails after rotation.
-//! * One-shot enforcement: a second `PskChange` on the same session
-//!   surfaces `TborStatus::InvalidPermissions`.
+//! * A default-authenticated CU session expires after rotation and
+//!   receives `TborStatus::DefaultPskChanged` on further rotation attempts.
 //! * Envelope tampering (ciphertext bit-flip, AAD bit-flip) →
 //!   `TborStatus::AeadEnvelopeAuthFailed`.
 //! * AAD that encodes a different session id → same auth failure.
@@ -121,6 +121,117 @@ fn psk_change_happy_co() {
     run_psk_change_happy(CO, SessionSuite::EcdhP384);
 }
 
+#[test]
+fn psk_change_seven_cu_bootstrap_sessions_have_one_winner() {
+    let ctx = TestCtx::new();
+    let contexts: Vec<_> = (0..7).map(|_| TestCtx::new_with_path(ctx.path())).collect();
+    let sessions: Vec<_> = contexts
+        .iter()
+        .map(|ctx| {
+            ctx.open_session(CU, SessionSuite::EcdhP384)
+                .expect("bootstrap CU")
+        })
+        .collect();
+    let barrier = std::sync::Barrier::new(sessions.len());
+    let results = std::thread::scope(|scope| {
+        let threads: Vec<_> = contexts
+            .iter()
+            .zip(&sessions)
+            .enumerate()
+            .map(|(index, (ctx, session))| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let psk = [0xA0 + index as u8; PSK_LEN];
+                    barrier.wait();
+                    ctx.psk_change(session.handshake(), &psk)
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("rotation thread"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let winner = results.iter().position(Result::is_ok).expect("one winner");
+    for (index, ((ctx, session), result)) in contexts.iter().zip(sessions).zip(results).enumerate()
+    {
+        if index != winner {
+            assert_fw_rejects(
+                &result.expect_err("losing rotation"),
+                TborStatus::DefaultPskChanged,
+            );
+        }
+        let request = tsra_ddi_tbor_types::TborHashReq {
+            session_id: session.session_id(),
+            algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
+            ..Default::default()
+        };
+        ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
+        let err = ctx
+            .psk_change(session.handshake(), &ROTATED_PSK)
+            .expect_err("expired bootstrap");
+        assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
+        session.close().expect("close expired session");
+    }
+    let winning_psk = [0xA0 + winner as u8; PSK_LEN];
+    let pending = ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&winning_psk),
+        )
+        .expect("open with winning credential");
+    let session = ctx.session_open_finish(pending).expect("finish new CU");
+    ctx.tbor(&tsra_ddi_tbor_types::TborHashReq {
+        session_id: session.session_id,
+        algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
+        ..Default::default()
+    })
+    .expect("normal CU command after reopening");
+    ctx.session_close(session.session_id)
+        .expect("close normal CU");
+}
+
+#[test]
+fn psk_change_non_default_noop_rejected_without_consuming_rotation() {
+    for role in [CO, CU] {
+        let ctx = TestCtx::new();
+        let bootstrap = ctx
+            .open_session(role, SessionSuite::EcdhP384)
+            .expect("bootstrap session");
+        ctx.psk_change(bootstrap.handshake(), &ROTATED_PSK)
+            .expect("initial rotation");
+        bootstrap.close().expect("close bootstrap");
+        let pending = ctx
+            .session_open_init_with_options(
+                SessionOpenInitOptions::new(role, SessionSuite::EcdhP384).with_psk(&ROTATED_PSK),
+            )
+            .expect("open with rotated PSK");
+        let session = ctx.session_open_finish(pending).expect("finish session");
+        let err = ctx
+            .psk_change(&session, &ROTATED_PSK)
+            .expect_err("reject no-op");
+        assert_fw_rejects(&err, TborStatus::InvalidArg);
+        ctx.psk_change(&session, &[0xD4; PSK_LEN])
+            .expect("rotate after rejected no-op");
+        let err = ctx
+            .psk_change(&session, &[0xE5; PSK_LEN])
+            .expect_err("obsolete credential");
+        assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+        if role == CU {
+            ctx.expect_fw_reject(
+                &tsra_ddi_tbor_types::TborHashReq {
+                    session_id: session.session_id,
+                    algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
+                    ..Default::default()
+                },
+                TborStatus::SessionAuthFailure,
+            );
+        }
+        ctx.session_close(session.session_id)
+            .expect("close stale session");
+    }
+}
+
 // ===========================================================================
 // Reopen with old PSK fails after rotation
 // ===========================================================================
@@ -148,7 +259,7 @@ fn psk_change_reopen_with_old_psk_fails() {
 }
 
 // ===========================================================================
-// One-shot enforcement
+// Bootstrap credential expiration
 // ===========================================================================
 
 /// Verifies a second CU PSK change on the same session is denied.
@@ -161,13 +272,12 @@ fn psk_change_second_attempt_same_session_fails() {
     ctx.psk_change(session.handshake(), &ROTATED_PSK)
         .expect("first rotate");
 
-    // The session's PSK-change budget is now consumed. A second
-    // PskChange on the same session must surface
-    // `TborStatus::InvalidPermissions`.
+    // Rotation changes the shared partition credential, not session
+    // privileges. This bootstrap session must be closed and reopened.
     let err = ctx
         .psk_change(session.handshake(), &DEFAULT_PSK_CU)
         .expect_err("second psk_change on same session must fail");
-    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::InvalidPermissions);
+    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
 }
 
 // ===========================================================================
@@ -526,7 +636,7 @@ fn psk_change_co_second_attempt_same_session_fails() {
         .psk_change(session.handshake(), &second_psk)
         .expect_err("second CO rotation must fail");
 
-    assert_fw_rejects(&err, TborStatus::InvalidPermissions);
+    assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
 }
 
 /// Verifies the rotated CU PSK authenticates across multiple fresh sessions.
@@ -654,13 +764,19 @@ fn psk_change_failed_envelope_then_valid_rotation() {
     // First request must fail authentication.
     ctx.expect_fw_reject(&bad_req, TborStatus::AeadEnvelopeAuthFailed);
 
-    // Current observed FW behavior: a subsequent
-    // PskChange on this session is also rejected.
-    let err = ctx
-        .psk_change(session.handshake(), &ROTATED_PSK)
-        .expect_err("second rotation request after failed envelope must fail");
-
-    println!("PskChange retry after authentication failure: {err:?}");
+    ctx.psk_change(session.handshake(), &ROTATED_PSK)
+        .expect("valid rotation after a failed envelope must succeed");
+    session.close().expect("close bootstrap session");
+    let pending = ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_PSK),
+        )
+        .expect("reopen using rotated credential");
+    let session = ctx
+        .session_open_finish(pending)
+        .expect("finish reopened session");
+    ctx.session_close(session.session_id)
+        .expect("close reopened session");
 }
 
 /// Verifies rotating the CU PSK does not alter CO authentication.

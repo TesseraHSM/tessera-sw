@@ -715,6 +715,19 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
                     return Err(HsmError::DefaultPskMustRotate);
                 }
             }
+            if is_in_session(opcode)
+                && opcode != opcode::SESSION_CLOSE
+                && sess_id.role() == HsmSessionRole::CryptoUser
+            {
+                // Rotation does not upgrade existing bootstrap sessions.
+                // All CU work, including PskChange, requires the captured
+                // credential to remain current; close is always available.
+                pal.alloc_scoped_async(io, async |alloc| {
+                    let binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
+                    crate::session::validate_auth_binding(pal, io, alloc, sess_id, binding).await
+                })
+                .await?;
+            }
         }
     }
 
