@@ -237,7 +237,8 @@ async fn encapsulate<'a, P: HsmPal>(
     match suite {
         HsmSessionSuite::EcdhP384EcdsaP384 => ecdh_encapsulate(pal, io, alloc, pk_init).await,
         HsmSessionSuite::MlKem1024EcdsaP384 => {
-            let param = HsmMlKemParam::MlKem1024;
+            let param = HsmMlKemParamSet::MlKem1024;
+            let pk_init = HsmMlKemPubKey::Encoded(pk_init);
             let (ct_len, ss_len) = pal.mlkem_encaps(io, param, pk_init, None).await?;
             let enc = alloc.dma_alloc(ct_len)?;
             let z = alloc.dma_alloc(ss_len)?;
