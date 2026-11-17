@@ -565,15 +565,11 @@ fn mutate(
                 item.truncate(usize::from(input.offset) % item.len());
             }
             req.remote_cert_chain[index].length = (item.len() as u16).into();
-            // The socket transport rejects empty OOB buffers before firmware runs.
-            if item.is_empty() && tsra_ddi::sock_selected() {
+            // All transports reject empty OOB buffers before firmware runs.
+            if item.is_empty() {
                 return Expected::InvalidParameter;
             }
-            return Expected::Reject(if item.is_empty() {
-                TborStatus::InvalidArg
-            } else {
-                TborStatus::X509ParseError
-            });
+            return Expected::Reject(TborStatus::X509ParseError);
         }
         _ => return Expected::Success,
     }
