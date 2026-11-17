@@ -557,6 +557,7 @@ fn assert_success(
 /// Require an exact rejection; infrastructure failures are never valid rejections.
 fn assert_rejection(ctx: &TestCtx, req: &TborDarcKeyWrapReq, status: TborStatus) {
     let error = ctx.tbor(req).expect_err("invalid DarcKeyWrap must fail");
+    let status = ctx.device_status(req, status);
     assertions::assert_session_rejects(&error, status);
 }
 

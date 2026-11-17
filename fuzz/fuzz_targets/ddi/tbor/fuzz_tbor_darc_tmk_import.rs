@@ -698,6 +698,7 @@ fn check(
         }
         Expected::Reject(status) => {
             let err = result.expect_err("invalid import must fail");
+            let status = ctx.device_status(&import.req, status);
             assert_session_rejects(&err, status);
         }
         Expected::EncodeError => {

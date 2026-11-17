@@ -298,8 +298,11 @@ impl TborOpReq for WireRequest<'_> {
         ];
         fields[self.field].resize(self.len, 0);
         codec::RequestEncoder::new(buf, codec::PROTOCOL_VERSION, Self::OPCODE)
+            .with_toc_slots(7)?
             .session_id(self.req.session_id)?
+            .align_to(4)?
             .buffer(&fields[0])?
+            .align_to(4)?
             .buffer(&fields[1])?
             .buffer(self.req.policy.as_bytes())?
             .buffer(&fields[2])?
@@ -324,6 +327,7 @@ fn execute<R: TborOpReq<OpResp = TborDarcTmkExportResp>>(
     match (expected, result) {
         (Expected::Success, Ok(resp)) => Some(resp),
         (Expected::Reject(status), Err(err)) => {
+            let status = ctx.device_status(req, status);
             if !matches!(
                 &err,
                 tsra_ddi_interface::DdiError::TborStatus(actual) if *actual == status

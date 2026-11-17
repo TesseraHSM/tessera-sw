@@ -313,6 +313,7 @@ fuzz_target!(|input: FuzzInput| {
                 panic!("expected rejection {status:?}; {req:?}; {input:?}; {state:?}");
             }
             (Expected::Reject(status), Err(err)) => {
+                let status = ctx.device_status(&req, status);
                 assert_session_rejects(&err, status);
             }
         }
