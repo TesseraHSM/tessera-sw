@@ -633,7 +633,7 @@ fn darc_key_unwrap_two_distinct_keys_same_tmk() {
         session_id: req1.session_id,
         scope: req1.scope,
         key_usage: req1.key_usage,
-        masked_tmk: req1.masked_tmk.clone(),
+        masked_tmk: req1.masked_tmk,
         wrapped_key: kwp_wrap(
             &TMK,
             &encode_cose(&key2, &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE]),

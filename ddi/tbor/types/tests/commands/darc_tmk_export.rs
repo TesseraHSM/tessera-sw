@@ -989,7 +989,7 @@ fn darc_tmk_export_rejects_tampered_second_target_der() {
         gen_masked_tmk(&ready),
     );
     let original = chain.der_items();
-    let mut tampered = original.clone();
+    let mut tampered = original;
     let mut second = original[1].to_vec();
     second[0] ^= 0xFF;
     tampered[1] = &second;
