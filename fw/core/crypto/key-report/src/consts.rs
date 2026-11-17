@@ -33,11 +33,8 @@ pub const PROTECTED_HEADER: [u8; 22] = [
 /// Report format version for a v1 report (no `policy_hash`).
 pub const REPORT_VERSION: u16 = 1;
 
-/// Report format version for a v2 report (carries a `policy_hash`).
+/// Report format version for policy-bound or kind-discriminated reports.
 pub const REPORT_VERSION_V2: u16 = 2;
-
-/// Report format version with an explicit signed [`crate::ReportKind`].
-pub const REPORT_VERSION_V3: u16 = 3;
 
 /// Length of the app-UUID field (RFC 4122 binary form).
 pub const APP_UUID_LEN: usize = 16;

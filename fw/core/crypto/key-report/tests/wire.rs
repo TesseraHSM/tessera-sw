@@ -476,7 +476,7 @@ enum ReportField {
 
 fn transfer_fields(kind: ReportKind) -> Vec<(u8, ReportField)> {
     let mut fields = vec![
-        (0, ReportField::Integer(3)),
+        (0, ReportField::Integer(2)),
         (8, ReportField::Integer(kind as u8)),
         (9, ReportField::Bytes(vec![0x11; 48])),
         (10, ReportField::Bytes(vec![0x22; 48])),
@@ -552,18 +552,21 @@ fn unified_public_key_parser_preserves_legacy_and_accepts_signed_kind() {
         &[0; REPORT_DATA_LEN],
         &[0; VM_LAUNCH_ID_LEN],
     );
-    // The independent fixture adds the v3 discriminator to a v1 payload.
+    // The independent fixture adds the v2 discriminator to a v1 payload.
     pl[0] = 0xa8;
-    pl[2] = 3;
+    pl[2] = 2;
     pl.extend_from_slice(&[8, 0]);
     let bytes = cose_sign1(&pl, &[0; SIGNATURE_LEN]);
-    let ReportView::PublicKey(view) = parse_report(dma_view(&bytes)).expect("v3 public-key report")
+    let ReportView::PublicKey(view) = parse_report(dma_view(&bytes)).expect("v2 public-key report")
     else {
         panic!("wrong report kind");
     };
-    assert_eq!(view.version, 3);
+    assert_eq!(view.version, 2);
     assert_eq!(view.flags, 4);
 
+    pl[2] = 3;
+    assert!(parse_report(dma_view(&cose_sign1(&pl, &[0; SIGNATURE_LEN]))).is_err());
+    pl[2] = 2;
     *pl.last_mut().expect("report kind") = ReportKind::Darc as u8;
     let wrong_kind = cose_sign1(&pl, &[0; SIGNATURE_LEN]);
     assert!(parse_report(dma_view(&wrong_kind)).is_err());
@@ -613,7 +616,7 @@ fn operation_parser_rejects_wrong_lengths_versions_and_truncated_envelopes() {
                 assert!(parse_report(dma_view(&operation_report(&fields))).is_err());
             }
         }
-        for (key, value) in [(0, 1), (0, 2), (0, 4), (8, 3), (8, u8::MAX)] {
+        for (key, value) in [(0, 1), (0, 3), (0, 4), (8, 3), (8, u8::MAX)] {
             let mut fields = transfer_fields(kind);
             for (field, current) in &mut fields {
                 if *field == key {

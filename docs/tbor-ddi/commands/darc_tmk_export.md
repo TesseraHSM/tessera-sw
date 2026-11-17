@@ -35,7 +35,7 @@ Handler flow:
 4. Build the canonical DARC header with source PID and recipient key IDs,
    and HPKE Base seal to `RcvrPub`, using the entire header as both
    HPKE `info` and AEAD AAD.
-5. Sign a v3 `Darc` report with the partition PID, binding the source PID
+5. Sign a v2 `Darc` report with the partition PID, binding the source PID
    key ID, recipient key ID, and digest of the complete encrypted envelope.
    Return both artifacts. IO teardown scrubs the plaintext TMK.
 
@@ -81,7 +81,7 @@ and operation report.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | `sealed_tmk` | `buffer` (258 B) | Canonical header (113 B), SEC1 encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 12 | `report` | `buffer` (1..=896 B) | PID-signed v3 `Darc` COSE_Sign1 report over the exact envelope and recipient. |
+| 12 | `report` | `buffer` (1..=896 B) | PID-signed v2 `Darc` COSE_Sign1 report over the exact envelope and recipient. |
 
 ### Data section
 

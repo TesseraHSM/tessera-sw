@@ -47,7 +47,8 @@ pub struct KeyReportView<'a> {
     pub report_data: &'a HsmDmaBuf,
     /// VM launch ID.
     pub vm_launch_id: &'a HsmDmaBuf,
-    /// Optional SHA-384 PartPolicy digest (required in v2, optional in v3).
+    /// Optional SHA-384 PartPolicy digest. Required for v2 public-key
+    /// reports without a signed kind discriminator.
     pub policy_hash: Option<&'a HsmDmaBuf>,
     /// COSE_Sign1 protected header (signed input).
     pub protected_header: &'a HsmDmaBuf,
@@ -131,7 +132,7 @@ fn parse_cose_report(report: &HsmDmaBuf) -> HsmResult<CoseReportView<'_>> {
     })
 }
 
-/// Parse a kind-discriminated v3 report or a legacy public-key report.
+/// Parse a kind-discriminated v2 report or a legacy public-key report.
 ///
 /// Each kind has a strict field set. Unknown or duplicate fields, missing
 /// fields, version mismatches, and invalid SHA-384 field lengths are errors.
@@ -180,9 +181,7 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
     }
     let kind = match report_kind {
         None | Some(0) => {
-            let expected_version = if report_kind.is_some() {
-                REPORT_VERSION_V3
-            } else if have_policy_hash {
+            let expected_version = if report_kind.is_some() || have_policy_hash {
                 REPORT_VERSION_V2
             } else {
                 REPORT_VERSION
@@ -230,7 +229,7 @@ fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
     let recipient = fields[10];
     let envelope = fields[11];
     if seen != required
-        || version != REPORT_VERSION_V3
+        || version != REPORT_VERSION_V2
         || source.1 - source.0 != SHA384_LEN
         || recipient.1 - recipient.0 != SHA384_LEN
         || envelope.1 - envelope.0 != SHA384_LEN

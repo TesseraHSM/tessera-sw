@@ -41,7 +41,7 @@ pub struct ResealedBackup {
     pub pok_remote_backup: Vec<u8>,
     /// Original SDMK backup paired with the security-domain seed.
     pub sd_mk_backup: Vec<u8>,
-    /// Actual authority PID report signer, raw P-384 X||Y (96 bytes).
+    /// Actual authority PID report signer, SEC1 uncompressed P-384 (97 bytes).
     pub sender_pid_pub_key: Vec<u8>,
     /// Authority PID chains and mandatory outgoing SdBackup operation report.
     pub sender_evidence: Evidence,
@@ -61,8 +61,8 @@ impl ResealedBackup {
             "invalid remote SDMK backup length"
         );
         anyhow::ensure!(
-            self.sender_pid_pub_key.len() == 96,
-            "missing raw P-384 reseal signer key"
+            self.sender_pid_pub_key.len() == 97 && self.sender_pid_pub_key.first() == Some(&4),
+            "reseal signer must be a SEC1 uncompressed P-384 point"
         );
         require_evidence(&self.sender_evidence)
     }

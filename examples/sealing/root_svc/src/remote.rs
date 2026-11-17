@@ -138,7 +138,7 @@ pub fn create(
         },
         masked_receiver_key: receiver.masked,
         sd_mk_backup: state.sd_mk_backup,
-        sender_pid_pub_key: raw.to_vec(),
+        sender_pid_pub_key: [&[4][..], raw.as_slice()].concat(),
         receiver_cert_chain: vec![receiver_chain.root_der, receiver_chain.leaf_der],
     };
     validate(&remote, env.policy())?;
@@ -212,7 +212,7 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
         )?;
         verify_sd_transfer_report(
             &remote.backup.evidence.report,
-            &remote.sender_pid_pub_key,
+            &remote.sender_pid_pub_key[1..],
             &remote.backup.pok_remote_backup,
             policy.as_bytes(),
             Some(&recipient),
@@ -239,7 +239,7 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
             None,
         )?;
         anyhow::ensure!(
-            pid.as_slice() == remote.sender_pid_pub_key,
+            pid.as_slice() == &remote.sender_pid_pub_key[1..],
             "restore source PID mismatch"
         );
     }

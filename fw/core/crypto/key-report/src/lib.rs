@@ -39,7 +39,6 @@ pub use consts::PUBLIC_KEY_MAX_SIZE;
 pub use consts::REPORT_DATA_LEN;
 pub use consts::REPORT_VERSION;
 pub use consts::REPORT_VERSION_V2;
-pub use consts::REPORT_VERSION_V3;
 pub use consts::SIGNATURE_LEN;
 pub use consts::VM_LAUNCH_ID_LEN;
 pub use cose_key::parse_ec2_cose_key;

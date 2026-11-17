@@ -180,6 +180,7 @@ fn write_sender_evidence(output: &mut impl Write, evidence: &Evidence) -> Result
 }
 
 fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Result<()> {
+    remote.validate()?;
     writeln!(
         output,
         "\nRemote restore parties (saved certificates, not fresh attestation):"
@@ -191,7 +192,10 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
         "Receiver",
         "SATA-authorized HPKE",
     )?;
-    verify_sd_report_signature(&remote.backup.evidence.report, &remote.sender_pid_pub_key)?;
+    verify_sd_report_signature(
+        &remote.backup.evidence.report,
+        &remote.sender_pid_pub_key[1..],
+    )?;
     write_operation_report(output, &remote.backup.evidence.report)?;
     writeln!(
         output,
@@ -236,7 +240,7 @@ fn write_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> R
 
 fn write_operation_report(output: &mut impl Write, bytes: &[u8]) -> Result<()> {
     let report = parse_sd_transfer_report(bytes)?;
-    writeln!(output, "  Format: COSE_Sign1 v3 / SdBackup / ES384")?;
+    writeln!(output, "  Format: COSE_Sign1 v2 / SdBackup / ES384")?;
     writeln!(
         output,
         "  Source PID key ID: {}",

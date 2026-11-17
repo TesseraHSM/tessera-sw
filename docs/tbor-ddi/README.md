@@ -7,6 +7,11 @@ Licensed under the MIT License.
 
 Per-command specifications for the TBOR DDI protocol.
 
+For the security-domain transfer migration, see
+[SD HPKE authentication rationale](sd-hpke-pqc-rationale.md), including
+the command-by-command changes from HPKE Auth, security invariants, and
+preparation for post-quantum KEMs.
+
 Per-command documents in [`commands/`](./commands/) describe only the
 request and response **bodies** (the TOC entries that follow the
 shared headers below).  Wire framing, TOC entry layout, alignment, and

@@ -585,13 +585,25 @@ struct tsra_sd_create_remote_backup_params {
 Reseal an existing remote backup to a new recipient over a security-domain
 session.
 
-Verifies the source PID's `SdBackup` report and client SD policy before
-Base-opening with the actual recipient key and resealing to the destination
-in `dest_evidence`. Returns the 322-byte envelope and SA-PID-signed report.
-Both evidences' partition-owner chains must anchor to the client policy's
-POTA. Destination `PublicKey` evidence must prove an HSM-generated SD
-sealing key and match the client SD policy. The SA-local policy may differ;
-the outgoing operation report still binds the client SD policy.
+**Verifies signatures on both incoming reports**, not just their certificate
+chains, before HPKE decapsulation of the source backup:
+
+| Evidence | Required verification |
+|---|---|
+| `src_evidence` | Verify the `SdBackup` operation report's ES384 signature under the source PID certified by its identity chains. Bind the report to that PID, the complete input envelope, the actual input recipient derived from `masked_sealing_key`, and the request's client SD policy hash. A `PublicKey` report is not sufficient. |
+| `dest_evidence` | Verify the `PublicKey` attestation report's ES384 signature under the destination PID certified by its identity chains. Require a P-384 SD-sealing key marked Generated and not Imported, with the same client SD policy hash. Use this attested key as the output recipient. |
+
+For both sides, the partition-owner chain must anchor to the **client
+policy's POTA**. Manufacturer and partition-owner chains are required;
+all supplied chains for each side must certify the same PID. These
+requirements apply regardless of `require_trusted_sa_key`, unlike the
+conditional SAPOTA authorization of remote restore.
+
+Only after these checks pass does the SA Base-open and reseal BKS3.
+It returns a fresh 322-byte envelope and a new `SdBackup` report signed
+by its own PID, binding that PID, the destination key, complete output
+envelope, and client SD policy hash. The SA-local policy may differ;
+its policy hash is not substituted for the client SD policy hash.
 
 The inputs are grouped into an
 [`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
@@ -655,8 +667,9 @@ Recovers the security-domain masking key from `prev_sd_mk_backup`, and
 returns the refreshed device-local backups: the local partition-owner-key
 backup (280 bytes) and the security-domain masking-key backup (264 bytes).
 
-`sender_pid_pub_key` is the report signer's 96-byte big-endian P-384
-`X || Y`. SATA sender authorization is removed. Under `require_trusted_sa_key`,
+`sender_pid_pub_key` is the report signer's 97-byte SEC1 uncompressed P-384
+point `0x04 || X_be[48] || Y_be[48]`; other lengths and point prefixes
+are rejected. SATA sender authorization is removed. Under `require_trusted_sa_key`,
 the source PID chains in `sender_evidence` must anchor to SAPOTA and match
 this supplied key. Otherwise chains may be empty and are ignored, but
 `sender_evidence.report` remains required. This establishes signature
@@ -717,7 +730,7 @@ struct tsra_sd_restore_remote_backup_params {
  | ------------------ | ------------------------------------------ | -------------------------------------------------- |
  | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (1-384 B)             |
  | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (280 B)           |
- | sender_pid_pub_key | [tsra_buffer*](#tsra_buffer) | report signer PID, 96-byte big-endian P-384 X || Y |
+ | sender_pid_pub_key | [tsra_buffer*](#tsra_buffer) | report signer PID, 97-byte SEC1 uncompressed P-384 point |
  | sender_evidence | [tsra_sd_evidence*](#tsra_sd_evidence) | mandatory `SdBackup` report; SAPOTA PID chains required only under trusted-SA policy |
  | src_remote_backup  | [tsra_buffer*](#tsra_buffer)           | remote backup to restore (322 B)                   |
  | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)           | previous security-domain masking-key backup (264 B)|

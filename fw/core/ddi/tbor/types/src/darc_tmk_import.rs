@@ -48,7 +48,7 @@ pub struct TborDarcTmkImportReq<'a> {
     #[tbor(buffer, len = 258)]
     pub sealed_tmk: &'a [u8],
 
-    /// PID-signed version-3 `Darc` report returned by `DarcTmkExport`.
+    /// PID-signed version-2 `Darc` report returned by `DarcTmkExport`.
     #[tbor(buffer, min_len = 1, max_len = 896)]
     pub report: &'a [u8],
 

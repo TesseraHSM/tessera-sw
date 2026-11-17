@@ -85,18 +85,17 @@ pub(super) async fn source<'a, P: HsmPal>(
     if let Some(anchor) = anchor {
         verify_evidence_signer(pal, io, evidence, anchor, signer).await?;
         if let Some(public) = pid_public {
-            let actual: &[u8] = &signer[1..];
+            let actual: &[u8] = signer;
             if public != actual {
                 return Err(HsmError::InvalidArg);
             }
         }
     } else {
         let public = pid_public.ok_or(HsmError::InvalidArg)?;
-        if public.len() != 96 {
+        if public.len() != 97 || public[0] != 4 {
             return Err(HsmError::InvalidArg);
         }
-        signer[0] = 4;
-        signer[1..].copy_from_slice(public);
+        signer.copy_from_slice(public);
     }
     let len = evidence.report.length.get() as usize;
     if len == 0 || len > KEY_REPORT_MAX_LEN {

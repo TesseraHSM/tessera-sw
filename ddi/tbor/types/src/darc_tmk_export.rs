@@ -38,7 +38,7 @@ pub struct TborDarcTmkExportReq {
 pub struct TborDarcTmkExportResp {
     /// `header(113) || enc(97) || ciphertext(32) || tag(16)`.
     pub sealed_tmk: [u8; SEALED_TMK_LEN],
-    /// Version-3 `Darc` report binding this envelope and its recipient.
+    /// Version-2 `Darc` report binding this envelope and its recipient.
     #[tbor(min_len = 1, max_len = 896)]
     pub report: Vec<u8>,
 }

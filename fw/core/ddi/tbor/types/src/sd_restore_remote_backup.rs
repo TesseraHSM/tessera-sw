@@ -28,8 +28,8 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     /// Bound SD policy.
     #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
-    /// Raw big-endian P-384 X || Y of the operation-report signer.
-    #[tbor(buffer, len = 96)]
+    /// SEC1 uncompressed P-384 operation-report signer: 0x04 || X_be || Y_be.
+    #[tbor(buffer, len = 97)]
     pub sender_pid_pub_key: &'a [u8],
     /// Always-required SdBackup report; identity chains are SAPOTA-checked
     /// only when the policy requires trusted SA identity.

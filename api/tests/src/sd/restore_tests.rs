@@ -23,6 +23,7 @@ use crate::utils::sd_provision::CaKey;
 use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
+use crate::utils::sd_provision::sec1_pub;
 
 /// Happy path: create a remote backup on one incarnation, then restore it
 /// on a rebooted (factory-reset, same-seed) incarnation; the restore
@@ -41,6 +42,7 @@ fn sd_restore_remote_backup_roundtrip() {
     let (session1, policy, pid_pub, local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session1);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let sender_pid = sec1_pub(&pid_pub);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session1.sd_create_remote_backup(&policy, rcvr_chain, ev)
@@ -68,7 +70,7 @@ fn sd_restore_remote_backup_roundtrip() {
     };
     for report in [&[][..], evidence.report()] {
         assert!(
-            restore(&masked, &pid_pub, report, &created.pok_remote_backup).is_err(),
+            restore(&masked, &sender_pid, report, &created.pok_remote_backup).is_err(),
             "empty and generic PublicKey reports cannot authorize SD restore",
         );
     }
@@ -77,7 +79,7 @@ fn sd_restore_remote_backup_roundtrip() {
     assert!(
         restore(
             &masked,
-            &pid_pub,
+            &sender_pid,
             &tampered_report,
             &created.pok_remote_backup
         )
@@ -87,21 +89,21 @@ fn sd_restore_remote_backup_roundtrip() {
     let mut tampered_backup = created.pok_remote_backup.clone();
     *tampered_backup.last_mut().expect("envelope tag") ^= 1;
     assert!(
-        restore(&masked, &pid_pub, &created.report, &tampered_backup).is_err(),
+        restore(&masked, &sender_pid, &created.report, &tampered_backup).is_err(),
         "the operation report must bind the complete envelope",
     );
     let (wrong_receiver, _, _) = masked_key_and_report(&session2);
     assert!(
         restore(
             &wrong_receiver,
-            &pid_pub,
+            &sender_pid,
             &created.report,
             &created.pok_remote_backup
         )
         .is_err(),
         "a valid report cannot authorize a different recipient",
     );
-    let wrong_pid = CaKey::generate().raw_pub();
+    let wrong_pid = sec1_pub(&CaKey::generate().raw_pub());
     assert!(
         restore(
             &masked,
@@ -112,7 +114,7 @@ fn sd_restore_remote_backup_roundtrip() {
         .is_err(),
         "the supplied PID must verify the operation signature",
     );
-    for len in [0, 95, 97] {
+    for len in [0, 96, 98] {
         let malformed_pid = vec![0; len];
         assert!(
             matches!(
@@ -124,8 +126,21 @@ fn sd_restore_remote_backup_roundtrip() {
                 ),
                 Err(HsmError::InvalidArgument)
             ),
-            "the signer PID must be exactly 96 bytes",
+            "the signer PID must be exactly 97 bytes",
         );
+    }
+    for prefix in [0, 2, 3] {
+        let mut malformed_pid = sender_pid;
+        malformed_pid[0] = prefix;
+        assert!(matches!(
+            restore(
+                &masked,
+                &malformed_pid,
+                &created.report,
+                &created.pok_remote_backup
+            ),
+            Err(HsmError::InvalidArgument)
+        ));
     }
     let evidence = evidence.with_report(&created.report);
     let restored = evidence
@@ -139,7 +154,7 @@ fn sd_restore_remote_backup_roundtrip() {
             session2.sd_restore_remote_backup(
                 &policy,
                 &masked,
-                &pid_pub,
+                &sender_pid,
                 &ev,
                 &created.pok_remote_backup,
                 &created.sd_mk_backup,
@@ -187,7 +202,7 @@ fn sd_restore_remote_backup_is_one_shot() {
         session.sd_restore_remote_backup(
             &policy,
             &masked,
-            &pid_pub,
+            &sec1_pub(&pid_pub),
             ev,
             &created.pok_remote_backup,
             &created.sd_mk_backup,
