@@ -357,20 +357,6 @@ test = false
 [[bin]]
 bench = false
 doc = false
-name = "fuzz_mbor_dispatcher"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_dispatcher_aes_fp"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher_aes_fp.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
 name = "fuzz_mbor_aes_encrypt_decrypt"
 path = "fuzz_targets/ddi/mbor/fuzz_mbor_aes_encrypt_decrypt.rs"
 test = false
@@ -380,60 +366,4 @@ bench = false
 doc = false
 name = "fuzz_mbor_attest_key"
 path = "fuzz_targets/ddi/mbor/fuzz_mbor_attest_key.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_ecdh_key_exchange"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecdh_key_exchange.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_ecc_sign"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecc_sign.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_hmac"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_hmac.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_hkdf"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_hkdf.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_kbkdf"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_kbkdf.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_rsa_mod_exp"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_mod_exp.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_rsa_unwrap"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_unwrap.rs"
-test = false
-
-[[bin]]
-bench = false
-doc = false
-name = "fuzz_mbor_establish_credential"
-path = "fuzz_targets/ddi/mbor/fuzz_mbor_establish_credential.rs"
 test = false
