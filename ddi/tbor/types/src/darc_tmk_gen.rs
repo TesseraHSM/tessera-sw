@@ -63,7 +63,7 @@ mod tests {
         let req = TborDarcTmkGenReq { session_id: 9 };
 
         let mut buf = [0u8; 128];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // A session-id-only request still produces a well-formed frame.
         assert!(!frame.is_empty(), "encoded frame must be non-empty");

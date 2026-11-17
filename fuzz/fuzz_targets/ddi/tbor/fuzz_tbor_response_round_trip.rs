@@ -13,14 +13,13 @@ use common::validate_toc_entry;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_ddi_tbor_codec::DecodeError;
 use tsra_ddi_tbor_codec::ResponseEncoder;
 use tsra_ddi_tbor_codec::ResponseView;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     buf_size: usize,
-    version: u8,
+    api_rev: (u16, u16),
     status: u32,
     fips_approved: bool,
     ops: Vec<EncoderTOCBuilders>,
@@ -30,14 +29,11 @@ fuzz_target!(|input: FuzzInput| {
     let mut backing = [0u8; FUZZ_RESP_BUF_SIZE];
     let len = input.buf_size % (FUZZ_RESP_BUF_SIZE + 1); // clamp into range
     let buf = &mut backing[..len];
-    let encoder = ResponseEncoder::new(buf, input.version, input.status, input.fips_approved);
+    let encoder = ResponseEncoder::new(buf, input.api_rev, input.status, input.fips_approved);
     if let Some(encoded) = run_encoder(encoder, &input.ops) {
-        let view = match ResponseView::parse(encoded) {
-            Ok(view) => view,
-            Err(DecodeError::UnsupportedVersion(_)) => return,
-            Err(e) => panic!("bytes from a successful ResponseEncoder::finish must parse: {e:?}"),
-        };
-        assert_eq!(view.version(), input.version);
+        let view = ResponseView::parse(encoded)
+            .expect("bytes from a successful ResponseEncoder::finish must parse");
+        assert_eq!(view.api_rev(), input.api_rev);
         assert_eq!(view.status(), input.status);
         assert_eq!(view.fips_approved(), input.fips_approved);
         assert_eq!(view.flags(), u8::from(input.fips_approved));

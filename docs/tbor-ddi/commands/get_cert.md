@@ -24,25 +24,25 @@ the request does not carry a partition selector.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries.
+Wire layout: 12-byte header, followed by the TOC entries.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition. |
-| 12 | `cert_id` | `uint8` (inline) | Zero-based certificate index; `0` = root, last index (`count - 1`) = partition leaf.  Must satisfy `cert_id < num_certs`. |
+| 12 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition. |
+| 16 | `cert_id` | `uint8` (inline) | Zero-based certificate index; `0` = root, last index (`count - 1`) = partition leaf.  Must satisfy `cert_id < num_certs`. |
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `certificate` | `buffer` (offset/len) | The DER-encoded X.509 certificate, up to 2048 B. |
+| 12 | `certificate` | `buffer` (offset/len) | The DER-encoded X.509 certificate, up to 2048 B. |
 
 ### Data section
 

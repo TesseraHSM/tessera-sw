@@ -135,11 +135,11 @@ fn open_session_unsupported_suite_id() {
 #[test]
 fn open_session_pk_init_length_mismatch_rejected() {
     let ctx = TestCtx::new();
-    let ecdh_pk = SessionInitiator::generate(SessionSuite::EcdhP384)
+    let ecdh_pk = SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
         .expect("generate ECDH ephemeral")
         .pk_init()
         .to_vec();
-    let mlkem_pk = SessionInitiator::generate(SessionSuite::MlKem1024)
+    let mlkem_pk = SessionInitiator::generate(SessionSuite::MlKem1024, (1, 1))
         .expect("generate ML-KEM ephemeral")
         .pk_init()
         .to_vec();
@@ -586,7 +586,7 @@ fn pk_init_y_as_prime_rejected() {
 #[test]
 fn pk_init_single_byte_tampered_rejected() {
     let ctx = TestCtx::new();
-    let mut pk_init = SessionInitiator::generate(SessionSuite::EcdhP384)
+    let mut pk_init = SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
         .expect("generate ECDH ephemeral")
         .pk_init()
         .to_vec();

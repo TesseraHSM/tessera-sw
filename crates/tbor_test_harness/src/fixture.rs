@@ -188,6 +188,15 @@ impl TestDev {
         })
     }
 
+    /// Selected TBOR revision for this test device.
+    pub fn api_rev(&self) -> (u16, u16) {
+        if self.is_duo() {
+            (2, 0)
+        } else {
+            (1, 1)
+        }
+    }
+
     /// Whether the device is a Duo (API revision 2.x).
     pub fn is_duo(&self) -> bool {
         self.model() == DdiDeviceModel::Duo
@@ -243,11 +252,11 @@ impl TestDev {
         oob_items: &mut [TborOobItem<'_>],
     ) -> DdiResult<T::OpResp> {
         let mut buf = vec![0u8; SECURE_REQ_CAP];
-        let len = req.encode_request(&mut buf)?.len();
+        let len = req.encode_request(&mut buf, self.api_rev())?.len();
         buf.truncate(len);
         if !self.is_duo() {
-            let frame = transport
-                .seal_frame(&buf)
+            let (frame, request) = transport
+                .seal_frame(session_id, req.session_ctrl(), &buf)
                 .map_err(|_| DdiError::TborEncodeError)?;
             let req = SealedFrameReq {
                 session_ctrl: req.session_ctrl(),
@@ -255,14 +264,18 @@ impl TestDev {
                 frame,
             };
             let SealedFrameResp(mut resp) =
-                self.dev.exec_op_tbor_oob(&req, oob_items, &mut None)?;
+                self.dev
+                    .exec_op_tbor_oob(self.api_rev(), &req, oob_items, &mut None)?;
             transport
-                .open_frame(&mut resp)
+                .open_frame(request, &mut resp)
                 .map_err(|_| DdiError::TborDecodeError)?;
-            return Ok(T::OpResp::decode_response(&resp)?);
+            return Ok(T::OpResp::decode_response_for_api_rev(
+                &resp,
+                self.api_rev(),
+            )?);
         }
-        let seal = transport
-            .seal_request(&mut buf)
+        let (seal, request) = transport
+            .seal_request(session_id, &mut buf)
             .map_err(|_| DdiError::TborEncodeError)?;
         let seal = DdiTransportSeal {
             iv: seal.iv,
@@ -276,9 +289,12 @@ impl TestDev {
             tag: seal.tag,
         };
         transport
-            .open_response(&seal, &mut resp)
+            .open_response(request, &seal, &mut resp)
             .map_err(|_| DdiError::TborDecodeError)?;
-        Ok(T::OpResp::decode_response(&resp)?)
+        Ok(T::OpResp::decode_response_for_api_rev(
+            &resp,
+            self.api_rev(),
+        )?)
     }
 
     /// [`DdiDev::exec_op_tbor`], routed over the session transport for
@@ -297,7 +313,8 @@ impl TestDev {
                 .collect();
             return self.exec_op_tbor_sealed(id, &transport, req, &mut items);
         }
-        self.dev.exec_op_tbor(req, oob_items, cookie)
+        self.dev
+            .exec_op_tbor(self.api_rev(), req, oob_items, cookie)
     }
 
     /// [`DdiDev::exec_op_tbor_oob`], routed like [`Self::exec_op_tbor`].
@@ -310,7 +327,8 @@ impl TestDev {
         if let Some((id, transport)) = self.session_transport(req) {
             return self.exec_op_tbor_sealed(id, &transport, req, oob_items);
         }
-        self.dev.exec_op_tbor_oob(req, oob_items, cookie)
+        self.dev
+            .exec_op_tbor_oob(self.api_rev(), req, oob_items, cookie)
     }
 
     /// Factory-reset the device, dropping every session transport.

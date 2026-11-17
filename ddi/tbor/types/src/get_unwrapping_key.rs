@@ -51,7 +51,7 @@ mod tests {
     fn request_encodes_session_id() {
         let req = TborGetUnwrappingKeyReq { session_id: 11 };
         let mut buf = [0u8; 128];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         // The session id (11) must appear in the encoded frame.
         assert!(
             frame.contains(&11),

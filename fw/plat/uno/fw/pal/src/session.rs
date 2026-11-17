@@ -21,6 +21,7 @@
 //! `session_try_consume_psk_change`) are synchronous.
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmApiRevision;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -57,15 +58,18 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 /// `Session`-kind blob: `[api_rev(8) || masking_key(80)]` = 88 bytes.
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
+/// Offset of `param_key`, after the format tag and selected API revision.
+const SESSION_EX_PARAM_OFF: usize = SESSION_API_REV_SIZE + 4;
 /// Offset of `masking_key` in a `SessionEx` blob.
-const SESSION_EX_MASKING_OFF: usize = SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN;
+const SESSION_EX_MASKING_OFF: usize = SESSION_EX_PARAM_OFF + SESSION_PARAM_KEY_LEN;
 /// Offset of `auth_binding` in a `SessionEx` blob.
 const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_LEN;
 /// Offset of the `h2m ‖ m2h` transport secrets in a `SessionEx` blob.
 const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
 
-/// `SessionEx` blob: `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖
-/// auth_binding(68) ‖ h2m(36) ‖ m2h(36)` = 212 bytes.  The SessionEx
+/// `SessionEx` blob: `internal_format_tag(8) ‖ selected_api_rev(4) ‖
+/// param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖ h2m(36) ‖ m2h(36)`
+/// = 216 bytes. The SessionEx
 /// masking key is the 32 B AES-256-GCM `key_masking::aead` key
 /// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
 const SESSION_EX_BLOB_SIZE: usize = SESSION_EX_KEYS_OFF + 2 * SESSION_TRANSPORT_SECRET_LEN;
@@ -313,11 +317,34 @@ impl HsmSessionManager for UnoHsmPal {
         }
     }
 
+    fn session_api_revision(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<HsmApiRevision> {
+        let table = SessionStore::partition(io.pid())?;
+        let revision = match table.state(id) {
+            HsmSessionState::Pending => self
+                .vault_key(io, table.pending_phys(id)?)?
+                .get(..4)
+                .ok_or(HsmError::InvalidArg)?,
+            HsmSessionState::Active => {
+                let blob = self.vault_key(io, table.physical_id(id)?)?;
+                if blob.len() != SESSION_EX_BLOB_SIZE {
+                    return Err(HsmError::InvalidPermissions);
+                }
+                &blob[SESSION_API_REV_SIZE..SESSION_EX_PARAM_OFF]
+            }
+            _ => return Err(HsmError::SessionNotFound),
+        };
+        Ok(HsmApiRevision::new(
+            u16::from_le_bytes([revision[0], revision[1]]),
+            u16::from_le_bytes([revision[2], revision[3]]),
+        ))
+    }
+
     async fn session_promote(
         &self,
         io: &UnoHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
+        selected_api_rev: HsmApiRevision,
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
@@ -343,7 +370,11 @@ impl HsmSessionManager for UnoHsmPal {
         let blob = self.dma_alloc(io, SESSION_EX_BLOB_SIZE)?;
         let (head, keys) = blob.split_at_mut(SESSION_EX_KEYS_OFF);
         head[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
-        head[SESSION_API_REV_SIZE..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
+        head[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + 2]
+            .copy_from_slice(&selected_api_rev.major.to_le_bytes());
+        head[SESSION_API_REV_SIZE + 2..SESSION_EX_PARAM_OFF]
+            .copy_from_slice(&selected_api_rev.minor.to_le_bytes());
+        head[SESSION_EX_PARAM_OFF..SESSION_EX_MASKING_OFF].copy_from_slice(param_key);
         head[SESSION_EX_MASKING_OFF..SESSION_EX_AUTH_OFF].copy_from_slice(masking_key);
         head[SESSION_EX_AUTH_OFF..].copy_from_slice(auth_binding);
         let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
@@ -391,7 +422,7 @@ impl HsmSessionManager for UnoHsmPal {
             return Err(HsmError::InvalidPermissions);
         }
         Ok(blob
-            .split_at(SESSION_API_REV_SIZE)
+            .split_at(SESSION_EX_PARAM_OFF)
             .1
             .split_at(SESSION_PARAM_KEY_LEN)
             .0)

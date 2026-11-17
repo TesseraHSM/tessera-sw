@@ -141,7 +141,8 @@ fn hkdf_derive_tbor(
     };
     let mut cookie = None;
     let resp = shared_secret.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = shared_secret.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

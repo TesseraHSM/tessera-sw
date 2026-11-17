@@ -359,8 +359,12 @@ impl<R: TborOpReq> TborOpReq for PayloadGapReq<R> {
         self.0.session_ctrl()
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let len = self.0.encode_request(buf)?.len();
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let len = self.0.encode_request(buf, api_rev)?.len();
         let toc_count = RequestView::parse(&buf[..len])
             .expect("parse canonical request")
             .toc_count();
@@ -463,8 +467,12 @@ impl<R: TborOpReq> TborOpReq for MaskedKeyLayoutReq<'_, R> {
         self.req.session_ctrl()
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let len = self.req.encode_request(buf)?.len();
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let len = self.req.encode_request(buf, api_rev)?.len();
         let toc_count = RequestView::parse(&buf[..len])
             .expect("parse canonical request")
             .toc_count();
@@ -515,7 +523,9 @@ where
     R::OpResp: core::fmt::Debug,
 {
     let mut buf = vec![0u8; 0x2000];
-    let encoded = req.encode_request(&mut buf).expect("encode request");
+    let encoded = req
+        .encode_request(&mut buf, (1, 1))
+        .expect("encode request");
     let toc_count = RequestView::parse(encoded)
         .expect("parse canonical request")
         .toc_count();

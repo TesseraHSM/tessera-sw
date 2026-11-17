@@ -16,22 +16,29 @@ fn parse_rejects_short_buffer() {
 }
 
 #[test]
-fn parse_rejects_unsupported_version() -> TestResult {
+fn selected_api_revision_rejects_changed_header() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .none()?
         .finish()?
         .len();
     buf[0] = 0xFF;
-    let err = RequestView::parse(&buf[..len]).unwrap_err();
-    assert_eq!(err, DecodeError::UnsupportedVersion(0xFF));
+    let view = RequestView::parse(&buf[..len])?;
+    let err = view.require_api_rev((1, 1)).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::ApiRevisionMismatch {
+            expected: (1, 1),
+            actual: (255, 1),
+        }
+    );
     Ok(())
 }
 
 #[test]
 fn parse_rejects_truncated_message() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .uint64(1)?
         .finish()?
         .len();
@@ -49,7 +56,7 @@ fn parse_rejects_truncated_message() -> TestResult {
 #[test]
 fn parse_rejects_offset_length_out_of_bounds() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .buffer(b"ok")?
         .finish()?
         .len();
@@ -65,7 +72,7 @@ fn parse_rejects_offset_length_out_of_bounds() -> TestResult {
 #[test]
 fn parse_rejects_uint32_with_wrong_length() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .uint32(0x1234_5678)?
         .finish()?
         .len();
@@ -81,7 +88,7 @@ fn parse_rejects_uint32_with_wrong_length() -> TestResult {
 #[test]
 fn parse_rejects_uint64_with_wrong_length() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .uint64(0x0123_4567_89AB_CDEF)?
         .finish()?
         .len();
@@ -97,7 +104,7 @@ fn parse_rejects_uint64_with_wrong_length() -> TestResult {
 #[test]
 fn parse_rejects_none_with_nonzero_reserved_bits() -> TestResult {
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .none()?
         .finish()?
         .len();

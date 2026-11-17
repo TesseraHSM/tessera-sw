@@ -5,10 +5,23 @@
 
 #include <tsra_api.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
+
+/// Controlled test enrollment only. Applications must provision root trust
+/// independently, not learn it from the connection being authenticated.
+struct TestRootPin
+{
+    explicit TestRootPin(tsra_handle partition);
+    TestRootPin(const TestRootPin &) = delete;
+    TestRootPin &operator=(const TestRootPin &) = delete;
+
+    std::array<uint8_t, 48> hash{};
+    tsra_buffer buffer{ hash.data(), static_cast<uint32_t>(hash.size()) };
+};
 
 // Pinned TBOR masked-blob wire lengths, mirroring the host / firmware
 // `tsra_ddi_tbor_types` constants (which are not exposed in the C

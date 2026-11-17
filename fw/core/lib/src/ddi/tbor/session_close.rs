@@ -44,7 +44,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     }
     undo.push_session_close(id)?;
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSessionCloseResp::encode(buf, 0, false)?.finish();
+        let frame = TborSessionCloseResp::encode_for_request(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })?;
     Ok(resp)

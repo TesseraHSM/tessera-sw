@@ -58,7 +58,6 @@ pub use toc::TocEntry;
 pub use toc::TocType;
 pub use toc::MAX_DATA_SIZE;
 pub use toc::MAX_TOC_ENTRIES;
-pub use toc::PROTOCOL_VERSION;
 pub use toc::TOC_ENTRY_LEN;
 pub use view::RequestView;
 pub use view::ResponseView;

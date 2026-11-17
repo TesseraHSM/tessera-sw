@@ -34,6 +34,10 @@ use zeroize::Zeroizing;
 
 use super::*;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "session_ex_tests.rs"]
+mod tests;
+
 /// Maps a [`SessionExCryptoError`] onto the API error domain. Malformed
 /// inputs surface as [`HsmError::InvalidArgument`]; a transcript
 /// signature or transport authentication failure as
@@ -66,6 +70,7 @@ impl TryFrom<HsmSessionSuite> for SessionSuite {
 
 /// Phase-1 outcome, consumed by [`open_session_ex_finish`].
 struct PendingHandshake {
+    api_rev: HsmApiRev,
     /// Reserved session identifier returned by the FW.
     session_id: u16,
     /// Caller-selected PSK id (0 = CO, 1 = CU).
@@ -109,52 +114,71 @@ pub(crate) struct OpenSessionExResult {
 ///
 /// The negotiated API revision is validated before issuing the TBOR cert
 /// commands; revisions below [`TBOR_MIN_API_REV`] are unsupported.
-pub(super) fn fetch_pk_hsm(dev: &HsmDev, rev: HsmApiRev) -> HsmResult<EccPublicKey> {
+pub(super) fn fetch_pk_hsm(
+    dev: &HsmDev,
+    rev: HsmApiRev,
+    root_spki_thumbprint: &[u8; 48],
+) -> HsmResult<EccPublicKey> {
     require_tbor_rev(rev)?;
-    let (chain_pem, leaf_der) = fetch_cert_chain_checked_tbor(dev, 0)?;
-    validate_part_cert_chain(&chain_pem)?;
-
-    let leaf = X509Certificate::from_der(&leaf_der).map_err(|_| HsmError::InternalError)?;
-    let pk_der = leaf
-        .get_public_key_der()
-        .map_err(|_| HsmError::InternalError)?;
-    EccPublicKey::from_bytes(&pk_der).map_err(|_| HsmError::InternalError)
+    let (chain_pem, _) = fetch_cert_chain_checked_tbor(dev, rev, 0)?;
+    validate_part_cert_chain(&chain_pem, root_spki_thumbprint)
 }
 
-/// Cryptographically verify the partition cert chain's internal
-/// issuance/order (leaf issued by intermediate ... issued by root)
-/// before its leaf key is trusted as `pk_hsm`.
-///
-/// `chain_pem` is the leaf->root PEM stack returned by
-/// [`fetch_cert_chain_checked_tbor`]. [`X509CertificateOp::validate_chain`]
-/// verifies internal consistency, not a pinned trust anchor. A single
-/// self-signed cert (e.g. the sim backend) has no ordering to verify,
-/// so chains shorter than two certs are accepted as-is.
-///
-/// # Errors
-///
-/// Returns [`HsmError::InternalError`] when the PEM stack is empty or
-/// fails to parse, and [`HsmError::InvalidSignature`] when the chain
-/// fails cryptographic verification.
-fn validate_part_cert_chain(chain_pem: &str) -> HsmResult<()> {
+/// Authenticate the PID path against the caller's root SPKI thumbprint and require
+/// DICE layer zero plus the Tessera EKU on the same non-PID certificate.
+fn validate_part_cert_chain(
+    chain_pem: &str,
+    root_spki_thumbprint: &[u8; 48],
+) -> HsmResult<EccPublicKey> {
     let certs = X509Certificate::from_pem_stack(chain_pem.as_bytes())
-        .map_err(|_| HsmError::InternalError)?;
+        .map_err(|_| HsmError::InvalidSignature)?;
     let Some((leaf, rest)) = certs.split_first() else {
-        return Err(HsmError::InternalError);
+        return Err(HsmError::InvalidSignature);
     };
     if rest.is_empty() {
-        // Single self-signed cert (e.g. sim): no chain ordering to verify.
-        return Ok(());
+        return Err(HsmError::InvalidSignature);
     }
-    match leaf.validate_chain(rest) {
-        Ok(true) => Ok(()),
-        // A verification failure (bad signature / broken issuance chain)
-        // surfaces as `Ok(false)` on Windows and `Err(VerifyError)` on
-        // Linux; map both to `InvalidSignature`. Parse / store-setup
-        // failures remain `InternalError`.
-        Ok(false) | Err(X509CertificateError::VerifyError) => Err(HsmError::InvalidSignature),
-        Err(_) => Err(HsmError::InternalError),
+    let path = match leaf.verified_chain(rest) {
+        Ok(Some(path)) => path,
+        Ok(None) | Err(X509CertificateError::VerifyError) => {
+            return Err(HsmError::InvalidSignature);
+        }
+        Err(_) => return Err(HsmError::InternalError),
+    };
+    let root = path.last().ok_or(HsmError::InvalidSignature)?;
+    let root_spki = root
+        .subject_public_key_info_der()
+        .map_err(|_| HsmError::InvalidSignature)?;
+    let actual = Hasher::hash_vec(&mut HashAlgo::sha384(), root_spki)
+        .map_err(|_| HsmError::InternalError)?;
+    if actual.as_slice() != root_spki_thumbprint {
+        return Err(HsmError::InvalidSignature);
     }
+    // The thumbprint identifies the root key, not its certificate's extensions.
+    // Trust stores may skip this signature, but the root may supply the profile.
+    if !root
+        .verify_signature(root)
+        .map_err(|_| HsmError::InvalidSignature)?
+    {
+        return Err(HsmError::InvalidSignature);
+    }
+    let mut tessera_device = false;
+    for certificate in path.iter().skip(1) {
+        let layer_zero = certificate
+            .has_dice_tcb_info_layer(0)
+            .map_err(|_| HsmError::InvalidSignature)?;
+        let tessera_eku = certificate
+            .has_extended_key_usage("1.3.6.1.4.1.311.102.1.50.1")
+            .map_err(|_| HsmError::InvalidSignature)?;
+        tessera_device |= layer_zero && tessera_eku;
+    }
+    if !tessera_device {
+        return Err(HsmError::InvalidSignature);
+    }
+    let pk_der = leaf
+        .subject_public_key_info_der()
+        .map_err(|_| HsmError::InvalidSignature)?;
+    EccPublicKey::from_bytes(pk_der).map_err(|_| HsmError::InvalidSignature)
 }
 
 /// Opens a session on an HSM partition over the TBOR transport.
@@ -168,6 +192,7 @@ fn validate_part_cert_chain(chain_pem: &str) -> HsmResult<()> {
 /// * `rev` - The negotiated API revision. A `session_ex` session is
 ///   TBOR-only and requires [`TBOR_MIN_API_REV`] or newer; an older revision
 ///   is rejected with [`HsmError::UnsupportedApiRevision`].
+/// * `root_spki_thumbprint` - Independently provisioned root SPKI SHA-384 digest.
 /// * `psk_id` - Pre-shared-key identity selecting the role (0 = CO,
 ///   1 = CU).
 /// * `psk` - Caller-supplied PSK; `None` selects the partition default.
@@ -185,12 +210,13 @@ fn validate_part_cert_chain(chain_pem: &str) -> HsmResult<()> {
 pub(crate) fn open_session_ex(
     partition: &HsmPartition,
     rev: HsmApiRev,
+    root_spki_thumbprint: &[u8; 48],
     psk_id: u8,
     psk: Option<&[u8; crate::PSK_LEN]>,
     suite: HsmSessionSuite,
 ) -> HsmResult<OpenSessionExResult> {
     require_tbor_rev(rev)?;
-    let pending = open_session_ex_init(partition, rev, psk_id, psk, suite)?;
+    let pending = open_session_ex_init(partition, rev, root_spki_thumbprint, psk_id, psk, suite)?;
     open_session_ex_finish(partition, pending)
 }
 
@@ -214,6 +240,7 @@ pub(crate) fn open_session_ex(
 fn open_session_ex_init(
     partition: &HsmPartition,
     rev: HsmApiRev,
+    root_spki_thumbprint: &[u8; 48],
     psk_id: u8,
     psk: Option<&[u8; crate::PSK_LEN]>,
     suite: HsmSessionSuite,
@@ -229,8 +256,8 @@ fn open_session_ex_init(
     let inner = partition.inner().read();
     let dev = inner.dev();
 
-    let pk_hsm = fetch_pk_hsm(dev, rev)?;
-    let initiator = SessionInitiator::generate(session_suite)?;
+    let pk_hsm = fetch_pk_hsm(dev, rev, root_spki_thumbprint)?;
+    let initiator = SessionInitiator::generate(session_suite, rev.tbor().map_err(HsmError::from)?)?;
     let session_type = SessionType::Encrypted.to_u8();
     let req = TborSessionOpenInitReq {
         psk_id,
@@ -239,11 +266,12 @@ fn open_session_ex_init(
         pk_init: initiator.pk_init().to_vec(),
     };
     let resp = dev
-        .exec_op_tbor(&req, None, &mut None)
+        .exec_op_tbor(rev, &req, None, &mut None)
         .map_err(HsmError::from)?;
 
     match initiator.complete(psk_id, session_type, &pk_hsm, psk, &resp.enc, &resp.sig) {
         Ok(handshake) => Ok(PendingHandshake {
+            api_rev: rev,
             session_id: resp.session_id,
             psk_id,
             suite,
@@ -294,7 +322,8 @@ fn open_session_ex_finish(
             mac_fin: handshake.fin()?,
             seed_envelope,
         };
-        let resp = dev.exec_op_tbor_sealed(session_id, &transport, &req, &mut [])?;
+        let resp =
+            dev.exec_op_tbor_sealed(pending.api_rev, session_id, &transport, &req, &mut [])?;
         Ok((
             transport,
             OpenSessionExResult {
@@ -347,6 +376,7 @@ fn open_session_ex_finish(
 /// and surfaces DDI/device failures from the round-trip.
 pub(crate) fn psk_change(
     partition: &HsmPartition,
+    rev: HsmApiRev,
     session_id: u16,
     param_key: &AesKey,
     new_psk: &[u8; crate::PSK_LEN],
@@ -388,7 +418,7 @@ pub(crate) fn psk_change(
     let dev = inner.dev();
     with_explicit_cookie(ddi_cookie, |cookie| {
         let _resp: TborPskChangeResp = dev
-            .exec_op_tbor(&req, None, cookie)
+            .exec_op_tbor(rev, &req, None, cookie)
             .map_err(HsmError::from)?;
         Ok(())
     })
@@ -415,6 +445,7 @@ pub(crate) fn psk_change(
 /// Propagates DDI failures from the round-trip.
 pub(crate) fn close_session_ex(
     partition: &HsmPartition,
+    rev: HsmApiRev,
     session_id: u16,
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<()> {
@@ -423,7 +454,7 @@ pub(crate) fn close_session_ex(
 
     let req = TborSessionCloseReq { session_id };
     let result = with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, None, cookie)
+        dev.exec_op_tbor(rev, &req, None, cookie)
             .map_err(HsmError::from)
             .map(|_| ())
     });

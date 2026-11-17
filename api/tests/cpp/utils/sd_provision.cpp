@@ -8,6 +8,8 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -23,6 +25,7 @@
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/obj_mac.h>
+#include <openssl/pem.h>
 #endif
 
 namespace
@@ -980,9 +983,11 @@ Bytes build_backing_part_policy(
 
 tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
 {
+    TestRootPin root(part_handle);
     tsra_handle sess = 0;
     tsra_session_psk psk{ 0 /* CO */, psk_buf };
-    auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess);
+    auto err =
+        tsra_sess_ex_open(part_handle, &root.buffer, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess);
     if (err != TSRA_STATUS_SUCCESS || sess == 0)
     {
         ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;
@@ -991,6 +996,117 @@ tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
     return sess;
 }
 } // namespace
+
+TestRootPin::TestRootPin(tsra_handle partition)
+{
+    tsra_part_prop prop{ TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, nullptr, 0 };
+    if (tsra_part_get_prop(partition, &prop) != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        throw std::runtime_error("test root certificate chain size query failed");
+    }
+    std::vector<tsra_char> storage((prop.len + sizeof(tsra_char) - 1) / sizeof(tsra_char));
+    prop.val = storage.data();
+    if (tsra_part_get_prop(partition, &prop) != TSRA_STATUS_SUCCESS)
+    {
+        throw std::runtime_error("test root certificate chain retrieval failed");
+    }
+    const std::basic_string<tsra_char> text(storage.data());
+    const std::string pem(text.begin(), text.end());
+    const auto offset = pem.rfind("-----BEGIN CERTIFICATE-----");
+    if (offset == std::string::npos)
+    {
+        throw std::runtime_error("test root certificate missing");
+    }
+    const std::string root = pem.substr(offset);
+    Bytes spki;
+#ifdef _WIN32
+    DWORD der_len = 0;
+    if (!CryptStringToBinaryA(
+            root.c_str(),
+            static_cast<DWORD>(root.size()),
+            CRYPT_STRING_BASE64HEADER,
+            nullptr,
+            &der_len,
+            nullptr,
+            nullptr
+        ))
+    {
+        throw std::runtime_error("test root PEM decoding failed");
+    }
+    Bytes der(der_len);
+    if (!CryptStringToBinaryA(
+            root.c_str(),
+            static_cast<DWORD>(root.size()),
+            CRYPT_STRING_BASE64HEADER,
+            der.data(),
+            &der_len,
+            nullptr,
+            nullptr
+        ))
+    {
+        throw std::runtime_error("test root PEM decoding failed");
+    }
+    auto cert = CertCreateCertificateContext(X509_ASN_ENCODING, der.data(), der_len);
+    if (cert == nullptr)
+    {
+        throw std::runtime_error("test root certificate parsing failed");
+    }
+    auto guard = scope_guard::make_scope_exit([&] { CertFreeCertificateContext(cert); });
+    DWORD size = 0;
+    if (!CryptEncodeObjectEx(
+            X509_ASN_ENCODING,
+            X509_PUBLIC_KEY_INFO,
+            &cert->pCertInfo->SubjectPublicKeyInfo,
+            0,
+            nullptr,
+            nullptr,
+            &size
+        ))
+    {
+        throw std::runtime_error("test root SPKI size query failed");
+    }
+    spki.resize(size);
+    if (!CryptEncodeObjectEx(
+            X509_ASN_ENCODING,
+            X509_PUBLIC_KEY_INFO,
+            &cert->pCertInfo->SubjectPublicKeyInfo,
+            0,
+            nullptr,
+            spki.data(),
+            &size
+        ))
+    {
+        throw std::runtime_error("test root SPKI encoding failed");
+    }
+    spki.resize(size);
+#else
+    std::unique_ptr<BIO, decltype(&BIO_free)> bio(
+        BIO_new_mem_buf(root.data(), static_cast<int>(root.size())),
+        BIO_free
+    );
+    std::unique_ptr<X509, decltype(&X509_free)> cert(
+        bio ? PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr) : nullptr,
+        X509_free
+    );
+    if (!cert)
+    {
+        throw std::runtime_error("test root certificate parsing failed");
+    }
+    auto *pubkey = X509_get_X509_PUBKEY(cert.get());
+    const int size = i2d_X509_PUBKEY(pubkey, nullptr);
+    if (size <= 0)
+    {
+        throw std::runtime_error("test root SPKI size query failed");
+    }
+    spki.resize(static_cast<size_t>(size));
+    auto *output = spki.data();
+    if (i2d_X509_PUBKEY(pubkey, &output) != size)
+    {
+        throw std::runtime_error("test root SPKI encoding failed");
+    }
+#endif
+    hash = sha384(spki.data(), spki.size());
+}
 
 tsra_handle provision_sd_co_session(tsra_handle part_handle)
 {

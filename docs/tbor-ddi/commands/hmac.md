@@ -33,10 +33,10 @@ available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (260..=356 B) | The masked HMAC key (from `HmacGenerateKey` / unwrap), an AEAD-GCM-256 envelope. Its scope selects the masking key; its kind selects the SHA variant. |
-| 20 | `msg` | `buffer` (≤ 1024 B) | The message to MAC. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (260..=356 B) | The masked HMAC key (from `HmacGenerateKey` / unwrap), an AEAD-GCM-256 envelope. Its scope selects the masking key; its kind selects the SHA variant. |
+| 24 | `msg` | `buffer` (≤ 1024 B) | The message to MAC. |
 
 ### Data section
 
@@ -48,7 +48,7 @@ Carries the masked key followed by the message.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `tag` | `buffer` (32 / 48 / 64 B) | The HMAC tag over `msg` (SHA-256 / 384 / 512). |
+| 12 | `tag` | `buffer` (32 / 48 / 64 B) | The HMAC tag over `msg` (SHA-256 / 384 / 512). |
 
 ### Data section
 

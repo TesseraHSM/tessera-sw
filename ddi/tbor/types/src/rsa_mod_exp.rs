@@ -83,7 +83,7 @@ mod tests {
             y: alloc::vec![0x22u8; 256],
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&RSA_OP_SIGN),
             "encoded frame must carry the op-type discriminant",

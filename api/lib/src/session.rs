@@ -189,6 +189,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { param_key, .. } => ddi::psk_change(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 param_key,
                 new_psk,
@@ -634,7 +635,7 @@ impl Drop for HsmSessionInner {
                 self.with_dev(|dev| ddi::close_session(dev, self.id, self.rev))
             }
             SessionKind::Ver2 { .. } => {
-                ddi::close_session_ex(&self.partition, self.id, &self.ddi_cookie)
+                ddi::close_session_ex(&self.partition, self.rev, self.id, &self.ddi_cookie)
             }
         };
 

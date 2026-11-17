@@ -24,6 +24,7 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 
+use core::cell::Cell;
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
@@ -50,6 +51,7 @@ use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmRequest;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
@@ -144,6 +146,7 @@ pub struct UnoHsmIo {
     pid: HsmPartId,
     /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
     queue_id: u16,
+    transport_binding: Cell<Option<sealed::SessionTransportBinding>>,
 }
 
 impl UnoHsmIo {
@@ -165,6 +168,7 @@ impl UnoHsmIo {
                 index,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
+                transport_binding: Cell::new(None),
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
@@ -189,6 +193,7 @@ impl UnoHsmIo {
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
             queue_id,
+            transport_binding: Cell::new(None),
         }
     }
 
@@ -323,6 +328,7 @@ impl HsmIoController for UnoHsmPal {
     /// can run post-completion work over `io` first.
     async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
         let sealed_id = sealed::sealed_session(io.sqe())?;
+        let control = io.sqe().session_ctrl();
         let sqe = io.sqe().view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -336,12 +342,13 @@ impl HsmIoController for UnoHsmPal {
             sqe.oob_prp(),
         )?;
         let len = sqe.src_len() as usize;
-        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+        let headroom = sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN);
+        let mut buf = self.dma_alloc_exchange(io, headroom + len.next_multiple_of(4))?;
         self.copy_mem_from_host(
             io,
             sqe.src_prp1(),
             sqe.src_prp2(),
-            &mut buf.buffer_mut()[..len],
+            &mut buf.buffer_mut()[headroom..headroom + len],
             true,
         )
         .await
@@ -354,7 +361,16 @@ impl HsmIoController for UnoHsmPal {
                 resp_capacity,
             });
         };
-        let len = sealed::sealed_open(self, io, id, &mut buf.buffer_mut()[..len]).await?;
+        let (len, binding) = sealed::sealed_open(
+            self,
+            io,
+            id,
+            control,
+            &mut buf.buffer_mut()[..headroom + len],
+        )
+        .await?;
+        io.transport_binding.set(Some(binding));
+        let buf = buf.skip_prefix(headroom)?;
         Ok(HsmRequest {
             buf,
             len,
@@ -367,7 +383,11 @@ impl HsmIoController for UnoHsmPal {
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
         let resp = match sealed::sealed_session(io.sqe())? {
             Some(id) => {
-                let frame = sealed::sealed_seal(self, io, id, resp).await?;
+                let binding = io
+                    .transport_binding
+                    .take()
+                    .ok_or(HsmError::SessionTransportError)?;
+                let frame = sealed::sealed_seal(self, io, id, binding, resp).await?;
                 let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
                 io.cqe().view().set_dst_len(frame_len);
                 frame

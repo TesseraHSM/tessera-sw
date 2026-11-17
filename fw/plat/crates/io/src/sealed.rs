@@ -16,16 +16,18 @@
 //!
 //! The plaintext is padded to whole AES blocks, so the engine never takes
 //! a partial-block path; the padding count is its last byte, encrypted
-//! and authenticated with the message, so the frame needs no AAD. The
-//! ciphertext starts the frame, so it is opened in place and the message
-//! is left at offset 0 of the exchange buffer.
+//! and authenticated with the message. An implicit 32-byte AAD binds the
+//! request IV and transport context, with distinct request/response domains.
+//! AAD is local, not part of the frame. Receive DMA leaves headroom for it,
+//! so opening needs no additional message copy.
 //!
 //! Requests are opened with the session's VM→HSM transport key, responses
 //! sealed with the HSM→VM key. The sender builds the IV from its
 //! direction's salt and big-endian message counter, so no per-message
 //! randomness is needed and nonces never repeat under a key. As on Duo,
 //! the receiver uses the IV it is given: it is read in place from the
-//! frame, so opening needs no extra DMA staging.
+//! frame. Responses use the original authenticated request context, so
+//! concurrent responses can complete in any order without substitution.
 
 use tsra_fw_hsm_pal_traits::HsmAesGcm;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
@@ -48,6 +50,52 @@ pub const SEALED_BLOCK_LEN: usize = 16;
 
 /// Length of the `iv ‖ tag` frame trailer.
 pub const SEALED_TRAILER_LEN: usize = SESSION_TRANSPORT_IV_LEN + SESSION_TRANSPORT_TAG_LEN;
+
+/// Exact AAD prefix size required by the Uno GCM engine.
+pub const TRANSPORT_AAD_LEN: usize = 32;
+
+/// Authenticated context retained for one request until its response is sealed.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionTransportBinding([u8; 16]);
+
+impl SessionTransportBinding {
+    /// Uno context; the control byte matches the SQE wire encoding.
+    pub fn uno(id: u16, control: HsmSessCtrl, iv: [u8; 12]) -> HsmResult<Self> {
+        let control = match control {
+            HsmSessCtrl::Close => 2,
+            HsmSessCtrl::InSession => 3,
+            _ => return Err(HsmError::SessionTransportError),
+        };
+        Ok(Self::new(id, control, 1, iv))
+    }
+
+    /// Duo declares session control inside TBOR, not its SQE.
+    pub fn duo(id: u16, iv: [u8; 12]) -> Self {
+        Self::new(id, 0, 2, iv)
+    }
+
+    fn new(id: u16, control: u8, protocol: u8, iv: [u8; 12]) -> Self {
+        let mut context = [0; 16];
+        context[..12].copy_from_slice(&iv);
+        context[12..14].copy_from_slice(&id.to_le_bytes());
+        context[14] = control;
+        context[15] = protocol;
+        Self(context)
+    }
+
+    /// Mirrors the host: domain(16), request IV(12), session id(2, LE),
+    /// session control(1), protocol(1: Uno=1, Duo=2).
+    pub fn aad(&self, response: bool) -> [u8; TRANSPORT_AAD_LEN] {
+        let mut aad = [0; TRANSPORT_AAD_LEN];
+        aad[..16].copy_from_slice(if response {
+            b"TSRA-RSP-AAD-V1\0"
+        } else {
+            b"TSRA-REQ-AAD-V1\0"
+        });
+        aad[16..].copy_from_slice(&self.0);
+        aad
+    }
+}
 
 /// Whether `sqe`'s request and response travel in a sealed frame: a TBOR
 /// command that runs within (or closes) a session.
@@ -89,9 +137,9 @@ pub const fn sealed_msg_capacity(frame_capacity: usize) -> usize {
     }
 }
 
-/// Opens the sealed request `frame` in place with session `id`'s VM→HSM
-/// key, returning the message length; the message is left at the start of
-/// `frame`.
+/// Opens `[AAD headroom(32) | frame]` in place with session `id`'s VM→HSM
+/// key. Returns the message length and authenticated request binding.
+/// The message remains immediately after the headroom.
 ///
 /// # Errors
 ///
@@ -102,25 +150,31 @@ pub async fn sealed_open<P>(
     pal: &P,
     io: &P::Io,
     id: HsmSessId,
+    control: HsmSessCtrl,
     frame: &mut HsmDmaBuf,
-) -> HsmResult<usize>
+) -> HsmResult<(usize, SessionTransportBinding)>
 where
     P: HsmAesGcm + HsmSessionManager,
 {
     let ct_len = frame
         .len()
-        .checked_sub(SEALED_TRAILER_LEN)
+        .checked_sub(TRANSPORT_AAD_LEN + SEALED_TRAILER_LEN)
         .filter(|&n| n != 0 && n % SEALED_BLOCK_LEN == 0)
         .ok_or(HsmError::SessionTransportError)?;
     let key = pal
         .session_transport_key(io, id, HsmSessionTransportDir::H2m)
         .map_err(|_| HsmError::SessionTransportError)?;
-    let (ct, trailer) = frame.split_at_mut(ct_len);
+    let (data, trailer) = frame.split_at_mut(TRANSPORT_AAD_LEN + ct_len);
     let (iv, tag) = trailer.split_at(SESSION_TRANSPORT_IV_LEN);
-    pal.gcm_decrypt_in_place(io, key.key(), iv, 0, tag, ct)
+    let mut request_iv = [0; SESSION_TRANSPORT_IV_LEN];
+    request_iv.copy_from_slice(iv);
+    let binding = SessionTransportBinding::uno(u16::from(id), control, request_iv)?;
+    data[..TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(false));
+    pal.gcm_decrypt_in_place(io, key.key(), iv, TRANSPORT_AAD_LEN, tag, data)
         .await
         .map_err(|_| HsmError::SessionTransportError)?;
-    unpad(ct).ok_or(HsmError::SessionTransportError)
+    let len = unpad(&data[TRANSPORT_AAD_LEN..]).ok_or(HsmError::SessionTransportError)?;
+    Ok((len, binding))
 }
 
 /// Seals the response `msg` with session `id`'s HSM→VM key under the
@@ -136,6 +190,7 @@ pub async fn sealed_seal<'a, P>(
     pal: &'a P,
     io: &P::Io,
     id: HsmSessId,
+    binding: SessionTransportBinding,
     msg: &HsmDmaBuf,
 ) -> HsmResult<&'a HsmDmaBuf>
 where
@@ -143,8 +198,10 @@ where
 {
     let frame_len = sealed_frame_len(msg.len());
     let pt_len = frame_len - SEALED_TRAILER_LEN;
-    let frame = pal.dma_alloc(io, frame_len)?;
-    let (pt, trailer) = frame.split_at_mut(pt_len);
+    let frame = pal.dma_alloc(io, TRANSPORT_AAD_LEN + frame_len)?;
+    let (data, trailer) = frame.split_at_mut(TRANSPORT_AAD_LEN + pt_len);
+    data[..TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(true));
+    let pt = &mut data[TRANSPORT_AAD_LEN..];
     pt[..msg.len()].copy_from_slice(msg);
     pt[msg.len()..pt_len - 1].fill(0);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
@@ -156,10 +213,10 @@ where
         .map_err(|_| HsmError::SessionTransportError)?;
     let (iv, tag) = trailer.split_at_mut(SESSION_TRANSPORT_IV_LEN);
     iv.copy_from_slice(&key.nonce(seq));
-    pal.gcm_encrypt_in_place(io, key.key(), iv, 0, pt, tag)
+    pal.gcm_encrypt_in_place(io, key.key(), iv, TRANSPORT_AAD_LEN, data, tag)
         .await
         .map_err(|_| HsmError::SessionTransportError)?;
-    Ok(frame)
+    Ok(&frame[TRANSPORT_AAD_LEN..])
 }
 
 /// Message length of the padded plaintext `pt`, or `None` if its padding

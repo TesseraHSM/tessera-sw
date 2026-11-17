@@ -92,7 +92,7 @@ pub(crate) async fn handle<P: HsmPal>(
         }
         let (response, input) = buffer[..digest_end].split_at_mut(key_at);
         let response = &mut response[..len];
-        TborEccSignResp::encode(response, 0, false)?
+        TborEccSignResp::encode_for_request(response, 0, false)?
             .signature_reserve(curve.wire_sig_len(P::BYTE_ORDER))?
             .finish();
         if key_len > input.len() || digest_offset > input.len() {

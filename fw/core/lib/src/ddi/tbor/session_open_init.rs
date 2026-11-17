@@ -11,12 +11,13 @@
 //! returns `(slot, enc, sig)` to the caller.
 //!
 //! ```text
-//! T1   = SHA-384("TSRA-SESSION-v2" ‖ suite_id ‖ psk_id ‖ session_type
+//! T1   = SHA-384("TSRA-SESSION-v1" ‖ BE16(api_major) ‖ BE16(api_minor)
+//!                ‖ suite_id ‖ psk_id ‖ session_type
 //!                ‖ pk_hsm(97) ‖ len16 ‖ pk_init ‖ len16 ‖ enc)
 //! sig  = ECDSA-P384(PID, T1)
-//! prk  = HKDF-Extract(salt = "TSRA-SESSION-v2", Z ‖ PSK)
-//! hs   = HKDF-Expand(prk, "tsra-session-hs-v2" ‖ T1, 48)
-//! key ‖ salt = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v2", 36)
+//! prk  = HKDF-Extract(salt = "TSRA-SESSION-v1", Z ‖ PSK)
+//! hs   = HKDF-Expand(prk, "tsra-session-hs-v1" ‖ T1, 48)
+//! key ‖ salt = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v1", 36)
 //! ```
 //!
 //! Each direction's AES-GCM nonce is `salt(4) ‖ be64(seq)`, `seq` being
@@ -45,6 +46,7 @@ use super::session_open_finish::hkdf_expand_labeled_into;
 
 /// Validated `SessionOpenInit` request fields.
 struct ParsedRequest<'a> {
+    api_rev: (u16, u16),
     /// Role asserted by `psk_id`.
     role: HsmSessionRole,
 
@@ -66,8 +68,11 @@ struct ParsedRequest<'a> {
 /// Curve of the ECDH suite and of the transcript signature.
 const CURVE: HsmEccCurve = HsmEccCurve::P384;
 
+/// Offset of `hs`, after the selected API revision.
+pub(super) const PENDING_HS_OFF: usize = 4;
+
 /// Offset of `T1` in the Pending blob.
-pub(super) const PENDING_T1_OFF: usize = SESSION_HS_LEN;
+pub(super) const PENDING_T1_OFF: usize = PENDING_HS_OFF + SESSION_HS_LEN;
 
 /// Offset of `auth_binding` in the Pending blob.
 pub(super) const PENDING_AUTH_OFF: usize = PENDING_T1_OFF + SESSION_HS_LEN;
@@ -83,7 +88,7 @@ pub(super) const PENDING_SUITE_OFF: usize = PENDING_TYPE_OFF + 1;
 pub(super) const PENDING_KEYS_OFF: usize = PENDING_SUITE_OFF + 1;
 
 /// Length of the Pending handshake-state blob:
-/// `hs(48) ‖ T1(48) ‖ auth_binding(68) ‖ session_type(1) ‖ suite_id(1)
+/// `selected_api_rev(4) ‖ hs(48) ‖ T1(48) ‖ auth_binding(68) ‖ session_type(1) ‖ suite_id(1)
 /// ‖ h2m(36) ‖ m2h(36)`.
 ///
 /// The transport secrets must end the blob (see
@@ -103,6 +108,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
         let ParsedRequest {
+            api_rev,
             role,
             psk_id,
             session_type,
@@ -119,11 +125,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let (enc, z) = encapsulate(pal, io, alloc, suite, pk_init).await?;
 
         // ── Transcript, signature and handshake secret ─────────────
+        let major = api_rev.0.to_be_bytes();
+        let minor = api_rev.1.to_be_bytes();
         let t1 = transcript_hash(
             pal,
             io,
             alloc,
-            [suite.to_u8(), psk_id, session_type.to_u8()],
+            [
+                major[0],
+                major[1],
+                minor[0],
+                minor[1],
+                suite.to_u8(),
+                psk_id,
+                session_type.to_u8(),
+            ],
             pk_hsm,
             pk_init,
             enc,
@@ -138,6 +154,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             io,
             alloc,
             role,
+            api_rev,
             session_type,
             suite,
             hs,
@@ -182,6 +199,7 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     }
 
     Ok(ParsedRequest {
+        api_rev: req.api_rev(),
         role,
         psk_id,
         session_type,
@@ -295,13 +313,14 @@ async fn ecdh_encapsulate<'a, P: HsmPal>(
     Ok((enc, &mut z[..z_len]))
 }
 
-/// `T1 = SHA-384(label ‖ suite_id ‖ psk_id ‖ session_type ‖ pk_hsm
+/// `T1 = SHA-384(label ‖ BE16(api_major) ‖ BE16(api_minor)
+/// ‖ suite_id ‖ psk_id ‖ session_type ‖ pk_hsm
 /// ‖ len16 ‖ pk_init ‖ len16 ‖ enc)`, as a standard digest.
 async fn transcript_hash<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    params: [u8; 3],
+    params: [u8; 7],
     pk_hsm: &HsmDmaBuf,
     pk_init: &HsmDmaBuf,
     enc: &HsmDmaBuf,
@@ -357,8 +376,8 @@ async fn sign_transcript<'a, P: HsmPal>(
     Ok(sig)
 }
 
-/// `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v2", Z ‖ PSK),
-/// "tsra-session-hs-v2" ‖ T1, 48)`.
+/// `hs = HKDF-Expand(HKDF-Extract("TSRA-SESSION-v1", Z ‖ PSK),
+/// "tsra-session-hs-v1" ‖ T1, 48)`.
 async fn handshake_secret<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -393,6 +412,7 @@ async fn create_pending_slot<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     role: HsmSessionRole,
+    api_rev: (u16, u16),
     session_type: HsmSessionType,
     suite: HsmSessionSuite,
     hs: &HsmDmaBuf,
@@ -400,7 +420,9 @@ async fn create_pending_slot<P: HsmPal>(
     auth_binding: &HsmDmaBuf,
 ) -> HsmResult<HsmSessId> {
     let blob = alloc.dma_alloc(PENDING_BLOB_LEN)?;
-    blob[..PENDING_T1_OFF].copy_from_slice(hs);
+    blob[..2].copy_from_slice(&api_rev.0.to_le_bytes());
+    blob[2..PENDING_HS_OFF].copy_from_slice(&api_rev.1.to_le_bytes());
+    blob[PENDING_HS_OFF..PENDING_T1_OFF].copy_from_slice(hs);
     blob[PENDING_T1_OFF..PENDING_AUTH_OFF].copy_from_slice(t1);
     blob[PENDING_AUTH_OFF..PENDING_TYPE_OFF].copy_from_slice(auth_binding);
     blob[PENDING_TYPE_OFF] = session_type.to_u8();
@@ -419,7 +441,7 @@ fn encode_response(
     sig: &[u8],
 ) -> HsmResult<usize> {
     cmd_buf.encode_response(|buf| {
-        let frame = TborSessionOpenInitResp::encode(buf, 0, false)?
+        let frame = TborSessionOpenInitResp::encode_for_request(buf, 0, false)?
             .session_id(SessionId(session_id))?
             .enc(enc)?
             .sig(sig)?

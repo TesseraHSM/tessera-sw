@@ -91,7 +91,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0x11u8; MASKED_ECC_KEY_MIN_LEN];
         let digest = [0x22u8; 32];
-        let frame = TborEccSignReq::encode(&mut buf)
+        let frame = TborEccSignReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -107,7 +107,7 @@ mod tests {
     fn response_round_trips_signature() {
         let mut buf = [0u8; 256];
         let sig = [0x33u8; ECC_SIG_MAX_LEN];
-        let frame = TborEccSignResp::encode(&mut buf, 0, true)
+        let frame = TborEccSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&sig)
             .unwrap()

@@ -10,6 +10,9 @@ was opened with [`tsra_part_open`](#tsra_part_open).
 
 Not supported at API revision 2.0 (it fails with an error status); use
 [`tsra_sess_ex_open`](#tsra_sess_ex_open) instead.
+That API requires an independently provisioned SHA-384 fingerprint of the
+trusted root certificate's DER SubjectPublicKeyInfo; see the security-domain
+session documentation for its certificate-path and Tessera profile requirements.
 
 ```cpp
 tsra_status tsra_sess_open(

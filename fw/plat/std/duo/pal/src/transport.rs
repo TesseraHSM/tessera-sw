@@ -9,11 +9,13 @@
 //! (IV and tag in the SQE), the response with the HSM→VM key (IV and tag
 //! in the CQE). Each sender builds its IV as `salt ‖ be64(seq)` from its
 //! direction's salt and message counter; the receiver uses the IV it is
-//! given.
+//! given. Implicit 32-byte AAD binds responses to the authenticated
+//! request IV and session context, independently of completion order.
 
 use tsra_fw_hsm_io::duo::DuoCqeEntry;
 use tsra_fw_hsm_io::duo::DuoOp;
 use tsra_fw_hsm_io::duo::DuoSqeEntry;
+use tsra_fw_hsm_io::sealed::SessionTransportBinding;
 use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_pal_traits::*;
 use zeroize::Zeroizing;
@@ -82,11 +84,21 @@ impl StdHsmPal {
             .await
             .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
         if let Some(key) = key {
+            let binding = SessionTransportBinding::duo(sqe.session_id(), sqe.iv());
+            let aad = binding.aad(false);
             let ciphertext = data.to_vec();
             self.aes
-                .gcm_decrypt(&key[..], &sqe.iv(), None, &sqe.gcm_tag(), &ciphertext, data)
+                .gcm_decrypt(
+                    &key[..],
+                    &sqe.iv(),
+                    Some(&aad),
+                    &sqe.gcm_tag(),
+                    &ciphertext,
+                    data,
+                )
                 .await
                 .map_err(|_| HsmError::SessionTransportError)?;
+            io.transport_binding.set(Some(binding));
         }
         Ok(HsmRequest {
             buf,
@@ -122,10 +134,15 @@ impl StdHsmPal {
             .session_transport_next_seq(io, id)
             .map_err(|_| HsmError::SessionTransportError)?;
         let iv = xport.nonce(seq);
+        let binding = io
+            .transport_binding
+            .take()
+            .ok_or(HsmError::SessionTransportError)?;
+        let aad = binding.aad(true);
         let mut tag = [0u8; SESSION_TRANSPORT_TAG_LEN];
         let ciphertext = self.dma_alloc(io, resp.len())?;
         self.aes
-            .gcm_encrypt(&key[..], &iv, None, resp, ciphertext, &mut tag)
+            .gcm_encrypt(&key[..], &iv, Some(&aad), resp, ciphertext, &mut tag)
             .await
             .map_err(|_| HsmError::SessionTransportError)?;
         self.copy_mem_to_host(io, ciphertext, sqe.dst_prp1(), sqe.dst_prp2(), true)

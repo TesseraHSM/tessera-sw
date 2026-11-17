@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn request_round_trips_seed_kind() {
         let mut buf = [0u8; 256];
-        let frame = TborMlDsaGenerateKeyReq::encode(&mut buf)
+        let frame = TborMlDsaGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -197,7 +197,7 @@ mod tests {
             MlDsaKeyKind::MlDsa87Seed,
         ] {
             let mut buf = [0u8; 256];
-            let frame = TborMlDsaGenerateKeyReq::encode(&mut buf)
+            let frame = TborMlDsaGenerateKeyReq::encode(&mut buf, (1, 1))
                 .unwrap()
                 .session_id(SessionId(1))
                 .unwrap()
@@ -223,7 +223,7 @@ mod tests {
         let mut buf = [0u8; 8192];
         let masked = [0xABu8; MASKED_MLDSA_KEY_MAX_LEN];
         let pub_key = [0xCDu8; MLDSA_PUB_KEY_MAX_LEN];
-        let frame = TborMlDsaGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborMlDsaGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

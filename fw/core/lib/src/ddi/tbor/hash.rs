@@ -67,7 +67,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let mut ctx = pal.hash_begin(io, algo, alloc)?;
         pal.hash_continue(io, &mut ctx, req.msg()).await?;
 
-        let len = TborHashResp::encode(cmd_buf.buffer_mut(), 0, false)?
+        let len = TborHashResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
             .digest_reserve(algo.digest_len())?
             .finish()
             .len();

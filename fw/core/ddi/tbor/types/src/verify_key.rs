@@ -66,7 +66,7 @@ mod tests {
     fn request_round_trips_masked_key() {
         let mut buf = [0u8; 1024];
         let masked = [0xCDu8; 180];
-        let frame = TborVerifyKeyReq::encode(&mut buf)
+        let frame = TborVerifyKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -80,7 +80,7 @@ mod tests {
     fn request_bounds_largest_generated_key() {
         let masked = [0xCD; VERIFY_KEY_MASKED_KEY_MAX_LEN + 1];
         let mut buf = [0u8; 8192];
-        let frame = TborVerifyKeyReq::encode(&mut buf)
+        let frame = TborVerifyKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -88,7 +88,7 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_key().len(), VERIFY_KEY_MASKED_KEY_MAX_LEN);
-        assert!(TborVerifyKeyReq::encode(&mut buf)
+        assert!(TborVerifyKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()

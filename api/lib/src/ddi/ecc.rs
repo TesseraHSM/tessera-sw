@@ -135,7 +135,8 @@ fn ecc_generate_key_tbor(
     };
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = session.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -332,7 +333,8 @@ pub(crate) fn ecc_sign_masked_tbor(
     };
     let mut cookie = None;
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = session.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -473,7 +475,8 @@ fn ecdh_derive_tbor(
     };
     let mut cookie = None;
     let resp = base_key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        let rev = base_key.api_rev();
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

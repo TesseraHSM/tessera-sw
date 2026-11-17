@@ -517,6 +517,7 @@ fn sealing_key_gen_sd_scope_reopen() {
     let reopened = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &sd_provision::ROTATED_CO_PSK),
             HsmSessionSuite::EcdhP384,
         )
@@ -549,6 +550,7 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
                 HsmSessionSuite::EcdhP384,
             )
@@ -559,6 +561,7 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &rotated_psk),
             HsmSessionSuite::EcdhP384,
         )

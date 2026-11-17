@@ -870,6 +870,7 @@ impl DdiSockDev {
     /// response. Returns the bytes of each [`OobItem::Out`].
     fn exec_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Vec<OobItem>,
     ) -> DdiResult<(T::OpResp, Vec<Vec<u8>>)> {
@@ -879,7 +880,7 @@ impl DdiSockDev {
 
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
-            let bytes = req.encode_request(buf.as_mut_slice())?;
+            let bytes = req.encode_request(buf.as_mut_slice(), api_rev)?;
             bytes.len()
         };
         buf.truncate(req_len);
@@ -904,7 +905,7 @@ impl DdiSockDev {
         }
 
         // ── 3. Decode the typed response.
-        let resp = <T::OpResp>::decode_response(&resp_buf)?;
+        let resp = <T::OpResp>::decode_response_for_api_rev(&resp_buf, api_rev)?;
         Ok((resp, out_items))
     }
 
@@ -1158,6 +1159,7 @@ impl DdiDev for DdiSockDev {
 
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
@@ -1167,18 +1169,20 @@ impl DdiDev for DdiSockDev {
             .iter()
             .map(|item| OobItem::In(item.to_vec()))
             .collect();
-        self.exec_tbor(req, oob_items).map(|(resp, _)| resp)
+        self.exec_tbor(api_rev, req, oob_items)
+            .map(|(resp, _)| resp)
     }
 
     /// TBOR exec path with device-writable out-of-band items. Output
     /// buffers travel as lengths; the server returns their contents.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        let (resp, out_items) = self.exec_tbor(req, wire_oob_items(oob_items)?)?;
+        let (resp, out_items) = self.exec_tbor(api_rev, req, wire_oob_items(oob_items)?)?;
         copy_oob_outputs(oob_items, out_items);
         Ok(resp)
     }

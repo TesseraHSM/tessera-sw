@@ -112,8 +112,8 @@ pub fn session_open_init_with_options(
     dev: &TestDev,
     opts: SessionOpenInitOptions<'_>,
 ) -> Result<PendingHandshake, DdiError> {
-    let initiator =
-        SessionInitiator::generate(opts.suite).map_err(|_| DdiError::InvalidParameter)?;
+    let initiator = SessionInitiator::generate(opts.suite, dev.api_rev())
+        .map_err(|_| DdiError::InvalidParameter)?;
     let pk_hsm = crypto::fetch_pk_hsm(dev)?;
 
     let session_type = SessionType::Encrypted.to_u8();

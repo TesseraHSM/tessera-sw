@@ -59,7 +59,7 @@ pub const SIG_LEN: usize = 96;
 /// as the HKDF-Extract salt.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSCRIPT_LABEL`.
-pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v2";
+pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v1";
 
 /// Channel profile of a TBOR session.
 ///

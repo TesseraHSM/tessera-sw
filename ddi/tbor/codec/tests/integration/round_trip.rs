@@ -7,10 +7,10 @@ use super::common::*;
 
 #[test]
 fn known_toc_footprint_writes_payload_at_final_offset() -> TestResult {
-    let mut buffer = [0xA5; 23];
+    let mut buffer = [0xA5; 27];
     let payload = b"payload";
-    let payload_address = buffer[16..].as_ptr();
-    let bytes = RequestEncoder::new(&mut buffer, PROTOCOL_VERSION, OPCODE)
+    let payload_address = buffer[20..].as_ptr();
+    let bytes = RequestEncoder::new(&mut buffer, (1, 1), OPCODE)
         .with_toc_slots(2)?
         .uint8(7)?
         .buffer(payload)?
@@ -18,14 +18,14 @@ fn known_toc_footprint_writes_payload_at_final_offset() -> TestResult {
     let request = RequestView::parse(bytes)?;
     assert_eq!(request.data_section(), payload);
     assert_eq!(request.data_section().as_ptr(), payload_address);
-    assert_eq!(request.len(), 23);
+    assert_eq!(request.len(), 27);
     Ok(())
 }
 
 #[test]
 fn known_toc_footprint_cannot_be_overwritten_by_extra_entries() -> TestResult {
     let mut buffer = [0xA5; 32];
-    let result = RequestEncoder::new(&mut buffer, PROTOCOL_VERSION, OPCODE)
+    let result = RequestEncoder::new(&mut buffer, (1, 1), OPCODE)
         .with_toc_slots(1)?
         .uint8(7)?
         .buffer(b"payload");
@@ -40,7 +40,7 @@ fn request_round_trip_all_entry_types() -> TestResult {
     let sealed = [0xABu8; 32];
     let padding_len = 7;
 
-    let bytes = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let bytes = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .session_id(0x1234)?
         .key_id(0x5678)?
         .uint8(0xA5)?
@@ -54,7 +54,7 @@ fn request_round_trip_all_entry_types() -> TestResult {
         .finish()?;
 
     let view = RequestView::parse(bytes)?;
-    assert_eq!(view.version(), PROTOCOL_VERSION);
+    assert_eq!(view.api_rev(), (1, 1));
     assert_eq!(view.opcode(), OPCODE);
     assert_eq!(view.toc_count(), 10);
     assert_eq!(view.len(), bytes.len());
@@ -84,7 +84,7 @@ fn request_round_trip_all_entry_types() -> TestResult {
 #[test]
 fn toc_iter_matches_toc_entry_indexed() -> TestResult {
     let mut buf = [0u8; 256];
-    let bytes = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let bytes = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .session_id(1)?
         .uint8(2)?
         .buffer(b"x")?
@@ -100,13 +100,13 @@ fn toc_iter_matches_toc_entry_indexed() -> TestResult {
 #[test]
 fn response_round_trip_fips_off() -> TestResult {
     let mut buf = [0u8; 256];
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, STATUS_OK, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), STATUS_OK, false)
         .uint32(0x1111_2222)?
         .buffer(b"abc")?
         .finish()?;
 
     let view = ResponseView::parse(bytes)?;
-    assert_eq!(view.version(), PROTOCOL_VERSION);
+    assert_eq!(view.api_rev(), (1, 1));
     assert_eq!(view.status(), STATUS_OK);
     assert_eq!(view.flags(), 0);
     assert!(!view.fips_approved());
@@ -118,7 +118,7 @@ fn response_round_trip_fips_off() -> TestResult {
 fn response_round_trip_fips_on_with_status() -> TestResult {
     let mut buf = [0u8; 256];
     let status = 0xDEAD_BEEF;
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, status, true)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), status, true)
         .uint8(0)?
         .finish()?;
 
@@ -132,7 +132,7 @@ fn response_round_trip_fips_on_with_status() -> TestResult {
 #[test]
 fn encoded_len_matches_finish_length() -> TestResult {
     let mut buf = [0u8; 256];
-    let enc = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let enc = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .session_id(1)?
         .buffer(b"hello")?
         .uint64(0xFF)?;
@@ -149,7 +149,7 @@ fn buffer_reserve_does_not_write() -> TestResult {
     for (i, b) in buf.iter_mut().enumerate() {
         *b = (i as u8).wrapping_add(1);
     }
-    let bytes_len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let bytes_len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .buffer_reserve(4)?
         .finish()?
         .len();
@@ -164,7 +164,7 @@ fn buffer_reserve_does_not_write() -> TestResult {
 #[test]
 fn max_toc_entries_round_trip() -> TestResult {
     let mut buf = vec![0u8; REQ_HEADER_LEN + MAX_TOC_ENTRIES * TOC_ENTRY_LEN];
-    let mut enc = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE);
+    let mut enc = RequestEncoder::new(&mut buf, (1, 1), OPCODE);
     for _ in 0..MAX_TOC_ENTRIES {
         enc = enc.none()?;
     }

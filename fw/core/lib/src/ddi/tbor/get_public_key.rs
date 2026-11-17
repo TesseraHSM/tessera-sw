@@ -57,7 +57,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let pub_key = derive_pub_key(pal, io, alloc, view.key_kind, view.target_key).await?;
 
         cmd_buf.encode_response(|buf| {
-            let frame = TborGetPublicKeyResp::encode(buf, 0, false)?
+            let frame = TborGetPublicKeyResp::encode_for_request(buf, 0, false)?
                 .pub_key(pub_key)?
                 .finish();
             Ok(frame.as_bytes().len())

@@ -271,7 +271,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcTmkExport` response around the sealed TMK.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, sealed_tmk: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkExportResp::encode(buf, 0, false)?
+        let frame = TborDarcTmkExportResp::encode_for_request(buf, 0, false)?
             .sealed_tmk(sealed_tmk)?
             .finish();
         Ok(frame.as_bytes().len())

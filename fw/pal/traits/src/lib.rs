@@ -325,15 +325,15 @@ pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
 
 /// Domain-separation prefix of the session handshake transcript `T1`,
 /// and the HKDF-Extract salt of the handshake key schedule.
-pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v2";
+pub const SESSION_TRANSCRIPT_LABEL: &[u8] = b"TSRA-SESSION-v1";
 
 /// HKDF-Expand label (followed by `T1`) deriving the handshake secret
 /// `hs` from the extracted `Z ‖ PSK` key.
-pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v2";
+pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v1";
 
 /// HKDF-Expand label deriving the host-finished key from `hs`; the host
 /// proves PSK possession with `HMAC-SHA-384(fin_key, T1)`.
-pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v2";
+pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v1";
 
 /// Length in bytes of the handshake secret `hs`, the transcript hash
 /// `T1`, the host-finished key and the `fin` MAC (SHA-384 sized).
@@ -357,13 +357,13 @@ pub const SESSION_SIG_LEN: usize = 96;
 /// [`tsra_fw_core_crypto_aead_envelope`] to AEAD-seal/open the
 /// `seed_envelope` (in `OpenSessionFinish`) and per-parameter
 /// envelopes carried by in-session commands such as `ChangePsk`.
-pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v2";
+pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v1";
 
 /// HKDF-Expand label producing the **VM→HSM** session transport secret.
-pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v2";
+pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
 
 /// HKDF-Expand label producing the **HSM→VM** session transport secret.
-pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v2";
+pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
 
 /// Length in bytes of each directional AES-256-GCM session transport key.
 ///

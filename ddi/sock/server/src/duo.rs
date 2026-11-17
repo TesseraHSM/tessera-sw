@@ -241,7 +241,10 @@ mod tests {
 
     fn tbor(op: DuoOp, session_id: u16, request: &impl TborOpReq) -> RequestFrame {
         let mut buf = [0u8; 1024];
-        let payload = request.encode_request(&mut buf).expect("encode").to_vec();
+        let payload = request
+            .encode_request(&mut buf, (2, 0))
+            .expect("encode")
+            .to_vec();
         RequestFrame::Submit(Request {
             sqe: sqe(op, session_id, payload.len()),
             payload,
@@ -269,7 +272,7 @@ mod tests {
     async fn open_init(connection: &Connection) -> u16 {
         let request = TborSessionOpenInitReq {
             psk_id: 0,
-            pk_init: SessionInitiator::generate(SessionSuite::EcdhP384)
+            pk_init: SessionInitiator::generate(SessionSuite::EcdhP384, (2, 0))
                 .expect("ephemeral")
                 .pk_init()
                 .to_vec(),

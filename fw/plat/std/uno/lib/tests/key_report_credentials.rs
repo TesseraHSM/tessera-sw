@@ -9,6 +9,7 @@ use tsra_crypto::*;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_fw_hsm_core::Hsm;
+use tsra_fw_hsm_io::sealed::SessionTransportBinding;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::SessionFlags;
@@ -20,8 +21,10 @@ use tsra_fw_hsm_pal_std_uno::HsmIoRequest;
 use tsra_fw_hsm_pal_std_uno::HsmPartId;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmApiRevision;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
+use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
@@ -69,6 +72,7 @@ async fn install_session(
         io,
         id,
         &[0; 8],
+        HsmApiRevision::new(1, 1),
         key(0x22, 32),
         key(0x33, 32),
         key(0, SESSION_AUTH_BINDING_LEN),
@@ -81,9 +85,9 @@ async fn install_session(
 }
 
 /// Seals `msg` into `out` as an Uno transport frame
-/// (`ct ‖ iv ‖ tag`, block-padded, no AAD, `iv = salt ‖ seq`), returning
-/// the frame length.
-fn seal_frame(msg: &[u8], seq: u64, out: &mut [u8]) -> usize {
+/// (`ct ‖ iv ‖ tag`, block-padded, request-bound AAD, `iv = salt ‖ seq`),
+/// returning the frame length.
+fn seal_frame(msg: &[u8], session: HsmSessId, seq: u64, out: &mut [u8]) -> usize {
     let pt_len = (msg.len() + 1).next_multiple_of(16);
     let mut pt = vec![0u8; pt_len];
     pt[..msg.len()].copy_from_slice(msg);
@@ -92,7 +96,10 @@ fn seal_frame(msg: &[u8], seq: u64, out: &mut [u8]) -> usize {
     iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&H2M_SALT);
     iv[SESSION_TRANSPORT_SALT_LEN..].copy_from_slice(&seq.to_be_bytes());
     let key = AesKey::from_bytes(&H2M_KEY).expect("transport key");
-    let mut algo = AesGcmAlgo::for_encrypt(&iv, None).expect("gcm");
+    let aad = SessionTransportBinding::uno(u16::from(session), HsmSessCtrl::InSession, iv)
+        .expect("request binding")
+        .aad(false);
+    let mut algo = AesGcmAlgo::for_encrypt(&iv, Some(&aad)).expect("gcm");
     algo.encrypt(&key, &pt, Some(&mut out[..pt_len]))
         .expect("seal");
     out[pt_len..pt_len + iv.len()].copy_from_slice(&iv);
@@ -146,7 +153,7 @@ async fn check_credential_guard() {
     let mut msg = [0u8; 2048];
     let mut request = HostPage([0; 4096]);
     let mut response = HostPage([0xA5; 4096]);
-    let msg_len = TborKeyReportReq::encode(&mut msg)
+    let msg_len = TborKeyReportReq::encode(&mut msg, (1, 1))
         .expect("encode")
         .session_id(u16::from(session).into())
         .expect("session id")
@@ -158,7 +165,7 @@ async fn check_credential_guard() {
         .expect("auth envelope")
         .finish()
         .len();
-    let request_len = seal_frame(&msg[..msg_len], 0, &mut request.0);
+    let request_len = seal_frame(&msg[..msg_len], session, 0, &mut request.0);
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
     tx.send(HsmIoRequest::cmd(
         HsmPartId::from(0u8),
