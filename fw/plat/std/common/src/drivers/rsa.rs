@@ -189,6 +189,13 @@ impl StdRsa {
         byte_order::int_copy_from_be(self.order, x, &result)
     }
 
+    /// Validate an operand-order private input without performing exponentiation.
+    pub fn validate_mod_exp_priv_input(&self, priv_key: &RsaPrivateKey, y: &[u8]) -> HsmResult<()> {
+        let mut input = y.to_vec();
+        byte_order::int_to_be(self.order, &mut input);
+        reject_out_of_range_mod_exp_input(priv_key, &input)
+    }
+
     /// Replace an operand-order input block with the private-key result.
     pub async fn mod_exp_priv_in_place(
         &self,

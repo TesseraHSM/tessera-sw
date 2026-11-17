@@ -80,21 +80,20 @@ impl HsmEcc for StdHsmPal {
     /// In **query mode** (`out = None`) returns the std-PAL upper
     /// bounds: raw HSM scalar size for the private key
     /// ([`HsmEccCurve::wire_coord_len`]) and the wire-format LE
-    /// public-key length ([`HsmEccCurve::wire_pub_key_len`]).  In
+    /// public-key length ([`HsmEccCurve::wire_pub_key_len`]). In
     /// **use mode** (`out = Some((priv_out, pub_out))`) it asks the
     /// driver to generate a fresh keypair and write the wire-LE
-    /// public key into a scoped scratch slot, then exports the
+    /// public key into internally scoped scratch, then exports the
     /// private key as raw HSM-format scalar bytes into a separate
     /// scratch slot, and finally copies both into the caller's two
     /// output buffers.  Returns the actual byte counts written
     /// (both deterministic for raw HSM bytes).
     async fn ecc_gen_keypair(
         &self,
-        _io: &StdHsmIo,
-        alloc: &impl HsmScopedAlloc,
+        io: &StdHsmIo,
         curve: HsmEccCurve,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
@@ -107,23 +106,26 @@ impl HsmEcc for StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        // Allocate the contiguous `priv || pub` scratch a real PKA
-        // engine would write into.  The driver fills the pub half
-        // directly in operand order; we vault-serialize the priv half
-        // ourselves.
-        let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
-        let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
+        self.alloc_scoped_async(io, async |scope| {
+            // Use the contiguous `priv || pub` workspace a real PKA
+            // engine would write into.  The driver fills the pub half
+            // directly in operand order; we vault-serialize the priv half
+            // ourselves.
+            let scratch = scope.dma_alloc(priv_len + wire_pub_len)?;
+            let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
-        let (pk, pub_key) = self.ecc.gen_keypair(to_ecc_curve(curve)).await?;
-        self.ecc
-            .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
-            .await?;
-        export_priv(&pk, scratch_priv)?;
+            let (pk, pub_key) = self.ecc.gen_keypair(to_ecc_curve(curve)).await?;
+            self.ecc
+                .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
+                .await?;
+            export_priv(&pk, scratch_priv)?;
 
-        priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
-        pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
+            priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
+            pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
 
-        Ok((priv_len, wire_pub_len))
+            Ok((priv_len, wire_pub_len))
+        })
+        .await
     }
 
     /// Deterministically derive an ECC keypair from the `PartRoot`.
@@ -140,11 +142,10 @@ impl HsmEcc for StdHsmPal {
     async fn ecc_gen_keypair_from_root(
         &self,
         io: &StdHsmIo,
-        alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &HsmDmaBuf,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
@@ -164,35 +165,43 @@ impl HsmEcc for StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        // Derive the §A.2.1 OKM from PartRoot: HKDF-Expand-SHA384 with
-        // info = KEYPAIR_LABEL_PTA ‖ u16_be(okm_len). Mirrors the uno
-        // PAL's domain separation so both platforms fan out of the same
-        // PartRoot.
-        let okm_len = curve.a2_1_okm_len();
-        let info = alloc.dma_alloc(KEYPAIR_LABEL_PTA.len() + 2)?;
-        info[..KEYPAIR_LABEL_PTA.len()].copy_from_slice(KEYPAIR_LABEL_PTA);
-        info[KEYPAIR_LABEL_PTA.len()..].copy_from_slice(&(okm_len as u16).to_be_bytes());
-        let okm = alloc.dma_alloc(okm_len)?;
+        self.alloc_scoped_async(io, async |scope| {
+            let info_len = KEYPAIR_LABEL_PTA.len() + 2;
+            let info_aligned_len = info_len.next_multiple_of(4);
+            let okm_len = to_ecc_curve(curve).a2_1_okm_len();
+            let workspace_len = (info_aligned_len + okm_len).max(priv_len + wire_pub_len);
+            let workspace = scope.dma_alloc(workspace_len)?;
+            // Derive the §A.2.1 OKM from PartRoot: HKDF-Expand-SHA384 with
+            // info = KEYPAIR_LABEL_PTA ‖ u16_be(okm_len). Mirrors the uno
+            // PAL's domain separation so both platforms fan out of the same
+            // PartRoot.
+            let (info, rest) = workspace.split_at_mut(info_aligned_len);
+            let info = &mut info[..info_len];
+            info[..KEYPAIR_LABEL_PTA.len()].copy_from_slice(KEYPAIR_LABEL_PTA);
+            info[KEYPAIR_LABEL_PTA.len()..].copy_from_slice(&(okm_len as u16).to_be_bytes());
+            let okm = &mut rest[..okm_len];
 
-        self.hkdf_expand(io, HsmHashAlgo::Sha384, root, Some(&*info), &mut *okm)
-            .await?;
-        let pk = EccPrivateKey::from_okm_a2_1(to_ecc_curve(curve), &*okm)
-            .map_err(|_| HsmError::EccGenerateError)?;
+            self.hkdf_expand(io, HsmHashAlgo::Sha384, root, Some(&*info), &mut *okm)
+                .await?;
+            let pk = EccPrivateKey::from_okm_a2_1(to_ecc_curve(curve), &*okm)
+                .map_err(|_| HsmError::EccGenerateError)?;
 
-        let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
-        let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
+            let scratch = &mut workspace[..priv_len + wire_pub_len];
+            let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
-        export_priv(&pk, scratch_priv)?;
-        let pub_key = pk
-            .public_key()
-            .map_err(|_| HsmError::EccGetCoordinatesError)?;
-        self.ecc
-            .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
-            .await?;
-        priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
-        pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
+            export_priv(&pk, scratch_priv)?;
+            let pub_key = pk
+                .public_key()
+                .map_err(|_| HsmError::EccGetCoordinatesError)?;
+            self.ecc
+                .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
+                .await?;
+            priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
+            pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
 
-        Ok((priv_len, wire_pub_len))
+            Ok((priv_len, wire_pub_len))
+        })
+        .await
     }
 
     /// Raw EC sign over a pre-computed hash digest.
@@ -206,16 +215,26 @@ impl HsmEcc for StdHsmPal {
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
         hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let wire_len = curve.wire_sig_len(StdHsmPal::BYTE_ORDER);
+        if priv_key.len() != curve.wire_priv_key_len(Self::BYTE_ORDER)
+            || hash.len() < curve.ecdsa_digest_len()
+            || hash.len() > 64
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(signature) = out else {
+            return Ok(wire_len);
+        };
         if signature.len() < wire_len {
             return Err(HsmError::InvalidArg);
         }
         let key = import_priv(priv_key)?;
         self.ecc
             .ecc_sign_op(&key, hash, &mut signature[..wire_len])
-            .await
+            .await?;
+        Ok(wire_len)
     }
 
     /// Raw EC verify a signature over a pre-computed hash digest.
@@ -230,26 +249,20 @@ impl HsmEcc for StdHsmPal {
         pub_key: &HsmDmaBuf,
         hash: &HsmDmaBuf,
         signature: &HsmDmaBuf,
-        result: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+    ) -> HsmResult<bool> {
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
         let wire_sig_len = curve.wire_sig_len(StdHsmPal::BYTE_ORDER);
-        if pub_key.len() < wire_pub_len || signature.len() < wire_sig_len || result.len() < 4 {
+        if pub_key.len() < wire_pub_len || signature.len() < wire_sig_len {
             return Err(HsmError::InvalidArg);
         }
-        let valid = self
-            .ecc
+        self.ecc
             .ecc_verify_op(
                 to_ecc_curve(curve),
                 &pub_key[..wire_pub_len],
                 hash,
                 &signature[..wire_sig_len],
             )
-            .await?;
-
-        result.fill(0);
-        result[0] = if valid { 0 } else { 1 };
-        Ok(())
+            .await
     }
 
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
@@ -262,11 +275,18 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let wire_priv_len = curve.wire_priv_key_len(StdHsmPal::BYTE_ORDER);
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
-        if priv_key.len() != wire_priv_len || pub_key.len() < wire_pub_len {
+        if priv_key.len() != wire_priv_len {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(pub_key) = out else {
+            Self::ecc_private_curve(priv_key)?;
+            return Ok(wire_pub_len);
+        };
+        if pub_key.len() < wire_pub_len {
             return Err(HsmError::InvalidArg);
         }
         self.ecc
@@ -275,7 +295,8 @@ impl HsmEcc for StdHsmPal {
                 &priv_key[..wire_priv_len],
                 &mut pub_key[..wire_pub_len],
             )
-            .await
+            .await?;
+        Ok(wire_pub_len)
     }
 
     /// ECDH key agreement — derives a shared secret.
@@ -290,10 +311,19 @@ impl HsmEcc for StdHsmPal {
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
         pub_key: &HsmDmaBuf,
-        secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
-        if pub_key.len() < wire_pub_len || secret.len() < curve.secret_len() {
+        if priv_key.len() != curve.wire_priv_key_len(Self::BYTE_ORDER)
+            || pub_key.len() < wire_pub_len
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let secret_len = curve.secret_len();
+        let Some(secret) = out else {
+            return Ok(secret_len);
+        };
+        if secret.len() < secret_len {
             return Err(HsmError::InvalidArg);
         }
         let pk = import_priv(priv_key)?;
@@ -302,17 +332,18 @@ impl HsmEcc for StdHsmPal {
                 &pk,
                 to_ecc_curve(curve),
                 &pub_key[..wire_pub_len],
-                &mut secret[..],
+                &mut secret[..secret_len],
             )
-            .await
+            .await?;
+        Ok(secret_len)
     }
 
     async fn ecc_priv_der_to_vault(
         &self,
         _io: &StdHsmIo,
         der: &HsmDmaBuf,
-        out: Option<&mut HsmDmaBuf>,
         pct: HsmEccPct,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // The std PAL vault is the big-endian scalar, zero-padded to the
         // wire coordinate length. Like Uno, the key must carry a well-formed
@@ -351,16 +382,14 @@ impl HsmEcc for StdHsmPal {
         if d.len() != curve.priv_key_len() {
             return Err(HsmError::InvalidArg);
         }
-        // `from_scalar` validates `d` is in `[1, n-1]` and `check_key`s
-        // the derived key; re-export in the vault representation (the
-        // big-endian scalar padded to `wire_coord_len`).
-        let pk =
-            EccPrivateKey::from_scalar(to_ecc_curve(curve), d).map_err(|_| HsmError::InvalidArg)?;
+        crate::key_assurance::check_ecc_scalar(curve, d)?;
         let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
         if let Some(out) = out {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
+            let pk = EccPrivateKey::from_scalar(to_ecc_curve(curve), d)
+                .map_err(|_| HsmError::InvalidArg)?;
             export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
@@ -379,8 +408,7 @@ impl HsmEcc for StdHsmPal {
         if vault.len() != curve.wire_coord_len(StdHsmPal::BYTE_ORDER) {
             return Err(HsmError::InvalidArg);
         }
-        let pk = import_priv(vault)?;
-        if from_ecc_curve(pk.curve()) != curve {
+        if Self::ecc_private_curve(vault)? != curve {
             return Err(HsmError::InvalidArg);
         }
         let priv_len = curve.priv_key_len();
@@ -388,6 +416,7 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
+            let pk = import_priv(vault)?;
             export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
@@ -399,24 +428,58 @@ impl HsmEcc for StdHsmPal {
         priv_key: &HsmDmaBuf,
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        self.ecc_public_point(import_priv(priv_key)?, pub_out).await
+        let len = Self::ecc_private_curve(priv_key)?.wire_pub_key_len(Self::BYTE_ORDER);
+        let Some(pub_out) = pub_out else {
+            return Ok(len);
+        };
+        if pub_out.len() < len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.ecc_public_point(import_priv(priv_key)?, Some(pub_out))
+            .await
     }
 
     async fn ecc_vault_pub_key(
         &self,
         io: &StdHsmIo,
         key_id: HsmKeyId,
-        pub_out: &mut HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
+        if out
+            .as_ref()
+            .is_some_and(|buf| !(buf.as_ptr() as usize).is_multiple_of(4))
+        {
             return Err(HsmError::InvalidArg);
         }
-        let pk = import_priv(self.vault_key(io, key_id)?)?;
-        self.ecc_public_point(pk, Some(pub_out)).await
+        let key = self.vault_key(io, key_id)?;
+        let len = Self::ecc_private_curve(key)?.wire_pub_key_len(Self::BYTE_ORDER);
+        let Some(out) = out else {
+            return Ok(len);
+        };
+        if out.len() < len {
+            return Err(HsmError::InvalidArg);
+        }
+        let pk = import_priv(key)?;
+        self.ecc_public_point(pk, Some(out)).await
     }
 }
 
 impl StdHsmPal {
+    fn ecc_private_curve(private: &HsmDmaBuf) -> HsmResult<HsmEccCurve> {
+        let curve = match private.len() {
+            32 => HsmEccCurve::P256,
+            48 => HsmEccCurve::P384,
+            66 | 68 => HsmEccCurve::P521,
+            _ => return Err(HsmError::InvalidArg),
+        };
+        let (padding, scalar) = private.split_at(private.len() - curve.priv_key_len());
+        if padding.iter().any(|&b| b != 0) {
+            return Err(HsmError::InvalidArg);
+        }
+        crate::key_assurance::check_ecc_scalar(curve, scalar)?;
+        Ok(curve)
+    }
+
     async fn ecc_public_point(
         &self,
         pk: EccPrivateKey,
@@ -470,14 +533,12 @@ mod tests {
             root.copy_from_slice(root_bytes);
             let priv_out = alloc.dma_alloc(priv_len)?;
             let pub_out = alloc.dma_alloc(pub_len)?;
-
             pal.ecc_gen_keypair_from_root(
                 &io,
-                alloc,
                 curve,
                 &*root,
-                Some((priv_out, pub_out)),
                 HsmEccPct::None,
+                Some((priv_out, pub_out)),
             )
             .await?;
 
@@ -491,17 +552,266 @@ mod tests {
         let (pal, io) = pal_and_io();
         pal.alloc_scoped_async(&io, async |alloc| {
             let root = alloc.dma_alloc(root_len)?;
-            pal.ecc_gen_keypair_from_root(
-                &io,
-                alloc,
-                HsmEccCurve::P384,
-                &*root,
-                None,
-                HsmEccPct::None,
-            )
-            .await
+            pal.ecc_gen_keypair_from_root(&io, HsmEccCurve::P384, &*root, HsmEccPct::None, None)
+                .await
         })
         .await
+    }
+
+    async fn generate(
+        pal: &StdHsmPal,
+        io: &StdHsmIo,
+        curve: HsmEccCurve,
+        root: Option<&HsmDmaBuf>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        match root {
+            Some(root) => {
+                pal.ecc_gen_keypair_from_root(io, curve, root, HsmEccPct::SignVerify, out)
+                    .await
+            }
+            None => {
+                pal.ecc_gen_keypair(io, curve, HsmEccPct::SignVerify, out)
+                    .await
+            }
+        }
+    }
+
+    fn allocation_marks(pal: &StdHsmPal, io: &StdHsmIo) -> (usize, usize) {
+        let pool = pal.iic.pool();
+        (
+            pool.nondma_mark(io.slot).get(),
+            pool.dma_mark(io.slot).get(),
+        )
+    }
+
+    #[tokio::test]
+    async fn output_queries_and_short_buffers_preserve_storage() {
+        for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+            let (pal, io) = pal_and_io();
+            pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+                let private = alloc.dma_alloc(curve.wire_priv_key_len(StdHsmPal::BYTE_ORDER))?;
+                let public_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
+                let public = alloc.dma_alloc(public_len)?;
+                pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
+                    .await?;
+                let digest = alloc.dma_alloc(curve.ecdsa_digest_len())?;
+                digest.fill(0x42);
+                let signature_len = curve.wire_sig_len(StdHsmPal::BYTE_ORDER);
+                let signature = alloc.dma_alloc(signature_len + 4)?;
+                let derived_storage = alloc.dma_alloc(public_len + 5)?;
+                derived_storage.fill(0xCC);
+                let derived = &mut derived_storage[1..];
+                let secret_len = curve.secret_len();
+                let secret = alloc.dma_alloc(secret_len + 4)?;
+                signature.fill(0xCC);
+                secret.fill(0xCC);
+                let marks = allocation_marks(&pal, &io);
+
+                pal.alloc_scoped_async(&io, async |reserve| -> HsmResult<()> {
+                    let mark = pal.iic.pool().dma_mark(io.slot).get().next_multiple_of(4);
+                    let _remaining = reserve.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
+                    let full_marks = allocation_marks(&pal, &io);
+                    assert_eq!(
+                        pal.ecc_sign(&io, curve, private, digest, None).await?,
+                        signature_len
+                    );
+                    assert_eq!(
+                        pal.ecc_pub_from_priv(&io, curve, private, None).await?,
+                        public_len
+                    );
+                    assert_eq!(
+                        pal.ecdh_derive(&io, curve, private, public, None).await?,
+                        secret_len
+                    );
+                    assert_eq!(pal.ecc_priv_pub_key(&io, private, None).await?, public_len);
+                    let raw_len = curve.priv_key_len();
+                    let scalar = &private[private.len() - raw_len..];
+                    assert_eq!(
+                        pal.ecc_priv_to_vault(&io, curve, scalar, None)?,
+                        private.len()
+                    );
+                    assert_eq!(pal.ecc_vault_to_priv(&io, curve, private, None)?, raw_len);
+                    for outcome in [
+                        pal.ecc_sign(
+                            &io,
+                            curve,
+                            private,
+                            digest,
+                            Some(&mut signature[..signature_len - 1]),
+                        )
+                        .await,
+                        pal.ecc_pub_from_priv(
+                            &io,
+                            curve,
+                            private,
+                            Some(&mut derived[..public_len - 1]),
+                        )
+                        .await,
+                        pal.ecdh_derive(
+                            &io,
+                            curve,
+                            private,
+                            public,
+                            Some(&mut secret[..secret_len - 1]),
+                        )
+                        .await,
+                    ] {
+                        assert_eq!(outcome, Err(HsmError::InvalidArg));
+                    }
+                    assert_eq!(allocation_marks(&pal, &io), full_marks);
+                    Ok(())
+                })
+                .await?;
+                assert_eq!(allocation_marks(&pal, &io), marks);
+                assert!(signature.iter().all(|&b| b == 0xCC));
+                assert!(derived.iter().all(|&b| b == 0xCC));
+                assert!(secret.iter().all(|&b| b == 0xCC));
+
+                for _ in 0..2 {
+                    assert_eq!(
+                        pal.ecc_sign(&io, curve, private, digest, Some(signature))
+                            .await?,
+                        signature_len
+                    );
+                    assert_eq!(
+                        pal.ecc_pub_from_priv(&io, curve, private, Some(&mut *derived))
+                            .await?,
+                        public_len
+                    );
+                    assert_eq!(
+                        pal.ecdh_derive(&io, curve, private, public, Some(secret))
+                            .await?,
+                        secret_len
+                    );
+                    assert_eq!(allocation_marks(&pal, &io), marks);
+                    assert_eq!(&derived[..public_len], &public[..]);
+                    assert!(secret[..secret_len].iter().any(|&b| b != 0xCC));
+                    assert_eq!(&signature[signature_len..], &[0xCC; 4]);
+                    assert_eq!(&derived[public_len..], &[0xCC; 4]);
+                    assert_eq!(&secret[secret_len..], &[0xCC; 4]);
+                }
+                assert_eq!(derived_storage[0], 0xCC);
+                Ok(())
+            })
+            .await
+            .expect("query/size ECC outputs");
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_returns_validity_without_caller_scratch() {
+        for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+            let (pal, io) = pal_and_io();
+            pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+                let private = alloc.dma_alloc(curve.wire_coord_len(StdHsmPal::BYTE_ORDER))?;
+                let public = alloc.dma_alloc(curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER))?;
+                pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
+                    .await?;
+                let digest = alloc.dma_alloc(curve.ecdsa_digest_len())?;
+                digest.fill(0x42);
+                let signature = alloc.dma_alloc(curve.wire_sig_len(StdHsmPal::BYTE_ORDER))?;
+                pal.ecc_sign(&io, curve, private, digest, Some(signature))
+                    .await?;
+
+                let mark = pal.iic.pool().dma_mark(io.slot).get().next_multiple_of(4);
+                let _remaining = alloc.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
+                let marks = allocation_marks(&pal, &io);
+                for valid in [true, false, true] {
+                    assert_eq!(
+                        pal.ecc_verify(&io, curve, public, digest, signature)
+                            .await?,
+                        valid,
+                    );
+                    assert_eq!(allocation_marks(&pal, &io), marks);
+                    digest[0] ^= 1;
+                }
+                for (hash, sig) in [
+                    (&digest[..0], &signature[..]),
+                    (&digest[..], &signature[..signature.len() - 1]),
+                ] {
+                    assert_eq!(
+                        pal.ecc_verify(&io, curve, public, hash, sig).await,
+                        Err(HsmError::InvalidArg),
+                    );
+                    assert_eq!(allocation_marks(&pal, &io), marks);
+                }
+                Ok(())
+            })
+            .await
+            .expect("boolean ECC verification");
+        }
+    }
+
+    #[tokio::test]
+    async fn keypair_reclaims_scratch_and_preserves_outputs_on_allocation_failure() {
+        let (pal, io) = pal_and_io();
+        for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+            pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+                let root = alloc.dma_alloc(curve.wire_coord_len(StdHsmPal::BYTE_ORDER))?;
+                root.fill(0xA5);
+                for root in [None, Some(&*root)] {
+                    let sizes = generate(&pal, &io, curve, root, None).await?;
+                    let (private_len, public_len) = sizes;
+                    let private = alloc.dma_alloc(private_len + 4)?;
+                    let public_storage = alloc.dma_alloc(public_len + 5)?;
+                    public_storage.fill(0xA5);
+                    let public = &mut public_storage[1..];
+                    private.fill(0xA5);
+                    public.fill(0xA5);
+                    let marks = allocation_marks(&pal, &io);
+
+                    for short_private in [true, false] {
+                        let private_size = private_len - usize::from(short_private);
+                        let public_size = public_len - usize::from(!short_private);
+                        let outcome = generate(
+                            &pal,
+                            &io,
+                            curve,
+                            root,
+                            Some((&mut private[..private_size], &mut public[..public_size])),
+                        )
+                        .await;
+                        assert_eq!(outcome, Err(HsmError::InvalidArg));
+                        assert_eq!(allocation_marks(&pal, &io), marks);
+                        assert!(private.iter().all(|&b| b == 0xA5));
+                        assert!(public.iter().all(|&b| b == 0xA5));
+                    }
+                    pal.alloc_scoped_async(&io, async |reserve| -> HsmResult<()> {
+                        let mark = pal.iic.pool().dma_mark(io.slot).get().next_multiple_of(4);
+                        let _remaining = reserve.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
+                        let full_marks = allocation_marks(&pal, &io);
+                        assert_eq!(generate(&pal, &io, curve, root, None).await?, sizes);
+                        let outcome =
+                            generate(&pal, &io, curve, root, Some((&mut *private, &mut *public)))
+                                .await;
+                        assert_eq!(outcome, Err(HsmError::NotEnoughSpace));
+                        assert_eq!(allocation_marks(&pal, &io), full_marks);
+                        Ok(())
+                    })
+                    .await?;
+                    assert_eq!(allocation_marks(&pal, &io), marks);
+                    assert!(private.iter().all(|&b| b == 0xA5));
+                    assert!(public.iter().all(|&b| b == 0xA5));
+                    for _ in 0..2 {
+                        assert_eq!(
+                            generate(&pal, &io, curve, root, Some((&mut *private, &mut *public)))
+                                .await?,
+                            sizes,
+                        );
+                        assert_eq!(allocation_marks(&pal, &io), marks);
+                        assert!(private[..private_len].iter().any(|&b| b != 0xA5));
+                        assert!(public[..public_len].iter().any(|&b| b != 0xA5));
+                        assert_eq!(&private[private_len..], &[0xA5; 4]);
+                        assert_eq!(&public[public_len..], &[0xA5; 4]);
+                    }
+                    assert_eq!(public_storage[0], 0xA5);
+                }
+                Ok(())
+            })
+            .await
+            .expect("key generation with internally scoped scratch");
+        }
     }
 
     /// A wrong-sized `root` is rejected in **use** mode.

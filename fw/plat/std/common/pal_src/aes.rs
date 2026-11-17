@@ -85,8 +85,23 @@ fn sgl_write(pal: &StdHsmPal, dst: &[u8; 16], buf: &[u8]) -> HsmResult<()> {
 }
 
 impl HsmAes for StdHsmPal {
-    async fn aes_gen_key(&self, _io: &StdHsmIo, key: &mut [u8]) -> HsmResult<()> {
-        self.aes.gen_key(key).await
+    async fn aes_gen_key(
+        &self,
+        _io: &StdHsmIo,
+        key_len: usize,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if !matches!(key_len, 16 | 24 | 32) {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(key) = key else {
+            return Ok(key_len);
+        };
+        if key.len() < key_len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.aes.gen_key(&mut key[..key_len]).await?;
+        Ok(key_len)
     }
 
     async fn aes_enc_dec(
@@ -523,16 +538,24 @@ impl HsmAesKw for StdHsmPal {
 }
 
 impl HsmAesXts for StdHsmPal {
-    async fn aes_xts_gen_key(&self, _io: &StdHsmIo, key: &mut [u8]) -> HsmResult<()> {
-        if key.len() != HSM_AES_XTS_KEY_LEN {
+    async fn aes_xts_gen_key(
+        &self,
+        _io: &StdHsmIo,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let Some(key) = key else {
+            return Ok(HSM_AES_XTS_KEY_LEN);
+        };
+        if key.len() < HSM_AES_XTS_KEY_LEN {
             return Err(HsmError::InvalidArg);
         }
+        let key = &mut key[..HSM_AES_XTS_KEY_LEN];
         let (k1, k2) = key.split_at_mut(HSM_AES_XTS_KEY_LEN / 2);
         self.aes.gen_key(k1).await?;
         loop {
             self.aes.gen_key(k2).await?;
             if k1 != k2 {
-                return Ok(());
+                return Ok(HSM_AES_XTS_KEY_LEN);
             }
         }
     }
@@ -846,6 +869,133 @@ mod tests {
         (pal, io)
     }
 
+    #[tokio::test]
+    async fn keygen_queries_with_exhausted_dma_and_local_pools() {
+        let (pal, io) = test_pal();
+        let dma = pal
+            .dma_alloc(&io, crate::buf_pool::DMA_BUF_SIZE)
+            .expect("DMA pool");
+        let local = pal
+            .alloc(&io, crate::buf_pool::NONDMA_BUF_SIZE)
+            .expect("local pool");
+        dma.fill(0xA5);
+        local.fill(0x5A);
+
+        for key_len in [16, 24, 32] {
+            assert_eq!(
+                pal.aes_gen_key(&io, key_len, None)
+                    .await
+                    .expect("AES query"),
+                key_len
+            );
+        }
+        assert_eq!(
+            pal.aes_xts_gen_key(&io, None).await.expect("XTS query"),
+            HSM_AES_XTS_KEY_LEN
+        );
+        for key_len in [0, 1, 20, 32, 48, 64, 129, 257, usize::MAX] {
+            assert_eq!(
+                pal.hmac_gen_key(&io, HsmHashAlgo::Sha256, key_len, None)
+                    .await
+                    .expect("HMAC query"),
+                key_len
+            );
+        }
+        assert!(dma.iter().all(|&b| b == 0xA5));
+        assert!(local.iter().all(|&b| b == 0x5A));
+        assert!(matches!(
+            pal.dma_alloc(&io, 4),
+            Err(HsmError::NotEnoughSpace)
+        ));
+        assert!(matches!(pal.alloc(&io, 4), Err(HsmError::NotEnoughSpace)));
+    }
+
+    #[tokio::test]
+    async fn keygen_validates_lengths_and_preserves_output_tails() {
+        let (pal, io) = test_pal();
+        let output = pal.dma_alloc(&io, 264).expect("key capacity");
+        output.fill(0xA5);
+
+        for key_len in [0, 1, 15, 17, 23, 25, 31, 33, usize::MAX] {
+            assert_eq!(
+                pal.aes_gen_key(&io, key_len, None).await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.aes_gen_key(&io, key_len, Some(output)).await,
+                Err(HsmError::InvalidArg)
+            );
+            assert!(output.iter().all(|&b| b == 0xA5));
+        }
+        for key_len in [16, 24, 32] {
+            assert_eq!(
+                pal.aes_gen_key(&io, key_len, Some(&mut output[..key_len - 1]))
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert!(output.iter().all(|&b| b == 0xA5));
+            for capacity in [key_len, output.len()] {
+                assert_eq!(
+                    pal.aes_gen_key(&io, key_len, Some(&mut output[..capacity]))
+                        .await
+                        .expect("AES key"),
+                    key_len
+                );
+                assert!(output[key_len..].iter().all(|&b| b == 0xA5));
+                output.fill(0xA5);
+            }
+        }
+        assert_eq!(
+            pal.aes_xts_gen_key(&io, Some(&mut output[..HSM_AES_XTS_KEY_LEN - 1]))
+                .await,
+            Err(HsmError::InvalidArg)
+        );
+        assert!(output.iter().all(|&b| b == 0xA5));
+        for capacity in [HSM_AES_XTS_KEY_LEN, output.len()] {
+            assert_eq!(
+                pal.aes_xts_gen_key(&io, Some(&mut output[..capacity]))
+                    .await
+                    .expect("XTS key"),
+                HSM_AES_XTS_KEY_LEN
+            );
+            assert_ne!(&output[..32], &output[32..64]);
+            assert!(output[HSM_AES_XTS_KEY_LEN..].iter().all(|&b| b == 0xA5));
+            output.fill(0xA5);
+        }
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ] {
+            for key_len in [0, 1, 20, 32, 48, 64, 129, 257] {
+                if key_len > 0 {
+                    assert_eq!(
+                        pal.hmac_gen_key(&io, algo, key_len, Some(&mut output[..key_len - 1]))
+                            .await,
+                        Err(HsmError::InvalidArg)
+                    );
+                    assert!(output.iter().all(|&b| b == 0xA5));
+                }
+                for capacity in [key_len, output.len()] {
+                    assert_eq!(
+                        pal.hmac_gen_key(&io, algo, key_len, Some(&mut output[..capacity]))
+                            .await
+                            .expect("HMAC key"),
+                        key_len
+                    );
+                    assert!(output[key_len..].iter().all(|&b| b == 0xA5));
+                    output.fill(0xA5);
+                }
+            }
+            assert_eq!(
+                pal.hmac_gen_key(&io, algo, usize::MAX, Some(output)).await,
+                Err(HsmError::InvalidArg)
+            );
+            assert!(output.iter().all(|&b| b == 0xA5));
+        }
+    }
+
     fn dma<'a>(pal: &'a StdHsmPal, io: &'a StdHsmIo, bytes: &[u8]) -> &'a mut HsmDmaBuf {
         let buf = pal.dma_alloc(io, bytes.len()).unwrap();
         buf.copy_from_slice(bytes);
@@ -946,7 +1096,7 @@ mod tests {
     async fn xts_sgl_round_trips_and_uses_tweak() {
         let (pal, io) = test_pal();
         let key = pal.dma_alloc(&io, HSM_AES_XTS_KEY_LEN).unwrap();
-        pal.aes_xts_gen_key(&io, key).await.unwrap();
+        pal.aes_xts_gen_key(&io, Some(key)).await.unwrap();
         assert_ne!(&key[..32], &key[32..]);
         let tweak = dma(&pal, &io, &7u64.to_le_bytes());
         let pt: Vec<u8> = (0..64u8).collect();
@@ -977,7 +1127,7 @@ mod tests {
     async fn xts_sgl_multi_unit_matches_per_unit() {
         let (pal, io) = test_pal();
         let key = pal.dma_alloc(&io, HSM_AES_XTS_KEY_LEN).unwrap();
-        pal.aes_xts_gen_key(&io, key).await.unwrap();
+        pal.aes_xts_gen_key(&io, Some(key)).await.unwrap();
         let pt: Vec<u8> = (0..128u8).collect();
         let enc = HsmAesOp::Encrypt;
 

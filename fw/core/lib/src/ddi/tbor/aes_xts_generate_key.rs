@@ -83,7 +83,7 @@ pub(crate) async fn handle<P: HsmPal>(
             key_label,
         };
         let key_buf = alloc.dma_alloc(HSM_AES_XTS_KEY_LEN)?;
-        pal.aes_xts_gen_key(io, key_buf).await?;
+        pal.aes_xts_gen_key(io, Some(key_buf)).await?;
         let written = mask(
             pal,
             io,

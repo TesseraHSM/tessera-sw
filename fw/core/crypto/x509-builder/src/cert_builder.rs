@@ -353,8 +353,8 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
         io,
         HsmHashAlgo::Sha384,
         tbs_dma,
-        digest_dma,
         HsmDigestForm::Standard,
+        Some(digest_dma),
     )
     .await?;
 
@@ -382,8 +382,9 @@ impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, 
         let e = self.alloc.dma_alloc(SHA384_DIGEST_LEN)?;
         byte_order::int_copy_from_be(P::BYTE_ORDER, e, digest)?;
         self.pal
-            .ecc_sign(io, HsmEccCurve::P384, self.priv_key, e, sig)
+            .ecc_sign(io, HsmEccCurve::P384, self.priv_key, e, Some(sig))
             .await
+            .map(|_| ())
     }
 }
 
@@ -421,13 +422,13 @@ where
         io,
         HsmHashAlgo::Sha384,
         tbs_dma,
-        digest_dma,
         HsmDigestForm::Operand,
+        Some(digest_dma),
     )
     .await?;
 
     let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, sig_dma)
+    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, Some(sig_dma))
         .await?;
 
     Ok((tbs_dma, sig_dma))

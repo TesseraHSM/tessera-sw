@@ -30,7 +30,6 @@
 //! responsible for providing buffers of the correct size (key size in
 //! bytes for RSA operations).
 
-use super::HsmScopedAlloc;
 use super::*;
 
 // ── RSA key size ───────────────────────────────────────────────────
@@ -127,12 +126,14 @@ impl HsmRsaKey {
         self.modulus_len().saturating_sub(2 * algo.digest_len() + 2)
     }
 
-    /// Minimum work buffer size for PKCS#1 v1.5 operations.
+    /// Encoded PKCS#1 v1.5 block length, excluding backend scratch.
+    /// The PAL manages temporary DMA scratch in internal allocator scopes.
     pub const fn pkcs1_work_len(&self) -> usize {
         self.modulus_len()
     }
 
-    /// Minimum work buffer size for OAEP operations.
+    /// OAEP encoding and MGF storage estimate, excluding backend scratch.
+    /// The PAL manages temporary DMA scratch in internal allocator scopes.
     pub const fn oaep_work_len(&self, algo: HsmHashAlgo) -> usize {
         let k = self.modulus_len();
         let h_len = algo.digest_len();
@@ -140,7 +141,8 @@ impl HsmRsaKey {
         k + algo.mgf1_state_len(db_len)
     }
 
-    /// Minimum work buffer size for PSS operations.
+    /// PSS encoding and MGF storage estimate, excluding backend scratch.
+    /// The PAL manages temporary DMA scratch in internal allocator scopes.
     pub const fn pss_work_len(&self, algo: HsmHashAlgo) -> usize {
         let k = self.modulus_len();
         let h_len = algo.digest_len();
@@ -179,18 +181,18 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key_size` — modulus size selector (2048 / 3072 / 4096).
-    /// - `priv_key` — destination for the serialized private key;
-    ///   length depends on `key_size` and CRT vs non-CRT layout.
-    /// - `pub_key` — destination for the serialized public key;
-    ///   length is `key_size.modulus_len()` plus the encoded
-    ///   exponent.
     /// - `pct` — Pairwise Consistency Test selector.  When not
     ///   [`HsmRsaPct::None`], a sign / verify or encrypt / decrypt
     ///   round-trip is performed (FIPS 140-3 requirement).
+    /// - `out` — `None` to query private/public output capacity bounds without
+    ///   generating a key or running a PCT; `Some((priv_key, pub_key))` to
+    ///   generate into caller buffers. Serialization is backend-defined.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — both buffers populated.
+    /// - `Ok((priv_len, pub_len))` — capacity bounds in query mode;
+    ///   otherwise actual byte counts written. Output tails are untouched.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError)` — PKA / RNG failure or PCT failed (the key
     ///   pair is rejected).
@@ -198,10 +200,9 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        priv_key: &mut HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
         pct: HsmRsaPct,
-    ) -> Result<(), HsmError>;
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)>;
 
     /// Private-key modular exponentiation: `x = y^d mod n`.
     ///
@@ -217,12 +218,13 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///   `key_size.modulus_len()` bytes, in operand order
     ///   ([`HsmCryptoOrder::BYTE_ORDER`]), and must satisfy
     ///   `1 < y < n - 1`, where `n` is the private key's modulus.
-    /// - `x` — output integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, written in operand order.
+    /// - `out` — `None` to query the modulus length without exponentiation
+    ///   or DMA scratch allocation; `Some(x)` to write the operand-order result.
+    ///   The buffer must fit the modulus; any tail is left untouched.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `x` populated.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch or `y` does
     ///   not satisfy `1 < y < n - 1`.
     /// - `Err(HsmError)` — PKA driver failure.
@@ -232,8 +234,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         key_size: HsmRsaKey,
         key: &HsmDmaBuf,
         y: &HsmDmaBuf,
-        x: &mut HsmDmaBuf,
-    ) -> Result<(), HsmError>;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Compute the private primitive, replacing the input integer with its result.
     ///
@@ -241,6 +243,7 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// `y_x` is exactly `key_type.modulus_len()` bytes and disjoint from `key`.
     /// The implementation must consume the input before publishing the result.
     /// Operand sizes, byte order, and input bounds match [`Self::mod_exp_priv`].
+    /// This input/output buffer is an explicit exception to output-size queries.
     async fn mod_exp_priv_in_place(
         &self,
         io: &Self::Io,
@@ -261,12 +264,13 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `x` — input integer; must be exactly
     ///   `key_size.modulus_len()` bytes, in operand order
     ///   ([`HsmCryptoOrder::BYTE_ORDER`]).
-    /// - `y` — output integer; must be exactly
-    ///   `key_size.modulus_len()` bytes, written in operand order.
+    /// - `out` — `None` to query the modulus length without exponentiation
+    ///   or DMA scratch allocation; `Some(y)` to write the operand-order result.
+    ///   The buffer must fit the modulus; any tail is left untouched.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `y` populated.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError)` — PKA driver failure.
     async fn mod_exp_pub(
@@ -275,8 +279,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         key_size: HsmRsaKey,
         key: &HsmDmaBuf,
         x: &HsmDmaBuf,
-        y: &mut HsmDmaBuf,
-    ) -> Result<(), HsmError>;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Derive the raw operand-order public key (`n || e`) from a
     /// vault-stored RSA private key.
@@ -333,6 +337,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///   `n1q`/`n2p` need async PKA arithmetic), the PAL allocates its own
     ///   buffer and returns a borrow of it.
     ///
+    /// This mutable input is an explicit in-place exception to output-size queries.
+    ///
     /// The implementation is responsible for scrubbing any plaintext key
     /// material it leaves behind (e.g. the recovered DER when it is not reused
     /// as the vault buffer).
@@ -365,29 +371,26 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `pub_key` — RSA public key.
     /// - `message` — plaintext; must satisfy
     ///   `message.len() <= key_size.max_pkcs1_message()`.
-    /// - `output` — ciphertext destination; must be at least
-    ///   `key_size.pkcs1_work_len()` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    /// - `out` — `None` to validate and query the ciphertext length without
+    ///   scratch allocation, RNG or PKA operations; `Some(output)` to encrypt.
+    ///   Temporary DMA scratch, including nested operations, is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `output[..modulus_len]` populated.
+    /// - `Ok(len)` — required output capacity in query mode;
+    ///   otherwise `output[..len]` holds the ciphertext.
     /// - `Err(HsmError::InvalidArg)` — message too long or buffer
     ///   too small.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too
-    ///   small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — RNG / PKA failure.
-    async fn rsa_pkcs1_encrypt<'a>(
+    async fn rsa_pkcs1_encrypt(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
         pub_key: &HsmDmaBuf,
         message: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// PKCS#1 v1.5 decrypt (EME-PKCS1-v1_5).
     ///
@@ -401,30 +404,29 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `priv_key` — RSA private key.
     /// - `ciphertext` — must be exactly
     ///   `key_size.modulus_len()` bytes.
-    /// - `output` — plaintext destination; must be at least
-    ///   `key_size.max_pkcs1_message()` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    /// - `out` — `None` to validate and query plaintext capacity without
+    ///   scratch allocation or decryption; `Some(output)` to
+    ///   decrypt. The capacity is an upper bound, not a recovered length.
+    ///   A smaller output is accepted if the recovered plaintext fits.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(len)` — length of recovered plaintext;
-    ///   `output[..len]` is valid.
+    /// - `Ok(len)` — capacity bound in query mode;
+    ///   otherwise the recovered plaintext length, with `output[..len]` valid.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError::RsaPkcs1DecryptFailed)` — padding check
     ///   failed (likely wrong key or tampered ciphertext).
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — PKA failure.
-    async fn rsa_pkcs1_decrypt<'a>(
+    async fn rsa_pkcs1_decrypt(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
         priv_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// PKCS#1 v1.5 sign (EMSA-PKCS1-v1_5, pre-hashed).
     ///
@@ -440,29 +442,27 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `priv_key` — RSA private key.
     /// - `message_hash` — pre-computed digest;
     ///   `algo.digest_len()` bytes.
-    /// - `signature` — destination; must be at least
-    ///   `key_size.pkcs1_work_len()` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    /// - `out` — `None` to validate and query signature length without
+    ///   scratch allocation or signing; `Some(signature)` to sign.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `signature[..modulus_len]` populated.
+    /// - `Ok(len)` — required output capacity in query mode;
+    ///   otherwise `signature[..len]` is populated.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — PKA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_pkcs1_sign<'a>(
+    async fn rsa_pkcs1_sign(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// PKCS#1 v1.5 verify (EMSA-PKCS1-v1_5, pre-hashed).
     ///
@@ -478,20 +478,21 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `message_hash` — pre-computed digest.
     /// - `signature` — signature to verify;
     ///   `key_size.modulus_len()` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    ///
+    /// Temporary DMA scratch is allocated and reclaimed in an internal scope.
     ///
     /// # Returns
     ///
     /// - `Ok(true)` — signature valid.
     /// - `Ok(false)` — signature does not verify.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — PKA failure.
     ///
     /// `pub_key` is `n || e(4)` and `signature` is modulus-sized, both in
     /// operand order. `message_hash` is a standard digest byte string.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_pkcs1_verify<'a>(
+    async fn rsa_pkcs1_verify(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
@@ -499,10 +500,7 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         pub_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
         signature: &HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a;
+    ) -> HsmResult<bool>;
 
     /// OAEP encrypt (EME-OAEP, RFC 8017 §7.1.1).
     ///
@@ -515,19 +513,20 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `message` — plaintext; must satisfy `message.len() <=
     ///   key_size.max_oaep_message(algo)`.
     /// - `label` — OAEP label; `&[]` for the default empty label.
-    /// - `output` — ciphertext destination; must be at least
-    ///   `key_size.oaep_work_len(algo)` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    /// - `out` — `None` to validate and query ciphertext length without
+    ///   scratch allocation or encryption; `Some(output)` to encrypt.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `output[..modulus_len]` populated.
+    /// - `Ok(len)` — required output capacity in query mode;
+    ///   otherwise `output[..len]` holds the ciphertext.
     /// - `Err(HsmError::InvalidArg)` — message too long or buffer
     ///   too small.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — RNG / SHA / PKA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_oaep_encrypt<'a>(
+    async fn rsa_oaep_encrypt(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
@@ -535,11 +534,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         pub_key: &HsmDmaBuf,
         message: &HsmDmaBuf,
         label: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// OAEP decrypt (EME-OAEP, RFC 8017 §7.1.2).
     ///
@@ -553,26 +549,27 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///   `key_size.modulus_len()` bytes.
     /// - `label` — OAEP label; must equal the encryption-time
     ///   label.
-    /// - `output` — plaintext destination; must be large enough to hold
-    ///   the recovered plaintext (at most `key_size.modulus_len()`
-    ///   bytes — the recovered length is returned).  A recovered
+    /// - `out` — `None` to validate and query plaintext capacity without
+    ///   scratch allocation or decryption; `Some(output)` to
+    ///   decrypt. The capacity is an upper bound. An output smaller than
+    ///   the bound is accepted if the recovered plaintext fits. A recovered
     ///   plaintext longer than `output` fails with
     ///   [`HsmError::RsaInvalidKeyLength`], so a caller that accepts only
     ///   a bounded plaintext (e.g. a small KEK) may size `output` to that
     ///   bound.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(len)` — length of recovered plaintext;
-    ///   `output[..len]` is valid.
+    /// - `Ok(len)` — capacity bound in query mode;
+    ///   otherwise the recovered plaintext length, with `output[..len]` valid.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError::RsaOaepDecryptFailed)` — OAEP unmasking
     ///   detected tampering or label mismatch.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — SHA / PKA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_oaep_decrypt<'a>(
+    async fn rsa_oaep_decrypt(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
@@ -580,11 +577,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         priv_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
         label: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// PSS sign (EMSA-PSS, RFC 8017 §9.1.1, pre-hashed).
     ///
@@ -597,19 +591,20 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `message_hash` — pre-computed digest;
     ///   `algo.digest_len()` bytes.
     /// - `salt_len` — PSS salt length in bytes.
-    /// - `signature` — destination; must be at least
-    ///   `key_size.pss_work_len(algo)` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    /// - `out` — `None` to validate and query signature length without
+    ///   scratch allocation, RNG or signing; `Some(signature)` to sign.
+    ///   Temporary DMA scratch is scoped internally.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `signature[..modulus_len]` populated.
+    /// - `Ok(len)` — required output capacity in query mode;
+    ///   otherwise `signature[..len]` is populated.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch or
     ///   `salt_len` exceeds the EMSA-PSS limit.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — RNG / SHA / PKA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_pss_sign<'a>(
+    async fn rsa_pss_sign(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
@@ -617,11 +612,8 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         priv_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// PSS verify (EMSA-PSS, RFC 8017 §9.1.2, pre-hashed).
     ///
@@ -636,20 +628,21 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     /// - `salt_len` — expected PSS salt length in bytes.
     /// - `signature` — signature to verify;
     ///   `key_size.modulus_len()` bytes.
-    /// - `alloc` — scoped allocator for RSA scratch.
+    ///
+    /// Temporary DMA scratch is allocated and reclaimed in an internal scope.
     ///
     /// # Returns
     ///
     /// - `Ok(true)` — signature valid.
     /// - `Ok(false)` — signature does not verify.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
-    /// - `Err(HsmError::NotEnoughSpace)` — allocator scope too small.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — SHA / PKA failure.
     ///
     /// `pub_key` is `n || e(4)` and `signature` is modulus-sized, both in
     /// operand order. `message_hash` is a standard digest byte string.
     #[allow(clippy::too_many_arguments)]
-    async fn rsa_pss_verify<'a>(
+    async fn rsa_pss_verify(
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
@@ -658,10 +651,7 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
         message_hash: &HsmDmaBuf,
         salt_len: usize,
         signature: &HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a;
+    ) -> HsmResult<bool>;
 }
 
 #[cfg(test)]

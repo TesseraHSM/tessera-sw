@@ -26,6 +26,9 @@ mod vectors;
 mod tests;
 
 pub use ecc::ecc_pct;
+pub use ecc::ecc_pct_in_workspace;
+pub use ecc::ecc_pct_workspace_len;
+pub use ecc::EccPctOperation;
 pub use rsa::rsa_pct;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmResult;

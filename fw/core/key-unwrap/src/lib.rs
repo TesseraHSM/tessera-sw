@@ -143,29 +143,23 @@ pub async fn unwrap_key<'p, P: HsmPal>(
     // advance the bump-allocator watermark via alignment padding, wasting the
     // scarce per-IO DMA budget).
     let (label, kek_buf) = kek_buf.split_at_mut(0);
+    let priv_key = pal.vault_key(io, params.unwrap_key_id)?;
     let kek_len = pal
-        .alloc_scoped_async(io, async |a| -> HsmResult<usize> {
-            let priv_key = pal.vault_key(io, params.unwrap_key_id)?;
-            pal.rsa_oaep_decrypt(
-                io,
-                HsmRsaKey::Rsa2048Priv,
-                params.oaep_hash,
-                priv_key,
-                oaep_ct,
-                &*label,
-                &mut *kek_buf,
-                a,
-            )
-            .await
-            // An oversized recovered KEK (plaintext larger than the
-            // `MAX_KEK_LEN` output buffer) comes back as
-            // `RsaInvalidKeyLength`; surface it as the KEK-specific error.
-            .map_err(|e| match e {
-                HsmError::RsaInvalidKeyLength => HsmError::RsaUnwrapInvalidKek,
-                other => other,
-            })
-        })
-        .await?;
+        .rsa_oaep_decrypt(
+            io,
+            HsmRsaKey::Rsa2048Priv,
+            params.oaep_hash,
+            priv_key,
+            oaep_ct,
+            &*label,
+            Some(&mut *kek_buf),
+        )
+        .await
+        // An oversized recovered KEK is a KEK-length error, not a key-size error.
+        .map_err(|e| match e {
+            HsmError::RsaInvalidKeyLength => HsmError::RsaUnwrapInvalidKek,
+            other => other,
+        })?;
     if kek_len == 0 || kek_len > MAX_KEK_LEN {
         return Err(HsmError::RsaUnwrapInvalidKek);
     }

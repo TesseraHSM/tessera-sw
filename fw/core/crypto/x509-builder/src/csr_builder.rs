@@ -151,14 +151,14 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
         io,
         HsmHashAlgo::Sha384,
         tbs_dma,
-        digest_dma,
         HsmDigestForm::Operand,
+        Some(digest_dma),
     )
     .await?;
 
     // 3. ECDSA-P384 sign — output is `r || s` in operand order.
     let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, sig_dma)
+    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, Some(sig_dma))
         .await?;
 
     // 4. Assemble the final DER document into `out`.

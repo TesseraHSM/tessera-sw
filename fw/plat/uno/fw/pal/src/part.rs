@@ -332,13 +332,7 @@ impl UnoHsmPal {
             let priv_buf = alloc.dma_alloc(P384_PRIV_LEN)?;
             let pub_buf = alloc.dma_alloc(ID_PUB_KEY_LEN)?;
             let (_priv_len, pub_len) = self
-                .ecc_gen_keypair(
-                    admin_io,
-                    alloc,
-                    HsmEccCurve::P384,
-                    Some((priv_buf, pub_buf)),
-                    pct,
-                )
+                .ecc_gen_keypair(admin_io, HsmEccCurve::P384, pct, Some((priv_buf, pub_buf)))
                 .await?;
 
             if pub_len != ID_PUB_KEY_LEN {

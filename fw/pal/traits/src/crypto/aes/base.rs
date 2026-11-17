@@ -119,16 +119,23 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `key` — output buffer; entirely filled with random bytes.
-    ///   Buffer length determines key size: 16 / 24 / 32 bytes for
+    /// - `key_len` — requested key length in bytes: 16 / 24 / 32 for
     ///   AES-128 / 192 / 256 respectively.
+    /// - `key` — `None` validates and queries the required length without
+    ///   allocation or RNG use. `Some` must hold at least `key_len` bytes;
+    ///   only that prefix is filled, leaving any tail unchanged.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `key` populated.
-    /// - `Err(HsmError::InvalidArg)` — `key.len()` is not 16, 24, or 32.
+    /// - `Ok(len)` — required key length or bytes written.
+    /// - `Err(HsmError::InvalidArg)` — invalid `key_len` or output too short.
     /// - `Err(HsmError)` — propagated from the CSPRNG.
-    async fn aes_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
+    async fn aes_gen_key(
+        &self,
+        io: &Self::Io,
+        key_len: usize,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Generic AES encrypt or decrypt in any [`HsmAesMode`].
     ///

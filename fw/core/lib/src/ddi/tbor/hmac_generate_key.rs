@@ -164,7 +164,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Generate the random HMAC key into scratch.
             let key_buf = alloc.dma_alloc(key_len)?;
             let mask_res = async {
-                pal.hmac_gen_key(io, algo, key_buf).await?;
+                pal.hmac_gen_key(io, algo, key_len, Some(key_buf)).await?;
                 let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
                 let params = MaskParams {
                     key_kind: kind,

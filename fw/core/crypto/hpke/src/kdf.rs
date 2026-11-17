@@ -109,7 +109,9 @@ where
     P: HsmKdf + HsmAlloc + 'a,
 {
     let labeled_ikm = concat_alloc(&[HPKE_V1, suite_id, label, ikm], alloc)?;
-    pal.hkdf_extract(io, algo, salt, labeled_ikm, prk_out).await
+    pal.hkdf_extract(io, algo, salt, labeled_ikm, Some(prk_out))
+        .await
+        .map(|_| ())
 }
 
 /// HPKE `LabeledExpand` (RFC 9180 §4):

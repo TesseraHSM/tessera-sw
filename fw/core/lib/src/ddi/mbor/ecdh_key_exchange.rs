@@ -78,7 +78,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
             curve,
             priv_key,
             &body.pub_key_der[..wire_pub_key_len],
-            secret,
+            Some(secret),
         )
         .await?;
 

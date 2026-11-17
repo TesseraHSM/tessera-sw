@@ -107,14 +107,19 @@ impl HsmHashAlgo {
         }
     }
 
-    /// Minimum buffer size for a multi-step hash context: state +
-    /// block.
+    /// Algorithmic SHA state + pending-block layout size.
+    ///
+    /// Query [`HsmHash::hash_state_size`] for the backend's actual storage
+    /// requirement: native state can need no DMA bytes, while buffered
+    /// SHAKE needs more than this layout.
     pub const fn hash_state_len(&self) -> usize {
         self.state_len() + self.block_len()
     }
 
-    /// Buffer size for a multi-step HMAC context: state + block
-    /// (pending) + block (opad key).
+    /// Algorithmic HMAC layout size: state + pending block + opad block.
+    ///
+    /// Query [`HsmHmac::hmac_state_size`] for the backend's actual DMA storage
+    /// requirement.
     pub const fn hmac_state_len(&self) -> usize {
         self.state_len() + self.block_len() * 2
     }
@@ -143,7 +148,7 @@ impl HsmHashAlgo {
 /// - **Multi-step** ([`hash_begin`](Self::hash_begin) →
 ///   [`hash_continue`](Self::hash_continue) … →
 ///   [`hash_finish`](Self::hash_finish)) — message arrives in
-///   fragments; intermediate state lives in a PAL-allocated context.
+///   fragments; intermediate state lives in caller-provided storage.
 ///
 /// Every digest is produced in the [`HsmDigestForm`] the caller asks
 /// for: the standard digest (DDI responses, KDF input, certificates) or
@@ -151,12 +156,11 @@ impl HsmHashAlgo {
 pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
     /// Platform-specific multi-step hash context.
     ///
-    /// Created by [`hash_begin`](Self::hash_begin) and consumed by
-    /// [`hash_finish`](Self::hash_finish).  Holds the intermediate
-    /// SHA working state and a single block's worth of pending
-    /// bytes; the underlying buffer is allocated from the
-    /// [`HsmScopedAlloc`] passed to `hash_begin`, so the context's
-    /// lifetime is bounded by that scope.
+    /// Created by [`hash_begin`](Self::hash_begin) and finalized by
+    /// [`hash_finish`](Self::hash_finish). Holds the intermediate
+    /// SHA working state and pending bytes. The context borrows caller-provided
+    /// storage for `'a`, independently of the PAL and IO lifetimes.
+    /// Contexts are backend-specific objects, not serializable byte strings.
     type HashCtx<'a>
     where
         Self: 'a;
@@ -169,15 +173,15 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
     /// - `algo` — hash algorithm; selects the digest length and
     ///   hardware mode.
     /// - `data` — input message; any length, including zero.
-    /// - `digest` — output buffer; must be at least
-    ///   [`HsmHashAlgo::digest_len`] bytes.  Only the leading
-    ///   `digest_len` bytes are written.
     /// - `form` — [`HsmDigestForm::Standard`] for the standard digest,
     ///   [`HsmDigestForm::Operand`] for an ECC sign/verify operand.
+    /// - `digest` — `None` queries the digest length without performing
+    ///   crypto or allocating scratch. `Some` must hold at least that
+    ///   many bytes; only the returned prefix is written.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `digest[..digest_len]` populated.
+    /// - `Ok(len)` — required digest size or bytes written.
     /// - `Err(HsmError::InvalidArg)` — `digest` shorter than
     ///   `algo.digest_len()` or `data.len()` exceeds the engine's
     ///   length limit.
@@ -187,39 +191,42 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
         io: &Self::Io,
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
-        digest: &mut HsmDmaBuf,
         form: HsmDigestForm,
-    ) -> HsmResult<()>;
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
-    /// Begins a multi-step hash.
+    /// Returns the backend's required DMA storage size for a multi-step hash.
     ///
-    /// Allocates the working state buffer from `alloc` and returns a
-    /// fresh context with no bytes processed and an empty pending
-    /// region.
+    /// Validates algorithm support and limits without allocating or initializing
+    /// a crypto operation. May return zero for native crypto backends.
+    fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize>;
+
+    /// Begins a multi-step hash in caller-provided storage.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `algo` — hash algorithm.
-    /// - `alloc` — scoped allocator used to back the
-    ///   [`Self::HashCtx`] state buffer; the returned context
-    ///   borrows from this allocator's scope.
+    /// - `state` — storage of at least [`hash_state_size`](Self::hash_state_size)
+    ///   bytes, 4-byte aligned when the required size is nonzero.
+    ///   Only the required prefix may be modified.
     ///
     /// # Returns
     ///
-    /// - `Ok(ctx)` — fresh hash context ready for
+    /// - `Ok(ctx)` — initialized context ready for
     ///   [`hash_continue`](Self::hash_continue).
     /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — the platform
     ///   cannot run `algo`.
-    /// - `Err(HsmError::NotEnoughSpace)` — `alloc` cannot satisfy
-    ///   the context allocation (typically
-    ///   [`HsmHashAlgo::hash_state_len`] bytes; a PAL that buffers the
-    ///   message for an XOF needs more).
+    /// - `Err(HsmError::InvalidArg)` — storage is too short or misaligned.
+    ///
+    /// The caller must keep storage alive until context drop, then
+    /// reclaim and scrub it according to its allocation lifetime. Dropping
+    /// the context does not reclaim or scrub caller-provided storage.
     fn hash_begin<'a>(
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        alloc: &'a impl HsmScopedAlloc,
+        state: &'a mut HsmDmaBuf,
     ) -> HsmResult<Self::HashCtx<'a>>
     where
         Self: 'a;
@@ -241,8 +248,8 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
     /// # Returns
     ///
     /// - `Ok(())` on success.
-    /// - `Err(HsmError::InvalidArg)` — cumulative byte count
-    ///   overflows the engine's length field.
+    /// - `Err(HsmError::InvalidArg)` — context is no longer active or the
+    ///   cumulative byte count overflows the engine's length field.
     /// - `Err(HsmError)` — propagated from the SHA driver.
     async fn hash_continue(
         &self,
@@ -251,31 +258,33 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
         data: &HsmDmaBuf,
     ) -> HsmResult<()>;
 
-    /// Finalises the hash and writes the digest into `digest`.
+    /// Queries the digest size or finalises the hash into `digest`.
     ///
-    /// Consumes `ctx`; any pending bytes are flushed with SHA
-    /// auto-padding before the final block is submitted.
+    /// A query leaves the active context unchanged. Execution flushes pending
+    /// bytes with SHA auto-padding. After finalization starts, the context is
+    /// no longer usable, including if execution fails or is cancelled.
+    /// Native resources are released on finalization or context drop.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `ctx` — context to finalise (consumed).
-    /// - `digest` — output buffer; must be at least
-    ///   [`HsmHashAlgo::digest_len`] bytes.
+    /// - `ctx` — active context to query or finalise.
     /// - `form` — [`HsmDigestForm::Standard`] for the standard digest,
     ///   [`HsmDigestForm::Operand`] for an ECC sign/verify operand.
+    /// - `digest` — `None` queries the digest size; `Some` must have at
+    ///   least that capacity. Only the returned prefix is written.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `digest[..digest_len]` populated.
-    /// - `Err(HsmError::InvalidArg)` — `digest` is shorter than
-    ///   `digest_len`.
+    /// - `Ok(len)` — required digest size or bytes written.
+    /// - `Err(HsmError::InvalidArg)` — context is no longer active or the
+    ///   output is too short. A short output leaves the context unchanged.
     /// - `Err(HsmError)` — propagated from the SHA driver.
     async fn hash_finish(
         &self,
         io: &Self::Io,
-        ctx: Self::HashCtx<'_>,
-        digest: &mut HsmDmaBuf,
+        ctx: &mut Self::HashCtx<'_>,
         form: HsmDigestForm,
-    ) -> HsmResult<()>;
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 }

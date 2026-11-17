@@ -187,7 +187,7 @@ where
         let (tagged, tag_slot) = out.split_at_mut(tag_off);
         let tag_slot = &mut tag_slot[..total_len - tag_off];
         let hmac_key = &masking_key[AES_CBC_256_KEY_SIZE..];
-        pal.hmac_sign(io, HsmHashAlgo::Sha384, hmac_key, tagged, tag_slot)
+        pal.hmac_sign(io, HsmHashAlgo::Sha384, hmac_key, tagged, Some(tag_slot))
             .await
     };
     hmac_result?;

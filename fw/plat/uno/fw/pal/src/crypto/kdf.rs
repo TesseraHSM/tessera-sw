@@ -46,13 +46,13 @@ impl HsmKdf for UnoHsmPal {
     ///   underlying HMAC variant).
     /// * `salt` — HKDF salt (any length, may be empty).
     /// * `ikm` — input keying material (any length).
-    /// * `prk` — destination buffer for the pseudo-random key. Must be
-    ///   at least `algo.digest_len()` bytes; only the first
-    ///   `algo.digest_len()` bytes are written.
+    /// * `prk` — `None` queries the required length without allocation or
+    ///   crypto. An output buffer must hold at least `algo.digest_len()`
+    ///   bytes; only that prefix is written.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `prk` is shorter than
-    ///   `algo.digest_len()`.
+    ///   `algo.digest_len()` or inputs exceed SHA engine length limits.
     /// * Any [`HsmError`] surfaced by the HMAC trait calls.
     async fn hkdf_extract(
         &self,
@@ -60,16 +60,24 @@ impl HsmKdf for UnoHsmPal {
         algo: HsmHashAlgo,
         salt: Option<&HsmDmaBuf>,
         ikm: &HsmDmaBuf,
-        prk: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        prk: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // any allocation sized by them.
         ShaMode::try_from(algo)?;
+        let len = algo.digest_len();
+        if ikm.len() > u32::MAX as usize - algo.block_len()
+            || salt.is_some_and(|salt| u32::try_from(salt.len()).is_err())
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(prk) = prk else {
+            return Ok(len);
+        };
+        if prk.len() < len {
+            return Err(HsmError::InvalidArg);
+        }
         self.alloc_scoped_async(io, async |scope| {
-            if prk.len() < algo.digest_len() {
-                return Err(HsmError::InvalidArg);
-            }
-
             // RFC 5869: if salt is empty, use a zero-filled salt of digest_len
             // bytes in DMA-accessible memory.
             let zero_salt;
@@ -86,7 +94,7 @@ impl HsmKdf for UnoHsmPal {
             // PRK = HMAC(salt, IKM)  — salt is the HMAC key, IKM is the message
             let mut ctx = self.hmac_begin_in_buf(io, algo, salt, hmac_buf).await?;
             self.hmac_continue(io, &mut ctx, ikm).await?;
-            self.hmac_finish_into(io, ctx, &mut prk[..algo.digest_len()])
+            self.hmac_finish_into(io, &mut ctx, Some(&mut prk[..len]))
                 .await
         })
         .await
@@ -122,49 +130,16 @@ impl HsmKdf for UnoHsmPal {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // the empty-output shortcut and any allocation sized by them.
         ShaMode::try_from(algo)?;
+        if output.len() > 255 * algo.digest_len() {
+            return Err(HsmError::InvalidArg);
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
         self.alloc_scoped_async(io, async |scope| {
-            let hlen = algo.digest_len();
-
-            // RFC 5869: output length must not exceed 255 * HashLen.
-            if output.len() > 255 * hlen {
-                return Err(HsmError::InvalidArg);
-            }
-
-            if output.is_empty() {
-                return Ok::<(), HsmError>(());
-            }
-
-            let n = output.len().div_ceil(hlen);
-            let hmac_buf = scope.dma_alloc(algo.hmac_state_len())?;
-            // 1-byte DMA scratch for the HKDF counter byte.
-            let ctr = scope.dma_alloc(1)?;
-
-            // T(i-1) is read back from the previous iteration's slot in `output`.
-            // Iterations 1..n-1 always wrote a full hlen-sized T, so reading
-            // hlen bytes back is safe.  The first iteration has no T(0).
-            for i in 1..=n {
-                let mut ctx = self
-                    .hmac_begin_in_buf(io, algo, prk, &mut *hmac_buf)
-                    .await?;
-
-                if i > 1 {
-                    let prev_start = (i - 2) * hlen;
-                    self.hmac_continue(io, &mut ctx, &output[prev_start..prev_start + hlen])
-                        .await?;
-                }
-                if let Some(info) = info.filter(|info| !info.is_empty()) {
-                    self.hmac_continue(io, &mut ctx, info).await?;
-                }
-                ctr[0] = i as u8;
-                self.hmac_continue(io, &mut ctx, ctr).await?;
-
-                let start = (i - 1) * hlen;
-                let len = hlen.min(output.len() - start);
-                self.hmac_finish_into(io, ctx, &mut output[start..start + len])
-                    .await?;
-            }
-
-            Ok::<(), HsmError>(())
+            let workspace = scope.dma_alloc(Self::hkdf_expand_workspace_len(algo))?;
+            self.hkdf_expand_in_workspace(io, algo, prk, info, output, workspace)
+                .await
         })
         .await
     }
@@ -231,7 +206,7 @@ impl HsmKdf for UnoHsmPal {
 
                 let start = idx * hlen;
                 let len = hlen.min(output.len() - start);
-                self.hmac_finish_into(io, ctx, &mut output[start..start + len])
+                self.hmac_finish_into(io, &mut ctx, Some(&mut output[start..start + len]))
                     .await?;
             }
 
@@ -302,11 +277,7 @@ impl HsmKdf for UnoHsmPal {
 
             let state = scope.dma_alloc(algo.mgf1_state_len(seed.len()))?;
 
-            self.sha
-                .with_exclusive(async |sha| {
-                    ConcatKdf::Mgf1.run_xor(sha, algo, seed, mask, state).await
-                })
-                .await
+            self.mgf1_xor_in_workspace(algo, seed, mask, state).await
         })
         .await
     }
@@ -373,6 +344,76 @@ impl HsmKdf for UnoHsmPal {
 }
 
 impl UnoHsmPal {
+    pub(super) const fn hkdf_expand_workspace_len(algo: HsmHashAlgo) -> usize {
+        algo.hmac_state_len() + super::hmac::MAX_BLOCK_LEN + 1
+    }
+
+    pub(super) async fn hkdf_expand_in_workspace(
+        &self,
+        io: &UnoHsmIo,
+        algo: HsmHashAlgo,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        ShaMode::try_from(algo)?;
+        let hlen = algo.digest_len();
+        if output.len() > 255 * hlen {
+            return Err(HsmError::InvalidArg);
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
+        if workspace.len() < Self::hkdf_expand_workspace_len(algo) {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        let (hmac_buf, rest) = workspace.split_at_mut(algo.hmac_state_len());
+        let (effective_key, ctr) = rest.split_at_mut(super::hmac::MAX_BLOCK_LEN);
+        let ctr = &mut ctr[..1];
+        for i in 1..=output.len().div_ceil(hlen) {
+            let mut ctx = self
+                .hmac_begin_in_workspace(algo, prk, &mut *hmac_buf, effective_key)
+                .await?;
+            if i > 1 {
+                let prev_start = (i - 2) * hlen;
+                self.hmac_continue(io, &mut ctx, &output[prev_start..prev_start + hlen])
+                    .await?;
+            }
+            if let Some(info) = info.filter(|info| !info.is_empty()) {
+                self.hmac_continue(io, &mut ctx, info).await?;
+            }
+            ctr[0] = i as u8;
+            self.hmac_continue(io, &mut ctx, ctr).await?;
+            let start = (i - 1) * hlen;
+            let len = hlen.min(output.len() - start);
+            self.hmac_finish_into(io, &mut ctx, Some(&mut output[start..start + len]))
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn mgf1_xor_in_workspace(
+        &self,
+        algo: HsmHashAlgo,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        ShaMode::try_from(algo)?;
+        let len = algo.mgf1_state_len(seed.len());
+        if workspace.len() < len {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        self.sha
+            .with_exclusive(async |sha| {
+                ConcatKdf::Mgf1
+                    .run_xor(sha, algo, seed, mask, &mut workspace[..len])
+                    .await
+            })
+            .await
+    }
+
     /// Shared boilerplate for [`HsmKdf::mgf1`], [`HsmKdf::x963_kdf`],
     /// and [`HsmKdf::sp800_56a_kdf`].
     ///

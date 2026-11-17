@@ -384,24 +384,21 @@ async fn verify_pota_signature<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         id_uncompressed,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
 
-    let verify_result = pal.dma_alloc(io, 4)?;
-
-    pal.ecc_verify(
-        io,
-        HsmEccCurve::P384,
-        signer_pub_key_raw,
-        digest,
-        signature_raw,
-        verify_result,
-    )
-    .await?;
-
-    if (verify_result[0] & 1) != 0 {
+    if !pal
+        .ecc_verify(
+            io,
+            HsmEccCurve::P384,
+            signer_pub_key_raw,
+            digest,
+            signature_raw,
+        )
+        .await?
+    {
         return Err(HsmError::EccVerifyFailed);
     }
     Ok(())
@@ -450,7 +447,7 @@ async fn derive_credential_keys<P: HsmPal>(
             HsmEccCurve::P384,
             priv_key,
             host_eph_pub_key_raw,
-            secret,
+            Some(secret),
         )
         .await?;
     }
@@ -462,7 +459,7 @@ async fn derive_credential_keys<P: HsmPal>(
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
-    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
         .await?;
 
     pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)

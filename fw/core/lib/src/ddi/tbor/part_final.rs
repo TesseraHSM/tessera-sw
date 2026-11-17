@@ -422,8 +422,8 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         part_policy,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
 
