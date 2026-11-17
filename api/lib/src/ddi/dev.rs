@@ -34,6 +34,16 @@ pub(in crate::ddi) type TsraDev = <HsmDdi as Ddi>::Dev;
 /// Lazily initialized singleton providing access to the DDI implementation.
 static DDI: LazyLock<HsmDdi> = LazyLock::new(HsmDdi::default);
 
+/// Raw [`DdiError::DdiError`] status firmware returns when it does not
+/// recognize the SQE opcode used to route TBOR requests (`OP_TBOR`, see
+/// `ddi/nix/src/dev.rs::exec_tbor`). Firmware predating the TBOR
+/// dispatcher rejects the command at the opcode-routing layer with this
+/// generic completion status, rather than decoding the request and
+/// returning a typed `DdiStatus`/`TborStatus::UnsupportedCmd`. Treated the
+/// same as those typed statuses: it means "this device has no TBOR
+/// support," not a command-specific failure.
+const RAW_STATUS_TBOR_OPCODE_UNSUPPORTED: u32 = 1;
+
 /// Retrieves the API revision range supported by the HSM device.
 ///
 /// Queries the device for its supported API revision range, returning both
@@ -70,7 +80,8 @@ pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
         Err(
             DdiError::UnsupportedEncoding
             | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
-            | DdiError::TborStatus(TborStatus::UnsupportedCmd),
+            | DdiError::TborStatus(TborStatus::UnsupportedCmd)
+            | DdiError::DdiError(RAW_STATUS_TBOR_OPCODE_UNSUPPORTED),
         ) => {}
         Err(err) => return Err(HsmError::from(err)),
     }
@@ -96,7 +107,8 @@ pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<bool> {
         Err(
             DdiError::UnsupportedEncoding
             | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
-            | DdiError::TborStatus(TborStatus::UnsupportedCmd),
+            | DdiError::TborStatus(TborStatus::UnsupportedCmd)
+            | DdiError::DdiError(RAW_STATUS_TBOR_OPCODE_UNSUPPORTED),
         ) => {
             return Ok(false);
         }
