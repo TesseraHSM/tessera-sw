@@ -10,11 +10,12 @@
 //! the host with `tsra_crypto` (OpenSSL) against the returned public key
 //! — exercising the full unmask → sign → return path for every curve.
 //!
-//! The device speaks the PKA-native **little-endian** wire format: the
-//! public key is `x_le ‖ y_le` and the signature is `r_le ‖ s_le` (each
-//! component zero-padded to the curve's wire coordinate length; P-521 pads
-//! 66→68). `tsra_crypto` is big-endian native, so the test reverses
-//! each component before verifying. The host verifies the full big-endian
+//! The device speaks its native crypto byte order on the wire: the
+//! public key is `x ‖ y` and the signature is `r ‖ s` (each component at
+//! the head of a zero-padded lane of the curve's wire coordinate length;
+//! P-521 uses 68-byte lanes on little-endian devices and 72-byte lanes on
+//! big-endian ones). `tsra_crypto` is big-endian native, so the test
+//! converts each component before verifying. The host verifies the full big-endian
 //! digest; ECDSA truncation retains its most significant curve-width bits
 //! when the digest is longer than the curve's order.
 
@@ -182,9 +183,8 @@ fn ecc_sign_digest_with_zero_bytes_roundtrip() {
     }
 }
 
-/// Verifies P-521 signatures zero-fill the two wire-padding bytes per
-/// component on a little-endian device (a big-endian one sends them
-/// unpadded).
+/// Verifies P-521 signatures zero-fill the lane padding after each
+/// component (2 bytes on a little-endian device, 6 on a big-endian one).
 #[test]
 fn ecc_sign_p521_signature_padding_is_zero() {
     with_generated_ecc_key(ECC_CURVE_P521, |ctx, session_id, masked_key, pub_key| {

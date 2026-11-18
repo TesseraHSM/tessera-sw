@@ -83,7 +83,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let digest_offset = digest_at.checked_sub(key_at).ok_or(HsmError::InvalidArg)?;
         let len = tsra_fw_ddi_tbor::RESP_HEADER_LEN
             + TborEccSignResp::TOC_COUNT * 4
-            + curve.wire_sig_len(P::BYTE_ORDER);
+            + curve.wire_sig_len(P::ECC_COORD_PAD);
         // Authenticated envelope metadata is dead; the private key and
         // digest remain live beyond it. Check disjointness before encoding.
         let buffer = cmd_buf.buffer_mut();
@@ -93,7 +93,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let (response, input) = buffer[..digest_end].split_at_mut(key_at);
         let response = &mut response[..len];
         TborEccSignResp::encode_for_request(response, 0, false)?
-            .signature_reserve(curve.wire_sig_len(P::BYTE_ORDER))?
+            .signature_reserve(curve.wire_sig_len(P::ECC_COORD_PAD))?
             .finish();
         if key_len > input.len() || digest_offset > input.len() {
             return Err(HsmError::InvalidArg);
@@ -122,10 +122,11 @@ pub(crate) async fn handle<P: HsmPal>(
         // P-384 case (32/32 and 48/48), so the common path needs neither
         // the allocation nor the copy. Only P-521 genuinely differs
         // (64-byte digest, 68-byte operand) and still needs zero pad.
-        let operand: &HsmDmaBuf = if supplied_digest.len() == curve.wire_coord_len(P::BYTE_ORDER) {
+        let operand: &HsmDmaBuf = if supplied_digest.len() == curve.wire_coord_len(P::ECC_COORD_PAD)
+        {
             supplied_digest
         } else {
-            let staged = pal.dma_alloc_zeroed(io, curve.wire_coord_len(P::BYTE_ORDER))?;
+            let staged = pal.dma_alloc_zeroed(io, curve.wire_coord_len(P::ECC_COORD_PAD))?;
             staged
                 .get_mut(digest_at..digest_at + digest.len())
                 .ok_or(HsmError::InvalidArg)?
@@ -136,7 +137,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // `response` is exactly header, TOC and the one reserved field, so the
         // signature slot is its tail; taking it there spares re-decoding the
         // frame just encoded from DMA memory.
-        let signature = &mut response[len - curve.wire_sig_len(P::BYTE_ORDER)..len];
+        let signature = &mut response[len - curve.wire_sig_len(P::ECC_COORD_PAD)..len];
         pal.ecc_sign(io, curve, key, &operand[..sign_len], Some(signature))
             .await?;
         Ok(len)

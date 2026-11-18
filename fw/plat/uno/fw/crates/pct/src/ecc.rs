@@ -47,7 +47,7 @@ pub enum EccPctOperation<'a> {
 
 /// PCT-owned storage, excluding the backend's verification/ECDH workspace.
 pub fn ecc_pct_workspace_len<P: HsmEcc>(curve: HsmEccCurve, pct: &HsmEccPct) -> usize {
-    let coord = curve.wire_coord_len(P::BYTE_ORDER);
+    let coord = curve.wire_coord_len(P::ECC_COORD_PAD);
     match pct {
         HsmEccPct::None => 0,
         HsmEccPct::SignVerify => MESSAGE_LEN + 3 * coord,
@@ -155,7 +155,7 @@ where
         HsmEccPct::KeyAgreement => {
             key_agreement(
                 curve,
-                curve.wire_coord_len(P::BYTE_ORDER),
+                curve.wire_coord_len(P::ECC_COORD_PAD),
                 priv_key,
                 pub_key,
                 scratch,
@@ -198,7 +198,7 @@ where
     // The PKA reads a full field-width digest operand (68 bytes for P-521),
     // so the little-endian digest sits in a zeroed buffer of that width. The
     // PAL receives the ECDSA digest width, which is at most 64 bytes.
-    let (digest, scratch) = scratch.split_at_mut(curve.wire_coord_len(P::BYTE_ORDER));
+    let (digest, scratch) = scratch.split_at_mut(curve.wire_coord_len(P::ECC_COORD_PAD));
     digest.fill(0);
     pal.hash(
         io,
@@ -210,7 +210,7 @@ where
     .await?;
     let digest = &digest[..curve.ecdsa_digest_len()];
 
-    let signature = &mut scratch[..curve.wire_sig_len(P::BYTE_ORDER)];
+    let signature = &mut scratch[..curve.wire_sig_len(P::ECC_COORD_PAD)];
     signature.fill(0);
     pal.ecc_sign(io, curve, priv_key, digest, Some(signature))
         .await?;

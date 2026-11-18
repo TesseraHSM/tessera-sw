@@ -513,7 +513,7 @@ fn ecc_sign_multiple_trailing_toc_entries_are_ignored() {
 /// Verifies forward-compatible decoding of the maximum-size ECDSA signature buffer.
 #[test]
 fn ecc_sign_maximum_signature_with_trailing_entry_is_preserved() {
-    let signature: Vec<u8> = (0..136).map(|index| index as u8).collect();
+    let signature: Vec<u8> = (0..144).map(|index| index as u8).collect();
 
     let mut buf = [0u8; 512];
     let bytes = encode_buffer_with_trailing(&mut buf, &signature, &[0xA5]);

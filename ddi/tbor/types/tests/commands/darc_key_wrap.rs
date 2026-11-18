@@ -71,8 +71,8 @@ fn coord_sizes(pub_len: usize) -> (usize, usize) {
     match pub_len {
         64 => (32, 32),
         96 => (48, 48),
-        132 => (66, 66),
         136 => (68, 66),
+        144 => (72, 66),
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }
@@ -115,7 +115,7 @@ fn digest_len_for(pub_len: usize) -> usize {
     match pub_len {
         64 => 32,
         96 => 48,
-        132 | 136 => 64,
+        136 | 144 => 64,
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }

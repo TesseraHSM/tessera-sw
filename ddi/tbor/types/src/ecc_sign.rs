@@ -18,8 +18,8 @@ pub const TBOR_OP_ECC_SIGN: u8 = 0x18;
 
 /// Maximum digest length (bytes): the SHA-512 digest.
 pub const ECC_DIGEST_MAX_LEN: usize = 64;
-/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 little-endian word-padded).
-pub const ECC_SIG_MAX_LEN: usize = 136;
+/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 8-byte-padded big-endian lanes).
+pub const ECC_SIG_MAX_LEN: usize = 144;
 
 /// Host-facing TBOR `EccSign` request.
 #[tbor(opcode = TBOR_OP_ECC_SIGN, session_ctrl = in_session)]
@@ -46,8 +46,8 @@ pub struct TborEccSignReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborEccSignResp {
     /// Raw ECDSA `r ‖ s`, each component in device byte order and sized to
-    /// the curve wire coordinate length (64 / 96 / 132-or-136 B).
-    #[tbor(max_len = 136)]
+    /// the curve wire coordinate length (64 / 96 / 136-or-144 B).
+    #[tbor(max_len = 144)]
     pub signature: Vec<u8>,
 }
 

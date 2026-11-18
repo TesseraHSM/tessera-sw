@@ -254,7 +254,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
+            byte_order::pair_to_be::<P>(SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3

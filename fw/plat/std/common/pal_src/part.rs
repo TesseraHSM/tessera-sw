@@ -60,6 +60,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::cert::MAX_CERT_DER_LEN;
+use crate::drivers::ecc::EccForm;
 use crate::drivers::session::SessionTable;
 use crate::drivers::vault::KeyVault;
 use crate::StdHsmPal;
@@ -724,7 +725,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::Ecc384Private,
                 id_attrs,
                 HsmEccPct::SignVerify,
-                HsmByteOrder::Be,
+                EccForm::BE,
                 &mut id_pub,
             )
             .await;
@@ -835,7 +836,7 @@ impl StdHsmPal {
                     HsmVaultKeyKind::Ecc384Private,
                     id_attrs,
                     HsmEccPct::SignVerify,
-                    HsmByteOrder::Be,
+                    EccForm::BE,
                     &mut id_pub,
                 )
                 .await?;
@@ -856,7 +857,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::EstablishCred,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                StdHsmPal::BYTE_ORDER,
+                EccForm::of::<StdHsmPal>(),
                 &mut ec_pub,
             )
             .await?;
@@ -875,7 +876,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::SessionEncryption,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                StdHsmPal::BYTE_ORDER,
+                EccForm::of::<StdHsmPal>(),
                 &mut se_pub,
             )
             .await;
@@ -1008,10 +1009,10 @@ impl StdHsmPal {
     /// derivation can split off the public half); every other kind stores
     /// the bare raw HSM-format private scalar `d` (48 B for P-384).
     ///
-    /// `big_endian` selects the public-key byte order (the BE↔LE flip is
-    /// the driver's responsibility): [`HsmByteOrder::Be`] yields
+    /// `form` selects the public-key layout (the conversion is the
+    /// driver's responsibility): [`EccForm::BE`] yields exact-width
     /// big-endian coordinates for internally-consumed keys (cert
-    /// generation / POTA hashing); the PAL operand order yields the DDI
+    /// generation / POTA hashing); the PAL operand form yields the DDI
     /// wire form for wire-only keys.
     ///
     /// Bypasses [`HsmEcc::ecc_gen_keypair`] (which now requires an
@@ -1027,13 +1028,13 @@ impl StdHsmPal {
         kind: HsmVaultKeyKind,
         attrs: HsmVaultKeyAttrs,
         pct: HsmEccPct,
-        order: HsmByteOrder,
+        form: EccForm,
         pub_key_out: &mut [u8; P384_PUB_KEY_LEN],
     ) -> HsmResult<HsmKeyId> {
         // Generate the keypair; the driver owns the public-key byte
         // order, so this layer stays free of byte-shuffling boilerplate.
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
-        self.ecc.pub_coords(&pub_key, order, pub_key_out).await?;
+        self.ecc.pub_coords(&pub_key, form, pub_key_out).await?;
 
         // Export the private key as raw HSM scalar bytes (48 B for P-384).
         // `Zeroizing` scrubs the transient heap copy on drop once the vault
@@ -1049,8 +1050,8 @@ impl StdHsmPal {
                 _ => HsmError::PartitionIdKeyGenerationPctFailed,
             };
             let vault_key = EccPrivateKey::from_hsm_bytes(&priv_buf).map_err(|_| error)?;
-            let output_public = Self::ecc_public_from_wire(EccCurve::P384, pub_key_out, order)
-                .map_err(|_| error)?;
+            let output_public =
+                Self::ecc_public_from_wire(EccCurve::P384, pub_key_out, form).map_err(|_| error)?;
             if !self.ecc_pair_pct(&vault_key, &output_public, pct).await? {
                 return Err(error);
             }
@@ -1799,7 +1800,7 @@ mod tests {
                     kind,
                     HsmVaultKeyAttrs::new(),
                     pct,
-                    StdHsmPal::BYTE_ORDER,
+                    EccForm::of::<StdHsmPal>(),
                     &mut public,
                 )
                 .await

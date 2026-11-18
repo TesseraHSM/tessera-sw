@@ -147,13 +147,13 @@ async fn attested_pub_key<'a, P: HsmPal>(
 
     let coord_raw = curve.priv_key_len();
 
-    let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
+    let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::ECC_COORD_PAD))?;
     pal.ecc_pub_from_priv(io, curve, priv_key, Some(pub_key))
         .await?;
 
     // The COSE_Key encodes big-endian coordinates; convert the PAL's
     // operand-order `x ‖ y` in place to the exact-width BE pair.
-    byte_order::pair_to_be(P::BYTE_ORDER, curve, pub_key)?;
+    byte_order::pair_to_be::<P>(curve, pub_key)?;
     let pub_key: &'a HsmDmaBuf = pub_key;
     let (x, y) = pub_key[..2 * coord_raw].split_at(coord_raw);
 

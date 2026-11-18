@@ -1238,6 +1238,7 @@ impl HsmPalFeatures for UnoHsmPal {
 /// Uno PKA operands are little-endian (word-padded P-521 slots).
 impl HsmCryptoOrder for UnoHsmPal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
 }
 
 impl HsmPal for UnoHsmPal {

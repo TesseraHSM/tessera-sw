@@ -172,6 +172,7 @@ impl HsmIoTypes for FakePal {
 
 impl HsmCryptoOrder for FakePal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
 }
 
 impl HsmMlDsa for FakePal {
@@ -393,7 +394,7 @@ impl HsmEcc for FakePal {
         hash: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let len = curve.wire_sig_len(Self::BYTE_ORDER);
+        let len = curve.wire_sig_len(Self::ECC_COORD_PAD);
         if let Some(signature) = out {
             self.ecc_sign.run(&self.calls, hash, signature)?;
         }
@@ -882,8 +883,8 @@ fn run_ecc(
     curve: HsmEccCurve,
     pct: &HsmEccPct,
 ) -> HsmResult<bool> {
-    let priv_key = key(curve.wire_coord_len(FakePal::BYTE_ORDER));
-    let pub_key = key(curve.wire_pub_key_len(FakePal::BYTE_ORDER));
+    let priv_key = key(curve.wire_coord_len(FakePal::ECC_COORD_PAD));
+    let pub_key = key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD));
     block_on(ecc_pct(
         pal,
         &FakeIo::default(),
@@ -988,8 +989,8 @@ fn ecc_pct_reuses_caller_workspace_for_backend_operations() {
                 &io,
                 curve,
                 &pct,
-                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+                key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
                 workspace,
                 async |operation, scratch| {
                     assert_eq!(scratch.len(), 16);
@@ -1036,8 +1037,8 @@ fn ecc_pct_rejects_short_workspace_before_running_operations() {
                 &FakeIo::default(),
                 curve,
                 &pct,
-                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+                key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
                 &mut *workspace,
                 async |_, _| panic!("short workspace must not reach a backend"),
             ));
@@ -1067,8 +1068,8 @@ fn sign_verify_fails_when_backend_does_not_set_validity() {
             &FakeIo::default(),
             curve,
             &pct,
-            key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-            key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+            key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+            key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
             workspace,
             async |_, _| Ok(()),
         ));

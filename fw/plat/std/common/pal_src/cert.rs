@@ -39,6 +39,7 @@ use tsra_crypto::HashAlgo;
 use tsra_crypto::PrivateKey;
 
 use super::*;
+use crate::drivers::ecc::EccForm;
 use crate::part::NUM_PARTITIONS;
 use crate::part::P384_PUB_KEY_LEN;
 use crate::StdHsmPal;
@@ -376,7 +377,7 @@ impl StdHsmPal {
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
         let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
         self.ecc
-            .pub_coords(&pub_key, HsmByteOrder::Be, &mut pub_raw)
+            .pub_coords(&pub_key, EccForm::BE, &mut pub_raw)
             .await?;
         let priv_len = pk.hsm_bytes_len();
         let mut priv_key = vec![0u8; priv_len];
@@ -452,7 +453,7 @@ impl StdHsmPal {
         };
         let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
         self.ecc
-            .pub_coords(&public_key, HsmByteOrder::Be, &mut pub_raw)
+            .pub_coords(&public_key, EccForm::BE, &mut pub_raw)
             .await?;
         let uncompressed = to_uncompressed(&pub_raw);
 
