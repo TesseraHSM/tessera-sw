@@ -146,14 +146,12 @@ impl HsmVault for UnoHsmPal {
         if pct == HsmVaultPct::UnwrappingKey && !self.unwrapping_key_pct(io, key).await? {
             tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed);
         }
-        // A session-scoped create stages its slot before the key write can
-        // yield. Hold `fp_bulk_lock` through the record so session teardown,
-        // which holds it, can't evict the staged slot or invalidate the
-        // session's ledger records between the stage and the record.
-        let _guard = match session_id {
-            Some(_) => Some(self.fp_bulk_lock.lock().await),
-            None => None,
-        };
+        // The create stages its slot before the key write can yield. Hold
+        // `fp_bulk_lock` through the record so a concurrent key delete or
+        // session teardown, which hold it, can't free (and let another create
+        // reuse) the staged slot or invalidate its ledger record between the
+        // stage and the record.
+        let _guard = self.fp_bulk_lock.lock().await;
         check_bulk_session(self, io, session_id)?;
         let app_id = u8::from(io.pid());
         let session = session_id.map(u16::from);

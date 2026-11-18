@@ -200,7 +200,8 @@ impl HsmSessionManager for UnoHsmPal {
 
     /// Roll back a failed post-migration re-key (`ReopenSession`).
     ///
-    /// Deletes the fresh masking-key vault entry that
+    /// Deletes any keys created under the reopened session and the fresh
+    /// masking-key vault entry that
     /// [`session_create`](Self::session_create) installed, then restores
     /// the slot to [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
     /// (clearing its physical mapping), so neither the vault nor the slot
@@ -219,9 +220,11 @@ impl HsmSessionManager for UnoHsmPal {
         let mut table = SessionStore::partition(io.pid())?;
 
         // Resolve the physical vault key id the failed reopen installed
-        // before the vault await; delete it, then restore the slot's
+        // before the vault await. Delete every key created under the
+        // reopened session, then the session key, then restore the slot's
         // renegotiation state (zeroing its physical mapping).
         let physical_id = table.physical_id(id)?;
+        crate::vault::delete_session_keys(self, io, id).await?;
         crate::vault::vault(io)
             .delete(self, io, physical_id)
             .await?;
