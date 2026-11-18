@@ -46,10 +46,10 @@ mod model;
 mod tests;
 
 /// Number of record slots in the ring.
-pub const SLOTS: u32 = 170;
+pub const SLOTS: u32 = io_gsram::HSM_LOG_RECORDS_COUNT;
 
 /// Size of one record in bytes.
-pub const RECORD_BYTES: u32 = 12;
+pub const RECORD_BYTES: u32 = io_gsram::HSM_LOG_RECORDS_STRIDE;
 
 /// GSRAM offset of `buffer_size`, the first word of the ring.
 pub const BUFFER_SIZE_OFFSET: u32 = io_gsram::HSM_LOG_BUFFER_SIZE_OFFSET;
@@ -74,9 +74,7 @@ const _: () = assert!(TAIL_OFFSET == 0x2800);
 const _: () = assert!(OVERFLOWS_OFFSET == 0x2804);
 const _: () = assert!(RECORDS_OFFSET == 0x2808);
 const _: () = assert!(RECORD_BYTES == 12);
-const _: () = assert!(io_gsram::HSM_LOG_RECORDS_STRIDE == RECORD_BYTES);
 const _: () = assert!(SLOTS == 170);
-const _: () = assert!(io_gsram::HSM_LOG_RECORDS_COUNT == SLOTS);
 const _: () = assert!(RECORDS_OFFSET + SLOTS * RECORD_BYTES == 0x3000);
 const _: () =
     assert!(io_gsram::IO_GSRAM_BASE + RECORDS_OFFSET + SLOTS * RECORD_BYTES == 0x6100_3000);
