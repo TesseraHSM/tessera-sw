@@ -750,11 +750,7 @@ mod tests {
             pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
                 let root = alloc.dma_alloc(curve.wire_coord_len(StdHsmPal::BYTE_ORDER))?;
                 root.fill(0xA5);
-                // PTA uses P-384 roots; CNG HKDF-SHA384 requires a 48-byte PRK.
-                for root in [None, Some(&*root)]
-                    .into_iter()
-                    .filter(|root| root.is_none() || curve == HsmEccCurve::P384)
-                {
+                for root in [None, Some(&*root)] {
                     let sizes = generate(&pal, &io, curve, root, None).await?;
                     let (private_len, public_len) = sizes;
                     let private = alloc.dma_alloc(private_len + 4)?;
