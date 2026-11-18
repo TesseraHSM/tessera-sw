@@ -31,6 +31,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_hsm_pal_traits::MASKED_BK_BOOT_LEN;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
@@ -320,9 +321,7 @@ impl UnoHsmPal {
     /// Generates an internal ECC P-384 key pair, stores the private key in
     /// partition `pid`'s vault, and returns `(key_handle, public_key)`.
     ///
-    /// Mirrors the reference firmware's `create_internal_ecc384_key`. The
-    /// `pct` argument is accepted for parity with the trait; the uno PKA
-    /// path performs no pairwise-consistency self-test.
+    /// Runs the selected PCT and reports the partition-key-specific failure.
     async fn create_internal_ecc384(
         &self,
         pid: HsmPartId,
@@ -343,12 +342,33 @@ impl UnoHsmPal {
             let (_priv_len, pub_len) = self
                 .ecc_gen_keypair(
                     admin_io,
-                    alloc,
                     HsmEccCurve::P384,
+                    HsmEccPct::None,
                     Some((priv_buf, pub_buf)),
-                    pct,
                 )
                 .await?;
+            if !tsra_fw_uno_pct::ecc_pct(
+                self,
+                admin_io,
+                alloc,
+                HsmEccCurve::P384,
+                &pct,
+                priv_buf,
+                pub_buf,
+            )
+            .await?
+            {
+                let error = match kind {
+                    HsmVaultKeyKind::EstablishCred => {
+                        HsmError::PctValidationEstablishCredEncKeyFailed
+                    }
+                    HsmVaultKeyKind::SessionEncryption => {
+                        HsmError::PctValidationSessionEncKeyFailed
+                    }
+                    _ => HsmError::PartitionIdKeyGenerationPctFailed,
+                };
+                tsra_fw_uno_fault::enter_error_state(error);
+            }
 
             if pub_len != ID_PUB_KEY_LEN {
                 return Err(HsmError::InternalError);
@@ -827,10 +847,9 @@ impl HsmPartitionManager for UnoHsmPal {
             let (priv_len, pub_len) = self
                 .ecc_gen_keypair(
                     io,
-                    alloc,
                     HsmEccCurve::P384,
-                    Some((priv_key, pub_key)),
                     HsmEccPct::KeyAgreement,
+                    Some((priv_key, pub_key)),
                 )
                 .await?;
             if priv_len != P384_PRIV_LEN || pub_len != ID_PUB_KEY_LEN {
@@ -844,7 +863,14 @@ impl HsmPartitionManager for UnoHsmPal {
             blob[..ID_PUB_KEY_LEN].copy_from_slice(pub_key);
             blob[ID_PUB_KEY_LEN..].copy_from_slice(priv_key);
             let kid = self
-                .vault_key_create(io, blob, HsmVaultKeyKind::EstablishCred, None, attrs)
+                .vault_key_create(
+                    io,
+                    blob,
+                    HsmVaultKeyKind::EstablishCred,
+                    None,
+                    attrs,
+                    HsmVaultPct::None,
+                )
                 .await?;
             part.set_ec_pub_key(pub_key)?;
             part.set_ec_key_id(Some(kid));

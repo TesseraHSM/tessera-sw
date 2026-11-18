@@ -74,7 +74,8 @@ pub(crate) async fn rsa_mod_exp<'p, P: HsmPal>(
     })?;
     let frame = DdiRsaModExpResp::from_layout(resp, &layout);
     let key = pal.vault_key(io, key_id)?;
-    pal.mod_exp_priv(io, key_size, key, body.y, frame.x).await?;
+    pal.mod_exp_priv(io, key_size, key, body.y, Some(frame.x))
+        .await?;
 
     Ok(resp)
 }

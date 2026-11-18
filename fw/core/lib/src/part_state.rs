@@ -1083,7 +1083,7 @@ pub(crate) async fn key_id_pub_key<P: HsmPal>(
     if out.len() != HsmEccCurve::P384.pub_key_len() {
         return Err(HsmError::EccInvalidKeyLength);
     }
-    let len = pal.ecc_vault_pub_key(io, key_id, out).await?;
+    let len = pal.ecc_vault_pub_key(io, key_id, Some(out)).await?;
     if len != out.len() {
         return Err(HsmError::InternalError);
     }

@@ -32,6 +32,21 @@ use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKeyMut;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
+use tsra_fw_hsm_pal_traits::HsmMlKem;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlKemPct;
+use tsra_fw_hsm_pal_traits::HsmMlKemPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlKemPubKey;
+use tsra_fw_hsm_pal_traits::HsmMlKemPubKeyMut;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
@@ -42,6 +57,8 @@ use tsra_fw_hsm_pal_traits::HsmSqe;
 
 use super::ct_eq;
 use super::ecc_pct;
+use super::mldsa_pct;
+use super::mlkem_pct;
 use super::rsa_pct;
 
 const CURVES: [HsmEccCurve; 3] = [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521];
@@ -59,8 +76,7 @@ const RSA_ORDERS: [(&str, &HsmRsaPct); 2] = [
     ("encrypt/decrypt", &HsmRsaPct::EncryptDecrypt),
 ];
 
-/// Fills fresh scratch, as real scratch starts uninitialized. Its bit 0 is
-/// clear, so a verify result that nothing writes would read as valid.
+/// Fills fresh scratch, as real scratch starts uninitialized.
 const GARBAGE: u8 = 0xCC;
 
 /// `ecc_verify` status bytes: bit 0 clear means the signature is valid.
@@ -125,6 +141,10 @@ struct FakePal {
     ecdh_calls: Cell<usize>,
     mod_exp_priv: Op,
     mod_exp_pub: Op,
+    mldsa_sign: Op,
+    mldsa_verify: HsmResult<bool>,
+    mlkem_encaps: Op,
+    mlkem_decaps: Op,
 }
 
 impl Default for FakePal {
@@ -138,6 +158,10 @@ impl Default for FakePal {
             ecdh_calls: Cell::new(0),
             mod_exp_priv: Op::Xor(RSA_MASK),
             mod_exp_pub: Op::Xor(RSA_MASK),
+            mldsa_sign: Op::Fill(0x22),
+            mldsa_verify: Ok(true),
+            mlkem_encaps: Op::Fill(0x33),
+            mlkem_decaps: Op::Fill(0x33),
         }
     }
 }
@@ -150,25 +174,148 @@ impl HsmCryptoOrder for FakePal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
 }
 
+impl HsmMlDsa for FakePal {
+    async fn mldsa_gen_keypair(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlSeedSrc,
+        _: HsmMlDsaPct,
+        _: &mut HsmDmaBuf,
+        _: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mldsa_gen_seed(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPct,
+        _: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mldsa_sign(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPrivKey<'_>,
+        _: HsmMlDsaHedge,
+        _: HsmMlDsaMsg<'_>,
+        sig: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let sig = sig.expect("PCT signs in use mode");
+        self.mldsa_sign.run(&self.calls, &[], sig)?;
+        Ok(sig.len())
+    }
+    async fn mldsa_sign_in_place(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPrivKeyMut<'_>,
+        _: HsmMlDsaHedge,
+        _: HsmMlDsaMsg<'_>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mldsa_verify(
+        &self,
+        _: &FakeIo,
+        _: HsmMlDsaParamSet,
+        _: HsmMlDsaPubKey<'_>,
+        _: HsmMlDsaMsg<'_>,
+        _: &HsmDmaBuf,
+    ) -> HsmResult<bool> {
+        self.calls.set(self.calls.get() + 1);
+        self.mldsa_verify
+    }
+}
+
+impl HsmMlKem for FakePal {
+    async fn mlkem_gen_keypair(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlSeedSrc,
+        _: HsmMlKemPct,
+        _: &mut HsmDmaBuf,
+        _: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mlkem_gen_seed(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPct,
+        _: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+    async fn mlkem_encaps(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPubKey<'_>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        let (ct, ss) = out.expect("PCT encapsulates in use mode");
+        self.mlkem_encaps.run(&self.calls, &[], ss)?;
+        Ok((ct.len(), ss.len()))
+    }
+    async fn mlkem_encaps_in_place(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPubKeyMut<'_>,
+        _: &mut HsmDmaBuf,
+    ) -> HsmResult<(usize, usize)> {
+        unimplemented!()
+    }
+    async fn mlkem_decaps(
+        &self,
+        _: &FakeIo,
+        _: HsmMlKemParamSet,
+        _: HsmMlKemPrivKey<'_>,
+        _: &HsmDmaBuf,
+        ss: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let ss = ss.expect("PCT decapsulates in use mode");
+        self.mlkem_decaps.run(&self.calls, &[], ss)?;
+        Ok(ss.len())
+    }
+}
+
 impl HsmHash for FakePal {
     type HashCtx<'a> = ();
 
     async fn hash(
         &self,
         _io: &Self::Io,
-        _algo: HsmHashAlgo,
+        algo: HsmHashAlgo,
         data: &HsmDmaBuf,
-        digest: &mut HsmDmaBuf,
         _form: HsmDigestForm,
-    ) -> HsmResult<()> {
-        self.hash.run(&self.calls, data, digest)
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if let Some(digest) = digest {
+            if digest.len() < algo.digest_len() {
+                return Err(HsmError::InvalidArg);
+            }
+            self.hash
+                .run(&self.calls, data, &mut digest[..algo.digest_len()])?;
+        }
+        Ok(algo.digest_len())
+    }
+
+    fn hash_state_size(&self, _algo: HsmHashAlgo) -> HsmResult<usize> {
+        unimplemented!()
     }
 
     fn hash_begin<'a>(
         &self,
         _io: &Self::Io,
         _algo: HsmHashAlgo,
-        _alloc: &'a impl HsmScopedAlloc,
+        _state: &'a mut HsmDmaBuf,
     ) -> HsmResult<Self::HashCtx<'a>>
     where
         Self: 'a,
@@ -188,10 +335,10 @@ impl HsmHash for FakePal {
     async fn hash_finish(
         &self,
         _io: &Self::Io,
-        _ctx: Self::HashCtx<'_>,
-        _digest: &mut HsmDmaBuf,
+        _ctx: &mut Self::HashCtx<'_>,
         _form: HsmDigestForm,
-    ) -> HsmResult<()> {
+        _digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 }
@@ -220,10 +367,9 @@ impl HsmEcc for FakePal {
     async fn ecc_gen_keypair(
         &self,
         _io: &Self::Io,
-        _alloc: &impl HsmScopedAlloc,
         _curve: HsmEccCurve,
-        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
+        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         unimplemented!()
     }
@@ -231,11 +377,10 @@ impl HsmEcc for FakePal {
     async fn ecc_gen_keypair_from_root(
         &self,
         _io: &Self::Io,
-        _alloc: &impl HsmScopedAlloc,
         _curve: HsmEccCurve,
         _root: &HsmDmaBuf,
-        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
+        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         unimplemented!()
     }
@@ -243,12 +388,16 @@ impl HsmEcc for FakePal {
     async fn ecc_sign(
         &self,
         _io: &Self::Io,
-        _curve: HsmEccCurve,
+        curve: HsmEccCurve,
         _priv_key: &HsmDmaBuf,
         hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.ecc_sign.run(&self.calls, hash, signature)
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let len = curve.wire_sig_len(Self::BYTE_ORDER);
+        if let Some(signature) = out {
+            self.ecc_sign.run(&self.calls, hash, signature)?;
+        }
+        Ok(len)
     }
 
     async fn ecc_verify(
@@ -258,17 +407,18 @@ impl HsmEcc for FakePal {
         _pub_key: &HsmDmaBuf,
         _hash: &HsmDmaBuf,
         signature: &HsmDmaBuf,
-        result: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.ecc_verify.run(&self.calls, signature, result)
+    ) -> HsmResult<bool> {
+        let mut result = [0xFF; 4];
+        self.ecc_verify.run(&self.calls, signature, &mut result)?;
+        Ok(result[0] & 1 == 0)
     }
 
     async fn ecc_priv_der_to_vault(
         &self,
         _io: &Self::Io,
         _der: &HsmDmaBuf,
-        _out: Option<&mut HsmDmaBuf>,
         _pct: HsmEccPct,
+        _out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         unimplemented!()
     }
@@ -286,7 +436,7 @@ impl HsmEcc for FakePal {
         &self,
         _io: &Self::Io,
         _key_id: HsmKeyId,
-        _pub_out: &mut HsmDmaBuf,
+        _out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         unimplemented!()
     }
@@ -296,22 +446,26 @@ impl HsmEcc for FakePal {
         _io: &Self::Io,
         _curve: HsmEccCurve,
         _priv_key: &HsmDmaBuf,
-        _pub_key: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
     async fn ecdh_derive(
         &self,
         _io: &Self::Io,
-        _curve: HsmEccCurve,
+        curve: HsmEccCurve,
         _priv_key: &HsmDmaBuf,
         pub_key: &HsmDmaBuf,
-        secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let Some(secret) = out else {
+            return Ok(curve.secret_len());
+        };
         let call = self.ecdh_calls.get();
         self.ecdh_calls.set(call + 1);
-        self.ecdh_derive[call].run(&self.calls, pub_key, secret)
+        self.ecdh_derive[call].run(&self.calls, pub_key, secret)?;
+        Ok(curve.secret_len())
     }
 }
 
@@ -330,33 +484,38 @@ impl HsmRsa for FakePal {
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
-        _priv_key: &mut HsmDmaBuf,
-        _pub_key: &mut HsmDmaBuf,
         _pct: HsmRsaPct,
-    ) -> HsmResult<()> {
+        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
         unimplemented!()
     }
 
     async fn mod_exp_priv(
         &self,
         _io: &Self::Io,
-        _key_size: HsmRsaKey,
+        key_size: HsmRsaKey,
         _key: &HsmDmaBuf,
         y: &HsmDmaBuf,
-        x: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.mod_exp_priv.run(&self.calls, y, x)
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if let Some(x) = out {
+            self.mod_exp_priv.run(&self.calls, y, x)?;
+        }
+        Ok(key_size.modulus_len())
     }
 
     async fn mod_exp_pub(
         &self,
         _io: &Self::Io,
-        _key_size: HsmRsaKey,
+        key_size: HsmRsaKey,
         _key: &HsmDmaBuf,
         x: &HsmDmaBuf,
-        y: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.mod_exp_pub.run(&self.calls, x, y)
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if let Some(y) = out {
+            self.mod_exp_pub.run(&self.calls, x, y)?;
+        }
+        Ok(key_size.modulus_len())
     }
 
     fn rsa_priv_pub_key(
@@ -378,53 +537,41 @@ impl HsmRsa for FakePal {
         unimplemented!()
     }
 
-    async fn rsa_pkcs1_encrypt<'a>(
+    async fn rsa_pkcs1_encrypt(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
         _pub_key: &HsmDmaBuf,
         _message: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_pkcs1_decrypt<'a>(
+    async fn rsa_pkcs1_decrypt(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
         _priv_key: &HsmDmaBuf,
         _ciphertext: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_pkcs1_sign<'a>(
+    async fn rsa_pkcs1_sign(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _priv_key: &HsmDmaBuf,
         _message_hash: &HsmDmaBuf,
-        _signature: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_pkcs1_verify<'a>(
+    async fn rsa_pkcs1_verify(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
@@ -432,15 +579,11 @@ impl HsmRsa for FakePal {
         _pub_key: &HsmDmaBuf,
         _message_hash: &HsmDmaBuf,
         _signature: &HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a,
-    {
+    ) -> HsmResult<bool> {
         unimplemented!()
     }
 
-    async fn rsa_oaep_encrypt<'a>(
+    async fn rsa_oaep_encrypt(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
@@ -448,16 +591,12 @@ impl HsmRsa for FakePal {
         _pub_key: &HsmDmaBuf,
         _message: &HsmDmaBuf,
         _label: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_oaep_decrypt<'a>(
+    async fn rsa_oaep_decrypt(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
@@ -465,16 +604,12 @@ impl HsmRsa for FakePal {
         _priv_key: &HsmDmaBuf,
         _ciphertext: &HsmDmaBuf,
         _label: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_pss_sign<'a>(
+    async fn rsa_pss_sign(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
@@ -482,16 +617,12 @@ impl HsmRsa for FakePal {
         _priv_key: &HsmDmaBuf,
         _message_hash: &HsmDmaBuf,
         _salt_len: usize,
-        _signature: &mut HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        _out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         unimplemented!()
     }
 
-    async fn rsa_pss_verify<'a>(
+    async fn rsa_pss_verify(
         &self,
         _io: &Self::Io,
         _key_size: HsmRsaKey,
@@ -500,11 +631,7 @@ impl HsmRsa for FakePal {
         _message_hash: &HsmDmaBuf,
         _salt_len: usize,
         _signature: &HsmDmaBuf,
-        _alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a,
-    {
+    ) -> HsmResult<bool> {
         unimplemented!()
     }
 }
@@ -608,6 +735,146 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     }
 }
 
+#[test]
+fn mldsa_pct_covers_all_parameters_and_operation_failures() {
+    for param in [
+        HsmMlDsaParamSet::MlDsa44,
+        HsmMlDsaParamSet::MlDsa65,
+        HsmMlDsaParamSet::MlDsa87,
+    ] {
+        let run = |pal: &FakePal, alloc: &FakeAlloc| {
+            block_on(mldsa_pct(
+                pal,
+                &FakeIo::default(),
+                alloc,
+                param,
+                key(param.sk_len()),
+                key(param.pk_len()),
+            ))
+        };
+        let pal = FakePal::default();
+        assert_eq!(run(&pal, &FakeAlloc::default()), Ok(true));
+        assert_eq!(pal.calls.get(), 2);
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_verify: Ok(false),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_sign: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mldsa_verify: Err(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        for index in 0..2 {
+            assert_eq!(
+                run(
+                    &FakePal::default(),
+                    &FakeAlloc {
+                        fail_at: Some(index),
+                        ..FakeAlloc::default()
+                    }
+                ),
+                Err(HsmError::NotEnoughSpace)
+            );
+        }
+    }
+}
+
+#[test]
+fn mlkem_pct_covers_all_parameters_and_operation_failures() {
+    for param in [
+        HsmMlKemParamSet::MlKem512,
+        HsmMlKemParamSet::MlKem768,
+        HsmMlKemParamSet::MlKem1024,
+    ] {
+        let run = |pal: &FakePal, alloc: &FakeAlloc| {
+            block_on(mlkem_pct(
+                pal,
+                &FakeIo::default(),
+                alloc,
+                param,
+                key(param.sk_len()),
+                key(param.pk_len()),
+            ))
+        };
+        let pal = FakePal::default();
+        assert_eq!(run(&pal, &FakeAlloc::default()), Ok(true));
+        assert_eq!(pal.calls.get(), 2);
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_decaps: Op::Fill(0x44),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_encaps: Op::Nothing,
+                    mlkem_decaps: Op::Nothing,
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_encaps: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        assert_eq!(
+            run(
+                &FakePal {
+                    mlkem_decaps: Op::Fail(HsmError::InternalError),
+                    ..FakePal::default()
+                },
+                &FakeAlloc::default()
+            ),
+            Err(HsmError::InternalError)
+        );
+        for index in 0..3 {
+            assert_eq!(
+                run(
+                    &FakePal::default(),
+                    &FakeAlloc {
+                        fail_at: Some(index),
+                        ..FakeAlloc::default()
+                    }
+                ),
+                Err(HsmError::NotEnoughSpace)
+            );
+        }
+    }
+}
 /// Runs the ECC PCT that `pct` selects.
 fn run_ecc(
     pal: &FakePal,
@@ -704,15 +971,109 @@ fn sign_verify_passes_a_valid_signature() {
 }
 
 #[test]
+fn ecc_pct_reuses_caller_workspace_for_backend_operations() {
+    for curve in CURVES {
+        for pct in [
+            HsmEccPct::None,
+            HsmEccPct::SignVerify,
+            HsmEccPct::KeyAgreement,
+        ] {
+            let pal = FakePal::default();
+            let io = FakeIo::default();
+            let alloc = FakeAlloc::default();
+            let len = crate::ecc_pct_workspace_len::<FakePal>(curve, &pct);
+            let workspace = alloc.dma_alloc(len + 16).expect("workspace");
+            let outcome = block_on(crate::ecc_pct_in_workspace(
+                &pal,
+                &io,
+                curve,
+                &pct,
+                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                workspace,
+                async |operation, scratch| {
+                    assert_eq!(scratch.len(), 16);
+                    scratch.fill(0xAB);
+                    match operation {
+                        crate::EccPctOperation::Verify {
+                            public,
+                            digest,
+                            signature,
+                            valid,
+                        } => {
+                            *valid = pal
+                                .ecc_verify(&io, curve, public, digest, signature)
+                                .await?;
+                            Ok(())
+                        }
+                        crate::EccPctOperation::Derive {
+                            private,
+                            public,
+                            secret,
+                        } => pal
+                            .ecdh_derive(&io, curve, private, public, Some(secret))
+                            .await
+                            .map(|_| ()),
+                    }
+                },
+            ));
+            assert_eq!(outcome, Ok(true));
+            assert_eq!(alloc.count.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn ecc_pct_rejects_short_workspace_before_running_operations() {
+    for curve in CURVES {
+        for pct in [HsmEccPct::SignVerify, HsmEccPct::KeyAgreement] {
+            let pal = FakePal::default();
+            let alloc = FakeAlloc::default();
+            let len = crate::ecc_pct_workspace_len::<FakePal>(curve, &pct);
+            let workspace = alloc.dma_alloc(len - 1).expect("short workspace");
+            let outcome = block_on(crate::ecc_pct_in_workspace(
+                &pal,
+                &FakeIo::default(),
+                curve,
+                &pct,
+                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                &mut *workspace,
+                async |_, _| panic!("short workspace must not reach a backend"),
+            ));
+            assert_eq!(outcome, Err(HsmError::NotEnoughSpace));
+            assert_eq!(pal.calls.get(), 0);
+            assert!(workspace.iter().all(|&b| b == GARBAGE));
+        }
+    }
+}
+
+#[test]
 fn sign_verify_fails_an_invalid_signature() {
     let pal = pal_with(|p| p.ecc_verify = Op::Fill(INVALID));
     check_ecc(&HsmEccPct::SignVerify, pal, Ok(false));
 }
 
 #[test]
-fn sign_verify_fails_when_verify_writes_nothing() {
-    let pal = pal_with(|p| p.ecc_verify = Op::Nothing);
-    check_ecc(&HsmEccPct::SignVerify, pal, Ok(false));
+fn sign_verify_fails_when_backend_does_not_set_validity() {
+    for curve in CURVES {
+        let pal = FakePal::default();
+        let alloc = FakeAlloc::default();
+        let pct = HsmEccPct::SignVerify;
+        let len = crate::ecc_pct_workspace_len::<FakePal>(curve, &pct);
+        let workspace = alloc.dma_alloc(len).expect("PCT workspace");
+        let outcome = block_on(crate::ecc_pct_in_workspace(
+            &pal,
+            &FakeIo::default(),
+            curve,
+            &pct,
+            key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
+            key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+            workspace,
+            async |_, _| Ok(()),
+        ));
+        assert_eq!(outcome, Ok(false));
+    }
 }
 
 #[test]

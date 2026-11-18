@@ -64,8 +64,9 @@ pub async fn p384_spki_thumbprint<P: HsmHash>(
         io,
         HsmHashAlgo::Sha384,
         scratch,
-        out,
         HsmDigestForm::Standard,
+        Some(out),
     )
     .await
+    .map(|_| ())
 }

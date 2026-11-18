@@ -392,8 +392,10 @@ async fn verify_mac<P: HsmPal>(
     label_sid[..SESSION_PHASE2_LABEL.len()].copy_from_slice(SESSION_PHASE2_LABEL);
     label_sid[SESSION_PHASE2_LABEL.len()..].copy_from_slice(&session_id_be);
 
+    let state_len = pal.hmac_state_size(HsmHashAlgo::Sha384)?;
+    let state = alloc.dma_alloc(state_len)?;
     let mut hmac_ctx = pal
-        .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
+        .hmac_begin(io, HsmHashAlgo::Sha384, exported, state)
         .await?;
     for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
         pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;

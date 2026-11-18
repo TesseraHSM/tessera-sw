@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Shared status block in GSRAM, used to prove FP↔HSM shared memory works.
+//! Shared status block in PSRAM, used to prove FP↔HSM shared memory works.
 //!
 //! FP has no console, so before any real transport is built there needs to
 //! be *some* way to show that an FP core can reach the memory the HSM will
@@ -30,27 +30,17 @@
 //!
 //! # Placement and addressing
 //!
-//! GSRAM spans `0x6100_0000`–`0x6120_0000` (2 MB) **in the global SoC map**,
-//! which is how the HSM core sees it.  An FP core does not: it reaches
-//! GSRAM through a core-local aperture at `0xE046_0000`, only `0x2_0000`
-//! (128 KB) wide.  So the same word has two addresses, and each side must
-//! use its own —
+//! The block is in PSRAM, which this core addresses core-locally at
+//! `0x0001_0000` and the HSM globally at `0xA3E0_0000`. dTCM is split the
+//! same way: core-local `0x2000_0000`, global `0xA300_0000 + 0x20_0000 * n`.
 //!
-//! ```text
-//! FP-local  = 0xE046_0000 + offset
-//! global    = 0x6100_0000 + offset      (offset < 0x2_0000)
-//! ```
-//!
-//! Getting this wrong is not subtle: addressing GSRAM from FP by its global
-//! address faults the core, and with no console the only symptom is a lost
-//! heartbeat.  The same split applies to the other shared memories — dTCM
-//! is core-local `0x2000_0000` but global `0xA300_0000 + 0x20_0000 * n`,
-//! and PSRAM is core-local `0x0001_0000` but global `0xA3E0_0000`.
-//!
-//! In use in GSRAM today are the boot status and Admin↔HSM IPC rings at
-//! offsets `0x7000`–`0x7114`, and the IO queues from `0xE440` upward.  This
-//! block sits at offset `0x8000`, inside the gap between them and
-//! comfortably within the 128 KB an FP core can see.
+//! An FP core addresses GSRAM globally, as the HSM does, and reaches only
+//! the ranges the SP's memory fence opens to the fastpath initiator
+//! (`QMGR_FP`), such as the IO DMA heap and the `0x611D_0000` window. This
+//! block first sat at `0x6100_8000`, which the fence keeps to the SP, Admin
+//! and HSM, and every core faulted on it, as it did at the `0xE046_0000`
+//! GSRAM base the legacy memory map names. With no console, the only
+//! symptom was a lost heartbeat.
 //!
 //! The layout is mirrored on the HSM side in the PQC driver; the two must
 //! be kept in step.
@@ -65,12 +55,6 @@ use core::sync::atomic::Ordering;
 static DOORBELL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Base of PSRAM in this core's local view.  Global address `0xA3E0_0000`.
-///
-/// GSRAM was tried first and faulted every core, at both its global address
-/// and the `0xE046_0000` aperture the legacy memory map names.  That map
-/// *defines* a GSRAM base but never uses it anywhere in the legacy
-/// firmware, so it appears FP was never able to reach GSRAM.  PSRAM, by
-/// contrast, the legacy fastpath used routinely.
 const PSRAM_LOCAL_BASE: usize = 0x0001_0000;
 
 /// Offset of the shared status block within PSRAM's 32 KB.
@@ -112,9 +96,8 @@ pub const FP_STATUS_MAGIC: u32 = 0x464F_4B50;
 pub fn publish(core_id: u8, counter: u32) {
     let block = (BLOCK_BASE + CORE_BLOCK_OFFSET + (core_id as usize) * CORE_BLOCK_SIZE) as *mut u32;
 
-    // SAFETY: `block` is a 16-byte slot in the GSRAM aperture, reserved for
-    // this core by the layout above and mapped Normal / non-cacheable /
-    // shareable by the MPU. It lies outside every region described to the
+    // SAFETY: `block` is this core's slot in the status block, reserved by
+    // the layout above. PSRAM lies outside every region described to the
     // linker, so no Rust object aliases it. Volatile because the HSM core
     // observes these writes.
     unsafe {

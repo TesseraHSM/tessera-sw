@@ -187,6 +187,7 @@ impl HsmEccCurve {
 /// FIPS 140-3 requires a PCT after key generation and key import to
 /// verify the key pair is functional.  The variant selects which
 /// operation is used for verification, or skips the test entirely.
+#[derive(Clone, Copy)]
 pub enum HsmEccPct {
     /// No PCT — skip the consistency test.
     None,
@@ -216,16 +217,15 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// Uses the canonical query-alloc-use workflow:
     ///
     /// 1. **Query** — call with `out = None`.  No key generation
-    ///    happens; the method returns `(priv_len, pub_len)` byte
-    ///    counts the caller must allocate.  Both are deterministic
+    ///    or scratch allocation happens; the method returns `(priv_len, pub_len)`
+    ///    byte counts the caller must allocate. The output sizes are deterministic
     ///    per-curve: `priv_len = HsmEccCurve::wire_coord_len(curve)`
     ///    (raw HSM scalar) and
     ///    `pub_len = HsmEccCurve::wire_pub_key_len(curve)`.
-    /// 2. **Alloc** — caller allocates two DMA buffers of those
-    ///    sizes.
+    /// 2. **Alloc** — caller allocates disjoint DMA output buffers.
     /// 3. **Use** — call with `out = Some((priv_out, pub_out))`.
-    ///    The method generates a fresh keypair (using `alloc` for
-    ///    any internal contiguous PKA scratch), writes the raw
+    ///    The method manages temporary DMA storage in internal allocator scopes,
+    ///    including nested PCT scratch, and writes the raw
     ///    HSM-format private scalar into `priv_out[..priv_len]` and
     ///    the operand-order public key into `pub_out[..pub_len]`,
     ///    and returns the same lengths reported by the query call.
@@ -233,17 +233,12 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `alloc` — scoped allocator used by the implementation for
-    ///   any internal scratch (e.g. the contiguous `priv || pub`
-    ///   buffer real PKA hardware emits before the bytes are split
-    ///   into the caller's two output slots).  Unused in query
-    ///   mode.
     /// - `curve` — NIST curve selector.
+    /// - `pct` — pairwise consistency test selector.
     /// - `out` — `None` to query buffer sizes; `Some((priv_out,
-    ///   pub_out))` to actually generate.  Each output buffer must
+    ///   pub_out))` to actually generate. Each output buffer must
     ///   be at least as large as the corresponding length returned
     ///   by an earlier query call.
-    /// - `pct` — pairwise consistency test selector.
     ///
     /// # Returns
     ///
@@ -252,15 +247,15 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///   bytes written into `priv_out` / `pub_out` (always `≤` the
     ///   query bounds).
     /// - `Err(HsmError::InvalidArg)` — `out` is `Some` and one of
-    ///   the buffers is shorter than the required length.
+    ///   the output buffers is too short.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — PKA / RNG / PCT / DMA failure.
     async fn ecc_gen_keypair(
         &self,
         io: &Self::Io,
-        alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
 
     /// Derive an ECC keypair deterministically from a KDF-derived
@@ -292,8 +287,10 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///   bytes (48 for P-384, the `PartRoot` size); any other length is
     ///   [`HsmError::InvalidArg`]. Validated in **both** query and use
     ///   mode, so the error does not depend on `out`.
-    /// - `out` — `None` to query the required `(priv_len, pub_len)`, or
-    ///   `Some((priv_out, pub_out))` to derive into caller buffers.
+    /// - `pct` — pairwise consistency test selector.
+    /// - `out` — `None` to query `(priv_len, pub_len)` without derivation,
+    ///   scratch allocation or a PCT, or `Some((priv_out, pub_out))` to
+    ///   derive into caller buffers. Scratch is scoped internally.
     ///
     /// # Errors
     ///
@@ -305,11 +302,10 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     async fn ecc_gen_keypair_from_root(
         &self,
         io: &Self::Io,
-        alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &HsmDmaBuf,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
 
     /// Raw EC sign over a pre-computed message digest.
@@ -332,13 +328,13 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///   bytes, so e.g. a SHA-256 digest signed with a P-384 key arrives
     ///   as 48 bytes with the high 16 zero.  A digest longer than the
     ///   curve's order is ECDSA-truncated internally.
-    /// - `signature` — output buffer.  On return, holds `r || s`, each
-    ///   component in operand order.  Required length is
-    ///   `curve.wire_sig_len(Self::BYTE_ORDER)`.
+    /// - `out` — `None` to query the signature length without signing or
+    ///   allocating DMA scratch; `Some(signature)` to write `r || s` in
+    ///   operand order. Any output tail is left untouched.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `signature[..wire_sig_len]` populated.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
     /// - `Err(HsmError)` — PKA / RNG failure.
     async fn ecc_sign(
@@ -347,8 +343,8 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
         hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Raw EC verify of `signature` against a pre-computed message
     /// digest.
@@ -366,17 +362,17 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// - `signature` — signature to verify; exactly
     ///   `curve.wire_sig_len(Self::BYTE_ORDER)` bytes (`r || s`), each
     ///   component in operand order.
-    /// - `result` — caller-allocated, DMA-capable scratch buffer the
-    ///   hardware DMA-writes the verify status word into.  Must be at
-    ///   least 4 bytes.  Callers interpret the first byte: bit 0 clear
-    ///   indicates "valid", bit 0 set indicates "invalid".
+    ///
+    /// Temporary DMA storage, including the hardware status word, is
+    /// allocated and reclaimed in an internal allocator scope.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — verification command completed; read validity from
-    ///   `result[0]`.
+    /// - `Ok(true)` — signature valid.
+    /// - `Ok(false)` — signature does not verify.
     /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch or
     ///   malformed public key.
+    /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_verify(
         &self,
@@ -385,8 +381,7 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         pub_key: &HsmDmaBuf,
         hash: &HsmDmaBuf,
         signature: &HsmDmaBuf,
-        result: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+    ) -> HsmResult<bool>;
 
     /// Convert a PKCS#8 DER-encoded ECC private key (recovered from a
     /// `CKM_RSA_AES_KEY_WRAP` unwrap) into the PAL's vault representation
@@ -416,8 +411,8 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         &self,
         io: &Self::Io,
         der: &HsmDmaBuf,
-        out: Option<&mut HsmDmaBuf>,
         pct: HsmEccPct,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)>;
 
     /// Convert a raw big-endian ECC private scalar `d` on `curve` into
@@ -509,9 +504,11 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///
     /// Accepts the same raw-scalar key representation as
     /// [`Self::ecc_priv_pub_key`]. The PAL snapshots the key before yielding
-    /// and writes directly into `pub_out`, returning the number of bytes
-    /// written. The output must be 4-byte aligned and fit the curve's wire
-    /// public-key length.
+    /// and writes directly into `out`, returning the number of bytes written.
+    /// Pass `None` to query the wire length without snapshotting the key,
+    /// allocating DMA scratch or deriving a public point. In use mode,
+    /// the output must be 4-byte aligned and fit the curve's wire public-key
+    /// length; any output tail is left untouched.
     ///
     /// Propagates vault lookup, invalid-scalar, undersized-buffer, allocation
     /// and ECC-engine errors.
@@ -519,7 +516,7 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         &self,
         io: &Self::Io,
         key_id: HsmKeyId,
-        pub_out: &mut HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
@@ -534,15 +531,13 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// - `curve` — NIST curve the private key is on.
     /// - `priv_key` — private scalar in operand order,
     ///   `curve.wire_priv_key_len(Self::BYTE_ORDER)` bytes.
-    /// - `pub_key` — output buffer for the uncompressed point `x || y`;
-    ///   must be **at least** `curve.wire_pub_key_len(Self::BYTE_ORDER)`
-    ///   bytes. Only the first `wire_pub_key_len` bytes are written (any
-    ///   tail is left untouched — see *Returns*), each coordinate in
-    ///   operand order.
+    /// - `out` — `None` to query the public-key length without deriving a
+    ///   point or allocating DMA scratch; `Some(pub_key)` to write `x || y`
+    ///   in operand order. Any output tail is left untouched.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `pub_key[..wire_pub_key_len]` populated.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
     /// - `Err(HsmError::InvalidArg)` — `priv_key` not `wire_priv_key_len`
     ///   bytes, `pub_key` shorter than `wire_pub_key_len`, or an invalid
     ///   private scalar.
@@ -552,8 +547,8 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         io: &Self::Io,
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// ECDH key agreement: derives a shared secret from a local
     /// private key and a remote public key.
@@ -567,14 +562,15 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// - `pub_key` — remote uncompressed point; exactly
     ///   `curve.wire_pub_key_len(Self::BYTE_ORDER)` bytes (`x || y`),
     ///   each coordinate in operand order.
-    /// - `secret` — output buffer; must be at least
-    ///   `curve.secret_len()` bytes.  On success, holds the x-coordinate of
+    /// - `out` — `None` to query `curve.secret_len()` without deriving a
+    ///   secret or allocating DMA scratch; `Some(secret)` to write the x-coordinate of
     ///   the shared point in operand order. Conversion to the standard
-    ///   big-endian form (e.g. before an HKDF) is the caller's.
+    ///   big-endian form (e.g. before an HKDF) is the caller's. Any output tail
+    ///   is left untouched.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `secret[..secret_len]` populated.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
     /// - `Err(HsmError::InvalidArg)` — buffer mismatch or invalid
     ///   public-key point.
     /// - `Err(HsmError)` — PKA driver failure.
@@ -584,8 +580,8 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
         pub_key: &HsmDmaBuf,
-        secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 }
 
 #[cfg(test)]

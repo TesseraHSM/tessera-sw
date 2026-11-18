@@ -828,12 +828,12 @@ pub enum DdiStatus {
     /// underlying AES failure)
     AesUnwrapFailed = 141557977,
 
-    // Note: 141557978..=141557991 (0x087000DA..=0x087000E7) are reserved; do not reuse.
+    // Note: 141557978..=141557993 (0x087000DA..=0x087000E9) are reserved; do not reuse.
     /// BK3 PIN already set (Phase 2 is one-shot per partition)
-    Bk3PinAlreadySet = 141557992,
+    Bk3PinAlreadySet = 141557997,
 
     /// BK3 PIN not set (Phase 4 requires Phase 2 to have completed)
-    Bk3PinNotSet = 141557993,
+    Bk3PinNotSet = 141557998,
 
     /// BK3 PIN credential tag mismatch (Phase 2 / Phase 4 HMAC verification failed)
     Bk3PinTagMismatch = 141557994,

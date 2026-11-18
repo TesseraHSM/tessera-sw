@@ -24,7 +24,7 @@ env:
 
 jobs:
   build-and-drive:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -189,7 +189,7 @@ jobs:
   # and LDFLAGS reach the module's CMake build through cargo; the suite is
   # built with ASan too, so the runtime is loaded before the module.
   functional-asan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

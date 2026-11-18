@@ -30,9 +30,7 @@ use der::Decode;
 use der::Reader;
 use der::SliceReader;
 use der::TagNumber;
-use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
-use tsra_crypto::Key;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaPrivateKey;
 use zeroize::Zeroizing;
@@ -183,29 +181,6 @@ pub(crate) fn check_ecc_scalar(curve: HsmEccCurve, scalar: &[u8]) -> HsmResult<(
     Ok(())
 }
 
-/// Constant-time byte-slice equality.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// Digest length of the PCT hash for an ECC curve (SHA-256/384/512).
-fn ecc_pct_digest_len(curve: HsmEccCurve) -> usize {
-    match curve {
-        HsmEccCurve::P256 => 32,
-        HsmEccCurve::P384 => 48,
-        HsmEccCurve::P521 => 64,
-    }
-}
-
-/// Digest length of the PCT hash for an RSA modulus (SHA-256/384/512).
-fn rsa_pct_digest_len(modulus_len: usize) -> usize {
-    match modulus_len {
-        0..=256 => 32,
-        257..=384 => 48,
-        _ => 64,
-    }
-}
-
 impl StdHsmPal {
     /// Checks an imported ECC key pair: the public key derived from `pk` must
     /// equal `embedded` (big-endian `x ‖ y`), then the pair must pass `pct`.
@@ -232,25 +207,7 @@ impl StdHsmPal {
             return Err(HsmError::KeyStructuralValidationFailed);
         }
 
-        let passed = match pct {
-            HsmEccPct::None => true,
-            HsmEccPct::SignVerify => {
-                let digest = vec![100u8; ecc_pct_digest_len(curve)];
-                let sig = self.ecc.ecc_sign(pk, &digest).await?;
-                self.ecc.ecc_verify(&pub_key, &digest, &sig).await?
-            }
-            HsmEccPct::KeyAgreement => {
-                let (peer_priv, peer_pub) = self.ecc.gen_keypair(EccKeyOp::curve(pk)).await?;
-                let len = curve.secret_len();
-                let mut ours = Zeroizing::new(vec![0u8; len]);
-                let mut theirs = Zeroizing::new(vec![0u8; len]);
-                self.ecc.ecdh_derive(pk, &peer_pub, &mut ours).await?;
-                self.ecc
-                    .ecdh_derive(&peer_priv, &pub_key, &mut theirs)
-                    .await?;
-                ct_eq(&ours, &theirs)
-            }
-        };
+        let passed = self.ecc_pair_pct(pk, &pub_key, pct).await?;
         if !passed {
             return Err(HsmError::PctValidationRsaUnwrapEccKeyFailed);
         }
@@ -262,35 +219,11 @@ impl StdHsmPal {
     /// # Errors
     /// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the PCT failed.
     pub(crate) async fn check_rsa_pct(&self, pk: &RsaPrivateKey, pct: HsmRsaPct) -> HsmResult<()> {
-        if !self.rsa_pct(pk, pct, pk.size()).await? {
+        let public = pk.public_key().map_err(|_| HsmError::RsaGenerateError)?;
+        if !self.rsa_pair_pct(pk, &public, pct).await? {
             return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
         }
         Ok(())
-    }
-
-    /// Runs the RSA PCT on wire (little-endian) operands, like Uno's
-    /// `rsa_pct`: the intermediate value must differ from the input and the
-    /// round trip must recover it.
-    async fn rsa_pct(&self, pk: &RsaPrivateKey, pct: HsmRsaPct, k: usize) -> HsmResult<bool> {
-        let pubk = pk.public_key().map_err(|_| HsmError::RsaGenerateError)?;
-        let mut input = vec![0u8; k];
-        let mut middle = vec![0u8; k];
-        let mut output = vec![0u8; k];
-        match pct {
-            HsmRsaPct::None => return Ok(true),
-            HsmRsaPct::SignVerify => {
-                input[..rsa_pct_digest_len(k)].fill(100);
-                self.rsa.mod_exp_priv(pk, &input, &mut middle).await?;
-                self.rsa.mod_exp_pub(&pubk, &middle, &mut output).await?;
-            }
-            HsmRsaPct::EncryptDecrypt => {
-                // Little-endian: the most significant byte is the last one.
-                input[..k - 1].fill(0x5A);
-                self.rsa.mod_exp_pub(&pubk, &input, &mut middle).await?;
-                self.rsa.mod_exp_priv(pk, &middle, &mut output).await?;
-            }
-        }
-        Ok(middle != input && output == input)
     }
 }
 

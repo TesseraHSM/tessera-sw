@@ -313,7 +313,7 @@ pub(super) async fn derive_session_credential_keys<P: HsmPal>(
             HsmEccCurve::P384,
             priv_key,
             host_eph_pub_key_raw,
-            secret,
+            Some(secret),
         )
         .await?;
     }
@@ -325,7 +325,7 @@ pub(super) async fn derive_session_credential_keys<P: HsmPal>(
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
-    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
         .await?;
 
     pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)

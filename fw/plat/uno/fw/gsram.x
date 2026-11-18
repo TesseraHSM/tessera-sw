@@ -1,7 +1,8 @@
 /* Copyright (c) Microsoft Corporation. */
 /* Licensed under the MIT License. */
 
-/* Self-test code and its read-only data are kept in separate output
+/* Self-test and cold-path code (certificate chain validation) and their
+   read-only data are kept in separate output
    sections: .gsram_text (executable) first, then .gsram_rodata (not
    executable). The boundary is 32-byte aligned, the ARMv7-M MPU region
    granularity, so the rodata can be mapped execute-never on its own. */
@@ -13,6 +14,9 @@ SECTIONS
         *(.text.*self_test*)
         /* Only present in non-production test-hook builds. */
         *(.text.*test_hooks*)
+        /* Cold path: certificate chain validation is not on the crypto
+           hot path. */
+        *(.text.*tsra_fw_core_crypto_x509_chain*)
         . = ALIGN(32);
         __gsram_text_end = .;
     } > GSRAM_CODE
@@ -21,6 +25,7 @@ SECTIONS
     {
         __gsram_rodata_start = .;
         *(.rodata.*self_test*)
+        *(.rodata.*tsra_fw_core_crypto_x509_chain*)
         . = ALIGN(32);
         __gsram_rodata_end = .;
     } > GSRAM_CODE

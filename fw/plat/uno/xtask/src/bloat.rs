@@ -11,6 +11,7 @@ use xshell::cmd;
 use xshell::Shell;
 
 use crate::fw_util::FwPaths;
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -27,11 +28,12 @@ impl Xtask for Bloat {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let sh = Shell::new()?;
         let fw = FwPaths::new(&ctx)?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
         let _dir = sh.push_dir(&fw.fw_dir);
         let extra = self.args;
 
         log::info!("Running cargo-bloat...");
-        cmd!(sh, "cargo +nightly bloat --release {extra...}").run()?;
+        cmd!(sh, "cargo {toolchain} bloat --release {extra...}").run()?;
         Ok(())
     }
 }
