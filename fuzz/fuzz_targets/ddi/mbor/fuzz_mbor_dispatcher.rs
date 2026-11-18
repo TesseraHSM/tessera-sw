@@ -20,8 +20,8 @@ use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_std_uno::StdHsm;
 
-use crate::requests::get_rand_ddi_request;
 use crate::requests::RequestBuffers;
+use crate::requests::get_rand_ddi_request;
 
 const PAGE_LEN: usize = 4096;
 const DMA_LEN: usize = 2 * PAGE_LEN;
@@ -131,7 +131,8 @@ fuzz_target!(|input: FuzzInput| -> Corpus {
         match get_rand_ddi_request(input.request_header, input.request_seed, &mut _rbuf) {
             Ok(data) => data,
             Err(_) => return Corpus::Keep,
-        }.to_vec()
+        }
+        .to_vec()
     };
     if data.len() > DMA_LEN {
         return Corpus::Reject;

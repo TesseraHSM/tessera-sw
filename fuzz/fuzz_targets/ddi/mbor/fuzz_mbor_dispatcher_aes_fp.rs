@@ -130,9 +130,8 @@ fuzz_target!(|input: FuzzInput| {
             )
         }
     };
-    if let Err(
-        err @ (DdiError::DriverError(_) | DdiError::IoError(_) | DdiError::DdiError(_)),
-    ) = result
+    if let Err(err @ (DdiError::DriverError(_) | DdiError::IoError(_) | DdiError::DdiError(_))) =
+        result
     {
         panic!("Crash Detected: {err:?}");
     }
