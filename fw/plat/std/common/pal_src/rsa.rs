@@ -284,6 +284,9 @@ impl HsmRsa for StdHsmPal {
         // then OAEP decrypt the wire-LE ciphertext (the driver flips
         // LE->BE).  An empty `label` maps to the default empty OAEP label.
         let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
+        if pk.n(None).map_err(|_| HsmError::InvalidArg)? != key_size.modulus_len() {
+            return Err(HsmError::InvalidArg);
+        }
         let hash = crate::hash::to_hash_algo(algo)?;
         let Some(output) = out else {
             return Ok(key_size.max_oaep_message(algo));
@@ -481,6 +484,72 @@ mod tests {
             })
             .await
             .expect("query/size RSA outputs");
+        }
+    }
+
+    #[tokio::test]
+    async fn oaep_rejects_mismatched_private_key_width_in_query_and_execution() {
+        let (pal, io) = pal_and_io();
+        for key_len in [256, 384] {
+            let key = RsaPrivateKey::generate(key_len).expect("RSA key");
+            for crt in [false, true] {
+                pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+                    let private = alloc.dma_alloc(if crt {
+                        key.hsm_crt_bytes_len()
+                    } else {
+                        key.hsm_bytes_len()
+                    })?;
+                    if crt {
+                        key.to_hsm_crt_bytes(private).expect("CRT vault key");
+                    } else {
+                        key.to_hsm_bytes(private).expect("vault key");
+                    }
+                    let ciphertext = alloc.dma_alloc_zeroed(512)?;
+                    let label = alloc.dma_alloc(0)?;
+                    let output = alloc.dma_alloc(512)?;
+                    output.fill(0xCC);
+                    for key_size in [
+                        HsmRsaKey::Rsa2048Priv,
+                        HsmRsaKey::Rsa3072Priv,
+                        HsmRsaKey::Rsa4096Priv,
+                    ] {
+                        let ciphertext = &ciphertext[..key_size.modulus_len()];
+                        let query = pal
+                            .rsa_oaep_decrypt(
+                                &io,
+                                key_size,
+                                HsmHashAlgo::Sha256,
+                                private,
+                                ciphertext,
+                                label,
+                                None,
+                            )
+                            .await;
+                        if key_size.modulus_len() == key_len {
+                            assert_eq!(query, Ok(key_size.max_oaep_message(HsmHashAlgo::Sha256)));
+                        } else {
+                            assert_eq!(query, Err(HsmError::InvalidArg));
+                            assert_eq!(
+                                pal.rsa_oaep_decrypt(
+                                    &io,
+                                    key_size,
+                                    HsmHashAlgo::Sha256,
+                                    private,
+                                    ciphertext,
+                                    label,
+                                    Some(output),
+                                )
+                                .await,
+                                Err(HsmError::InvalidArg)
+                            );
+                        }
+                        assert!(output.iter().all(|&b| b == 0xCC));
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("OAEP private-key width validation");
+            }
         }
     }
 
