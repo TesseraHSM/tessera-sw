@@ -46,7 +46,6 @@ pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
     let pub_key_len = crate::part_state::part_session_enc_pub_key(pal, io)?.len();
     let nonce_len = crate::part_state::part_nonce(pal, io)?.len();
 
-    let digest = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
     let id_priv_key = pal.vault_key(io, crate::part_state::part_id_key_id(pal, io)?)?;
 
     let (resp, layout) = pal.dma_alloc_var_with(io, |buf| {
@@ -77,22 +76,13 @@ pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
         frame.nonce.copy_from_slice(&n[..nonce_len]);
     }
 
-    // Hash pub key directly in wire-LE (PAL's `ecc_sign` digest
-    // contract), then sign into the signature slot.
-    pal.hash(
+    // Sign SHA-384 of the pub key in place in the signature slot.
+    super::sign_p384_in_slot(
+        pal,
         io,
-        HsmHashAlgo::Sha384,
-        frame.pub_key.raw,
-        HsmDigestForm::Operand,
-        Some(digest),
-    )
-    .await?;
-    pal.ecc_sign(
-        io,
-        HsmEccCurve::P384,
         id_priv_key,
-        digest,
-        Some(frame.pub_key_signature),
+        frame.pub_key.raw,
+        frame.pub_key_signature,
     )
     .await?;
 

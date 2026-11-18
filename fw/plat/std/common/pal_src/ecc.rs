@@ -77,6 +77,45 @@ fn from_ecc_curve(curve: EccCurve) -> HsmEccCurve {
     }
 }
 
+/// Checks an ECDSA input of `lanes` coordinate lanes followed by a digest
+/// lane against the trait contract, and returns the digest's range.
+///
+/// # Errors
+/// * [`HsmError::UnsupportedDigestHashAlgorithm`] — `hash` is not SHA-1 or
+///   SHA-2.
+/// * [`HsmError::InvalidArg`] — `input` has the wrong length, or a byte
+///   after the digest in its lane is not zero.
+fn ecdsa_digest_range(
+    curve: HsmEccCurve,
+    hash: HsmHashAlgo,
+    lanes: usize,
+    input: &[u8],
+) -> HsmResult<core::ops::Range<usize>> {
+    if !matches!(
+        hash,
+        HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 | HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512
+    ) {
+        return Err(HsmError::UnsupportedDigestHashAlgorithm);
+    }
+    let pad = StdHsmPal::ECC_COORD_PAD;
+    let at = lanes * curve.wire_coord_len(pad);
+    let end = at + hash.digest_len();
+    if input.len() != at + curve.ecdsa_digest_lane_len(hash, pad)
+        || input[end..].iter().any(|&b| b != 0)
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(at..end)
+}
+
+/// Checks the ECDSA nonce source: OpenSSL always generates `k`.
+fn check_nonce(nonce: HsmEcdsaNonce) -> HsmResult<()> {
+    match nonce {
+        HsmEcdsaNonce::Generated => Ok(()),
+        HsmEcdsaNonce::Supplied => Err(HsmError::CryptoUnsupportedMode),
+    }
+}
+
 impl StdHsmPal {
     pub(crate) fn ecc_public_from_wire(
         curve: EccCurve,
@@ -340,7 +379,7 @@ impl HsmEcc for StdHsmPal {
         .await
     }
 
-    /// Raw EC sign over a pre-computed hash digest.
+    /// ECDSA sign over a pre-computed digest.
     ///
     /// Parses the vault-format private key into an OpenSSL handle and
     /// delegates to the driver's operand-order sign method, which
@@ -349,15 +388,16 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        input: &mut HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
+        let digest = ecdsa_digest_range(curve, hash, 1, input)?;
+        check_nonce(nonce)?;
         let wire_len = curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD);
-        if priv_key.len() != curve.wire_priv_key_len(Self::ECC_COORD_PAD)
-            || hash.len() < curve.ecdsa_digest_len()
-            || hash.len() > 64
-        {
+        if priv_key.len() != curve.wire_priv_key_len(Self::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         let Some(signature) = out else {
@@ -368,12 +408,40 @@ impl HsmEcc for StdHsmPal {
         }
         let key = import_priv(priv_key)?;
         self.ecc
-            .ecc_sign_op(&key, hash, &mut signature[..wire_len])
+            .ecc_sign_op(&key, &input[digest], &mut signature[..wire_len])
             .await?;
         Ok(wire_len)
     }
 
-    /// Raw EC verify a signature over a pre-computed hash digest.
+    /// ECDSA sign, writing `r ‖ s` over the start of `k_sig`.
+    ///
+    /// OpenSSL signs from a copy of the digest, so the signature is staged
+    /// on the stack before it overwrites the input.
+    async fn ecc_sign_in_place(
+        &self,
+        _io: &StdHsmIo,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let digest = ecdsa_digest_range(curve, hash, 1, k_sig)?;
+        check_nonce(nonce)?;
+        let wire_len = curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD);
+        if priv_key.len() != curve.wire_priv_key_len(Self::ECC_COORD_PAD) {
+            return Err(HsmError::InvalidArg);
+        }
+        let key = import_priv(priv_key)?;
+        let mut signature = [0u8; 144];
+        self.ecc
+            .ecc_sign_op(&key, &k_sig[digest], &mut signature[..wire_len])
+            .await?;
+        k_sig[..wire_len].copy_from_slice(&signature[..wire_len]);
+        Ok(wire_len)
+    }
+
+    /// ECDSA verify of `r ‖ s` over a pre-computed digest.
     ///
     /// Delegates to the driver's operand-order verify method which
     /// constructs the OpenSSL pub-key handle from the operand-order
@@ -382,21 +450,22 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
     ) -> HsmResult<bool> {
+        let digest = ecdsa_digest_range(curve, hash, 2, input)?;
         let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::ECC_COORD_PAD);
         let wire_sig_len = curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD);
-        if pub_key.len() < wire_pub_len || signature.len() < wire_sig_len {
+        if pub_key.len() < wire_pub_len {
             return Err(HsmError::InvalidArg);
         }
         self.ecc
             .ecc_verify_op(
                 to_ecc_curve(curve),
                 &pub_key[..wire_pub_len],
-                hash,
-                &signature[..wire_sig_len],
+                &input[digest],
+                &input[..wire_sig_len],
             )
             .await
     }
@@ -654,6 +723,30 @@ mod tests {
     const ROOT_LEN: usize = 48;
 
     /// Builds a PAL plus an admin IO context for a single derivation.
+    const GENERATED: HsmEcdsaNonce = HsmEcdsaNonce::Generated;
+
+    fn standard_hash(curve: HsmEccCurve) -> HsmHashAlgo {
+        match curve {
+            HsmEccCurve::P256 => HsmHashAlgo::Sha256,
+            HsmEccCurve::P384 => HsmHashAlgo::Sha384,
+            HsmEccCurve::P521 => HsmHashAlgo::Sha512,
+        }
+    }
+
+    /// A zeroed `k ‖ digest` input with a `0x42` digest.
+    fn sign_input(
+        alloc: &impl HsmScopedAlloc,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+    ) -> HsmResult<&mut HsmDmaBuf> {
+        let pad = StdHsmPal::ECC_COORD_PAD;
+        let input = alloc.dma_alloc(curve.ecdsa_sign_input_len(hash, pad))?;
+        input.fill(0);
+        let coord = curve.wire_coord_len(pad);
+        input[coord..coord + hash.digest_len()].fill(0x42);
+        Ok(input)
+    }
+
     fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
         let (_tx, rx) = async_channel::bounded(1);
         let pal = StdHsmPal::new(rx, Handle::current());
@@ -736,8 +829,8 @@ mod tests {
                 let public = alloc.dma_alloc(public_len)?;
                 pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
                     .await?;
-                let digest = alloc.dma_alloc(curve.ecdsa_digest_len())?;
-                digest.fill(0x42);
+                let hash = standard_hash(curve);
+                let input = sign_input(alloc, curve, hash)?;
                 let signature_len = curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD);
                 let signature = alloc.dma_alloc(signature_len + 4)?;
                 let derived_storage = alloc.dma_alloc(public_len + 5)?;
@@ -754,7 +847,8 @@ mod tests {
                     let _remaining = reserve.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
                     let full_marks = allocation_marks(&pal, &io);
                     assert_eq!(
-                        pal.ecc_sign(&io, curve, private, digest, None).await?,
+                        pal.ecc_sign(&io, curve, hash, private, GENERATED, input, None)
+                            .await?,
                         signature_len
                     );
                     assert_eq!(
@@ -777,8 +871,10 @@ mod tests {
                         pal.ecc_sign(
                             &io,
                             curve,
+                            hash,
                             private,
-                            digest,
+                            GENERATED,
+                            input,
                             Some(&mut signature[..signature_len - 1]),
                         )
                         .await,
@@ -811,7 +907,7 @@ mod tests {
 
                 for _ in 0..2 {
                     assert_eq!(
-                        pal.ecc_sign(&io, curve, private, digest, Some(signature))
+                        pal.ecc_sign(&io, curve, hash, private, GENERATED, input, Some(signature))
                             .await?,
                         signature_len
                     );
@@ -842,46 +938,113 @@ mod tests {
 
     #[tokio::test]
     async fn verification_returns_validity_without_caller_scratch() {
+        let hashes = [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ];
         for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
-            let (pal, io) = pal_and_io();
-            pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
-                let private = alloc.dma_alloc(curve.wire_coord_len(StdHsmPal::ECC_COORD_PAD))?;
-                let public = alloc.dma_alloc(curve.wire_pub_key_len(StdHsmPal::ECC_COORD_PAD))?;
-                pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
-                    .await?;
-                let digest = alloc.dma_alloc(curve.ecdsa_digest_len())?;
-                digest.fill(0x42);
-                let signature = alloc.dma_alloc(curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD))?;
-                pal.ecc_sign(&io, curve, private, digest, Some(signature))
-                    .await?;
+            for hash in hashes {
+                let (pal, io) = pal_and_io();
+                pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+                    let pad = StdHsmPal::ECC_COORD_PAD;
+                    let private = alloc.dma_alloc(curve.wire_coord_len(pad))?;
+                    let public = alloc.dma_alloc(curve.wire_pub_key_len(pad))?;
+                    pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
+                        .await?;
+                    let coord = curve.wire_coord_len(pad);
+                    let input = alloc.dma_alloc(curve.ecdsa_verify_input_len(hash, pad))?;
+                    input.fill(0);
+                    let sign_len = curve.ecdsa_sign_input_len(hash, pad);
+                    let digest_len = hash.digest_len();
+                    input[coord..coord + digest_len].fill(0x42);
+                    let signed = pal
+                        .ecc_sign_in_place(
+                            &io,
+                            curve,
+                            hash,
+                            private,
+                            GENERATED,
+                            &mut input[..sign_len],
+                        )
+                        .await?;
+                    assert_eq!(signed, curve.wire_sig_len(pad));
+                    input[2 * coord..].fill(0);
+                    input[2 * coord..2 * coord + digest_len].fill(0x42);
 
-                let mark = pal.iic.pool().dma_mark(io.slot).get().next_multiple_of(4);
-                let _remaining = alloc.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
-                let marks = allocation_marks(&pal, &io);
-                for valid in [true, false, true] {
-                    assert_eq!(
-                        pal.ecc_verify(&io, curve, public, digest, signature)
-                            .await?,
-                        valid,
-                    );
+                    let mark = pal.iic.pool().dma_mark(io.slot).get().next_multiple_of(4);
+                    let _remaining = alloc.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
+                    let marks = allocation_marks(&pal, &io);
+                    for valid in [true, false, true] {
+                        assert_eq!(
+                            pal.ecc_verify(&io, curve, hash, public, input).await?,
+                            valid,
+                        );
+                        assert_eq!(allocation_marks(&pal, &io), marks);
+                        // Truncation drops the low end of an over-long digest,
+                        // so flip both ends to reach the bits that are kept.
+                        input[2 * coord] ^= 1;
+                        input[2 * coord + digest_len - 1] ^= 1;
+                    }
+                    let last = input.len() - 1;
+                    for (algo, len, error) in [
+                        (hash, last, HsmError::InvalidArg),
+                        (
+                            HsmHashAlgo::Sha3_256,
+                            input.len(),
+                            HsmError::UnsupportedDigestHashAlgorithm,
+                        ),
+                    ] {
+                        assert_eq!(
+                            pal.ecc_verify(&io, curve, algo, public, &input[..len])
+                                .await,
+                            Err(error),
+                        );
+                    }
+                    if input.len() > 2 * coord + digest_len {
+                        input[last] = 1;
+                        assert_eq!(
+                            pal.ecc_verify(&io, curve, hash, public, input).await,
+                            Err(HsmError::InvalidArg),
+                        );
+                    }
                     assert_eq!(allocation_marks(&pal, &io), marks);
-                    digest[0] ^= 1;
-                }
-                for (hash, sig) in [
-                    (&digest[..0], &signature[..]),
-                    (&digest[..], &signature[..signature.len() - 1]),
-                ] {
-                    assert_eq!(
-                        pal.ecc_verify(&io, curve, public, hash, sig).await,
-                        Err(HsmError::InvalidArg),
-                    );
-                    assert_eq!(allocation_marks(&pal, &io), marks);
-                }
-                Ok(())
-            })
-            .await
-            .expect("boolean ECC verification");
+                    Ok(())
+                })
+                .await
+                .expect("boolean ECC verification");
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn supplied_nonce_is_unsupported() {
+        let (pal, io) = pal_and_io();
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let curve = HsmEccCurve::P256;
+            let pad = StdHsmPal::ECC_COORD_PAD;
+            let private = alloc.dma_alloc(curve.wire_coord_len(pad))?;
+            let public = alloc.dma_alloc(curve.wire_pub_key_len(pad))?;
+            pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
+                .await?;
+            let hash = standard_hash(curve);
+            let input = sign_input(alloc, curve, hash)?;
+            let supplied = HsmEcdsaNonce::Supplied;
+            assert_eq!(
+                pal.ecc_sign(&io, curve, hash, private, supplied, input, None)
+                    .await,
+                Err(HsmError::CryptoUnsupportedMode),
+            );
+            assert_eq!(
+                pal.ecc_sign_in_place(&io, curve, hash, private, supplied, input)
+                    .await,
+                Err(HsmError::CryptoUnsupportedMode),
+            );
+            Ok(())
+        })
+        .await
+        .expect("supplied nonce");
     }
 
     #[tokio::test]

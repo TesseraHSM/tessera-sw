@@ -32,13 +32,14 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
-use tsra_fw_uno_drivers_upka::hash_size;
 use tsra_fw_uno_drivers_upka::hsm_point_size;
 use tsra_fw_uno_drivers_upka::mont_operand_size;
 use tsra_fw_uno_pct::ecc_pct;
@@ -195,6 +196,44 @@ fn curve_order_be(curve: HsmEccCurve) -> &'static [u8] {
     }
 }
 
+/// Checks an ECDSA input of `lanes` coordinate lanes followed by a digest
+/// lane against the trait contract.
+///
+/// # Errors
+/// * [`HsmError::UnsupportedDigestHashAlgorithm`] — `hash` is not SHA-1 or
+///   SHA-2.
+/// * [`HsmError::InvalidArg`] — `input` has the wrong length, or a byte
+///   after the digest in its lane is not zero.
+fn check_ecdsa_input(
+    curve: HsmEccCurve,
+    hash: HsmHashAlgo,
+    lanes: usize,
+    input: &[u8],
+) -> HsmResult<()> {
+    if !matches!(
+        hash,
+        HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 | HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512
+    ) {
+        return Err(HsmError::UnsupportedDigestHashAlgorithm);
+    }
+    let pad = UnoHsmPal::ECC_COORD_PAD;
+    let at = lanes * curve.wire_coord_len(pad);
+    if input.len() != at + curve.ecdsa_digest_lane_len(hash, pad)
+        || input[at + hash.digest_len()..].iter().any(|&b| b != 0)
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(())
+}
+
+/// Checks the ECDSA nonce source: the engine always generates `k`.
+fn check_nonce(nonce: HsmEcdsaNonce) -> HsmResult<()> {
+    match nonce {
+        HsmEcdsaNonce::Generated => Ok(()),
+        HsmEcdsaNonce::Supplied => Err(HsmError::CryptoUnsupportedMode),
+    }
+}
+
 // =============================================================================
 // Peer public-key range validation
 // =============================================================================
@@ -288,16 +327,13 @@ impl UnoHsmPal {
     async fn ecc_verify_in_workspace(
         &self,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         workspace: &mut HsmDmaBuf,
     ) -> HsmResult<bool> {
         let pka_curve = map_ecc_curve(curve)?;
-        let digest_len = hash_size(pka_curve);
-        if hash.len() < digest_len {
-            return Err(HsmError::InvalidArg);
-        }
+        check_ecdsa_input(curve, hash, 2, input)?;
         let prime_le = curve_prime_le(pka_curve);
         if workspace.len() < 2 * prime_le.len() + 4 {
             return Err(HsmError::NotEnoughSpace);
@@ -308,15 +344,7 @@ impl UnoHsmPal {
         let result = &mut rest[..4];
         result.fill(0xFF);
         self.pka
-            .ecc_verify(
-                pka_curve,
-                pub_key,
-                &hash[..digest_len],
-                signature,
-                result,
-                prime,
-                mont_result,
-            )
+            .ecc_verify(pka_curve, hash, pub_key, input, result, prime, mont_result)
             .await?;
         Ok(result[0] & 1 == 0)
     }
@@ -392,13 +420,13 @@ impl UnoHsmPal {
             workspace,
             async |operation, scratch| match operation {
                 tsra_fw_uno_pct::EccPctOperation::Verify {
+                    hash,
                     public,
-                    digest,
-                    signature,
+                    input,
                     valid,
                 } => {
                     *valid = self
-                        .ecc_verify_in_workspace(curve, public, digest, signature, scratch)
+                        .ecc_verify_in_workspace(curve, hash, public, input, scratch)
                         .await?;
                     Ok(())
                 }
@@ -696,39 +724,30 @@ impl HsmEcc for UnoHsmPal {
         .await
     }
 
-    /// Raw EC sign over a pre-computed hash digest.
+    /// ECDSA sign over a pre-computed digest.
     ///
-    /// Delegates to [`UnoHsmPal::pka.ecc_sign`] after curve mapping.
-    /// The PKA driver enforces the per-curve length requirements on
-    /// `priv_key`, `hash`, and `signature`.
-    ///
-    /// # Parameters
-    /// * `curve` — NIST curve the key was generated on.
-    /// * `priv_key` — signing key in the wire format produced by
-    ///   [`Self::ecc_gen_keypair`].
-    /// * `hash` — pre-computed hash digest to sign. Caller is responsible
-    ///   for hashing the message first.
-    /// * `out` — `None` to query the wire signature length without signing;
-    ///   `Some(signature)` to write `R ‖ S`. Any output tail is untouched.
-    ///
-    /// # Returns
-    /// * `Ok(len)` — required capacity in query mode; otherwise bytes written.
+    /// The PKA reads the digest operand straight from `input`.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is not one of the supported
-    ///   NIST curves.
+    ///   NIST curves, or a buffer has the wrong shape.
+    /// * [`HsmError::CryptoUnsupportedMode`] for a supplied `k`.
     /// * Any [`HsmError`] surfaced by the PKA driver.
     async fn ecc_sign(
         &self,
         _io: &UnoHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        input: &mut HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let pka_curve = map_ecc_curve(curve)?;
+        check_ecdsa_input(curve, hash, 1, input)?;
+        check_nonce(nonce)?;
         let wire_len = curve.wire_sig_len(Self::ECC_COORD_PAD);
-        if priv_key.len() != hsm_point_size(pka_curve) || hash.len() < hash_size(pka_curve) {
+        if priv_key.len() != hsm_point_size(pka_curve) {
             return Err(HsmError::InvalidArg);
         }
         let Some(signature) = out else {
@@ -740,7 +759,7 @@ impl HsmEcc for UnoHsmPal {
         self.service_pka();
         let signed = self
             .pka
-            .ecc_sign(pka_curve, priv_key, hash, &mut signature[..wire_len])
+            .ecc_sign(pka_curve, hash, priv_key, input, &mut signature[..wire_len])
             .await;
         // Other engines may have finished while this one signed; see to
         // them before the reply goes out.
@@ -749,41 +768,57 @@ impl HsmEcc for UnoHsmPal {
         Ok(wire_len)
     }
 
-    /// Raw EC verify of a signature over a pre-computed hash digest.
+    /// ECDSA sign, writing `r ‖ s` over the start of `k_sig`.
     ///
-    /// Delegates to [`UnoHsmPal::pka.ecc_verify`] after curve mapping.
-    /// Returns signature validity; DMA status and Montgomery scratch are scoped
-    /// internally.
+    /// The PKA reads the digest operand from `k_sig` and writes the
+    /// signature back into it, so no staging copy is made.
+    async fn ecc_sign_in_place(
+        &self,
+        _io: &UnoHsmIo,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let pka_curve = map_ecc_curve(curve)?;
+        check_ecdsa_input(curve, hash, 1, k_sig)?;
+        check_nonce(nonce)?;
+        if priv_key.len() != hsm_point_size(pka_curve) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.service_pka();
+        let signed = self
+            .pka
+            .ecc_sign_in_place(pka_curve, hash, priv_key, k_sig)
+            .await;
+        self.service_pka();
+        signed?;
+        Ok(curve.wire_sig_len(Self::ECC_COORD_PAD))
+    }
+
+    /// ECDSA verify of `r ‖ s` over a pre-computed digest.
     ///
-    /// # Parameters
-    /// * `curve` — NIST curve the key was generated on.
-    /// * `pub_key` — verification key as `(X ‖ Y)` in the wire format
-    ///   produced by [`Self::ecc_gen_keypair`].
-    /// * `hash` — pre-computed hash digest that was signed.
-    /// * `signature` — `R ‖ S` signature pair to verify.
+    /// The PKA reads the signature and digest straight from `input`; DMA
+    /// status and Montgomery scratch are scoped internally.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is not one of the supported
-    ///   NIST curves.
+    ///   NIST curves, or a buffer has the wrong shape.
     /// * Any [`HsmError`] surfaced by the PKA driver (e.g. malformed
     ///   inputs, hardware fault).
     async fn ecc_verify(
         &self,
         io: &UnoHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let pka_curve = map_ecc_curve(curve)?;
-
-        let digest_len = hash_size(pka_curve);
-        if hash.len() < digest_len {
-            return Err(HsmError::InvalidArg);
-        }
         self.alloc_scoped_async(io, async |scope| {
             let workspace = scope.dma_alloc(2 * hsm_point_size(pka_curve) + 4)?;
-            self.ecc_verify_in_workspace(curve, pub_key, hash, signature, workspace)
+            self.ecc_verify_in_workspace(curve, hash, pub_key, input, workspace)
                 .await
         })
         .await

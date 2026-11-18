@@ -20,12 +20,31 @@
 //! [`EccCurve::sig_len`], and [`EccCurve::secret_len`] to determine
 //! the required sizes.
 //!
-//! ## Raw EC vs ECDSA
+//! ## ECDSA operands
 //!
-//! - **`ecc_sign` / `ecc_verify`** — Raw EC operations on a pre-computed
-//!   hash digest. The caller is responsible for hashing the message first.
-//! - **`ecdsa_sign` / `ecdsa_verify`** — Full ECDSA with algorithm
-//!   selection. The implementation hashes internally using `hash_algo`.
+//! **`ecc_sign` / `ecc_sign_in_place` / `ecc_verify`** take a pre-computed
+//! message digest; the caller hashes the message. Each takes one packed
+//! input of coordinate lanes followed by a digest lane, as the hardware
+//! engines read it:
+//!
+//! - sign: `k ‖ digest` ([`HsmEccCurve::ecdsa_sign_input_len`]);
+//! - verify: `r ‖ s ‖ digest` ([`HsmEccCurve::ecdsa_verify_input_len`]).
+//!
+//! ## Key buffer alignment
+//!
+//! Hardware engines require ECC key material to start
+//! at a **4-byte aligned** address, with **`roundup8(len)`** bytes of
+//! readable memory behind it. Callers must uphold this; implementations
+//! may rely on it. It holds for:
+//!
+//! - PAL allocations, which are 4-byte aligned;
+//! - keys unmasked in place from a masked-key blob: the TBOR field is
+//!   `align = 4`, the key starts at a 4-byte aligned offset within the
+//!   blob, and the masked-key format pads the key to a multiple of 16
+//!   bytes, which covers `roundup8(len)`.
+//!
+//! With [`HsmCryptoOrder::ECC_COORD_PAD`] of 8, key lanes are already a
+//! multiple of 8 bytes.
 
 use super::*;
 
@@ -70,23 +89,32 @@ impl HsmEccCurve {
         }
     }
 
-    /// Return the ECDSA digest field width in bytes that the sign path
-    /// zero-extends the host digest to before handing it to the signing
-    /// primitive: the raw curve field size ([`HsmEccCurve::priv_key_len`])
-    /// capped at the largest FIPS digest (SHA-512, 64 bytes).
+    /// Return the length in bytes of the ECDSA digest lane for `hash` with
+    /// lane padding `pad` ([`HsmCryptoOrder::ECC_COORD_PAD`]): the digest
+    /// length rounded up to `pad`, and at least one coordinate lane
+    /// ([`HsmEccCurve::wire_coord_len`]).
     ///
-    /// | Curve  | Width |
-    /// |--------|-------|
-    /// | P-256  | 32    |
-    /// | P-384  | 48    |
-    /// | P-521  | 64    |
-    ///
-    /// A host digest shorter than this (e.g. a SHA-256 digest signed with a
-    /// P-384 key) is zero-extended up to this width so the on-chip PKA engine
-    /// receives a full field-width operand; the width stays
-    /// `<= 64` so the OpenSSL-backed std PAL signs it without truncation.
-    pub fn ecdsa_digest_len(&self) -> usize {
-        self.priv_key_len().min(64)
+    /// The lane holds the digest in [`HsmDigestForm::Operand`] form at its
+    /// start, followed by zero bytes. Because it is at least a coordinate
+    /// lane, a field-width engine read stays inside it, and a `k ‖ digest`
+    /// sign input is long enough to hold `r ‖ s`.
+    pub fn ecdsa_digest_lane_len(&self, hash: HsmHashAlgo, pad: usize) -> usize {
+        self.wire_coord_len(pad)
+            .max(hash.digest_len().next_multiple_of(pad))
+    }
+
+    /// Return the length in bytes of the ECDSA sign input
+    /// `k ‖ digest`: one coordinate lane and one digest lane
+    /// ([`HsmEccCurve::ecdsa_digest_lane_len`]).
+    pub fn ecdsa_sign_input_len(&self, hash: HsmHashAlgo, pad: usize) -> usize {
+        self.wire_coord_len(pad) + self.ecdsa_digest_lane_len(hash, pad)
+    }
+
+    /// Return the length in bytes of the ECDSA verify input
+    /// `r ‖ s ‖ digest`: two coordinate lanes and one digest lane
+    /// ([`HsmEccCurve::ecdsa_digest_lane_len`]).
+    pub fn ecdsa_verify_input_len(&self, hash: HsmHashAlgo, pad: usize) -> usize {
+        self.wire_sig_len(pad) + self.ecdsa_digest_lane_len(hash, pad)
     }
 
     /// Return the **raw cryptographic** public-key length in bytes
@@ -178,6 +206,20 @@ pub enum HsmEccPct {
     /// ECDH key-agreement self-test against a known public-key
     /// counterpart.
     KeyAgreement,
+}
+
+/// Source of the per-signature ECDSA nonce `k`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmEcdsaNonce {
+    /// The PAL generates `k` from its DRBG. The `k` lane of the sign
+    /// input is ignored.
+    Generated = 0,
+
+    /// The `k` lane of the sign input holds a caller-supplied `k` in
+    /// operand order. PALs whose engine always generates `k` reject it
+    /// with [`HsmError::CryptoUnsupportedMode`].
+    Supplied = 1,
 }
 
 /// Asynchronous ECC operations.
@@ -288,60 +330,103 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)>;
 
-    /// Raw EC sign over a pre-computed message digest.
+    /// ECDSA sign over a pre-computed message digest.
     ///
-    /// The caller is responsible for hashing the message; this method
-    /// performs no hashing itself.
+    /// The caller hashes the message; this method performs no hashing.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `curve` — NIST curve the private key is on.
+    /// - `hash` — the algorithm that produced the digest: SHA-1, SHA-256,
+    ///   SHA-384 or SHA-512. It sizes the digest lane, and a digest longer
+    ///   than the curve order is truncated to its leftmost bits (FIPS 186-5
+    ///   §6.4.1).
     /// - `priv_key` — signing key in raw HSM-format scalar bytes
     ///   (`curve.wire_coord_len(Self::ECC_COORD_PAD)`).
-    /// - `hash` — message digest to sign, in operand order
-    ///   ([`HsmDigestForm::Operand`]).  This is the field-width sign *operand*, not
-    ///   necessarily the raw digest: the caller (the DDI `EccSign`
-    ///   handler) widens a short digest to at least
-    ///   `HsmEccCurve::ecdsa_digest_len(curve)` (32 / 48 / 64 for
-    ///   P-256 / P-384 / P-521) by zero-extending the most-significant
-    ///   bytes, so e.g. a SHA-256 digest signed with a P-384 key arrives
-    ///   as 48 bytes with the high 16 zero.  A digest longer than the
-    ///   curve's order is ECDSA-truncated internally.
+    /// - `nonce` — the source of `k`.
+    /// - `input` — exactly
+    ///   [`curve.ecdsa_sign_input_len(hash, Self::ECC_COORD_PAD)`](HsmEccCurve::ecdsa_sign_input_len)
+    ///   bytes: a `k` lane of `curve.wire_coord_len(Self::ECC_COORD_PAD)`
+    ///   bytes, then a digest lane
+    ///   ([`HsmEccCurve::ecdsa_digest_lane_len`]) holding the digest in
+    ///   [`HsmDigestForm::Operand`] form, followed by zero bytes. With
+    ///   [`HsmEcdsaNonce::Supplied`] the `k` lane holds `k` in operand
+    ///   order, and a PAL that signs with it zeroes the lane before return;
+    ///   with [`HsmEcdsaNonce::Generated`] it is ignored and left unchanged.
     /// - `out` — `None` to query the signature length without signing or
-    ///   allocating DMA scratch; `Some(signature)` to write `r || s` in
-    ///   operand order. Any output tail is left untouched.
+    ///   allocating DMA scratch; `Some(signature)`, disjoint from `input`,
+    ///   to write `r || s` in operand order. Any output tail is left
+    ///   untouched.
+    ///
+    /// Arguments are checked in both modes.
     ///
     /// # Returns
     ///
-    /// - `Ok(len)` — required capacity in query mode; otherwise bytes written.
-    /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch.
+    /// - `Ok(len)` — required capacity in query mode; otherwise bytes
+    ///   written (`curve.wire_sig_len(Self::ECC_COORD_PAD)`).
+    /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — `hash` is not
+    ///   SHA-1 or SHA-2.
+    /// - `Err(HsmError::CryptoUnsupportedMode)` — the PAL cannot use a
+    ///   supplied `k`.
+    /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch, or a non-zero
+    ///   byte after the digest in its lane.
     /// - `Err(HsmError)` — PKA / RNG failure.
+    #[allow(clippy::too_many_arguments)]
     async fn ecc_sign(
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        input: &mut HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
-    /// Raw EC verify of `signature` against a pre-computed message
-    /// digest.
+    /// ECDSA sign, replacing the prefix of the `k ‖ digest` input with the
+    /// signature.
+    ///
+    /// `k_sig` is the sign input of [`Self::ecc_sign`], disjoint from
+    /// `priv_key`. The implementation consumes every input before it
+    /// publishes the result. Because the digest lane is at least one
+    /// coordinate lane, `r || s` fits in `k_sig` and overwrites the whole
+    /// `k` lane; the bytes after it are left over from the digest. A
+    /// supplied `k` that the PAL signs with is zeroed, on success or error.
+    ///
+    /// This input/output buffer is an explicit exception to output-size
+    /// queries.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(len)` — `k_sig[..len]` holds `r || s`, where `len` is
+    ///   `curve.wire_sig_len(Self::ECC_COORD_PAD)`.
+    /// - Errors as listed on [`Self::ecc_sign`].
+    async fn ecc_sign_in_place(
+        &self,
+        io: &Self::Io,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
+
+    /// ECDSA verify of a signature over a pre-computed message digest.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `curve` — NIST curve the public key is on; determines the
-    ///   expected signature length.
+    /// - `curve` — NIST curve the public key is on.
+    /// - `hash` — the algorithm that produced the digest, as for
+    ///   [`Self::ecc_sign`].
     /// - `pub_key` — verification key; uncompressed `x || y`, exactly
     ///   `curve.wire_pub_key_len(Self::ECC_COORD_PAD)` bytes, each
     ///   coordinate in operand order.
-    /// - `hash` — message digest that was signed, in operand order
-    ///   ([`HsmDigestForm::Operand`]), at least the curve's digest length.
-    /// - `signature` — signature to verify; exactly
-    ///   `curve.wire_sig_len(Self::ECC_COORD_PAD)` bytes (`r || s`), each
-    ///   component in operand order.
+    /// - `input` — exactly
+    ///   [`curve.ecdsa_verify_input_len(hash, Self::ECC_COORD_PAD)`](HsmEccCurve::ecdsa_verify_input_len)
+    ///   bytes: the signature `r || s` in two coordinate lanes, then the
+    ///   digest lane as for [`Self::ecc_sign`].
     ///
     /// Temporary DMA storage, including the hardware status word, is
     /// allocated and reclaimed in an internal allocator scope.
@@ -350,17 +435,19 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///
     /// - `Ok(true)` — signature valid.
     /// - `Ok(false)` — signature does not verify.
-    /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch or
-    ///   malformed public key.
+    /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — `hash` is not
+    ///   SHA-1 or SHA-2.
+    /// - `Err(HsmError::InvalidArg)` — buffer-size mismatch, a non-zero
+    ///   byte after the digest in its lane, or a malformed public key.
     /// - `Err(HsmError::NotEnoughSpace)` — insufficient scoped scratch space.
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_verify(
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
     ) -> HsmResult<bool>;
 
     /// Convert a PKCS#8 DER-encoded ECC private key (recovered from a
