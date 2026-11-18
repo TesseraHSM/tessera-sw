@@ -5,6 +5,10 @@
 
 #![allow(dead_code)]
 
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
 use ddi_sock_server as _;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
@@ -149,7 +153,24 @@ pub fn import_rsa_key(
     rev: Option<DdiApiRev>,
     bits: u16,
 ) -> Result<u16, DdiError> {
-    let unwrapping = helper_get_unwrapping_key(dev, Some(session), rev)?;
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    let interval = Duration::from_secs(5);
+    let unwrapping = loop {
+        match helper_get_unwrapping_key(dev, Some(session), rev) {
+            Ok(resp) => break resp,
+            Err(err @ DdiError::DdiStatus(DdiStatus::PendingKeyGeneration)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(err);
+                }
+                thread::sleep(interval.min(remaining));
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    };
     let key = RsaPrivateKey::generate(usize::from(bits) / 8).expect("Failed to generate RSA key");
     let key_bytes = key.to_vec().expect("Failed to export RSA key");
     let wrapped = wrap_data(unwrapping.data.pub_key.der.as_slice(), &key_bytes)
