@@ -262,8 +262,7 @@ fn parameter_sets_do_not_interoperate() {
 }
 
 /// Signing an external `μ` computed by [`HashAlgo::mldsa_mu`] is pure signing:
-/// under the same randomness both give the same signature, and each
-/// verifies under the other interface.
+/// signatures from either interface verify under the other.
 #[test]
 fn external_mu_is_pure_signing_over_the_same_message() {
     for variant in VARIANTS {
@@ -272,20 +271,9 @@ fn external_mu_is_pure_signing_over_the_same_message() {
         let (msg, ctx) = (filler(32, 100), filler(33, 17));
         let mu = Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, &ctx).unwrap(), &msg).unwrap();
 
-        #[cfg(target_os = "linux")]
-        let (mut pure, mut external) = (
-            MlDsaAlgo::with_randomness(&ctx, rnd(34)).unwrap(),
-            MlDsaAlgo::external_mu_with_randomness(rnd(34)),
-        );
-        #[cfg(target_os = "windows")]
         let (mut pure, mut external) = (MlDsaAlgo::new(&ctx).unwrap(), MlDsaAlgo::external_mu());
         let pure_sig = Signer::sign_vec(&mut pure, &sk, &msg).unwrap();
         let mu_sig = Signer::sign_vec(&mut external, &sk, &mu).unwrap();
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            pure_sig, mu_sig,
-            "{variant:?}: mu differs from the one pure signing computes"
-        );
 
         let mut pure = MlDsaAlgo::new(&ctx).unwrap();
         let mut external = MlDsaAlgo::external_mu();
@@ -297,6 +285,24 @@ fn external_mu_is_pure_signing_over_the_same_message() {
         let other =
             Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, b"other").unwrap(), &msg).unwrap();
         assert!(!Verifier::verify(&mut external, &pk, &other, &mu_sig).unwrap());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_mu_matches_pure_signing_with_the_same_randomness() {
+    for variant in VARIANTS {
+        let sk = MlDsaPrivateKey::from_seed(variant, &filler(31, MLDSA_SEED_LEN)).unwrap();
+        let pk = sk.public_key().unwrap();
+        let (msg, ctx) = (filler(32, 100), filler(33, 17));
+        let mu = Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, &ctx).unwrap(), &msg).unwrap();
+        let mut pure = MlDsaAlgo::with_randomness(&ctx, rnd(34)).unwrap();
+        let mut external = MlDsaAlgo::external_mu_with_randomness(rnd(34));
+        assert_eq!(
+            Signer::sign_vec(&mut pure, &sk, &msg).unwrap(),
+            Signer::sign_vec(&mut external, &sk, &mu).unwrap(),
+            "{variant:?}: mu differs from the one pure signing computes"
+        );
     }
 }
 

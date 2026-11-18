@@ -7,6 +7,10 @@
 //! sets across key generation, signing (deterministic and hedged) and
 //! verification — including NIST's tampered-signature and modified-message
 //! cases, which a roundtrip test cannot produce.
+//!
+//! Both backends verify NIST's signing vectors and sign their inputs. Exact
+//! signature reproduction requires OpenSSL's test-entropy control; CNG does
+//! not expose signing randomness or deterministic signing.
 
 use super::*;
 use crate::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS;
@@ -59,6 +63,26 @@ fn signing_matches_nist_vectors() {
     }
 }
 
+#[test]
+fn signing_vectors_sign_and_verify() {
+    for v in MLDSA_SIGGEN_TEST_VECTORS {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let pk = sk.public_key().unwrap();
+        let mut algo = MlDsaAlgo::new(v.ctx).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.msg, v.sig).unwrap(),
+            "ML-DSA-{} NIST signing-vector signature did not verify",
+            v.param_set
+        );
+        let sig = Signer::sign_vec(&mut algo, &sk, v.msg).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.msg, &sig).unwrap(),
+            "ML-DSA-{} signing-vector input did not roundtrip",
+            v.param_set
+        );
+    }
+}
+
 /// NIST's verification vectors must be accepted or rejected exactly as
 /// specified. The negative cases tamper with distinct parts of the signature —
 /// the commitment, the hint, and `z` — which a roundtrip test never exercises.
@@ -94,6 +118,26 @@ fn external_mu_signing_matches_nist_vectors() {
             "ML-DSA-{} external-mu signature disagrees with NIST (deterministic={})",
             v.param_set,
             v.deterministic
+        );
+    }
+}
+
+#[test]
+fn external_mu_signing_vectors_sign_and_verify() {
+    for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let pk = sk.public_key().unwrap();
+        let mut algo = MlDsaAlgo::external_mu();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.mu, v.sig).unwrap(),
+            "ML-DSA-{} NIST external-mu signing-vector signature did not verify",
+            v.param_set
+        );
+        let sig = Signer::sign_vec(&mut algo, &sk, v.mu).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.mu, &sig).unwrap(),
+            "ML-DSA-{} external-mu signing-vector input did not roundtrip",
+            v.param_set
         );
     }
 }
