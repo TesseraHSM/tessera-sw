@@ -175,11 +175,11 @@ pub fn create_secret_key(
     curve: DdiEccCurve,
     availability: DdiKeyAvailability,
 ) -> Result<u16, DdiError> {
-    let secret_type = match curve {
-        DdiEccCurve::P256 => DdiKeyType::Secret256,
-        DdiEccCurve::P384 => DdiKeyType::Secret384,
-        DdiEccCurve::P521 => DdiKeyType::Secret521,
-        _ => return Err(DdiError::InvalidParameter),
+    let (curve, secret_type) = match curve {
+        DdiEccCurve::P256 => (DdiEccCurve::P256, DdiKeyType::Secret256),
+        DdiEccCurve::P384 => (DdiEccCurve::P384, DdiKeyType::Secret384),
+        DdiEccCurve::P521 => (DdiEccCurve::P521, DdiKeyType::Secret521),
+        _ => (DdiEccCurve::P256, DdiKeyType::Secret256),
     };
     let properties = helper_key_properties(DdiKeyUsage::Derive, availability);
     let first = helper_ecc_generate_key_pair(dev, Some(session), rev, curve, properties)?;
@@ -223,7 +223,13 @@ pub fn helper_create_hmac_key(
         Some(session),
         rev,
         secret,
-        hash,
+        match hash {
+            DdiHashAlgorithm::Sha1
+            | DdiHashAlgorithm::Sha256
+            | DdiHashAlgorithm::Sha384
+            | DdiHashAlgorithm::Sha512 => hash,
+            _ => DdiHashAlgorithm::Sha256,
+        },
         None,
         None,
         key_type,

@@ -72,15 +72,10 @@ pub fn fuzz_ddi_rsa_mod_exp(input: FuzzInput) {
             input.key_size as u16,
         );
 
-        key_id = match key_resp {
-            Some(id) => id,
-            None => {
-                panic!("Could not get rsa key ID");
-            }
-        };
+        key_id = key_resp.expect("Could not get RSA key ID");
     }
     let mut rng = StdRng::seed_from_u64(input.rand_seed);
-    let mut y_buf = vec![0u8; 512];
+    let mut y_buf = vec![0u8; usize::from(input.key_size as u16) / 8];
     rng.fill_bytes(&mut y_buf);
 
     let y = MborByteArray::from_slice(&y_buf).expect("Failed to create y buffer");

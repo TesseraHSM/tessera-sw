@@ -96,7 +96,5 @@ pub fn fuzz_ddi_establish_credential(input: FuzzInput) {
         cmdreq_data.pota_pub_key,
     );
 
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
+    check_driver_error(resp);
 }
