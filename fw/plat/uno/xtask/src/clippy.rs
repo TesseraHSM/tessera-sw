@@ -12,6 +12,7 @@ use xshell::Shell;
 
 use crate::fw_util::FwPaths;
 use crate::fw_util::BULK_CRYPTO_FEATURE;
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -24,12 +25,13 @@ impl Xtask for Clippy {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let sh = Shell::new()?;
         let fw = FwPaths::new(&ctx)?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
 
         // Firmware workspaces (nightly, thumb target).
         for (label, dir) in fw.firmware_workspaces() {
             let _dir = sh.push_dir(dir);
             log::info!("Running clippy on {label} workspace...");
-            cmd!(sh, "cargo +nightly clippy -- -D warnings").run()?;
+            cmd!(sh, "cargo {toolchain} clippy -- -D warnings").run()?;
         }
 
         // The bulk-crypto fastpath flavor compiles different PAL paths; lint it
@@ -39,7 +41,7 @@ impl Xtask for Clippy {
             log::info!("Running clippy on firmware workspace ({BULK_CRYPTO_FEATURE})...");
             cmd!(
                 sh,
-                "cargo +nightly clippy --features {BULK_CRYPTO_FEATURE} -- -D warnings"
+                "cargo {toolchain} clippy --features {BULK_CRYPTO_FEATURE} -- -D warnings"
             )
             .run()?;
         }
