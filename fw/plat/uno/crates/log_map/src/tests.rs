@@ -282,11 +282,11 @@ fn a_component_has_256_numbers() {
     assert!(error.to_string().contains("all 256 numbers"), "{error}");
     let header = m.decoder_header(&used(&m)).expect("a header");
     assert!(
-        header.contains("    [0x00] = \"[t] message 000\",\n"),
+        header.contains("    [0] = \"[t] message 000\",\n"),
         "{header}"
     );
     assert!(
-        header.contains("    [0xff] = \"[t] message 255\",\n"),
+        header.contains("    [255] = \"[t] message 255\",\n"),
         "{header}"
     );
 }
@@ -339,9 +339,9 @@ fn the_decoder_header_has_one_format_per_number() {
         "#define TSRA_LOG_COMPONENT_UNO 0xFA\n",
         "\n",
         "static const char *const tsra_log_core_messages[256] = {\n",
-        "    [0x00] = \"[core] Invalid length: %u [err:%08x]\",\n",
-        "    [0x01] = \"[gdma] slot %x at 0x%08x\",\n",
-        "    [0x02] = \"[io] 50%% of {queue} 0x%x?\\? %08x\",\n",
+        "    [0] = \"[core] Invalid length: %u [err:%08x]\",\n",
+        "    [1] = \"[gdma] slot %x at 0x%08x\",\n",
+        "    [2] = \"[io] 50%% of {queue} 0x%x?\\? %08x\",\n",
         "};\n",
         "\n",
         "static const char *const tsra_log_uno_messages[256] = {\n",
@@ -407,7 +407,7 @@ fn a_record_decodes_like_the_text_output_line() {
     let header = m.decoder_header(&used(&m)).expect("a header");
     let format = header
         .lines()
-        .find_map(|line| line.strip_prefix("    [0x00] = \""))
+        .find_map(|line| line.strip_prefix("    [0] = \""))
         .and_then(|rest| rest.strip_suffix("\","))
         .expect("slot 0");
     // With text output, the facade formats this call's message as
@@ -512,10 +512,10 @@ fn every_error_format_in_the_firmware_map_ends_with_the_code() {
     for line in header.lines() {
         if let Some(rest) = line.strip_prefix("static const char *const tsra_log_") {
             table = rest.split('_').next();
-        } else if let Some(rest) = line.strip_prefix("    [0x") {
+        } else if let Some(rest) = line.strip_prefix("    [") {
             let (number, rest) = rest.split_once("] = \"").expect("a slot");
             let (format, _) = rest.rsplit_once("\",").expect("a format");
-            let number = u8::from_str_radix(number, 16).expect("a hex number");
+            let number: u8 = number.parse().expect("a decimal number");
             formats.insert((table.expect("a table"), number), format);
         }
     }
@@ -549,15 +549,15 @@ fn an_unused_message_is_marked_deprecated() {
     let used_v2: BTreeSet<String> = [key("c", Kind::Warn, "core", "slow: {} ms").symbol()].into();
     let header = m.decoder_header(&used_v2).expect("a header");
     assert!(
-        header.contains("    [0x00] = \"[core] booted\", // Deprecated message\n"),
+        header.contains("    [0] = \"[core] booted\", // Deprecated message\n"),
         "{header}"
     );
     assert!(
-        header.contains("    [0x01] = \"[core] slow %u\", // Deprecated message\n"),
+        header.contains("    [1] = \"[core] slow %u\", // Deprecated message\n"),
         "{header}"
     );
     assert!(
-        header.contains("    [0x02] = \"[core] slow: %u ms\",\n"),
+        header.contains("    [2] = \"[core] slow: %u ms\",\n"),
         "{header}"
     );
     assert_eq!(check_prefix(&base, &m.to_text()), Ok(()));
@@ -578,11 +578,11 @@ fn an_unused_message_is_marked_deprecated() {
     .into();
     let header = m.decoder_header(&used_v3).expect("a header");
     assert!(
-        header.contains("    [0x00] = \"[core] booted\",\n"),
+        header.contains("    [0] = \"[core] booted\",\n"),
         "{header}"
     );
     assert!(
-        header.contains("    [0x01] = \"[core] slow %u\", // Deprecated message\n"),
+        header.contains("    [1] = \"[core] slow %u\", // Deprecated message\n"),
         "{header}"
     );
     assert_eq!(check_prefix(&before, &m.to_text()), Ok(()));
@@ -601,7 +601,7 @@ fn a_message_that_one_supported_image_uses_is_not_deprecated() {
     let only_default = m.decoder_header(&default_image).expect("a header");
     assert!(
         only_default
-            .contains("    [0x00] = \"[bulk] engine failed [err:%08x]\", // Deprecated message\n"),
+            .contains("    [0] = \"[bulk] engine failed [err:%08x]\", // Deprecated message\n"),
         "{only_default}"
     );
 }

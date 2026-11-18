@@ -1075,7 +1075,7 @@ mod tests {
             "{header}"
         );
         assert!(
-            header.contains("    [0x01] = \"[test] crash hook ran\", // Deprecated message\n"),
+            header.contains("    [1] = \"[test] crash hook ran\", // Deprecated message\n"),
             "{header}"
         );
     }

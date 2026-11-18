@@ -169,7 +169,7 @@ pub(crate) fn write(map: &Map, used: &BTreeSet<String>) -> Result<String, Error>
             } else {
                 " // Deprecated message"
             };
-            let _ = writeln!(out, "    [{number:#04x}] = \"{text}\",{note}");
+            let _ = writeln!(out, "    [{number}] = \"{text}\",{note}");
         }
         if empty {
             out.push_str("    0,\n");
