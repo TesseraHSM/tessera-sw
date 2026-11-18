@@ -86,24 +86,17 @@ async fn generate_kex_keypair<'p, P: HsmPal>(
     // scoped keygen-scratch allocator, so allocate them between the two
     // query/use calls rather than inside one scope.
     let (priv_key_size, pub_key_size) = pal
-        .alloc_scoped_async(io, async |a| {
-            pal.ecc_gen_keypair(io, a, DARC_KEX_CURVE, None, HsmEccPct::KeyAgreement)
-                .await
-        })
+        .ecc_gen_keypair(io, DARC_KEX_CURVE, HsmEccPct::KeyAgreement, None)
         .await?;
     let priv_key = pal.dma_alloc(io, priv_key_size)?;
     let pub_key = pal.dma_alloc(io, pub_key_size)?;
     let (priv_key_len, pub_key_len) = pal
-        .alloc_scoped_async(io, async |a| -> HsmResult<_> {
-            pal.ecc_gen_keypair(
-                io,
-                a,
-                DARC_KEX_CURVE,
-                Some((&mut *priv_key, &mut *pub_key)),
-                HsmEccPct::KeyAgreement,
-            )
-            .await
-        })
+        .ecc_gen_keypair(
+            io,
+            DARC_KEX_CURVE,
+            HsmEccPct::KeyAgreement,
+            Some((&mut *priv_key, &mut *pub_key)),
+        )
         .await?;
 
     Ok((&mut priv_key[..priv_key_len], &mut pub_key[..pub_key_len]))

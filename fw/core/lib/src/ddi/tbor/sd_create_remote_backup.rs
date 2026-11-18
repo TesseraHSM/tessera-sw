@@ -303,7 +303,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // `pk_s`; converting in place then yields SEC1
             // `0x04 ‖ X_be ‖ Y_be` with no separate scratch buffer or copy.
             let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
             byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;

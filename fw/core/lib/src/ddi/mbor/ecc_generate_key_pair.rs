@@ -46,33 +46,19 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     super::key_attrs::check_session_key_tag(attrs, body.key_tag)?;
 
     // ECC key generation follows the trait's query-alloc-use flow.
-    // The IO-lifetime priv/pub buffers must outlive the scoped
-    // allocator block — `StdScopedAlloc::Drop` resets the DMA
-    // bump-mark on scope exit, including any `pal.dma_alloc(io, _)`
-    // bumps made inside, so an IO-scoped allocation done within the
-    // scope would silently overlap the next post-scope allocation
-    // (e.g. the response buffer).  Keep the `dma_alloc(io, _)`
-    // bufs outside any scope; reserve the scope only for the
-    // keygen's internal PKA-style scratch.
+    // Allocate IO-lifetime outputs before the PAL's internal scratch scope.
     let (priv_size, pub_size) = pal
-        .alloc_scoped_async(io, async |a| {
-            pal.ecc_gen_keypair(io, a, pal_curve, None, ecc_pct_for(attrs))
-                .await
-        })
+        .ecc_gen_keypair(io, pal_curve, ecc_pct_for(attrs), None)
         .await?;
     let priv_key = pal.dma_alloc(io, priv_size)?;
     let pub_key = pal.dma_alloc(io, pub_size)?;
     let (priv_len, pub_len) = pal
-        .alloc_scoped_async(io, async |a| -> HsmResult<_> {
-            pal.ecc_gen_keypair(
-                io,
-                a,
-                pal_curve,
-                Some((&mut *priv_key, &mut *pub_key)),
-                ecc_pct_for(attrs),
-            )
-            .await
-        })
+        .ecc_gen_keypair(
+            io,
+            pal_curve,
+            ecc_pct_for(attrs),
+            Some((&mut *priv_key, &mut *pub_key)),
+        )
         .await?;
 
     // Store the private key in the vault, session-scoped iff the

@@ -111,14 +111,16 @@ pub trait HsmKdf: HsmIoTypes {
     /// - `salt` — optional salt; `None` selects the RFC 5869 default
     ///   (a string of zero bytes of `algo.digest_len()`).
     /// - `ikm` — input keying material.
-    /// - `prk` — output PRK; must be at least `algo.digest_len()`
-    ///   bytes.  Only the leading `digest_len` bytes are written.
+    /// - `prk` — `None` validates the request and queries the PRK length
+    ///   without allocation or crypto. `Some` must hold at least
+    ///   `algo.digest_len()` bytes; only that prefix is written,
+    ///   leaving any tail unchanged.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `prk[..digest_len]` populated.
-    /// - `Err(HsmError::InvalidArg)` — `prk` shorter than
-    ///   `algo.digest_len()`.
+    /// - `Ok(len)` — required PRK length or bytes written.
+    /// - `Err(HsmError::InvalidArg)` — output too short or inputs exceed
+    ///   backend length limits.
     /// - `Err(HsmError::NotEnoughSpace)` — internal scoped allocation too
     ///   small for the HMAC state.
     /// - `Err(HsmError)` — SHA / HMAC driver failure.
@@ -128,8 +130,8 @@ pub trait HsmKdf: HsmIoTypes {
         algo: HsmHashAlgo,
         salt: Option<&HsmDmaBuf>,
         ikm: &HsmDmaBuf,
-        prk: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        prk: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// HKDF-Expand (RFC 5869 §2.3): derive arbitrary-length output
     /// key material from a PRK.

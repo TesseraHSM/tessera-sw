@@ -332,10 +332,9 @@ impl UnoHsmPal {
             let (_priv_len, pub_len) = self
                 .ecc_gen_keypair(
                     admin_io,
-                    alloc,
                     HsmEccCurve::P384,
-                    Some((priv_buf, pub_buf)),
                     HsmEccPct::None,
+                    Some((priv_buf, pub_buf)),
                 )
                 .await?;
             if !tsra_fw_uno_pct::ecc_pct(

@@ -19,6 +19,7 @@ use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaAlgo;
 use tsra_crypto::MlDsaPublicKey;
 use tsra_crypto::VerifyOp;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::pqc::MlDsaParams;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_44;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_65;
@@ -123,10 +124,10 @@ fn mldsa_sign_hedged_signatures_differ() {
     }
 }
 
-/// Deterministic signing gives the same signature every time, and it
-/// verifies.
+/// Deterministic-required signing repeats and verifies, or explicitly fails
+/// on a backend without the optional deterministic variant.
 #[test]
-fn mldsa_sign_deterministic_signatures_repeat() {
+fn mldsa_sign_deterministic_required_is_honored_or_unsupported() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let sid = session.session_id;
@@ -135,7 +136,25 @@ fn mldsa_sign_deterministic_signatures_repeat() {
         let (masked_key, pub_key) = generate(&ctx, sid, p);
         let mu = host_mu(&pub_key);
 
-        let first = device_sign(&ctx, sid, &masked_key, MLDSA_HEDGE_DETERMINISTIC, &mu);
+        let req = sign_req(sid, &masked_key, MLDSA_HEDGE_DETERMINISTIC, &mu);
+        let first = match ctx.tbor(&req) {
+            Ok(resp) => resp.signature,
+            Err(DdiError::TborStatus(TborStatus::UnsupportedCmd)) => {
+                for hedge in [MLDSA_HEDGE_PREFERRED, MLDSA_HEDGE_REQUIRED] {
+                    let sig = device_sign(&ctx, sid, &masked_key, hedge, &mu);
+                    assert!(
+                        host_verify(&pub_key, &sig),
+                        "{}: hedged signing after rejection",
+                        p.name
+                    );
+                }
+                continue;
+            }
+            Err(error) => panic!(
+                "{}: deterministic-required signing failed: {error:?}",
+                p.name
+            ),
+        };
         assert!(
             host_verify(&pub_key, &first),
             "{}: deterministic signature does not verify",

@@ -23,6 +23,7 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 
 use super::validate_active_session;
@@ -64,7 +65,9 @@ pub(crate) async fn handle<P: HsmPal>(
         validate_active_session(pal, io, sess_id)?;
 
         let algo = hsm_hash_algo(req.algo(), req.out_len())?;
-        let mut ctx = pal.hash_begin(io, algo, alloc)?;
+        let state_len = pal.hash_state_size(algo)?;
+        let state = alloc.dma_alloc(state_len)?;
+        let mut ctx = pal.hash_begin(io, algo, state)?;
         pal.hash_continue(io, &mut ctx, req.msg()).await?;
 
         let len = TborHashResp::encode(cmd_buf.buffer_mut(), 0, false)?
@@ -72,7 +75,7 @@ pub(crate) async fn handle<P: HsmPal>(
             .finish()
             .len();
         let out = TborHashResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
-        pal.hash_finish(io, ctx, out.digest, HsmDigestForm::Standard)
+        pal.hash_finish(io, &mut ctx, HsmDigestForm::Standard, Some(out.digest))
             .await?;
         Ok(len)
     })

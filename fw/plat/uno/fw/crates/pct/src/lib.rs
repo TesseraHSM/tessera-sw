@@ -29,6 +29,9 @@ mod vectors;
 mod tests;
 
 pub use ecc::ecc_pct;
+pub use ecc::ecc_pct_in_workspace;
+pub use ecc::ecc_pct_workspace_len;
+pub use ecc::EccPctOperation;
 pub use ml::mldsa_pct;
 pub use ml::mlkem_pct;
 pub use rsa::rsa_pct;

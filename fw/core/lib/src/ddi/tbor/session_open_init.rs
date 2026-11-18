@@ -400,14 +400,17 @@ async fn compute_phase1_mac<'a, P: HsmPal>(
     label_sid[SESSION_PHASE1_LABEL.len()..].copy_from_slice(&session_id.to_be_bytes());
 
     let mac_resp = alloc.dma_alloc(suite.nh())?;
+    let state_len = pal.hmac_state_size(HsmHashAlgo::Sha384)?;
+    let state = alloc.dma_alloc(state_len)?;
     let mut hmac_ctx = pal
-        .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
+        .hmac_begin(io, HsmHashAlgo::Sha384, exported, state)
         .await?;
 
     for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
         pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;
     }
-    pal.hmac_finish_into(io, hmac_ctx, mac_resp).await?;
+    pal.hmac_finish_into(io, &mut hmac_ctx, Some(mac_resp))
+        .await?;
     Ok(mac_resp)
 }
 

@@ -41,27 +41,28 @@ fn digest_algo(algo: HsmHashAlgo) -> HsmResult<HashAlgo> {
     }
 }
 
-pub struct StdHashCtx {
+pub struct StdHashCtx<'a> {
     algo: HsmHashAlgo,
-    state: <HashAlgo as HashStreamingOp>::Context,
+    state: Option<<HashAlgo as HashStreamingOp>::Context>,
+    _storage: &'a mut HsmDmaBuf,
 }
 
 impl HsmHash for StdHsmPal {
-    type HashCtx<'a>
-        = StdHashCtx
-    where
-        Self: 'a;
+    type HashCtx<'a> = StdHashCtx<'a>;
 
     async fn hash(
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
-        digest: &mut HsmDmaBuf,
         form: HsmDigestForm,
-    ) -> HsmResult<()> {
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let hash_algo = digest_algo(algo)?;
         let digest_len = algo.digest_len();
+        let Some(digest) = digest else {
+            return Ok(digest_len);
+        };
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
@@ -71,22 +72,30 @@ impl HsmHash for StdHsmPal {
         if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
-        Ok(())
+        Ok(digest_len)
+    }
+
+    fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
+        digest_algo(algo)?;
+        Ok(0)
     }
 
     fn hash_begin<'a>(
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        _alloc: &'a impl HsmScopedAlloc,
+        storage: &'a mut HsmDmaBuf,
     ) -> HsmResult<Self::HashCtx<'a>>
     where
         Self: 'a,
     {
-        let state = digest_algo(algo)?
-            .hash_init()
-            .map_err(|_| HsmError::ShaError)?;
-        Ok(StdHashCtx { algo, state })
+        let hash_algo = digest_algo(algo)?;
+        let state = hash_algo.hash_init().map_err(|_| HsmError::ShaError)?;
+        Ok(StdHashCtx {
+            algo,
+            state: Some(state),
+            _storage: storage,
+        })
     }
 
     async fn hash_continue(
@@ -95,27 +104,38 @@ impl HsmHash for StdHsmPal {
         ctx: &mut Self::HashCtx<'_>,
         data: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        ctx.state.update(data).map_err(|_| HsmError::ShaError)
+        ctx.state
+            .as_mut()
+            .ok_or(HsmError::InvalidArg)?
+            .update(data)
+            .map_err(|_| HsmError::ShaError)
     }
 
     async fn hash_finish(
         &self,
         _io: &StdHsmIo,
-        mut ctx: Self::HashCtx<'_>,
-        digest: &mut HsmDmaBuf,
+        ctx: &mut Self::HashCtx<'_>,
         form: HsmDigestForm,
-    ) -> HsmResult<()> {
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if ctx.state.is_none() {
+            return Err(HsmError::InvalidArg);
+        }
         let digest_len = ctx.algo.digest_len();
+        let Some(digest) = digest else {
+            return Ok(digest_len);
+        };
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
-        ctx.state
+        let mut state = ctx.state.take().ok_or(HsmError::InvalidArg)?;
+        state
             .finish(Some(&mut digest[..digest_len]))
             .map_err(|_| HsmError::ShaError)?;
         if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
-        Ok(())
+        Ok(digest_len)
     }
 }
 
@@ -152,7 +172,7 @@ mod tests {
         data.copy_from_slice(msg);
         let digest = pal.dma_alloc(&io, digest_len).unwrap();
 
-        pal.hash(&io, algo, data, digest, form).await.unwrap();
+        pal.hash(&io, algo, data, form, Some(digest)).await.unwrap();
         digest[..digest_len].to_vec()
     }
 
@@ -252,6 +272,561 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_begin_queries_with_exhausted_dma_and_local_pools() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let dma = pal
+            .dma_alloc(&io, crate::buf_pool::DMA_BUF_SIZE)
+            .expect("DMA pool");
+        let local = pal
+            .alloc(&io, crate::buf_pool::NONDMA_BUF_SIZE)
+            .expect("local pool");
+        dma.fill(0xA5);
+        local.fill(0x5A);
+
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+            shake128(32),
+            shake256(64),
+        ] {
+            let len = pal
+                .hash_state_size(algo)
+                .expect("hash query without allocation");
+            assert_eq!(len, 0);
+            assert_eq!(
+                pal.hash(&io, algo, dma, HsmDigestForm::Standard, None)
+                    .await
+                    .expect("digest query without allocation"),
+                algo.digest_len()
+            );
+            let (storage, data) = dma.split_at_mut(0);
+            let mut ctx = pal.hash_begin(&io, algo, storage).expect("begin");
+            pal.hash_continue(&io, &mut ctx, data)
+                .await
+                .expect("update");
+            assert_eq!(
+                pal.hash_finish(&io, &mut ctx, HsmDigestForm::Standard, None)
+                    .await
+                    .expect("finish query without allocation"),
+                algo.digest_len()
+            );
+            let hmac = pal.hmac_state_size(algo);
+            if algo.is_xof() {
+                assert!(matches!(
+                    hmac,
+                    Err(HsmError::UnsupportedDigestHashAlgorithm)
+                ));
+            } else {
+                let len = hmac.expect("HMAC query without allocation");
+                assert_eq!(len, 0);
+                assert_eq!(
+                    pal.hmac_sign(&io, algo, dma, dma, None)
+                        .await
+                        .expect("tag query without allocation"),
+                    algo.digest_len()
+                );
+                let (storage, data) = dma.split_at_mut(0);
+                let mut ctx = pal
+                    .hmac_begin(&io, algo, data, storage)
+                    .await
+                    .expect("begin");
+                pal.hmac_continue(&io, &mut ctx, data)
+                    .await
+                    .expect("update");
+                assert_eq!(
+                    pal.hmac_finish(&io, &mut ctx, None).await.expect("query"),
+                    algo.digest_len()
+                );
+                assert_eq!(
+                    pal.hmac_finish_into(&io, &mut ctx, None)
+                        .await
+                        .expect("query"),
+                    algo.digest_len()
+                );
+            }
+        }
+        for algo in [
+            HsmHashAlgo::Sha3_256,
+            HsmHashAlgo::Sha3_384,
+            HsmHashAlgo::Sha3_512,
+        ] {
+            assert!(matches!(
+                pal.hash_state_size(algo),
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            ));
+            assert!(matches!(
+                pal.hmac_state_size(algo),
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            ));
+            assert!(matches!(
+                pal.hash_begin(&io, algo, &mut dma[..16]),
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            ));
+            let (key, state) = dma.split_at_mut(260);
+            assert!(matches!(
+                pal.hmac_begin(&io, algo, key, state).await,
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            ));
+        }
+        assert!(dma.iter().all(|&b| b == 0xA5));
+        assert!(local.iter().all(|&b| b == 0x5A));
+        assert!(matches!(
+            pal.dma_alloc(&io, 4),
+            Err(HsmError::NotEnoughSpace)
+        ));
+        assert!(matches!(pal.alloc(&io, 4), Err(HsmError::NotEnoughSpace)));
+    }
+
+    #[tokio::test]
+    async fn hash_output_queries_preserve_streaming_state_and_output_tails() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let data = pal.dma_alloc(&io, 3).expect("message");
+        data.copy_from_slice(b"abc");
+        let state = pal.dma_alloc(&io, 16).expect("state");
+        let output = pal.dma_alloc(&io, 68).expect("output");
+        let expected = pal.dma_alloc(&io, 68).expect("reference");
+
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+            shake128(32),
+            shake256(64),
+        ] {
+            let len = algo.digest_len();
+            for form in [HsmDigestForm::Standard, HsmDigestForm::Operand] {
+                expected.fill(0xA5);
+                output.fill(0x5A);
+                assert_eq!(
+                    pal.hash(&io, algo, data, form, Some(&mut output[..len - 1]))
+                        .await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(output.iter().all(|&b| b == 0x5A));
+                assert_eq!(
+                    pal.hash(&io, algo, data, form, Some(expected))
+                        .await
+                        .expect("one shot"),
+                    len
+                );
+                assert!(expected[len..].iter().all(|&b| b == 0xA5));
+                assert_eq!(
+                    pal.hash(&io, algo, data, form, Some(&mut output[..len]))
+                        .await
+                        .expect("exact output"),
+                    len
+                );
+                assert_eq!(&output[..len], &expected[..len]);
+                output.fill(0x5A);
+
+                let mut ctx = pal.hash_begin(&io, algo, state).expect("begin");
+                for _ in 0..2 {
+                    assert_eq!(
+                        pal.hash_finish(&io, &mut ctx, form, None)
+                            .await
+                            .expect("empty query"),
+                        len
+                    );
+                }
+                pal.hash_continue(&io, &mut ctx, &data[..1])
+                    .await
+                    .expect("first update");
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, None)
+                        .await
+                        .expect("partial query"),
+                    len
+                );
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, Some(&mut output[..len - 1]))
+                        .await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(output.iter().all(|&b| b == 0x5A));
+                pal.hash_continue(&io, &mut ctx, &data[1..])
+                    .await
+                    .expect("update after short output");
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, None)
+                        .await
+                        .expect("final query"),
+                    len
+                );
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, Some(output))
+                        .await
+                        .expect("finish"),
+                    len
+                );
+                assert_eq!(&output[..len], &expected[..len]);
+                assert!(output[len..].iter().all(|&b| b == 0x5A));
+
+                output.fill(0xA5);
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, None).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hash_finish(&io, &mut ctx, form, Some(output)).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hash_continue(&io, &mut ctx, data).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(output.iter().all(|&b| b == 0xA5));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hmac_output_queries_retry_and_truncating_finalizers() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let key = pal.dma_alloc(&io, 20).expect("key");
+        key.fill(0x0B);
+        let data = pal.dma_alloc(&io, 8).expect("message");
+        data.copy_from_slice(b"Hi There");
+        let state = pal.dma_alloc(&io, 16).expect("state");
+        let output = pal.dma_alloc(&io, 68).expect("output");
+        let expected = pal.dma_alloc(&io, 68).expect("reference");
+
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ] {
+            let len = algo.digest_len();
+            expected.fill(0xA5);
+            output.fill(0x5A);
+            assert_eq!(
+                pal.hmac_sign(&io, algo, key, data, Some(&mut output[..len - 1]))
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert!(output.iter().all(|&b| b == 0x5A));
+            assert_eq!(
+                pal.hmac_sign(&io, algo, key, data, Some(expected))
+                    .await
+                    .expect("one shot"),
+                len
+            );
+            assert!(expected[len..].iter().all(|&b| b == 0xA5));
+            assert_eq!(
+                pal.hmac_sign(&io, algo, key, data, Some(&mut output[..len]))
+                    .await
+                    .expect("exact output"),
+                len
+            );
+            assert_eq!(&output[..len], &expected[..len]);
+
+            for finish in 0..5 {
+                output.fill(0x5A);
+                let mut ctx = pal.hmac_begin(&io, algo, key, state).await.expect("begin");
+                assert_eq!(
+                    pal.hmac_finish(&io, &mut ctx, None)
+                        .await
+                        .expect("empty query"),
+                    len
+                );
+                assert_eq!(
+                    pal.hmac_finish_into(&io, &mut ctx, None)
+                        .await
+                        .expect("empty query"),
+                    len
+                );
+                pal.hmac_continue(&io, &mut ctx, &data[..1])
+                    .await
+                    .expect("first update");
+                for _ in 0..2 {
+                    assert_eq!(
+                        pal.hmac_finish(&io, &mut ctx, None)
+                            .await
+                            .expect("partial query"),
+                        len
+                    );
+                    assert_eq!(
+                        pal.hmac_finish_into(&io, &mut ctx, None)
+                            .await
+                            .expect("partial query"),
+                        len
+                    );
+                }
+                assert_eq!(
+                    pal.hmac_finish(&io, &mut ctx, Some(&mut output[..len - 1]))
+                        .await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(output.iter().all(|&b| b == 0x5A));
+                pal.hmac_continue(&io, &mut ctx, &data[1..])
+                    .await
+                    .expect("update after short output");
+                let written = match finish {
+                    0 => pal
+                        .hmac_finish(&io, &mut ctx, Some(output))
+                        .await
+                        .expect("finish"),
+                    1 => pal
+                        .hmac_finish_into(&io, &mut ctx, Some(output))
+                        .await
+                        .expect("finish into"),
+                    2 => pal
+                        .hmac_finish_into(&io, &mut ctx, Some(&mut output[..len - 1]))
+                        .await
+                        .expect("truncate"),
+                    3 => pal
+                        .hmac_finish_into(&io, &mut ctx, Some(&mut output[..0]))
+                        .await
+                        .expect("empty destination"),
+                    _ => {
+                        assert!(pal
+                            .hmac_finish_verify(&io, ctx, &expected[..len])
+                            .await
+                            .expect("verify after queries"));
+                        continue;
+                    }
+                };
+                assert_eq!(
+                    written,
+                    match finish {
+                        2 => len - 1,
+                        3 => 0,
+                        _ => len,
+                    }
+                );
+                assert_eq!(&output[..written], &expected[..written]);
+                assert!(output[written..].iter().all(|&b| b == 0x5A));
+                output.fill(0xA5);
+                assert_eq!(
+                    pal.hmac_finish(&io, &mut ctx, None).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hmac_finish_into(&io, &mut ctx, None).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hmac_finish(&io, &mut ctx, Some(output)).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hmac_finish_into(&io, &mut ctx, Some(output)).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hmac_continue(&io, &mut ctx, data).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(
+                    pal.hmac_finish_verify(&io, ctx, &expected[..len]).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(output.iter().all(|&b| b == 0xA5));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_hmac_uses_caller_storage_and_all_finalizers() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let key = pal.dma_alloc(&io, 257).expect("key");
+        let data = pal.dma_alloc(&io, 301).expect("message");
+        let expected = pal.dma_alloc(&io, 64).expect("reference tag");
+        let tag = pal.dma_alloc(&io, 68).expect("tag");
+        let state = pal.dma_alloc(&io, 16).expect("state capacity");
+        key.fill(0x0B);
+        data.fill(0x37);
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ] {
+            let len = pal.hmac_state_size(algo).expect("query");
+            assert!(state.len() >= len);
+            for key_len in [20, 129, 257] {
+                pal.hmac_sign(&io, algo, &key[..key_len], data, Some(expected))
+                    .await
+                    .expect("reference tag");
+                for finish in 0..4 {
+                    tag.fill(0xA5);
+                    state.fill(0x5A);
+                    let capacity = if finish % 2 == 0 { len } else { state.len() };
+                    let mut ctx = pal
+                        .hmac_begin(&io, algo, &key[..key_len], &mut state[..capacity])
+                        .await
+                        .expect("begin");
+                    pal.hmac_continue(&io, &mut ctx, &data[..0])
+                        .await
+                        .expect("empty update");
+                    for start in (0..data.len()).step_by(13) {
+                        pal.hmac_continue(
+                            &io,
+                            &mut ctx,
+                            &data[start..(start + 13).min(data.len())],
+                        )
+                        .await
+                        .expect("update");
+                    }
+                    match finish {
+                        0 => {
+                            pal.hmac_finish(&io, &mut ctx, Some(tag))
+                                .await
+                                .expect("finish");
+                        }
+                        1 => pal
+                            .hmac_finish_into(&io, &mut ctx, Some(tag))
+                            .await
+                            .map(|_| ())
+                            .expect("finish into"),
+                        _ => {
+                            tag[..algo.digest_len()]
+                                .copy_from_slice(&expected[..algo.digest_len()]);
+                            if finish == 3 {
+                                tag[0] ^= 1;
+                            }
+                            assert_eq!(
+                                pal.hmac_finish_verify(&io, ctx, &tag[..algo.digest_len()])
+                                    .await
+                                    .expect("verify"),
+                                finish == 2
+                            );
+                        }
+                    }
+                    if finish < 2 {
+                        assert_eq!(&tag[..algo.digest_len()], &expected[..algo.digest_len()]);
+                    }
+                    assert!(tag[algo.digest_len()..].iter().all(|&b| b == 0xA5));
+                    assert!(state.iter().all(|&b| b == 0x5A));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_contexts_borrow_storage_independently_of_operation_ios() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let storage_io = StdHsmIo::admin(HsmPartId::from(0u8), 3, reply_tx);
+        let hash_state = pal.dma_alloc(&storage_io, 16).expect("hash storage");
+        let hmac_state = pal.dma_alloc(&storage_io, 16).expect("HMAC storage");
+        hash_state.fill(0x5A);
+        hmac_state.fill(0xA5);
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let begin_io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let key = pal.dma_alloc(&begin_io, 20).expect("key");
+        key.fill(0x0B);
+        let mut hash = pal
+            .hash_begin(&begin_io, HsmHashAlgo::Sha256, &mut *hash_state)
+            .expect("begin hash");
+        let mut hmac = pal
+            .hmac_begin(&begin_io, HsmHashAlgo::Sha256, key, &mut *hmac_state)
+            .await
+            .expect("begin HMAC");
+        key.fill(0);
+        drop(begin_io);
+
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let update_io = StdHsmIo::admin(HsmPartId::from(0u8), 1, reply_tx);
+        let data = pal.dma_alloc(&update_io, 8).expect("message");
+        data.copy_from_slice(b"Hi There");
+        pal.hash_continue(&update_io, &mut hash, data)
+            .await
+            .expect("hash update");
+        pal.hmac_continue(&update_io, &mut hmac, data)
+            .await
+            .expect("HMAC update");
+        data.fill(0);
+        drop(update_io);
+
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let finish_io = StdHsmIo::admin(HsmPartId::from(0u8), 2, reply_tx);
+        let out = pal.dma_alloc(&finish_io, 36).expect("digest output");
+        out.fill(0xA5);
+        pal.hash_finish(&finish_io, &mut hash, HsmDigestForm::Standard, Some(out))
+            .await
+            .expect("hash finish");
+        assert_eq!(
+            &out[..32],
+            openssl_digest(HsmHashAlgo::Sha256, b"Hi There")
+                .await
+                .as_slice()
+        );
+        pal.hmac_finish(&finish_io, &mut hmac, Some(out))
+            .await
+            .expect("HMAC finish");
+        assert_eq!(
+            &out[..32],
+            hex::decode("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+                .expect("RFC 4231 tag")
+                .as_slice()
+        );
+        assert!(out[32..].iter().all(|&b| b == 0xA5));
+        assert!(hash_state.iter().all(|&b| b == 0x5A));
+        assert!(hmac_state.iter().all(|&b| b == 0xA5));
+
+        let hash = pal
+            .hash_begin(&finish_io, HsmHashAlgo::Sha256, &mut *hash_state)
+            .expect("begin hash to abort");
+        let hmac = pal
+            .hmac_begin(
+                &finish_io,
+                HsmHashAlgo::Sha256,
+                &out[..20],
+                &mut *hmac_state,
+            )
+            .await
+            .expect("begin HMAC to abort");
+        drop((hash, hmac));
+
+        let mut hash = pal
+            .hash_begin(&finish_io, HsmHashAlgo::Sha256, &mut *hash_state)
+            .expect("begin hash with short output");
+        assert_eq!(
+            pal.hash_finish(
+                &finish_io,
+                &mut hash,
+                HsmDigestForm::Standard,
+                Some(&mut out[..31])
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
+        let mut hmac = pal
+            .hmac_begin(
+                &finish_io,
+                HsmHashAlgo::Sha256,
+                &out[..20],
+                &mut *hmac_state,
+            )
+            .await
+            .expect("begin HMAC with short output");
+        assert_eq!(
+            pal.hmac_finish(&finish_io, &mut hmac, Some(&mut out[..31]))
+                .await,
+            Err(HsmError::InvalidArg)
+        );
+        hash_state.fill(0);
+        hmac_state.fill(0);
+    }
+
+    #[tokio::test]
     async fn streaming_hash_consumes_fragments_before_output_reuse() {
         let (_tx, rx) = async_channel::bounded(1);
         let pal = StdHsmPal::new(rx, Handle::current());
@@ -274,7 +849,8 @@ mod tests {
                 data.copy_from_slice(&msg);
                 digest.fill(0xA5);
                 pal.alloc_scoped_async(&io, async |alloc| {
-                    let mut ctx = pal.hash_begin(&io, algo, alloc)?;
+                    let state_len = pal.hash_state_size(algo)?;
+                    let mut ctx = pal.hash_begin(&io, algo, alloc.dma_alloc(state_len)?)?;
                     pal.hash_continue(&io, &mut ctx, &data[..0]).await?;
                     for offset in (0..data.len()).step_by(13) {
                         pal.hash_continue(
@@ -285,7 +861,7 @@ mod tests {
                         .await?;
                     }
                     data.fill(0xE7);
-                    pal.hash_finish(&io, ctx, digest, form).await
+                    pal.hash_finish(&io, &mut ctx, form, Some(digest)).await
                 })
                 .await
                 .unwrap();
@@ -296,12 +872,13 @@ mod tests {
         for algo in [HsmHashAlgo::Sha256, shake128(64)] {
             let result = pal
                 .alloc_scoped_async(&io, async |alloc| {
-                    let ctx = pal.hash_begin(&io, algo, alloc)?;
+                    let state_len = pal.hash_state_size(algo)?;
+                    let mut ctx = pal.hash_begin(&io, algo, alloc.dma_alloc(state_len)?)?;
                     pal.hash_finish(
                         &io,
-                        ctx,
-                        &mut digest[..algo.digest_len() - 1],
+                        &mut ctx,
                         HsmDigestForm::Standard,
+                        Some(&mut digest[..algo.digest_len() - 1]),
                     )
                     .await
                 })
@@ -343,12 +920,13 @@ mod tests {
         let digest = pal.dma_alloc(&io, algo.digest_len() + 4).unwrap();
         digest.fill(0xA5);
         pal.alloc_scoped_async(&io, async |alloc| {
-            let mut ctx = pal.hash_begin(&io, algo, alloc)?;
+            let state_len = pal.hash_state_size(algo)?;
+            let mut ctx = pal.hash_begin(&io, algo, alloc.dma_alloc(state_len)?)?;
             for offset in (0..data.len()).step_by(13) {
                 let end = (offset + 13).min(data.len());
                 pal.hash_continue(&io, &mut ctx, &data[offset..end]).await?;
             }
-            pal.hash_finish(&io, ctx, digest, form).await
+            pal.hash_finish(&io, &mut ctx, form, Some(digest)).await
         })
         .await
         .unwrap();
@@ -413,16 +991,12 @@ mod tests {
             HsmHashAlgo::Sha3_512,
         ] {
             assert_eq!(
-                pal.hash(&io, algo, data, digest, HsmDigestForm::Standard)
+                pal.hash(&io, algo, data, HsmDigestForm::Standard, Some(digest))
                     .await,
                 Err(HsmError::UnsupportedDigestHashAlgorithm),
                 "{algo:?} one-shot"
             );
-            let begin = pal
-                .alloc_scoped_async(&io, async |alloc| {
-                    pal.hash_begin(&io, algo, alloc).map(|_| ())
-                })
-                .await;
+            let begin = pal.hash_begin(&io, algo, &mut digest[..0]).map(|_| ());
             assert_eq!(
                 begin,
                 Err(HsmError::UnsupportedDigestHashAlgorithm),
