@@ -276,7 +276,7 @@ fn pub_key_in_valid_range(pub_key: &[u8], curve: UpkaEccCurve) -> bool {
 
 impl UnoHsmPal {
     fn generation_pct_workspace_len(curve: HsmEccCurve, pct: &HsmEccPct) -> usize {
-        let coord = curve.wire_coord_len(Self::BYTE_ORDER);
+        let coord = curve.wire_coord_len(Self::ECC_COORD_PAD);
         let backend = match pct {
             HsmEccPct::None => 0,
             HsmEccPct::SignVerify => 2 * coord + 4,
@@ -463,7 +463,7 @@ fn embedded_public_key<'a>(key: &DecodedEcKey<'a>) -> HsmResult<&'a [u8]> {
 /// wire coordinate must be zero.
 fn is_wire_point(curve: HsmEccCurve, xy: &[u8], wire_pub: &[u8]) -> bool {
     let raw = curve.priv_key_len();
-    let coord = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
+    let coord = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
     xy.len() == 2 * raw
         && wire_pub.len() == 2 * coord
         && xy
@@ -497,7 +497,7 @@ impl UnoHsmPal {
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
             let pub_key =
-                tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len(UnoHsmPal::BYTE_ORDER))?;
+                tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len(UnoHsmPal::ECC_COORD_PAD))?;
             self.ecc_priv_pub_key(io, priv_key, Some(&mut *pub_key))
                 .await?;
             if !is_wire_point(curve, embedded, pub_key) {
@@ -727,7 +727,7 @@ impl HsmEcc for UnoHsmPal {
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let pka_curve = map_ecc_curve(curve)?;
-        let wire_len = curve.wire_sig_len(Self::BYTE_ORDER);
+        let wire_len = curve.wire_sig_len(Self::ECC_COORD_PAD);
         if priv_key.len() != hsm_point_size(pka_curve) || hash.len() < hash_size(pka_curve) {
             return Err(HsmError::InvalidArg);
         }
@@ -877,7 +877,7 @@ impl HsmEcc for UnoHsmPal {
         // The key must carry a well-formed public key, whatever `pct` selects.
         let embedded = embedded_public_key(&key)?;
         let (curve, scalar) = (key.curve, key.scalar);
-        let vault_len = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
+        let vault_len = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         // SEC1 / RFC 5915 encodes the scalar as a fixed-width octet string for
         // the curve (P-256 32, P-384 48, P-521 66 bytes). Require exactly that
         // raw length — reject shorter (non-canonical) or overlong scalars,
@@ -921,7 +921,7 @@ impl HsmEcc for UnoHsmPal {
         if d.len() != curve.priv_key_len() {
             return Err(HsmError::InvalidArg);
         }
-        let vault_len = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
+        let vault_len = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         // Require the scalar in `[1, n-1]`; reject `d == 0` or `d >= n`
         // (the curve order) in constant time, mirroring the DER path.
         if !ct_in_range(d, curve_order_be(curve)) {
@@ -950,7 +950,7 @@ impl HsmEcc for UnoHsmPal {
         // The vault stores the scalar little-endian (PKA-native),
         // zero-padded to `wire_coord_len`. Recover the canonical
         // big-endian COSE `d` by reversing the low `priv_key_len` bytes.
-        if vault.len() != curve.wire_coord_len(UnoHsmPal::BYTE_ORDER) {
+        if vault.len() != curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         let field = curve.priv_key_len();
@@ -1005,7 +1005,7 @@ impl HsmEcc for UnoHsmPal {
         if !ct_in_range_le(&priv_key[..raw_len], curve_order_be(curve)) {
             return Err(HsmError::InvalidArg);
         }
-        let wire_pub_len = curve.wire_pub_key_len(UnoHsmPal::BYTE_ORDER);
+        let wire_pub_len = curve.wire_pub_key_len(UnoHsmPal::ECC_COORD_PAD);
         let Some(pub_out) = pub_out else {
             return Ok(wire_pub_len);
         };
@@ -1013,7 +1013,7 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let pka_curve = map_ecc_curve(curve)?;
-        let field = curve.wire_coord_len(UnoHsmPal::BYTE_ORDER);
+        let field = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         let (bx, by) = curve_base_point_le(pka_curve);
         let mont = mont_operand_size(pka_curve);
 
@@ -1125,7 +1125,7 @@ impl HsmEcc for UnoHsmPal {
         // `wire_priv_key_len_is_unambiguous` in the traits crate pins so a
         // colliding variant fails CI rather than mis-dispatching here.
         map_ecc_curve(curve)?;
-        if priv_key.len() != curve.wire_priv_key_len(UnoHsmPal::BYTE_ORDER) {
+        if priv_key.len() != curve.wire_priv_key_len(UnoHsmPal::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         self.ecc_priv_pub_key(io, priv_key, out).await

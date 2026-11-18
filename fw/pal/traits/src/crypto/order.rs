@@ -8,11 +8,13 @@
 //! operands, and digests fed to ECC sign/verify — are in the platform's
 //! *operand order*, [`HsmCryptoOrder::BYTE_ORDER`]:
 //!
-//! - [`HsmByteOrder::Le`] — little-endian. Each ECC component is
-//!   zero-extended to a 4-byte word boundary (P-521: 66 bytes padded to
-//!   68 with two trailing zero bytes).
-//! - [`HsmByteOrder::Be`] — big-endian, the standard encoding. Each ECC
-//!   component has its exact width (P-521: 66 bytes).
+//! - [`HsmByteOrder::Le`] — little-endian.
+//! - [`HsmByteOrder::Be`] — big-endian, the standard encoding.
+//!
+//! Each ECC component sits at the start of a lane padded to
+//! [`HsmCryptoOrder::ECC_COORD_PAD`] bytes, followed by zero bytes
+//! (P-521: 66 bytes in a 68-byte lane with a 4-byte pad, a 72-byte lane
+//! with an 8-byte pad).
 //!
 //! Byte strings — hash and KDF outputs, AES data, ML-DSA / ML-KEM
 //! encodings — have no byte order and are never converted.
@@ -20,10 +22,10 @@
 /// Byte order of a platform's crypto operands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmByteOrder {
-    /// Little-endian, ECC components word-padded.
+    /// Little-endian.
     Le,
 
-    /// Big-endian, ECC components at their exact width.
+    /// Big-endian.
     Be,
 }
 
@@ -35,15 +37,22 @@ impl HsmByteOrder {
     }
 }
 
-/// Operand byte order of a platform's crypto engines.
+/// Operand form of a platform's crypto engines: byte order and ECC lane
+/// padding.
 ///
 /// A supertrait of the crypto traits whose operands are big integers
 /// ([`HsmEcc`](crate::HsmEcc), [`HsmRsa`](crate::HsmRsa),
-/// [`HsmHash`](crate::HsmHash)). Core branches on the const;
+/// [`HsmHash`](crate::HsmHash)). Core branches on the consts;
 /// the branch folds per platform.
 pub trait HsmCryptoOrder {
     /// Operand byte order.
     const BYTE_ORDER: HsmByteOrder;
+
+    /// ECC lane padding in bytes: every scalar, coordinate and signature
+    /// component occupies a lane of its raw length rounded up to this
+    /// multiple, value first and zero-filled after
+    /// (see [`HsmEccCurve::wire_coord_len`](crate::HsmEccCurve::wire_coord_len)).
+    const ECC_COORD_PAD: usize;
 
     /// [`BYTE_ORDER`](Self::BYTE_ORDER), for call sites that only hold a
     /// PAL value.

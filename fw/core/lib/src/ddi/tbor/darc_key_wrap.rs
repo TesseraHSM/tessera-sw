@@ -235,8 +235,8 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 let build_res = async {
                     let field = curve.priv_key_len();
-                    let wc = curve.wire_coord_len(P::BYTE_ORDER);
-                    let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+                    let wc = curve.wire_coord_len(P::ECC_COORD_PAD);
+                    let wire_pub_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
 
                     // Re-derive the operand-order public key and the big-endian
                     // COSE scalar `d` from the vault key.

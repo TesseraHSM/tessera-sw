@@ -197,7 +197,7 @@ fn ecdh_derive_p384_peer_pub_trailing_byte_rejected() {
     );
 }
 
-/// Rejects a P-521 peer public key that exceeds the 136-byte TBOR field maximum.
+/// Rejects a P-521 peer public key that exceeds the 144-byte TBOR field maximum.
 #[test]
 fn ecdh_derive_p521_peer_pub_trailing_byte_rejected() {
     let ctx = TestCtx::new();
@@ -206,11 +206,11 @@ fn ecdh_derive_p521_peer_pub_trailing_byte_rejected() {
     let (masked_key, _) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P521);
     let (_, peer_pub) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P521);
 
-    // Pad the valid peer public key to 137 bytes, one past the 136-byte
-    // `peer_pub_key` TBOR maximum (a big-endian device key is only 132
+    // Pad the valid peer public key to 145 bytes, one past the 144-byte
+    // `peer_pub_key` TBOR maximum (a little-endian device key is only 136
     // bytes), so TBOR rejects it before curve-specific ECDH validation.
     let mut overlong = peer_pub;
-    overlong.resize(137, 0xAA);
+    overlong.resize(145, 0xAA);
 
     ctx.expect_fw_reject(
         &TborEcdhDeriveReq {

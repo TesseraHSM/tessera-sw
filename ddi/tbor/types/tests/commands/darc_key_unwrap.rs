@@ -275,7 +275,7 @@ fn assert_roundtrip_on(curve: EccCurve) {
         "masked_key must be a non-empty envelope within the wire max",
     );
     assert!(resp.masked_key.iter().any(|&b| b != 0));
-    // Exercises the curve's wire padding (P-521: 66-byte coords padded to 68).
+    // Exercises the curve's wire padding (P-521: 66-byte coords in 68- or 72-byte lanes).
     assert_eq!(resp.pub_key, expected_wire_pub(&key));
 }
 

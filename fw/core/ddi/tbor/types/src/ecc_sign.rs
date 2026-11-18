@@ -25,7 +25,7 @@
 //!
 //! * `signature` — raw `r ‖ s`, each component in device byte order and
 //!   sized to the curve's wire coordinate length (`r ‖ s` is 64 / 96 B for
-//!   P-256 / P-384; 132 B big-endian or 136 B little-endian for P-521).
+//!   P-256 / P-384; 144 B big-endian or 136 B little-endian for P-521).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -40,10 +40,10 @@ pub const TBOR_OP_ECC_SIGN: u8 = 0x18;
 /// [`TborEccSignReq::digest`].
 pub const ECC_DIGEST_MAX_LEN: usize = 64;
 
-/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 little-endian word-padded).  Pinned
-/// into the `#[tbor(buffer, max_len = 136)]` literal on
+/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 8-byte-padded big-endian lanes).  Pinned
+/// into the `#[tbor(buffer, max_len = 144)]` literal on
 /// [`TborEccSignResp::signature`].
-pub const ECC_SIG_MAX_LEN: usize = 136;
+pub const ECC_SIG_MAX_LEN: usize = 144;
 
 /// `EccSign` request schema.
 ///
@@ -73,8 +73,8 @@ pub struct TborEccSignReq<'a> {
 pub struct TborEccSignResp<'a> {
     /// Raw ECDSA `r ‖ s`, each component in device byte order and sized to
     /// the curve wire coordinate length: 64 / 96 B for P-256 / P-384;
-    /// 132 B (big-endian) or 136 B (little-endian) for P-521.
-    #[tbor(buffer, max_len = 136, mutable)]
+    /// 144 B (big-endian) or 136 B (little-endian) for P-521.
+    #[tbor(buffer, max_len = 144, mutable)]
     pub signature: &'a [u8],
 }
 
@@ -118,8 +118,8 @@ mod tests {
     #[test]
     fn lengths_match_pinned_values() {
         const _: () = assert!(64 == ECC_DIGEST_MAX_LEN);
-        const _: () = assert!(136 == ECC_SIG_MAX_LEN);
+        const _: () = assert!(144 == ECC_SIG_MAX_LEN);
         assert_eq!(ECC_DIGEST_MAX_LEN, 64);
-        assert_eq!(ECC_SIG_MAX_LEN, 136);
+        assert_eq!(ECC_SIG_MAX_LEN, 144);
     }
 }

@@ -216,7 +216,7 @@ pub(crate) async fn handle<P: HsmPal>(
             pal.ecc_pub_from_priv(io, DARC_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_r[1..])?;
+            byte_order::pair_to_be::<P>(DARC_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = TMK + GCM tag = 48 B); the recovered TMK

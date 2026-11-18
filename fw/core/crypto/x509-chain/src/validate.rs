@@ -590,17 +590,17 @@ impl ChainValidator {
         // X.509 carries the public key and signature as big-endian
         // `x ‖ y` / `r ‖ s`; convert each pair in place to the operand
         // layout `ecc_verify` expects.
-        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
+        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len(P::ECC_COORD_PAD))?;
         let point = verify_key
             .point
             .get(..2 * coord_len)
             .ok_or(HsmError::X509ParseError)?;
         pk_dma[..2 * coord_len].copy_from_slice(point);
-        byte_order::pair_from_be(P::BYTE_ORDER, curve, pk_dma)?;
+        byte_order::pair_from_be::<P>(curve, pk_dma)?;
 
-        let sig_dma = alloc.dma_alloc(curve.wire_sig_len(P::BYTE_ORDER))?;
+        let sig_dma = alloc.dma_alloc(curve.wire_sig_len(P::ECC_COORD_PAD))?;
         ecdsa::decode_ecdsa_sig(curr.signature, curve, sig_dma)?;
-        byte_order::pair_from_be(P::BYTE_ORDER, curve, sig_dma)?;
+        byte_order::pair_from_be::<P>(curve, sig_dma)?;
 
         if pal
             .ecc_verify(io, curve, pk_dma, digest_dma, sig_dma)

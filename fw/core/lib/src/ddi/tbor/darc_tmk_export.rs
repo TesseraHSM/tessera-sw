@@ -231,7 +231,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                     .await?;
                 pk_s[0] = SEC1_UNCOMPRESSED;
-                byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_s[1..])?;
+                byte_order::pair_to_be::<P>(DARC_CURVE, &mut pk_s[1..])?;
 
                 // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
                 let cfg = HpkeSealConfig::auth(

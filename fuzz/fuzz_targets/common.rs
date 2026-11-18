@@ -182,7 +182,7 @@ impl EccCurve {
         }
     }
 
-    /// Device coordinate width, including Uno's P-521 padding.
+    /// Device coordinate width, including lane padding (P-521: 66 -> 68 or 72 bytes).
     pub fn wire_coord_len(self) -> usize {
         wire_coord_len(self.coord_len())
     }
@@ -202,7 +202,7 @@ impl EccCurve {
     }
 
     /// Wire `x ‖ y` public-key length, each coordinate padded to the wire
-    /// coordinate width (P-521: 68 bytes on Uno, 66 on Duo).
+    /// coordinate width (P-521: 68 or 72 bytes).
     pub fn wire_pub_key_len(self) -> usize {
         self.wire_coord_len() * 2
     }
