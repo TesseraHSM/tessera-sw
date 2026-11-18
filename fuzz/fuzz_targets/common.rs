@@ -13,6 +13,7 @@ use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::AesKey;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::aead_envelope::{self};
+use tsra_crypto::*;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_tbor_codec::Encoder;
@@ -28,6 +29,7 @@ use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::TestPolicy;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::policy::TestBackupPart;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
@@ -37,6 +39,7 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
+use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
@@ -61,6 +64,7 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::*;
 
 pub type DdiTest = TsraDdi;
 
@@ -201,6 +205,20 @@ impl EccCurve {
     /// coordinate width (P-521: 68 bytes on Uno, 66 on Duo).
     pub fn wire_pub_key_len(self) -> usize {
         self.wire_coord_len() * 2
+    }
+
+    /// Convert a wire `x || y` or `r || s` pair to unpadded big-endian bytes.
+    pub fn wire_pair_to_be(self, wire: &[u8]) -> Vec<u8> {
+        assert_eq!(wire.len(), self.wire_coord_len() * 2, "wire pair length");
+        let mut result = Vec::with_capacity(self.coord_len() * 2);
+        for component in wire.chunks_exact(self.wire_coord_len()) {
+            assert!(
+                component[self.coord_len()..].iter().all(|&b| b == 0),
+                "wire component padding"
+            );
+            result.extend(dev_rev(&component[..self.coord_len()]));
+        }
+        result
     }
 }
 
@@ -628,10 +646,6 @@ pub fn import_darc_tmk(
     fixture: &SecurityDomainFixture,
     tmk: &[u8; tsra_ddi_tbor_types::TMK_LEN],
 ) -> [u8; tsra_ddi_tbor_types::MASKED_TMK_LEN] {
-    use tsra_crypto::*;
-    use tsra_ddi_tbor_test_harness::x509_fixture::*;
-    use tsra_ddi_tbor_types::*;
-
     let kex = ctx
         .tbor(&TborDarcKexKeyGenReq {
             session_id,

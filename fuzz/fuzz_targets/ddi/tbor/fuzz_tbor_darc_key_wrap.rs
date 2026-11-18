@@ -371,20 +371,6 @@ fn mutate(req: &mut TborDarcKeyWrapReq, input: &FuzzInput<'_>) {
     }
 }
 
-/// Convert device-order public coordinates to raw host big-endian coordinates.
-fn public_be(curve: common::EccCurve, wire: &[u8]) -> Vec<u8> {
-    assert_eq!(wire.len(), curve.wire_pub_key_len());
-    let mut result = Vec::with_capacity(2 * curve.coord_len());
-    for coordinate in wire.chunks_exact(curve.wire_coord_len()) {
-        assert!(
-            coordinate[curve.coord_len()..].iter().all(|&b| b == 0),
-            "wire public padding"
-        );
-        result.extend(dev_rev(&coordinate[..curve.coord_len()]));
-    }
-    result
-}
-
 /// Map the shared wire curve selector to the host crypto curve selector.
 fn host_curve(curve: common::EccCurve) -> tsra_crypto::EccCurve {
     match curve {
@@ -455,7 +441,7 @@ fn assert_host_cose(
             "COSE field width"
         );
     }
-    let expected_public = public_be(input.curve, public);
+    let expected_public = input.curve.wire_pair_to_be(public);
     assert!(x == &expected_public[..x.len()], "COSE public x");
     assert!(y == &expected_public[x.len()..], "COSE public y");
     let private =
@@ -524,15 +510,8 @@ fn assert_success(
             .expect("sign with round-tripped key")
             .signature;
         assert_eq!(signature.len(), input.curve.wire_sig_len());
-        let mut raw_signature = Vec::new();
-        for component in signature.chunks_exact(input.curve.wire_coord_len()) {
-            assert!(
-                component[input.curve.coord_len()..].iter().all(|&b| b == 0),
-                "signature padding"
-            );
-            raw_signature.extend(dev_rev(&component[..input.curve.coord_len()]));
-        }
-        let public_coordinates = public_be(input.curve, original_public);
+        let raw_signature = input.curve.wire_pair_to_be(&signature);
+        let public_coordinates = input.curve.wire_pair_to_be(original_public);
         let (x, y) = public_coordinates.split_at(input.curve.coord_len());
         let public =
             EccPublicKey::from_coordinates(host_curve(input.curve), x, y).expect("host public key");
