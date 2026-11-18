@@ -262,6 +262,12 @@ pub enum TborStatus {
     DropIoFailure = 0x087000E5,
     DefaultPskMustRotate = 0x087000E6,
     UnsupportedSessionSuite = 0x087000E7,
+
+    /// An ML-DSA key pair failed its sign/verify PCT.
+    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+
+    /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
+    PctValidationMlKemGenKeyFailed = 0x087000E9,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,

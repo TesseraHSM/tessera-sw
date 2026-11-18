@@ -105,7 +105,6 @@ impl<'a> DeriveOp for CngHkdfAlgo<'a> {
     ///
     /// Returns an error if:
     /// - Extract mode is used and length doesn't match the hash output size
-    /// - Expand mode is used and the PRK length doesn't match the hash output size
     /// - The key derivation operation fails
     /// - Memory allocation fails
     fn derive(&self, key: &Self::Key, length: usize) -> Result<Self::DerivedKey, CryptoError> {
@@ -119,11 +118,7 @@ impl<'a> DeriveOp for CngHkdfAlgo<'a> {
             }
             CngHkdfKeyHandle::with_salt(&key_vec, self.hash, self.salt)?
         } else {
-            // if key extraction is not requested than `key` is PRK
-            if key.size() != self.hash.size() {
-                // Length of PRK must be equal to hash output size
-                return Err(CryptoError::HkdfInvalidPrkLength);
-            }
+            // Use the supplied PRK directly, regardless of length, as OpenSSL does.
             CngHkdfKeyHandle::with_prk(&key_vec, self.hash)?
         };
 

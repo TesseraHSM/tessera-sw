@@ -35,10 +35,10 @@
 //!
 //! Output buffers are caller-supplied `&mut [u8]` with size contracts
 //! documented per method (typically derived from the algorithm or
-//! key-size selector enum).  Methods whose scratch escapes the call
-//! (for example, multi-step contexts) take an `&'a impl HsmScopedAlloc`;
-//! one-shot helpers may allocate scoped scratch internally and free it
-//! before they return.
+//! key-size selector enum). Multi-step hash/HMAC initialization borrows
+//! caller-provided storage sized by separate backend-specific queries.
+//! One-shot helpers may allocate scoped scratch internally
+//! and free it before they return.
 
 mod aes;
 mod bulk;

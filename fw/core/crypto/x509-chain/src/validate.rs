@@ -476,8 +476,14 @@ impl ChainValidator {
         }
 
         let digest = alloc.dma_alloc(hash.digest_len())?;
-        pal.hash(io, hash, curr.tbs_raw, digest, HsmDigestForm::Standard)
-            .await?;
+        pal.hash(
+            io,
+            hash,
+            curr.tbs_raw,
+            HsmDigestForm::Standard,
+            Some(digest),
+        )
+        .await?;
         let public = alloc.dma_alloc_zeroed(k + 4)?;
         public[..k].copy_from_slice(key.modulus);
         public[k + 4 - key.exponent.len()..].copy_from_slice(key.exponent);
@@ -488,7 +494,7 @@ impl ChainValidator {
         byte_order::int_from_be(P::BYTE_ORDER, signature);
         let valid = match curr.sig_algo {
             SigAlgo::RsaPkcs1(_) => {
-                pal.rsa_pkcs1_verify(io, key.key_size, hash, public, digest, signature, alloc)
+                pal.rsa_pkcs1_verify(io, key.key_size, hash, public, digest, signature)
                     .await?
             }
             SigAlgo::RsaPss(params) => {
@@ -500,7 +506,6 @@ impl ChainValidator {
                     digest,
                     usize::from(params.salt_len),
                     signature,
-                    alloc,
                 )
                 .await?
             }
@@ -568,8 +573,8 @@ impl ChainValidator {
             io,
             hash_algo,
             curr.tbs_raw,
-            &mut digest_dma[..digest_len],
             HsmDigestForm::Standard,
+            Some(&mut digest_dma[..digest_len]),
         )
         .await?;
         // Truncate the big-endian hash or left-pad it to the PAL's fixed
@@ -597,12 +602,10 @@ impl ChainValidator {
         ecdsa::decode_ecdsa_sig(curr.signature, curve, sig_dma)?;
         byte_order::pair_from_be(P::BYTE_ORDER, curve, sig_dma)?;
 
-        let result_dma = alloc.dma_alloc(4)?;
-
-        pal.ecc_verify(io, curve, pk_dma, digest_dma, sig_dma, result_dma)
-            .await?;
-
-        if (result_dma[0] & 1) == 0 {
+        if pal
+            .ecc_verify(io, curve, pk_dma, digest_dma, sig_dma)
+            .await?
+        {
             Ok(())
         } else {
             Err(HsmError::X509SignatureInvalid)

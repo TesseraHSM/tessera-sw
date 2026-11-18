@@ -27,6 +27,8 @@
 //! (encrypt/decrypt, sign/verify, digest-sign). New backends adopt the same
 //! accessor without touching this module.
 
+#[cfg(ossl350)]
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::sync::OnceLock;
@@ -104,6 +106,17 @@ unsafe extern "C" {
 pub(crate) struct PkeyCtx(*mut ffi::EVP_PKEY_CTX);
 
 impl PkeyCtx {
+    /// Creates an algorithm context in the isolated default-provider libctx.
+    #[cfg(ossl350)]
+    #[allow(unsafe_code)]
+    pub(crate) fn from_name(name: &CStr) -> Option<Self> {
+        // SAFETY: the name is NUL-terminated and the libctx outlives the context.
+        let ctx = unsafe {
+            ffi::EVP_PKEY_CTX_new_from_name(crypto_libctx_ptr(), name.as_ptr(), std::ptr::null())
+        };
+        (!ctx.is_null()).then_some(Self(ctx))
+    }
+
     /// Builds a pkey-operation context for `pkey` in the crate-private libctx
     /// (default-provider only). Returns `None` if libcrypto could not create
     /// the context.

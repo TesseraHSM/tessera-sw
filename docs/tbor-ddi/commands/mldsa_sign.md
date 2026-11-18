@@ -42,12 +42,20 @@ follow PKCS#11's `CK_HEDGE_TYPE`:
 |---|---|---|
 | `0` — preferred | `CKH_HEDGE_PREFERRED` | Hedged or deterministic, as the device chooses.  The device signs hedged. |
 | `1` — required | `CKH_HEDGE_REQUIRED` | Hedged: FIPS 204's default variant, with fresh randomness `rnd` from the device's TRNG, so the same `μ` yields a different, equally valid signature each time. |
-| `2` — deterministic | `CKH_DETERMINISTIC_REQUIRED` | Deterministic: FIPS 204's variant with `rnd = {0}^32`, so the same key and `μ` always yield the same signature. |
+| `2` — deterministic | `CKH_DETERMINISTIC_REQUIRED` | Deterministic, or fail: FIPS 204's variant with `rnd = {0}^32`, so the same key and `μ` always yield the same signature. |
 
 Both variants verify the same way, so `MlDsaVerify` has no `hedge`.
 Hedged signing also resists fault and side-channel attacks that exploit
 signing the same input repeatedly; prefer it unless signatures must be
 reproducible.  Other values are rejected.
+
+Linux simulators use OpenSSL 3.5+; Windows simulators use native CNG on
+PQC-capable Windows versions. Both sign hedged for `0` and `1`. Linux
+simulators and Uno hardware support `2`; Windows simulators return
+`UnsupportedCmd` because CNG exposes no supported deterministic-signing
+control. Windows clients talking to real Uno hardware retain hardware
+deterministic support. Deterministic-required requests never fall back
+to hedged signing.
 
 Available to **both Crypto-Officer and Crypto-User** sessions.
 
@@ -91,6 +99,7 @@ Carries the signature.
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
 | `InvalidArg` | `hedge` other than `0`, `1` or `2` |
+| `UnsupportedCmd` | The selected signing variant is not supported by the backend |
 | `InvalidKeyType` | The masked blob is not an ML-DSA key |
 | `InvalidPermissions` | The key may not sign |
 | `TborInvalidFixedLength` | `mu` is not 64 bytes |

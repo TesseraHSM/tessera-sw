@@ -38,6 +38,7 @@ fn keygen_matches_nist_vectors() {
 /// Encapsulation is deterministic in the message, so each vector must
 /// reproduce NIST's ciphertext and shared secret exactly.
 #[test]
+#[cfg(target_os = "linux")]
 fn encapsulation_matches_nist_vectors() {
     for v in MLKEM_ENCAP_TEST_VECTORS {
         let ek = MlKemPublicKey::from_bytes(v.pub_key).unwrap();

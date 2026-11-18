@@ -134,8 +134,8 @@ pub(super) async fn run_rsa_mod_exp_on_engine(
             io,
             HsmHashAlgo::Sha256,
             empty,
-            label_hash,
             HsmDigestForm::Standard,
+            Some(label_hash),
         )
         .await?;
         let db = &em[1 + H_LEN..RSA_2K_LEN];

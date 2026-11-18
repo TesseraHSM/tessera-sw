@@ -841,9 +841,13 @@ pub trait HsmAlloc: HsmIoTypes {
     /// allocation made through that handle when `f` returns.
     ///
     /// Scopes may nest; nested scopes see the parent's watermark
-    /// and roll back to it on return.  Allocations made through the
-    /// outer PAL trait (e.g. [`dma_alloc`](Self::dma_alloc)) are
-    /// **not** freed by scope exit.
+    /// and roll back to it on return. Scopes for the same IO must be
+    /// strictly nested, not interleaved or run concurrently.
+    ///
+    /// Current backends restore the shared per-IO watermarks, including
+    /// allocations made through the outer PAL trait while the scope is active.
+    /// Allocate all buffers that must outlive the scope before entering it.
+    /// Inside the scope, allocate temporary storage through its handle.
     ///
     /// # Type Parameters
     ///

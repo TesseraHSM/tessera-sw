@@ -27,7 +27,7 @@ PIN="${TSRA_PKCS11_TEST_PIN:-1234}"
 INCLUDE="$HERE/include-list.txt"
 # The include-list only grows: fewer names than this fails the gate. Raise the
 # floor when names are added; lowering it is a deliberate edit with a reason.
-FLOOR=148
+FLOOR=149
 PATCHES=("$HERE/hsm-profile-login.patch" "$HERE/aes-fixture.patch")
 SRC="$WORK/src"
 
@@ -71,6 +71,8 @@ for patch in "${PATCHES[@]}"; do
 done
 
 # --- 3. Build from clean (the makefile tracks no header dependencies) ------
+# GoogleTest 1.10 uses uintptr_t without including cstdint on newer compilers.
+CXXFLAGS="${CXXFLAGS:-} -include cstdint" \
 make -C "$SRC" -s -j"$(nproc 2>/dev/null || echo 2)" > "$WORK/build.log" 2>&1 ||
     { tail -n 30 "$WORK/build.log"; fail "build failed (see $WORK/build.log)"; }
 

@@ -10,6 +10,7 @@ use clap::Parser;
 use xshell::cmd;
 use xshell::Shell;
 
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::install;
 use crate::rustup_component_add;
 use crate::Xtask;
@@ -41,12 +42,15 @@ impl Xtask for Setup {
         log::trace!("running setup");
 
         let sh = Shell::new()?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
 
         // Add required cross-compilation targets.
         {
             let tgt = "thumbv7em-none-eabi";
             cmd!(sh, "rustup target add {tgt}").quiet().run()?;
-            cmd!(sh, "rustup +nightly target add {tgt}").quiet().run()?;
+            cmd!(sh, "rustup {toolchain} target add {tgt}")
+                .quiet()
+                .run()?;
         }
 
         // Run Install Cargo nextest
@@ -91,34 +95,34 @@ impl Xtask for Setup {
         // Add Clippy (nightly)
         let add_clippy = rustup_component_add::RustupComponentAdd {
             component: "clippy".to_string(),
-            toolchain: Some("nightly".to_string()),
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
         };
         // ignore failure in adding Clippy (nightly)
         if add_clippy.run(ctx.clone()).is_ok() {
             // Check Clippy (nightly) version
-            let _ = cmd!(sh, "cargo +nightly clippy --version").quiet().run();
+            let _ = cmd!(sh, "cargo {toolchain} clippy --version").quiet().run();
         }
 
         // Add Fmt (nightly)
         let add_fmt = rustup_component_add::RustupComponentAdd {
             component: "rustfmt".to_string(),
-            toolchain: Some("nightly".to_string()), // Use nightly toolchain by default
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
         };
         // ignore failure in adding Fmt (nightly)
         if add_fmt.run(ctx.clone()).is_ok() {
             // Check Fmt (nightly) version
-            let _ = cmd!(sh, "cargo +nightly fmt --version").quiet().run();
+            let _ = cmd!(sh, "cargo {toolchain} fmt --version").quiet().run();
         }
 
         // Add rust-src (nightly)
         let add_rust_src = rustup_component_add::RustupComponentAdd {
             component: "rust-src".to_string(),
-            toolchain: Some("nightly".to_string()), // Use nightly toolchain by default
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
         };
         // ignore failure in adding rust-src (nightly)
         if add_rust_src.run(ctx.clone()).is_ok() {
             // Check rust-src (nightly) version
-            let _ = cmd!(sh, "rustup +nightly component list --installed")
+            let _ = cmd!(sh, "rustup {toolchain} component list --installed")
                 .quiet()
                 .run();
         }

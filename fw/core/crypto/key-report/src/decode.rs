@@ -256,8 +256,8 @@ where
         io,
         HsmHashAlgo::Sha384,
         sig_struct,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
 
@@ -275,10 +275,6 @@ where
         sig
     };
 
-    let result = alloc.dma_alloc(4)?;
-    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig, result)
-        .await?;
-
-    // Per the trait contract, bit 0 clear indicates a valid signature.
-    Ok(result[0] & 1 == 0)
+    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig)
+        .await
 }

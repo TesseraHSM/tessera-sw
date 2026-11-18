@@ -7,10 +7,10 @@
 use super::*;
 
 /// Builds a key pair and an encapsulation engine for `variant`.
-fn setup(variant: MlKemVariant, m_tag: u8) -> (MlKemPrivateKey, MlKemPublicKey, MlKemAlgo) {
+fn setup(variant: MlKemVariant) -> (MlKemPrivateKey, MlKemPublicKey, MlKemAlgo) {
     let dk = MlKemPrivateKey::from_seed(variant, &filler(9, MLKEM_SEED_LEN)).unwrap();
     let ek = dk.public_key().unwrap();
-    let algo = MlKemAlgo::with_message(msg(m_tag));
+    let algo = MlKemAlgo::new();
     (dk, ek, algo)
 }
 
@@ -36,7 +36,7 @@ fn decapsulate(dk: &MlKemPrivateKey, ct: &[u8]) -> Vec<u8> {
 #[test]
 fn encapsulate_decapsulate_roundtrip() {
     for variant in VARIANTS {
-        let (dk, ek, mut algo) = setup(variant, 10);
+        let (dk, ek, mut algo) = setup(variant);
         let (ct, ss) = encapsulate(&mut algo, &ek);
         assert_eq!(ct.len(), variant.ciphertext_len());
         assert_eq!(ss.len(), MLKEM_SHARED_SECRET_LEN);
@@ -47,9 +47,11 @@ fn encapsulate_decapsulate_roundtrip() {
 /// Encapsulation is deterministic in the message, which is what makes the
 /// known-answer vectors checkable.
 #[test]
+#[cfg(target_os = "linux")]
 fn encapsulation_is_deterministic_in_the_message() {
     for variant in VARIANTS {
-        let (_, ek, mut a) = setup(variant, 11);
+        let (_, ek, _) = setup(variant);
+        let mut a = MlKemAlgo::with_message(msg(11));
         let mut b = MlKemAlgo::with_message(msg(11));
         assert_eq!(encapsulate(&mut a, &ek), encapsulate(&mut b, &ek));
     }
@@ -58,9 +60,11 @@ fn encapsulation_is_deterministic_in_the_message() {
 /// Different messages must give different ciphertexts and secrets; otherwise
 /// the message is not reaching the algorithm.
 #[test]
+#[cfg(target_os = "linux")]
 fn distinct_messages_give_distinct_results() {
     for variant in VARIANTS {
-        let (_, ek, mut a) = setup(variant, 12);
+        let (_, ek, _) = setup(variant);
+        let mut a = MlKemAlgo::with_message(msg(12));
         let mut b = MlKemAlgo::with_message(msg(13));
         let (ct_a, ss_a) = encapsulate(&mut a, &ek);
         let (ct_b, ss_b) = encapsulate(&mut b, &ek);
@@ -75,7 +79,7 @@ fn distinct_messages_give_distinct_results() {
 #[test]
 fn a_tampered_ciphertext_rejects_implicitly() {
     for variant in VARIANTS {
-        let (dk, ek, mut algo) = setup(variant, 14);
+        let (dk, ek, mut algo) = setup(variant);
         let (mut ct, ss) = encapsulate(&mut algo, &ek);
         ct[0] ^= 0x01;
 
@@ -90,7 +94,7 @@ fn a_tampered_ciphertext_rejects_implicitly() {
 #[test]
 fn implicit_rejection_is_deterministic() {
     for variant in VARIANTS {
-        let (dk, ek, mut algo) = setup(variant, 15);
+        let (dk, ek, mut algo) = setup(variant);
         let (mut ct, _) = encapsulate(&mut algo, &ek);
         ct[1] ^= 0xFF;
         assert_eq!(decapsulate(&dk, &ct), decapsulate(&dk, &ct));
@@ -101,7 +105,7 @@ fn implicit_rejection_is_deterministic() {
 #[test]
 fn decapsulation_under_a_different_key_does_not_recover_the_secret() {
     for variant in VARIANTS {
-        let (_, ek, mut algo) = setup(variant, 16);
+        let (_, ek, mut algo) = setup(variant);
         let (ct, ss) = encapsulate(&mut algo, &ek);
 
         let other = MlKemPrivateKey::from_seed(variant, &filler(17, MLKEM_SEED_LEN)).unwrap();
@@ -135,7 +139,7 @@ fn decapsulation_rejects_a_wrong_length_ciphertext() {
 #[test]
 fn operations_report_required_sizes() {
     for variant in VARIANTS {
-        let (dk, ek, mut algo) = setup(variant, 20);
+        let (dk, ek, mut algo) = setup(variant);
         assert_eq!(
             algo.encapsulate(&ek, None, None).unwrap(),
             (variant.ciphertext_len(), MLKEM_SHARED_SECRET_LEN)
@@ -153,7 +157,7 @@ fn operations_report_required_sizes() {
 #[test]
 fn operations_reject_short_buffers() {
     for variant in VARIANTS {
-        let (dk, ek, mut algo) = setup(variant, 21);
+        let (dk, ek, mut algo) = setup(variant);
         let (ct, _) = encapsulate(&mut algo, &ek);
 
         let mut short_ct = vec![0u8; variant.ciphertext_len() - 1];
@@ -186,7 +190,7 @@ fn operations_reject_short_buffers() {
 #[test]
 fn a_drawn_message_engine_rerandomises_every_encapsulation() {
     for variant in VARIANTS {
-        let (dk, ek, _) = setup(variant, 22);
+        let (dk, ek, _) = setup(variant);
         let mut algo = MlKemAlgo::new();
 
         let (ct_a, ss_a) = encapsulate(&mut algo, &ek);
@@ -202,9 +206,11 @@ fn a_drawn_message_engine_rerandomises_every_encapsulation() {
 /// A pinned message does the opposite: the same engine reproduces one
 /// ciphertext, which is what the known-answer vectors rely on.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_pinned_message_engine_repeats_its_ciphertext() {
     for variant in VARIANTS {
-        let (_, ek, mut algo) = setup(variant, 23);
+        let (_, ek, _) = setup(variant);
+        let mut algo = MlKemAlgo::with_message(msg(23));
         assert_eq!(encapsulate(&mut algo, &ek), encapsulate(&mut algo, &ek));
     }
 }
@@ -214,7 +220,7 @@ fn a_pinned_message_engine_repeats_its_ciphertext() {
 /// silently reinterpreted.
 #[test]
 fn parameter_sets_do_not_interoperate() {
-    let (_, ek, mut algo) = setup(MlKemVariant::MlKem512, 24);
+    let (_, ek, mut algo) = setup(MlKemVariant::MlKem512);
     let (ct, _) = encapsulate(&mut algo, &ek);
 
     for variant in [MlKemVariant::MlKem768, MlKemVariant::MlKem1024] {

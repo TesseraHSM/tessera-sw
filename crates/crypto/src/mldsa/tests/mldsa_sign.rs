@@ -9,7 +9,7 @@ use super::*;
 fn setup(variant: MlDsaVariant, ctx: &[u8]) -> (MlDsaPrivateKey, MlDsaPublicKey, MlDsaAlgo) {
     let sk = MlDsaPrivateKey::from_seed(variant, &filler(9, MLDSA_SEED_LEN)).unwrap();
     let pk = sk.public_key().unwrap();
-    let algo = MlDsaAlgo::with_randomness(ctx, rnd(10)).unwrap();
+    let algo = MlDsaAlgo::new(ctx).unwrap();
     (sk, pk, algo)
 }
 
@@ -37,10 +37,8 @@ fn signing_is_hedged() {
         let pk = sk.public_key().unwrap();
         let msg = filler(13, 64);
 
-        let mut a =
-            MlDsaAlgo::with_randomness(b"", filler(14, MLDSA_RND_LEN).try_into().unwrap()).unwrap();
-        let mut b =
-            MlDsaAlgo::with_randomness(b"", filler(15, MLDSA_RND_LEN).try_into().unwrap()).unwrap();
+        let mut a = MlDsaAlgo::new(b"").unwrap();
+        let mut b = MlDsaAlgo::new(b"").unwrap();
         let sig_a = Signer::sign_vec(&mut a, &sk, &msg).unwrap();
         let sig_b = Signer::sign_vec(&mut b, &sk, &msg).unwrap();
         assert_ne!(sig_a, sig_b, "different randomness gave the same signature");
@@ -54,9 +52,11 @@ fn signing_is_hedged() {
 /// The same randomness reproduces the same signature, which is what makes the
 /// known-answer vectors checkable.
 #[test]
+#[cfg(target_os = "linux")]
 fn signing_is_deterministic_in_the_randomness() {
     for variant in VARIANTS {
-        let (sk, _, mut a) = setup(variant, b"ctx");
+        let (sk, _, _) = setup(variant, b"ctx");
+        let mut a = MlDsaAlgo::with_randomness(b"ctx", rnd(10)).unwrap();
         let mut b =
             MlDsaAlgo::with_randomness(b"ctx", filler(10, MLDSA_RND_LEN).try_into().unwrap())
                 .unwrap();
@@ -197,6 +197,7 @@ fn a_drawn_randomness_engine_rerandomises_every_signature() {
 /// Pinned randomness does the opposite: the same engine reproduces one
 /// signature, which is what the known-answer vectors rely on.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_pinned_randomness_engine_repeats_its_signature() {
     for variant in VARIANTS {
         let sk = MlDsaPrivateKey::from_seed(variant, &filler(22, MLDSA_SEED_LEN)).unwrap();
@@ -214,12 +215,7 @@ fn a_pinned_randomness_engine_repeats_its_signature() {
 /// which direction the engine will be used in.
 #[test]
 fn construction_rejects_an_oversized_context() {
-    let pinned = rnd(24);
     let ctx = filler(25, MLDSA_CTX_MAX_LEN + 1);
-    assert!(matches!(
-        MlDsaAlgo::with_randomness(&ctx, pinned),
-        Err(CryptoError::MlDsaInvalidContext)
-    ));
     assert!(matches!(
         MlDsaAlgo::new(&ctx),
         Err(CryptoError::MlDsaInvalidContext)
@@ -227,7 +223,6 @@ fn construction_rejects_an_oversized_context() {
 
     // The boundary itself is allowed.
     let ctx = filler(25, MLDSA_CTX_MAX_LEN);
-    assert!(MlDsaAlgo::with_randomness(&ctx, pinned).is_ok());
     assert!(MlDsaAlgo::new(&ctx).is_ok());
 }
 
@@ -251,8 +246,7 @@ fn a_maximal_context_roundtrips() {
 #[test]
 fn parameter_sets_do_not_interoperate() {
     let msg = filler(28, 32);
-    let mut algo =
-        MlDsaAlgo::with_randomness(b"", filler(29, MLDSA_RND_LEN).try_into().unwrap()).unwrap();
+    let mut algo = MlDsaAlgo::new(b"").unwrap();
     let sk =
         MlDsaPrivateKey::from_seed(MlDsaVariant::MlDsa44, &filler(30, MLDSA_SEED_LEN)).unwrap();
     let sig = Signer::sign_vec(&mut algo, &sk, &msg).unwrap();
@@ -268,8 +262,7 @@ fn parameter_sets_do_not_interoperate() {
 }
 
 /// Signing an external `μ` computed by [`HashAlgo::mldsa_mu`] is pure signing:
-/// under the same randomness both give the same signature, and each
-/// verifies under the other interface.
+/// signatures from either interface verify under the other.
 #[test]
 fn external_mu_is_pure_signing_over_the_same_message() {
     for variant in VARIANTS {
@@ -278,14 +271,9 @@ fn external_mu_is_pure_signing_over_the_same_message() {
         let (msg, ctx) = (filler(32, 100), filler(33, 17));
         let mu = Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, &ctx).unwrap(), &msg).unwrap();
 
-        let mut pure = MlDsaAlgo::with_randomness(&ctx, rnd(34)).unwrap();
-        let mut external = MlDsaAlgo::external_mu_with_randomness(rnd(34));
+        let (mut pure, mut external) = (MlDsaAlgo::new(&ctx).unwrap(), MlDsaAlgo::external_mu());
         let pure_sig = Signer::sign_vec(&mut pure, &sk, &msg).unwrap();
         let mu_sig = Signer::sign_vec(&mut external, &sk, &mu).unwrap();
-        assert_eq!(
-            pure_sig, mu_sig,
-            "{variant:?}: mu differs from the one pure signing computes"
-        );
 
         let mut pure = MlDsaAlgo::new(&ctx).unwrap();
         let mut external = MlDsaAlgo::external_mu();
@@ -297,6 +285,53 @@ fn external_mu_is_pure_signing_over_the_same_message() {
         let other =
             Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, b"other").unwrap(), &msg).unwrap();
         assert!(!Verifier::verify(&mut external, &pk, &other, &mu_sig).unwrap());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_mu_matches_pure_signing_with_the_same_randomness() {
+    for variant in VARIANTS {
+        let sk = MlDsaPrivateKey::from_seed(variant, &filler(31, MLDSA_SEED_LEN)).unwrap();
+        let pk = sk.public_key().unwrap();
+        let (msg, ctx) = (filler(32, 100), filler(33, 17));
+        let mu = Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, &ctx).unwrap(), &msg).unwrap();
+        let mut pure = MlDsaAlgo::with_randomness(&ctx, rnd(34)).unwrap();
+        let mut external = MlDsaAlgo::external_mu_with_randomness(rnd(34));
+        assert_eq!(
+            Signer::sign_vec(&mut pure, &sk, &msg).unwrap(),
+            Signer::sign_vec(&mut external, &sk, &mu).unwrap(),
+            "{variant:?}: mu differs from the one pure signing computes"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn deterministic_required_is_rejected_without_writing() {
+    for variant in VARIANTS {
+        let (sk, pk, _) = setup(variant, b"ctx");
+        for mut algo in [
+            MlDsaAlgo::new(b"ctx").unwrap().deterministic(),
+            MlDsaAlgo::external_mu().deterministic(),
+        ] {
+            let input = if algo.external_mu {
+                vec![1; MLDSA_MU_LEN]
+            } else {
+                vec![1; 17]
+            };
+            let mut output = vec![0xA5; variant.sig_len()];
+            assert_eq!(
+                algo.sign(&sk, &input, Some(&mut output)),
+                Err(CryptoError::MlDsaDeterministicUnsupported)
+            );
+            assert!(output.iter().all(|byte| *byte == 0xA5));
+            assert_eq!(algo.sign(&sk, &input, None).unwrap(), variant.sig_len());
+        }
+        let mut hedged = MlDsaAlgo::new(b"ctx").unwrap();
+        let sig = Signer::sign_vec(&mut hedged, &sk, b"message").unwrap();
+        let mut verifier = MlDsaAlgo::new(b"ctx").unwrap().deterministic();
+        assert!(verifier.verify(&pk, b"message", &sig).unwrap());
     }
 }
 
