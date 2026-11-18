@@ -195,7 +195,7 @@ pub enum HsmVaultKeyKind {
     /// Partition Unique Secret — the 48 B HMAC-SHA-384-sized root of the
     /// partition key schedule.  Initially the Unique Machine Secret (UMS)
     /// derived in `PartInit` from `UDS` plus the request-side inputs
-    /// (`MachineSeed`, `PartPolicy`, `POTAThumbprint`); `PartFinal`
+    /// (`MachineSeed`, `PartPolicy`); `PartFinal`
     /// replaces it with the Unique Partition Secret (UPS).
     ///
     /// Persisted in the partition key vault for the lifetime of the

@@ -769,6 +769,7 @@ impl HsmRsa for UnoHsmPal {
         em[3 + ps_len..3 + ps_len + prefix.len()].copy_from_slice(prefix);
         em[3 + ps_len + prefix.len()..k].copy_from_slice(message_hash);
 
+        em.reverse();
         self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
             .await
     }
@@ -799,6 +800,8 @@ impl HsmRsa for UnoHsmPal {
         let em = alloc.dma_alloc(k)?;
         self.mod_exp_pub(io, key_size, pub_key, signature, em)
             .await?;
+        // PKA results are little-endian integers; EMSA is a big-endian byte string.
+        em.reverse();
 
         // Verify EM = 0x00 || 0x01 || PS(0xFF) || 0x00 || T
         if em[0] != 0x00 || em[1] != 0x01 {
@@ -1043,6 +1046,7 @@ impl HsmRsa for UnoHsmPal {
         // Clear top bit
         em[0] &= 0x7F;
 
+        em.reverse();
         self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
             .await
     }
@@ -1080,6 +1084,7 @@ impl HsmRsa for UnoHsmPal {
 
         self.mod_exp_pub(io, key_size, pub_key, signature, em)
             .await?;
+        em.reverse();
 
         // Check trailer
         if em[k - 1] != 0xBC {

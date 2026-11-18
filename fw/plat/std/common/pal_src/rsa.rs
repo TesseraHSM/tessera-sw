@@ -8,9 +8,8 @@
 //! keys, wire form for public keys) and the
 //! [`StdRsa`](crate::drivers::rsa::StdRsa) driver (OpenSSL key handles).
 //!
-//! Raw key generation and modular exponentiation are implemented. The
-//! newer padding-helper entry points are present in the trait but are not
-//! currently used by the standard PAL, so they are left as `todo!()`.
+//! Raw key generation, modular exponentiation, signature verification and
+//! OAEP decryption are implemented. Unused padding helpers remain unfinished.
 
 use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::ExportableHsmRsaKey;
@@ -215,17 +214,26 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_pkcs1_verify<'a>(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _algo: HsmHashAlgo,
-        _pub_key: &HsmDmaBuf,
-        _message_hash: &HsmDmaBuf,
-        _signature: &HsmDmaBuf,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
         Self: 'a,
     {
-        todo!()
+        self.rsa
+            .verify(
+                key_size,
+                crate::hash::to_hash_algo(algo)?,
+                pub_key,
+                message_hash,
+                signature,
+                None,
+            )
+            .await
     }
 
     async fn rsa_oaep_encrypt<'a>(
@@ -302,17 +310,26 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_pss_verify<'a>(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _algo: HsmHashAlgo,
-        _pub_key: &HsmDmaBuf,
-        _message_hash: &HsmDmaBuf,
-        _salt_len: usize,
-        _signature: &HsmDmaBuf,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        salt_len: usize,
+        signature: &HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
         Self: 'a,
     {
-        todo!()
+        self.rsa
+            .verify(
+                key_size,
+                crate::hash::to_hash_algo(algo)?,
+                pub_key,
+                message_hash,
+                signature,
+                Some(salt_len),
+            )
+            .await
     }
 }

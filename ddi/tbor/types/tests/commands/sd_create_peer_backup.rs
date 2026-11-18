@@ -29,32 +29,22 @@ use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::PartPolicy;
+use tsra_ddi_tbor_types::PolicyFlags;
+use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreatePeerBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
-use crate::commands::sd_create_remote_backup::backing_part_policy;
+use crate::commands::sd_create_remote_backup::backing_test_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 use crate::commands::sd_create_remote_backup::ReceiverEvidence;
-
-/// Byte offset of the `flags` field in the 484-byte `PartPolicy` image.
-const OFF_FLAGS: usize = 418;
-
-/// `PolicyFlags::ALLOW_PEER_CLONING` (bit 2) — mirror of the firmware
-/// policy flag that gates the peer-backup commands.
-const ALLOW_PEER_CLONING: u8 = 1 << 2;
 
 /// A finalized backing partition ready for the peer-backup commands: the
 /// live CO session, its exact policy image, its PID public key (every
@@ -62,7 +52,7 @@ const ALLOW_PEER_CLONING: u8 = 1 << 2;
 /// (replayed on a rebooted peer to restore `PartLocalMK`).
 pub(crate) struct PeerPartition {
     pub(crate) session: SessionHandshake,
-    pub(crate) policy: [u8; PART_POLICY_LEN],
+    pub(crate) policy: Vec<u8>,
     pub(crate) pid_pub: [u8; RAW_PUB_LEN],
     pub(crate) local_mk_backup: Vec<u8>,
 }
@@ -84,19 +74,21 @@ pub(crate) fn finalize_peer_partition(
     let mut pid_pub = [0u8; RAW_PUB_LEN];
     pid_pub.copy_from_slice(&info.pid_pub_key);
 
-    let mut policy = backing_part_policy(
+    let flags = if allow_cloning {
+        PolicyFlags::ALLOW_PEER_CLONING
+    } else {
+        0
+    };
+    let policy = backing_test_policy(
         &info.pid,
         &info.pid_pub_key,
         &sata.raw_pub(),
         &pota.raw_pub(),
-    );
-    if allow_cloning {
-        policy[OFF_FLAGS] |= ALLOW_PEER_CLONING;
-    }
+    )
+    .with_flags(flags)
+    .encode();
 
-    let init = ctx
-        .part_init(&session, seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, seed, &policy).expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -117,7 +109,7 @@ pub(crate) fn create_peer_req(
     session_id: u16,
     masked_sealing_key: &[u8],
     evidence: &ReceiverEvidence,
-    policy: &[u8; PART_POLICY_LEN],
+    policy: &[u8],
     pok_local_backup: &[u8; MASKED_SD_LEN],
 ) -> TborSdCreatePeerBackupReq {
     TborSdCreatePeerBackupReq {
@@ -125,7 +117,7 @@ pub(crate) fn create_peer_req(
         masked_sealing_key: masked_sealing_key
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
-        policy: PartPolicy::try_read_from_bytes(policy).expect("policy image is canonical"),
+        policy: policy.to_vec(),
         dst_mfgr_cert_chain: evidence.mfgr.clone(),
         dst_owner_cert_chain: evidence.owner.clone(),
         dst_part_owner_cert_chain: evidence.part_owner.clone(),
@@ -309,7 +301,7 @@ fn sd_create_peer_backup_rejects_before_finalize() {
     let req = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: Vec::new(),
         dst_mfgr_cert_chain: Vec::new(),
         dst_owner_cert_chain: Vec::new(),
         dst_part_owner_cert_chain: Vec::new(),
@@ -398,11 +390,16 @@ fn sd_create_peer_backup_rejects_zero_local_backup() {
 fn sd_create_peer_backup_rejects_modified_policy() {
     let (ctx, mut req, evidence) = valid_peer_backup_fixture();
 
-    let mut policy_bytes = [0u8; PART_POLICY_LEN];
-    policy_bytes.copy_from_slice(req.policy.as_bytes());
-    policy_bytes[OFF_FLAGS] &= !ALLOW_PEER_CLONING;
-
-    req.policy = PartPolicy::try_read_from_bytes(&policy_bytes).expect("modified policy image");
+    // The canonical encoding places the one-byte `flags` entry (key 7)
+    // immediately before the fixture's 64-byte `info` entry (key 8).
+    const INFO_ENTRY_HEAD: [u8; 3] = [PolicyKey::Info as u8, 0x58, 64];
+    let info_pos = req
+        .policy
+        .windows(INFO_ENTRY_HEAD.len())
+        .position(|w| w == INFO_ENTRY_HEAD)
+        .expect("policy carries the 64-byte fixture info");
+    assert_eq!(req.policy[info_pos - 2], PolicyKey::Flags as u8);
+    req.policy[info_pos - 1] &= !PolicyFlags::ALLOW_PEER_CLONING;
 
     assert!(
         ctx.tbor_oob(&req, &evidence.oob()).is_err(),

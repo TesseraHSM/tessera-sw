@@ -30,7 +30,6 @@ use tsra_ddi_tbor_test_harness::build_part_init_mach_seed_aad;
 use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborPartInitReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
@@ -38,22 +37,13 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use super::build_envelope;
 use super::known_good_part_policy;
 use super::mach_seed;
-use super::pota_thumbprint;
 
 fn make_part_init_req(session_id: u16, mach_seed_envelope: Vec<u8>) -> TborPartInitReq {
-    let mut req = TborPartInitReq {
+    TborPartInitReq {
         session_id,
         mach_seed_envelope,
-        ..Default::default()
-    };
-
-    req.part_policy =
-        <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(&known_good_part_policy())
-            .expect("known-good policy parses");
-
-    req.pota_thumbprint.copy_from_slice(&pota_thumbprint());
-
-    req
+        part_policy: known_good_part_policy(),
+    }
 }
 
 /// Bit-flip the ciphertext of a valid `mach_seed_envelope`.  AEAD-GCM
@@ -714,30 +704,6 @@ fn part_init_all_zero_mach_seed() {
 
     ctx.tbor(&req)
         .expect("correctly authenticated all-zero mach_seed is accepted");
-}
-
-/// Verify that PartInit accepts a caller-supplied POTA thumbprint.
-///
-/// The thumbprint is input used during partition initialization rather than
-/// a value validated against an existing firmware-side thumbprint. Changing
-/// its contents therefore must not cause PartInit to reject an otherwise
-/// valid request.
-#[test]
-fn part_init_accepts_nondefault_pota_thumbprint() {
-    let ctx = TestCtx::new();
-    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-
-    let valid_envelope =
-        encrypt_mach_seed_envelope(&session, &mach_seed()).expect("seal mach_seed envelope");
-
-    let mut modified_thumbprint = pota_thumbprint();
-    modified_thumbprint[0] ^= 0x01;
-
-    let mut req = make_part_init_req(session.session_id, valid_envelope);
-    req.pota_thumbprint.copy_from_slice(&modified_thumbprint);
-
-    ctx.tbor(&req)
-        .expect("PartInit accepts a caller-supplied POTA thumbprint");
 }
 
 /// Reject an envelope whose four-byte format magic does not match

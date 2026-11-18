@@ -9,8 +9,10 @@
 //!
 //! * [`SealingSession`] — open and factory-reset a partition, rotate the
 //!   Crypto-Officer PSK, and hand back a live CO session.
-//! * [`SecurityDomainEnv`] — serves the complete policy and anchor
-//!   certificate thumbprints for the domain's lifetime.
+//! * [`PartPolicy`] — builds and parses the deterministic CBOR partition
+//!   policy; [`spki_thumbprint`] derives its public-key thumbprints.
+//! * [`SecurityDomainEnv`] — serves the complete policy for the domain's
+//!   lifetime.
 //! * [`SecurityDomainStore`] — atomically persists [`PartitionState`] and
 //!   [`SecurityDomainState`] recovery records in one save.
 //! * [`mint_sealing_key`] — the HSM-side sealing key.
@@ -59,6 +61,7 @@ pub mod error;
 pub mod evidence;
 pub mod hsm;
 pub mod peer;
+pub mod policy;
 pub mod remote;
 pub mod sd;
 pub mod session;
@@ -74,6 +77,10 @@ pub use hsm::SealingKey;
 pub use hsm::RAW_PUB_LEN;
 pub use peer::PeerBackup;
 pub use peer::PreparedPeer;
+pub use policy::spki_thumbprint;
+pub use policy::PartPolicy;
+pub use policy::PolicyFields;
+pub use policy::Thumbprint;
 pub use remote::reseal_remote_backup;
 pub use remote::PreparedRemoteRestore;
 pub use remote::ResealedBackup;

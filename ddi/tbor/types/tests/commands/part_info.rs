@@ -24,7 +24,6 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 
 /// `DdiDeviceKind::Physical` discriminant — uno is a physical device.
 const DEVICE_KIND_PHYSICAL: u8 = 2;
@@ -177,13 +176,8 @@ fn part_info_reflects_part_init_transition() {
     // gate, then bind PTA / policy / POTA thumb on the rotated session.
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    ctx.part_init(
-        &session,
-        &mach_seed(),
-        &known_good_part_policy(),
-        &pota_thumbprint(),
-    )
-    .expect("PartInit");
+    ctx.part_init(&session, &mach_seed(), &known_good_part_policy())
+        .expect("PartInit");
 
     // After PartInit: the lifecycle state advances to Initializing while
     // the stable device and identity fields remain unchanged.
@@ -392,13 +386,8 @@ fn part_info_initializing_state_persists_after_session_close() {
 
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    ctx.part_init(
-        &session,
-        &mach_seed(),
-        &known_good_part_policy(),
-        &pota_thumbprint(),
-    )
-    .expect("PartInit");
+    ctx.part_init(&session, &mach_seed(), &known_good_part_policy())
+        .expect("PartInit");
 
     let initializing = ctx
         .tbor(&TborPartInfoReq::new())
@@ -500,13 +489,8 @@ fn part_info_initializing_independent_of_session_state() {
     // Move the partition from Enabled to Initializing.
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    ctx.part_init(
-        &session,
-        &mach_seed(),
-        &known_good_part_policy(),
-        &pota_thumbprint(),
-    )
-    .expect("PartInit");
+    ctx.part_init(&session, &mach_seed(), &known_good_part_policy())
+        .expect("PartInit");
 
     ctx.session_close(session.session_id)
         .expect("close PartInit CO session");

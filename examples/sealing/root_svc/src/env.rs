@@ -10,26 +10,27 @@
 //!
 //! It is the application's trust authority, so it lives here in the app
 //! rather than in the reusable `tsra_sealing_api` crate. It supplies the
-//! complete policy and thumbprints through [`SecurityDomainEnv`],
+//! complete policy through [`SecurityDomainEnv`],
 //! the local POTA signing callback, and the receiver
 //! certificate chain supplied to that flow.
 
 use anyhow::Context;
 use anyhow::Result;
 use tsra_api::HsmPartition;
-use tsra_api::PartPolicy;
-use tsra_api::PartPolicyBuilder;
-use tsra_api::PolicyKeyKind;
+use tsra_api::PolicyFlags;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::ImportableKey;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
-use tsra_ddi_tbor_types::POLICY_INFO_LEN;
+use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
 use tsra_sealing_api::device_cert_chain;
 use tsra_sealing_api::load_local_recovery;
 use tsra_sealing_api::load_partition_recovery;
+use tsra_sealing_api::spki_thumbprint;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::PartitionState;
+use tsra_sealing_api::PolicyFields;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_api::RAW_PUB_LEN;
@@ -55,8 +56,6 @@ pub struct SelfContainedEnv {
     sata_certificate: Option<Vec<u8>>,
     machine_seed: [u8; MACH_SEED_LEN],
     policy: PartPolicy,
-    pota_thumbprint: [u8; 48],
-    sata_thumbprint: [u8; 48],
     mfgr_cert_chain: Vec<Vec<u8>>,
     store: FileStore,
 }
@@ -82,24 +81,26 @@ impl SelfContainedEnv {
             .partition
             .ex_pub_key()
             .context("read partition identity public key")?;
-        let pid_pub: [u8; RAW_PUB_LEN] = pid_pub
-            .as_slice()
-            .try_into()
-            .context("partition identity public key must be a raw P-384 point")?;
-        let policy = PartPolicyBuilder::new()
-            .version(1, 0)
-            .pota_key(PolicyKeyKind::Ecc384, &pota.raw_pub())
-            .sata_key(PolicyKeyKind::Ecc384, &sata.raw_pub())
-            .backup_part_id(&pid)
-            .backup_part_pub_key(PolicyKeyKind::Ecc384, &pid_pub)
-            .info(&[0xAB; POLICY_INFO_LEN])
-            .allow_peer_cloning(true)
-            .require_trusted_sa_key(false)
-            .build()
-            .context("build unified partition policy")?;
+        let policy = PartPolicy::new(PolicyFields {
+            pota_spki_thumbprint: spki_thumbprint(&pota.raw_pub())?,
+            sata_spki_thumbprint: spki_thumbprint(&sata.raw_pub())?,
+            sapota_spki_thumbprint: None,
+            backup_part: Some((
+                pid.as_slice()
+                    .try_into()
+                    .context("partition id length mismatch")?,
+                spki_thumbprint(&pid_pub)
+                    .context("partition identity public key must be a raw P-384 point")?,
+            )),
+            flags: PolicyFlags::new()
+                .with_allow_peer_cloning(true)
+                .with_require_trusted_sa_key(false),
+            info: Some(vec![0xAB; POLICY_INFO_MAX_LEN]),
+            data_spki_thumbprint: None,
+        })
+        .context("build unified partition policy")?;
         let pota_certificate = pota.self_cert();
         let sata_certificate = sata.self_cert();
-        let pota_thumbprint = thumbprint(&pota_certificate);
         let sata_thumbprint = thumbprint(&sata_certificate);
         let store = store.with_authority(AuthorityState {
             pota_private_key: pota.private_key_der()?,
@@ -118,8 +119,6 @@ impl SelfContainedEnv {
             sata_certificate: Some(sata_certificate),
             machine_seed,
             policy,
-            pota_thumbprint,
-            sata_thumbprint,
             mfgr_cert_chain,
             store,
         })
@@ -144,18 +143,15 @@ impl SelfContainedEnv {
         let authority = store.load_authority()?.context(
             "saved state has no POTA signer or machine seed; records from older create commands cannot be restored by this service",
         )?;
-        let policy = PartPolicy::ref_from_wire(&partition.policy)
-            .context("decode saved partition policy")?
-            .clone();
+        let policy =
+            PartPolicy::from_bytes(&partition.policy).context("decode saved partition policy")?;
         let pota = CaKey::from_der(&authority.pota_private_key)?;
         anyhow::ensure!(
-            policy.pota_pub_key.kind() == PolicyKeyKind::Ecc384
-                && policy.pota_pub_key.len() == RAW_PUB_LEN
-                && policy.pota_pub_key.data == pota.raw_pub(),
+            policy.pota_spki_thumbprint == spki_thumbprint(&pota.raw_pub())?,
             "saved POTA signing key does not match the partition policy",
         );
         anyhow::ensure!(
-            policy.sapota_pub_key.is_empty(),
+            policy.sapota_spki_thumbprint.is_none(),
             "this demo does not support restoring a SAPOTA-bound policy"
         );
         anyhow::ensure!(
@@ -169,9 +165,7 @@ impl SelfContainedEnv {
             Some(saved) => {
                 let sata = CaKey::from_der(&saved.private_key).context("load saved SATA signer")?;
                 anyhow::ensure!(
-                    policy.sata_pub_key.kind() == PolicyKeyKind::Ecc384
-                        && policy.sata_pub_key.len() == RAW_PUB_LEN
-                        && policy.sata_pub_key.data == sata.raw_pub(),
+                    policy.sata_spki_thumbprint == spki_thumbprint(&sata.raw_pub())?,
                     "saved SATA signing key does not match the partition policy"
                 );
                 verify_certificate_chain(std::slice::from_ref(&saved.certificate))
@@ -181,7 +175,6 @@ impl SelfContainedEnv {
             }
             None => (None, None),
         };
-        let pota_thumbprint = thumbprint(&authority.pota_certificate);
         Ok(Self {
             pota,
             pota_certificate: authority.pota_certificate.clone(),
@@ -189,8 +182,6 @@ impl SelfContainedEnv {
             sata_certificate,
             machine_seed: authority.machine_seed,
             policy,
-            pota_thumbprint,
-            sata_thumbprint: authority.sata_thumbprint,
             mfgr_cert_chain: Vec::new(),
             store: store.with_authority(authority),
         })
@@ -258,18 +249,6 @@ impl SecurityDomainEnv for SelfContainedEnv {
 
     fn policy(&self) -> &PartPolicy {
         &self.policy
-    }
-
-    fn pota_thumbprint(&self) -> &[u8] {
-        &self.pota_thumbprint
-    }
-
-    fn sata_thumbprint(&self) -> &[u8] {
-        &self.sata_thumbprint
-    }
-
-    fn sapota_thumbprint(&self) -> Option<&[u8]> {
-        None
     }
 
     fn mfgr_cert_chain(&self) -> &[Vec<u8>] {

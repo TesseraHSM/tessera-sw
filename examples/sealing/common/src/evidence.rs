@@ -8,13 +8,15 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_api::PartPolicy;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
 use tsra_crypto::ImportableKey;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
+use tsra_sealing_api::Thumbprint;
 use tsra_sealing_api::RAW_PUB_LEN;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
 use tsra_sealing_report::verify_certificate_chain;
@@ -22,7 +24,6 @@ use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::Curve;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
-use zerocopy::IntoBytes;
 
 pub fn cert_public(cert: &[u8]) -> Result<Vec<u8>> {
     let cert = X509Certificate::from_der(cert)?;
@@ -60,19 +61,19 @@ pub fn verify_report(
 }
 
 /// Check peer evidence whose partition-owner chain is anchored to the policy
-/// POTA key, matching the firmware peer-clone check.
+/// POTA thumbprint, matching the firmware peer-clone check.
 pub fn verify_peer(evidence: &Evidence, policy: &PartPolicy) -> Result<()> {
-    verify_attested_key(evidence, policy, &policy.pota_pub_key.data)?;
+    verify_attested_key(evidence, policy, &policy.pota_spki_thumbprint)?;
     Ok(())
 }
 
 /// Check required manufacturer/partition-owner and optional device-owner chains,
-/// a caller-selected partition-owner anchor,
+/// a caller-selected partition-owner anchor (an SPKI key thumbprint),
 /// and the report's policy. Return the PID and attested key independently.
 pub fn verify_attested_key(
     evidence: &Evidence,
     policy: &PartPolicy,
-    part_owner_anchor: &[u8],
+    part_owner_anchor: &Thumbprint,
 ) -> Result<([u8; RAW_PUB_LEN], Vec<u8>)> {
     let (pid, public) = verify_report(&evidence.mfgr_cert_chain, &evidence.report, policy)?;
     let owner = (!evidence.owner_cert_chain.is_empty()).then_some(&evidence.owner_cert_chain);
@@ -90,7 +91,7 @@ pub fn verify_attested_key(
         .first()
         .context("missing partition-owner root")?;
     anyhow::ensure!(
-        cert_public(root)? == part_owner_anchor,
+        spki_thumbprint(&cert_public(root)?)? == *part_owner_anchor,
         "evidence not anchored to the required partition-owner authority"
     );
     Ok((pid, public))

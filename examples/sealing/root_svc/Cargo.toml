@@ -25,7 +25,6 @@ tsra_sealing_api.workspace = true
 tsra_sealing_common.workspace = true
 tsra_sealing_report.workspace = true
 x509.workspace = true
-zerocopy.workspace = true
 zeroize.workspace = true
 
 [lints]
