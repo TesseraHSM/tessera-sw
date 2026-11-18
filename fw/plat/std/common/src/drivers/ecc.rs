@@ -240,8 +240,8 @@ impl StdEcc {
     /// OpenSSL pub-key handle and converts byte order (plus P-521
     /// per-coordinate lane de-padding) internally.
     ///
-    /// `hash` is the operand-order digest, symmetric with
-    /// [`Self::ecc_sign_op`].
+    /// `hash` is the operand-order digest of at most 64 bytes, symmetric
+    /// with [`Self::ecc_sign_op`].
     ///
     /// `pub_op` and `sig_op` must each be at least
     /// `2 * wire_coord_len(curve, form)` bytes.
@@ -263,15 +263,14 @@ impl StdEcc {
         sig_be[..coord_len].copy_from_slice(&r_be[..coord_len]);
         sig_be[coord_len..sig_len].copy_from_slice(&s_be[..coord_len]);
 
-        // The PAL trait allows a `hash` buffer larger than the curve digest;
-        // verify only the leading curve-digest bytes (matching the uno PAL,
-        // which feeds the PKA exactly `hash_size(curve)`).
-        let digest_len = ecc_digest_len(curve);
-        let digest = hash.get(..digest_len).ok_or(HsmError::InvalidArg)?;
+        // OpenSSL truncates a digest longer than the curve order, as on sign.
+        if hash.len() > 64 {
+            return Err(HsmError::InvalidArg);
+        }
         let mut hash_be = [0u8; 64];
-        byte_order::int_copy_to_be(self.form.order, &mut hash_be[..digest_len], digest)?;
+        byte_order::int_copy_to_be(self.form.order, &mut hash_be[..hash.len()], hash)?;
 
-        self.ecc_verify(&key, &hash_be[..digest_len], &sig_be[..sig_len])
+        self.ecc_verify(&key, &hash_be[..hash.len()], &sig_be[..sig_len])
             .await
     }
 
@@ -525,6 +524,7 @@ fn priv_key_len(curve: EccCurve) -> usize {
 }
 
 /// ECDSA digest length for the curve's standard hash (SHA-256/384/512).
+#[cfg(test)]
 fn ecc_digest_len(curve: EccCurve) -> usize {
     match curve {
         EccCurve::P256 => 32,

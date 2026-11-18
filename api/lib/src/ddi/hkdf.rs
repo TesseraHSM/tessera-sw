@@ -175,7 +175,7 @@ fn tbor_hkdf_key_type(props: &HsmKeyProps) -> HsmResult<u8> {
 }
 
 /// Maps `HsmHashAlgo` to the 1-byte TBOR `HashAlgo` discriminant.
-fn tbor_hash_algo(algo: HsmHashAlgo) -> u8 {
+pub(crate) fn tbor_hash_algo(algo: HsmHashAlgo) -> u8 {
     match algo {
         HsmHashAlgo::Sha1 => HASH_ALGO_SHA1,
         HsmHashAlgo::Sha256 => HASH_ALGO_SHA256,
