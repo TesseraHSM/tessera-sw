@@ -164,6 +164,80 @@ fn test_hkdf_expand_only() {
 }
 
 #[test]
+fn test_hkdf_expand_non_digest_sized_prks() {
+    // RFC 5869 expand recurrence evaluated independently with Python hashlib/hmac.
+    for (hash, prk_len, info, expected) in [
+        (
+            HashAlgo::sha1(),
+            32,
+            b"".as_slice(),
+            "ee96669ded54b8c0567b955c3fcfe3d0f57a7fd4324ce60b49c89f7fcfd202e62e28f40cca5b97ec28",
+        ),
+        (
+            HashAlgo::sha256(),
+            48,
+            b"info".as_slice(),
+            concat!(
+                "ba8f468b66c731f921efec867cc364eb1a9d9956c455c74b51d9ba04bd1aa040f2cd9b4c",
+                "fdba97a480cbe2948dba2da1344a605858a73098b6de3f438fc15ba567",
+            ),
+        ),
+        (
+            HashAlgo::sha384(),
+            32,
+            b"info".as_slice(),
+            concat!(
+                "249ec18946feaaa977cc3f2458850da241e90899c3e042673fec10e2721caa2feb8df1a56048734f78b5fc85b099edf885",
+                "c7614e06cdfd3bce5acdf89c6307553ffa497e243876426966d30685ed2e3fb81fabd71b24aba830a9af01c1c3aef34d",
+            ),
+        ),
+        (
+            HashAlgo::sha384(),
+            66,
+            b"info".as_slice(),
+            concat!(
+                "3f9980078bb9976065b8fb3b30a8bc6b6ad826c04a66f49c5215e78fb7039bfdb0fd0491879ac847e413528475df5f0c",
+                "8909adb0b235fbea727e42eb229ca684bcf9a05ad9605779c7ae2f3a51bc1bde22faa78625d1dfd502a2664c8f1b6c75f9",
+            ),
+        ),
+        (
+            HashAlgo::sha384(),
+            68,
+            b"info".as_slice(),
+            concat!(
+                "89935be87dcd98f7464ffeeb7e0d85722bcebdb3fe1046852e2c342512bac1c0867f55f20b778fb3f296f3cf8980d5cbf",
+                "d2dbb53b0a1bb6e81f97c4c5d998059fd118707a31631315ee0986d96b9a4a2beae74a0d902d8b2ddd656268092016f97",
+            ),
+        ),
+        (
+            HashAlgo::sha512(),
+            257,
+            b"".as_slice(),
+            concat!(
+                "3fe9406061b0d9a01e03dd6b5ec47410a4519809e236ddd91cdb5b907d7659aad",
+                "22b22e6359debcba6135b2db65537dd814fc6bbdaaf04c7f516ffde76ff7264bd",
+            ),
+        ),
+    ] {
+        let expected = hex::decode(expected).expect("HKDF expected output");
+        let output = hkdf_derive(
+            &hash,
+            HkdfMode::Expand,
+            &vec![0xA5; prk_len],
+            None,
+            Some(info),
+            expected.len(),
+        );
+        assert_eq!(
+            output,
+            expected,
+            "HKDF-Expand with {prk_len}-byte PRK and {}-byte digest",
+            hash.size()
+        );
+    }
+}
+
+#[test]
 fn test_hkdf_sha384_extract_then_expand() {
     let ikm = &[0x0b; 22];
     let salt = &[

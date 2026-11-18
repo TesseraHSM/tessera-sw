@@ -282,7 +282,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         // Re-derive the wire public key and enforce COSE
                         // private/public consistency against `x` / `y`.
                         let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
-                        pal.ecc_pub_from_priv(io, curve, vault, &mut pub_out[..wire_pub_len])
+                        pal.ecc_pub_from_priv(io, curve, vault, Some(&mut pub_out[..wire_pub_len]))
                             .await?;
                         if !pub_key_matches(
                             P::BYTE_ORDER,

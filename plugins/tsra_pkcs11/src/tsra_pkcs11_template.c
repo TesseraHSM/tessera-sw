@@ -55,6 +55,12 @@ static const tsra_pkcs11_cipher_mech CIPHER_MECHS[] = {
     { CKM_AES_XTS, TSRA_PKCS11_KIND_AES_XTS, CKK_AES_XTS },
 };
 
+static const tsra_pkcs11_sign_mech SIGN_MECHS[] = {
+    { CKM_ECDSA, CKK_EC, false },       { CKM_ECDSA_SHA1, CKK_EC, true },
+    { CKM_ECDSA_SHA256, CKK_EC, true }, { CKM_ECDSA_SHA384, CKK_EC, true },
+    { CKM_ECDSA_SHA512, CKK_EC, true },
+};
+
 const CK_ATTRIBUTE *tsra_pkcs11_tmpl_find(
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
@@ -95,13 +101,12 @@ _Static_assert(sizeof(CK_OBJECT_CLASS) == sizeof(CK_ULONG), "CKA_CLASS is CK_ULO
 _Static_assert(sizeof(CK_KEY_TYPE) == sizeof(CK_ULONG), "CKA_KEY_TYPE is CK_ULONG-wide");
 
 /*
- * Read a CK_ULONG-wide template attribute into *out; length must match exactly.
  * pValue is whatever pointer the caller handed us and carries no alignment
  * guarantee (a template packed into a byte buffer is enough to misalign it),
  * so the value is copied out instead of dereferenced through a cast. Reading
  * a CK_BBOOL needs no such care: it is one byte wide.
  */
-static CK_RV tmpl_ulong(const CK_ATTRIBUTE *a, CK_ULONG *out)
+CK_RV tsra_pkcs11_tmpl_ulong(const CK_ATTRIBUTE *a, CK_ULONG *out)
 {
     if ((a == NULL) || (a->pValue == NULL) || (out == NULL))
     {
@@ -118,7 +123,7 @@ static CK_RV tmpl_ulong(const CK_ATTRIBUTE *a, CK_ULONG *out)
 /*
  * Entry `i` of a CK_MECHANISM_TYPE array attribute. The value is whatever
  * pointer the caller handed us, with no alignment guarantee, so it is copied
- * out rather than indexed through a cast (see tmpl_ulong).
+ * out rather than indexed through a cast (see tsra_pkcs11_tmpl_ulong).
  */
 static CK_MECHANISM_TYPE mech_at(const void *value, CK_ULONG i)
 {
@@ -258,7 +263,7 @@ CK_RV tsra_pkcs11_keygen_check_template(
         switch (a->type)
         {
         case CKA_CLASS:
-            rv = tmpl_ulong(a, &scalar);
+            rv = tsra_pkcs11_tmpl_ulong(a, &scalar);
             if (rv != CKR_OK)
             {
                 return rv;
@@ -269,7 +274,7 @@ CK_RV tsra_pkcs11_keygen_check_template(
             }
             break;
         case CKA_KEY_TYPE:
-            rv = tmpl_ulong(a, &scalar);
+            rv = tsra_pkcs11_tmpl_ulong(a, &scalar);
             if (rv != CKR_OK)
             {
                 return rv;
@@ -284,7 +289,7 @@ CK_RV tsra_pkcs11_keygen_check_template(
             have_key_type = CK_TRUE;
             break;
         case CKA_VALUE_LEN:
-            rv = tmpl_ulong(a, value_len);
+            rv = tsra_pkcs11_tmpl_ulong(a, value_len);
             if (rv != CKR_OK)
             {
                 return rv;
@@ -376,8 +381,7 @@ CK_RV tsra_pkcs11_keygen_check_template(
     return CKR_OK;
 }
 
-/* Append `a` unless the caller's template already carries the type. */
-static void tmpl_append(
+void tsra_pkcs11_tmpl_append(
     CK_ATTRIBUTE *full,
     CK_ULONG *n,
     const CK_ATTRIBUTE *tmpl,
@@ -418,16 +422,28 @@ CK_RV tsra_pkcs11_keygen_build_template(
     {
         full[k++] = tmpl[i];
     }
-    tmpl_append(full, &k, tmpl, count, (CK_ATTRIBUTE){ CKA_CLASS, &fill->cls, sizeof(fill->cls) });
-    tmpl_append(full, &k, tmpl, count, (CK_ATTRIBUTE){ CKA_KEY_TYPE, &fill->kt, sizeof(fill->kt) });
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
+        full,
+        &k,
+        tmpl,
+        count,
+        (CK_ATTRIBUTE){ CKA_CLASS, &fill->cls, sizeof(fill->cls) }
+    );
+    tsra_pkcs11_tmpl_append(
+        full,
+        &k,
+        tmpl,
+        count,
+        (CK_ATTRIBUTE){ CKA_KEY_TYPE, &fill->kt, sizeof(fill->kt) }
+    );
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
         count,
         (CK_ATTRIBUTE){ CKA_PRIVATE, &fill->btrue, sizeof(fill->btrue) }
     );
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
@@ -435,28 +451,28 @@ CK_RV tsra_pkcs11_keygen_build_template(
         (CK_ATTRIBUTE
         ){ CKA_ALLOWED_MECHANISMS, fill->mechs, policy->mech_count * sizeof(fill->mechs[0]) }
     );
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
         count,
         (CK_ATTRIBUTE){ CKA_SENSITIVE, &fill->btrue, sizeof(fill->btrue) }
     );
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
         count,
         (CK_ATTRIBUTE){ CKA_EXTRACTABLE, &fill->bfalse, sizeof(fill->bfalse) }
     );
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
         count,
         (CK_ATTRIBUTE){ CKA_ENCRYPT, &fill->btrue, sizeof(fill->btrue) }
     );
-    tmpl_append(
+    tsra_pkcs11_tmpl_append(
         full,
         &k,
         tmpl,
@@ -490,6 +506,18 @@ const tsra_pkcs11_cipher_mech *tsra_pkcs11_cipher_mech_find(CK_MECHANISM_TYPE me
         if (CIPHER_MECHS[i].mech == mech)
         {
             return &CIPHER_MECHS[i];
+        }
+    }
+    return NULL;
+}
+
+const tsra_pkcs11_sign_mech *tsra_pkcs11_sign_mech_find(CK_MECHANISM_TYPE mech)
+{
+    for (size_t i = 0; i < (sizeof(SIGN_MECHS) / sizeof(SIGN_MECHS[0])); i++)
+    {
+        if (SIGN_MECHS[i].mech == mech)
+        {
+            return &SIGN_MECHS[i];
         }
     }
     return NULL;

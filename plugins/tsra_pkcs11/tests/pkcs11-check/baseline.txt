@@ -41,8 +41,10 @@ tool testcases/test_mech_coverage.py::TestMechanismRegistryCoverage::test_advert
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_load_module_via_p11kit
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_list_modules
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_proxy_exists
+timing testcases/security/test_cve_regression.py::TestECDSATimingBasic::test_ecdsa_timing_variance
 timing testcases/security/test_padding_oracle.py::TestTimingBasic::test_aes_cbc_pad_decrypt_timing_sanity
 timing testcases/test_benchmark.py::test_bench_aes256_cbc_encrypt
 timing testcases/test_benchmark.py::test_bench_aes_keygen
+timing testcases/test_benchmark.py::test_bench_ecdsa_p256_sign
 timing testcases/test_benchmark.py::test_bench_sha256_digest
 import-refused testcases/test_surface_audit.py::TestMechanismLimitProbing::test_hmac_short_key

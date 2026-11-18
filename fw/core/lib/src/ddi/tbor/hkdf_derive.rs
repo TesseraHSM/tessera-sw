@@ -250,7 +250,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let prk = alloc.dma_alloc(algo.digest_len())?;
         let okm = alloc.dma_alloc(target.out_len)?;
         let derived = async {
-            pal.hkdf_extract(io, algo, salt, view.target_key, prk)
+            pal.hkdf_extract(io, algo, salt, view.target_key, Some(prk))
                 .await?;
             pal.hkdf_expand(io, algo, prk, info, okm).await
         }

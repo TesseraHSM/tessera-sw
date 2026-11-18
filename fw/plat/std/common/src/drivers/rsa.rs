@@ -50,6 +50,7 @@
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::HashAlgo;
+use tsra_crypto::Key;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
@@ -108,6 +109,42 @@ pub fn rsa_pub_wire(
         .map_err(|_| HsmError::RsaGenerateError)?;
     byte_order::int_from_be(order, e_out);
     Ok(wire_len)
+}
+
+/// Synchronous RSA-2048 PCT for lazy, await-free unwrapping-key provisioning.
+pub fn unwrapping_key_pct(key: &RsaPrivateKey) -> HsmResult<bool> {
+    if key.size() != 256 {
+        return Err(HsmError::RsaInvalidKeyLength);
+    }
+    let public = key.public_key().map_err(|_| HsmError::RsaGenerateError)?;
+    let mut input = zeroize::Zeroizing::new([0x5a; 256]);
+    input[0] = 0;
+    let mut middle = zeroize::Zeroizing::new([0u8; 256]);
+    let mut output = zeroize::Zeroizing::new([0xff; 256]);
+    let mut algo = RsaEncryptAlgo::with_no_padding();
+    if algo
+        .encrypt(&public, input.as_ref(), Some(middle.as_mut()))
+        .map_err(|_| HsmError::RsaEncryptFailed)?
+        != input.len()
+    {
+        return Err(HsmError::RsaEncryptFailed);
+    }
+    if algo
+        .decrypt(key, middle.as_ref(), Some(output.as_mut()))
+        .map_err(|_| HsmError::RsaDecryptFailed)?
+        != input.len()
+    {
+        return Err(HsmError::RsaDecryptFailed);
+    }
+    let diff = input
+        .iter()
+        .zip(output.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b));
+    let changed = input
+        .iter()
+        .zip(middle.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b));
+    Ok(core::hint::black_box(diff) == 0 && core::hint::black_box(changed) != 0)
 }
 
 /// Std RSA driver — software RSA via OpenSSL with async worker dispatch.
@@ -187,6 +224,13 @@ impl StdRsa {
     ) -> HsmResult<()> {
         let result = self.mod_exp_priv_result(priv_key, y, x.len()).await?;
         byte_order::int_copy_from_be(self.order, x, &result)
+    }
+
+    /// Validate an operand-order private input without performing exponentiation.
+    pub fn validate_mod_exp_priv_input(&self, priv_key: &RsaPrivateKey, y: &[u8]) -> HsmResult<()> {
+        let mut input = y.to_vec();
+        byte_order::int_to_be(self.order, &mut input);
+        reject_out_of_range_mod_exp_input(priv_key, &input)
     }
 
     /// Replace an operand-order input block with the private-key result.

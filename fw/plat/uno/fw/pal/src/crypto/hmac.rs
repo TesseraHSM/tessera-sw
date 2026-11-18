@@ -4,12 +4,12 @@
 //! [`HsmHmac`] implementation for the Uno PAL.
 //!
 //! Implements RFC 2104 HMAC over the on-chip SHA accelerator. Both
-//! one-shot and multi-step APIs are supported; multi-step state is
-//! allocated from an [`HsmScopedAlloc`].
+//! one-shot and multi-step APIs are supported; multi-step state uses
+//! caller-provided storage.
 //!
-//! ## Scoped state buffer
+//! ## State buffer
 //!
-//! Every multi-step call allocates a buffer of at least
+//! Multi-step initialization accepts a buffer of at least
 //! [`HsmHashAlgo::hmac_state_len`] bytes, partitioned as
 //! `[state(state_len) | pending(block_len) | opad(block_len)]`:
 //!
@@ -52,7 +52,7 @@ use crate::UnoHsmPal;
 // =============================================================================
 
 /// Maximum block length across all supported hash algorithms (SHA-512 = 128).
-const MAX_BLOCK_LEN: usize = HsmHashAlgo::Sha512.block_len();
+pub(super) const MAX_BLOCK_LEN: usize = HsmHashAlgo::Sha512.block_len();
 
 /// RFC 2104 inner padding byte (0x36).
 const HMAC_IPAD: u8 = 0x36;
@@ -66,13 +66,13 @@ const HMAC_OPAD: u8 = 0x5C;
 
 /// Multi-step HMAC context.
 ///
-/// Created by [`hmac_begin`](HsmHmac::hmac_begin) and consumed by
+/// Created by [`hmac_begin`](HsmHmac::hmac_begin) and finalized by
 /// [`hmac_finish`](HsmHmac::hmac_finish),
 /// [`hmac_finish_into`](HsmHmac::hmac_finish_into), or
 /// [`hmac_finish_verify`](HsmHmac::hmac_finish_verify). Carries the
 /// algorithm selection, running inner-hash byte count, and the
-/// alloc-allocated `[state | pending | opad]` buffer (see [module-level
-/// docs](self#scoped-state-buffer)).
+/// caller-provided `[state | pending | opad]` buffer (see [module-level
+/// docs](self#state-buffer)).
 #[derive(Debug)]
 pub struct HmacContext<'a> {
     /// Hash algorithm selected at [`hmac_begin`](HsmHmac::hmac_begin).
@@ -85,14 +85,15 @@ pub struct HmacContext<'a> {
     /// the length field in the SHA padding.
     byte_count: u32,
 
-    /// Scope-allocated `[state | pending | opad]` buffer.
+    /// Caller-provided `[state | pending | opad]` buffer.
     buf: &'a mut HsmDmaBuf,
 
     /// Number of valid bytes currently in the pending region.
     pending_len: u8,
+    active: bool,
 }
 
-impl<'a> HmacContext<'a> {
+impl HmacContext<'_> {
     /// Copies bytes from `data` into the pending region until it is
     /// full or `data` is exhausted.
     ///
@@ -161,27 +162,27 @@ impl ShaDigestContext for HmacContext<'_> {
 impl HsmHmac for UnoHsmPal {
     type HmacCtx<'a> = HmacContext<'a>;
 
-    /// Generate a random HMAC key.
-    ///
-    /// # Parameters
-    /// * `io` — PAL I/O handle for platform-mediated operations.
-    /// * `_algo` — hash algorithm the key will be used with (ignored;
-    ///   key length is determined by `key.len()`).
-    /// * `key` — destination buffer; every byte is overwritten with
-    ///   hardware-generated random bytes.
-    ///
-    /// # Returns
-    /// * `Ok(())` on success.
+    /// Query the requested key length or fill its prefix from the on-chip RNG.
+    /// The algorithm is informational; `key_len` determines the key length.
     ///
     /// # Errors
+    /// * [`HsmError::InvalidArg`] if the output is too short.
     /// * Any [`HsmError`] surfaced by the RNG driver.
     async fn hmac_gen_key(
         &self,
         io: &UnoHsmIo,
         _algo: HsmHashAlgo,
-        key: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.rng_fill_bytes(io, key)
+        key_len: usize,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let Some(key) = key else {
+            return Ok(key_len);
+        };
+        if key.len() < key_len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.rng_fill_bytes(io, &mut key[..key_len])?;
+        Ok(key_len)
     }
 
     /// One-shot HMAC sign: compute `HMAC(key, data)` and write the tag.
@@ -195,11 +196,11 @@ impl HsmHmac for UnoHsmPal {
     /// * `algo` — hash algorithm (selects digest/block lengths).
     /// * `key` — HMAC key bytes (any length).
     /// * `data` — message to authenticate (any length).
-    /// * `tag` — destination buffer for the tag. Must be at least
-    ///   `algo.digest_len()` bytes.
+    /// * `tag` — `None` queries the tag length; an output buffer must hold
+    ///   at least `algo.digest_len()` bytes.
     ///
     /// # Returns
-    /// * `Ok(())` on success.
+    /// * `Ok(len)` with the required length or bytes written.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `tag` is shorter than the
@@ -211,18 +212,25 @@ impl HsmHmac for UnoHsmPal {
         algo: HsmHashAlgo,
         key: &HsmDmaBuf,
         data: &HsmDmaBuf,
-        tag: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        tag: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        self.hmac_state_size(algo)?;
+        let len = algo.digest_len();
+        if data.len() > (u32::MAX as usize - algo.block_len()) || u32::try_from(key.len()).is_err()
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(tag) = tag else {
+            return Ok(len);
+        };
+        if tag.len() < len {
+            return Err(HsmError::InvalidArg);
+        }
         self.alloc_scoped_async(io, async |scope| {
-            if tag.len() < algo.digest_len() {
-                return Err(HsmError::InvalidArg);
-            }
-
             let hmac_buf = scope.dma_alloc(algo.hmac_state_len())?;
             let mut ctx = self.hmac_begin_in_buf(io, algo, key, hmac_buf).await?;
             self.hmac_continue(io, &mut ctx, data).await?;
-            self.hmac_finish(io, ctx, tag).await?;
-            Ok::<(), HsmError>(())
+            self.hmac_finish(io, &mut ctx, Some(tag)).await
         })
         .await
     }
@@ -263,42 +271,29 @@ impl HsmHmac for UnoHsmPal {
         .await
     }
 
-    /// Begin a multi-step HMAC computation.
-    ///
-    /// Performs RFC 2104 key conditioning, pre-computes the opad SHA
-    /// working state into the opad region of `state`, then primes the
-    /// inner hash with the ipad block.
-    ///
-    /// # Parameters
-    /// * `algo` — hash algorithm.
-    /// * `key` — HMAC key bytes (any length). Hashed down to
-    ///   `digest_len()` bytes if longer than `block_len()`.
-    /// * `alloc` — scoped allocator used for the internal HMAC state.
-    ///
-    /// # Returns
-    /// * `Ok(HmacContext)` ready to accept message bytes.
-    ///
-    /// # Errors
-    /// * [`HsmError::NotEnoughSpace`] if `alloc` cannot allocate the
-    ///   internal HMAC state buffer.
-    /// * Any [`HsmError`] surfaced by the SHA driver during key
-    ///   conditioning or opad pre-hashing.
+    fn hmac_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
+        ShaMode::try_from(algo)?;
+        Ok(algo.hmac_state_len())
+    }
+
+    /// Conditions the key and primes the inner hash in caller storage.
+    /// Effective-key scratch is internally scoped.
     async fn hmac_begin<'a>(
         &self,
-        _io: &UnoHsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
+        buf: &'a mut HsmDmaBuf,
     ) -> HsmResult<Self::HmacCtx<'a>>
     where
         Self: 'a,
     {
-        // Generic multi-step HMAC callers may already retain substantial
-        // Local (DTCM) scratch in the same scoped allocation (for example,
-        // HPKE KEM/KDF intermediates). Put the larger HMAC state in Global
-        // SRAM so CBC-HMAC does not exhaust the 2 KiB Local heap.
-        let buf = alloc.dma_alloc(algo.hmac_state_len())?;
-        self.hmac_begin_in_buf(_io, algo, key, buf).await
+        let state_len = self.hmac_state_size(algo)?;
+        if buf.len() < state_len || buf.as_ptr() as usize & 3 != 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        self.hmac_begin_in_buf(io, algo, key, &mut buf[..state_len])
+            .await
     }
 
     /// Feed arbitrary-length data into the inner hash.
@@ -326,13 +321,13 @@ impl HsmHmac for UnoHsmPal {
         self.hmac_continue_bytes(ctx, data).await
     }
 
-    /// Finalize the HMAC and copy the tag into `tag`. Consumes `ctx`.
+    /// Query the tag length, or finalize the HMAC and copy the tag.
     ///
     /// # Parameters
     /// * `io` — PAL I/O handle for platform-mediated operations.
     /// * `ctx` — context to finalize.
-    /// * `tag` — destination buffer for the final tag. Must be at least
-    ///   `algo.digest_len()` bytes.
+    /// * `tag` — `None` queries the length; an output buffer must hold
+    ///   at least `algo.digest_len()` bytes.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `tag` is shorter than the digest.
@@ -340,56 +335,65 @@ impl HsmHmac for UnoHsmPal {
     async fn hmac_finish(
         &self,
         io: &UnoHsmIo,
-        mut ctx: Self::HmacCtx<'_>,
-        tag: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        ctx: &mut Self::HmacCtx<'_>,
+        tag: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let _ = io;
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
         let digest_len = ctx.algo.digest_len();
+        let Some(tag) = tag else {
+            return Ok(digest_len);
+        };
         if tag.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
 
-        self.hmac_outer_compute(&mut ctx, OuterMode::IntoState)
-            .await?;
+        self.hmac_outer_compute(ctx, OuterMode::IntoState).await?;
         tag[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
-        Ok(())
+        Ok(digest_len)
     }
 
-    /// Finalize the HMAC and write the tag directly into `dest`.
-    /// Consumes `ctx`.
+    /// Query the tag length, or finalize the HMAC directly into `dest`.
     ///
     /// # Parameters
     /// * `io` — PAL I/O handle for platform-mediated operations.
     /// * `ctx` — context to finalize.
-    /// * `dest` — destination buffer. Must be non-empty; if shorter
-    ///   than `algo.digest_len()` the tag is truncated.
+    /// * `dest` — `None` queries the full length; an output buffer shorter
+    ///   than `algo.digest_len()` receives a truncated tag.
     ///
     /// # Returns
-    /// * `Ok(())` on success.
+    /// * `Ok(len)` with the full length in query mode or actual bytes written.
     ///
     /// # Errors
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_finish_into(
         &self,
         io: &UnoHsmIo,
-        mut ctx: Self::HmacCtx<'_>,
-        dest: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        ctx: &mut Self::HmacCtx<'_>,
+        dest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let _ = io;
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
         let digest_len = ctx.algo.digest_len();
+        let Some(dest) = dest else {
+            return Ok(digest_len);
+        };
 
         if dest.len() >= digest_len {
             // Direct DMA: SHA writes the outer hash straight into `dest`.
-            self.hmac_outer_compute(&mut ctx, OuterMode::IntoDest(&mut dest[..digest_len]))
+            self.hmac_outer_compute(ctx, OuterMode::IntoDest(&mut dest[..digest_len]))
                 .await?;
-            Ok(())
+            Ok(digest_len)
         } else {
             // Truncated: SHA writes to the state region, copy a prefix.
-            self.hmac_outer_compute(&mut ctx, OuterMode::IntoState)
-                .await?;
+            self.hmac_outer_compute(ctx, OuterMode::IntoState).await?;
             let dest_len = dest.len();
             dest.copy_from_slice(&ctx.buf[..dest_len]);
-            Ok(())
+            Ok(dest_len)
         }
     }
 
@@ -445,6 +449,9 @@ impl UnoHsmPal {
         ctx: &mut HmacContext<'_>,
         data: &HsmDmaBuf,
     ) -> HsmResult<()> {
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
         let block_len = ctx.algo.block_len();
 
         let remaining = if ctx.pending_len > 0 {
@@ -476,17 +483,34 @@ impl UnoHsmPal {
         key: &HsmDmaBuf,
         buf: &'a mut HsmDmaBuf,
     ) -> HsmResult<HmacContext<'a>> {
+        ShaMode::try_from(algo)?;
+        self.alloc_scoped_async(io, async move |scope| {
+            let effective_key = scope.dma_alloc(MAX_BLOCK_LEN)?;
+            self.hmac_begin_in_workspace(algo, key, buf, effective_key)
+                .await
+        })
+        .await
+    }
+
+    pub(super) async fn hmac_begin_in_workspace<'a>(
+        &self,
+        algo: HsmHashAlgo,
+        key: &HsmDmaBuf,
+        buf: &'a mut HsmDmaBuf,
+        effective_key: &mut HsmDmaBuf,
+    ) -> HsmResult<HmacContext<'a>> {
         // Reject algorithms the SHA engine cannot run before sizing the key
         // buffers by their block length.
         let mode = ShaMode::try_from(algo)?;
         let block_len = algo.block_len();
         let state_len = algo.state_len();
-        buf.fill(0);
+        if buf.len() < algo.hmac_state_len() || effective_key.len() < MAX_BLOCK_LEN {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        buf[..algo.hmac_state_len()].fill(0);
 
-        // `effective_key` must be DMA-accessible (SHA writes to it when
-        // key > block_len). Scoped alloc frees it after pad computation.
-        self.alloc_scoped_async(io, async |scope| {
-            let effective_key = scope.dma_alloc(MAX_BLOCK_LEN)?;
+        {
+            let effective_key = &mut effective_key[..MAX_BLOCK_LEN];
             effective_key.fill(0);
             if key.len() > block_len {
                 self.sha_oneshot(algo, key, &mut effective_key[..algo.digest_len()])
@@ -512,16 +536,14 @@ impl UnoHsmPal {
             for i in 0..block_len {
                 pending[i] = effective_key[i] ^ HMAC_IPAD;
             }
-
-            Ok::<(), HsmError>(())
-        })
-        .await?;
+        }
 
         let mut ctx = HmacContext {
             algo,
             byte_count: 0,
             buf,
             pending_len: block_len as u8,
+            active: true,
         };
         self.hmac_flush_pending(&mut ctx, false).await?;
         Ok(ctx)
@@ -605,6 +627,10 @@ impl UnoHsmPal {
         ctx: &mut HmacContext<'_>,
         mode: OuterMode<'_>,
     ) -> HsmResult<bool> {
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
+        ctx.active = false;
         // Step 1: flush remaining bytes through the inner hash with
         // padding enabled. The inner digest now lives in `ctx.buf[..]`.
         self.hmac_flush_pending(ctx, true).await?;

@@ -137,7 +137,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // signature slot is its tail; taking it there spares re-decoding the
         // frame just encoded from DMA memory.
         let signature = &mut response[len - curve.wire_sig_len(P::BYTE_ORDER)..len];
-        pal.ecc_sign(io, curve, key, &operand[..sign_len], signature)
+        pal.ecc_sign(io, curve, key, &operand[..sign_len], Some(signature))
             .await?;
         Ok(len)
     }

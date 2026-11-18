@@ -29,6 +29,7 @@ use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_upka::UpkaModSize;
 use tsra_fw_uno_drivers_upka::UpkaRsaKeyType;
 
+use super::hash::HsmHashContext;
 use super::reverse_copy;
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
@@ -259,6 +260,27 @@ fn mod_exp_input_in_range(n: &[u8], m: &[u8]) -> bool {
 // =============================================================================
 
 impl UnoHsmPal {
+    async fn rsa_mod_exp_pub_in_workspace(
+        &self,
+        key_size: HsmRsaKey,
+        key: &HsmDmaBuf,
+        x: &HsmDmaBuf,
+        y: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let k = key_size.modulus_len();
+        if key.len() != k + EXP_WIRE_LEN || workspace.len() < k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let pka_key = &mut workspace[..k + EXP_WIRE_LEN];
+        let (e, n) = pka_key.split_at_mut(EXP_WIRE_LEN);
+        e.copy_from_slice(&key[k..]);
+        n.copy_from_slice(&key[..k]);
+        self.pka
+            .rsa_mod_exp_pub(rsa_key_to_upka_key_type(key_size), pka_key, x, y)
+            .await
+    }
+
     async fn pss_message_digest<'a>(
         &'a self,
         io: &UnoHsmIo,
@@ -268,7 +290,24 @@ impl UnoHsmPal {
         digest: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()> {
-        let mut ctx = self.hash_begin(io, algo, alloc)?;
+        let state = alloc.dma_alloc(algo.hash_state_len())?;
+        self.pss_message_digest_in_workspace(io, algo, message_hash, salt, digest, state)
+            .await
+    }
+
+    async fn pss_message_digest_in_workspace(
+        &self,
+        io: &UnoHsmIo,
+        algo: HsmHashAlgo,
+        message_hash: &HsmDmaBuf,
+        salt: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        if workspace.len() < algo.hash_state_len() {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        let mut ctx = HsmHashContext::new(algo, &mut workspace[..algo.hash_state_len()]);
 
         self.hash_continue_bytes(&mut ctx, &[0u8; 8]).await?;
         self.hash_continue(io, &mut ctx, message_hash).await?;
@@ -277,11 +316,12 @@ impl UnoHsmPal {
         }
         self.hash_finish(
             io,
-            ctx,
-            &mut digest[..algo.digest_len()],
+            &mut ctx,
             HsmDigestForm::Standard,
+            Some(&mut digest[..algo.digest_len()]),
         )
         .await
+        .map(|_| ())
     }
     /// Compute the derived RSA-CRT PKA operands from the recovered primes.
     ///
@@ -428,10 +468,9 @@ impl HsmRsa for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         _key_size: HsmRsaKey,
-        _priv_key: &mut HsmDmaBuf,
-        _pub_key: &mut HsmDmaBuf,
         _pct: HsmRsaPct,
-    ) -> HsmResult<()> {
+        _out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
         Err(HsmError::UnsupportedCmd)
     }
 
@@ -441,8 +480,8 @@ impl HsmRsa for UnoHsmPal {
         key_size: HsmRsaKey,
         key: &HsmDmaBuf,
         y: &HsmDmaBuf,
-        x: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // FIPS / NIST-ACVP: the input `m` must satisfy `1 < m < n - 1`. The PKA
         // engine reduces `m mod n` and returns a valid result for out-of-range
         // inputs instead of rejecting them, so enforce the range in firmware
@@ -451,8 +490,18 @@ impl HsmRsa for UnoHsmPal {
         if !mod_exp_input_in_range(n, y) {
             return Err(HsmError::InvalidArg);
         }
+        let k = key_size.modulus_len();
+        let Some(x) = out else {
+            return Ok(k);
+        };
+        if x.len() < k {
+            return Err(HsmError::InvalidArg);
+        }
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
-        self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await
+        self.pka
+            .rsa_mod_exp_priv(upka_key_type, key, y, &mut x[..k])
+            .await?;
+        Ok(k)
     }
 
     async fn mod_exp_priv_in_place(
@@ -476,27 +525,33 @@ impl HsmRsa for UnoHsmPal {
     /// `key` is the wire public key that [`rsa_priv_pub_key`](HsmRsa::rsa_priv_pub_key)
     /// emits: `n ‖ e`, `k + 4` bytes, both little-endian. The PKA takes its
     /// public-key operand exponent first (`e ‖ n`), so the key is reordered
-    /// into the IO's scratch before the call. That copy is public and at most
-    /// 516 bytes; it stays allocated until the caller's scratch scope closes
-    /// or the IO ends.
+    /// into internally scoped scratch before the call. That copy is public
+    /// and at most 516 bytes; its storage is reclaimed when the operation ends.
     async fn mod_exp_pub(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         key: &HsmDmaBuf,
         x: &HsmDmaBuf,
-        y: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let k = key_size.modulus_len();
-        if key.len() != k + EXP_WIRE_LEN {
+        if key.len() != k + EXP_WIRE_LEN || x.len() != k {
             return Err(HsmError::InvalidArg);
         }
-        let upka_key_type = rsa_key_to_upka_key_type(key_size);
-        let pka_key = self.dma_alloc(io, k + EXP_WIRE_LEN)?;
-        let (e, n) = pka_key.split_at_mut(EXP_WIRE_LEN);
-        e.copy_from_slice(&key[k..]);
-        n.copy_from_slice(&key[..k]);
-        self.pka.rsa_mod_exp_pub(upka_key_type, pka_key, x, y).await
+        let Some(y) = out else {
+            return Ok(k);
+        };
+        if y.len() < k {
+            return Err(HsmError::InvalidArg);
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            let pka_key = scope.dma_alloc(k + EXP_WIRE_LEN)?;
+            self.rsa_mod_exp_pub_in_workspace(key_size, key, x, &mut y[..k], pka_key)
+                .await?;
+            Ok(k)
+        })
+        .await
     }
 
     fn rsa_priv_pub_key(
@@ -645,111 +700,122 @@ impl HsmRsa for UnoHsmPal {
 
     // ── PKCS#1 v1.5 encryption ─────────────────────────────────────
 
-    async fn rsa_pkcs1_encrypt<'a>(
+    async fn rsa_pkcs1_encrypt(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         pub_key: &HsmDmaBuf,
         message: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let k = key_size.modulus_len();
-        if message.len() > k - 11 || output.len() < k {
+        if message.len() > k - 11 || pub_key.len() != k + EXP_WIRE_LEN {
             return Err(HsmError::InvalidArg);
         }
-
-        let em = alloc.dma_alloc(k)?;
-        let m_len = message.len();
-
-        // EM = 0x00 || 0x02 || PS || 0x00 || M
-        em[0] = 0x00;
-        em[1] = 0x02;
-
-        // PS: non-zero random bytes, at least 8 bytes
-        let ps = &mut em[2..k - m_len - 1];
-        self.rng_fill_bytes(io, ps)?;
-        // Replace any zero bytes (PS must be non-zero)
-        for byte in ps.iter_mut() {
-            while *byte == 0 {
-                let mut replacement = [0u8; 1];
-                self.rng_fill_bytes(io, &mut replacement)?;
-                *byte = replacement[0];
-            }
+        let Some(output) = out else {
+            return Ok(k);
+        };
+        if output.len() < k {
+            return Err(HsmError::InvalidArg);
         }
+        self.alloc_scoped_async(io, async |scope| {
+            let workspace = scope.dma_alloc(2 * k + EXP_WIRE_LEN)?;
+            let (em, public_workspace) = workspace.split_at_mut(k);
+            let m_len = message.len();
 
-        em[k - m_len - 1] = 0x00;
-        em[k - m_len..].copy_from_slice(message);
+            // EM = 0x00 || 0x02 || PS || 0x00 || M
+            em[0] = 0x00;
+            em[1] = 0x02;
 
-        self.mod_exp_pub(io, key_size, pub_key, em, &mut output[..k])
-            .await
+            // PS: non-zero random bytes, at least 8 bytes
+            let ps = &mut em[2..k - m_len - 1];
+            self.rng_fill_bytes(io, ps)?;
+            // Replace any zero bytes (PS must be non-zero)
+            for byte in ps.iter_mut() {
+                while *byte == 0 {
+                    let mut replacement = [0u8; 1];
+                    self.rng_fill_bytes(io, &mut replacement)?;
+                    *byte = replacement[0];
+                }
+            }
+
+            em[k - m_len - 1] = 0x00;
+            em[k - m_len..].copy_from_slice(message);
+
+            self.rsa_mod_exp_pub_in_workspace(
+                key_size,
+                pub_key,
+                em,
+                &mut output[..k],
+                public_workspace,
+            )
+            .await?;
+            Ok(k)
+        })
+        .await
     }
 
-    async fn rsa_pkcs1_decrypt<'a>(
+    async fn rsa_pkcs1_decrypt(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         priv_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let k = key_size.modulus_len();
         if ciphertext.len() != k {
             return Err(HsmError::InvalidArg);
         }
 
-        let em = alloc.dma_alloc(k)?;
-        self.mod_exp_priv(io, key_size, priv_key, ciphertext, em)
-            .await?;
-
-        // Verify EM = 0x00 || 0x02 || PS || 0x00 || M
-        if em[0] != 0x00 || em[1] != 0x02 {
-            return Err(HsmError::RsaDecryptFailed);
-        }
-
-        // Find the 0x00 separator after PS (PS must be >= 8 bytes)
-        let sep = em[2..].iter().position(|&b| b == 0).map(|i| i + 2);
-        let sep = match sep {
-            Some(s) if s >= 10 => s,
-            _ => return Err(HsmError::RsaDecryptFailed),
+        rsa_modulus_le(key_size, priv_key)?;
+        let Some(output) = out else {
+            return Ok(key_size.max_pkcs1_message());
         };
+        self.alloc_scoped_async(io, async |scope| {
+            let em = scope.dma_alloc(k)?;
+            self.mod_exp_priv(io, key_size, priv_key, ciphertext, Some(em))
+                .await?;
 
-        let m_len = k - sep - 1;
-        if output.len() < m_len {
-            return Err(HsmError::InvalidArg);
-        }
+            // Verify EM = 0x00 || 0x02 || PS || 0x00 || M
+            if em[0] != 0x00 || em[1] != 0x02 {
+                return Err(HsmError::RsaDecryptFailed);
+            }
 
-        output[..m_len].copy_from_slice(&em[sep + 1..k]);
-        Ok(m_len)
+            // Find the 0x00 separator after PS (PS must be >= 8 bytes)
+            let sep = em[2..].iter().position(|&b| b == 0).map(|i| i + 2);
+            let sep = match sep {
+                Some(s) if s >= 10 => s,
+                _ => return Err(HsmError::RsaDecryptFailed),
+            };
+
+            let m_len = k - sep - 1;
+            if output.len() < m_len {
+                return Err(HsmError::InvalidArg);
+            }
+
+            output[..m_len].copy_from_slice(&em[sep + 1..k]);
+            Ok(m_len)
+        })
+        .await
     }
 
     // ── PKCS#1 v1.5 signatures ─────────────────────────────────────
 
-    async fn rsa_pkcs1_sign<'a>(
+    async fn rsa_pkcs1_sign(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Rejects SHA-3 and SHAKE before anything is sized by them.
         let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
-        if message_hash.len() != digest_len || signature.len() < k {
+        if message_hash.len() != digest_len {
             return Err(HsmError::InvalidArg);
         }
 
@@ -758,23 +824,34 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        let em = alloc.dma_alloc(k)?;
+        rsa_modulus_le(key_size, priv_key)?;
+        let Some(signature) = out else {
+            return Ok(k);
+        };
+        if signature.len() < k {
+            return Err(HsmError::InvalidArg);
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            let em = scope.dma_alloc(k)?;
 
-        // EM = 0x00 || 0x01 || PS(0xFF) || 0x00 || T
-        em[0] = 0x00;
-        em[1] = 0x01;
-        let ps_len = k - t_len - 3;
-        em[2..2 + ps_len].fill(0xFF);
-        em[2 + ps_len] = 0x00;
-        em[3 + ps_len..3 + ps_len + prefix.len()].copy_from_slice(prefix);
-        em[3 + ps_len + prefix.len()..k].copy_from_slice(message_hash);
+            // EM = 0x00 || 0x01 || PS(0xFF) || 0x00 || T
+            em[0] = 0x00;
+            em[1] = 0x01;
+            let ps_len = k - t_len - 3;
+            em[2..2 + ps_len].fill(0xFF);
+            em[2 + ps_len] = 0x00;
+            em[3 + ps_len..3 + ps_len + prefix.len()].copy_from_slice(prefix);
+            em[3 + ps_len + prefix.len()..k].copy_from_slice(message_hash);
 
-        em.reverse();
-        self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
-            .await
+            em.reverse();
+            self.mod_exp_priv(io, key_size, priv_key, em, Some(&mut signature[..k]))
+                .await?;
+            Ok(k)
+        })
+        .await
     }
 
-    async fn rsa_pkcs1_verify<'a>(
+    async fn rsa_pkcs1_verify(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
@@ -782,11 +859,7 @@ impl HsmRsa for UnoHsmPal {
         pub_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
         signature: &HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a,
-    {
+    ) -> HsmResult<bool> {
         // Rejects SHA-3 and SHAKE before the modular exponentiation, so an
         // unsupported hash is reported as such rather than as a bad
         // signature, and costs no PKA operation.
@@ -797,47 +870,50 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        let em = alloc.dma_alloc(k)?;
-        self.mod_exp_pub(io, key_size, pub_key, signature, em)
-            .await?;
-        // PKA results are little-endian integers; EMSA is a big-endian byte string.
-        em.reverse();
+        self.alloc_scoped_async(io, async |alloc| {
+            let em = alloc.dma_alloc(k)?;
+            self.mod_exp_pub(io, key_size, pub_key, signature, Some(em))
+                .await?;
+            // PKA results are little-endian integers; EMSA is a big-endian byte string.
+            em.reverse();
 
-        // Verify EM = 0x00 || 0x01 || PS(0xFF) || 0x00 || T
-        if em[0] != 0x00 || em[1] != 0x01 {
-            return Ok(false);
-        }
+            // Verify EM = 0x00 || 0x01 || PS(0xFF) || 0x00 || T
+            if em[0] != 0x00 || em[1] != 0x01 {
+                return Ok(false);
+            }
 
-        let t_len = prefix.len() + digest_len;
-        if k < t_len + 11 {
-            return Ok(false);
-        }
+            let t_len = prefix.len() + digest_len;
+            if k < t_len + 11 {
+                return Ok(false);
+            }
 
-        let ps_len = k - t_len - 3;
+            let ps_len = k - t_len - 3;
 
-        // Check PS is all 0xFF
-        if !em[2..2 + ps_len].iter().all(|&b| b == 0xFF) {
-            return Ok(false);
-        }
-        if em[2 + ps_len] != 0x00 {
-            return Ok(false);
-        }
+            // Check PS is all 0xFF
+            if !em[2..2 + ps_len].iter().all(|&b| b == 0xFF) {
+                return Ok(false);
+            }
+            if em[2 + ps_len] != 0x00 {
+                return Ok(false);
+            }
 
-        // Check DigestInfo prefix
-        let prefix_region: &[u8] = &em[3 + ps_len..3 + ps_len + prefix.len()];
-        if prefix_region != prefix {
-            return Ok(false);
-        }
+            // Check DigestInfo prefix
+            let prefix_region: &[u8] = &em[3 + ps_len..3 + ps_len + prefix.len()];
+            if prefix_region != prefix {
+                return Ok(false);
+            }
 
-        // Check digest
-        let digest_region: &[u8] = &em[3 + ps_len + prefix.len()..k];
-        let message_hash_bytes: &[u8] = message_hash;
-        Ok(digest_region == message_hash_bytes)
+            // Check digest
+            let digest_region: &[u8] = &em[3 + ps_len + prefix.len()..k];
+            let message_hash_bytes: &[u8] = message_hash;
+            Ok(digest_region == message_hash_bytes)
+        })
+        .await
     }
 
     // ── OAEP encryption ────────────────────────────────────────────
 
-    async fn rsa_oaep_encrypt<'a>(
+    async fn rsa_oaep_encrypt(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
@@ -845,12 +921,8 @@ impl HsmRsa for UnoHsmPal {
         pub_key: &HsmDmaBuf,
         message: &HsmDmaBuf,
         label: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // sizing anything by their digest length.
         ShaMode::try_from(algo)?;
@@ -858,52 +930,63 @@ impl HsmRsa for UnoHsmPal {
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
 
-        if message.len() > k - 2 * h_len - 2 || output.len() < k {
+        if message.len() > k - 2 * h_len - 2 || pub_key.len() != k + EXP_WIRE_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let em = alloc.dma_alloc(k)?;
-
-        // Initialize EM to zeros
-        em.fill(0);
-        // em[0] = 0x00 (already)
-
-        let m_len = message.len();
-        let ps_len = db_len - h_len - m_len - 1;
-
-        // Build DB in em[1+hLen..k]: lHash || PS || 0x01 || M
-        // Hash label directly into DB[0..hLen]
-        self.hash(
-            io,
-            algo,
-            label,
-            &mut em[1 + h_len..1 + 2 * h_len],
-            HsmDigestForm::Standard,
-        )
-        .await?;
-        // PS is already zeros
-        em[1 + 2 * h_len + ps_len] = 0x01;
-        em[1 + 2 * h_len + ps_len + 1..k].copy_from_slice(message);
-
-        // Generate random seed in em[1..1+hLen]
-        self.rng_fill_bytes(io, &mut em[1..1 + h_len])?;
-
-        // maskedDB = DB XOR MGF(seed, dbLen)
-        {
-            let (seed, db) = em[1..k].split_at_mut(h_len);
-            self.mgf1_xor(io, algo, seed, db).await?;
+        let Some(output) = out else {
+            return Ok(k);
+        };
+        if output.len() < k {
+            return Err(HsmError::InvalidArg);
         }
+        self.alloc_scoped_async(io, async |scope| {
+            let workspace = scope.dma_alloc(2 * k + EXP_WIRE_LEN)?;
+            let (em, scratch) = workspace.split_at_mut(k);
 
-        // maskedSeed = seed XOR MGF(maskedDB, hLen)
-        {
-            let (seed, db) = em[1..k].split_at_mut(h_len);
-            self.mgf1_xor(io, algo, db, seed).await?;
-        }
+            // Initialize EM to zeros
+            em.fill(0);
+            // em[0] = 0x00 (already)
 
-        self.mod_exp_pub(io, key_size, pub_key, em, &mut output[..k])
-            .await
+            let m_len = message.len();
+            let ps_len = db_len - h_len - m_len - 1;
+
+            // Build DB in em[1+hLen..k]: lHash || PS || 0x01 || M
+            // Hash label directly into DB[0..hLen]
+            self.hash(
+                io,
+                algo,
+                label,
+                HsmDigestForm::Standard,
+                Some(&mut em[1 + h_len..1 + 2 * h_len]),
+            )
+            .await?;
+            // PS is already zeros
+            em[1 + 2 * h_len + ps_len] = 0x01;
+            em[1 + 2 * h_len + ps_len + 1..k].copy_from_slice(message);
+
+            // Generate random seed in em[1..1+hLen]
+            self.rng_fill_bytes(io, &mut em[1..1 + h_len])?;
+
+            // maskedDB = DB XOR MGF(seed, dbLen)
+            {
+                let (seed, db) = em[1..k].split_at_mut(h_len);
+                self.mgf1_xor_in_workspace(algo, seed, db, scratch).await?;
+            }
+
+            // maskedSeed = seed XOR MGF(maskedDB, hLen)
+            {
+                let (seed, db) = em[1..k].split_at_mut(h_len);
+                self.mgf1_xor_in_workspace(algo, db, seed, scratch).await?;
+            }
+
+            self.rsa_mod_exp_pub_in_workspace(key_size, pub_key, em, &mut output[..k], scratch)
+                .await?;
+            Ok(k)
+        })
+        .await
     }
 
-    async fn rsa_oaep_decrypt<'a>(
+    async fn rsa_oaep_decrypt(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
@@ -911,12 +994,8 @@ impl HsmRsa for UnoHsmPal {
         priv_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
         label: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<usize>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // sizing anything by their digest length.
         ShaMode::try_from(algo)?;
@@ -927,70 +1006,78 @@ impl HsmRsa for UnoHsmPal {
         if ciphertext.len() != k {
             return Err(HsmError::InvalidArg);
         }
-        let em = alloc.dma_alloc(k)?;
-        let label_hash = alloc.dma_alloc(h_len)?;
-
-        self.mod_exp_priv(io, key_size, priv_key, ciphertext, em)
-            .await?;
-
-        // `mod_exp_priv` is little-endian (PKA-native): both the ciphertext
-        // operand and the `em` result are LE wire form. The RSA-OAEP decode
-        // below (RFC 8017 EME-OAEP) operates on the big-endian encoded
-        // message `EM = 0x00 ‖ maskedSeed ‖ maskedDB`, so flip the result
-        // LE→BE first (the std PAL does the same flip around OpenSSL).
-        em[..k].reverse();
-
-        if em[0] != 0x00 {
-            return Err(HsmError::RsaDecryptFailed);
-        }
-
-        // Recover seed: seed = maskedSeed XOR MGF(maskedDB, hLen)
-        {
-            let (seed, db) = em[1..k].split_at_mut(h_len);
-            self.mgf1_xor(io, algo, db, seed).await?;
-        }
-
-        // Recover DB: DB = maskedDB XOR MGF(seed, dbLen)
-        {
-            let (seed, db) = em[1..k].split_at_mut(h_len);
-            self.mgf1_xor(io, algo, seed, db).await?;
-        }
-
-        // Verify lHash using reusable scratch allocated from the alloc.
-        let db = &em[1 + h_len..k];
-        self.hash(io, algo, label, label_hash, HsmDigestForm::Standard)
-            .await?;
-        let db_hash: &[u8] = &db[..h_len];
-        let label_hash_slice: &[u8] = &label_hash[..h_len];
-        if db_hash != label_hash_slice {
-            return Err(HsmError::RsaDecryptFailed);
-        }
-
-        // Find 0x01 separator in DB after lHash
-        let ps_and_m = &db[h_len..];
-        let sep = ps_and_m.iter().position(|&b| b == 0x01);
-        let sep = match sep {
-            Some(s) if ps_and_m[..s].iter().all(|&b| b == 0x00) => s,
-            _ => return Err(HsmError::RsaDecryptFailed),
+        rsa_modulus_le(key_size, priv_key)?;
+        let Some(output) = out else {
+            return Ok(key_size.max_oaep_message(algo));
         };
+        self.alloc_scoped_async(io, async |scope| {
+            let workspace = scope.dma_alloc(2 * k + EXP_WIRE_LEN)?;
+            let (em, scratch) = workspace.split_at_mut(k);
 
-        let m_start = h_len + sep + 1;
-        let m_len = db_len - m_start;
-        // Contract (matches the std PAL): a recovered message longer than
-        // the caller's output buffer is a key/output-length error, reported
-        // as `RsaInvalidKeyLength`. The RsaUnwrap KEK path relies on this to
-        // map an oversized recovered KEK to `RsaUnwrapInvalidKek`.
-        if output.len() < m_len {
-            return Err(HsmError::RsaInvalidKeyLength);
-        }
+            self.mod_exp_priv(io, key_size, priv_key, ciphertext, Some(em))
+                .await?;
 
-        output[..m_len].copy_from_slice(&db[m_start..]);
-        Ok(m_len)
+            // `mod_exp_priv` is little-endian (PKA-native): both the ciphertext
+            // operand and the `em` result are LE wire form. The RSA-OAEP decode
+            // below (RFC 8017 EME-OAEP) operates on the big-endian encoded
+            // message `EM = 0x00 ‖ maskedSeed ‖ maskedDB`, so flip the result
+            // LE→BE first (the std PAL does the same flip around OpenSSL).
+            em[..k].reverse();
+
+            if em[0] != 0x00 {
+                return Err(HsmError::RsaDecryptFailed);
+            }
+
+            // Recover seed: seed = maskedSeed XOR MGF(maskedDB, hLen)
+            {
+                let (seed, db) = em[1..k].split_at_mut(h_len);
+                self.mgf1_xor_in_workspace(algo, db, seed, scratch).await?;
+            }
+
+            // Recover DB: DB = maskedDB XOR MGF(seed, dbLen)
+            {
+                let (seed, db) = em[1..k].split_at_mut(h_len);
+                self.mgf1_xor_in_workspace(algo, seed, db, scratch).await?;
+            }
+
+            // Reuse the MGF workspace for the label hash.
+            let db = &em[1 + h_len..k];
+            let label_hash = &mut scratch[..h_len];
+            self.hash(io, algo, label, HsmDigestForm::Standard, Some(label_hash))
+                .await?;
+            let db_hash: &[u8] = &db[..h_len];
+            let label_hash_slice: &[u8] = &label_hash[..h_len];
+            if db_hash != label_hash_slice {
+                return Err(HsmError::RsaDecryptFailed);
+            }
+
+            // Find 0x01 separator in DB after lHash
+            let ps_and_m = &db[h_len..];
+            let sep = ps_and_m.iter().position(|&b| b == 0x01);
+            let sep = match sep {
+                Some(s) if ps_and_m[..s].iter().all(|&b| b == 0x00) => s,
+                _ => return Err(HsmError::RsaDecryptFailed),
+            };
+
+            let m_start = h_len + sep + 1;
+            let m_len = db_len - m_start;
+            // Contract (matches the std PAL): a recovered message longer than
+            // the caller's output buffer is a key/output-length error, reported
+            // as `RsaInvalidKeyLength`. The RsaUnwrap KEK path relies on this to
+            // map an oversized recovered KEK to `RsaUnwrapInvalidKek`.
+            if output.len() < m_len {
+                return Err(HsmError::RsaInvalidKeyLength);
+            }
+
+            output[..m_len].copy_from_slice(&db[m_start..]);
+            Ok(m_len)
+        })
+        .await
     }
 
     // ── PSS signatures ─────────────────────────────────────────────
 
-    async fn rsa_pss_sign<'a>(
+    async fn rsa_pss_sign(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
@@ -998,12 +1085,8 @@ impl HsmRsa for UnoHsmPal {
         priv_key: &HsmDmaBuf,
         message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &mut HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<()>
-    where
-        Self: 'a,
-    {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // sizing anything by their digest length.
         ShaMode::try_from(algo)?;
@@ -1011,47 +1094,68 @@ impl HsmRsa for UnoHsmPal {
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
 
-        if message_hash.len() != h_len || signature.len() < k {
+        if message_hash.len() != h_len {
             return Err(HsmError::InvalidArg);
         }
-        if k < h_len + salt_len + 2 {
+        if salt_len > k - h_len - 2 {
             return Err(HsmError::InvalidArg);
         }
 
-        let em = alloc.dma_alloc(k)?;
-
-        let ps_len = db_len - salt_len - 1;
-
-        // Build DB in em[0..db_len]: PS(zeros) || 0x01 || salt
-        em[..ps_len].fill(0);
-        em[ps_len] = 0x01;
-        if salt_len > 0 {
-            self.rng_fill_bytes(io, &mut em[ps_len + 1..ps_len + 1 + salt_len])?;
+        rsa_modulus_le(key_size, priv_key)?;
+        let Some(signature) = out else {
+            return Ok(k);
+        };
+        if signature.len() < k {
+            return Err(HsmError::InvalidArg);
         }
+        self.alloc_scoped_async(io, async |scope| {
+            let state_len = algo.hash_state_len().max(algo.mgf1_state_len(h_len));
+            let workspace = scope.dma_alloc(k + state_len)?;
+            let (em, scratch) = workspace.split_at_mut(k);
 
-        // Trailer byte
-        em[k - 1] = 0xBC;
+            let ps_len = db_len - salt_len - 1;
 
-        // Compute H = Hash(0x00*8 || mHash || salt) → em[db_len..db_len+hLen]
-        let (db, h_region) = em.split_at_mut(db_len);
-        {
-            let salt = &db[ps_len + 1..ps_len + 1 + salt_len];
-            self.pss_message_digest(io, algo, message_hash, salt, &mut h_region[..h_len], alloc)
+            // Build DB in em[0..db_len]: PS(zeros) || 0x01 || salt
+            em[..ps_len].fill(0);
+            em[ps_len] = 0x01;
+            if salt_len > 0 {
+                self.rng_fill_bytes(io, &mut em[ps_len + 1..ps_len + 1 + salt_len])?;
+            }
+
+            // Trailer byte
+            em[k - 1] = 0xBC;
+
+            // Compute H = Hash(0x00*8 || mHash || salt) → em[db_len..db_len+hLen]
+            let (db, h_region) = em.split_at_mut(db_len);
+            {
+                let salt = &db[ps_len + 1..ps_len + 1 + salt_len];
+                self.pss_message_digest_in_workspace(
+                    io,
+                    algo,
+                    message_hash,
+                    salt,
+                    &mut h_region[..h_len],
+                    scratch,
+                )
                 .await?;
-        }
+            }
 
-        // maskedDB = DB XOR MGF(H, dbLen)
-        self.mgf1_xor(io, algo, &h_region[..h_len], db).await?;
+            // maskedDB = DB XOR MGF(H, dbLen)
+            self.mgf1_xor_in_workspace(algo, &h_region[..h_len], db, scratch)
+                .await?;
 
-        // Clear top bit
-        em[0] &= 0x7F;
+            // Clear top bit
+            em[0] &= 0x7F;
 
-        em.reverse();
-        self.mod_exp_priv(io, key_size, priv_key, em, &mut signature[..k])
-            .await
+            em.reverse();
+            self.mod_exp_priv(io, key_size, priv_key, em, Some(&mut signature[..k]))
+                .await?;
+            Ok(k)
+        })
+        .await
     }
 
-    async fn rsa_pss_verify<'a>(
+    async fn rsa_pss_verify(
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
@@ -1060,11 +1164,7 @@ impl HsmRsa for UnoHsmPal {
         message_hash: &HsmDmaBuf,
         salt_len: usize,
         signature: &HsmDmaBuf,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<bool>
-    where
-        Self: 'a,
-    {
+    ) -> HsmResult<bool> {
         // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
         // sizing anything by their digest length.
         ShaMode::try_from(algo)?;
@@ -1075,51 +1175,54 @@ impl HsmRsa for UnoHsmPal {
         if message_hash.len() != h_len || signature.len() != k {
             return Err(HsmError::InvalidArg);
         }
-        if k < h_len + salt_len + 2 {
+        if salt_len > k - h_len - 2 {
             return Err(HsmError::InvalidArg);
         }
 
-        let em = alloc.dma_alloc(k)?;
-        let expected_hash = alloc.dma_alloc(h_len)?;
+        self.alloc_scoped_async(io, async |alloc| {
+            let em = alloc.dma_alloc(k)?;
+            let expected_hash = alloc.dma_alloc(h_len)?;
 
-        self.mod_exp_pub(io, key_size, pub_key, signature, em)
-            .await?;
-        em.reverse();
+            self.mod_exp_pub(io, key_size, pub_key, signature, Some(em))
+                .await?;
+            em.reverse();
 
-        // Check trailer
-        if em[k - 1] != 0xBC {
-            return Ok(false);
-        }
+            // Check trailer
+            if em[k - 1] != 0xBC {
+                return Ok(false);
+            }
 
-        // RFC 8017 §9.1.2 step 4: reject if leftmost bit is set
-        if (em[0] & 0x80) != 0 {
-            return Ok(false);
-        }
+            // RFC 8017 §9.1.2 step 4: reject if leftmost bit is set
+            if (em[0] & 0x80) != 0 {
+                return Ok(false);
+            }
 
-        // Unmask DB: DB = maskedDB XOR MGF(H, dbLen)
-        let (db, h_region) = em.split_at_mut(db_len);
-        self.mgf1_xor(io, algo, &h_region[..h_len], db).await?;
+            // Unmask DB: DB = maskedDB XOR MGF(H, dbLen)
+            let (db, h_region) = em.split_at_mut(db_len);
+            self.mgf1_xor(io, algo, &h_region[..h_len], db).await?;
 
-        // Clear top bit
-        em[0] &= 0x7F;
+            // Clear top bit
+            em[0] &= 0x7F;
 
-        // Verify DB format: PS(zeros) || 0x01 || salt
-        let ps_len = db_len - salt_len - 1;
-        if !em[..ps_len].iter().all(|&b| b == 0x00) {
-            return Ok(false);
-        }
-        if em[ps_len] != 0x01 {
-            return Ok(false);
-        }
+            // Verify DB format: PS(zeros) || 0x01 || salt
+            let ps_len = db_len - salt_len - 1;
+            if !em[..ps_len].iter().all(|&b| b == 0x00) {
+                return Ok(false);
+            }
+            if em[ps_len] != 0x01 {
+                return Ok(false);
+            }
 
-        // Recompute H' = Hash(0x00*8 || mHash || salt)
-        let salt = &em[ps_len + 1..ps_len + 1 + salt_len];
-        self.pss_message_digest(io, algo, message_hash, salt, expected_hash, alloc)
-            .await?;
+            // Recompute H' = Hash(0x00*8 || mHash || salt)
+            let salt = &em[ps_len + 1..ps_len + 1 + salt_len];
+            self.pss_message_digest(io, algo, message_hash, salt, expected_hash, alloc)
+                .await?;
 
-        // Compare H (in em[db_len..]) with H'
-        let actual_hash: &[u8] = &em[db_len..db_len + h_len];
-        let expected_hash: &[u8] = &expected_hash[..h_len];
-        Ok(actual_hash == expected_hash)
+            // Compare H (in em[db_len..]) with H'
+            let actual_hash: &[u8] = &em[db_len..db_len + h_len];
+            let expected_hash: &[u8] = &expected_hash[..h_len];
+            Ok(actual_hash == expected_hash)
+        })
+        .await
     }
 }

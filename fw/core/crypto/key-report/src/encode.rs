@@ -215,14 +215,14 @@ where
         io,
         HsmHashAlgo::Sha384,
         sig_struct,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
 
     // 5. ECDSA-P384 sign — output is `r || s` in operand order.
     let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest, sig)
+    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest, Some(sig))
         .await?;
 
     // 6. Convert the signature in place to big-endian per half for COSE.

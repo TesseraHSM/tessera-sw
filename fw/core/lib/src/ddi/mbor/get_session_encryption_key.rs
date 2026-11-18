@@ -83,8 +83,8 @@ pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         frame.pub_key.raw,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
     pal.ecc_sign(
@@ -92,7 +92,7 @@ pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
         HsmEccCurve::P384,
         id_priv_key,
         digest,
-        frame.pub_key_signature,
+        Some(frame.pub_key_signature),
     )
     .await?;
 

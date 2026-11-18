@@ -35,6 +35,7 @@ pub(crate) fn filler(tag: u8, len: usize) -> Vec<u8> {
 }
 
 /// A reproducible encapsulation message, sized for the pinning constructor.
+#[cfg(target_os = "linux")]
 pub(crate) fn msg(tag: u8) -> [u8; MLKEM_M_LEN] {
     filler(tag, MLKEM_M_LEN)
         .try_into()

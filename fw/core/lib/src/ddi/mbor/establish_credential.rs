@@ -303,8 +303,15 @@ async fn reimport_unwrapping_key<P: HsmPal>(
                 &masked[layout.plaintext_offset..layout.plaintext_offset + key_len],
             );
 
-            pal.vault_key_create(io, key_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)
-                .await
+            pal.vault_key_create(
+                io,
+                key_buf,
+                HsmVaultKeyKind::Rsa2kPrivate,
+                None,
+                attrs,
+                HsmVaultPct::UnwrappingKey,
+            )
+            .await
         })
         .await?;
 
@@ -384,24 +391,21 @@ async fn verify_pota_signature<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         id_uncompressed,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
 
-    let verify_result = pal.dma_alloc(io, 4)?;
-
-    pal.ecc_verify(
-        io,
-        HsmEccCurve::P384,
-        signer_pub_key_raw,
-        digest,
-        signature_raw,
-        verify_result,
-    )
-    .await?;
-
-    if (verify_result[0] & 1) != 0 {
+    if !pal
+        .ecc_verify(
+            io,
+            HsmEccCurve::P384,
+            signer_pub_key_raw,
+            digest,
+            signature_raw,
+        )
+        .await?
+    {
         return Err(HsmError::EccVerifyFailed);
     }
     Ok(())
@@ -450,7 +454,7 @@ async fn derive_credential_keys<P: HsmPal>(
             HsmEccCurve::P384,
             priv_key,
             host_eph_pub_key_raw,
-            secret,
+            Some(secret),
         )
         .await?;
     }
@@ -462,7 +466,7 @@ async fn derive_credential_keys<P: HsmPal>(
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
-    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
         .await?;
 
     pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)
@@ -671,6 +675,7 @@ async fn provision_mk<P: HsmPal>(
                 HsmVaultKeyKind::MaskingKey,
                 None,
                 MK_VAULT_ATTRS,
+                HsmVaultPct::None,
             )
             .await;
     }
@@ -680,8 +685,15 @@ async fn provision_mk<P: HsmPal>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let mk_pt = &bmk[layout.plaintext_offset..layout.plaintext_offset + BK_LEN];
-    pal.vault_key_create(io, mk_pt, HsmVaultKeyKind::MaskingKey, None, MK_VAULT_ATTRS)
-        .await
+    pal.vault_key_create(
+        io,
+        mk_pt,
+        HsmVaultKeyKind::MaskingKey,
+        None,
+        MK_VAULT_ATTRS,
+        HsmVaultPct::None,
+    )
+    .await
 }
 
 /// Envelopes the vault-resident `MK` (referenced by `mk_key_id`) under

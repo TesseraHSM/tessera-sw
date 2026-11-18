@@ -86,7 +86,7 @@ async fn hash<'a, P: HsmPal>(
     input: &HsmDmaBuf,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let digest = alloc.dma_alloc(algorithm.digest_len())?;
-    pal.hash(io, algorithm, input, digest, HsmDigestForm::Standard)
+    pal.hash(io, algorithm, input, HsmDigestForm::Standard, Some(digest))
         .await?;
     Ok(digest)
 }
@@ -250,8 +250,8 @@ pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<HsmC
         io,
         HsmHashAlgo::Sha256,
         cert,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
     let thumbprint = *fixed_size::<SHA256_DIGEST_LEN>(digest)?;

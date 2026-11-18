@@ -17,6 +17,7 @@ use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 
 #[test]
 fn public_keys_follow_vault_references_and_preserve_big_endian_encoding() {
@@ -52,6 +53,7 @@ async fn check_public_keys() {
     let io = pal.poll_io().await.expect("poll IO");
 
     let identity_id = part_state::part_id_key_id(&pal, &io).expect("identity key ID");
+    assert_eq!(pal.ecc_vault_pub_key(&io, identity_id, None).await, Ok(96));
     let identity = EccPrivateKey::from_hsm_bytes(pal.vault_key(&io, identity_id).expect("key"))
         .expect("identity private key");
     let identity_public = identity.public_key().expect("identity public key");
@@ -75,13 +77,13 @@ async fn check_public_keys() {
         Err(HsmError::EccInvalidKeyLength)
     );
     assert_eq!(
-        pal.ecc_vault_pub_key(&io, identity_id, short).await,
+        pal.ecc_vault_pub_key(&io, identity_id, Some(short)).await,
         Err(HsmError::InvalidArg)
     );
     let misaligned = pal.dma_alloc(&io, 97).expect("misaligned output backing");
     misaligned.fill(0xA5);
     assert_eq!(
-        pal.ecc_vault_pub_key(&io, identity_id, misaligned.split_at_mut(1).1)
+        pal.ecc_vault_pub_key(&io, identity_id, Some(misaligned.split_at_mut(1).1))
             .await,
         Err(HsmError::InvalidArg)
     );
@@ -97,6 +99,7 @@ async fn check_public_keys() {
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             HsmVaultKeyAttrs::new().with_internal(true),
+            HsmVaultPct::None,
         )
         .await
         .expect("PTA key");
@@ -125,6 +128,7 @@ async fn check_public_keys() {
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             HsmVaultKeyAttrs::new().with_internal(true),
+            HsmVaultPct::None,
         )
         .await
         .expect("replacement PTA key");

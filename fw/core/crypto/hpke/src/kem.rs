@@ -220,7 +220,7 @@ where
     // operand-order `X ‖ Y` (no SEC1 prefix), `npk_pal` bytes.  The ephemeral key
     // is used for ECDH, so its generation runs a key-agreement PCT.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
+        .ecc_gen_keypair(io, curve, HsmEccPct::KeyAgreement, None)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -231,10 +231,9 @@ where
     let (sk_len, pk_len) = pal
         .ecc_gen_keypair(
             io,
-            alloc,
             curve,
-            Some((&mut *sk_e, &mut *pk_e_op)),
             HsmEccPct::KeyAgreement,
+            Some((&mut *sk_e, &mut *pk_e_op)),
         )
         .await?;
     if pk_len != npk_pal {
@@ -247,7 +246,7 @@ where
     sec1_to_operand(P::BYTE_ORDER, pk_r, &mut pk_r_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh, alloc)?;
-    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, dh)
+    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, Some(dh))
         .await?;
     // HPKE (RFC 9180) feeds the big-endian secret to the KDF.
     byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
@@ -316,7 +315,8 @@ where
 
     let dh = alloc_bytes(ndh, alloc)?;
     let sk_r_dma = dma_copy_in(alloc, sk_r)?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, dh).await?;
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, Some(dh))
+        .await?;
     // HPKE (RFC 9180) feeds the big-endian secret to the KDF.
     byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
 
@@ -376,7 +376,7 @@ where
 
     // Query-alloc-use ECC keygen — same flow as `encap`.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
+        .ecc_gen_keypair(io, curve, HsmEccPct::KeyAgreement, None)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -387,10 +387,9 @@ where
     let (sk_len, pk_len) = pal
         .ecc_gen_keypair(
             io,
-            alloc,
             curve,
-            Some((&mut *sk_e, &mut *pk_e_op)),
             HsmEccPct::KeyAgreement,
+            Some((&mut *sk_e, &mut *pk_e_op)),
         )
         .await?;
     if pk_len != npk_pal {
@@ -403,9 +402,9 @@ where
     sec1_to_operand(P::BYTE_ORDER, pk_r, &mut pk_r_op[..], coord_len)?;
 
     let dh = alloc_bytes(ndh * 2, alloc)?;
-    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, &mut dh[..ndh])
+    pal.ecdh_derive(io, curve, &sk_e[..sk_len], pk_r_op, Some(&mut dh[..ndh]))
         .await?;
-    pal.ecdh_derive(io, curve, sk_s, pk_r_op, &mut dh[ndh..])
+    pal.ecdh_derive(io, curve, sk_s, pk_r_op, Some(&mut dh[ndh..]))
         .await?;
     // HPKE (RFC 9180) feeds the big-endian `dh1 || dh2` to the KDF.
     byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);
@@ -477,9 +476,9 @@ where
 
     let dh = alloc_bytes(ndh * 2, alloc)?;
     let sk_r_dma = dma_copy_in(alloc, sk_r)?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, &mut dh[..ndh])
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_e_op, Some(&mut dh[..ndh]))
         .await?;
-    pal.ecdh_derive(io, curve, sk_r_dma, pk_s_op, &mut dh[ndh..])
+    pal.ecdh_derive(io, curve, sk_r_dma, pk_s_op, Some(&mut dh[ndh..]))
         .await?;
     // HPKE (RFC 9180) feeds the big-endian `dh1 || dh2` to the KDF.
     byte_order::int_to_be(P::BYTE_ORDER, &mut dh[..ndh]);

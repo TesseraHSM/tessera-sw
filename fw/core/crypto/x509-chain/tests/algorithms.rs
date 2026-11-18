@@ -194,7 +194,7 @@ impl TestKey {
                 signature
             }
             (Self::MlDsa(key), SigAlgo::MlDsa(_)) => {
-                let mut algorithm = MlDsaAlgo::new(&[]).expect("empty context").deterministic();
+                let mut algorithm = MlDsaAlgo::new(&[]).expect("empty context");
                 let len = Signer::sign(&mut algorithm, key, tbs, None).expect("ML-DSA length");
                 let mut signature = vec![0; len];
                 Signer::sign(&mut algorithm, key, tbs, Some(&mut signature))
