@@ -72,6 +72,7 @@ mod integration {
     pub mod masked_key_rsa_unwrap;
     pub mod open_session;
     pub mod open_session_smoke;
+    pub mod pf_mgmt_svn;
     pub mod prov_part;
     pub mod reopen_session;
     pub mod reopen_session_smoke;
