@@ -349,6 +349,20 @@ async fn check_psk_change_rollback() {
             &[0xA5; 32]
         };
         assert_eq!(
+            hsm.pal()
+                .session_psk_changed(&control_io, session)
+                .expect("consumed flag"),
+            !fail_completion,
+        );
+        let binding = hsm
+            .pal()
+            .session_auth_binding(&control_io, session)
+            .expect("binding");
+        assert!(
+            binding[4..4 + APP_ID_LEN] == expected[..APP_ID_LEN],
+            "binding follows committed PSK"
+        );
+        assert_eq!(
             tsra_fw_hsm_core::part_state::part_psk(hsm.pal(), &control_io, 1)
                 .expect("partition CU PSK"),
             expected.as_slice()
@@ -360,7 +374,7 @@ async fn check_psk_change_rollback() {
             if fail_completion {
                 HsmError::DefaultPskMustRotate
             } else {
-                HsmError::DefaultPskChanged
+                HsmError::KeyNotFound
             },
         )
         .await;

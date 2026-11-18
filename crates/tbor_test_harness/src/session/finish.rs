@@ -35,8 +35,8 @@ use crate::fixture::TestDev;
 /// `param_key` is the per-session AES-256 key the host uses to seal
 /// per-command parameter blobs as `aead_envelope` envelopes (e.g.,
 /// the new PSK in `PskChange`). `bmk_session` is the FW's wrapped
-/// masking-key envelope returned by `SessionOpenFinish`; it is
-/// opaque to the host today (MBOR `ReopenSession` consumes it).
+/// masking-key envelope returned by `SessionOpenFinish`; recovery returns it
+/// to the firmware alongside the securely retained original seed.
 pub struct SessionHandshake {
     /// Active session identifier.
     pub session_id: u16,
@@ -48,6 +48,8 @@ pub struct SessionHandshake {
     pub param_key: AesKey,
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     pub bmk_session: Vec<u8>,
+    /// Original wrapping-key derivation seed, retained for recovery.
+    pub seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
 }
 
 impl core::fmt::Debug for SessionHandshake {
@@ -92,12 +94,38 @@ pub fn session_open_finish_with_mac(
     pending: PendingHandshake,
     mac_fin: [u8; 48],
 ) -> Result<SessionHandshake, DdiError> {
+    let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
+    Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| DdiError::InvalidParameter)?;
+    finish(dev, pending, mac_fin, seed, &[])
+}
+
+/// Complete recovery using the original masking-key envelope and seed.
+pub fn session_reopen_finish(
+    dev: &TestDev,
+    pending: PendingHandshake,
+    original: &SessionHandshake,
+) -> Result<SessionHandshake, DdiError> {
+    let mac = build_mac_fin(&pending)?;
+    finish(
+        dev,
+        pending,
+        mac,
+        original.seed.clone(),
+        &original.bmk_session,
+    )
+}
+
+fn finish(
+    dev: &TestDev,
+    pending: PendingHandshake,
+    mac_fin: [u8; 48],
+    seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
+    recovery: &[u8],
+) -> Result<SessionHandshake, DdiError> {
     let param_key = pending
         .keys
         .param_key()
         .map_err(|_| DdiError::TborDecodeError)?;
-    let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
-    Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| DdiError::InvalidParameter)?;
     let envelope = seal_seed_envelope(&param_key, &*seed).map_err(|_| DdiError::TborDecodeError)?;
     let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
         .as_slice()
@@ -105,20 +133,25 @@ pub fn session_open_finish_with_mac(
         .map_err(|_| DdiError::TborDecodeError)?;
 
     let req = TborSessionOpenFinishReq {
+        bmk_session: recovery.to_vec(),
         session_id: pending.session_id,
         mac_fin,
         seed_envelope,
     };
     // Travels encrypted under the transport registered at Phase 1.
-    let mut cookie = None;
-    let resp: TborSessionOpenFinishResp =
-        dev.exec_op_tbor(&req, None, &mut cookie)
-            .inspect_err(|err| {
-                // Firmware reclaims the slot after an authentication failure.
-                if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
-                    dev.remove_session_transport(pending.session_id);
-                }
-            })?;
+    let transport = pending
+        .keys
+        .transport()
+        .map_err(|_| DdiError::TborDecodeError)?;
+    let resp: TborSessionOpenFinishResp = dev
+        .exec_op_tbor_sealed(pending.session_id, &transport, &req, &mut [])
+        .inspect_err(|err| {
+            // Firmware reclaims the slot after an authentication failure.
+            if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
+                dev.remove_session_transport(pending.session_id);
+            }
+        })?;
+    dev.set_session_transport(pending.session_id, transport);
 
     Ok(SessionHandshake {
         session_id: pending.session_id,
@@ -126,5 +159,6 @@ pub fn session_open_finish_with_mac(
         suite: pending.suite,
         param_key,
         bmk_session: resp.bmk_session,
+        seed,
     })
 }

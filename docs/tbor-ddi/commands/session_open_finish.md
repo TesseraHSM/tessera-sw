@@ -18,31 +18,36 @@ The common header must use the exact API major/minor selected in Init.
 Firmware recovers the revision, suite, type, transcript, and credential binding
 from Pending state rather than accepting replacements in the Finish body.
 
-The host sends `mac_fin = HMAC-SHA-384(fin_key, T1)` and a fresh 32-byte seed in
-an AEAD envelope under `param_key`. Firmware verifies both the confirmation and
-the credential's continued validity, opens the seed, generates an independent
-random masking key, wraps it for the response, and commits Active state.
+The host sends `mac_fin = HMAC-SHA-384(fin_key, T1)` and a 32-byte seed in
+an AEAD envelope under the fresh `param_key`. For a fresh open, the seed is
+new and firmware generates an independent random masking key. Reopen instead
+sends the original seed and saved masking-key envelope to restore the original
+masking key after validating its slot lineage. Firmware verifies the confirmation
+and current credential, wraps the masking key for the response, and commits
+Active state.
 
 ## Request
 
-The 12-byte header is followed by three TOC entries. Data begins at byte 24.
+The 12-byte header is followed by four TOC entries. Data begins at byte 28.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | `session_id` | `session_id` (inline) | Pending slot allocated by Init. |
 | 16 | `mac_fin` | `buffer` (ref) | 48-byte confirmation at data-relative offset 0. |
 | 20 | `seed_envelope` | `buffer` (ref) | 72-byte envelope at data-relative offset 48. |
+| 24 | `bmk_session` | `buffer` (ref) | Empty for fresh open; saved envelope for recovery, up to 512 bytes. |
 
 ## Response
 
-The header echoes the request revision. Three TOC slots preserve the request
-footprint; data begins at byte 24.
+The header echoes the request revision. Four TOC slots preserve the request
+footprint; data begins at byte 28.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | `bmk_session` | `buffer` (ref) | 264-byte wrapped masking key at data-relative offset 0. |
 | 16 | Reserved | `none` | Paired TOC placeholder. |
 | 20 | Reserved | `none` | Paired TOC placeholder. |
+| 24 | Reserved | `none` | Paired TOC placeholder. |
 
 ## Key schedule and storage
 
@@ -61,7 +66,7 @@ m2h       = ExpandLabel("tsra-session-xport-m2h-v1", 36)
 Each transport secret is `AES key(32) || nonce salt(4)`. The masking key is
 random device-generated material, not derived from host-known `hs`.
 
-The 242-byte Pending blob is replaced by the 216-byte Active blob:
+The 243-byte Pending blob is replaced by the 216-byte Active blob:
 
 ```text
 internal_format_tag(8) || LE16(api_major) || LE16(api_minor)
@@ -96,7 +101,12 @@ SVN, owner seed, and `SESSION_BMK` label:
 ```
 
 Neither the handshake secret nor parameter/transport keys are included in
-`bmk_session`. TBOR establishment always creates a fresh session.
+`bmk_session`. On reopen, the host reuses its securely retained original seed
+and supplies the saved envelope inside the fresh protected Finish. Firmware
+unwraps and validates the masking key, its metadata and a retained per-slot
+128-bit SHA-384 fingerprint. It restores the original masking key rather than
+generating a new one, but installs fresh parameter and transport keys.
+The firmware-owned PSK-change-consumed bit survives recovery.
 
 ## Errors
 
@@ -108,10 +118,12 @@ Neither the handshake secret nor parameter/transport keys are included in
 | `SessionAuthFailure` | Confirmation, seed authentication, or credential validation failed. |
 | `PartitionNotProvisioned` | Required partition material is unavailable. |
 
-Authentication failure tears down the slot after its protected error response,
+For fresh open, authentication failure tears down the slot after its protected error response,
 so transport keys remain available long enough to authenticate that response.
 A late Finish for an evicted/reused slot fails under its different handshake
 and transport keys; this is not a general command replay cache.
+Failed reopen instead restores `NeedsRenegotiation` after completion, preserving
+the original recovery identity and rotation allowance state for retry.
 
 ## See also
 

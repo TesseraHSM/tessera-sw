@@ -83,6 +83,7 @@ pub fn assert_session_rejects(err: &DdiError, expected: TborStatus) {
             TborStatus::SessionNotFound
                 | TborStatus::FileHandleSessionIdDoesNotMatch
                 | TborStatus::SessionTransportError
+                | TborStatus::InvalidSessionControlOpcode
         )
         && matches!(
             err,

@@ -27,11 +27,11 @@
 //! (proven by the host's `fin` in `SessionOpenFinish`) authenticates the
 //! host to the HSM.
 //!
-//! Resume is not multiplexed onto this opcode; the host recovers a prior
-//! session's `masking_key` via the MBOR `ReopenSession` command instead.
+//! A non-sentinel `reopen_id` recovers an existing stale slot through the
+//! same handshake, with masking-key recovery deferred to Finish.
 //!
 //! On any error after the Pending slot is reserved, the dispatcher's undo
-//! walk destroys it; no Pending slot is leaked.
+//! walk destroys a fresh slot or restores a recovery slot to renegotiation.
 //!
 //! All variable-length and crypto-sized buffers are allocated from the
 //! per-IO scoped allocator — handler frames never put DMA-targeted
@@ -47,6 +47,7 @@ use super::session_open_finish::hkdf_expand_labeled_into;
 /// Validated `SessionOpenInit` request fields.
 struct ParsedRequest<'a> {
     api_rev: (u16, u16),
+    reopen_id: u16,
     /// Role asserted by `psk_id`.
     role: HsmSessionRole,
 
@@ -85,11 +86,12 @@ pub(super) const PENDING_SUITE_OFF: usize = PENDING_TYPE_OFF + 1;
 
 /// Offset of the transport secrets `h2m ‖ m2h` (each `key ‖ salt`) in the
 /// Pending blob.
-pub(super) const PENDING_KEYS_OFF: usize = PENDING_SUITE_OFF + 1;
+pub(super) const PENDING_REOPEN_OFF: usize = PENDING_SUITE_OFF + 1;
+pub(super) const PENDING_KEYS_OFF: usize = PENDING_REOPEN_OFF + 1;
 
 /// Length of the Pending handshake-state blob:
 /// `selected_api_rev(4) ‖ hs(48) ‖ T1(48) ‖ auth_binding(68) ‖ session_type(1) ‖ suite_id(1)
-/// ‖ h2m(36) ‖ m2h(36)`.
+/// ‖ reopen(1) ‖ h2m(36) ‖ m2h(36)`.
 ///
 /// The transport secrets must end the blob (see
 /// [`HsmSessionManager::session_create_pending`]), so `SessionOpenFinish`
@@ -109,12 +111,31 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| {
         let ParsedRequest {
             api_rev,
+            reopen_id,
             role,
             psk_id,
             session_type,
             suite,
             pk_init,
         } = parse_request(cmd_buf.request())?;
+        let reopen = (reopen_id != u16::MAX).then(|| HsmSessId::from(reopen_id));
+        if let Some(id) = reopen {
+            if id.role() != role
+                || !matches!(
+                    pal.session_state(io, id),
+                    HsmSessionState::NeedsRenegotiation | HsmSessionState::Pending
+                )
+            {
+                return Err(HsmError::ProcessedIoEventInInvalidState);
+            }
+            if pal
+                .session_recovery_binding(io, id)?
+                .iter()
+                .all(|&b| b == 0)
+            {
+                return Err(HsmError::InvalidPermissions);
+            }
+        }
 
         // ── Identity + PSK material (all on the scoped allocator) ──
         let psk = load_psk(pal, io, alloc, psk_id)?;
@@ -143,6 +164,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_hsm,
             pk_init,
             enc,
+            reopen,
         )
         .await?;
         let sig = sign_transcript(pal, io, alloc, t1).await?;
@@ -160,12 +182,17 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             hs,
             t1,
             auth_binding,
+            reopen,
         )
         .await?;
         // Record the just-created Pending session's teardown inverse, so a
         // failure below (response encode, or the CQE post) reverts it via
         // the dispatcher's undo walk rather than leaking the slot.
-        undo.push_session_destroy(slot)?;
+        if reopen.is_some() {
+            undo.push_session_reopen(slot)?;
+        } else {
+            undo.push_session_destroy(slot)?;
+        }
         let session_id = u16::from(slot);
         // Hand the freshly allocated slot to the IO layer so it lands in
         // the CQE: the host driver registers the session against the
@@ -200,6 +227,7 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
 
     Ok(ParsedRequest {
         api_rev: req.api_rev(),
+        reopen_id: req.reopen_id(),
         role,
         psk_id,
         session_type,
@@ -296,6 +324,7 @@ async fn transcript_hash<'a, P: HsmPal>(
     pk_hsm: &HsmDmaBuf,
     pk_init: &HsmDmaBuf,
     enc: &HsmDmaBuf,
+    reopen: Option<HsmSessId>,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let label = SESSION_TRANSCRIPT_LABEL;
     let head = alloc.dma_alloc(label.len() + params.len() + pk_hsm.len() + 2)?;
@@ -313,6 +342,13 @@ async fn transcript_hash<'a, P: HsmPal>(
     let mut ctx = pal.hash_begin(io, HsmHashAlgo::Sha384, state)?;
     for chunk in [head as &HsmDmaBuf, pk_init, enc_len, enc] {
         pal.hash_continue(io, &mut ctx, chunk).await?;
+    }
+    if let Some(id) = reopen {
+        let label = b"TSRA-REOPEN-v1:";
+        let context = alloc.dma_alloc(label.len() + 2)?;
+        context[..label.len()].copy_from_slice(label);
+        context[label.len()..].copy_from_slice(&u16::from(id).to_be_bytes());
+        pal.hash_continue(io, &mut ctx, context).await?;
     }
     let t1 = alloc.dma_alloc(SESSION_HS_LEN)?;
     pal.hash_finish(io, &mut ctx, HsmDigestForm::Standard, Some(t1))
@@ -391,6 +427,7 @@ async fn create_pending_slot<P: HsmPal>(
     hs: &HsmDmaBuf,
     t1: &HsmDmaBuf,
     auth_binding: &HsmDmaBuf,
+    reopen: Option<HsmSessId>,
 ) -> HsmResult<HsmSessId> {
     let blob = alloc.dma_alloc(PENDING_BLOB_LEN)?;
     blob[..2].copy_from_slice(&api_rev.0.to_le_bytes());
@@ -400,10 +437,16 @@ async fn create_pending_slot<P: HsmPal>(
     blob[PENDING_AUTH_OFF..PENDING_TYPE_OFF].copy_from_slice(auth_binding);
     blob[PENDING_TYPE_OFF] = session_type.to_u8();
     blob[PENDING_SUITE_OFF] = suite.to_u8();
+    blob[PENDING_REOPEN_OFF] = u8::from(reopen.is_some());
     let (h2m, m2h) = blob[PENDING_KEYS_OFF..].split_at_mut(SESSION_TRANSPORT_SECRET_LEN);
     hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_H2M_LABEL, h2m).await?;
     hkdf_expand_labeled_into(pal, io, alloc, hs, SESSION_TRANSPORT_M2H_LABEL, m2h).await?;
-    pal.session_create_pending(io, role, blob).await
+    if let Some(id) = reopen {
+        pal.session_reopen_pending(io, id, blob).await?;
+        Ok(id)
+    } else {
+        pal.session_create_pending(io, role, blob).await
+    }
 }
 
 /// Encode the `SessionOpenInit` response.

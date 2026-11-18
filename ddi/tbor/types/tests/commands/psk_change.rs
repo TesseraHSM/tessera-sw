@@ -167,11 +167,22 @@ fn psk_change_seven_cu_bootstrap_sessions_have_one_winner() {
             algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
             ..Default::default()
         };
-        ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
+        if index == winner {
+            ctx.tbor(&request).expect("rotating session remains usable");
+        } else {
+            ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
+        }
         let err = ctx
             .psk_change(session.handshake(), &ROTATED_PSK)
             .expect_err("expired bootstrap");
-        assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
+        assert_fw_rejects(
+            &err,
+            if index == winner {
+                TborStatus::PskChangeAlreadyUsed
+            } else {
+                TborStatus::DefaultPskChanged
+            },
+        );
         session.close().expect("close expired session");
     }
     let winning_psk = [0xA0 + winner as u8; PSK_LEN];
@@ -216,16 +227,14 @@ fn psk_change_non_default_noop_rejected_without_consuming_rotation() {
         let err = ctx
             .psk_change(&session, &[0xE5; PSK_LEN])
             .expect_err("obsolete credential");
-        assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+        assert_fw_rejects(&err, TborStatus::PskChangeAlreadyUsed);
         if role == CU {
-            ctx.expect_fw_reject(
-                &tsra_ddi_tbor_types::TborHashReq {
-                    session_id: session.session_id,
-                    algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
-                    ..Default::default()
-                },
-                TborStatus::SessionAuthFailure,
-            );
+            ctx.tbor(&tsra_ddi_tbor_types::TborHashReq {
+                session_id: session.session_id,
+                algo: tsra_ddi_tbor_types::HASH_ALGO_SHA384,
+                ..Default::default()
+            })
+            .expect("rotating CU remains usable");
         }
         ctx.session_close(session.session_id)
             .expect("close stale session");
@@ -272,12 +281,35 @@ fn psk_change_second_attempt_same_session_fails() {
     ctx.psk_change(session.handshake(), &ROTATED_PSK)
         .expect("first rotate");
 
-    // Rotation changes the shared partition credential, not session
-    // privileges. This bootstrap session must be closed and reopened.
+    // Rotation upgrades the caller's binding, but consumes its one change.
     let err = ctx
         .psk_change(session.handshake(), &DEFAULT_PSK_CU)
         .expect_err("second psk_change on same session must fail");
-    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
+    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(
+        &err,
+        TborStatus::PskChangeAlreadyUsed,
+    );
+}
+
+#[test]
+fn psk_change_exact_envelope_replay_is_rejected_for_both_roles() {
+    use tsra_ddi_tbor_test_harness::encrypt_psk_envelope;
+    use tsra_ddi_tbor_types::TborPskChangeReq;
+
+    for role in [CO, CU] {
+        let ctx = TestCtx::new();
+        let session = ctx
+            .open_session(role, SessionSuite::EcdhP384)
+            .expect("open");
+        let request = TborPskChangeReq {
+            session_id: session.session_id(),
+            psk_envelope: encrypt_psk_envelope(session.handshake(), &ROTATED_PSK)
+                .expect("envelope"),
+        };
+        ctx.tbor(&request).expect("first rotation");
+        ctx.expect_fw_reject(&request, TborStatus::PskChangeAlreadyUsed);
+        session.close().expect("caller still usable");
+    }
 }
 
 // ===========================================================================
@@ -636,7 +668,7 @@ fn psk_change_co_second_attempt_same_session_fails() {
         .psk_change(session.handshake(), &second_psk)
         .expect_err("second CO rotation must fail");
 
-    assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    assert_fw_rejects(&err, TborStatus::PskChangeAlreadyUsed);
 }
 
 /// Verifies the rotated CU PSK authenticates across multiple fresh sessions.

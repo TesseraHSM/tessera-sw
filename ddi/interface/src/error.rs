@@ -127,6 +127,16 @@ pub enum DdiError {
 }
 
 impl DdiError {
+    /// Decode an outer TBOR completion without treating its unauthenticated
+    /// renegotiation hint as an application-command result.
+    pub fn from_tbor_completion_status(status: u32) -> Option<Self> {
+        match status {
+            0 => None,
+            0xCD => Some(Self::DdiStatus(DdiStatus::SessionNeedsRenegotiation)),
+            other => Some(Self::DdiError(other)),
+        }
+    }
+
     /// Maps a fast-path completion's status code (`sts`) and error code
     /// (`err`) to an error, or `None` on success.
     ///
@@ -145,6 +155,7 @@ impl DdiError {
             (STS_INVALID_FIELD_XTS | STS_INVALID_FIELD_GCM, ERR_INVALID_KEY) => {
                 Some(Self::DdiStatus(DdiStatus::KeyNotFound))
             }
+
             (0, err) => Some(Self::FpCmdSpecificError(err)),
             (sts, _) => Some(Self::FpError(sts)),
         }
@@ -185,5 +196,23 @@ impl From<tsra_ddi_tbor_codec::DecodeError> for DdiError {
             }
             _ => Self::TborDecodeError,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tbor_renegotiation_is_distinct_from_other_completion_failures() {
+        assert!(DdiError::from_tbor_completion_status(0).is_none());
+        assert!(matches!(
+            DdiError::from_tbor_completion_status(0xCD),
+            Some(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
+        ));
+        assert!(matches!(
+            DdiError::from_tbor_completion_status(0xCC),
+            Some(DdiError::DdiError(0xCC))
+        ));
     }
 }

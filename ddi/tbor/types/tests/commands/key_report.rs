@@ -76,6 +76,48 @@ use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
+fn rebound_caller_report(role: u8) {
+    use tsra_session_ex_crypto::seal_key_report_auth;
+
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
+    let caller = if role == CO_PSK_ID {
+        co
+    } else {
+        let pending = ctx
+            .session_open_init(role, SessionSuite::EcdhP384)
+            .expect("CU init");
+        ctx.session_open_finish(pending).expect("CU finish")
+    };
+    let new_psk = [0xD5; 32];
+    ctx.psk_change(&caller, &new_psk).expect("rotate caller");
+    let mut request = TborKeyReportReq {
+        session_id: caller.session_id,
+        masked_key,
+        report_data: sample_report_data(),
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope =
+        seal_key_report_auth(&caller.param_key, &request).expect("authenticate report");
+    let response = ctx
+        .tbor(&request)
+        .expect("same-session report after rotation");
+    let decoded = verify_key_report(&ctx, &response.report, &public_key, &request.report_data);
+    assert_eq!(&decoded.app_uuid[..], &new_psk[..16]);
+    ctx.session_close(caller.session_id).expect("close caller");
+}
+
+#[test]
+fn key_report_co_rotation_rebinds_calling_session_and_app_id() {
+    rebound_caller_report(CO_PSK_ID);
+}
+
+#[test]
+fn key_report_cu_rotation_rebinds_calling_session_and_app_id() {
+    rebound_caller_report(CU_PSK_ID);
+}
+
 /// Verifies an imported RSA or RSA-CRT key report against the host public key.
 fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
     use x509::X509Certificate;

@@ -479,6 +479,8 @@ pub enum HsmError {
     /// A protected IO transport failed: the request failed authentication,
     /// or its session has no transport keys.
     SessionTransportError = 0x08700113,
+    /// This logical session already committed its one permitted PSK change.
+    PskChangeAlreadyUsed = 0x08700114,
 
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol

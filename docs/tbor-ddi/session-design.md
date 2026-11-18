@@ -188,9 +188,9 @@ available to support bootstrap.
 
 CU bootstrap status belongs to the credential captured at authentication, not
 the partition's current default/non-default state. After one session rotates
-the partition CU PSK, every default-authenticated CU session (including the
-winner) becomes close-only and receives `DefaultPskChanged` for further work.
-A fresh session using the rotated credential is required.
+the partition CU PSK, peer default-authenticated CU sessions become close-only
+and receive `DefaultPskChanged` for further work. The rotating caller is rebound
+to the new PSK and AppId and remains usable, for both CO and CU.
 
 The application selects the suite explicitly. An unsupported suite or a
 nonzero `session_type` is rejected; there is no plaintext-role fallback.
@@ -207,7 +207,9 @@ stateDiagram-v2
     Pending --> Invalid: Registered rollback, close, flush, or reclamation
     Active --> Invalid: Close committed, flush, or partition teardown
     Active --> NeedsRenegotiation: Platform restoration loses live vault mapping
-    NeedsRenegotiation --> Invalid: Teardown / fresh-session recovery policy
+    NeedsRenegotiation --> Pending: Recovery Init / retain identity
+    Pending --> NeedsRenegotiation: Recovery rollback or migration
+    NeedsRenegotiation --> Invalid: Explicit plaintext close or flush
 ```
 
 `Pending` is **not** a plaintext state. It already contains directional
@@ -221,7 +223,7 @@ of service.
 
 ### 4.2 Pending handshake state
 
-The logical Pending blob is 242 bytes:
+The logical Pending blob is 243 bytes:
 
 ```text
 LE16(api_major) || LE16(api_minor)
@@ -230,6 +232,7 @@ LE16(api_major) || LE16(api_minor)
 || auth_binding(68)
 || session_type(1)
 || suite_id(1)
+|| reopen(1)
 || h2m_secret(36)
 || m2h_secret(36)
 ```
@@ -270,12 +273,18 @@ LE32(role_is_CU) || AppId(16) || SHA-384(PSK)(48)
 It is internal credential-derived state, not a public authentication token.
 The implementation revalidates it in Finish, PSK rotation, KeyReport, and
 every ordinary CU command, including bulk work. CU sessions established
-with the default credential stay bootstrap-only after rotation; close
-remains available. Rotation does not universally destroy all open sessions
+with the default credential remain stale after a peer rotates; the caller's
+binding is updated atomically with its own rotation. Close remains available.
+Rotation does not universally destroy all open sessions
 or apply the CU ordinary-command policy to CO sessions.
 
 The vault mapping, rather than only the reusable logical slot number, also
 supports ownership/cleanup of session-associated vault objects.
+
+Separate firmware-owned per-slot recovery metadata retains
+`SHA-384(masking_key)[0..16]` and one PSK-change-consumed bit across migration.
+Fresh close/free clears both; recovery does not reset them. A Pending recovery
+keeps its renegotiation reservation and cannot be evicted by a fresh open.
 
 ## 5. Cryptographic definitions and key schedule
 
@@ -1142,8 +1151,6 @@ The recommended bootstrap flow for either role is:
 Independently enroll root SPKI thumbprint
   -> open using the role's bootstrap/default PSK
   -> PskChange to a provisioned non-default credential
-  -> close
-  -> open a fresh session using that credential
   -> perform authorized provisioning / key operations
 ```
 
@@ -1155,16 +1162,20 @@ Its 32-byte AAD is:
 "psk-change-v1"(13) || LE16(session_id) || zeros(17)
 ```
 
-There is no per-session PSK-change bitmap or attempt budget. Under the partition
+Each logical session permits one successful PSK change. Under the partition
 credential lock, rotation revalidates the session's authenticated credential
 against the partition's current PSK. Exactly one concurrent bootstrap rotation
-can commit. An undo entry restores the prior credential if the guarded rotation
-or completion fails, and a valid retry may use the same session. Either public
+can commit. Undo restores the prior partition credential, caller binding and
+consumed bit if the guarded rotation or completion fails; a valid retry may use
+the same session. Successful rotation keeps transport, parameter and masking
+keys, counters and slot identity unchanged. A second change, including an exact
+replay, returns `PskChangeAlreadyUsed`, also after reopen. Either public
 default PSK and a replacement equal to the current PSK are rejected.
 
 After rotation, an old default-authenticated CU session receives
 `DefaultPskChanged` on every session command except close. This includes the
-winning session and a Pending session attempting Finish after rotation.
+peer sessions and a Pending session attempting Finish after rotation; the
+winning session instead uses its updated binding and new AppId.
 Non-default sessions attempting rotation with a stale credential receive
 `SessionAuthFailure`.
 
@@ -1219,7 +1230,14 @@ handshakes, stale local state, and recovery. It is not the same authenticated
 application exchange as SessionClose; access control for that path also
 depends on the backend, driver, and partition binding.
 
-On failed open/finish processing, the SDK attempts to flush the reserved
+For TBOR slots in `NeedsRenegotiation` only, explicit plaintext close is also
+permitted. Uno marks it with `NoSession` plus a valid SQE ID; Duo uses plaintext
+TBOR. Supported header revision and SQE/body ID agreement are still required.
+Missing negotiated-revision and channel keys are not consulted. The lifecycle
+lock covers the authoritative state check through deferred destruction, so
+plaintext cleanup cannot close an Active or Pending replacement.
+
+On failed fresh open/finish processing, the SDK attempts to flush the reserved
 slot while returning the original failure. Cleanup is best-effort if the
 transport itself is unavailable. On close, the SDK removes the installed
 transport and attempts cleanup if the close failed.
@@ -1227,9 +1245,27 @@ transport and attempts cleanup if the close failed.
 ### 9.3 Reset, migration, and recovery artifacts
 
 `bmk_session` carries the wrapped session masking key, not live transport
-state. Each Init creates a fresh signed KEM handshake and has no recovery-ticket
-field. Preserving or restoring the masking key does not preserve channel keys
-or sender counters.
+state. Open and reopen share the same signed KEM, credential validation, key
+derivation, protected Finish and promotion pipeline. `reopen_id = 65535` selects
+fresh open; another value targets the existing stale slot and must match its
+role. Reopen appends `"TSRA-REOPEN-v1:" || BE16(reopen_id)` to the signed
+transcript before hashing.
+
+The SDK retains the original seed in zeroizing memory with `bmk_session`.
+Recovery Finish encrypts that seed under its fresh `param_key` and sends the
+saved envelope inside the fresh protected channel. Firmware derives
+`BK_SESSION` using the stable partition `BK_BOOT`, validates the recovered
+masking-key metadata and per-slot fingerprint, then restores the original
+masking key. This preserves existing session-masked keys, not channel keys or
+sender counters. Migration retains current role PSKs and the consumed rotation
+bit; recovery authenticates the current PSK and captures its current binding.
+
+Failed recovery rolls back to `NeedsRenegotiation` without discarding recovery
+metadata. A new Init can replace an abandoned recovery Pending, but cannot
+replace a fresh Pending or Active slot. Pending traffic is serialized before
+decryption against replacement Init through completion. Host state is published
+only after authenticated Finish succeeds. Plaintext close independently
+discards a stale slot without knowing its PSK or recovery seed.
 
 `NeedsRenegotiation` records a platform/session-table condition requiring
 channel establishment; it does not permit reuse of retained keys with reset
@@ -1238,8 +1274,11 @@ counters.
 After host snapshot rollback, migration, or process recovery, never restore
 an old sender counter under a retained traffic key unless continuity is
 guaranteed. The safe channel policy is a fresh handshake when such continuity
-cannot be established. Masking-key recovery, where supported, is a separate
-platform/API concern.
+cannot be established. A protected request targeting `NeedsRenegotiation`
+returns dedicated outer completion `0x0CD` before channel-key lookup, mapped
+through the backend and SDK to `SessionNeedsRenegotiation`. Other transport
+authentication failures remain `0x0CC`. This unauthenticated recovery hint is
+not proof of a command result; the SDK never automatically replays the operation.
 
 ## 10. Failure and concurrency semantics
 
@@ -1247,7 +1286,7 @@ platform/API concern.
 |---|---|
 | Invalid thumbprint length or unsupported caller argument | Reject before device activity or session allocation. |
 | Invalid certificate path, root SPKI thumbprint, root signature, or required profile | Reject before Init; do not trust a separately fetched public key. |
-| Init signature or encapsulation validation fails on the host | Do not install a channel; attempt to flush the returned slot. |
+| Init signature or encapsulation validation fails on the host | Do not install a channel; fresh open attempts cleanup, recovery preserves the original reservation for replacement Init. |
 | Wrong PSK | Both peers derive incompatible channel keys; Finish cannot establish a successfully authenticated session. |
 | Request tag fails or Uno frame is malformed | No TBOR command is dispatched; report transport failure. This does not itself run the Finish handler's destroy undo. |
 | Valid transport, but Finish decoding/state lookup fails before undo registration | No successful promotion; cleanup may depend on close/flush or slot policy. |

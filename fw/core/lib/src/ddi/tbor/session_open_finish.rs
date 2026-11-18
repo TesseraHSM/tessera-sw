@@ -34,6 +34,7 @@ use super::session_open_init::PENDING_AUTH_OFF;
 use super::session_open_init::PENDING_BLOB_LEN;
 use super::session_open_init::PENDING_HS_OFF;
 use super::session_open_init::PENDING_KEYS_OFF;
+use super::session_open_init::PENDING_REOPEN_OFF;
 use super::session_open_init::PENDING_SUITE_OFF;
 use super::session_open_init::PENDING_T1_OFF;
 use super::session_open_init::PENDING_TYPE_OFF;
@@ -60,6 +61,7 @@ struct ParsedRequest<'a> {
     /// Codec-supplied `&mut HsmDmaBuf` sub-view of the inbound request
     /// buffer.  Decrypted in place by [`aead_open`] — no scratch copy.
     seed_envelope: &'a mut HsmDmaBuf,
+    bmk_session: &'a mut HsmDmaBuf,
 }
 
 /// Decoded Pending handshake state, split into the regions the PAL
@@ -71,6 +73,7 @@ struct HandshakeState<'a> {
     auth_binding: &'a mut HsmDmaBuf,
     h2m: &'a mut HsmDmaBuf,
     m2h: &'a mut HsmDmaBuf,
+    reopen: bool,
 }
 
 /// Handle a TBOR `SessionOpenFinish` request.
@@ -85,6 +88,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             sess_id,
             fin,
             seed_envelope,
+            bmk_session: recovery,
         } = parse_request(cmd_buf.request_mut())?;
 
         let HandshakeState {
@@ -93,6 +97,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             auth_binding,
             h2m,
             m2h,
+            reopen,
         } = load_pending_state(pal, io, alloc, sess_id)?;
 
         // Record the session's teardown inverse up front: any failure below
@@ -102,7 +107,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // this handler to seal the error reply, and a racing finish must
         // itself authenticate under those keys, so it gives a prober
         // nothing.
-        undo.push_session_destroy(sess_id)?;
+        if reopen {
+            undo.push_session_reopen(sess_id)?;
+        } else {
+            undo.push_session_destroy(sess_id)?;
+        }
 
         verify_fin(pal, io, alloc, hs, t1, fin).await?;
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
@@ -118,8 +127,25 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // does not depend on re-derivation: the key leaves the HSM only as
         // `bmk_session`, wrapped under `BK_SESSION`, and `BK_BOOT` never
         // leaves the device.
-        let masking_key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
-        pal.rng_fill_bytes(io, &mut masking_key[..])?;
+        let masking_key = if reopen {
+            recover_masking_key(pal, io, alloc, sess_id, seed, recovery).await?
+        } else {
+            if !recovery.is_empty() {
+                return Err(HsmError::InvalidArg);
+            }
+            let key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
+            pal.rng_fill_bytes(io, &mut key[..])?;
+            key
+        };
+        let fingerprint = alloc.dma_alloc(48)?;
+        pal.hash(
+            io,
+            HsmHashAlgo::Sha384,
+            masking_key,
+            fingerprint,
+            HsmDigestForm::Standard,
+        )
+        .await?;
 
         // ── Build bmk_session BEFORE promote, so no active session is
         //    ever created without a recovery blob.
@@ -141,6 +167,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             m2h,
         )
         .await?;
+        if !reopen {
+            pal.session_set_recovery_binding(io, sess_id, &fingerprint[..16])?;
+        }
 
         encode_response(cmd_buf, bmk_session)
     })
@@ -160,6 +189,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
         sess_id: id,
         fin,
         seed_envelope,
+        bmk_session: req.bmk_session,
     })
 }
 
@@ -178,6 +208,11 @@ fn load_pending_state<'a, P: HsmPal>(
     pal.session_pending_state(io, id, Some(&mut *blob))?;
     HsmSessionType::from_u8(blob[PENDING_TYPE_OFF])?;
     HsmSessionSuite::from_u8(blob[PENDING_SUITE_OFF])?;
+    let reopen = match blob[PENDING_REOPEN_OFF] {
+        0 => false,
+        1 => true,
+        _ => return Err(HsmError::InvalidArg),
+    };
 
     let (_, blob) = blob.split_at_mut(PENDING_HS_OFF);
     let (hs, rest) = blob.split_at_mut(PENDING_T1_OFF - PENDING_HS_OFF);
@@ -191,7 +226,44 @@ fn load_pending_state<'a, P: HsmPal>(
         auth_binding,
         h2m,
         m2h,
+        reopen,
     })
+}
+
+async fn recover_masking_key<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    id: HsmSessId,
+    seed: &HsmDmaBuf,
+    recovery: &mut HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let key = derive_bk_session(pal, io, alloc, seed).await?;
+    let view = tsra_fw_core_crypto_key_masking::aead::unmask(pal, io, key, recovery).await?;
+    if view.key_kind != HsmVaultKeyKind::MaskingKey
+        || view.key_label != BMK_SESSION_KEY_LABEL
+        || view.key_attrs != HsmVaultKeyAttrs::new()
+        || view.target_key.len() != SESSION_MASKING_KEY_LEN
+        || view.svn > crate::part_state::part_mfgr_svn(pal)
+        || u64::from(view.owner_seed_id) != crate::part_state::part_owner_svn(pal)
+    {
+        return Err(HsmError::SessionAuthFailure);
+    }
+    let fingerprint = alloc.dma_alloc(48)?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        view.target_key,
+        fingerprint,
+        HsmDigestForm::Standard,
+    )
+    .await?;
+    if &fingerprint[..16] != pal.session_recovery_binding(io, id)? {
+        return Err(HsmError::SessionAuthFailure);
+    }
+    let masking_key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
+    masking_key.copy_from_slice(view.target_key);
+    Ok(masking_key)
 }
 
 /// Verify the host's confirmation `fin = HMAC-SHA-384(fin_key, T1)`, with

@@ -97,9 +97,8 @@ pub const SIG_LEN: usize = 96;
 /// `SessionOpenInit` request schema.
 ///
 /// Always starts a fresh handshake bound to the partition identity key
-/// and the caller-asserted PSK.  Resume (recovery of a prior session's
-/// `masking_key`) is handled separately by the MBOR `ReopenSession`
-/// command.
+/// and the caller-asserted PSK. `reopen_id` selects a stale logical
+/// session whose original masking key will be restored by Finish.
 ///
 /// `psk_id`, `session_type`, `suite_id` and `pk_init` are all bound into
 /// the transcript the HSM signs, so a downgrade or substitution fails
@@ -107,6 +106,8 @@ pub const SIG_LEN: usize = 96;
 /// [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the suite registry.
 #[tbor(opcode = 0x03, pair = TborSessionOpenInitResp)]
 pub struct TborSessionOpenInitReq<'a> {
+    /// Existing stale slot to recover, or `u16::MAX` for a fresh session.
+    pub reopen_id: u16,
     /// PSK identifier asserting the caller role (`CryptoOfficer` = `0`,
     /// `CryptoUser` = `1`). Any other value is rejected with
     /// `InvalidPskId` by the handler.

@@ -82,6 +82,7 @@ fn round_trip(ctx: &TestCtx, input: &FuzzInput) {
 /// is reset.
 fn raw_open_init(ctx: &TestCtx, input: &FuzzInput) {
     let req = TborSessionOpenInitReq {
+        reopen_id: u16::MAX,
         psk_id: input.psk_id,
         session_type: input.session_type,
         suite_id: input.suite_id,

@@ -92,6 +92,8 @@ pub(crate) struct OpenSessionExResult {
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     /// Held in a [`Zeroizing`] buffer so it is wiped on drop.
     pub(crate) bmk_session: Zeroizing<Vec<u8>>,
+    /// Secret recovery context used to unwrap the original masking key.
+    pub(crate) seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
     /// Opaque continuity token for this session, stored in the resulting
     /// [`HsmSession`](super::super::HsmSession) and threaded through every
     /// later in-session TBOR op (and the final `CloseSession`) so any DDI
@@ -244,6 +246,27 @@ fn open_session_ex_init(
     psk: Option<&[u8; crate::PSK_LEN]>,
     suite: HsmSessionSuite,
 ) -> HsmResult<PendingHandshake> {
+    establish_session_ex_init(
+        partition,
+        rev,
+        root_spki_thumbprint,
+        psk_id,
+        psk,
+        suite,
+        u16::MAX,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn establish_session_ex_init(
+    partition: &HsmPartition,
+    rev: HsmApiRev,
+    root_spki_thumbprint: &[u8; 48],
+    psk_id: u8,
+    psk: Option<&[u8; crate::PSK_LEN]>,
+    suite: HsmSessionSuite,
+    reopen_id: u16,
+) -> HsmResult<PendingHandshake> {
     let session_suite: SessionSuite = suite.try_into()?;
     // Resolve the PSK before touching the device so an unknown role
     // fails without reserving a session slot.
@@ -256,9 +279,11 @@ fn open_session_ex_init(
     let dev = inner.dev();
 
     let pk_hsm = fetch_pk_hsm(dev, rev, root_spki_thumbprint)?;
-    let initiator = SessionInitiator::generate(session_suite, rev.tbor().map_err(HsmError::from)?)?;
+    let initiator = SessionInitiator::generate(session_suite, rev.tbor().map_err(HsmError::from)?)?
+        .for_reopen(reopen_id);
     let session_type = SessionType::Encrypted.to_u8();
     let req = TborSessionOpenInitReq {
+        reopen_id,
         psk_id,
         session_type,
         suite_id: session_suite.id(),
@@ -267,6 +292,9 @@ fn open_session_ex_init(
     let resp = dev
         .exec_op_tbor(rev, &req, None, &mut None)
         .map_err(HsmError::from)?;
+    if reopen_id != u16::MAX && resp.session_id != reopen_id {
+        return Err(HsmError::InvalidSession);
+    }
 
     match initiator.complete(psk_id, session_type, &pk_hsm, psk, &resp.enc, &resp.sig) {
         Ok(handshake) => Ok(PendingHandshake {
@@ -278,7 +306,9 @@ fn open_session_ex_init(
         }),
         Err(err) => {
             // Release the reserved slot; the error is the handshake failure.
-            let _ = dev.flush_session(resp.session_id);
+            if reopen_id == u16::MAX {
+                let _ = dev.flush_session(resp.session_id);
+            }
             Err(err.into())
         }
     }
@@ -303,6 +333,17 @@ fn open_session_ex_finish(
     partition: &HsmPartition,
     pending: PendingHandshake,
 ) -> HsmResult<OpenSessionExResult> {
+    let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
+    Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| HsmError::InternalError)?;
+    finish_session_ex(partition, pending, seed, &[])
+}
+
+fn finish_session_ex(
+    partition: &HsmPartition,
+    pending: PendingHandshake,
+    seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
+    recovery: &[u8],
+) -> HsmResult<OpenSessionExResult> {
     let inner = partition.inner().read();
     let dev = inner.dev();
     let session_id = pending.session_id;
@@ -310,8 +351,6 @@ fn open_session_ex_finish(
         let handshake = &pending.handshake;
         let transport = handshake.transport()?;
         let param_key = handshake.param_key()?;
-        let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
-        Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| HsmError::InternalError)?;
         let seed_envelope: [u8; SEED_ENVELOPE_LEN] = seal_seed_envelope(&param_key, &*seed)?
             .as_slice()
             .try_into()
@@ -320,6 +359,7 @@ fn open_session_ex_finish(
             session_id,
             mac_fin: handshake.fin()?,
             seed_envelope,
+            bmk_session: recovery.to_vec(),
         };
         let resp =
             dev.exec_op_tbor_sealed(pending.api_rev, session_id, &transport, &req, &mut [])?;
@@ -331,6 +371,7 @@ fn open_session_ex_finish(
                 suite: pending.suite,
                 param_key,
                 bmk_session: Zeroizing::new(resp.bmk_session),
+                seed,
                 ddi_cookie: None,
             },
         ))
@@ -342,10 +383,30 @@ fn open_session_ex_finish(
         }
         Err(err) => {
             // Release the reserved slot; the error is the finish failure.
-            let _ = dev.flush_session(session_id);
+            if recovery.is_empty() {
+                let _ = dev.flush_session(session_id);
+            }
             Err(err)
         }
     }
+}
+
+/// Recover a logical TBOR session using the same establishment pipeline as open.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reopen_session_ex(
+    partition: &HsmPartition,
+    rev: HsmApiRev,
+    root: &[u8; 48],
+    psk_id: u8,
+    psk: Option<&[u8; crate::PSK_LEN]>,
+    suite: HsmSessionSuite,
+    id: u16,
+    seed: &[u8; SESSION_SEED_LEN],
+    bmk: &[u8],
+) -> HsmResult<OpenSessionExResult> {
+    require_tbor_rev(rev)?;
+    let pending = establish_session_ex_init(partition, rev, root, psk_id, psk, suite, id)?;
+    finish_session_ex(partition, pending, Zeroizing::new(*seed), bmk)
 }
 
 /// Issue `PskChange` (opcode `0x06`) on the active session.
@@ -356,8 +417,8 @@ fn open_session_ex_finish(
 /// session role (CO session → CO slot, CU session → CU slot); the
 /// request carries no slot-selection field.
 ///
-/// A default-authenticated CU session must close and reopen with the new
-/// credential after rotation; further work returns [`HsmError::DefaultPskChanged`].
+/// Successful rotation rebinds the caller to the new credential without
+/// reopening. Each logical session allows one successful change.
 ///
 /// # Arguments
 ///
@@ -432,8 +493,8 @@ pub(crate) fn psk_change(
 /// Tears down the FW-side session slot identified by `session_id`,
 /// releasing its key material and invalidating the identifier.
 ///
-/// Resiliency (retry / session reopen) is not yet wired for the TBOR
-/// transport, so any DDI failure is surfaced to the caller as-is.
+/// A dedicated renegotiation response permits plaintext stale-slot cleanup;
+/// authentication failures never trigger that fallback.
 ///
 /// # Arguments
 ///
@@ -460,6 +521,15 @@ pub(crate) fn close_session_ex(
             .map_err(HsmError::from)
             .map(|_| ())
     });
+    let result = if result == Err(HsmError::SessionNeedsRenegotiation) {
+        with_explicit_cookie(ddi_cookie, |cookie| {
+            dev.exec_op_tbor(rev, &TborSessionClosePlainReq { session_id }, None, cookie)
+                .map_err(HsmError::from)
+                .map(|_| ())
+        })
+    } else {
+        result
+    };
     if dev.remove_session_transport(session_id) && result.is_err() {
         // Release the slot of an encrypted session the close left open.
         let _ = dev.flush_session(session_id);

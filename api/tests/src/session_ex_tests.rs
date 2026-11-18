@@ -14,6 +14,69 @@ use tsra_api::*;
 use crate::utils::partition_ex_helpers::*;
 
 #[test]
+fn session_ex_migration_reopen_preserves_psk_change_allowance() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let root = test_root_spki_sha384(&part);
+    let psk = [0xB4; PSK_LEN];
+    let session = part
+        .open_session_ex(
+            rev,
+            &root,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("open CU");
+    session.change_psk(&psk).expect("rotate");
+    part.reset().expect("migration");
+    assert_eq!(
+        session.change_psk(&[0xC5; PSK_LEN]),
+        Err(HsmError::SessionNeedsRenegotiation)
+    );
+    assert!(
+        session.reopen_ex(&root, Some(&[0xD6; PSK_LEN])).is_err(),
+        "wrong current PSK"
+    );
+    session
+        .reopen_ex(&root, Some(&psk))
+        .expect("retry with current PSK");
+    assert_eq!(
+        session.change_psk(&[0xC5; PSK_LEN]),
+        Err(HsmError::PskChangeAlreadyUsed)
+    );
+}
+
+#[test]
+fn session_ex_migration_close_does_not_require_reopen() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let root = test_root_spki_sha384(&part);
+    let session = part
+        .open_session_ex(
+            rev,
+            &root,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("open CO");
+    part.reset().expect("migration");
+    drop(session);
+    part.open_session_ex(
+        rev,
+        &root,
+        HsmSessionPsk::new(HsmPskId::CO),
+        HsmSessionSuite::EcdhP384,
+    )
+    .expect("stale close freed the CO slot");
+}
+
+#[test]
 fn open_session_ex_rejects_wrong_root_pin() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
@@ -168,7 +231,7 @@ fn change_psk_rotates_co_psk() {
 }
 
 #[test]
-fn session_ex_cu_bootstrap_requires_reopen_after_rotation() {
+fn session_ex_cu_rotation_keeps_session_and_consumes_allowance() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -187,7 +250,7 @@ fn session_ex_cu_bootstrap_requires_reopen_after_rotation() {
     bootstrap.change_psk(&psk).expect("initial rotation");
     assert_eq!(
         bootstrap.change_psk(&[0xB6; PSK_LEN]),
-        Err(HsmError::DefaultPskChanged)
+        Err(HsmError::PskChangeAlreadyUsed)
     );
     drop(bootstrap);
     let session = part

@@ -216,6 +216,11 @@ impl From<DdiError> for HsmError {
                 HsmError::DefaultPskMustRotate
             }
             DdiError::TborStatus(TborStatus::DefaultPskChanged) => HsmError::DefaultPskChanged,
+            DdiError::TborStatus(TborStatus::PskChangeAlreadyUsed) => {
+                HsmError::PskChangeAlreadyUsed
+            }
+            DdiError::TborStatus(TborStatus::SessionNeedsRenegotiation)
+            | DdiError::DdiError(0xCD) => HsmError::SessionNeedsRenegotiation,
             // Map the firmware's contract-level `InvalidArg` to the same
             // `InvalidArgument` the host guards return, so callers see a
             // consistent argument-rejection error across transports.

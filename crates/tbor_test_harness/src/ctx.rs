@@ -149,6 +149,20 @@ impl TestCtx {
         self.dev.erase()
     }
 
+    /// Simulate NSSR while keeping the host's stale channel keys.
+    pub fn migrate(&self) -> DdiResult<()> {
+        self.dev.migrate()
+    }
+
+    /// Complete a recovery handshake with saved masking-key material.
+    pub fn session_reopen_finish(
+        &self,
+        pending: PendingHandshake,
+        original: &SessionHandshake,
+    ) -> DdiResult<SessionHandshake> {
+        crate::session::session_reopen_finish(&self.dev, pending, original)
+    }
+
     /// Issue an `OP_TBOR` request and return the raw `DdiResult`.
     ///
     /// Use this when the test needs to inspect both `Ok` and `Err`
@@ -221,6 +235,13 @@ impl TestCtx {
     /// [`Self::unknown_session_status`]).
     #[track_caller]
     pub fn assert_unknown_session_rejects(&self, err: &DdiError, expected: TborStatus) {
+        // Plaintext close now reaches the stale-slot policy on Duo.
+        if self.is_duo()
+            && expected == TborStatus::SessionNotFound
+            && matches!(err, DdiError::TborStatus(TborStatus::SessionNotFound))
+        {
+            return;
+        }
         assert_session_rejects(err, self.unknown_session_status(expected));
     }
 

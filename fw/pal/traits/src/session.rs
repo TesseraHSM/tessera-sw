@@ -240,6 +240,36 @@ impl<'a> HsmSessionTransportKey<'a> {
 /// session table (the firmware is single-core, cooperatively
 /// scheduled, so a plain `Cell`/`RefCell` suffices).
 pub trait HsmSessionManager: HsmIoTypes {
+    /// Reserve a migrated slot for a fresh recovery handshake.
+    async fn session_reopen_pending(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        state: &HsmDmaBuf,
+    ) -> HsmResult<()>;
+
+    /// Stable, non-secret fingerprint of the original session masking key.
+    fn session_recovery_binding(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&[u8]>;
+
+    /// Install the fingerprint when establishing a fresh session.
+    fn session_set_recovery_binding(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        binding: &[u8],
+    ) -> HsmResult<()>;
+
+    /// Whether this logical session has already changed its role PSK.
+    fn session_psk_changed(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<bool>;
+
+    /// Replace the Active session's auth binding and rotation flag without re-keying.
+    fn session_set_auth_binding(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        binding: &HsmDmaBuf,
+        psk_changed: bool,
+    ) -> HsmResult<()>;
     /// Returns `true` if the calling partition has no free session
     /// slots.
     ///

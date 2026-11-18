@@ -33,20 +33,21 @@ the session lifetime.
 
 ## Request
 
-The 12-byte header is followed by four TOC entries. Variable-length data begins
-at byte 28.
+The 12-byte header is followed by five TOC entries. Variable-length data begins
+at byte 32.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 12 | `psk_id` | `uint8` (inline) | `0` = Crypto Officer; `1` = Crypto User. |
-| 16 | `session_type` | `uint8` (inline) | `0` = Encrypted; all other values are rejected. |
-| 20 | `suite_id` | `uint8` (inline) | `0x01`; all other identifiers are unsupported. |
-| 24 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97. |
+| 12 | `reopen_id` | `uint16` (inline) | `65535` for fresh open; otherwise existing stale slot. |
+| 16 | `psk_id` | `uint8` (inline) | `0` = Crypto Officer; `1` = Crypto User. |
+| 20 | `session_type` | `uint8` (inline) | `0` = Encrypted; all other values are rejected. |
+| 24 | `suite_id` | `uint8` (inline) | `0x01`; all other identifiers are unsupported. |
+| 28 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97. |
 
 ## Response
 
-The header echoes the request's API revision. Four TOC slots preserve the
-request footprint; variable-length data begins at byte 28.
+The header echoes the request's API revision. Five TOC slots preserve the
+request footprint; variable-length data begins at byte 32.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
@@ -54,6 +55,7 @@ request footprint; variable-length data begins at byte 28.
 | 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97. |
 | 20 | `sig` | `buffer` (ref) | Data-relative offset `len(enc)`; 96-byte raw ECDSA signature. |
 | 24 | Reserved | `none` | Paired TOC placeholder. |
+| 28 | Reserved | `none` | Paired TOC placeholder. |
 
 ## Transcript and key binding
 
@@ -67,6 +69,13 @@ M1 = "TSRA-SESSION-v1"
 T1 = SHA-384(M1)
 sig = ECDSA-P384.SignDigest(sk_pid, T1)
 ```
+
+For reopen only, append `"TSRA-REOPEN-v1:" || BE16(reopen_id)` to `M1`
+before hashing. Fresh-open transcripts are unchanged. Reopen uses the same
+establishment pipeline, authenticates the current role PSK, and reserves the
+same migrated slot. Active and fresh Pending targets are rejected. An abandoned
+recovery Pending may be replaced; fresh opens cannot evict it. Recovery lineage
+is authenticated by Finish using the saved envelope and retained fingerprint.
 
 The revision integers come from the header but are encoded big-endian in the
 transcript, unlike their little-endian wire representation. The host verifies

@@ -18,10 +18,13 @@ use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::TborSessionCloseResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
+use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_undo::UndoLog;
 
 /// Handle a TBOR `SessionClose` request.
@@ -39,6 +42,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let req = TborSessionCloseReq::decode(cmd_buf.request())?;
     let session_id: u16 = req.session_id().into();
     let id = HsmSessId::from(session_id);
+    if io.sqe().session_ctrl() == HsmSessCtrl::NoSession
+        && !matches!(
+            pal.session_state(io, id),
+            HsmSessionState::NeedsRenegotiation
+        )
+    {
+        return Err(HsmError::InvalidPermissions);
+    }
     if matches!(pal.session_state(io, id), HsmSessionState::Invalid) {
         return Err(HsmError::SessionNotFound);
     }

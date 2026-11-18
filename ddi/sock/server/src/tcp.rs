@@ -278,6 +278,7 @@ mod tests {
                 suite: SessionSuite::EcdhP384,
                 param_key: self.keys.param_key().expect("parameter key"),
                 bmk_session,
+                seed: [0x5A; SESSION_SEED_LEN].into(),
             }
         }
 
@@ -347,6 +348,7 @@ mod tests {
             .expect("verify handshake");
         let param_key = keys.param_key().expect("parameter key");
         let finish = TborSessionOpenFinishReq {
+            bmk_session: Vec::new(),
             session_id: response.session_id,
             mac_fin: keys.fin().expect("host confirmation"),
             seed_envelope: seal_seed_envelope(&param_key, &[0x5A; SESSION_SEED_LEN])

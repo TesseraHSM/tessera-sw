@@ -337,6 +337,8 @@ pub enum TborStatus {
     /// it is malformed, its session has no transport keys, or its tag or
     /// padding does not verify (mirror of `HsmError::SessionTransportError`).
     SessionTransportError = 0x08700113,
+    /// This logical session already committed its one permitted PSK change.
+    PskChangeAlreadyUsed = 0x08700114,
 
     // -- CPT (CryptoController) errors --------------------------------
     // Mirror of `HsmError`'s CPT range, which itself mirrors tiger-collab's

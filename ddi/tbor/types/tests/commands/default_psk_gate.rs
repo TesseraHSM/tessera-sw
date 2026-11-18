@@ -94,7 +94,12 @@ macro_rules! bootstrap_command_test {
             let request =
                 SessionCommandProbe::<{ <$request as TborOpReq>::OPCODE }>(session.session_id());
             ctx.expect_fw_reject(&request, TborStatus::DefaultPskMustRotate);
-            ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
+            let peer_ctx = TestCtx::new_with_path(ctx.path());
+            let rotating = peer_ctx
+                .open_session(CU, SessionSuite::EcdhP384)
+                .expect("rotating peer");
+            peer_ctx
+                .psk_change(rotating.handshake(), &GATE_ROTATED_PSK_A)
                 .expect("rotate CU PSK");
             ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
             session.close().expect("close expired bootstrap session");

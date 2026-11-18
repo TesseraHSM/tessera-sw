@@ -701,9 +701,16 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
                 return Err(HsmError::InvalidArg);
             }
             if needs_cross_check {
-                let selected = pal.session_api_revision(io, sess_id)?;
-                if api_rev != (selected.major, selected.minor) {
-                    return Err(HsmError::UnsupportedRevision);
+                let stale_close = opcode == opcode::SESSION_CLOSE
+                    && matches!(
+                        pal.session_state(io, sess_id),
+                        HsmSessionState::NeedsRenegotiation
+                    );
+                if !stale_close {
+                    let selected = pal.session_api_revision(io, sess_id)?;
+                    if api_rev != (selected.major, selected.minor) {
+                        return Err(HsmError::UnsupportedRevision);
+                    }
                 }
             }
 

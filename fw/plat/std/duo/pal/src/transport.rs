@@ -67,6 +67,12 @@ impl StdHsmPal {
         }
         let key = if secure {
             let id = HsmSessId::from(sqe.session_id());
+            if matches!(
+                self.session_state(io, id),
+                tsra_fw_hsm_pal_traits::HsmSessionState::NeedsRenegotiation
+            ) {
+                return Err(HsmError::SessionNeedsRenegotiation);
+            }
             let key = self
                 .session_transport_key(io, id, HsmSessionTransportDir::H2m)
                 .map_err(|_| HsmError::SessionTransportError)?;

@@ -23,6 +23,7 @@ pub use crypto::fetch_pk_hsm;
 pub use finish::build_mac_fin;
 pub use finish::session_open_finish;
 pub use finish::session_open_finish_with_mac;
+pub use finish::session_reopen_finish;
 pub use finish::SessionHandshake;
 pub use init::session_open_init;
 pub use init::session_open_init_with_options;

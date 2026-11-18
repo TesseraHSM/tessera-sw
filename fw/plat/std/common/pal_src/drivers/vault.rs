@@ -353,6 +353,18 @@ impl KeyVault {
         Ok(&entry.key)
     }
 
+    /// Overwrite a checked range without changing the key's identity.
+    pub fn update(&mut self, key_id: HsmKeyId, offset: usize, bytes: &[u8]) -> HsmResult<()> {
+        self.get_entry(key_id)?;
+        let entry = self.entry_mut_present(key_id)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(HsmError::InvalidArg)?;
+        let dst = entry.key.get_mut(offset..end).ok_or(HsmError::InvalidArg)?;
+        dst.copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Return the firmware raw key size for a given kind.
     pub fn key_len(kind: HsmVaultKeyKind) -> HsmResult<u16> {
         fw_key_size(kind)

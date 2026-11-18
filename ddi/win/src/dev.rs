@@ -1210,8 +1210,8 @@ impl DdiDev for DdiWinDev {
             Err(DdiError::WinError(ioctl_out_buffer.ioctl_status))?;
         }
 
-        if ioctl_out_buffer.status != 0 {
-            Err(DdiError::DdiError(ioctl_out_buffer.status))?;
+        if let Some(error) = DdiError::from_tbor_completion_status(ioctl_out_buffer.status) {
+            return Err(error);
         }
 
         // -- 4. Decode the typed TBOR response --------------------

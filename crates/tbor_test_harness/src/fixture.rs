@@ -83,6 +83,13 @@ pub const ROTATED_CU_PSK: [u8; PSK_LEN] = [
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
 ];
 
+fn factory_reset(dev: &tsra_ddi::TsraDdiDev) -> DdiResult<()> {
+    match dev {
+        tsra_ddi::TsraDdiDev::Sock(dev) => dev.factory_reset(),
+        tsra_ddi::TsraDdiDev::Ioctl(dev) => dev.erase(),
+    }
+}
+
 /// Rotate the default CO PSK and return a fresh CO session.
 pub fn bootstrap_rotated_co(ctx: &TestCtx, target_psk: &[u8; PSK_LEN]) -> SessionHandshake {
     let bootstrap = ctx
@@ -244,7 +251,7 @@ impl TestDev {
     /// Encode `req`, seal it with `transport`, execute it, and open and
     /// decode the response: on Duo as a `TborSecure` command, on Uno as
     /// an in-band sealed frame.
-    fn exec_op_tbor_sealed<T: TborOpReq>(
+    pub(crate) fn exec_op_tbor_sealed<T: TborOpReq>(
         &self,
         session_id: u16,
         transport: &SessionTransport,
@@ -334,6 +341,10 @@ impl TestDev {
     /// Factory-reset the device, dropping every session transport.
     pub fn erase(&self) -> DdiResult<()> {
         self.transports.lock().clear();
+        factory_reset(&self.dev)
+    }
+
+    pub(crate) fn migrate(&self) -> DdiResult<()> {
         self.dev.erase()
     }
 }
@@ -371,8 +382,7 @@ pub fn open_dev() -> TestDev {
     let info = infos.first().expect("backend should advertise a device");
     let path = info.path.clone();
     let dev = ddi.open_dev(&path).expect("open test backend device");
-    dev.erase()
-        .expect("open_dev: factory-reset backend before test");
+    factory_reset(&dev).expect("open_dev: factory-reset backend before test");
     TestDev::new(dev, Some(guard), &path)
 }
 
@@ -393,8 +403,7 @@ pub fn open_dev_with_path(path: &str) -> TestDev {
     let dev = TsraDdi::default()
         .open_dev(path)
         .expect("open test backend device on caller-supplied path");
-    dev.erase()
-        .expect("open_dev_with_path: factory-reset backend before test");
+    factory_reset(&dev).expect("open_dev_with_path: factory-reset backend before test");
     TestDev::new(dev, Some(guard), path)
 }
 
