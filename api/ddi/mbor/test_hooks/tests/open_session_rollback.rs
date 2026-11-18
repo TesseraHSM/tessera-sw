@@ -3,7 +3,7 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Uses separate native handles; capacity is checked before session cleanup.
-//! Unsupported injection hooks skip the scenario while still cleaning up sessions.
+//! Firmware without `tsra_test_hooks` is skipped before any session is opened.
 //!
 //! Test flow:
 //! 1. Establish a fresh credential, open a control session, and create a
@@ -31,8 +31,6 @@ use common::*;
 use test_with_tracing::test;
 use tsra_ddi::Ddi;
 use tsra_ddi::DdiError;
-use tsra_ddi_mbor_test_hooks::helper_test_action_cmd;
-use tsra_ddi_mbor_test_hooks::TestActionRequest;
 use tsra_ddi_mbor_types::*;
 
 fn open_fresh(dev: &<DdiTest as Ddi>::Dev) -> Result<DdiOpenSessionCmdResp, DdiError> {
@@ -53,6 +51,9 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
         common_setup,
         common_cleanup,
         |dev, ddi, path, session_id| {
+            if !rollback::rollback_hooks_supported(dev, session_id) {
+                return;
+            }
             let rev = Some(DdiApiRev { major: 1, minor: 0 });
             let mut sessions = Vec::new();
             let mut target = None;
@@ -105,14 +106,7 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
                     TEST_SESSION_SEED,
                 );
                 let nonce = credential.nonce;
-                match helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure) {
-                    Ok(resp) => assert_eq!(resp.hdr.status, DdiStatus::Success),
-                    Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                        println!("Firmware requires tsra_test_hooks for rollback injection.");
-                        return;
-                    }
-                    Err(err) => panic!("arm rollback injection: {err:?}"),
-                }
+                rollback::arm_io_failure(dev, session_id);
                 let failed =
                     helper_open_session(target_dev, None, rev, credential.clone(), public.clone());
                 if let Ok(resp) = &failed {

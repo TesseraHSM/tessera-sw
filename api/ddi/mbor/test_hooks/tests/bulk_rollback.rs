@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 //! Requires physical Uno firmware with `tsra_test_hooks` and exclusive partition access.
+//! Virtual devices and firmware without `tsra_test_hooks` are skipped.
 //!
 //! These tests exercise the host-visible DDI contract independently of the
 //! firmware's bulk engine. Firmware must support bulk key creation and bulk
@@ -81,11 +82,10 @@ fn test_unmask_bulk_rollback() {
 }
 
 fn check_bulk_cases(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str, op: DdiOp) {
-    assert_eq!(
-        get_device_kind(dev),
-        DdiDeviceKind::Physical,
-        "bulk rollback requires physical firmware"
-    );
+    if get_device_kind(dev) != DdiDeviceKind::Physical {
+        println!("Skipped bulk rollback test for virtual device.");
+        return;
+    }
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let mut bulk_dev = ddi.open_dev(path).expect("open bulk session handle");
     let (credential, public) =
@@ -94,6 +94,10 @@ fn check_bulk_cases(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str, 
         .expect("open bulk verification session");
     let session_id = opened.data.sess_id;
     let short_app_id = opened.data.short_app_id;
+    if !rollback::rollback_hooks_supported(&mut bulk_dev, session_id) {
+        helper_close_session(&bulk_dev, Some(session_id), rev).expect("close bulk session");
+        return;
+    }
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         for size in [
             DdiAesKeySize::AesGcmBulk256,

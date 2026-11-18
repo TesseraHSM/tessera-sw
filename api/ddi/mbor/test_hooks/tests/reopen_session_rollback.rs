@@ -3,6 +3,7 @@
 
 //! Physical Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Simulates migration with NSSR, preserving both native handles and session IDs.
+//! Virtual devices and firmware without `tsra_test_hooks` are skipped.
 //!
 //! Test flow:
 //! 1. Provision the partition and open control and target sessions on separate
@@ -21,6 +22,8 @@
 
 #[allow(clippy::unwrap_used)]
 mod common;
+#[path = "helper/rollback.rs"]
+mod rollback;
 
 use std::panic::AssertUnwindSafe;
 
@@ -31,8 +34,6 @@ use tsra_ddi::Ddi;
 use tsra_ddi::DdiDev;
 use tsra_ddi::DdiError;
 use tsra_ddi_mbor_codec::MborByteArray;
-use tsra_ddi_mbor_test_hooks::helper_test_action_cmd;
-use tsra_ddi_mbor_test_hooks::TestActionRequest;
 use tsra_ddi_mbor_types::*;
 
 fn establish_with_bmk(
@@ -107,6 +108,9 @@ fn test_reopen_session_with_rollback_after_migration() {
                 let first = helper_open_session(dev, None, rev, credential, public)
                     .expect("open control session");
                 first_id = Some(first.data.sess_id);
+                if !rollback::rollback_hooks_supported(dev, first.data.sess_id) {
+                    return;
+                }
                 let (credential, public) = encrypt_userid_pin_for_open_session(
                     &setup_dev,
                     TEST_CRED_ID,
@@ -140,18 +144,7 @@ fn test_reopen_session_with_rollback_after_migration() {
                 assert_eq!(control.hdr.status, DdiStatus::Success);
                 assert!(!control.data.bmk_session.is_empty());
 
-                match helper_test_action_cmd(
-                    dev,
-                    first.data.sess_id,
-                    TestActionRequest::TriggerIoFailure,
-                ) {
-                    Ok(resp) => assert_eq!(resp.hdr.status, DdiStatus::Success),
-                    Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                        println!("Firmware requires tsra_test_hooks for rollback injection.");
-                        return;
-                    }
-                    Err(err) => panic!("arm rollback injection: {err:?}"),
-                }
+                rollback::arm_io_failure(dev, first.data.sess_id);
                 helper_close_session(dev, first_id, rev).expect("close control session");
                 first_id = None;
 

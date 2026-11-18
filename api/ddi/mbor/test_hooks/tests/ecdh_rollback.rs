@@ -3,7 +3,7 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Capacity is checked before session cleanup so teardown cannot hide a leak.
-//! Unsupported injection hooks skip the scenario while still cleaning up keys.
+//! Firmware without `tsra_test_hooks` is skipped before any key is created.
 //!
 //! Test flow:
 //! 1. Establish a fresh credential and open a session. Generate a private input
@@ -20,6 +20,8 @@
 
 #[allow(clippy::unwrap_used)]
 mod common;
+#[path = "helper/rollback.rs"]
+mod rollback;
 
 use std::panic::AssertUnwindSafe;
 
@@ -27,8 +29,6 @@ use common::*;
 use test_with_tracing::test;
 use tsra_ddi::DdiError;
 use tsra_ddi_mbor_codec::MborByteArray;
-use tsra_ddi_mbor_test_hooks::helper_test_action_cmd;
-use tsra_ddi_mbor_test_hooks::TestActionRequest;
 use tsra_ddi_mbor_types::*;
 
 #[test]
@@ -37,6 +37,9 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
+            if !rollback::rollback_hooks_supported(dev, session_id) {
+                return;
+            }
             let rev = Some(DdiApiRev { major: 1, minor: 0 });
             let mut input_keys = Vec::new();
             let mut secrets = Vec::new();
@@ -88,14 +91,7 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
                     .expect("free one ECDH allocation");
                 secrets.pop();
 
-                match helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure) {
-                    Ok(resp) => assert_eq!(resp.hdr.status, DdiStatus::Success),
-                    Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                        println!("Firmware requires tsra_test_hooks for rollback injection.");
-                        return;
-                    }
-                    Err(err) => panic!("arm rollback injection: {err:?}"),
-                }
+                rollback::arm_io_failure(dev, session_id);
 
                 let failed = derive(dev);
                 if let Ok(resp) = &failed {

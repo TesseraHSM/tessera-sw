@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 
 //! Shared capacity checks for the native rollback tests.
-//! Unsupported injection hooks skip the scenario while still cleaning up keys.
+//! Firmware without `tsra_test_hooks` is detected before any key is created,
+//! and the scenario is skipped.
 //!
 //! Test flow:
+//! 0. Probe TriggerIoFailure; skip on UnsupportedCmd, otherwise disarm it.
 //! 1. Prepare and track command-specific input keys, then create outputs until
 //!    NotEnoughSpace. Retain one output and delete another to free an allocation.
 //! 2. Arm TriggerIoFailure and require InvalidKeyType from the next creation.
@@ -53,6 +55,9 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
     key_id: impl Fn(K) -> u16,
     verify: impl Fn(&<DdiTest as Ddi>::Dev, &T, K, K),
 ) {
+    if !rollback_hooks_supported(dev, session_id) {
+        return;
+    }
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let mut input_keys = Vec::new();
     let mut keys = Vec::new();
@@ -78,14 +83,7 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
             .expect("free one allocation");
         keys.pop();
 
-        match helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure) {
-            Ok(resp) => assert_eq!(resp.hdr.status, DdiStatus::Success),
-            Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                println!("Firmware requires tsra_test_hooks for rollback injection.");
-                return;
-            }
-            Err(err) => panic!("arm rollback injection: {err:?}"),
-        }
+        arm_io_failure(dev, session_id);
 
         let failed = create(dev, &input);
         if let Ok(key_id) = &failed {
@@ -123,6 +121,45 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
         std::panic::resume_unwind(payload);
     }
     assert!(cleanup_errors.is_empty(), "Key cleanup: {cleanup_errors:?}");
+}
+
+/// Returns false, after printing the standard skip message, when the firmware
+/// lacks `tsra_test_hooks`. Otherwise the probe arms TriggerIoFailure, so one
+/// ECC generation (which checks the flag) consumes it before the caller starts.
+pub fn rollback_hooks_supported(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) -> bool {
+    let resp = helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure);
+    if matches!(&resp, Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))) {
+        println!("Firmware is not built with tsra_test_hooks.");
+        return false;
+    }
+    assert_eq!(
+        resp.expect("probe rollback injection").hdr.status,
+        DdiStatus::Success
+    );
+    let rev = Some(DdiApiRev { major: 1, minor: 0 });
+    let disarm = helper_ecc_generate_key_pair(
+        dev,
+        Some(session_id),
+        rev,
+        DdiEccCurve::P256,
+        helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App),
+    );
+    if let Ok(resp) = &disarm {
+        helper_delete_key(dev, Some(session_id), rev, resp.data.private_key_id)
+            .expect("delete unexpected probe key");
+    }
+    assert!(
+        matches!(disarm, Err(DdiError::DdiStatus(DdiStatus::InvalidKeyType))),
+        "Probe must consume the armed injection, got {disarm:?}"
+    );
+    true
+}
+
+/// Arms TriggerIoFailure on firmware already probed for `tsra_test_hooks`.
+pub fn arm_io_failure(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) {
+    let resp = helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure)
+        .expect("arm rollback injection");
+    assert_eq!(resp.hdr.status, DdiStatus::Success);
 }
 
 pub fn kdf_input(dev: &<DdiTest as Ddi>::Dev, session_id: u16, keys: &mut Vec<u16>) -> u16 {
