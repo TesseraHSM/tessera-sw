@@ -148,7 +148,8 @@ async fn attested_pub_key<'a, P: HsmPal>(
     let coord_raw = curve.priv_key_len();
 
     let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
-    pal.ecc_pub_from_priv(io, curve, priv_key, pub_key).await?;
+    pal.ecc_pub_from_priv(io, curve, priv_key, Some(pub_key))
+        .await?;
 
     // The COSE_Key encodes big-endian coordinates; convert the PAL's
     // operand-order `x ‖ y` in place to the exact-width BE pair.
@@ -251,8 +252,8 @@ async fn authenticate_request<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         data,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
     let view = aead_open(pal, io, param_key, envelope)

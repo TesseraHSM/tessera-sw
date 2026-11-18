@@ -11,6 +11,7 @@ use xshell::cmd;
 use xshell::Shell;
 
 use crate::fw_util::FwPaths;
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -23,11 +24,12 @@ impl Xtask for Clean {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let sh = Shell::new()?;
         let fw = FwPaths::new(&ctx)?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
 
         for (label, dir) in fw.firmware_workspaces() {
             let _dir = sh.push_dir(dir);
             log::info!("Cleaning {label}...");
-            cmd!(sh, "cargo +nightly clean").run()?;
+            cmd!(sh, "cargo {toolchain} clean").run()?;
         }
         Ok(())
     }

@@ -155,7 +155,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // post) reverts the session via the dispatcher's undo walk — the
         // same "destroy on failure" the bespoke rollback did, now uniform.
         undo.push_session_destroy(sess_id)?;
-        let pk_hsm = load_pk_hsm(pal, io, alloc)?;
+        let pk_hsm = load_pk_hsm(pal, io, alloc).await?;
         // A transport-protected slot seals the reply under its own keys, so
         // an authentication failure must leave it for the undo walk.
         let sealed = transport.is_some();
@@ -355,18 +355,17 @@ fn load_pending_state<'a, P: HsmPal>(
 
 /// SEC1-uncompressed encoding (`0x04 ‖ X_be ‖ Y_be`) of the partition
 /// identity public key, in a freshly-allocated scoped buffer.
-fn load_pk_hsm<'a, P: HsmPal>(
+async fn load_pk_hsm<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
-    let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
+    let pk_hsm = alloc
+        .dma_alloc(HsmEccCurve::P384.pub_key_len() + 4)?
+        .split_at_mut(3)
+        .1;
     pk_hsm[0] = 0x04;
-    {
-        let pk = crate::part_state::part_id_pub_key(pal, io)?;
-        pk_hsm[1..1 + xy_len].copy_from_slice(&pk[..xy_len]);
-    }
+    crate::part_state::part_id_pub_key(pal, io, pk_hsm.split_at_mut(1).1).await?;
     Ok(pk_hsm)
 }
 
@@ -393,8 +392,10 @@ async fn verify_mac<P: HsmPal>(
     label_sid[..SESSION_PHASE2_LABEL.len()].copy_from_slice(SESSION_PHASE2_LABEL);
     label_sid[SESSION_PHASE2_LABEL.len()..].copy_from_slice(&session_id_be);
 
+    let state_len = pal.hmac_state_size(HsmHashAlgo::Sha384)?;
+    let state = alloc.dma_alloc(state_len)?;
     let mut hmac_ctx = pal
-        .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
+        .hmac_begin(io, HsmHashAlgo::Sha384, exported, state)
         .await?;
     for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
         pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;

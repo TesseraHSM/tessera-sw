@@ -6,7 +6,7 @@
 //!
 //! `DarcTmkImport` opens a `sealed_tmk` on the **target**. The handler
 //! re-hashes the supplied `policy`, validates the **source** certificate
-//! chain against the policy `POTAPubKey` to recover the source's HPKE
+//! chain against the policy POTA key thumbprint to recover the source's HPKE
 //! sender public key (`SndrPub`), unmasks the target's own KEX key
 //! (`RcvrPriv`), HPKE-Auth-opens `sealed_tmk` to recover the TMK, and
 //! re-masks it under the partition SDMK as a `DarcTmk` masked-key blob.
@@ -28,8 +28,8 @@ use super::*;
 /// * `masked_kex_key` - The target's masked DARC KEX key (from
 ///   [`darc_kex_key_gen`](super::darc_kex_key_gen)), exactly
 ///   [`MASKED_KEX_KEY_LEN`] bytes.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes)
-///   whose `POTAPubKey` anchors `remote_cert_chain`.
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes)
+///   whose POTA key thumbprint anchors `remote_cert_chain`.
 /// * `sealed_tmk` - The sealed TMK from
 ///   [`darc_tmk_export`](super::darc_tmk_export), exactly
 ///   [`SEALED_TMK_LEN`] bytes.
@@ -54,7 +54,7 @@ pub(crate) fn darc_tmk_import(
     let sealed_tmk: [u8; SEALED_TMK_LEN] = sealed_tmk
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     let mut oob: Vec<&[u8]> = Vec::new();
     let remote_cert_chain =

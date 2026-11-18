@@ -241,7 +241,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     // Re-derive the operand-order public key and the big-endian
                     // COSE scalar `d` from the vault key.
                     let pub_wire = alloc.dma_alloc(wire_pub_len)?;
-                    pal.ecc_pub_from_priv(io, curve, vault, &mut pub_wire[..wire_pub_len])
+                    pal.ecc_pub_from_priv(io, curve, vault, Some(&mut pub_wire[..wire_pub_len]))
                         .await?;
                     let d = alloc.dma_alloc(field)?;
                     let d_res = async {

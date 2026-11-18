@@ -28,7 +28,6 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_upka::EccStep;
@@ -687,8 +686,14 @@ impl UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let (data, _) = drbg.msg.split_at(len);
-        self.hmac_sign(io, HsmHashAlgo::Sha384, &*drbg.key, data, &mut *drbg.tag)
-            .await?;
+        self.hmac_sign(
+            io,
+            HsmHashAlgo::Sha384,
+            &*drbg.key,
+            data,
+            Some(&mut *drbg.tag),
+        )
+        .await?;
         core::mem::swap(&mut drbg.key, &mut drbg.tag);
         Ok(())
     }
@@ -702,7 +707,7 @@ impl UnoHsmPal {
             HsmHashAlgo::Sha384,
             &*drbg.key,
             &*drbg.v,
-            &mut *drbg.tag,
+            Some(&mut *drbg.tag),
         )
         .await?;
         core::mem::swap(&mut drbg.v, &mut drbg.tag);
@@ -741,6 +746,7 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         part_root: &HsmDmaBuf,
         d_be: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let field = PRIME384_LE.len(); // 48
         // `d_be` must hold the field-width scalar (may be oversized), and
@@ -751,11 +757,13 @@ impl UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        self.alloc_scoped_async(io, async |scope| {
+        {
             // info = label ‖ attempt(1 B) ‖ u16_be(OKM_LEN). The attempt byte is
             // rewritten each iteration so the retry counter is folded into the
             // KDF context — a fresh, unique derivation per SP 800-133r3 §4.2.1.
-            let info = scope.dma_alloc(KEYPAIR_LABEL_PTA.len() + 1 + 2)?;
+            let info_len = KEYPAIR_LABEL_PTA.len() + 3;
+            let (info, hkdf_workspace) = workspace.split_at_mut(info_len.next_multiple_of(4));
+            let info = &mut info[..info_len];
             info[..KEYPAIR_LABEL_PTA.len()].copy_from_slice(KEYPAIR_LABEL_PTA);
             info[KEYPAIR_LABEL_PTA.len() + 1..]
                 .copy_from_slice(&(PTA_OKM_LEN as u16).to_be_bytes());
@@ -768,12 +776,13 @@ impl UnoHsmPal {
             let outcome = async {
                 for attempt in 0..PTA_KEYGEN_MAX_TRIES {
                     info[KEYPAIR_LABEL_PTA.len()] = attempt;
-                    self.hkdf_expand(
+                    self.hkdf_expand_in_workspace(
                         io,
                         HsmHashAlgo::Sha384,
                         part_root,
                         Some(&*info),
                         &mut d_be[..PTA_OKM_LEN],
+                        hkdf_workspace,
                     )
                     .await?;
                     // A.2.2: the big-endian OKM is the candidate; accept iff it
@@ -801,8 +810,13 @@ impl UnoHsmPal {
                 }
                 Err(e) => Err(e),
             }
-        })
-        .await
+        }
+    }
+
+    pub(super) fn ecc_keypair_root_workspace_len() -> usize {
+        let derivation = (KEYPAIR_LABEL_PTA.len() + 3).next_multiple_of(4)
+            + Self::hkdf_expand_workspace_len(HsmHashAlgo::Sha384);
+        derivation.max(3 * PRIME384_LE.len() + mont_operand_size(UpkaEccCurve::P384))
     }
 
     /// Deterministically generate a P-384 key pair from `part_root`, the
@@ -842,6 +856,7 @@ impl UnoHsmPal {
         part_root: &HsmDmaBuf,
         d_le: &mut HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if curve != UpkaEccCurve::P384 {
             return Err(HsmError::UnsupportedCmd);
@@ -851,10 +866,14 @@ impl UnoHsmPal {
         if d_le.len() < field || pub_key.len() < field * 2 {
             return Err(HsmError::InvalidArg);
         }
+        if workspace.len() < Self::ecc_keypair_root_workspace_len() {
+            return Err(HsmError::NotEnoughSpace);
+        }
 
         // 1. Derive the scalar big-endian (A.2.2), then flip to PKA
         //    little-endian in place for the point multiply.
-        self.derive_pta_scalar_be(io, part_root, d_le).await?;
+        self.derive_pta_scalar_be(io, part_root, d_le, workspace)
+            .await?;
         d_le[..field].reverse();
 
         // 2. Q = d·G on ONE held engine, using the proven point-multiply
@@ -870,23 +889,21 @@ impl UnoHsmPal {
         //    point-mul opcode with a null (0) scalar operand, so the PKA reads
         //    the scalar from address 0 (not GSRAM) and faults with an AXI
         //    BUS_ERROR (0x08f0c003).
-        let mul_result = self
-            .alloc_scoped_async(io, async |scope| {
-                let prime = scope.dma_alloc(field)?;
-                prime.copy_from_slice(&PRIME384_LE);
-                let base_xy = scope.dma_alloc(field * 2)?;
-                base_xy[..field].copy_from_slice(&BASE384_X_LE);
-                base_xy[field..].copy_from_slice(&BASE384_Y_LE);
-                let mont_scratch = scope.dma_alloc(mont)?;
-                self.pka
-                    .with_engine(async |eng| {
-                        eng.ecc_mont_const_calc(curve, prime, mont_scratch).await?;
-                        eng.ecc_point_mul(curve, base_xy, &d_le[..field], &mut pub_key[..field * 2])
-                            .await
-                    })
-                    .await
-            })
-            .await;
+        let mul_result = {
+            let (prime, rest) = workspace.split_at_mut(field);
+            prime.copy_from_slice(&PRIME384_LE);
+            let (base_xy, rest) = rest.split_at_mut(field * 2);
+            base_xy[..field].copy_from_slice(&BASE384_X_LE);
+            base_xy[field..].copy_from_slice(&BASE384_Y_LE);
+            let mont_scratch = &mut rest[..mont];
+            self.pka
+                .with_engine(async |eng| {
+                    eng.ecc_mont_const_calc(curve, prime, mont_scratch).await?;
+                    eng.ecc_point_mul(curve, base_xy, &d_le[..field], &mut pub_key[..field * 2])
+                        .await
+                })
+                .await
+        };
 
         match mul_result {
             Ok(()) => {

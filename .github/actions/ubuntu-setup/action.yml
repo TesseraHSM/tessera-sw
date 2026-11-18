@@ -27,7 +27,16 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config libbsd-dev
+        sudo apt-get install -y pkg-config libbsd-dev openssl libssl-dev
+        echo "OPENSSL_DIR=/usr" >> "$GITHUB_ENV"
+        echo "OPENSSL_INCLUDE_DIR=/usr/include" >> "$GITHUB_ENV"
+        echo "OPENSSL_LIB_DIR=$(pkg-config --variable=libdir openssl)" >> "$GITHUB_ENV"
+    - name: Verify system OpenSSL PQC support
+      shell: bash
+      run: |
+        /usr/bin/openssl version
+        /usr/bin/openssl list -signature-algorithms | grep ML-DSA
+        /usr/bin/openssl list -kem-algorithms | grep ML-KEM
     - name: Restore Cargo cache
       id: cargo-cache
       uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0

@@ -14,8 +14,11 @@
 //!   plaintext only, and plaintext + AAD).
 //! * Encrypt / decrypt round trips across AAD and text lengths, including
 //!   the maximum data length.
+//! * An imported key matches the host reference AES-256-GCM on data and
+//!   AAD spanning multiple device streaming chunks.
 //! * Device-generated IV on encrypt; rejected on decrypt.
-//! * Tampered tag / AAD / ciphertext / masked key fail authentication.
+//! * Tampered tag / AAD / ciphertext / masked key fail authentication,
+//!   including ciphertext and AAD tampered in a later chunk.
 //! * Non-AES-256 key, oversize data, inconsistent lengths, missing OOB
 //!   and an invalid session are rejected.
 
@@ -279,6 +282,53 @@ fn aes_gcm_roundtrip_max_data_len() {
     }
 }
 
+/// An imported key encrypts multi-chunk data exactly like the host
+/// reference AES-256-GCM and decrypts back.
+///
+/// Text and AAD lengths span several device streaming chunks (2048 bytes)
+/// with partial final blocks, both AAD placements, and AAD itself longer
+/// than one chunk.
+#[test]
+fn aes_gcm_multi_chunk_matches_host() {
+    use tsra_crypto::AesGcmAlgo;
+    use tsra_crypto::AesKey;
+    use tsra_crypto::EncryptOp;
+    use tsra_crypto::ImportableKey;
+
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key_bytes = random(32);
+    let key = import_aes256(&ctx, sid, &key_bytes);
+    let host_key = AesKey::from_bytes(&key_bytes).expect("host AES key");
+
+    for (aad_len, text_len) in [
+        (0, 2049),
+        (16, 4095),
+        (20, 5000),
+        (32, GCM_DATA_MAX_LEN - 33),
+        (2050, 2049),
+        (3000, GCM_DATA_MAX_LEN - padded_aad_len(3000)),
+    ] {
+        let iv = random(GCM_IV_LEN);
+        let aad = random(aad_len);
+        let pt = random(text_len);
+        let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+        let mut algo = AesGcmAlgo::for_encrypt(&iv, Some(&aad)).expect("host GCM algo");
+        let mut expected = vec![0u8; text_len];
+        algo.encrypt(&host_key, &pt, Some(&mut expected))
+            .expect("host GCM encrypt");
+        assert_eq!(ct, expected, "ciphertext: aad {aad_len} text {text_len}");
+        assert_eq!(tag, algo.tag(), "tag: aad {aad_len} text {text_len}");
+
+        assert_eq!(
+            decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct),
+            pt,
+            "aad {aad_len} text {text_len}"
+        );
+    }
+}
+
 /// A device-generated IV is returned on encrypt and decrypts with a host
 /// IV; two encryptions draw distinct IVs.
 #[test]
@@ -371,6 +421,30 @@ fn aes_gcm_rejects_tampered_inputs() {
     let mut bad_empty_tag = empty_tag;
     bad_empty_tag[15] ^= 1;
     expect_tag_mismatch(&ctx, sid, &key, &iv, &bad_empty_tag, &[], &[]);
+}
+
+/// Multi-chunk data authenticates only when intact: tampering the
+/// ciphertext or AAD in a chunk after the first fails authentication.
+#[test]
+fn aes_gcm_rejects_tamper_in_later_chunk() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    let iv = random(GCM_IV_LEN);
+    let aad = random(3000);
+    let pt = random(10000);
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+    assert_eq!(decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct), pt);
+
+    for pos in [5000, ct.len() - 1] {
+        let mut bad_ct = ct.clone();
+        bad_ct[pos] ^= 1;
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &aad, &bad_ct);
+    }
+
+    let mut bad_aad = aad.clone();
+    bad_aad[2500] ^= 1;
+    expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &bad_aad, &ct);
 }
 
 /// A masked key whose authentication tag was altered is rejected.

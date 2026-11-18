@@ -16,7 +16,7 @@ A transfer proceeds in two phases:
   key with [`tsra_darc_tmk_export`](#tsra_darc_tmk_export), and the target
   opens it with [`tsra_darc_tmk_import`](#tsra_darc_tmk_import). The sealed
   TMK is bound to both endpoints' identities via HPKE-Auth and validated
-  against the certificate chains anchored in the unified partition policy.
+  against the certificate chains anchored in the partition policy.
 - **Key wrap.** The source wraps the designated key under the TMK with
   [`tsra_darc_key_wrap`](#tsra_darc_key_wrap); the target unwraps and
   installs it with [`tsra_darc_key_unwrap`](#tsra_darc_key_unwrap).
@@ -88,7 +88,7 @@ tsra_status tsra_darc_tmk_gen(
 Seal a DARC TMK to an authenticated target.
 
 Validates `target_cert_chain` against the `DATAPubKey` anchored in the
-supplied unified partition policy, then HPKE-Auth seals the TMK to the
+supplied partition policy, then HPKE-Auth seals the TMK to the
 target's KEX key using the source's KEX key as the sender-auth identity,
 returning the sealed TMK.
 
@@ -129,7 +129,7 @@ struct tsra_darc_tmk_export_params {
  | ----------------- | -------------------------------------------------------- | ------------------------------------------------------------ |
  | masked_sender_key | const [tsra_buffer*](#tsra_buffer)                   | source masked KEX key (`MASKED_KEX_KEY_LEN`, 276 B)          |
  | masked_tmk        | const [tsra_buffer*](#tsra_buffer)                   | masked TMK to export (`MASKED_TMK_LEN`, 260 B)              |
- | policy            | const [tsra_buffer*](#tsra_buffer)                   | unified partition policy image anchoring `DATAPubKey`        |
+ | policy            | const [tsra_buffer*](#tsra_buffer)                   | partition policy anchoring the DATA key thumbprint           |
  | target_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)        | DATA-anchored target certificate chain (1–2 certs)   &nbsp; |
 
 ## tsra_darc_tmk_import
@@ -137,7 +137,7 @@ struct tsra_darc_tmk_export_params {
 Import (open) a sealed DARC TMK on the target.
 
 Validates `remote_cert_chain` against the `POTAPubKey` anchored in the
-supplied unified partition policy, HPKE-Auth opens the sealed TMK against the
+supplied partition policy, HPKE-Auth opens the sealed TMK against the
 target's KEX key, and re-masks the recovered TMK under the target partition
 SDMK, returning the masked TMK.
 
@@ -177,7 +177,7 @@ struct tsra_darc_tmk_import_params {
  | Field             | Name                                                | Description                                                  |
  | ----------------- | --------------------------------------------------- | ------------------------------------------------------------ |
  | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (`MASKED_KEX_KEY_LEN`, 276 B)         |
- | policy            | const [tsra_buffer*](#tsra_buffer)              | unified partition policy image anchoring `POTAPubKey`        |
+ | policy            | const [tsra_buffer*](#tsra_buffer)              | partition policy anchoring the POTA key thumbprint           |
  | sealed_tmk        | const [tsra_buffer*](#tsra_buffer)              | sealed TMK to open (`SEALED_TMK_LEN`, 145 B)               |
  | remote_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)   | POTA-anchored source certificate chain (1–2 certs)   &nbsp; |
 

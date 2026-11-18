@@ -52,8 +52,6 @@ use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
 use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdResealRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
@@ -155,16 +153,13 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 HsmHashAlgo::Sha384,
                 policy,
-                expected,
                 HsmDigestForm::Standard,
+                Some(expected),
             )
             .await?;
 
             let part_policy = super::policy::from_bytes(policy)?;
-            let pota = &part_policy.pota_pub_key;
-            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
-                return Err(HsmError::InvalidArg);
-            }
+            let pota = part_policy.pota_spki_thumbprint;
 
             // Source **sender** evidence → `SndrPub`; its report's policy
             // digest must match the request policy.
@@ -181,7 +176,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: pota,
                         require_sd_sealing: true,
                     },
                     pk_sndr,
@@ -210,7 +205,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: pota,
                         require_sd_sealing: true,
                     },
                     pk_dst,
@@ -261,7 +256,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // operand-order `X ‖ Y` into the coordinate region; converting
             // in place yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
             let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
             byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;

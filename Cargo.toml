@@ -45,6 +45,7 @@ members = [
   "examples/sock/api_sock_get_api_rev",
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
+  "fuzz",
   "fw/core/byte-order",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
@@ -106,7 +107,7 @@ members = [
 # without this it would claim `fw/plat/uno/fw/drivers/*` and their
 # `workspace = true` dependencies would be looked up here instead of in their
 # own workspace.
-exclude = ["fuzz", "fw/plat/uno"]
+exclude = ["fw/plat/uno"]
 
 [workspace.dependencies]
 # Internal crates
@@ -207,7 +208,6 @@ bitfield = "0.19.1"
 bitfield-struct = "0.13.0"
 bitflags = "2.10.0"
 cfg-if = "1"
-chrono = "0.4.31"
 clap = "4.2"
 cmake = "0.1.57"
 critical-section = "1.2.0"
@@ -231,8 +231,6 @@ lit = "1.0.4"
 log = "0.4"
 memmap2 = "0.9.11"
 minicbor = "0.19.1"
-ml-dsa = "0.1.1"
-ml-kem = "0.3.2"
 nix = { default-features = false, version = "0.29" }
 num-bigint = "0.4"
 open-enum = "0.3.0"

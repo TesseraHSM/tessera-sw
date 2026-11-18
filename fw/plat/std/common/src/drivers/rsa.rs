@@ -50,12 +50,15 @@
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::HashAlgo;
+use tsra_crypto::Key;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
+use tsra_crypto::RsaSignAlgo;
+use tsra_crypto::Verifier;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
 
@@ -106,6 +109,42 @@ pub fn rsa_pub_wire(
         .map_err(|_| HsmError::RsaGenerateError)?;
     byte_order::int_from_be(order, e_out);
     Ok(wire_len)
+}
+
+/// Synchronous RSA-2048 PCT for lazy, await-free unwrapping-key provisioning.
+pub fn unwrapping_key_pct(key: &RsaPrivateKey) -> HsmResult<bool> {
+    if key.size() != 256 {
+        return Err(HsmError::RsaInvalidKeyLength);
+    }
+    let public = key.public_key().map_err(|_| HsmError::RsaGenerateError)?;
+    let mut input = zeroize::Zeroizing::new([0x5a; 256]);
+    input[0] = 0;
+    let mut middle = zeroize::Zeroizing::new([0u8; 256]);
+    let mut output = zeroize::Zeroizing::new([0xff; 256]);
+    let mut algo = RsaEncryptAlgo::with_no_padding();
+    if algo
+        .encrypt(&public, input.as_ref(), Some(middle.as_mut()))
+        .map_err(|_| HsmError::RsaEncryptFailed)?
+        != input.len()
+    {
+        return Err(HsmError::RsaEncryptFailed);
+    }
+    if algo
+        .decrypt(key, middle.as_ref(), Some(output.as_mut()))
+        .map_err(|_| HsmError::RsaDecryptFailed)?
+        != input.len()
+    {
+        return Err(HsmError::RsaDecryptFailed);
+    }
+    let diff = input
+        .iter()
+        .zip(output.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b));
+    let changed = input
+        .iter()
+        .zip(middle.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b));
+    Ok(core::hint::black_box(diff) == 0 && core::hint::black_box(changed) != 0)
 }
 
 /// Std RSA driver — software RSA via OpenSSL with async worker dispatch.
@@ -185,6 +224,13 @@ impl StdRsa {
     ) -> HsmResult<()> {
         let result = self.mod_exp_priv_result(priv_key, y, x.len()).await?;
         byte_order::int_copy_from_be(self.order, x, &result)
+    }
+
+    /// Validate an operand-order private input without performing exponentiation.
+    pub fn validate_mod_exp_priv_input(&self, priv_key: &RsaPrivateKey, y: &[u8]) -> HsmResult<()> {
+        let mut input = y.to_vec();
+        byte_order::int_to_be(self.order, &mut input);
+        reject_out_of_range_mod_exp_input(priv_key, &input)
     }
 
     /// Replace an operand-order input block with the private-key result.
@@ -268,6 +314,50 @@ impl StdRsa {
 
         // `result` is big-endian; emit the operand-order form.
         byte_order::int_copy_from_be(self.order, y, &result)
+    }
+
+    /// Verify a digest using an operand-order `n || e(4)` key and signature.
+    /// The digest is a standard byte string. `salt_len` selects PSS when
+    /// present, and PKCS#1 v1.5 otherwise.
+    pub async fn verify(
+        &self,
+        key_size: HsmRsaKey,
+        hash: HashAlgo,
+        pub_key: &[u8],
+        digest: &[u8],
+        signature: &[u8],
+        salt_len: Option<usize>,
+    ) -> HsmResult<bool> {
+        let k = key_size.modulus_len();
+        let max_salt = k
+            .checked_sub(hash.size())
+            .and_then(|len| len.checked_sub(2))
+            .ok_or(HsmError::InvalidArg)?;
+        if pub_key.len() != k + RSA_PUB_EXP_WIRE_LEN
+            || signature.len() != k
+            || digest.len() != hash.size()
+            || salt_len.is_some_and(|len| len > max_salt)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut public = pub_key.to_vec();
+        byte_order::int_to_be(self.order, &mut public[..k]);
+        byte_order::int_to_be(self.order, &mut public[k..]);
+        let mut signature = signature.to_vec();
+        byte_order::int_to_be(self.order, &mut signature);
+        let digest = digest.to_vec();
+        self.pool
+            .submit_with_result(async move {
+                let key = <RsaPublicKey as tsra_crypto::ImportableHsmKey>::from_hsm_bytes(&public)
+                    .map_err(|_| HsmError::InvalidArg)?;
+                let mut algorithm = match salt_len {
+                    Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
+                    None => RsaSignAlgo::with_pkcs1_padding(hash),
+                };
+                Verifier::verify(&mut algorithm, &key, &digest, &signature)
+                    .map_err(|_| HsmError::RsaEncryptFailed)
+            })
+            .await
     }
 
     /// RSA-OAEP decrypt (EME-OAEP, RFC 8017 §7.1.2).
@@ -433,6 +523,24 @@ mod tests {
     }
 
     // ── Key generation ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn verify_rejects_oversized_pss_hash() {
+        let driver = make_driver();
+        assert_eq!(
+            driver
+                .verify(
+                    HsmRsaKey::Rsa2048Pub,
+                    HashAlgo::shake256(std::num::NonZeroUsize::new(300).expect("nonzero length")),
+                    &[0; 260],
+                    &[0; 300],
+                    &[0; 256],
+                    Some(0)
+                )
+                .await,
+            Err(HsmError::InvalidArg)
+        );
+    }
 
     #[tokio::test]
     async fn gen_keypair_2048() {

@@ -26,15 +26,13 @@
 //!
 //! # Platform Support
 //!
-//! Unlike the classical algorithms in this crate there is no platform backend to
-//! select between: neither OpenSSL nor CNG exposes ML-DSA, so it comes from the
-//! pure-Rust `ml-dsa` crate and behaves identically on every host.
-//!
-//! That is a deliberate choice as well as a constraint. The Cortex-M firmware
-//! runs its own implementation on the fastpath cores, so this one is independent
-//! of it: the known-answer tests in this module are generated from that
-//! implementation, so they compare two unrelated codebases and a mistake in
-//! either shows up as a disagreement rather than as agreement on a wrong answer.
+//! Linux uses OpenSSL 3.5+ in the crate-private default-provider libctx.
+//! Windows uses the Microsoft CNG provider on PQC-capable systems (updated
+//! Windows Server 2025 or Windows 11 24H2 and newer). CNG supports hedged
+//! signing, but an explicit deterministic signing request returns
+//! [`CryptoError::MlDsaDeterministicUnsupported`]; it is never silently hedged.
+//! Older OpenSSL builds retain classical crypto support but return
+//! [`CryptoError::PqcUnavailable`] for PQC operations.
 //!
 //! # Randomness
 //!
@@ -67,6 +65,20 @@
 
 mod key;
 mod sign;
+
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "linux")] {
+        mod key_ossl;
+        mod sign_ossl;
+        use key_ossl as platform;
+    } else if #[cfg(target_os = "windows")] {
+        mod key_cng;
+        mod sign_cng;
+        use key_cng as platform;
+    } else {
+        compile_error!("Unsupported target OS for ML-DSA");
+    }
+}
 
 pub use key::MlDsaPrivateKey;
 pub use key::MlDsaPublicKey;
@@ -148,22 +160,25 @@ impl MlDsaVariant {
             .into_iter()
             .find(|v| v.sec_key_len() == len)
     }
-}
 
-#[cfg(test)]
-mod tests;
-
-/// Instantiates a generic body for the parameter set named by `$variant`.
-///
-/// The three sets are distinct types, so each arm monomorphises separately; the
-/// macro keeps the three-way match out of every operation.
-macro_rules! dispatch {
-    ($variant:expr, $f:ident($($arg:expr),* $(,)?)) => {
-        match $variant {
-            MlDsaVariant::MlDsa44 => $f::<MlDsa44>($($arg),*),
-            MlDsaVariant::MlDsa65 => $f::<MlDsa65>($($arg),*),
-            MlDsaVariant::MlDsa87 => $f::<MlDsa87>($($arg),*),
+    #[cfg(target_os = "windows")]
+    pub(super) fn parameter_name(self) -> &'static str {
+        match self {
+            Self::MlDsa44 => "44",
+            Self::MlDsa65 => "65",
+            Self::MlDsa87 => "87",
         }
-    };
+    }
+
+    #[cfg(all(target_os = "linux", ossl350))]
+    pub(super) fn name(self) -> &'static std::ffi::CStr {
+        match self {
+            Self::MlDsa44 => c"ML-DSA-44",
+            Self::MlDsa65 => c"ML-DSA-65",
+            Self::MlDsa87 => c"ML-DSA-87",
+        }
+    }
 }
-use dispatch;
+
+#[cfg(all(test, any(target_os = "windows", ossl350)))]
+mod tests;

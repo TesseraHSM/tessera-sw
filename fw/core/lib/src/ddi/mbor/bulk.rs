@@ -50,7 +50,7 @@ pub(crate) async fn commit_key<P: HsmPal>(
         (handle, Some(bulk_key_id))
     } else {
         let handle = pal
-            .vault_key_create(io, material, kind, session_id, attrs)
+            .vault_key_create(io, material, kind, session_id, attrs, HsmVaultPct::None)
             .await?;
         (handle, None)
     };

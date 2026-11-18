@@ -56,6 +56,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 
 #[repr(align(4096))]
 struct HostPage([u8; 4096]);
@@ -188,13 +189,12 @@ async fn check_cqe_boundary(op: DdiOp, kind: DdiKeyType) {
             let public_key = pal
                 .dma_alloc(&control_io, curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER))
                 .expect("public key");
-            pal.alloc_scoped_async(&control_io, async |alloc| {
+            pal.alloc_scoped_async(&control_io, async |_alloc| {
                 pal.ecc_gen_keypair(
                     &control_io,
-                    alloc,
                     curve,
-                    Some((&mut *private_key, &mut *public_key)),
                     HsmEccPct::KeyAgreement,
+                    Some((&mut *private_key, &mut *public_key)),
                 )
                 .await
             })
@@ -207,6 +207,7 @@ async fn check_cqe_boundary(op: DdiOp, kind: DdiKeyType) {
                     HsmVaultKeyKind::Ecc256Private,
                     None,
                     HsmVaultKeyAttrs::new().with_derive(true),
+                    HsmVaultPct::None,
                 )
                 .await
                 .expect("store input ECC key");
@@ -260,6 +261,7 @@ async fn check_cqe_boundary(op: DdiOp, kind: DdiKeyType) {
                     HsmVaultKeyKind::Secret256,
                     None,
                     HsmVaultKeyAttrs::new().with_derive(true),
+                    HsmVaultPct::None,
                 )
                 .await
                 .expect("store input secret");
@@ -598,6 +600,7 @@ async fn check_open_session_boundary() {
             HsmVaultKeyKind::MaskingKey,
             None,
             HsmVaultKeyAttrs::new().with_internal(true),
+            HsmVaultPct::None,
         )
         .await
         .expect("store masking key");
@@ -713,7 +716,7 @@ async fn encode_session_request(
             .expect("session key material");
         let (public, private) = key.split_at(HsmEccCurve::P384.pub_key_len());
         let secret = pal.dma_alloc(io, 48).expect("ECDH secret");
-        pal.ecdh_derive(io, HsmEccCurve::P384, private, public, secret)
+        pal.ecdh_derive(io, HsmEccCurve::P384, private, public, Some(secret))
             .await
             .expect("credential ECDH");
         secret.reverse();
@@ -725,7 +728,7 @@ async fn encode_session_request(
         let old_nonce = nonce.to_vec();
         let prk = pal.dma_alloc(io, 48).expect("credential PRK");
         let okm = pal.dma_alloc(io, 80).expect("transport keys");
-        pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+        pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
             .await
             .expect("extract");
         pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm)
@@ -744,9 +747,15 @@ async fn encode_session_request(
         authenticated[80..96].copy_from_slice(iv);
         authenticated[96..].copy_from_slice(nonce);
         let tag = pal.dma_alloc(io, 48).expect("credential tag");
-        pal.hmac_sign(io, HsmHashAlgo::Sha384, &okm[32..], authenticated, tag)
-            .await
-            .expect("authenticate credential");
+        pal.hmac_sign(
+            io,
+            HsmHashAlgo::Sha384,
+            &okm[32..],
+            authenticated,
+            Some(tag),
+        )
+        .await
+        .expect("authenticate credential");
         let public_buf = pal.dma_alloc(io, public.len()).expect("host public key");
         public_buf.copy_from_slice(public);
         let (encrypted_id, rest) = encrypted.split_at_mut(16);
@@ -853,6 +862,7 @@ async fn check_reopen_session_boundary() {
                     HsmVaultKeyKind::MaskingKey,
                     None,
                     HsmVaultKeyAttrs::new().with_internal(true),
+                    HsmVaultPct::None,
                 )
                 .await
                 .expect("restore partition masking key");
@@ -978,7 +988,14 @@ async fn vault_capacity(
     let mut keys = Vec::new();
     loop {
         match pal
-            .vault_key_create(io, material, kind, None, HsmVaultKeyAttrs::new())
+            .vault_key_create(
+                io,
+                material,
+                kind,
+                None,
+                HsmVaultKeyAttrs::new(),
+                HsmVaultPct::None,
+            )
             .await
         {
             Ok(id) => keys.push(id),
@@ -1135,7 +1152,7 @@ async fn encode_establish_request(
             .expect("transport material");
         let (public, private) = key.split_at(HsmEccCurve::P384.pub_key_len());
         let secret = pal.dma_alloc(io, 48).expect("ECDH secret");
-        pal.ecdh_derive(io, HsmEccCurve::P384, private, public, secret)
+        pal.ecdh_derive(io, HsmEccCurve::P384, private, public, Some(secret))
             .await
             .expect("establish ECDH");
         secret.reverse();
@@ -1146,7 +1163,7 @@ async fn encode_establish_request(
         );
         let prk = pal.dma_alloc(io, 48).expect("PRK");
         let okm = pal.dma_alloc(io, 80).expect("transport keys");
-        pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+        pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
             .await
             .expect("extract");
         pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm)
@@ -1164,30 +1181,39 @@ async fn encode_establish_request(
         authenticated[32..48].copy_from_slice(iv);
         authenticated[48..].copy_from_slice(nonce);
         let tag = pal.dma_alloc(io, 48).expect("credential HMAC");
-        pal.hmac_sign(io, HsmHashAlgo::Sha384, &okm[32..], authenticated, tag)
-            .await
-            .expect("authenticate credential");
+        pal.hmac_sign(
+            io,
+            HsmHashAlgo::Sha384,
+            &okm[32..],
+            authenticated,
+            Some(tag),
+        )
+        .await
+        .expect("authenticate credential");
 
-        let identity = pal
-            .part_prop_get_bytes(io, HsmPartPropId::PART_ID_ECC_PUB_KEY)
-            .expect("identity public key");
-        let identity_sec1 = pal.dma_alloc(io, 97).expect("SEC1 identity");
+        let identity_sec1 = pal
+            .dma_alloc(io, 100)
+            .expect("SEC1 identity")
+            .split_at_mut(3)
+            .1;
         identity_sec1[0] = 4;
-        identity_sec1[1..].copy_from_slice(identity);
+        tsra_fw_hsm_core::part_state::part_id_pub_key(pal, io, &mut identity_sec1[1..])
+            .await
+            .expect("identity public key");
         let digest = pal.dma_alloc(io, 48).expect("POTA digest");
         pal.hash(
             io,
             HsmHashAlgo::Sha384,
             identity_sec1,
-            digest,
             HsmDigestForm::Operand,
+            Some(digest),
         )
         .await
         .expect("hash identity");
         let pota_private = pal.dma_alloc(io, 48).expect("POTA private key");
         pota_private.copy_from_slice(&fixture.pota_private);
         let signature = pal.dma_alloc(io, 96).expect("POTA signature");
-        pal.ecc_sign(io, HsmEccCurve::P384, pota_private, digest, signature)
+        pal.ecc_sign(io, HsmEccCurve::P384, pota_private, digest, Some(signature))
             .await
             .expect("endorse identity");
 
@@ -1270,13 +1296,12 @@ async fn check_establish_boundary(failure: EstablishFailure) {
     });
     let pota_private = pal.dma_alloc(&io, 48).expect("POTA private key");
     let pota_public = pal.dma_alloc(&io, 96).expect("POTA public key");
-    pal.alloc_scoped_async(&io, async |scope| {
+    pal.alloc_scoped_async(&io, async |_scope| {
         pal.ecc_gen_keypair(
             &io,
-            scope,
             HsmEccCurve::P384,
-            Some((&mut *pota_private, &mut *pota_public)),
             HsmEccPct::SignVerify,
+            Some((&mut *pota_private, &mut *pota_public)),
         )
         .await
     })
@@ -1298,6 +1323,7 @@ async fn check_establish_boundary(failure: EstablishFailure) {
             HsmVaultKeyKind::Aes256,
             None,
             HsmVaultKeyAttrs::new(),
+            HsmVaultPct::None,
         )
         .await
         .expect("pre-existing key");
@@ -1373,6 +1399,7 @@ async fn check_establish_boundary(failure: EstablishFailure) {
                 HsmVaultKeyKind::EstablishCred,
                 None,
                 transport_attrs,
+                HsmVaultPct::None,
             )
             .await
             .expect("re-provision transport key");
@@ -1655,7 +1682,14 @@ async fn vault_allocation_cost(
 ) -> usize {
     let before = vault_capacity(pal, io, probe, HsmVaultKeyKind::Aes256).await;
     let key = pal
-        .vault_key_create(io, material, kind, None, HsmVaultKeyAttrs::new())
+        .vault_key_create(
+            io,
+            material,
+            kind,
+            None,
+            HsmVaultKeyAttrs::new(),
+            HsmVaultPct::None,
+        )
         .await
         .expect("allocation-size probe");
     let after = vault_capacity(pal, io, probe, HsmVaultKeyKind::Aes256).await;

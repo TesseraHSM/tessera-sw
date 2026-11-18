@@ -53,8 +53,6 @@ use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborSdCreatePeerBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdCreatePeerBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
@@ -134,10 +132,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 return Err(HsmError::SdPeerCloningNotAllowed);
             }
 
-            let pota = &part_policy.pota_pub_key;
-            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
-                return Err(HsmError::InvalidArg);
-            }
+            let pota = part_policy.pota_spki_thumbprint;
 
             // The destination peer's report must attest to the same policy.
             let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
@@ -145,8 +140,8 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 HsmHashAlgo::Sha384,
                 policy,
-                expected,
                 HsmDigestForm::Standard,
+                Some(expected),
             )
             .await?;
 
@@ -163,7 +158,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: pota,
                         require_sd_sealing: true,
                     },
                     pk_r,
@@ -209,7 +204,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Sender public key (`SndrPub`) in SEC1 BE, derived on-device
             // from the recovered private key.
             let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
             byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;

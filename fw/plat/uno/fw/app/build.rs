@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 use tsra_fw_uno_reg_soc::io_gsram;
 
+const _: () = assert!(
+    io_gsram::HSM_CODE_OFFSET + io_gsram::HSM_CODE_SIZE <= io_gsram::FP_DSA_CACHE_OFFSET,
+    "HSM_CODE overlaps FP_DSA_CACHE"
+);
+
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"));
     let manifest = PathBuf::from(
@@ -13,14 +18,10 @@ fn main() {
     );
 
     let code_start = io_gsram::IO_GSRAM_BASE + io_gsram::HSM_CODE_OFFSET;
-    let io_end = io_gsram::IO_GSRAM_BASE
-        + io_gsram::SRAM_IO_BUF_OFFSET
-        + io_gsram::SRAM_IO_BUF_COUNT * io_gsram::SRAM_IO_BUF_STRIDE;
-    assert!(io_end <= code_start, "SRAM_IO_BUF overlaps HSM_CODE");
     fs::write(
         out.join("gsram-memory.x"),
         format!(
-            "MEMORY {{ GSRAM_CODE : ORIGIN = {code_start:#x}, LENGTH = {:#x} }}\n",
+            "MEMORY {{ GSRAM_CODE (rx) : ORIGIN = {code_start:#x}, LENGTH = {:#x} }}\n",
             io_gsram::HSM_CODE_SIZE,
         ),
     )

@@ -10,7 +10,7 @@
 //!   `PtaKeyAlreadySet` guard.
 //! * [`part_init_determinism`] — across two cold restarts (via
 //!   `ctx.erase()`), the derived PTA pubkey is byte-identical given
-//!   the same `(UDS, MachineSeed, Policy, POTA thumb)` inputs.
+//!   the same `(UDS, MachineSeed, Policy)` inputs.
 //! * [`part_init_multi_threaded_single_winner`] — concurrent requests
 //!   race the write-once partition commit; exactly one succeeds and
 //!   every loser observes `PtaKeyAlreadySet`.
@@ -30,8 +30,7 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_ddi_tbor_types::PTA_REPORT_MAX_LEN;
 use x509::X509Certificate;
@@ -40,9 +39,10 @@ use x509::X509Csr;
 use x509::X509CsrOp;
 
 use super::known_good_part_policy;
+use super::known_good_test_policy;
 use super::mach_seed;
 use super::open_co_with;
-use super::pota_thumbprint;
+use super::FILLER_POTA_THUMBPRINT;
 use crate::commands::part_info::PART_STATE_INITIALIZING;
 
 /// Runs the supplied cleanup function when this value goes out of scope,
@@ -76,10 +76,9 @@ fn part_init_smoke_roundtrip() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let resp = ctx
-        .part_init(&session, &seed, &policy, &thumb)
+        .part_init(&session, &seed, &policy)
         .expect("PartInit roundtrip");
 
     // CSR — DER `SEQUENCE` (0x30) tag, length fits the FW max.
@@ -151,7 +150,7 @@ fn part_init_smoke_roundtrip() {
         .expect("close first PartInit session");
     let session2 = open_co_with(&ctx, &ROTATED_CO_PSK);
     let err = ctx
-        .part_init(&session2, &seed, &policy, &thumb)
+        .part_init(&session2, &seed, &policy)
         .expect_err("second PartInit must be rejected by one-shot state guard");
     assert_fw_rejects(&err, TborStatus::PtaKeyAlreadySet);
 }
@@ -167,7 +166,6 @@ fn part_init_multi_threaded_single_winner() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let policy = known_good_part_policy();
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
     let barrier = Barrier::new(THREAD_COUNT);
 
     let results: Vec<_> = std::thread::scope(|scope| {
@@ -178,11 +176,10 @@ fn part_init_multi_threaded_single_winner() {
                 let handshake = &session;
                 let seed = &seed;
                 let policy = &policy;
-                let thumb = &thumb;
 
                 scope.spawn(move || {
                     barrier.wait();
-                    worker_ctx.part_init(handshake, seed, policy, thumb)
+                    worker_ctx.part_init(handshake, seed, policy)
                 })
             })
             .collect();
@@ -311,17 +308,23 @@ fn verify_pta_report(ctx: &TestCtx, pta_report: &[u8], pta_spki_der: &[u8]) {
 fn run_part_init_capture_pta_pub(
     ctx: &TestCtx,
     seed: &[u8; MACH_SEED_LEN],
-    policy: &[u8; PART_POLICY_LEN],
-    thumb: &[u8; POTA_THUMBPRINT_LEN],
+    policy: &[u8],
 ) -> Vec<u8> {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let resp = ctx
-        .part_init(&session, seed, policy, thumb)
+        .part_init(&session, seed, policy)
         .expect("PartInit roundtrip");
     let _ = ctx.session_close(session.session_id);
 
     let csr = X509Csr::from_der(&resp.pta_csr).expect("PTACSR parses");
     csr.get_public_key_der().expect("CSR SPKI extracts")
+}
+
+/// Encode the known-good policy with `pota` as its POTA thumbprint.
+fn policy_with_pota(pota: [u8; POLICY_THUMBPRINT_LEN]) -> Vec<u8> {
+    let mut p = known_good_test_policy();
+    p.pota_spki_thumbprint = pota;
+    p.encode()
 }
 
 /// Changing only `PolicyFlags::INCLUDE_FMC_CDI` must produce a different PTA public key.
@@ -330,24 +333,18 @@ fn part_init_pta_pub_differs_when_include_fmc_cdi_flag_toggled() {
     let ctx = TestCtx::new();
 
     let seed = mach_seed();
-    let thumb = pota_thumbprint();
 
     let default_policy = known_good_part_policy();
+    let fmc_cdi_policy = known_good_test_policy()
+        .with_flags(PolicyFlags::INCLUDE_FMC_CDI)
+        .encode();
 
-    let mut fmc_cdi_policy = default_policy;
-
-    // PartPolicy wire layout:
-    // flags is byte 418.
-    const PART_POLICY_FLAGS_OFFSET: usize = 418;
-
-    fmc_cdi_policy[PART_POLICY_FLAGS_OFFSET] |= PolicyFlags::INCLUDE_FMC_CDI;
-
-    let pta_pub_default = run_part_init_capture_pta_pub(&ctx, &seed, &default_policy, &thumb);
+    let pta_pub_default = run_part_init_capture_pta_pub(&ctx, &seed, &default_policy);
 
     // Reset partition state before running PartInit with the modified policy.
     ctx.erase().expect("erase between policy runs");
 
-    let pta_pub_fmc_cdi = run_part_init_capture_pta_pub(&ctx, &seed, &fmc_cdi_policy, &thumb);
+    let pta_pub_fmc_cdi = run_part_init_capture_pta_pub(&ctx, &seed, &fmc_cdi_policy);
 
     assert_ne!(
         pta_pub_default, pta_pub_fmc_cdi,
@@ -357,18 +354,18 @@ fn part_init_pta_pub_differs_when_include_fmc_cdi_flag_toggled() {
 }
 
 /// Cold-start determinism: derive the PTA keypair twice with the
-/// same `(UDS, MachineSeed, Policy, POTA thumbprint)` inputs (UDS
+/// same `(UDS, MachineSeed, Policy)` inputs (UDS
 /// being deterministic per `pid` under the std/emu PAL) and assert
 /// the two PTA pubkeys are byte-identical.
 ///
 /// The emu device's `erase()` performs `part_disable` + `part_enable`,
 /// matching what real hardware does on NSSR: it wipes the rotated
 /// PSKs, the prior PTA key material, the partition policy, and the
-/// POTA thumbprint, and re-derives a fresh-but-deterministic UDS via
+/// partition policy, and re-derives a fresh-but-deterministic UDS via
 /// `derive_sim_uds(pid)`.  Each run therefore starts from a pristine
 /// `Enabled` partition with the canonical default PSKs and the
-/// same UDS, which means PTA = f(UDS, MachineSeed, Policy, POTA
-/// thumb) must collapse to the same bytes both times.
+/// same UDS, which means PTA = f(UDS, MachineSeed,
+/// Policy) must collapse to the same bytes both times.
 ///
 /// We compare the X.509 SubjectPublicKeyInfo carried in the CSR
 /// rather than the CSR bytes themselves: the CSR's ECDSA signature
@@ -381,21 +378,20 @@ fn part_init_determinism() {
 
     let seed = mach_seed();
     let policy = known_good_part_policy();
-    let thumb = pota_thumbprint();
 
-    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     // Cold restart: wipe partition state (including PTA key material
     // and rotated PSKs) and re-provision a fresh-but-deterministic
     // UDS via `part_enable_internal` → `derive_sim_uds(pid)`.
     ctx.erase().expect("erase between runs");
 
-    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     assert_eq!(
         pta_pub_run1, pta_pub_run2,
         "PTA pubkey must be byte-identical across cold restarts with the \
-         same (UDS, MachineSeed, Policy, POTA thumb) inputs",
+         same (UDS, MachineSeed, Policy) inputs",
     );
 }
 
@@ -405,17 +401,16 @@ fn part_init_determinism() {
 fn part_init_machine_seed_changes_pta_key() {
     let ctx = TestCtx::new();
     let policy = known_good_part_policy();
-    let thumb = pota_thumbprint();
 
     let seed_a = mach_seed();
     let mut seed_b = seed_a;
     seed_b[0] ^= 0x01;
 
     ctx.erase().expect("erase before seed-A run");
-    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed_a, &policy, &thumb);
+    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed_a, &policy);
 
     ctx.erase().expect("erase before seed-B run");
-    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed_b, &policy, &thumb);
+    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed_b, &policy);
 
     assert_ne!(
         pta_pub_a, pta_pub_b,
@@ -429,17 +424,16 @@ fn part_init_machine_seed_changes_pta_key() {
 fn part_init_pota_thumbprint_changes_pta_key() {
     let ctx = TestCtx::new();
     let seed = mach_seed();
-    let policy = known_good_part_policy();
 
-    let thumb_a = pota_thumbprint();
+    let thumb_a = FILLER_POTA_THUMBPRINT;
     let mut thumb_b = thumb_a;
-    thumb_b[POTA_THUMBPRINT_LEN - 1] ^= 0x01;
+    thumb_b[POLICY_THUMBPRINT_LEN - 1] ^= 0x01;
 
     ctx.erase().expect("erase before thumb-A run");
-    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb_a);
+    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed, &policy_with_pota(thumb_a));
 
     ctx.erase().expect("erase before thumb-B run");
-    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb_b);
+    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed, &policy_with_pota(thumb_b));
 
     assert_ne!(
         pta_pub_a, pta_pub_b,
@@ -453,19 +447,18 @@ fn part_init_pota_thumbprint_changes_pta_key() {
 #[test]
 fn part_init_changed_inputs_are_still_deterministic() {
     let ctx = TestCtx::new();
-    let policy = known_good_part_policy();
-
     let mut seed = mach_seed();
     seed[MACH_SEED_LEN - 1] ^= 0x80;
 
-    let mut thumb = pota_thumbprint();
+    let mut thumb = FILLER_POTA_THUMBPRINT;
     thumb[0] ^= 0x40;
+    let policy = policy_with_pota(thumb);
 
     ctx.erase().expect("erase before changed-input run 1");
-    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     ctx.erase().expect("erase before changed-input run 2");
-    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     assert_eq!(
         pta_pub_run1, pta_pub_run2,
@@ -483,14 +476,13 @@ fn part_init_succeeds_again_after_erase() {
     let ctx = TestCtx::new();
     let seed = mach_seed();
     let policy = known_good_part_policy();
-    let thumb = pota_thumbprint();
 
     ctx.erase().expect("erase before first PartInit");
-    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run1 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     ctx.erase()
         .expect("erase must clear prior PTA key and partition state");
-    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb);
+    let pta_pub_run2 = run_part_init_capture_pta_pub(&ctx, &seed, &policy);
 
     assert_eq!(
         pta_pub_run1, pta_pub_run2,
@@ -508,7 +500,6 @@ fn part_init_succeeds_again_after_erase() {
 #[test]
 fn part_init_distinct_valid_input_combinations_produce_unique_keys() {
     let ctx = TestCtx::new();
-    let policy = known_good_part_policy();
 
     let seed_0 = mach_seed();
     let mut seed_1 = seed_0;
@@ -517,24 +508,24 @@ fn part_init_distinct_valid_input_combinations_produce_unique_keys() {
     let mut seed_2 = seed_0;
     seed_2[MACH_SEED_LEN - 1] ^= 0x80;
 
-    let thumb_0 = pota_thumbprint();
+    let thumb_0 = FILLER_POTA_THUMBPRINT;
     let mut thumb_1 = thumb_0;
     thumb_1[0] ^= 0x01;
 
     let mut thumb_2 = thumb_0;
-    thumb_2[POTA_THUMBPRINT_LEN - 1] ^= 0x80;
+    thumb_2[POLICY_THUMBPRINT_LEN - 1] ^= 0x80;
 
     ctx.erase().expect("erase before combination 0");
-    let pub_0 = run_part_init_capture_pta_pub(&ctx, &seed_0, &policy, &thumb_0);
+    let pub_0 = run_part_init_capture_pta_pub(&ctx, &seed_0, &policy_with_pota(thumb_0));
 
     ctx.erase().expect("erase before combination 1");
-    let pub_1 = run_part_init_capture_pta_pub(&ctx, &seed_1, &policy, &thumb_0);
+    let pub_1 = run_part_init_capture_pta_pub(&ctx, &seed_1, &policy_with_pota(thumb_0));
 
     ctx.erase().expect("erase before combination 2");
-    let pub_2 = run_part_init_capture_pta_pub(&ctx, &seed_0, &policy, &thumb_1);
+    let pub_2 = run_part_init_capture_pta_pub(&ctx, &seed_0, &policy_with_pota(thumb_1));
 
     ctx.erase().expect("erase before combination 3");
-    let pub_3 = run_part_init_capture_pta_pub(&ctx, &seed_2, &policy, &thumb_2);
+    let pub_3 = run_part_init_capture_pta_pub(&ctx, &seed_2, &policy_with_pota(thumb_2));
 
     assert_ne!(
         pub_0, pub_1,
@@ -571,17 +562,16 @@ fn part_init_distinct_valid_input_combinations_produce_unique_keys() {
 fn part_init_last_machine_seed_byte_changes_pta_key() {
     let ctx = TestCtx::new();
     let policy = known_good_part_policy();
-    let thumb = pota_thumbprint();
 
     let seed_a = mach_seed();
     let mut seed_b = seed_a;
     seed_b[MACH_SEED_LEN - 1] ^= 0x01;
 
     ctx.erase().expect("erase before original-seed run");
-    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed_a, &policy, &thumb);
+    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed_a, &policy);
 
     ctx.erase().expect("erase before final-byte seed run");
-    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed_b, &policy, &thumb);
+    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed_b, &policy);
 
     assert_ne!(
         pta_pub_a, pta_pub_b,
@@ -598,17 +588,16 @@ fn part_init_last_machine_seed_byte_changes_pta_key() {
 fn part_init_first_pota_thumbprint_byte_changes_pta_key() {
     let ctx = TestCtx::new();
     let seed = mach_seed();
-    let policy = known_good_part_policy();
 
-    let thumb_a = pota_thumbprint();
+    let thumb_a = FILLER_POTA_THUMBPRINT;
     let mut thumb_b = thumb_a;
     thumb_b[0] ^= 0x01;
 
     ctx.erase().expect("erase before original-thumb run");
-    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb_a);
+    let pta_pub_a = run_part_init_capture_pta_pub(&ctx, &seed, &policy_with_pota(thumb_a));
 
     ctx.erase().expect("erase before first-byte thumb run");
-    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed, &policy, &thumb_b);
+    let pta_pub_b = run_part_init_capture_pta_pub(&ctx, &seed, &policy_with_pota(thumb_b));
 
     assert_ne!(
         pta_pub_a, pta_pub_b,
@@ -631,11 +620,10 @@ fn part_init_modified_inputs_return_fully_valid_artifacts() {
     seed[0] ^= 0x20;
     seed[MACH_SEED_LEN - 1] ^= 0x04;
 
-    let policy = known_good_part_policy();
-
-    let mut thumb = pota_thumbprint();
+    let mut thumb = FILLER_POTA_THUMBPRINT;
     thumb[0] ^= 0x10;
-    thumb[POTA_THUMBPRINT_LEN - 1] ^= 0x02;
+    thumb[POLICY_THUMBPRINT_LEN - 1] ^= 0x02;
+    let policy = policy_with_pota(thumb);
 
     ctx.erase()
         .expect("erase before modified-input artifact validation");
@@ -649,7 +637,7 @@ fn part_init_modified_inputs_return_fully_valid_artifacts() {
     });
 
     let resp = ctx
-        .part_init(&session, &seed, &policy, &thumb)
+        .part_init(&session, &seed, &policy)
         .expect("PartInit with modified valid inputs");
 
     // Validate the returned PKCS#10 CSR.

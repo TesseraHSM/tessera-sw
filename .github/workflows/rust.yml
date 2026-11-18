@@ -17,7 +17,7 @@ env:
 jobs:
   build_ubuntu:
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     defaults:
       run:
@@ -48,7 +48,7 @@ jobs:
 
   test_ubuntu_sock:
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     defaults:
       run:
@@ -72,7 +72,7 @@ jobs:
 
   test_ubuntu_api:
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     defaults:
       run:
@@ -104,7 +104,7 @@ jobs:
 
   test_ubuntu_misc:
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     defaults:
       run:

@@ -31,7 +31,7 @@
 //!   32-byte TMK plaintext; its kind must be
 //!   [`DarcTmk`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind::DarcTmk).
 //! * `policy` — the unified [`PartPolicy`] whose `DATAPubKey` anchors the
-//!   `target_cert_chain`.  Length pinned to [`PART_POLICY_LEN`] (584 B);
+//!   `target_cert_chain`.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B);
 //!   its SHA-384 digest must equal the partition's bound `policy_hash`.
 //! * `target_cert_chain` — a packed list of [`CertDescriptor`] entries
 //!   `(index, length)` referencing where each DER certificate of the
@@ -52,7 +52,7 @@ pub use crate::darc_tmk_import::MASKED_TMK_LEN;
 pub use crate::darc_tmk_import::SEALED_TMK_LEN;
 pub use crate::darc_tmk_import::TMK_LEN;
 use crate::evidence::CertDescriptor;
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 
 /// TBOR opcode for `DarcTmkExport`.
 pub const TBOR_OP_DARC_TMK_EXPORT: u8 = 0x24;
@@ -68,9 +68,9 @@ const _: () = assert!(MASKED_KEX_KEY_LEN == 280);
 const _: () = assert!(MASKED_TMK_LEN == 264);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
-// literal on the field, so the length is spelled out as `584` and pinned
+// literal on the field, so the maximum length is spelled out as `384` and pinned
 // against the canonical value here.
-const _: () = assert!(PART_POLICY_LEN == 584);
+const _: () = assert!(PART_POLICY_MAX_LEN == 384);
 
 // `sealed_tmk` is an HPKE-Auth seal; the derive needs an integer literal
 // on the field, so the length is spelled out as `145` and pinned against
@@ -108,10 +108,10 @@ pub struct TborDarcTmkExportReq<'a> {
     pub masked_tmk: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] whose `DATAPubKey` anchors
-    /// `target_cert_chain`.  Length pinned to [`PART_POLICY_LEN`] (584 B).
+    /// `target_cert_chain`.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B).
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 
     /// Packed list of [`CertDescriptor`] entries `(index, length)` for the
@@ -151,7 +151,7 @@ mod tests {
     fn request_round_trips_fields() {
         let masked_sender = [0u8; MASKED_KEX_KEY_LEN];
         let masked_tmk = [0u8; MASKED_TMK_LEN];
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let descs = [
             CertDescriptor {
                 index: 0,
@@ -180,7 +180,7 @@ mod tests {
 
         assert_eq!(frame.masked_sender_key().len(), MASKED_KEX_KEY_LEN);
         assert_eq!(frame.masked_tmk().len(), MASKED_TMK_LEN);
-        assert_eq!(frame.policy().len(), PART_POLICY_LEN);
+        assert_eq!(frame.policy().len(), PART_POLICY_MAX_LEN);
         assert_eq!(
             frame.target_cert_chain().len(),
             descs.len() * crate::evidence::CERT_DESCRIPTOR_LEN,
@@ -205,7 +205,7 @@ mod tests {
         // literals; pin them against the exported consts.
         const _: () = assert!(280 == MASKED_KEX_KEY_LEN);
         const _: () = assert!(264 == MASKED_TMK_LEN);
-        const _: () = assert!(584 == PART_POLICY_LEN);
+        const _: () = assert!(384 == PART_POLICY_MAX_LEN);
         const _: () = assert!(145 == SEALED_TMK_LEN);
         assert_eq!(TMK_LEN, 32);
     }
