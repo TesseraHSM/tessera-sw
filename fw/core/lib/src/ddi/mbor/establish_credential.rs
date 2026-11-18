@@ -66,8 +66,9 @@ const MK_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 ///
 /// Implements protocol steps 1-13.
 ///
-/// The authenticated nonce and transport key remain consumed on failure.
-/// Attempt-owned keys and credential/provisioning writes are undone until
+/// The authenticated nonce remains consumed on failure. The transport key
+/// is disabled and unpublished, then restored on failure or deleted on
+/// commit. Attempt-owned keys and credential/provisioning writes are undone until
 /// the outer IO owner successfully delivers the completion. The caller
 /// retains the partition lock through completion and the undo/commit walk.
 pub(crate) async fn establish_credential<'p, P: HsmPal>(
@@ -135,11 +136,16 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
         return Err(HsmError::InvalidAppCredentials);
     }
 
-    // Authenticated, valid credentials consume this transport key even if
-    // provisioning fails. A subsequent Get generates a fresh key pair.
+    // Retire the transport key for the lifetime of this attempt. Rollback
+    // re-enables and republishes it; commit deletes it.
     let transport_key = crate::part_state::part_establish_cred_key_id(pal, io)?;
+    undo.push_prop_restore_scalar(
+        HsmPartPropId::ESTABLISH_CRED_KEY_ID,
+        u32::from(u16::from(transport_key)),
+    )?;
+    undo.push_vault_disable(transport_key)?;
     crate::part_state::part_clear_establish_cred_key(pal, io)?;
-    let _ = pal.vault_key_delete(io, transport_key).await;
+    pal.vault_key_disable(io, transport_key)?;
 
     // ── Step 8: Unmask BK3 ───────────────────────────────────────────
     let bk3 = pal.dma_alloc(io, BK3_LEN)?;
@@ -180,18 +186,19 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // provisioned above so GetUnwrappingKey returns the same key rather
     // than lazily generating a fresh one.  `None` on the fresh-
     // provisioning path (no unwrapping key supplied).
-    let prior_unwrapping_key = if body.masked_unwrapping_key.is_empty() {
-        None
-    } else {
-        pal.part_existing_unwrapping_key_id(io)?
-    };
     let unwrapping_key_id =
         reimport_unwrapping_key(pal, io, mk_key_id, body.masked_unwrapping_key).await?;
+    let mut prior_unwrapping_key = None;
     if let Some(key) = unwrapping_key_id {
         if let Err(e) = undo.push_vault_create(key) {
             let _ = pal.vault_key_delete(io, key).await;
             return Err(e);
         }
+        prior_unwrapping_key = match crate::part_state::part_unwrapping_key_id(pal, io) {
+            Ok(key) => Some(key),
+            Err(HsmError::PartPropNotFound) => None,
+            Err(e) => return Err(e),
+        };
     }
 
     // ── Step 13: Envelope MK into BMK and emit the response ──────────

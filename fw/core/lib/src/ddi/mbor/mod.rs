@@ -181,7 +181,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::GetCertificate => get_certificate(pal, io, decoder, hdr).await,
         DdiOp::ShaDigest => sha_digest(pal, io, decoder, hdr).await,
         DdiOp::GetEstablishCredEncryptionKey => {
-            get_establish_cred_encryption_key(pal, io, decoder, hdr, undo).await
+            get_establish_cred_encryption_key(pal, io, decoder, hdr).await
         }
         DdiOp::GetSessionEncryptionKey => get_session_encryption_key(pal, io, decoder, hdr).await,
         DdiOp::GetUnwrappingKey => get_unwrapping_key(pal, io, decoder, hdr).await,

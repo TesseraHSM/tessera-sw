@@ -996,7 +996,7 @@ async fn vault_capacity(
 }
 
 #[test]
-fn mbor_establish_credential_fresh_cqe_failure_allows_new_transport_retry() {
+fn mbor_establish_credential_fresh_cqe_failure_restores_transport_key() {
     run_test(|| check_establish_boundary(EstablishFailure::FreshCompletion));
 }
 
@@ -1011,7 +1011,7 @@ fn mbor_establish_credential_invalid_unwrapping_type_reclaims_new_masking_key() 
 }
 
 #[test]
-fn mbor_establish_credential_invalid_bk3_consumes_transport_before_provisioning() {
+fn mbor_establish_credential_invalid_bk3_restores_transport_key() {
     run_test(|| check_establish_boundary(EstablishFailure::InvalidBk3));
 }
 
@@ -1304,6 +1304,18 @@ async fn check_establish_boundary(failure: EstablishFailure) {
     let mut original_mk = Vec::new();
     let mut prior_unwrapping = None;
     if recovery {
+        // Successful establishment deletes the transport key; snapshot it so
+        // re-provisioning can be modelled without disabling the partition.
+        let transport_id = pal
+            .part_prop_get_u16(&io, HsmPartPropId::ESTABLISH_CRED_KEY_ID)
+            .expect("initial transport key");
+        let transport_attrs = pal
+            .vault_key_attrs(&io, transport_id.into())
+            .expect("transport attrs");
+        let transport_material = pal
+            .vault_key(&io, transport_id.into())
+            .expect("transport material")
+            .to_vec();
         let len = encode_establish_request(pal, &io, &fixture, &mut request).await;
         let response = partition_mbor(&hsm, &tx, &request, len, SessionFlags::new(), true).await;
         fixture.bmk = decode_partition_response(pal, &io, &response, |decoded| {
@@ -1350,6 +1362,26 @@ async fn check_establish_boundary(failure: EstablishFailure) {
         pal.vault_key_delete(&io, mk_id.into())
             .await
             .expect("remove prior MK");
+        let transport = pal
+            .dma_alloc(&io, transport_material.len())
+            .expect("transport");
+        transport.copy_from_slice(&transport_material);
+        let transport_id = pal
+            .vault_key_create(
+                &io,
+                transport,
+                HsmVaultKeyKind::EstablishCred,
+                None,
+                transport_attrs,
+            )
+            .await
+            .expect("re-provision transport key");
+        pal.part_prop_set_u16(
+            &io,
+            HsmPartPropId::ESTABLISH_CRED_KEY_ID,
+            transport_id.into(),
+        )
+        .expect("publish transport key");
     }
     let (old_public, old_nonce) = refresh_establish_key(&hsm, &tx, &io, true).await;
     let old_transport = pal
@@ -1358,6 +1390,10 @@ async fn check_establish_boundary(failure: EstablishFailure) {
     let masked_boot_key = pal
         .part_prop_get_bytes(&io, HsmPartPropId::MASKED_BK_BOOT)
         .expect("boot-key backup")
+        .to_vec();
+    let old_transport_material = pal
+        .vault_key(&io, old_transport.into())
+        .expect("old transport material")
         .to_vec();
     let baseline = vault_capacity(pal, &io, material, HsmVaultKeyKind::Aes256).await;
     let transport_cost = vault_allocation_cost(
@@ -1414,26 +1450,23 @@ async fn check_establish_boundary(failure: EstablishFailure) {
             .expect("failed command response header")
     });
     assert_eq!(header.status, expected_status);
-    for property in [
-        HsmPartPropId::CREDENTIAL,
-        HsmPartPropId::MK_KEY_ID,
-        HsmPartPropId::ESTABLISH_CRED_KEY_ID,
-    ] {
-        if property == HsmPartPropId::CREDENTIAL {
-            assert_eq!(
-                pal.part_prop_get_bytes(&io, property),
-                Err(HsmError::PartPropNotFound)
-            );
-        } else {
-            assert_eq!(
-                pal.part_prop_get_u16(&io, property),
-                Err(HsmError::PartPropNotFound)
-            );
-        }
-    }
     assert_eq!(
-        pal.vault_key(&io, old_transport.into()),
-        Err(HsmError::KeyNotFound)
+        pal.part_prop_get_bytes(&io, HsmPartPropId::CREDENTIAL),
+        Err(HsmError::PartPropNotFound)
+    );
+    assert_eq!(
+        pal.part_prop_get_u16(&io, HsmPartPropId::MK_KEY_ID),
+        Err(HsmError::PartPropNotFound)
+    );
+    assert_eq!(
+        pal.part_prop_get_u16(&io, HsmPartPropId::ESTABLISH_CRED_KEY_ID),
+        Ok(old_transport),
+        "failed establishment must republish the transport key"
+    );
+    assert_eq!(
+        pal.vault_key(&io, old_transport.into())
+            .expect("restored transport key"),
+        old_transport_material.as_slice()
     );
     assert_ne!(
         pal.part_prop_get_bytes(&io, HsmPartPropId::NONCE)
@@ -1452,19 +1485,19 @@ async fn check_establish_boundary(failure: EstablishFailure) {
     );
     assert_eq!(
         vault_capacity(pal, &io, material, HsmVaultKeyKind::Aes256).await,
-        baseline + transport_cost,
-        "only the consumed transport key may change vault capacity"
+        baseline,
+        "failed establishment must not change vault capacity"
     );
     assert_eq!(
         pal.vault_key(&io, retained).expect("retained AES key"),
         material
     );
-    assert_eq!(
-        pal.part_existing_unwrapping_key_id(&io)
-            .expect("published UK"),
-        prior_unwrapping.as_ref().map(|(id, _)| (*id).into()),
-    );
     if let Some((id, expected)) = &prior_unwrapping {
+        assert_eq!(
+            pal.part_prop_get_u16(&io, HsmPartPropId::RSA_UNWRAPPING_KEY_ID),
+            Ok(*id),
+            "failed establishment must keep the prior UK published"
+        );
         assert_eq!(
             pal.vault_key(&io, (*id).into()).expect("original UK"),
             expected.as_slice()
@@ -1503,25 +1536,26 @@ async fn check_establish_boundary(failure: EstablishFailure) {
     assert_eq!(probe.status, HsmError::PartitionNotProvisioned.0);
     let (undelivered_public, undelivered_nonce) =
         refresh_establish_key(&hsm, &tx, &io, false).await;
-    assert_ne!(undelivered_public, old_public);
-    assert_ne!(undelivered_nonce, old_nonce);
+    assert_eq!(
+        undelivered_public, old_public,
+        "Get must expose the restored transport key"
+    );
+    assert_ne!(
+        undelivered_nonce, old_nonce,
+        "Get must expose the fresh nonce"
+    );
     assert_eq!(
         pal.part_prop_get_u16(&io, HsmPartPropId::ESTABLISH_CRED_KEY_ID),
-        Err(HsmError::PartPropNotFound),
-        "a regenerated transport key must not survive failed query completion"
+        Ok(old_transport),
+        "failed key-query completion must not affect the transport key"
     );
     assert_eq!(
         vault_capacity(pal, &io, material, HsmVaultKeyKind::Aes256).await,
-        baseline + transport_cost,
-        "failed key-query completion must reclaim its generated transport key"
+        baseline,
+        "key queries must not allocate vault keys"
     );
     let (new_public, new_nonce) = refresh_establish_key(&hsm, &tx, &io, true).await;
-    assert_ne!(
-        new_public, old_public,
-        "Get must regenerate the consumed key"
-    );
-    assert_ne!(new_nonce, old_nonce, "Get must expose the fresh nonce");
-    assert_ne!(new_public, undelivered_public);
+    assert_eq!(new_public, old_public);
     assert_eq!(
         new_nonce, undelivered_nonce,
         "key queries do not consume nonces"
@@ -1557,12 +1591,12 @@ async fn check_establish_boundary(failure: EstablishFailure) {
         );
         let (id, expected) = prior_unwrapping.as_ref().expect("prior UK");
         let imported = pal
-            .part_existing_unwrapping_key_id(&io)
-            .expect("imported UK")
+            .part_prop_get_u16(&io, HsmPartPropId::RSA_UNWRAPPING_KEY_ID)
             .expect("published import");
-        assert_ne!(u16::from(imported), *id);
+        assert_ne!(imported, *id);
         assert_eq!(
-            pal.vault_key(&io, imported).expect("imported material"),
+            pal.vault_key(&io, imported.into())
+                .expect("imported material"),
             expected.as_slice()
         );
         assert_eq!(
@@ -1575,6 +1609,15 @@ async fn check_establish_boundary(failure: EstablishFailure) {
         vault_capacity(pal, &io, material, HsmVaultKeyKind::Aes256).await,
         baseline + transport_cost - mk_cost - uk_cost,
         "retry retains exactly its MK and optional imported UK"
+    );
+    assert_eq!(
+        pal.part_prop_get_u16(&io, HsmPartPropId::ESTABLISH_CRED_KEY_ID),
+        Err(HsmError::PartPropNotFound),
+        "successful establishment must consume the transport key"
+    );
+    assert_eq!(
+        pal.vault_key(&io, old_transport.into()),
+        Err(HsmError::KeyNotFound)
     );
     assert_eq!(
         pal.vault_key(&io, retained)
