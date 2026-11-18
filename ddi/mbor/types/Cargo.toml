@@ -42,6 +42,9 @@ x509.workspace = true
 [lib]
 doctest = false
 
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { features = ["libloaderapi", "minwindef"], workspace = true }
+
 [[test]]
 name = "tsra_ddi_tests"
 path = "tests/tsra_ddi_tests.rs"
