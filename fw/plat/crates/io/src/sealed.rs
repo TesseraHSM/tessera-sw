@@ -156,6 +156,12 @@ pub async fn sealed_open<P>(
 where
     P: HsmAesGcm + HsmSessionManager,
 {
+    if matches!(
+        pal.session_state(io, id),
+        tsra_fw_hsm_pal_traits::HsmSessionState::NeedsRenegotiation
+    ) {
+        return Err(HsmError::SessionNeedsRenegotiation);
+    }
     let ct_len = frame
         .len()
         .checked_sub(TRANSPORT_AAD_LEN + SEALED_TRAILER_LEN)

@@ -127,7 +127,8 @@ const RESERVED3_LEN: usize = 626
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
     - 2  // session_meta (pending_mask + reserved)
-    - 2; // transport_epoch
+    - 2  // transport_epoch
+    - 129; // session recovery fingerprints and rotation-consumed mask
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -433,6 +434,7 @@ struct Storage {
     // surviving session's keys. Zeroed only by `reset` (power-on), which
     // also drops every session.
     transport_epoch: [u8; 2],
+    session_recovery: [u8; 129],
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -746,18 +748,8 @@ impl Partition {
         // ── Write-once provisioning material ──
         // Preserved by `Migrate` (NSSR keeps provisioning); wiped by `Disable`
         // (partition disable or deallocation).
-        // An NSSR (`Migrate`) returns the partition to its just-allocated
-        // state as far as the session PSKs are concerned: `part_psk` is
-        // `RequiredPresent` and default-baked at allocation, so the slots
-        // must read back as the defaults rather than keeping a rotated
-        // value. Re-uses [`bake_default_psks`] so allocation and NSSR can
-        // never drift apart. Mirrors the std PAL, whose migrated entry
-        // resets `psk_co`/`psk_cu` to `None` and therefore reads back as
-        // `DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`. `Disable` instead zeroes
-        // them below; the PAL restores defaults on a subsequent enable.
-        if matches!(kind, PartResetKind::Migrate) {
-            self.bake_default_psks();
-        }
+        // Migration retains role credentials so stale TBOR sessions can
+        // reauthenticate with the current PSK rather than a public default.
 
         if matches!(kind, PartResetKind::Disable) {
             self.slot_mut().reserved_pta_pub_key.fill(0);
@@ -1680,6 +1672,16 @@ impl Partition {
     #[inline(never)]
     pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
         &mut self.slot_mut().session_meta
+    }
+
+    /// Session masking-key fingerprints and rotation flags retained across LM.
+    pub fn session_recovery(self) -> &'static [u8; 129] {
+        &self.slot().session_recovery
+    }
+
+    /// Mutable session recovery metadata, owned by the session-store driver.
+    pub fn session_recovery_mut(&mut self) -> &mut [u8; 129] {
+        &mut self.slot_mut().session_recovery
     }
 
     /// The session transport epoch (see

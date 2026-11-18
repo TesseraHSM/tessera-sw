@@ -23,10 +23,11 @@ a new value supplied encrypted under the session's `param_key`.
 The PSK belongs to the partition, not the calling session slot. CU sessions
 authenticated with the public default are bootstrap-only: they may change the
 PSK or close while the partition still uses that default. Once one rotation
-commits, all such sessions, including the winner, receive `DefaultPskChanged`
-on subsequent commands except close. They must close and reopen using the
-rotated PSK. Session privileges are never upgraded by changing the partition
-credential.
+commits, the caller's authentication binding (including AppId) is updated to
+the new PSK. It remains usable without reopening; peer bootstrap sessions
+receive `DefaultPskChanged` except when closing. Each logical session allows
+only one successful change, for both CO and CU, including across migration
+and recovery. A further rotation requires a fresh session with the current PSK.
 
 Uno bulk operations enforce the same credential restriction before key
 lookup. Bulk CQEs use their existing invalid-session status because the
@@ -104,6 +105,7 @@ Built by the host with [`aead_envelope::seal`](
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout) |
 | `DefaultPskChanged` | The CU session authenticated with the default PSK, but the partition CU PSK has since changed; close and reopen |
 | `SessionAuthFailure` | A non-bootstrap session authenticated with an obsolete credential |
+| `PskChangeAlreadyUsed` | This session already completed a successful PSK change |
 | `InternalError` | Session vault blob shorter than expected; indicates internal corruption |
 
 ## Replay model
@@ -116,12 +118,12 @@ Built by the host with [`aead_envelope::seal`](
   commit or rollback are covered by the partition credential lock. Of
   concurrent valid bootstrap rotations, only one commits; the others receive
   `DefaultPskChanged`.
-* **Stale credentials:** an actual rotation makes the old session credential
-  binding stale. A replay cannot rotate again while that credential differs
-  from the partition's current PSK. No-op replacements are rejected.
-* **Retry:** there is no per-session attempt budget or changed bitmap.
-  Malformed requests and rolled-back rotations leave the prior credential
-  intact, so a valid request may retry on the same session.
+* **Same-session replay:** a firmware-owned consumed bit rejects every second
+  change, including an exact replay, even though the caller now has the current
+  credential. Reopen preserves this bit; ordinary transport is not a replay cache.
+* **Retry:** malformed requests and rolled-back rotations do not consume the
+  allowance. The partition PSK, caller binding, and consumed bit commit or roll
+  back together under the credential lock.
 
 ## Default PSKs
 

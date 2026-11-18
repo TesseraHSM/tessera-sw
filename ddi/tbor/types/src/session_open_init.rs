@@ -70,11 +70,13 @@ impl SessionType {
 /// Always starts a fresh handshake.  The 32-byte session seed is
 /// generated client-side and shipped AEAD-encrypted in
 /// [`TborSessionOpenFinishReq`](crate::TborSessionOpenFinishReq).
-/// Resume is handled by the MBOR `ReopenSession` command, not by this
-/// opcode.
+/// `reopen_id` selects recovery of an existing stale logical session;
+/// fresh open and recovery share this handshake.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_INIT, session_ctrl = open)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSessionOpenInitReq {
+    /// Existing stale slot to recover, or `u16::MAX` for a fresh session.
+    pub reopen_id: u16,
     /// PSK identifier asserting the caller role (`0` = CO, `1` = CU).
     pub psk_id: U8,
 
@@ -94,6 +96,7 @@ pub struct TborSessionOpenInitReq {
 impl Default for TborSessionOpenInitReq {
     fn default() -> Self {
         Self {
+            reopen_id: u16::MAX,
             psk_id: 0,
             session_type: SessionType::Encrypted.to_u8(),
             suite_id: SESSION_SUITE_ECDH_P384_ECDSA_P384,

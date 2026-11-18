@@ -19,9 +19,9 @@ use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_fw_ddi_tbor_types::TborGetCertReq;
 use tsra_fw_ddi_tbor_types::TborGetCertResp;
+use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoResp;
-use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::PID_LEN;
 use tsra_fw_ddi_tbor_types::PID_PUB_KEY_LEN;
 use tsra_fw_hsm_io::duo::DuoCmdDword;
@@ -342,7 +342,7 @@ async fn in_session_command_on_plain_tbor_is_rejected() {
     ensure_io_part().await;
 
     let (c, resp) = tbor_io(IO_PID, DuoOp::Tbor, 701, 1, 0, |buf| {
-        TborSessionCloseReq::encode(buf, (2, 0))
+        TborGetUnwrappingKeyReq::encode(buf, (2, 0))
             .expect("encode")
             .session_id(SessionId(1))
             .expect("session_id")

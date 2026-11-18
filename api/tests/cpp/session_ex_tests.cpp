@@ -701,7 +701,7 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
     });
 }
 
-TEST_F(tsra_sess_ex, cu_bootstrap_requires_reopen_after_psk_rotation)
+TEST_F(tsra_sess_ex, cu_rotation_rebinds_calling_session)
 {
     if (!api_rev_at_least(1, 1))
     {
@@ -737,7 +737,10 @@ TEST_F(tsra_sess_ex, cu_bootstrap_requires_reopen_after_psk_rotation)
         std::vector<uint8_t> psk(32, 0xA5);
         tsra_buffer psk_buffer{ psk.data(), static_cast<uint32_t>(psk.size()) };
         ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_SUCCESS);
-        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_DEFAULT_PSK_CHANGED);
+        ASSERT_EQ(
+            tsra_sess_ex_psk_change(session, &psk_buffer),
+            TSRA_STATUS_PSK_CHANGE_ALREADY_USED
+        );
         ASSERT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
         session = 0;
         credential.psk = &psk_buffer;
@@ -752,6 +755,47 @@ TEST_F(tsra_sess_ex, cu_bootstrap_requires_reopen_after_psk_rotation)
             TSRA_STATUS_SUCCESS
         );
         ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_sess_ex, migration_reopen_preserves_psk_change_allowance)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part = open_reset_partition(path);
+        ASSERT_NE(part, 0);
+        auto part_guard = scope_guard::make_scope_exit([&part] { tsra_part_close(part); });
+        tsra_handle session = open_sd_session(part);
+        ASSERT_NE(session, 0);
+        auto session_guard = scope_guard::make_scope_exit([&session] {
+            EXPECT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+        });
+        TestRootPin root(part);
+        std::vector<uint8_t> psk(32, 0xB4);
+        tsra_buffer credential{ psk.data(), static_cast<uint32_t>(psk.size()) };
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &credential), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_part_reset(part), TSRA_STATUS_SUCCESS);
+        EXPECT_EQ(
+            tsra_sess_ex_psk_change(session, &credential),
+            TSRA_STATUS_SESSION_NEEDS_RENEGOTIATION
+        );
+        EXPECT_EQ(tsra_sess_ex_reopen(session, nullptr, &credential), TSRA_STATUS_INVALID_ARGUMENT);
+        tsra_buffer short_psk{ psk.data(), 31 };
+        EXPECT_EQ(
+            tsra_sess_ex_reopen(session, &root.buffer, &short_psk),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        std::vector<uint8_t> wrong_psk(32, 0xD6);
+        tsra_buffer wrong{ wrong_psk.data(), static_cast<uint32_t>(wrong_psk.size()) };
+        EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &wrong), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        EXPECT_EQ(
+            tsra_sess_ex_psk_change(session, &credential),
+            TSRA_STATUS_PSK_CHANGE_ALREADY_USED
+        );
     });
 }
 

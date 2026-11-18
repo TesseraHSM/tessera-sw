@@ -160,6 +160,30 @@ pub fn transcript_hash(
     pk_init: &[u8],
     enc: &[u8],
 ) -> SessionExCryptoResult<[u8; SESSION_HS_LEN]> {
+    transcript_hash_for_reopen(
+        api_rev,
+        suite_id,
+        psk_id,
+        session_type,
+        pk_hsm_sec1,
+        pk_init,
+        enc,
+        u16::MAX,
+    )
+}
+
+/// Hash the shared establishment transcript, binding recovery to its target slot.
+#[allow(clippy::too_many_arguments)]
+pub fn transcript_hash_for_reopen(
+    api_rev: (u16, u16),
+    suite_id: u8,
+    psk_id: u8,
+    session_type: u8,
+    pk_hsm_sec1: &[u8],
+    pk_init: &[u8],
+    enc: &[u8],
+    reopen_id: u16,
+) -> SessionExCryptoResult<[u8; SESSION_HS_LEN]> {
     let mut data = Vec::with_capacity(
         SESSION_TRANSCRIPT_LABEL.len() + 7 + pk_hsm_sec1.len() + 4 + pk_init.len() + enc.len(),
     );
@@ -172,6 +196,10 @@ pub fn transcript_hash(
     data.extend_from_slice(pk_init);
     data.extend_from_slice(&len16(enc.len())?);
     data.extend_from_slice(enc);
+    if reopen_id != u16::MAX {
+        data.extend_from_slice(b"TSRA-REOPEN-v1:");
+        data.extend_from_slice(&reopen_id.to_be_bytes());
+    }
     let mut t1 = [0u8; SESSION_HS_LEN];
     HashAlgo::sha384()
         .hash(&data, Some(&mut t1))
@@ -278,6 +306,7 @@ pub struct SessionInitiator {
     suite: SessionSuite,
     eph: EccPrivateKey,
     pk_init: Vec<u8>,
+    reopen_id: u16,
 }
 
 impl SessionInitiator {
@@ -300,6 +329,7 @@ impl SessionInitiator {
                     suite,
                     eph: sk,
                     pk_init,
+                    reopen_id: u16::MAX,
                 })
             }
         }
@@ -313,6 +343,12 @@ impl SessionInitiator {
     /// The wire `pk_init`.
     pub fn pk_init(&self) -> &[u8] {
         &self.pk_init
+    }
+
+    /// Bind this fresh handshake to recovery of an existing logical slot.
+    pub fn for_reopen(mut self, session_id: u16) -> Self {
+        self.reopen_id = session_id;
+        self
     }
 
     /// Complete the handshake from the `SessionOpenInit` response.
@@ -338,7 +374,7 @@ impl SessionInitiator {
             return Err(SessionExCryptoError::InvalidInput);
         }
         let pk_hsm_sec1 = ec_pub_to_sec1(pk_hsm)?;
-        let t1 = transcript_hash(
+        let t1 = transcript_hash_for_reopen(
             self.api_rev,
             self.suite.id(),
             psk_id,
@@ -346,6 +382,7 @@ impl SessionInitiator {
             &pk_hsm_sec1,
             &self.pk_init,
             enc,
+            self.reopen_id,
         )?;
         let mut verifier = EccAlgo::default();
         if !verifier.verify(pk_hsm, &t1, sig).unwrap_or(false) {
@@ -906,6 +943,19 @@ mod tests {
         let a = SessionHandshake::from_parts(HS, [1; SESSION_HS_LEN]);
         let b = SessionHandshake::from_parts(HS, [2; SESSION_HS_LEN]);
         assert_ne!(a.fin().expect("fin"), b.fin().expect("fin"));
+    }
+
+    #[test]
+    fn recovery_transcript_binds_mode_and_target() {
+        let hash = |id| {
+            transcript_hash_for_reopen((2, 0), 1, 1, 0, &[1; 97], &[2; 97], &[3; 97], id)
+                .expect("transcript")
+        };
+        let fresh = transcript_hash((2, 0), 1, 1, 0, &[1; 97], &[2; 97], &[3; 97])
+            .expect("fresh transcript");
+        assert_eq!(hash(u16::MAX), fresh);
+        assert_ne!(hash(1), fresh);
+        assert_ne!(hash(1), hash(2));
     }
 
     #[test]

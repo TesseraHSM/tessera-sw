@@ -357,6 +357,15 @@ impl<P: HsmPal> Hsm<P> {
         undo: &mut Option<UndoLog<'s>>,
         credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> HsmResult<UnoReply<'s>> {
+        // Pin Pending channel keys through decrypt, promotion, and completion.
+        if io.sqe().session_id().is_some_and(|id| {
+            matches!(
+                self.pal().session_state(io, HsmSessId::from(id)),
+                HsmSessionState::Pending
+            )
+        }) {
+            *credential_guard = Some(self.pal().partition_lock(io).await?);
+        }
         let HsmRequest {
             buf: mut allocation,
             len: src_len,
@@ -378,12 +387,16 @@ impl<P: HsmPal> Hsm<P> {
             (op, sid)
         };
 
-        if matches!(
-            opcode,
-            ddi::tbor::opcode::PSK_CHANGE
-                | ddi::tbor::opcode::SESSION_OPEN_FINISH
-                | ddi::tbor::opcode::KEY_REPORT
-        ) {
+        if credential_guard.is_none()
+            && matches!(
+                opcode,
+                ddi::tbor::opcode::PSK_CHANGE
+                    | ddi::tbor::opcode::SESSION_OPEN_INIT
+                    | ddi::tbor::opcode::SESSION_CLOSE
+                    | ddi::tbor::opcode::SESSION_OPEN_FINISH
+                    | ddi::tbor::opcode::KEY_REPORT
+            )
+        {
             *credential_guard = Some(
                 self.pal()
                     .partition_lock(io)
@@ -543,6 +556,12 @@ impl<P: HsmPal> Hsm<P> {
         sqe_ctrl: HsmSessCtrl,
         sqe_session_id: Option<u16>,
     ) -> HsmResult<()> {
+        if expected == HsmSessCtrl::Close
+            && sqe_ctrl == HsmSessCtrl::NoSession
+            && sqe_session_id.is_some()
+        {
+            return Ok(());
+        }
         if sqe_ctrl != expected {
             return Err(HsmError::InvalidArg);
         }

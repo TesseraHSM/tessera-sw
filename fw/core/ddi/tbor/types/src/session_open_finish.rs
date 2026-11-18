@@ -24,8 +24,8 @@ pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Upper bound on the `bmk_session` envelope length on the wire.
 ///
-/// Today's tight layout (AEAD-GCM with 32-byte AAD wrapping the
-/// 80-byte `masking_key`): `8 + 16 + 32 + 80 + 16` = 152 B.  The
+/// Today's tight layout (AEAD-GCM with 192-byte AAD wrapping the
+/// 32-byte `masking_key`): `8 + 16 + 192 + 32 + 16` = 264 B. The
 /// declared cap is kept generous to accommodate future AAD growth
 /// without breaking the schema.
 pub const BMK_SESSION_MAX_LEN: usize = 512;
@@ -59,16 +59,18 @@ pub struct TborSessionOpenFinishReq<'a> {
     /// `TborSessionOpenFinishReqViewMut` destructured view.
     #[tbor(buffer, len = 72, mutable)]
     pub seed_envelope: &'a [u8],
+    /// Saved masking-key recovery blob; empty for a fresh open.
+    #[tbor(buffer, max_len = 512, mutable)]
+    pub bmk_session: &'a [u8],
 }
 
 /// `SessionOpenFinish` response schema.
 ///
 /// Carries the `bmk_session` blob: an AEAD-GCM envelope of the
-/// 80-byte session `masking_key`, wrapped under
+/// 32-byte session `masking_key`, wrapped under
 /// `BK_SESSION = KBKDF-SHA384(BK_BOOT, "SESSION_BK", seed)`.  The
-/// host persists this blob and replays it through the MBOR
-/// `ReopenSession` command to recover masked-key compatibility
-/// after the device resets or the slot is destroyed.
+/// host retains this blob with its original seed and supplies it to
+/// recovery Finish to restore masked-key compatibility after migration.
 #[tbor(response, pair = TborSessionOpenFinishReq)]
 pub struct TborSessionOpenFinishResp<'a> {
     /// Wrapped session-key blob.  Variable length up to

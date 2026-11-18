@@ -443,6 +443,30 @@ enum CloseLeakedSessionOutcome {
 }
 
 impl DdiSockDev {
+    /// Recreate the emulator partition, discarding credentials and session
+    /// reservations. Unlike `erase` (NSSR), this is not live migration.
+    pub fn factory_reset(&self) -> DdiResult<()> {
+        self.reset_partition(RequestFrame::FactoryReset)
+    }
+
+    fn reset_partition(&self, request: RequestFrame) -> DdiResult<()> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let mut stream = self.stream.lock();
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        request.write_to(&mut *stream).map_err(map_proto_err)?;
+        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
+            ResponseFrame::Reset { status: 0 } => Ok(()),
+            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
+            _ => Err(map_proto_err(ProtoError::Malformed(
+                "expected reset response",
+            ))),
+        }
+    }
+
     /// Connect to the server at `path` (a Unix socket path, `tcp://HOST:PORT`,
     /// or `vsock://CID:PORT` endpoint).
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
@@ -717,8 +741,8 @@ impl DdiSockDev {
         status: u32,
         dst_len: usize,
     ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
-        if status != 0 {
-            return Err(DdiError::DdiError(status));
+        if let Some(error) = DdiError::from_tbor_completion_status(status) {
+            return Err(error);
         }
 
         // Each output item must come back exactly once with its requested length.
@@ -1354,26 +1378,7 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        if self.retired.load(Ordering::Acquire) {
-            return Err(self.retired_err());
-        }
-        let mut stream = self.stream.lock();
-        // See `exchange`'s matching recheck: a cleanup on another clone
-        // may have retired the connection after the check above but
-        // before this lock was acquired.
-        if self.retired.load(Ordering::Acquire) {
-            return Err(self.retired_err());
-        }
-        RequestFrame::Reset
-            .write_to(&mut *stream)
-            .map_err(map_proto_err)?;
-        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
-            ResponseFrame::Reset { status: 0 } => Ok(()),
-            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
-            _ => Err(map_proto_err(ProtoError::Malformed(
-                "expected reset response",
-            ))),
-        }
+        self.reset_partition(RequestFrame::Reset)
     }
 
     fn discover(&self) -> DdiResult<DdiDeviceInfo> {

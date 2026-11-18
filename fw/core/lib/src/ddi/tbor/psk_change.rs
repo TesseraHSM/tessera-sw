@@ -73,6 +73,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let param_key = alloc.dma_alloc(SESSION_PARAM_KEY_LEN)?;
         param_key.copy_from_slice(pal.session_param_key(io, sess_id)?);
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
+        if pal.session_psk_changed(io, sess_id)? {
+            return Err(HsmError::PskChangeAlreadyUsed);
+        }
 
         // Record the prior PSK *before* overwriting it, so any later failure
         // — the crypto below, the response DMA, or the CQE post — restores it
@@ -125,7 +128,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // view.  `part_psk_set` is synchronous and takes `&[u8]`, so
         // the borrow ends with the call — no need for a separate
         // scratch buffer.
+        let new_binding =
+            crate::session::capture_auth_binding(pal, io, alloc, sess_id.role(), aead_view.payload)
+                .await?;
+        undo.push_session_auth(sess_id, auth_binding, false)?;
         crate::part_state::part_set_psk(pal, io, target_psk_id, aead_view.payload)?;
+        pal.session_set_auth_binding(io, sess_id, new_binding, true)?;
 
         encode_response(cmd_buf)
     })

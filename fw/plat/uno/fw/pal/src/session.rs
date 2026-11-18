@@ -93,6 +93,88 @@ fn m2h_count(pid: u8, id: HsmSessId) -> HsmResult<&'static SingleCell<u64>> {
 }
 
 impl HsmSessionManager for UnoHsmPal {
+    async fn session_reopen_pending(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        state: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let counter = m2h_count(u8::from(io.pid()), id)?;
+        let mut table = SessionStore::partition(io.pid())?;
+        table.validate_reopen_pending(id)?;
+        let replaced = if matches!(table.state(id), HsmSessionState::Pending) {
+            Some(table.pending_phys(id)?)
+        } else {
+            None
+        };
+        let physical_id = crate::vault::vault(io)
+            .create(
+                self,
+                io,
+                u8::from(io.pid()),
+                state,
+                HsmVaultKeyKind::SessionExPending,
+                None,
+                HsmVaultKeyAttrs::new().with_internal(true),
+            )
+            .await?;
+        if let Err(err) = table.reopen_pending(id, physical_id) {
+            crate::vault::vault(io)
+                .delete(self, io, physical_id)
+                .await?;
+            return Err(err);
+        }
+        if let Some(old) = replaced {
+            if let Err(err) = crate::vault::vault(io).delete(self, io, old).await {
+                table.reopen_pending(id, old)?;
+                crate::vault::vault(io)
+                    .delete(self, io, physical_id)
+                    .await?;
+                return Err(err);
+            }
+        }
+        counter.with(|c| *c = 0);
+        Ok(())
+    }
+
+    fn session_recovery_binding(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&[u8]> {
+        SessionStore::partition(io.pid())?.recovery_binding(id)
+    }
+
+    fn session_set_recovery_binding(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        binding: &[u8],
+    ) -> HsmResult<()> {
+        SessionStore::partition(io.pid())?.set_recovery_binding(id, binding)
+    }
+
+    fn session_psk_changed(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<bool> {
+        SessionStore::partition(io.pid())?.psk_changed(id)
+    }
+
+    fn session_set_auth_binding(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        binding: &HsmDmaBuf,
+        changed: bool,
+    ) -> HsmResult<()> {
+        let mut table = SessionStore::partition(io.pid())?;
+        if binding.len() != SESSION_AUTH_BINDING_LEN
+            || !matches!(table.state(id), HsmSessionState::Active)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let kid = table.physical_id(id)?;
+        let mut vault = crate::vault::vault(io);
+        if vault.key(kid)?.len() != SESSION_EX_BLOB_SIZE {
+            return Err(HsmError::InvalidPermissions);
+        }
+        vault.update(kid, SESSION_EX_AUTH_OFF, binding)?;
+        table.set_psk_changed(id, changed)
+    }
     fn session_limit_reached(&self, io: &UnoHsmIo) -> bool {
         let Ok(table) = SessionStore::partition(io.pid()) else {
             return true;
@@ -230,10 +312,17 @@ impl HsmSessionManager for UnoHsmPal {
         // Resolve the physical vault key id the failed reopen installed
         // before the vault await; delete it, then restore the slot's
         // renegotiation state (zeroing its physical mapping).
-        let physical_id = table.physical_id(id)?;
-        crate::vault::vault(io)
-            .delete(self, io, physical_id)
-            .await?;
+        let physical_id = match table.state(id) {
+            HsmSessionState::Pending => Some(table.pending_phys(id)?),
+            HsmSessionState::Active => Some(table.physical_id(id)?),
+            HsmSessionState::NeedsRenegotiation => None,
+            _ => return Err(HsmError::SessionNotFound),
+        };
+        if let Some(physical_id) = physical_id {
+            crate::vault::vault(io)
+                .delete(self, io, physical_id)
+                .await?;
+        }
         table.rollback_recreation(id)?;
         Ok(())
     }

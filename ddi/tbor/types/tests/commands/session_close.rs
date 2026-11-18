@@ -24,7 +24,47 @@ use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
+use tsra_ddi_tbor_types::TborSessionClosePlainReq;
 use tsra_ddi_tbor_types::TborStatus;
+
+#[test]
+fn session_close_plaintext_rejects_active_and_pending() {
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let request = TborSessionClosePlainReq {
+        session_id: pending.session_id,
+    };
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    ctx.session_open_finish(pending)
+        .expect("pending survives denied close");
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    ctx.session_close(request.session_id)
+        .expect("protected close");
+}
+
+#[test]
+fn session_close_plaintext_after_migration_cannot_close_reused_active_slot() {
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    let request = TborSessionClosePlainReq {
+        session_id: original.session_id,
+    };
+    ctx.migrate().expect("migration");
+    ctx.tbor(&request).expect("plaintext stale close");
+    let replacement = ctx
+        .open_session(CU, SessionSuite::EcdhP384)
+        .expect("reuse slot");
+    assert_eq!(replacement.session_id(), original.session_id);
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    replacement
+        .close()
+        .expect("replacement survives stale close");
+}
 
 // ---------------------------------------------------------------------------
 // Happy paths — close an Active session

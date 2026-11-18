@@ -29,9 +29,252 @@ use tsra_session_ex_crypto::SessionInitiator;
 /// Every key-establishment suite the host supports.
 const SUITES: [SessionSuite; 1] = [SessionSuite::EcdhP384];
 
+#[test]
+fn session_reopen_rejects_another_slots_valid_recovery_material() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let first = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("first init");
+    let first = ctx.session_open_finish(first).expect("first finish");
+    let other = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("other init");
+    let other = ctx.session_open_finish(other).expect("other finish");
+    ctx.migrate().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, first.suite).for_reopen(first.session_id);
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("recovery init");
+    assert!(
+        ctx.session_reopen_finish(pending, &other).is_err(),
+        "different slot lineage rejected"
+    );
+    assert!(
+        ctx.session_open_init_with_options(
+            SessionOpenInitOptions::new(CO, first.suite).for_reopen(first.session_id)
+        )
+        .is_err(),
+        "wrong role rejected"
+    );
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init");
+    ctx.session_reopen_finish(pending, &first)
+        .expect("correct lineage succeeds");
+    ctx.session_close(first.session_id)
+        .expect("close recovered");
+    ctx.tbor(&tsra_ddi_tbor_types::TborSessionClosePlainReq {
+        session_id: other.session_id,
+    })
+    .expect("close stale peer");
+}
+
+#[test]
+fn session_reopen_and_plaintext_close_are_serialized() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+    use tsra_ddi_tbor_types::TborSessionClosePlainReq;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    ctx.migrate().expect("migration");
+    let barrier = std::sync::Barrier::new(2);
+    let (close, reopen) = std::thread::scope(|scope| {
+        let close = scope.spawn(|| {
+            barrier.wait();
+            ctx.tbor(&TborSessionClosePlainReq {
+                session_id: original.session_id,
+            })
+        });
+        let reopen = scope.spawn(|| {
+            barrier.wait();
+            ctx.session_open_init_with_options(
+                SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id),
+            )
+        });
+        (
+            close.join().expect("close thread"),
+            reopen.join().expect("reopen thread"),
+        )
+    });
+    match (close, reopen) {
+        (Ok(_), Err(_)) => {
+            ctx.open_session(CU, original.suite)
+                .expect("closed slot reusable")
+                .close()
+                .expect("close new");
+        }
+        (Err(err), Ok(pending)) => {
+            assert_fw_rejects(&err, TborStatus::InvalidPermissions);
+            ctx.session_reopen_finish(pending, &original)
+                .expect("close did not destroy recovery");
+            ctx.session_close(original.session_id)
+                .expect("close recovered");
+        }
+        _ => panic!("exactly one lifecycle operation must win"),
+    }
+}
+
+#[test]
+fn session_reopen_restores_masked_keys_and_preserves_rotation_for_both_roles() {
+    use tsra_crypto::ExportableKey;
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+    use tsra_ddi_tbor_types::*;
+
+    for role in [CO, CU] {
+        let ctx = TestCtx::new();
+        let pending = ctx
+            .session_open_init(role, SessionSuite::EcdhP384)
+            .expect("init");
+        let original = ctx.session_open_finish(pending).expect("finish");
+        let psk = [0xA7; PSK_LEN];
+        ctx.psk_change(&original, &psk)
+            .expect("rotate without reopening");
+        let masked_key = crate::commands::aes_generate_key::generate_key(
+            &ctx,
+            original.session_id,
+            crate::commands::common::SCOPE_SESSION,
+            AES_KEY_SIZE_256,
+        );
+        let request = TborAesEncryptDecryptReq {
+            session_id: original.session_id,
+            op: AES_OP_ENCRYPT,
+            mode: AES_MODE_CBC,
+            iv: vec![0; 16],
+            msg: vec![0x42; 32],
+            masked_key,
+        };
+        let before = ctx.tbor(&request).expect("use key before migration");
+        ctx.migrate().expect("migration");
+        let error = ctx.tbor(&request).expect_err("stale channel rejected");
+        assert!(
+            matches!(
+                error,
+                tsra_ddi_interface::DdiError::DdiStatus(
+                    tsra_ddi_mbor_types::DdiStatus::SessionNeedsRenegotiation
+                )
+            ),
+            "{error:?}"
+        );
+        let pending = ctx
+            .session_open_init_with_options(
+                SessionOpenInitOptions::new(role, original.suite)
+                    .with_psk(&psk)
+                    .for_reopen(original.session_id),
+            )
+            .expect("recovery init");
+        let recovered = ctx
+            .session_reopen_finish(pending, &original)
+            .expect("recovery finish");
+        assert_eq!(recovered.session_id, original.session_id);
+        assert!(
+            recovered.param_key.to_vec().expect("new key")
+                != original.param_key.to_vec().expect("original key"),
+            "fresh parameter key"
+        );
+        assert_eq!(ctx.tbor(&request).expect("use original masked key"), before);
+        let err = ctx
+            .psk_change(&recovered, &[0xB8; PSK_LEN])
+            .expect_err("allowance retained");
+        assert_fw_rejects(&err, TborStatus::PskChangeAlreadyUsed);
+        ctx.session_close(recovered.session_id)
+            .expect("close recovered");
+    }
+}
+
+#[test]
+fn session_reopen_failed_recovery_is_retryable() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let mut original = ctx.session_open_finish(pending).expect("finish");
+    ctx.migrate().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("init recovery");
+    original.seed[0] ^= 1;
+    assert!(
+        ctx.session_reopen_finish(pending, &original).is_err(),
+        "wrong seed rejected"
+    );
+    original.seed[0] ^= 1;
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init");
+    original.bmk_session[0] ^= 1;
+    assert!(
+        ctx.session_reopen_finish(pending, &original).is_err(),
+        "tampered recovery rejected"
+    );
+    original.bmk_session[0] ^= 1;
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init again");
+    ctx.session_reopen_finish(pending, &original)
+        .expect("retry succeeds");
+    ctx.session_close(original.session_id).expect("close");
+}
+
+#[test]
+fn session_reopen_abandoned_handshake_can_be_replaced() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    ctx.migrate().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
+    let abandoned = ctx
+        .session_open_init_with_options(opts())
+        .expect("abandoned recovery");
+    let replacement = ctx
+        .session_open_init_with_options(opts())
+        .expect("replacement recovery");
+    assert!(
+        ctx.session_reopen_finish(abandoned, &original).is_err(),
+        "old channel rejected"
+    );
+    ctx.session_reopen_finish(replacement, &original)
+        .expect("replacement succeeds");
+    ctx.session_close(original.session_id).expect("close");
+}
+
+#[test]
+fn session_reopen_rejects_active_and_fresh_pending_slots() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let opts =
+        || SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).for_reopen(pending.session_id);
+    assert!(ctx.session_open_init_with_options(opts()).is_err());
+    let id = pending.session_id;
+    ctx.session_open_finish(pending)
+        .expect("ordinary pending survives");
+    assert!(ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).for_reopen(id)
+        )
+        .is_err());
+    ctx.session_close(id).expect("active session survives");
+}
+
 /// A raw `SessionOpenInit` request for a CU session.
 fn raw_init_req(session_type: u8, suite_id: u8, pk_init: Vec<u8>) -> TborSessionOpenInitReq {
     TborSessionOpenInitReq {
+        reopen_id: u16::MAX,
         psk_id: CU,
         session_type,
         suite_id,
@@ -175,6 +418,7 @@ fn session_open_finish_unknown_session_id() {
     // pending slot. The FW pre-check fails to load the blob.
     let ctx = TestCtx::new();
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: 0xFFFF,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -194,6 +438,7 @@ fn open_session_double_finish() {
         .expect("open_session must succeed");
     // Replay the finish: pending slot is gone, FW must refuse.
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: session.session_id(),
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -224,6 +469,7 @@ fn session_open_finish_seed_envelope_tampered() {
     seed_envelope[4] = 0x03; // AeadAlg::AesGcm256
 
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id,
         mac_fin,
         seed_envelope,
@@ -784,6 +1030,7 @@ fn failed_finish_mac_reclaims_session_state() {
 
     // Confirm the failed authentication destroyed the FW pending slot.
     let replay = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -866,6 +1113,7 @@ fn unknown_finish_does_not_destroy_pending_session() {
     let mac_fin = build_mac_fin(&pending).expect("build valid phase-2 MAC");
 
     let unknown = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: 0xFFFF,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],

@@ -123,6 +123,10 @@ enum tsra_status
      The CU default PSK changed; close and reopen with the new credential.
      */
     TSRA_STATUS_DEFAULT_PSK_CHANGED = -80,
+    /*
+     This session already committed its one permitted PSK change.
+     */
+    TSRA_STATUS_PSK_CHANGE_ALREADY_USED = -81,
     TSRA_STATUS_PANIC = INT32_MIN,
 };
 #ifndef __cplusplus
@@ -3392,6 +3396,26 @@ tsra_status tsra_sess_ex_open(
     const struct tsra_session_psk *psk,
     tsra_session_suite suite,
     tsra_handle *sess_handle
+);
+
+/*
+ @brief Recover a migrated security-domain session in place
+
+ Establishes fresh channel keys while restoring the original session
+ masking key. Uses the session's existing role and the current role PSK.
+ Does not replay an interrupted command or reset the PSK-change allowance.
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+ - `psk` must be NULL (default PSK) or identify a valid buffer containing
+   exactly `TSRA_PSK_LEN` bytes.
+ */
+tsra_status tsra_sess_ex_reopen(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
+    const struct tsra_buffer *psk
 );
 
 /*

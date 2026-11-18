@@ -116,6 +116,8 @@ pub enum HsmError {
     DefaultPskMustRotate = -79,
     /// The CU default PSK changed; close and reopen with the new credential.
     DefaultPskChanged = -80,
+    /// This session already committed its one permitted PSK change.
+    PskChangeAlreadyUsed = -81,
     Panic = i32::MIN,
 }
 

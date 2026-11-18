@@ -199,6 +199,49 @@ impl HsmSession {
         }
     }
 
+    /// Recover this migrated TBOR session with the current role PSK.
+    ///
+    /// Uses a fresh authenticated handshake while restoring the original
+    /// masking key. Reopen does not grant another PSK change or retry the
+    /// interrupted application command. Only valid for a stale V2 session.
+    pub fn reopen_ex(
+        &self,
+        root_spki_thumbprint: &[u8; 48],
+        psk: Option<&[u8; PSK_LEN]>,
+    ) -> HsmResult<()> {
+        let mut inner = self.inner.write();
+        let SessionKind::Ver2 {
+            psk_id,
+            suite,
+            seed,
+            bmk_session,
+            ..
+        } = &inner.kind
+        else {
+            return Err(HsmError::InvalidSession);
+        };
+        let result = ddi::reopen_session_ex(
+            &inner.partition,
+            inner.rev,
+            root_spki_thumbprint,
+            *psk_id,
+            psk,
+            *suite,
+            inner.id,
+            seed,
+            bmk_session,
+        )?;
+        inner.kind = SessionKind::Ver2 {
+            psk_id: result.psk_id,
+            suite: result.suite,
+            param_key: result.param_key,
+            bmk_session: result.bmk_session.to_vec(),
+            seed: result.seed,
+        };
+        *inner.ddi_cookie.lock() = result.ddi_cookie;
+        Ok(())
+    }
+
     pub(crate) fn key_report_auth(
         &self,
         request: &tsra_ddi_tbor_types::TborKeyReportReq,
@@ -539,6 +582,8 @@ enum SessionKind {
     /// Version 2 session, established over the two-phase
     /// `OpenSessionEx` handshake.
     Ver2 {
+        /// Secret context for recovering the original session masking key.
+        seed: zeroize::Zeroizing<[u8; 32]>,
         /// PSK id selecting the role (0 = CO, 1 = CU).
         psk_id: u8,
         /// Key-establishment suite of the handshake.
@@ -714,6 +759,7 @@ impl HsmSessionInner {
                 suite: result.suite,
                 param_key: result.param_key,
                 bmk_session: result.bmk_session.to_vec(),
+                seed: result.seed,
             },
         }
     }

@@ -68,6 +68,8 @@ pub struct SessionOpenInitOptions<'a> {
     /// `DEFAULT_PSK_CO` for `psk_id=0`, `DEFAULT_PSK_CU` for `psk_id=1`.
     /// Tests that exercise a rotated PSK pass the rotated bytes here.
     pub psk: Option<&'a [u8]>,
+    /// Existing logical slot, or `u16::MAX` for a fresh open.
+    pub reopen_id: u16,
 }
 
 impl<'a> SessionOpenInitOptions<'a> {
@@ -79,12 +81,19 @@ impl<'a> SessionOpenInitOptions<'a> {
             suite,
             suite_id: suite.id(),
             psk: None,
+            reopen_id: u16::MAX,
         }
     }
 
     /// Builder shortcut: override the PSK bytes.
     pub fn with_psk(mut self, psk: &'a [u8]) -> Self {
         self.psk = Some(psk);
+        self
+    }
+
+    /// Recover an existing stale slot with a fresh handshake.
+    pub fn for_reopen(mut self, id: u16) -> Self {
+        self.reopen_id = id;
         self
     }
 
@@ -113,11 +122,13 @@ pub fn session_open_init_with_options(
     opts: SessionOpenInitOptions<'_>,
 ) -> Result<PendingHandshake, DdiError> {
     let initiator = SessionInitiator::generate(opts.suite, dev.api_rev())
-        .map_err(|_| DdiError::InvalidParameter)?;
+        .map_err(|_| DdiError::InvalidParameter)?
+        .for_reopen(opts.reopen_id);
     let pk_hsm = crypto::fetch_pk_hsm(dev)?;
 
     let session_type = SessionType::Encrypted.to_u8();
     let req = TborSessionOpenInitReq {
+        reopen_id: opts.reopen_id,
         psk_id: opts.psk_id,
         session_type,
         suite_id: opts.suite_id,

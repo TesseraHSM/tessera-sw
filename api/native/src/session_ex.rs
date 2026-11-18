@@ -106,6 +106,38 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
     })
 }
 
+/// @brief Recover a migrated security-domain session in place
+///
+/// Establishes fresh channel keys while restoring the original session
+/// masking key. Uses the session's existing role and the current role PSK.
+/// Does not replay an interrupted command or reset the PSK-change allowance.
+///
+/// # Safety
+///
+/// - `sess_handle` must be a valid security-domain session handle.
+/// - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+/// - `psk` must be NULL (default PSK) or identify a valid buffer containing
+///   exactly `TSRA_PSK_LEN` bytes.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_sess_ex_reopen(
+    sess_handle: TsraHandle,
+    root_spki_thumbprint: *const TsraBuffer,
+    psk: *const TsraBuffer,
+) -> TsraStatus {
+    abi_boundary(|| {
+        let session = api::HsmSession::try_from(sess_handle)?;
+        let root: &[u8; 48] = <&[u8]>::try_from(deref_ptr(root_spki_thumbprint)?)?
+            .try_into()
+            .map_err(|_| TsraStatus::InvalidArgument)?;
+        let psk: Option<&[u8; api::PSK_LEN]> = buffer_to_optional_slice(psk)?
+            .map(|bytes| bytes.try_into().map_err(|_| TsraStatus::InvalidArgument))
+            .transpose()?;
+        session.reopen_ex(root, psk)?;
+        Ok(())
+    })
+}
+
 /// Input buffers for [`tsra_sess_ex_part_init`].
 ///
 /// Groups the security-domain provisioning inputs into a single struct so

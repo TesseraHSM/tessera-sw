@@ -107,7 +107,7 @@ pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Host-facing TBOR `SessionOpenFinish` request.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_FINISH, session_ctrl = in_session)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSessionOpenFinishReq {
     /// Pending session identifier reserved in Phase 1.
     #[tbor(session_id)]
@@ -118,6 +118,8 @@ pub struct TborSessionOpenFinishReq {
     /// the session's `param_key`.  See [`SEED_ENVELOPE_LEN`] for the
     /// fixed wire layout.
     pub seed_envelope: [u8; SEED_ENVELOPE_LEN],
+    /// Saved masking-key recovery blob; empty for a fresh open.
+    pub bmk_session: Vec<u8>,
 }
 
 impl Default for TborSessionOpenFinishReq {
@@ -126,6 +128,7 @@ impl Default for TborSessionOpenFinishReq {
             session_id: 0,
             mac_fin: [0u8; MAC_FIN_LEN],
             seed_envelope: [0u8; SEED_ENVELOPE_LEN],
+            bmk_session: Vec::new(),
         }
     }
 }

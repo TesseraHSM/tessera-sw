@@ -90,6 +90,8 @@ pub struct SessionTable {
     /// Pending slot installs fresh transport keys; carries over on
     /// promote, which keeps them.
     m2h_seqs: [u64; MAX_SESSIONS],
+    recovery_bindings: [[u8; 16]; MAX_SESSIONS],
+    psk_changed: u8,
 }
 
 /// Opaque per-slot handshake state for Pending sessions.
@@ -147,6 +149,8 @@ impl SessionTable {
             pending_seqs: [0u64; MAX_SESSIONS],
             next_init_seq: 0,
             m2h_seqs: [0u64; MAX_SESSIONS],
+            recovery_bindings: [[0; 16]; MAX_SESSIONS],
+            psk_changed: 0,
         }
     }
 
@@ -159,7 +163,7 @@ impl SessionTable {
     /// because they carry no reopenable credential state.  Mirrors the
     /// reference firmware's `backup`/`restore` pair.
     pub fn backup(&self) -> u8 {
-        self.alloc_mask & !self.pending_mask
+        self.alloc_mask & (!self.pending_mask | self.renego_mask)
     }
 
     /// Re-establish session slots preserved across a partition disable,
@@ -183,6 +187,12 @@ impl SessionTable {
         self.pending_seqs = [0u64; MAX_SESSIONS];
         self.next_init_seq = 0;
         self.m2h_seqs = [0u64; MAX_SESSIONS];
+        self.psk_changed &= mask;
+        for (slot, binding) in self.recovery_bindings.iter_mut().enumerate() {
+            if mask & (1 << slot) == 0 {
+                binding.fill(0);
+            }
+        }
     }
 
     /// Validate that a logical session ID refers to an allocated slot.
@@ -240,6 +250,8 @@ impl SessionTable {
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
         self.m2h_seqs[slot] = 0;
+        self.recovery_bindings[slot].fill(0);
+        self.psk_changed &= mask;
         Ok(phys)
     }
 
@@ -300,6 +312,48 @@ impl SessionTable {
         let slot = self.active_slot(id)?;
         self.renego_mask |= 1 << slot;
         self.phys_ids[slot] = 0;
+        self.pending_mask &= !(1 << slot);
+        self.pending_blobs[slot].clear();
+        Ok(())
+    }
+
+    /// Reserve an existing migrated slot without resetting its recovery identity.
+    pub fn reopen_pending(&mut self, id: HsmSessId, blob: &[u8]) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if self.renego_mask & (1 << slot) == 0 {
+            return Err(HsmError::ProcessedIoEventInInvalidState);
+        }
+        self.install_pending(u16::from(id) as usize, blob)
+    }
+
+    /// Read the original masking-key fingerprint retained across migration.
+    pub fn recovery_binding(&self, id: HsmSessId) -> HsmResult<&[u8]> {
+        Ok(&self.recovery_bindings[self.active_slot(id)?])
+    }
+
+    /// Install a fresh session's recovery fingerprint.
+    pub fn set_recovery_binding(&mut self, id: HsmSessId, binding: &[u8]) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if binding.len() != 16 {
+            return Err(HsmError::InvalidArg);
+        }
+        self.recovery_bindings[slot].copy_from_slice(binding);
+        Ok(())
+    }
+
+    /// Read the one-successful-rotation flag.
+    pub fn psk_changed(&self, id: HsmSessId) -> HsmResult<bool> {
+        Ok(self.psk_changed & (1 << self.active_slot(id)?) != 0)
+    }
+
+    /// Update the one-successful-rotation flag.
+    pub fn set_psk_changed(&mut self, id: HsmSessId, changed: bool) -> HsmResult<()> {
+        let bit = 1 << self.active_slot(id)?;
+        if changed {
+            self.psk_changed |= bit;
+        } else {
+            self.psk_changed &= !bit;
+        }
         Ok(())
     }
 
@@ -363,7 +417,9 @@ impl SessionTable {
         let mut victim: Option<usize> = None;
         let mut victim_seq = u64::MAX;
         for slot in range_start..=range_end {
-            if (self.pending_mask & (1 << slot)) != 0 && self.pending_seqs[slot] < victim_seq {
+            if (self.pending_mask & !self.renego_mask & (1 << slot)) != 0
+                && self.pending_seqs[slot] < victim_seq
+            {
                 victim_seq = self.pending_seqs[slot];
                 victim = Some(slot);
             }
@@ -435,6 +491,7 @@ impl SessionTable {
             return Err(HsmError::SessionNotPending);
         }
         self.pending_mask &= !(1u8 << slot);
+        self.renego_mask &= !(1u8 << slot);
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
         self.phys_ids[slot] = u16::from(physical_id);
@@ -453,6 +510,47 @@ fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_identity_survives_retry_migration_and_eviction_pressure() {
+        let mut table = SessionTable::new();
+        let id = table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .expect("pending");
+        table.promote(id, HsmKeyId::from(1u16)).expect("promote");
+        table
+            .set_recovery_binding(id, &[0xA5; 16])
+            .expect("fingerprint");
+        table.set_psk_changed(id, true).expect("rotation");
+        table.restore(table.backup());
+        table.reopen_pending(id, b"recovery").expect("recovery");
+        assert!(table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .is_err());
+        table.reopen_pending(id, b"replacement").expect("replace");
+        table.restore(table.backup());
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+        assert_eq!(
+            table.recovery_binding(id).expect("fingerprint"),
+            &[0xA5; 16]
+        );
+        assert!(table.psk_changed(id).expect("rotation retained"));
+        table.reopen_pending(id, b"retry").expect("retry");
+        table.rollback_recreation(id).expect("rollback");
+        assert!(table.psk_changed(id).expect("rollback retained rotation"));
+        table.delete(id).expect("close");
+        let fresh = table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .expect("fresh");
+        assert!(!table.psk_changed(fresh).expect("new allowance"));
+        assert_eq!(
+            table.recovery_binding(fresh).expect("new fingerprint"),
+            &[0; 16]
+        );
+    }
 
     #[test]
     fn create_session() {

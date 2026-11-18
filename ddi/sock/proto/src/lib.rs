@@ -69,6 +69,8 @@
 //! response carries one [`FieldId::Device`] field reporting the hosted
 //! device model and its API revision range, so a client knows which SQE
 //! format to send before its first command.
+//! Factory-reset requests use kind 7 and a kind-4 response. Unlike reset,
+//! they free and recreate the partition, discarding persistent credentials.
 //! Client and server must be updated together; only one protocol is supported.
 
 pub mod bulk;
@@ -146,6 +148,7 @@ enum Kind {
     ResetResponse = 4,
     DiscoverRequest = 5,
     DiscoverResponse = 6,
+    FactoryResetRequest = 7,
 }
 
 impl Kind {
@@ -157,6 +160,7 @@ impl Kind {
             4 => Ok(Self::ResetResponse),
             5 => Ok(Self::DiscoverRequest),
             6 => Ok(Self::DiscoverResponse),
+            7 => Ok(Self::FactoryResetRequest),
             other => Err(ProtoError::BadKind(other)),
         }
     }
@@ -284,6 +288,8 @@ pub enum RequestFrame {
     Submit(Request),
     /// Disable and re-enable the endpoint's existing partition.
     Reset,
+    /// Free and recreate the emulator partition, discarding persistent state.
+    FactoryReset,
     /// Report the hosted device (see [`ResponseFrame::Discover`]).
     Discover,
 }
@@ -493,6 +499,7 @@ impl RequestFrame {
         match self {
             Self::Submit(request) => request.encode(),
             Self::Reset => encode_frame(Kind::ResetRequest, 0, &[]),
+            Self::FactoryReset => encode_frame(Kind::FactoryResetRequest, 0, &[]),
             Self::Discover => encode_frame(Kind::DiscoverRequest, 0, &[]),
         }
     }
@@ -501,12 +508,16 @@ impl RequestFrame {
     pub fn decode(body: &[u8]) -> Result<Self, ProtoError> {
         match frame_kind(body)? {
             Kind::Request => Request::decode(body).map(Self::Submit),
-            Kind::ResetRequest => {
-                let frame = Frame::parse(body, Kind::ResetRequest)?;
+            kind @ (Kind::ResetRequest | Kind::FactoryResetRequest) => {
+                let frame = Frame::parse(body, kind)?;
                 if !frame.toc.is_empty() || !frame.data.is_empty() {
                     return Err(ProtoError::Malformed("reset request has fields or data"));
                 }
-                Ok(Self::Reset)
+                Ok(if kind == Kind::FactoryResetRequest {
+                    Self::FactoryReset
+                } else {
+                    Self::Reset
+                })
             }
             Kind::DiscoverRequest => {
                 let frame = Frame::parse(body, Kind::DiscoverRequest)?;
@@ -1290,6 +1301,16 @@ mod tests {
             RequestFrame::Reset
         ));
         assert!(Request::decode(&bytes[4..]).is_err());
+        let bytes = RequestFrame::FactoryReset
+            .encode()
+            .expect("encode factory reset");
+        assert!(matches!(
+            RequestFrame::decode(&bytes).expect("decode factory reset"),
+            RequestFrame::FactoryReset
+        ));
+        let body = encode_frame(Kind::FactoryResetRequest, 0, &[(FieldId::Payload, &[1])])
+            .expect("encode invalid factory reset");
+        assert!(RequestFrame::decode(&body).is_err());
         for status in [0, 2] {
             let mut bytes = Vec::new();
             ResponseFrame::Reset { status }

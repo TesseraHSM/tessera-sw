@@ -952,8 +952,8 @@ impl DdiNixDev {
             )
         };
         let _ = ioctl_status;
-        if status != 0 {
-            return Err(DdiError::DdiError(status));
+        if let Some(error) = DdiError::from_tbor_completion_status(status) {
+            return Err(error);
         }
 
         // ── 4. Decode the typed response ─────────────────────────

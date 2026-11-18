@@ -58,6 +58,58 @@ const SESSION_EX_AUTH_OFF: usize = SESSION_EX_MASKING_OFF + SESSION_MASKING_KEY_
 const SESSION_EX_KEYS_OFF: usize = SESSION_EX_AUTH_OFF + SESSION_AUTH_BINDING_LEN;
 
 impl HsmSessionManager for StdHsmPal {
+    async fn session_reopen_pending(
+        &self,
+        io: &StdHsmIo,
+        id: HsmSessId,
+        state: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.active_part_mut(io.pid())?
+            .session_table
+            .reopen_pending(id, state)
+    }
+
+    fn session_recovery_binding(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&[u8]> {
+        self.active_part(io.pid())?
+            .session_table
+            .recovery_binding(id)
+    }
+
+    fn session_set_recovery_binding(
+        &self,
+        io: &StdHsmIo,
+        id: HsmSessId,
+        binding: &[u8],
+    ) -> HsmResult<()> {
+        self.active_part_mut(io.pid())?
+            .session_table
+            .set_recovery_binding(id, binding)
+    }
+
+    fn session_psk_changed(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<bool> {
+        self.active_part(io.pid())?.session_table.psk_changed(id)
+    }
+
+    fn session_set_auth_binding(
+        &self,
+        io: &StdHsmIo,
+        id: HsmSessId,
+        binding: &HsmDmaBuf,
+        changed: bool,
+    ) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        if binding.len() != SESSION_AUTH_BINDING_LEN
+            || !matches!(entry.session_table.state(id), HsmSessionState::Active)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let kid = entry.session_table.physical_id(id)?;
+        if entry.vault.key(kid)?.len() != SESSION_EX_BLOB_SIZE {
+            return Err(HsmError::InvalidPermissions);
+        }
+        entry.vault.update(kid, SESSION_EX_AUTH_OFF, binding)?;
+        entry.session_table.set_psk_changed(id, changed)
+    }
     /// Check whether the partition's session table is full.
     fn session_limit_reached(&self, io: &StdHsmIo) -> bool {
         let Ok(entry) = self.active_part(io.pid()) else {
@@ -175,8 +227,10 @@ impl HsmSessionManager for StdHsmPal {
 
         // Delete the fresh masking-key vault entry while the physical mapping
         // is still intact, then restore the slot (clearing the mapping).
-        let physical_id = entry.session_table.physical_id(id)?;
-        entry.vault.delete(physical_id)?;
+        if matches!(entry.session_table.state(id), HsmSessionState::Active) {
+            let physical_id = entry.session_table.physical_id(id)?;
+            entry.vault.delete(physical_id)?;
+        }
         entry.session_table.rollback_recreation(id)?;
         Ok(())
     }

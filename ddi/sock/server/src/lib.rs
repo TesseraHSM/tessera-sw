@@ -181,6 +181,7 @@ struct SocketHsm {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SessionState {
     Pending,
+    Recovering,
     Active,
     NeedsRenegotiation,
 }
@@ -329,6 +330,14 @@ impl Connection {
             let session_flags = SessionFlags::from(submission.sqe[11]);
             let session_id = submission.sqe[12] as u16;
             let session_ctrl = session_flags.ctrl();
+            let tbor_reopen = (op == OP_TBOR)
+                .then(|| tbor_reopen_target(&submission.payload))
+                .flatten();
+            let plain_close = op == OP_TBOR
+                && session_ctrl == u8::from(SessionControlKind::NoSession)
+                && session_flags.id_valid()
+                && tsra_ddi_tbor_types::codec::RequestView::parse(&submission.payload)
+                    .is_ok_and(|view| view.opcode() == 0x05);
             let scoped = session_ctrl == u8::from(SessionControlKind::InSession)
                 || session_ctrl == u8::from(SessionControlKind::Close);
             if scoped && !session_flags.id_valid() {
@@ -348,6 +357,8 @@ impl Connection {
             let lifecycle = session_ctrl == u8::from(SessionControlKind::Open)
                 || session_ctrl == u8::from(SessionControlKind::Close)
                 || op == OP_FLUSH
+                || plain_close
+                || tbor_reopen.is_some()
                 || reopen;
             if !lifecycle {
                 if !scoped {
@@ -371,7 +382,9 @@ impl Connection {
             // Serialize slot mutations through firmware completion and ownership
             // publication; ordinary in-session commands can still run concurrently.
             let mut sessions = server.sessions.write().await;
-            if (scoped || reopen) && !state.owns_session(session_id, &sessions) {
+            if ((scoped || reopen || plain_close) && !state.owns_session(session_id, &sessions))
+                || tbor_reopen.is_some_and(|id| !state.owns_session(id, &sessions))
+            {
                 return Ok(ResponseFrame::Submit(transport_error(
                     TRANSPORT_SESSION_NOT_OWNED,
                 )));
@@ -392,6 +405,10 @@ impl Connection {
                     if flags.session_closed() {
                         sessions.remove(&id);
                         state.sessions.retain(|session| session.id != id);
+                    } else if tbor_reopen == Some(id) {
+                        if let Some(owner) = sessions.get_mut(&id) {
+                            owner.state = SessionState::Recovering;
+                        }
                     } else {
                         // Allocation identity is independent of the reusable slot ID.
                         let generation = Arc::new(());
@@ -448,9 +465,25 @@ impl Connection {
 
 /// Whether `id` is a Pending (handshake-in-progress) slot.
 fn is_pending(sessions: &HashMap<u16, SessionOwner>, id: u16) -> bool {
-    sessions
-        .get(&id)
-        .is_some_and(|owner| owner.state == SessionState::Pending)
+    sessions.get(&id).is_some_and(|owner| {
+        matches!(
+            owner.state,
+            SessionState::Pending | SessionState::Recovering
+        )
+    })
+}
+
+fn tbor_reopen_target(payload: &[u8]) -> Option<u16> {
+    use tsra_ddi_tbor_types::codec::RequestView;
+    use tsra_ddi_tbor_types::codec::TocEntry;
+    let view = RequestView::parse(payload).ok()?;
+    if view.opcode() != tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_INIT {
+        return None;
+    }
+    match view.toc_iter().next()? {
+        TocEntry::Uint16(id) if id != u16::MAX => Some(id),
+        _ => None,
+    }
 }
 
 impl Drop for Connection {
@@ -770,7 +803,8 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
 }
 
 async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> ResponseFrame {
-    let reset = matches!(&request, RequestFrame::Reset);
+    let reset = matches!(&request, RequestFrame::Reset | RequestFrame::FactoryReset);
+    let factory_reset = matches!(&request, RequestFrame::FactoryReset);
     // Own every DMA buffer and the execution gate until firmware completes,
     // even if the connection task is cancelled while awaiting this task.
     match tokio::spawn(async move {
@@ -778,10 +812,15 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
             RequestFrame::Submit(request) => {
                 ResponseFrame::Submit(execute_request(&server, request).await)
             }
-            RequestFrame::Reset => {
+            RequestFrame::Reset | RequestFrame::FactoryReset => {
                 let mut sessions = server.sessions.write().await;
                 let _execution = server.execution.write().await;
                 let result = async {
+                    if factory_reset {
+                        server.hsm.part_free(HSM_PARTITION_ID).await?;
+                        sessions.clear();
+                        return init_partition(&server).await;
+                    }
                     server.hsm.part_disable(HSM_PARTITION_ID).await?;
                     // NSSR discards Pending slots but preserves Active slots
                     // for renegotiation, including their connection ownership.
