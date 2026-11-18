@@ -365,7 +365,8 @@ pub struct UnoHsmPal {
     /// Serializes bulk-key registration with the fast-path engine against
     /// bulk-key deletion and session teardown, so a key for a session that is
     /// being torn down can't be registered with the engine after the
-    /// session's engine-side delete (see `vault.rs`).
+    /// session's engine-side delete (see `vault.rs`). Session-scoped
+    /// non-bulk creates also take it, so teardown can't evict a staged slot.
     pub(crate) fp_bulk_lock: Mutex<NoopRawMutex, ()>,
 
     /// Count of host IOs currently holding an IO_SQ slot: incremented when an
