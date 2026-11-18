@@ -70,8 +70,11 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
     let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
 
     if input.use_valid_key_id {
-        let key_resp =
-            helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, key_props);
+        let curve = match input.curve {
+            DdiEccCurve::P256 | DdiEccCurve::P384 | DdiEccCurve::P521 => input.curve,
+            _ => DdiEccCurve::P256,
+        };
+        let key_resp = helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, curve, key_props);
 
         priv_key_id = match key_resp {
             Ok(resp) => resp.data.private_key_id,
@@ -82,7 +85,7 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
 
         if input.use_valid_pub_key_der {
             let pub_key_resp =
-                helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, key_props);
+                helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, curve, key_props);
 
             // Extract both pub_key_der and the peer private key id from the same match,
             let (pub_key_der, peer_priv_id) = match pub_key_resp {

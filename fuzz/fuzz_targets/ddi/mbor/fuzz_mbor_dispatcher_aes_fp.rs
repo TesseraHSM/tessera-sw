@@ -3,18 +3,24 @@
 
 #![no_main]
 
-#[path = "../../common.rs"]
+#[path = "../../mbor_common.rs"]
 mod common;
 
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_cred_encrypt::DeviceCredKey;
 use tsra_ddi::Ddi;
 use tsra_ddi::DdiAesGcmParams;
 use tsra_ddi::DdiAesXtsParams;
 use tsra_ddi::DdiDev;
 use tsra_ddi::DdiError;
+use tsra_ddi_mbor_test_helpers::*;
+use tsra_ddi_mbor_types::DdiAesKeySize;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiApiRev;
+use tsra_ddi_mbor_types::DdiKeyAvailability;
+use tsra_ddi_mbor_types::DdiKeyUsage;
 
 /// A small enum to differentiate between dispatching an AES-GCM request and an
 /// AES-XTS request.
@@ -74,6 +80,9 @@ struct FuzzInput {
 
     /// Destination buffers concatenated for the DDI fast-path slice operation.
     destination_buffers: Vec<Vec<u8>>,
+
+    /// Use owned session and bulk-key IDs with valid buffer lengths.
+    use_valid_key: bool,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -81,8 +90,48 @@ fuzz_target!(|input: FuzzInput| {
     let dev_infos = ddi.dev_info_list();
     let path = std::env::var("FUZZ_DEVICE")
         .unwrap_or_else(|_| dev_infos.first().expect("No devices found").path.clone());
-    let dev = ddi.open_dev(&path).expect("Failed to open device");
-    let source: Vec<u8> = input.source_buffers.into_iter().flatten().collect();
+    let mut dev = ddi.open_dev(&path).expect("Failed to open device");
+    common::cleanup(&ddi, &path, None);
+    common::helper_common_establish_credential(
+        &mut dev,
+        common::TEST_CRED_ID,
+        common::TEST_CRED_PIN,
+    );
+    let rev = Some(DdiApiRev { major: 1, minor: 0 });
+    let encryption_key = helper_get_session_encryption_key(&dev, None, rev)
+        .expect("Failed to get session encryption key");
+    let key = DeviceCredKey::new(&encryption_key.data.pub_key, encryption_key.data.nonce)
+        .expect("Invalid session encryption key");
+    let (key, public_key) = key
+        .generate_ephemeral_encryption_key()
+        .expect("Failed to generate session encryption key");
+    let credential = key
+        .encrypt_session_credential(
+            common::TEST_CRED_ID,
+            common::TEST_CRED_PIN,
+            [3; 48],
+            encryption_key.data.nonce,
+        )
+        .expect("Failed to encrypt session credential");
+    let session = helper_open_session(&dev, None, rev, credential, public_key)
+        .expect("Failed to open session");
+    let session_id = session.data.sess_id;
+    let short_app_id = session.data.short_app_id;
+    let mut keys = Vec::new();
+    let mut generate_key = |key_size| {
+        let response = helper_aes_generate(
+            &dev,
+            Some(session_id),
+            rev,
+            key_size,
+            helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
+        )
+        .expect("Failed to generate bulk AES key");
+        keys.push(response.data.key_id);
+        u32::from(response.data.bulk_key_id.expect("Missing bulk AES key ID"))
+    };
+
+    let mut source: Vec<u8> = input.source_buffers.into_iter().flatten().collect();
     let mut destination: Vec<u8> = input.destination_buffers.into_iter().flatten().collect();
     let mode = match input.aes_mode {
         FuzzAesMode::Encrypt => DdiAesOp::Encrypt,
@@ -92,7 +141,21 @@ fuzz_target!(|input: FuzzInput| {
 
     let result = match input.aes_type {
         FuzzAesType::AesGcm => {
-            let request = input.gcm_request;
+            let mut request = input.gcm_request;
+            if input.use_valid_key {
+                request.key_id = generate_key(DdiAesKeySize::AesGcmBulk256Unapproved);
+                request.session_id = session_id;
+                request.short_app_id = short_app_id;
+                if let Some(aad) = &mut request.aad {
+                    aad.truncate(32);
+                }
+                // Bulk submissions allow 16 KiB including the aligned AAD.
+                source.resize(source.len().clamp(1, 16384 - 32), 0);
+                destination.resize(source.len(), 0);
+                if matches!(mode, DdiAesOp::Decrypt) {
+                    request.tag = Some(request.tag.unwrap_or_default());
+                }
+            }
             let mut tag = None;
             let mut iv = None;
             dev.exec_op_fp_gcm_slice(
@@ -113,7 +176,17 @@ fuzz_target!(|input: FuzzInput| {
             )
         }
         FuzzAesType::AesXts => {
-            let request = input.xts_request;
+            let mut request = input.xts_request;
+            if input.use_valid_key {
+                request.key_id1 = generate_key(DdiAesKeySize::AesXtsBulk256);
+                request.key_id2 = generate_key(DdiAesKeySize::AesXtsBulk256);
+                request.session_id = session_id;
+                request.short_app_id = short_app_id;
+                let len = source.len().clamp(16, 16384) / 16 * 16;
+                source.resize(len, 0);
+                destination.resize(len, 0);
+                request.data_unit_len = len;
+            }
             dev.exec_op_fp_xts_slice(
                 mode,
                 DdiAesXtsParams {
@@ -131,8 +204,22 @@ fuzz_target!(|input: FuzzInput| {
         }
     };
     if let Err(err @ (DdiError::DriverError(_) | DdiError::IoError(_) | DdiError::DdiError(_))) =
-        result
+        &result
     {
         panic!("Crash Detected: {err:?}");
     }
+    if input.use_valid_key
+        && (matches!(input.aes_type, FuzzAesType::AesXts) || matches!(mode, DdiAesOp::Encrypt))
+    {
+        assert_eq!(
+            result.expect("Valid bulk AES request failed"),
+            source.len(),
+            "Bulk AES output length must match input"
+        );
+    }
+    for key_id in keys {
+        helper_delete_key(&dev, Some(session_id), rev, key_id)
+            .expect("Failed to delete bulk AES key");
+    }
+    common::cleanup_with_session(&dev, Some(session_id));
 });

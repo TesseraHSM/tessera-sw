@@ -60,9 +60,12 @@ pub fn fuzz_ddi_ecc_sign(input: FuzzInput) {
     let mut key_id = cmdreq_data.key_id;
 
     if input.use_valid_key_id {
+        let curve = match input.curve {
+            DdiEccCurve::P256 | DdiEccCurve::P384 | DdiEccCurve::P521 => input.curve,
+            _ => DdiEccCurve::P256,
+        };
         let key_props = helper_key_properties(DdiKeyUsage::SignVerify, input.key_availability);
-        let key_resp =
-            helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, input.curve, key_props);
+        let key_resp = helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, curve, key_props);
 
         key_id = match key_resp {
             Ok(resp) => resp.data.private_key_id,
