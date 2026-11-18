@@ -40,6 +40,8 @@ pub enum HsmError {
     TborMissingField = 0x08680019,
     TborDuplicateField = 0x0868001A,
     TborInvalidEnumValue = 0x0868001B,
+    TborMisalignedField = 0x08680020,
+    TborNonCanonicalLayout = 0x08680021,
     // TBOR wire-encode failures.
     TborBufferTooSmall = 0x0868001C,
     TborTooManyTocEntries = 0x0868001D,
@@ -274,6 +276,12 @@ pub enum HsmError {
     /// See [`HsmSessionSuite`] for the registered values.
     UnsupportedSessionSuite = 0x087000E7,
 
+    /// An ML-DSA key pair failed its sign/verify PCT.
+    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+
+    /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
+    PctValidationMlKemGenKeyFailed = 0x087000E9,
+
     /// X.509 DER parsing failed (malformed structure, bad tag/length,
     /// or unsupported field encoding).
     X509ParseError = 0x087000F0,
@@ -394,7 +402,7 @@ pub enum HsmError {
     PartFinalBackupSvnRollback = 0x08700106,
 
     /// `PartFinal` validated the supplied PTA certificate chain
-    /// (well-formed and correctly anchored to the policy `POTAPubKey`),
+    /// (well-formed and anchored to the policy `pota_spki_thumbprint`),
     /// but the chain's **leaf** public key does not match this
     /// partition's Partition Trust Anchor (PTA) key.  Distinct from an
     /// [`X509`](Self::X509SignatureInvalid) chain error — the chain is
@@ -422,7 +430,7 @@ pub enum HsmError {
 
     /// A `SdCreatePeerBackup` / `SdRestorePeerBackup` handler was asked to
     /// clone a security domain to (or from) a peer partition, but the
-    /// partition's unified [`PartPolicy`](crate::PartPolicy) does not permit
+    /// partition's unified `PartPolicy` does not permit
     /// peer cloning (its `allow_peer_cloning` policy flag is clear).  Peer
     /// backup/restore is only allowed when the security-domain owner has
     /// opted in via policy.
@@ -463,6 +471,10 @@ pub enum HsmError {
 
     /// Admin could not quiesce host IO for the periodic RNG test after all retries.
     RngSelfTestRetriesExhausted = 0x08700112,
+
+    /// A protected IO transport failed: the request failed authentication,
+    /// or its session has no transport keys.
+    SessionTransportError = 0x08700113,
 
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol

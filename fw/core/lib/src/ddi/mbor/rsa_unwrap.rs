@@ -246,6 +246,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
                         vault_kind,
                         session_binding,
                         import_attrs,
+                        HsmVaultPct::None,
                     )
                     .await?;
 

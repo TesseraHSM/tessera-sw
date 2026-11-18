@@ -39,6 +39,11 @@ pub mod x509_builder;
 mod op;
 mod traits;
 
+#[cfg(target_os = "windows")]
+mod pqc_cng;
+#[cfg(all(target_os = "linux", ossl350))]
+mod pqc_ossl;
+
 /// Crate-private `OSSL_LIB_CTX` (default-provider-only) for the OpenSSL
 /// backends, so the emu SDK's crypto never re-enters the tsra provider on
 /// OpenSSL 3.5. Linux-only (the Windows backends use CNG).
@@ -72,6 +77,14 @@ pub mod testvectors;
 /// random number generation.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum CryptoError {
+    /// The platform crypto library does not support native PQC.
+    #[error("Native PQC requires OpenSSL 3.5+ or a PQC-capable Windows CNG provider")]
+    PqcUnavailable,
+
+    /// The native backend cannot honor deterministic-required ML-DSA signing.
+    #[error("Deterministic ML-DSA signing is not supported by this backend")]
+    MlDsaDeterministicUnsupported,
+
     // AES-related errors
     /// AES key size is invalid for the specified algorithm.
     #[error("AES invalid key size")]

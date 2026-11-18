@@ -14,6 +14,8 @@
 //!   [`XTS_DATA_MAX_LEN`] bytes (multiple data units per submission).
 //! * A multi-unit submission equals per-unit submissions with
 //!   incrementing tweaks.
+//! * An imported key matches the host reference AES-XTS, including data
+//!   units longer than the device's 2048-byte streaming chunk.
 //! * The tweak and the key both change the ciphertext.
 //! * Bad data-unit / data lengths, tweak overflow, oversize data, missing
 //!   OOB, a non-XTS key, a tampered key and an invalid session are
@@ -21,7 +23,6 @@
 
 use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -34,6 +35,7 @@ use tsra_ddi_tbor_types::XTS_DATA_MAX_LEN;
 use crate::commands::aes_generate_key::SCOPE_LOCAL;
 use crate::commands::aes_generate_key::SCOPE_SESSION;
 use crate::commands::aes_xts_generate_key::generate_xts_key;
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
@@ -274,11 +276,15 @@ fn aes_xts_rejects_invalid_session() {
             &mut [TborOobItem::In(&input), TborOobItem::Out(&mut out)],
         )
         .expect_err("session command must be rejected");
-    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
 
 /// A key imported through `UnwrapKey` (`K1 ‖ K2`) encrypts exactly like the
 /// host reference AES-XTS with the same key and tweak, and decrypts back.
+///
+/// Data-unit lengths cover single-chunk units and units spanning several
+/// device streaming chunks (2048 bytes), including a partial final chunk,
+/// where the per-chunk tweak hand-off must continue the unit's tweak.
 #[test]
 fn aes_xts_unwrapped_key_matches_host() {
     use tsra_crypto::AesXtsAlgo;
@@ -292,23 +298,46 @@ fn aes_xts_unwrapped_key_matches_host() {
     let key_bytes = random(64);
     let key = unwrap(&ctx, sid, KEY_CLASS_AES_XTS512, &key_bytes).masked_key;
 
-    let (dul, units) = (512, 4);
-    let pt = random(dul * units);
-    let tweak = random_tweak();
-    let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &pt);
-
     let host_key = AesXtsKey::from_bytes(&key_bytes).expect("host XTS key");
-    let mut expected = Vec::with_capacity(pt.len());
-    for (i, unit) in pt.chunks(dul).enumerate() {
-        let unit_tweak = (tweak + i as u64).to_le_bytes();
-        let mut algo = AesXtsAlgo::new(&unit_tweak, dul).expect("host XTS algo");
-        let mut out = vec![0u8; dul];
-        algo.encrypt(&host_key, unit, Some(&mut out))
-            .expect("host XTS encrypt");
-        expected.extend_from_slice(&out);
-    }
-    assert_eq!(ct, expected, "device ciphertext must match host AES-XTS");
 
-    let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &ct);
-    assert_eq!(back, pt);
+    for (dul, units) in [
+        (512, 4),
+        (2064, 2),
+        (3072, 3),
+        (4096, 4),
+        (8192, 2),
+        (XTS_DATA_MAX_LEN, 1),
+    ] {
+        let pt = random(dul * units);
+        let tweak = random_tweak();
+        let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &pt);
+
+        let mut expected = Vec::with_capacity(pt.len());
+        for (i, unit) in pt.chunks(dul).enumerate() {
+            let unit_tweak = (tweak + i as u64).to_le_bytes();
+            let mut algo = AesXtsAlgo::new(&unit_tweak, dul).expect("host XTS algo");
+            let mut out = vec![0u8; dul];
+            algo.encrypt(&host_key, unit, Some(&mut out))
+                .expect("host XTS encrypt");
+            expected.extend_from_slice(&out);
+        }
+        assert_eq!(
+            ct, expected,
+            "device ciphertext must match host AES-XTS: dul {dul} units {units}"
+        );
+
+        let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &ct);
+        assert_eq!(back, pt, "dul {dul} units {units}");
+    }
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+///
+/// The decoder rejects the layout before any OOB block is consumed.
+#[test]
+fn aes_xts_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+    assert_masked_key_layout_rejected(&ctx, &req(sid, AES_OP_ENCRYPT, &key, 0, 512, 512));
 }

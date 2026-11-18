@@ -252,7 +252,7 @@ pub(crate) fn open_session_ex(
     // DDI wire type.
     let session_type: SessionType = session_type.try_into()?;
     let pending = open_session_ex_init(partition, rev, psk_id, psk, session_type)?;
-    open_session_ex_finish(partition, pending)
+    open_session_ex_finish(partition, rev, pending)
 }
 
 /// Phase 1 of the TBOR handshake — `OpenSessionInit` (opcode `0x10`).
@@ -368,9 +368,10 @@ fn open_session_ex_init(
 /// MAC, exchange `OpenSessionFinish` via [`exec_handshake_tbor`], and
 /// fold the response into an [`OpenSessionExResult`] whose
 /// `ddi_cookie` is Phase 2's (possibly refreshed) token.
-fn finish_handshake_tbor<D: DdiDev>(
-    dev: &D,
+fn finish_handshake_tbor(
+    dev: &HsmDev,
     pending: &PendingHandshake,
+    transport: Option<&SessionTransport>,
 ) -> HsmResult<OpenSessionExResult> {
     // Derive the per-session wrap key, generate a fresh seed, and seal
     // it under `param_key` as the `seed_envelope` wire blob.
@@ -401,8 +402,13 @@ fn finish_handshake_tbor<D: DdiDev>(
     // Carry the Phase-1 `Open` token forward so the Phase-2
     // `InSession` exchange is recognized as the same handshake rather
     // than rejected for lacking one.
-    let (resp, cookie) =
-        exec_handshake_tbor(dev, &req, pending.ddi_cookie).map_err(HsmError::from)?;
+    let (resp, cookie) = match transport {
+        Some(transport) => (
+            dev.exec_op_tbor_sealed(pending.session_id, transport, &req, &mut [])?,
+            pending.ddi_cookie,
+        ),
+        None => exec_handshake_tbor(&**dev, &req, pending.ddi_cookie)?,
+    };
 
     Ok(OpenSessionExResult {
         session_id: pending.session_id,
@@ -420,11 +426,28 @@ fn finish_handshake_tbor<D: DdiDev>(
 
 fn open_session_ex_finish(
     partition: &HsmPartition,
+    rev: HsmApiRev,
     pending: PendingHandshake,
 ) -> HsmResult<OpenSessionExResult> {
     let inner = partition.inner().read();
     let dev = inner.dev();
-    finish_handshake_tbor(&**dev, &pending)
+    if rev < SESSION_TRANSPORT_API_REV {
+        return finish_handshake_tbor(dev, &pending, None);
+    }
+    // Revision 2.0 sends the finish and every later in-session command
+    // encrypted under the transport keys derived from the handshake.
+    let transport = SessionTransport::derive(&pending.exported)?;
+    match finish_handshake_tbor(dev, &pending, Some(&transport)) {
+        Ok(result) => {
+            dev.set_session_transport(pending.session_id, transport);
+            Ok(result)
+        }
+        Err(err) => {
+            // Release the reserved slot; the error is the finish failure.
+            let _ = dev.flush_session(pending.session_id);
+            Err(err)
+        }
+    }
 }
 
 /// Issue `PskChange` (opcode `0x06`) on the active session.
@@ -529,9 +552,14 @@ pub(crate) fn close_session_ex(
     let dev = inner.dev();
 
     let req = TborSessionCloseReq { session_id };
-    with_explicit_cookie(ddi_cookie, |cookie| {
+    let result = with_explicit_cookie(ddi_cookie, |cookie| {
         dev.exec_op_tbor(&req, None, cookie)
             .map_err(HsmError::from)
             .map(|_| ())
-    })
+    });
+    if dev.remove_session_transport(session_id) && result.is_err() {
+        // Release the slot of an encrypted session the close left open.
+        let _ = dev.flush_session(session_id);
+    }
+    result
 }

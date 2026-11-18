@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../utils/part_init_config.hpp"
+#include "../utils/sd_provision.hpp"
 #include "../utils/utils.hpp"
 #include "part_list_handle.hpp"
 #include "test_creds.hpp"
@@ -76,6 +77,21 @@ class PartitionHandle
   private:
     tsra_handle handle_;
 
+    // Legacy init is unsupported from API revision 2.0: reset and
+    // provision the partition through `open_session_ex` instead.
+    void provision_session_ex()
+    {
+        auto err = tsra_part_reset(handle_);
+        tsra_handle session = err == TSRA_STATUS_SUCCESS ? provision_sd_co_session(handle_) : 0;
+        if (session == 0)
+        {
+            tsra_part_close(handle_);
+            handle_ = 0;
+            throw std::runtime_error("Failed to provision session_ex partition");
+        }
+        tsra_sess_close(session);
+    }
+
     // Private constructor for wrapping a pre-opened handle
     explicit PartitionHandle(tsra_handle handle) : handle_(handle)
     {
@@ -112,6 +128,12 @@ class PartitionHandle
         }
 
         std::lock_guard<std::mutex> lock(get_init_mutex());
+
+        if (!api_rev_at_most(1, 1))
+        {
+            provision_session_ex();
+            return;
+        }
 
         // Reset before initialization to clear any previous state and ensure clean state for each
         // test

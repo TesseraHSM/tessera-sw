@@ -45,19 +45,21 @@
 //! `clear_enabled_state`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::GeneratedChain;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::PolicyKeyKind;
+use tsra_ddi_tbor_types::PolicyFlags;
 use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborKeyReportReq;
@@ -67,50 +69,26 @@ use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
+use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_ENABLED;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::known_good_part_policy;
+use crate::commands::part_init::known_good_test_policy;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::part_policy_with_pota;
-use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant (wire mirror of the firmware
 /// `HsmKeyScope`).
 const SCOPE_LOCAL: u8 = 0b011;
 
-/// Byte offset of the SATA public-key **data** inside the 484-byte
-/// `PartPolicy` image: `sata_pub_key` starts at 102 (`kind(2) ‖ len(2) ‖
-/// data(96)`), so the raw `X ‖ Y` coordinates begin at 106.
-const OFF_SATA_PUB_KEY_DATA: usize = 106;
-
-/// Byte offsets of the backing-partition fields inside the 484-byte
-/// `PartPolicy` image (mirror of `fw/core/ddi/tbor/types/src/policy.rs`).
-const OFF_BACKUP_PART_ID: usize = 302;
-const OFF_BACKUP_PART_PUB_KEY: usize = 318;
-const BACKUP_PART_ID_LEN: usize = 16;
-
-/// Byte offsets of the SAPOTA anchor and the policy flags inside the
-/// 484-byte `PartPolicy` image (mirror of
-/// `fw/core/ddi/tbor/types/src/policy.rs`): `sapota_pub_key` starts at 202
-/// (`kind(2) ‖ len(2) ‖ data(96)`), so its data begins at 206; the flags
-/// byte is at 418.
-const OFF_SAPOTA_PUB_KEY: usize = 202;
-const OFF_SAPOTA_PUB_KEY_DATA: usize = 206;
-const OFF_FLAGS: usize = 418;
-
-/// `PolicyFlags` bit for `require_trusted_sa_key` (bit 1).
-const FLAG_REQUIRE_TRUSTED_SA_KEY: u8 = 0b010;
-
 /// Build a policy naming **this** partition as the backing partition
-/// (`backup_part_id = PID`, `backup_part_pub_key = PID public key`) and
+/// (`backup_part_id = PID`, `backup_part_spki_thumbprint = SPKI thumbprint
+/// of the PID public key`) and
 /// anchoring the security domain to `sata_pub` (raw `X ‖ Y`, big-endian).
 ///
 /// The caller learns the PID / PID public key from `PartInfo` (before
@@ -121,24 +99,27 @@ pub(crate) fn backing_part_policy(
     pid_pub: &[u8],
     sata_pub: &[u8; RAW_PUB_LEN],
     pota_pub: &[u8; RAW_PUB_LEN],
-) -> [u8; PART_POLICY_LEN] {
-    // Anchor the policy to a real POTA key so `PartFinal` can validate a
-    // PTA certificate chain against it.
-    let mut bytes = part_policy_with_pota(pota_pub);
+) -> Vec<u8> {
+    backing_test_policy(pid, pid_pub, sata_pub, pota_pub).encode()
+}
 
-    // Overwrite the placeholder SATA key with the test anchor's real
-    // P-384 public coordinates (kind / len already Ecc384 / 96).
-    bytes[OFF_SATA_PUB_KEY_DATA..OFF_SATA_PUB_KEY_DATA + RAW_PUB_LEN].copy_from_slice(sata_pub);
-
-    bytes[OFF_BACKUP_PART_ID..OFF_BACKUP_PART_ID + BACKUP_PART_ID_LEN].copy_from_slice(pid);
-
-    // backup_part_pub_key = { kind: Ecc384 (LE), len: 96 (LE), data }.
-    let off = OFF_BACKUP_PART_PUB_KEY;
-    bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-    bytes[off + 2..off + 4].copy_from_slice(&(POLICY_MAX_KEY_LEN as u16).to_le_bytes());
-    bytes[off + 4..off + 4 + POLICY_MAX_KEY_LEN].copy_from_slice(pid_pub);
-
-    bytes
+/// The [`TestPolicy`] behind [`backing_part_policy`], for callers that
+/// add further anchors before encoding.  Every trust anchor is bound by
+/// the SPKI thumbprint of its real P-384 key: POTA so `PartFinal` can
+/// validate a PTA chain, SATA for the receiver chain, and the PID key
+/// for the backing-partition check.
+pub(crate) fn backing_test_policy(
+    pid: &[u8],
+    pid_pub: &[u8],
+    sata_pub: &[u8; RAW_PUB_LEN],
+    pota_pub: &[u8; RAW_PUB_LEN],
+) -> TestPolicy {
+    let pid: [u8; POLICY_BACKUP_PART_ID_LEN] = pid.try_into().expect("PID is 16 bytes");
+    let pid_pub: &[u8; RAW_PUB_LEN] = pid_pub.try_into().expect("PID public key is raw X || Y");
+    let mut p = known_good_test_policy().with_backup_part(pid, spki_thumbprint(pid_pub));
+    p.pota_spki_thumbprint = spki_thumbprint(pota_pub);
+    p.sata_spki_thumbprint = spki_thumbprint(sata_pub);
+    p
 }
 
 /// Drive `PartInit → PartFinal` with a backing-partition policy anchored
@@ -149,7 +130,17 @@ pub(crate) fn backing_part_policy(
 pub(crate) fn finalized_backing_session(
     ctx: &TestCtx,
     sata_key: &CaKey,
-) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+) -> (SessionHandshake, Vec<u8>, [u8; RAW_PUB_LEN]) {
+    finalized_backing_session_with_pota(ctx, sata_key, &CaKey::generate())
+}
+
+/// [`finalized_backing_session`] with a caller-held POTA key, for commands
+/// whose evidence must chain to the partition's POTA.
+pub(crate) fn finalized_backing_session_with_pota(
+    ctx: &TestCtx,
+    sata_key: &CaKey,
+    pota: &CaKey,
+) -> (SessionHandshake, Vec<u8>, [u8; RAW_PUB_LEN]) {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
 
     // PID / PID public key are materialized before PartInit.
@@ -158,7 +149,6 @@ pub(crate) fn finalized_backing_session(
     pid_pub.copy_from_slice(&info.pid_pub_key);
 
     // POTA anchor for the PTA certificate chain `PartFinal` validates.
-    let pota = CaKey::generate();
     let policy = backing_part_policy(
         &info.pid,
         &info.pid_pub_key,
@@ -167,9 +157,9 @@ pub(crate) fn finalized_backing_session(
     );
 
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit");
-    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
@@ -178,7 +168,7 @@ pub(crate) fn finalized_backing_session(
 
 /// Build a backing-partition policy that additionally **requires a trusted
 /// Sealing Authority key** (`require_trusted_sa_key` set): like
-/// [`backing_part_policy`] but with the `sapota_pub_key` anchor populated
+/// [`backing_part_policy`] but with the SAPOTA anchor thumbprint populated
 /// and the flag set. Under this policy `SdCreateRemoteBackup` validates the
 /// three-chain evidence (partition-owner chain anchored to SAPOTA) in
 /// addition to the always-required receiver certificate chain.
@@ -188,20 +178,11 @@ pub(crate) fn backing_part_policy_trusted(
     sata_pub: &[u8; RAW_PUB_LEN],
     sapota_pub: &[u8; RAW_PUB_LEN],
     pota_pub: &[u8; RAW_PUB_LEN],
-) -> [u8; PART_POLICY_LEN] {
-    let mut bytes = backing_part_policy(pid, pid_pub, sata_pub, pota_pub);
-
-    // Populate the SAPOTA slot { kind: Ecc384 (LE), len: 96 (LE), data }.
-    bytes[OFF_SAPOTA_PUB_KEY..OFF_SAPOTA_PUB_KEY + 2]
-        .copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-    bytes[OFF_SAPOTA_PUB_KEY + 2..OFF_SAPOTA_PUB_KEY + 4]
-        .copy_from_slice(&(POLICY_MAX_KEY_LEN as u16).to_le_bytes());
-    bytes[OFF_SAPOTA_PUB_KEY_DATA..OFF_SAPOTA_PUB_KEY_DATA + RAW_PUB_LEN]
-        .copy_from_slice(sapota_pub);
-
-    bytes[OFF_FLAGS] |= FLAG_REQUIRE_TRUSTED_SA_KEY;
-
-    bytes
+) -> Vec<u8> {
+    backing_test_policy(pid, pid_pub, sata_pub, pota_pub)
+        .with_sapota(spki_thumbprint(sapota_pub))
+        .with_flags(PolicyFlags::REQUIRE_TRUSTED_SA_KEY)
+        .encode()
 }
 
 /// Like [`finalized_backing_session`], but provisions the partition under a
@@ -211,7 +192,7 @@ pub(crate) fn finalized_backing_session_trusted(
     ctx: &TestCtx,
     sata_key: &CaKey,
     sapota_key: &CaKey,
-) -> (SessionHandshake, [u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+) -> (SessionHandshake, Vec<u8>, [u8; RAW_PUB_LEN]) {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
 
     let info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
@@ -228,7 +209,7 @@ pub(crate) fn finalized_backing_session_trusted(
     );
 
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
@@ -265,18 +246,9 @@ pub(crate) fn masked_key_report_and_pub(
 
     const COORD_LEN: usize = RAW_PUB_LEN / 2;
     let mut rcvr_pub = [0u8; RAW_PUB_LEN];
-    for (dst, src) in rcvr_pub[..COORD_LEN]
-        .iter_mut()
-        .zip(seal.pub_key[..COORD_LEN].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in rcvr_pub[COORD_LEN..]
-        .iter_mut()
-        .zip(seal.pub_key[COORD_LEN..].iter().rev())
-    {
-        *dst = *src;
-    }
+    rcvr_pub.copy_from_slice(&seal.pub_key);
+    dev_rev_in_place(&mut rcvr_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
         .tbor(&TborKeyReportReq {
@@ -312,6 +284,24 @@ impl ReceiverEvidence {
     /// Borrow the OOB items as the `&[&[u8]]` slice `tbor_oob` expects.
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
+    }
+
+    /// Copy this evidence, replacing only the partition-owner chain with
+    /// `part_owner` (appended as new OOB items).
+    pub(crate) fn with_part_owner_chain(&self, part_owner: &GeneratedChain) -> Self {
+        let mut oob_items = self.oob_items.clone();
+        let part_owner_desc = vec![
+            push_item(&mut oob_items, &part_owner.root_der),
+            push_item(&mut oob_items, &part_owner.leaf_der),
+        ];
+        Self {
+            oob_items,
+            receiver: self.receiver.clone(),
+            mfgr: self.mfgr.clone(),
+            owner: self.owner.clone(),
+            part_owner: part_owner_desc,
+            report: self.report,
+        }
     }
 }
 
@@ -381,10 +371,23 @@ pub(crate) fn build_receiver_evidence(
     sata_key: &CaKey,
     report: &[u8],
 ) -> ReceiverEvidence {
+    build_evidence(pid_pub, rcvr_pub, sata_key, sata_key, report)
+}
+
+/// Like [`build_receiver_evidence`], but roots the partition-owner chain at
+/// `part_owner_anchor` (the policy POTA key for peer and reseal evidence)
+/// while the receiver chain stays rooted at `sata_key`.
+pub(crate) fn build_evidence(
+    pid_pub: &[u8; RAW_PUB_LEN],
+    rcvr_pub: &[u8; RAW_PUB_LEN],
+    sata_key: &CaKey,
+    part_owner_anchor: &CaKey,
+    report: &[u8],
+) -> ReceiverEvidence {
     let receiver = make_chain(sata_key, rcvr_pub);
     let mfgr = make_chain(&CaKey::generate(), pid_pub);
     let owner = make_chain(&CaKey::generate(), pid_pub);
-    let part_owner = make_chain(sata_key, pid_pub);
+    let part_owner = make_chain(part_owner_anchor, pid_pub);
     evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, report)
 }
 
@@ -394,7 +397,7 @@ pub(crate) fn backup_request(
     session_id: u16,
     masked_sealing_key: Vec<u8>,
     evidence: &ReceiverEvidence,
-    policy: &[u8; PART_POLICY_LEN],
+    policy: &[u8],
 ) -> TborSdCreateRemoteBackupReq {
     TborSdCreateRemoteBackupReq {
         session_id,
@@ -407,7 +410,7 @@ pub(crate) fn backup_request(
         receiver_owner_cert_chain: evidence.owner.clone(),
         receiver_part_owner_cert_chain: evidence.part_owner.clone(),
         receiver_report: evidence.report,
-        policy: PartPolicy::try_read_from_bytes(policy).expect("policy image is canonical"),
+        policy: policy.to_vec(),
     }
 }
 
@@ -767,8 +770,11 @@ fn sd_create_remote_backup_rejects_policy_hash_mismatch() {
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
 
+    // Flip a byte inside the trailing `info` value: still a valid policy,
+    // but with a different hash.
     let mut modified_policy = policy;
-    modified_policy[OFF_FLAGS] ^= 0x01;
+    let last = modified_policy.len() - 1;
+    modified_policy[last] ^= 0x01;
 
     let req = backup_request(session.session_id, masked, &evidence, &modified_policy);
 
@@ -1027,4 +1033,17 @@ fn sd_create_remote_backup_accepts_duplicate_receiver_cert_descriptor() {
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN,);
 
     assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN,);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_create_remote_backup_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sata_key = CaKey::generate();
+    let (session, policy, pid_pub) = finalized_backing_session(&ctx, &sata_key);
+    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    assert_masked_key_layout_rejected(&ctx, &req);
 }

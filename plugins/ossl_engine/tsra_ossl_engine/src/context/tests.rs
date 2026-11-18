@@ -199,6 +199,8 @@ mod round_trips {
     use tsra_api::HsmAesKey;
     use tsra_api::HsmAesKeyGenAlgo;
     use tsra_api::HsmAesKeyUnmaskAlgo;
+    use tsra_api::HsmAesXtsAlgo;
+    use tsra_api::HsmAesXtsKey;
     use tsra_api::HsmAesXtsKeyUnmaskAlgo;
     use tsra_api::HsmEccCurve;
     use tsra_api::HsmEccKeyGenAlgo;
@@ -221,6 +223,8 @@ mod round_trips {
     use tsra_ossl_engine_core::cipher_method::GCM_IV_LEN;
     use tsra_ossl_engine_core::cipher_method::GCM_TAG_LEN;
     use tsra_ossl_engine_core::cipher_method::TSRA_CTRL_SET_KEY_URI;
+    use tsra_ossl_engine_core::cipher_method::XTS_MAX_DATA_UNIT;
+    use tsra_ossl_engine_core::cipher_method::XTS_TWEAK_LEN;
     use tsra_ossl_engine_core::cipher_method::register_aes_ciphers;
     use tsra_ossl_engine_core::cipher_method::release_aes_ciphers;
     use tsra_ossl_engine_core::error::RetCode;
@@ -1289,6 +1293,241 @@ mod round_trips {
         drop(crate::aes::CipherKey::new(key));
         assert!(
             sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_err(),
+            "a released key must be deleted from the HSM"
+        );
+
+        let _ = slot.take(&mut engine)?;
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: every cipher context above is freed; engine_raw is the
+        // ENGINE_new ref from new_test_engine.
+        unsafe {
+            release_aes_ciphers(&engine);
+            ffi::ENGINE_free(engine_raw);
+        }
+        Ok(())
+    }
+
+    /// Each `(tweak, data unit)` of `units` in turn through one context of
+    /// `engine_raw`'s AES-256-XTS cipher with the key at `uri` attached: an
+    /// init setting the tweak, then one update; the final must write nothing.
+    /// The concatenated output, or `None` if a step fails.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    fn aes_xts(
+        engine_raw: *mut ffi::ENGINE,
+        uri: &str,
+        encrypt: bool,
+        units: &[(&[u8; XTS_TWEAK_LEN], &[u8])],
+    ) -> Option<Vec<u8>> {
+        let ok = RetCode::Success as c_int;
+        let uri = CString::new(uri).unwrap();
+        let enc = c_int::from(encrypt);
+        let mut out = vec![0u8; units.iter().map(|(_, unit)| unit.len()).sum()];
+        let mut total = 0usize;
+        let mut n: c_int = 0;
+        // SAFETY: standard EVP cipher calls on a fresh context, freed below; uri
+        // is NUL-terminated and out has room for every data unit.
+        let done = unsafe {
+            let nid = c_int::try_from(ffi::NID_aes_256_xts).unwrap();
+            let cipher = ffi::ENGINE_get_cipher(engine_raw, nid);
+            assert!(!cipher.is_null(), "engine AES-256-XTS cipher");
+            let ctx = ffi::EVP_CIPHER_CTX_new();
+            assert!(!ctx.is_null());
+            let uri_ptr = uri.as_ptr().cast_mut().cast::<c_void>();
+            let mut done = ffi::EVP_CipherInit_ex(ctx, cipher, engine_raw, null(), null(), enc)
+                == ok
+                && ffi::EVP_CIPHER_CTX_ctrl(ctx, TSRA_CTRL_SET_KEY_URI, 0, uri_ptr) == ok;
+            for (tweak, unit) in units {
+                let len = c_int::try_from(unit.len()).unwrap();
+                done = done
+                    && ffi::EVP_CipherInit_ex(ctx, null(), null_mut(), null(), tweak.as_ptr(), enc)
+                        == ok
+                    && ffi::EVP_CipherUpdate(
+                        ctx,
+                        out[total..].as_mut_ptr(),
+                        &mut n,
+                        unit.as_ptr(),
+                        len,
+                    ) == ok
+                    && n == len;
+                if !done {
+                    break;
+                }
+                total = total.saturating_add(unit.len());
+            }
+            done = done && ffi::EVP_CipherFinal_ex(ctx, out.as_mut_ptr(), &mut n) == ok && n == 0;
+            ffi::EVP_CIPHER_CTX_free(ctx);
+            ffi::ERR_clear_error();
+            done
+        };
+        done.then_some(out)
+    }
+
+    /// The SDK's own AES-XTS encryption of `msg` under `key`, in data units
+    /// of `dul` bytes from `tweak` on: the reference the engine's output must
+    /// equal.
+    fn sdk_xts_encrypt(
+        key: &HsmAesXtsKey,
+        tweak: &[u8; XTS_TWEAK_LEN],
+        dul: usize,
+        msg: &[u8],
+    ) -> EngineResult<Vec<u8>> {
+        let mut algo =
+            HsmAesXtsAlgo::new(tweak, dul).map_err(|e| EngineError::wrap("AES-XTS algo", e))?;
+        HsmEncrypter::encrypt_vec(&mut algo, key, msg)
+            .map_err(|e| EngineError::wrap("SDK AES-XTS", e))
+    }
+
+    /// AES-256-XTS with a `GENERATE_KEY` key matches the SDK's, one data unit
+    /// per update under the tweak set for it; data units that are not whole
+    /// blocks or exceed the limit, and keys of another kind, size or file, are
+    /// refused. Backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_aes_xts(data: EngineData, dir: &Path) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let data = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let pid = std::process::id();
+        let path = dir.join(format!("aes-xts-{pid}.bin"));
+        let _guard = TempFile(path.clone());
+        let uri = format!("tsra://{};type=aes-xts", path.display());
+        assert!(generate_key_cmd(engine_raw, &uri), "{uri}");
+        let masked = std::fs::read(&path).map_err(|e| EngineError::wrap("read XTS blob", e))?;
+        let key = data.with_session(|session| {
+            HsmKeyManager::unmask_key(session, &mut HsmAesXtsKeyUnmaskAlgo::default(), &masked)
+                .map_err(|e| EngineError::wrap("unmask XTS key", e))
+        })?;
+
+        // Every byte set, and the next data unit's tweak carries out of the
+        // first byte: a dropped or byte-swapped tweak changes the output.
+        let tweak: [u8; XTS_TWEAK_LEN] = [
+            0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xf1,
+        ];
+        let next_tweak = u128::from_le_bytes(tweak).wrapping_add(1).to_le_bytes();
+        for len in [AES_BLOCK, 48, 512, 4096, XTS_MAX_DATA_UNIT] {
+            let msg = pattern(len);
+            let ct = sdk_xts_encrypt(&key, &tweak, len, &msg)?;
+            assert_ne!(ct, msg, "{len} bytes");
+            assert_eq!(
+                aes_xts(engine_raw, &uri, true, &[(&tweak, &msg)]),
+                Some(ct.clone()),
+                "{len} bytes"
+            );
+            assert_eq!(
+                aes_xts(engine_raw, &uri, false, &[(&tweak, &ct)]),
+                Some(msg),
+                "{len} bytes"
+            );
+        }
+
+        // Two equal data units on one context, each under its own tweak,
+        // against the SDK's run over both from the first tweak.
+        let unit = pattern(512);
+        let both = [unit.as_slice(), unit.as_slice()].concat();
+        let ct = sdk_xts_encrypt(&key, &tweak, unit.len(), &both)?;
+        let (ct_first, ct_second) = ct.split_at(unit.len());
+        assert_ne!(ct_first, ct_second, "the tweak must change the output");
+        assert_eq!(
+            aes_xts(
+                engine_raw,
+                &uri,
+                true,
+                &[(&tweak, &unit), (&next_tweak, &unit)]
+            ),
+            Some(ct.clone())
+        );
+        assert_eq!(
+            aes_xts(
+                engine_raw,
+                &uri,
+                false,
+                &[(&tweak, ct_first), (&next_tweak, ct_second)]
+            ),
+            Some(both)
+        );
+        // The context does not advance the tweak itself.
+        assert_eq!(
+            aes_xts(engine_raw, &uri, true, &[(&tweak, &unit), (&tweak, &unit)]),
+            Some([ct_first, ct_first].concat())
+        );
+        // The SDK cannot advance the all-ones tweak; the engine refuses it.
+        let ones = [u8::MAX; XTS_TWEAK_LEN];
+        assert!(sdk_xts_encrypt(&key, &ones, unit.len(), &unit).is_err());
+        assert!(aes_xts(engine_raw, &uri, true, &[(&ones, &unit)]).is_none());
+        assert!(aes_xts(engine_raw, &uri, false, &[(&ones, &unit)]).is_none());
+
+        for len in [
+            1usize,
+            AES_BLOCK.saturating_sub(1),
+            AES_BLOCK.saturating_add(1),
+            XTS_MAX_DATA_UNIT.saturating_sub(1),
+            XTS_MAX_DATA_UNIT.saturating_add(AES_BLOCK),
+        ] {
+            assert!(
+                aes_xts(engine_raw, &uri, true, &[(&tweak, &pattern(len))]).is_none(),
+                "a {len}-byte data unit must be refused"
+            );
+        }
+
+        let aes_path = dir.join(format!("aes-xts-plain-{pid}.bin"));
+        let _aes_guard = TempFile(aes_path.clone());
+        assert!(generate_key_cmd(
+            engine_raw,
+            &format!("tsra://{};type=aes", aes_path.display())
+        ));
+        let gcm_path = dir.join(format!("aes-xts-gcm-{pid}.bin"));
+        let _gcm_guard = TempFile(gcm_path.clone());
+        assert!(generate_key_cmd(
+            engine_raw,
+            &format!("tsra://{};type=aes-gcm", gcm_path.display())
+        ));
+        let garbage = dir.join(format!("aes-xts-garbage-{pid}.bin"));
+        let _garbage_guard = TempFile(garbage.clone());
+        write_key_material(&garbage, &[0x5au8; 64])
+            .map_err(|e| EngineError::wrap("write garbage blob", e))?;
+        for bad_uri in [
+            format!("tsra://{};type=aes", path.display()),
+            format!("tsra://{};type=aes-gcm", path.display()),
+            format!("{uri};bits=256"),
+            format!("tsra://{};type=aes-xts", aes_path.display()),
+            format!("tsra://{};type=aes-xts", gcm_path.display()),
+            format!(
+                "tsra://{};type=aes-xts",
+                dir.join("no-such-xts-key.bin").display()
+            ),
+            format!("tsra://{};type=aes-xts", garbage.display()),
+        ] {
+            assert!(
+                aes_xts(engine_raw, &bad_uri, true, &[(&tweak, &unit)]).is_none(),
+                "{bad_uri} must be refused"
+            );
+        }
+        // The XTS key serves no other cipher.
+        assert!(
+            aes_gcm(engine_raw, &uri, &random_gcm_iv(), &[], &unit, None).is_none(),
+            "an XTS key must not attach to AES-256-GCM"
+        );
+        let aes256 = c_int::try_from(ffi::NID_aes_256_cbc).unwrap();
+        assert!(
+            aes_cbc(engine_raw, aes256, &uri, &tweak, true, &unit, unit.len()).is_none(),
+            "an XTS key must not attach to AES-256-CBC"
+        );
+
+        // A second handle observes the wrapper's delete on drop.
+        let observer = key.clone();
+        assert!(
+            sdk_xts_encrypt(&observer, &tweak, unit.len(), &unit).is_ok(),
+            "key usable"
+        );
+        drop(crate::aes::CipherKey::new(key));
+        assert!(
+            sdk_xts_encrypt(&observer, &tweak, unit.len(), &unit).is_err(),
             "a released key must be deleted from the HSM"
         );
 
@@ -2929,6 +3168,21 @@ mod sim {
         round_trips::run_aes_gcm(data, &scratch.0).unwrap();
     }
 
+    // AES-256-XTS with an HSM key through the engine's cipher, cross-checked
+    // against the SDK on the same device (see round_trips::run_aes_xts).
+    #[test]
+    #[serial]
+    fn aes_xts_via_engine_cipher() {
+        let scratch = Scratch::new("aes-xts");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_aes_xts(data, &scratch.0).unwrap();
+    }
+
     // The GENERATE_KEY ctrl command for every AES key kind and size (see
     // round_trips::run_generate_key).
     #[test]
@@ -3447,6 +3701,19 @@ mod hw_tests {
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_aes_gcm(data, &std::env::temp_dir())
+    }
+
+    /// [`super::round_trips::run_aes_xts`] on hardware; env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine aes_xts_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn aes_xts_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_aes_xts(data, &std::env::temp_dir())
     }
 
     /// Hardware `GENERATE_KEY`, same flow as the simulator test (see

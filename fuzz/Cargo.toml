@@ -10,9 +10,7 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
-ddi_sock_server = { features = [
-  "autostart-isolated",
-], path = "../ddi/sock/server" }
+ddi_sock_server = { path = "../ddi/sock/server" }
 tsra_crypto = { path = "../crates/crypto" }
 tsra_ddi = { path = "../ddi/lib" }
 tsra_ddi_interface = { path = "../ddi/interface" }
@@ -32,6 +30,7 @@ minicbor = "0.19.1"
 [features]
 default = []
 # Fuzz against an in-process simulated HSM reached over the sock transport.
+autostart-isolated = ["ddi_sock_server/autostart-isolated"]
 
 [[bin]]
 bench = false

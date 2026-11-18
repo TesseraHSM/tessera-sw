@@ -44,6 +44,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_hsm_undo::UndoLog;
 use zeroize::Zeroize;
 
@@ -151,7 +152,7 @@ fn attrs_for_class(
 /// and how to re-derive it from the vault-resident private key.  Shared
 /// with [`super::get_public_key`] so both commands emit the same format.
 pub(super) enum PubDeriv {
-    /// RSA — wire public key is `n_le ‖ e_le`, via `rsa_priv_pub_key`.
+    /// RSA — wire public key is `n ‖ e` (device byte order), via `rsa_priv_pub_key`.
     Rsa,
     /// ECC — wire public key is `x ‖ y`, via `ecc_priv_pub_key`.
     Ecc,
@@ -263,8 +264,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 let created = async {
                     let decoded = decode(pal, io, &mut *material, dclass, attrs).await?;
                     // Transient, partition-scoped (`None` session): deleted below.
-                    pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
-                        .await
+                    pal.vault_key_create(
+                        io,
+                        decoded.material,
+                        decoded.kind,
+                        None,
+                        attrs,
+                        HsmVaultPct::None,
+                    )
+                    .await
                 }
                 .await;
                 material.zeroize();

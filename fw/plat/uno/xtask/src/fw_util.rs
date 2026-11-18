@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use toml_edit::DocumentMut;
+pub use tsra_reggen::NIGHTLY_TOOLCHAIN;
 
 use crate::XtaskCtx;
 

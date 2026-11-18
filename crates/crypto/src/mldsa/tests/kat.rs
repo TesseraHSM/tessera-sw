@@ -7,6 +7,10 @@
 //! sets across key generation, signing (deterministic and hedged) and
 //! verification — including NIST's tampered-signature and modified-message
 //! cases, which a roundtrip test cannot produce.
+//!
+//! Both backends verify NIST's signing vectors and sign their inputs. Exact
+//! signature reproduction requires OpenSSL's test-entropy control; CNG does
+//! not expose signing randomness or deterministic signing.
 
 use super::*;
 use crate::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS;
@@ -42,6 +46,7 @@ fn keygen_matches_nist_vectors() {
 /// signature exactly. This covers both the deterministic groups, where FIPS
 /// 204 fixes `rnd` to zero, and the hedged groups, which carry their own.
 #[test]
+#[cfg(target_os = "linux")]
 fn signing_matches_nist_vectors() {
     for v in MLDSA_SIGGEN_TEST_VECTORS {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
@@ -54,6 +59,26 @@ fn signing_matches_nist_vectors() {
             v.deterministic,
             v.msg.len(),
             v.ctx.len()
+        );
+    }
+}
+
+#[test]
+fn signing_vectors_sign_and_verify() {
+    for v in MLDSA_SIGGEN_TEST_VECTORS {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let pk = sk.public_key().unwrap();
+        let mut algo = MlDsaAlgo::new(v.ctx).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.msg, v.sig).unwrap(),
+            "ML-DSA-{} NIST signing-vector signature did not verify",
+            v.param_set
+        );
+        let sig = Signer::sign_vec(&mut algo, &sk, v.msg).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.msg, &sig).unwrap(),
+            "ML-DSA-{} signing-vector input did not roundtrip",
+            v.param_set
         );
     }
 }
@@ -82,6 +107,7 @@ fn verification_matches_nist_vectors() {
 /// NIST's external-`μ` signing vectors, reproduced exactly as for the pure
 /// interface: the engine signs the supplied `μ` without computing its own.
 #[test]
+#[cfg(target_os = "linux")]
 fn external_mu_signing_matches_nist_vectors() {
     for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
@@ -96,11 +122,32 @@ fn external_mu_signing_matches_nist_vectors() {
     }
 }
 
+#[test]
+fn external_mu_signing_vectors_sign_and_verify() {
+    for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let pk = sk.public_key().unwrap();
+        let mut algo = MlDsaAlgo::external_mu();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.mu, v.sig).unwrap(),
+            "ML-DSA-{} NIST external-mu signing-vector signature did not verify",
+            v.param_set
+        );
+        let sig = Signer::sign_vec(&mut algo, &sk, v.mu).unwrap();
+        assert!(
+            Verifier::verify(&mut algo, &pk, v.mu, &sig).unwrap(),
+            "ML-DSA-{} external-mu signing-vector input did not roundtrip",
+            v.param_set
+        );
+    }
+}
+
 /// NIST's deterministic signing vectors, reproduced by a
 /// [`deterministic`](MlDsaAlgo::deterministic) engine rather than by pinning
 /// `rnd`: the variant itself must supply FIPS 204's all-zero randomness, for
 /// the message and for an external `μ`.
 #[test]
+#[cfg(target_os = "linux")]
 fn deterministic_engine_matches_nist_deterministic_vectors() {
     for v in MLDSA_SIGGEN_TEST_VECTORS.iter().filter(|v| v.deterministic) {
         let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();

@@ -42,7 +42,7 @@ use crate::utils::partition::generate_pota_endorsement;
 use crate::utils::partition::test_api_rev;
 
 /// Number of sequential open/close cycles to drive, comfortably past
-/// `MAX_SESSIONS` (8, see `fw/plat/std/pal/src/drivers/session.rs`) so a
+/// `MAX_SESSIONS` (8, see `fw/plat/std/common/src/drivers/session.rs`) so a
 /// session leak (closed sessions not actually freeing their table slot)
 /// would exhaust the partition's session table well before this test
 /// completes.
@@ -89,14 +89,25 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 /// `unsafe_code`.
 fn reexec_with_ddi_sock_env(test_name: &str) {
     let port = reserve_ephemeral_port().expect("failed to reserve a TCP port");
+    let endpoint = format!("tcp://127.0.0.1:{port}");
     let mut args = ddi_sock_server::TestArgs::from_env();
-    args.sock = Some(format!("tcp://127.0.0.1:{port}"));
+    args.transport = Some("sock".to_owned());
+    args.sock = Some(endpoint.clone());
+
+    // `HsmPartitionManager::open_partition` (used by this test's body)
+    // goes through `tsra_ddi::TsraDdi`, which selects its transport from
+    // `tsra_ddi::DDI_ARGS_ENV`, not `TSRA_TEST_ARGS` - so the sock
+    // endpoint above must also be reflected there, or the re-executed
+    // child falls back to the default `ioctl` transport and tries (and
+    // fails) to open this TCP endpoint as a device path.
+    let ddi_args = format!("transport=sock;sock={endpoint}");
 
     let exe = std::env::current_exe().expect("failed to resolve current test executable");
     let status = Command::new(exe)
         .arg(test_name)
         .arg("--nocapture")
         .env(ddi_sock_server::TEST_ARGS_ENV, args.to_string())
+        .env(tsra_ddi::DDI_ARGS_ENV, ddi_args)
         .env(REEXEC_CHILD_MARKER, "1")
         .status()
         .expect("failed to spawn re-executed test process");
@@ -175,6 +186,9 @@ fn open_partition_with_retry(path: &str, api_rev: HsmApiRev, timeout: Duration) 
 /// initializes at startup.
 #[test]
 fn many_sequential_sessions_do_not_exhaust_partition() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     // Re-execute this test in a child process with the `sock` endpoint set
     // via `Command::env` instead of mutating this process's own
     // environment: see `reexec_with_ddi_sock_env`.
@@ -219,6 +233,9 @@ fn many_sequential_sessions_do_not_exhaust_partition() {
 /// others.
 #[test]
 fn many_concurrent_sessions_are_all_usable() {
+    if !crate::utils::session::api_rev_at_most(1, 1) {
+        return;
+    }
     if std::env::var_os(REEXEC_CHILD_MARKER).is_none() {
         return reexec_with_ddi_sock_env("many_concurrent_sessions_are_all_usable");
     }

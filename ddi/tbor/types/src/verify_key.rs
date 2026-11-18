@@ -32,7 +32,7 @@ pub struct TborVerifyKeyReq {
 
     /// The masked-key envelope. Variable length up to
     /// [`VERIFY_KEY_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 5160)]
+    #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 }
 

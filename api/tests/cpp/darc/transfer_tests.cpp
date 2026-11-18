@@ -38,9 +38,8 @@ constexpr uint32_t kMaskedTmkLen = 264;
 constexpr uint32_t kSealedTmkLen = 145;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 
-// Raw P-384 public-key width and per-coordinate width.
+// Raw P-384 public-key width.
 constexpr size_t kRawPubLen = 96;
-constexpr size_t kCoordLen = 48;
 
 // `KeyScope::Local` discriminant (mirror of `KEY_SCOPE_LOCAL`).
 constexpr uint8_t kKeyScopeLocal = 0b011;
@@ -54,9 +53,8 @@ struct KexKey
     std::vector<uint8_t> pub_raw; // kRawPubLen (big-endian X ‖ Y)
 };
 
-/// Mint an `tsra_darc_kex_key_gen` key and convert its device
-/// little-endian `x ‖ y` public key into the raw big-endian `X ‖ Y` a
-/// certificate leaf carries (reversing each P-384 coordinate).
+/// Mint an `tsra_darc_kex_key_gen` key; its public key is already the raw
+/// big-endian `X ‖ Y` a certificate leaf carries.
 KexKey mint_kex(tsra_handle session)
 {
     KexKey key;
@@ -72,10 +70,6 @@ KexKey mint_kex(tsra_handle session)
     }
     key.masked.resize(masked_buf.len);
     key.pub_raw.resize(pub_buf.len);
-    // Device wire order is little-endian per coordinate; a leaf carries raw
-    // big-endian, so reverse each 48-byte coordinate.
-    std::reverse(key.pub_raw.begin(), key.pub_raw.begin() + kCoordLen);
-    std::reverse(key.pub_raw.begin() + kCoordLen, key.pub_raw.begin() + 2 * kCoordLen);
     return key;
 }
 

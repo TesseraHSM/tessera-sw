@@ -79,14 +79,20 @@ pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
 
     // Hash pub key directly in wire-LE (PAL's `ecc_sign` digest
     // contract), then sign into the signature slot.
-    pal.hash(io, HsmHashAlgo::Sha384, frame.pub_key.raw, digest, false)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        frame.pub_key.raw,
+        HsmDigestForm::Operand,
+        Some(digest),
+    )
+    .await?;
     pal.ecc_sign(
         io,
         HsmEccCurve::P384,
         id_priv_key,
         digest,
-        frame.pub_key_signature,
+        Some(frame.pub_key_signature),
     )
     .await?;
 

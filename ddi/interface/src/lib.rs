@@ -168,6 +168,31 @@ pub enum DriverError {
     IoAborted = 0x04000002,
 }
 
+/// Device model behind a [`DdiDev`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DdiDeviceModel {
+    /// Uno: MBOR and plain TBOR over 16-dword SQEs.
+    Uno,
+    /// Duo: TBOR over 32-dword SQEs with session transport encryption.
+    Duo,
+}
+
+/// Result of [`DdiDev::discover`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DdiDeviceInfo {
+    /// Device model.
+    pub model: DdiDeviceModel,
+}
+
+/// AES-GCM IV and tag carried in the SQE/CQE of a Duo secure command.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DdiTransportSeal {
+    /// AES-GCM IV.
+    pub iv: [u8; 12],
+    /// AES-GCM tag.
+    pub tag: [u8; 16],
+}
+
 /// Device Trait
 pub trait DdiDev {
     /// Returns the device kind.
@@ -357,6 +382,47 @@ pub trait DdiDev {
             }
         }
         self.exec_op_tbor(req, Some(&inputs), cookie)
+    }
+
+    /// Identify the device model.
+    ///
+    /// # Default
+    ///
+    /// Reports [`DdiDeviceModel::Uno`].
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Ok(DdiDeviceInfo {
+            model: DdiDeviceModel::Uno,
+        })
+    }
+
+    /// Execute a session-transport-encrypted TBOR command on a Duo device.
+    ///
+    /// `payload` is the TBOR request already sealed with the session's
+    /// host-to-device key and `seal` its IV and tag. On success, returns the
+    /// response still sealed with the device-to-host key, with its seal.
+    /// `oob_items` travel outside the transport encryption, as in
+    /// [`Self::exec_op_tbor_oob`].
+    ///
+    /// # Default
+    ///
+    /// Returns [`DdiError::UnsupportedEncoding`].
+    fn exec_op_tbor_secure(
+        &self,
+        _session_id: u16,
+        _payload: &[u8],
+        _seal: DdiTransportSeal,
+        _oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        Err(DdiError::UnsupportedEncoding)
+    }
+
+    /// Release a Duo session slot without a TBOR close.
+    ///
+    /// # Default
+    ///
+    /// Returns [`DdiError::UnsupportedEncoding`].
+    fn flush_session(&self, _session_id: u16) -> DdiResult<()> {
+        Err(DdiError::UnsupportedEncoding)
     }
 }
 
