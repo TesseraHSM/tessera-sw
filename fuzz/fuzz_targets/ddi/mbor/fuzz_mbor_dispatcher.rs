@@ -152,6 +152,7 @@ mod tests {
 
     #[test]
     fn dispatches_mbor_without_transport_and_resets_between_inputs() {
+        let mut buffers = RequestBuffers::default();
         let request = requests::TestDdiReqs::GetApiRev
             .encode(
                 DdiReqHdr {
@@ -161,8 +162,10 @@ mod tests {
                 },
                 0,
                 true,
+                &mut buffers,
             )
-            .unwrap();
+            .expect("Encode API revision request")
+            .to_vec();
         for data in [
             request.as_slice(),
             &[0xFF; PAGE_LEN + 1],

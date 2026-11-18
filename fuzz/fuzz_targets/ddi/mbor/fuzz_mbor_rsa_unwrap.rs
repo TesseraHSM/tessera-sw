@@ -83,7 +83,7 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
         if input.use_valid_wrapped_blob {
             let unwrap_pub_key_der = unwrapping_resp.data.pub_key.der.as_slice();
 
-            let private_key = RsaPrivateKey::generate(input.key_size as usize)
+            let private_key = RsaPrivateKey::generate(input.key_size as usize / 8)
                 .expect("Could not generate RSA private key");
 
             let private_key_der = private_key
