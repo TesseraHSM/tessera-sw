@@ -11,12 +11,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use toml_edit::DocumentMut;
+pub use tsra_reggen::NIGHTLY_TOOLCHAIN;
 
 use crate::XtaskCtx;
-
-/// Last-green firmware nightly; keep in sync with `.github/workflows/fw_uno.yml`.
-/// The following nightly reports `uncommon_codepoints` in zerocopy-generated code.
-pub const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-11-17";
 
 /// Feature that builds the firmware for the bulk-crypto fastpath firmware
 /// instead of the PQC one (`tsra_fw_uno_pal/bulk_crypto`).  Given in
