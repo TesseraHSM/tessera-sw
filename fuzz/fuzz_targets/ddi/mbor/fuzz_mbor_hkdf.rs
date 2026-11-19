@@ -77,9 +77,7 @@ pub fn fuzz_ddi_hkdf_derive(input: FuzzInput) {
             cmdreq_data.key_length,
         );
 
-        if let Err(err @ DdiError::DriverError(_)) = &resp {
-            panic!("Crash Detected: {err}");
-        }
+        check_driver_error(resp);
 
         if input.use_valid_key_id {
             helper_delete_key(dev, Some(sess_id), rev, key_id).expect("Could not delete key");
