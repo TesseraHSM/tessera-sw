@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::*;
 use winapi::shared::winerror::ERROR_INVALID_FUNCTION;
+
+use super::*;
 
 const COMPLETION_SIZE: u32 = mem::size_of::<TborSecureIoctlOutData>() as u32;
 
