@@ -441,16 +441,13 @@ fn sd_restore_remote_backup_rejects_max_session_id() {
 
     let req = restore_remote_req(u16::MAX, &backup);
 
-    // This invalid session ID is rejected by the DDI layer, which returns
-    // DdiStatus rather than the TborStatus variant used by firmware errors.
+    // Unknown sessions may be rejected by firmware or the socket ownership gate.
     let err = ctx
         .tbor_oob(&req, &backup.evidence.oob())
         .expect_err("u16::MAX session ID must be rejected");
-    assert_eq!(
-        format!("{err:?}"),
-        format!("DdiStatus(DdiStatus({}))", 0x0870_0020u32),
-        "unexpected error for invalid session ID",
-    );
+
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
     assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 }
 
