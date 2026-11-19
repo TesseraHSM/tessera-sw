@@ -51,6 +51,7 @@ use tsra_ddi_tbor_types::TBOR_OP_MLKEM_ENCAPSULATE;
 use tsra_ddi_tbor_types::TBOR_OP_MLKEM_GENERATE_KEY;
 use tsra_ddi_tbor_types::TBOR_OP_PART_FINAL;
 use tsra_ddi_tbor_types::TBOR_OP_PART_INIT;
+use tsra_ddi_tbor_types::TBOR_OP_PART_INIT_WITH_OBK;
 use tsra_ddi_tbor_types::TBOR_OP_PSK_CHANGE;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_MOD_EXP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_PEER_BACKUP;
@@ -77,6 +78,7 @@ const OPCODES: &[u8] = &[
     TBOR_OP_PSK_CHANGE,
     TBOR_OP_PART_INIT,
     TBOR_OP_PART_FINAL,
+    TBOR_OP_PART_INIT_WITH_OBK,
     TBOR_OP_SD_SEALING_KEY_GEN,
     TBOR_OP_SD_CREATE_REMOTE_BACKUP,
     TBOR_OP_SD_RESEAL_REMOTE_BACKUP,

@@ -140,6 +140,7 @@ back to the partition in the upcoming `FinalizePart` opcode.
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout / `session_id`). |
 | `PartStateInvalid` | Partition is not in `Enabled`; e.g. already `Initializing` or `Initialized` (write-once gate via `part_mark_initializing`). |
 | `PtaKeyAlreadySet` / `UmsKeyAlreadySet` | A prior `PartInit` already committed PTA or UMS material; write-once setters reject the duplicate. |
+| `PartitionAlreadyProvisioned` | The partition is not `Enabled` and has no PTA key, i.e. it was provisioned from the owner backup key by [`PartInitWithObk`](part_init_with_obk.md). Checked after the PTA-key guard, so the statuses above are unchanged. |
 | `InternalError` | KDF / signing / encoding internal failure; should not occur on a healthy device. |
 
 ## Determinism

@@ -351,7 +351,10 @@ sets `prop.len` to `sizeof(tsra_bool)`. No session is required.
 
 `TSRA_PART_PROP_ID_BACKUP_MASKING_KEY` and
 `TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` are populated only by
-[`tsra_part_init`](#tsra_part_init). On a partition provisioned with
+[`tsra_part_init`](#tsra_part_init); the masked owner backup key is also
+populated by
+[`tsra_sess_ex_part_init_with_obk`](#tsra_sess_ex_part_init_with_obk). On a
+partition provisioned with
 [`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init), including every
 partition at API revision 2.0, they return `TSRA_STATUS_PROPERTY_NOT_PRESENT`.
 

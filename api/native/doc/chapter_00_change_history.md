@@ -59,5 +59,8 @@
 |            | `tsra_policy_key_thumbprint`                                     |
 |            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
 |            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
+| 11/18/2026 | Added `tsra_sess_ex_part_init_with_obk` and                      |
+|            | `tsra_sess_ex_part_init_with_obk_params`: provision a partition  |
+|            | from the owner backup key inside a security-domain session       |
 
 \pagebreak

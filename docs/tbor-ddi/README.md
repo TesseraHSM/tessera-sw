@@ -255,6 +255,7 @@ storage is zero.
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
+| `0x30` | `PartInitWithObk` | InSession | [`commands/part_init_with_obk.md`](./commands/part_init_with_obk.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 
 ## Default-PSK gate
@@ -287,6 +288,13 @@ bootstrap session.
 1. Open a session for the role under the default PSK.
 2. Issue `PskChange` as the first in-session command.
 3. (Optional) `SessionClose`; subsequent sessions are unrestricted.
+
+A session keeps authenticating with the PSK it was opened under: commands
+that check the credential (`PartInitWithObk`, `KeyReport`, `PskChange`)
+reject, with `SessionAuthFailure`, a session opened before the PSK was
+rotated.  After rotating, close the bootstrap session and open a new one under
+the rotated PSK before provisioning with
+[`PartInitWithObk`](./commands/part_init_with_obk.md).
 
 Disabling a partition erases its configured CO and CU PSKs. Re-enabling
 installs the public defaults again, so each role must repeat this bootstrap

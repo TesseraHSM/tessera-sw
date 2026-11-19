@@ -925,7 +925,10 @@ impl HsmPartition {
     ///
     /// Only successful credential establishment or restore populates this cache.
     /// Initialization of an already-established partition does not cache an
-    /// unvalidated caller-supplied MOBK.
+    /// unvalidated caller-supplied MOBK. The exception is
+    /// [`HsmSession::part_init_with_obk`]: once the device has masked a raw
+    /// owner backup key (a one-shot per power cycle) the MOBK is cached
+    /// immediately, so it survives a later rejection of that call.
     ///
     /// # Arguments
     /// * `mobk` - Optional output buffer to receive the MOBK.

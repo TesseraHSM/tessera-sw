@@ -39,6 +39,27 @@ pub struct HsmPartFinalExResult {
     pub local_mk_backup: Vec<u8>,
 }
 
+/// Result of an owner-backup-key partition provisioning
+/// (`part_init_with_obk`): the artifacts the device returns after
+/// provisioning a partition from the owner backup key.
+///
+/// API-layer type with owned bytes. The DDI/wire response type
+/// (`TborPartInitWithObkResp`) is converted into it inside the DDI layer, so
+/// the wire type never surfaces to public callers.
+#[derive(Debug, Clone, Default)]
+pub struct HsmPartInitWithObkResult {
+    /// Masked owner backup key (MOBK) the provisioning used. With a raw
+    /// owner backup key the device masks it on first use (a one-shot per
+    /// power cycle), so callers persist this value for later
+    /// provisioning; with a TPM-sealed or caller-supplied MOBK it is that
+    /// same value.
+    pub mobk: Vec<u8>,
+    /// Current `local_mk` backup envelope the firmware produced. Replay it
+    /// as `prev_local_mk_backup` after a device reset to restore the same
+    /// partition-local masking key.
+    pub local_mk_backup: Vec<u8>,
+}
+
 /// Borrowed attestation evidence for one party in a security-domain
 /// backup: required manufacturer and partition-owner DER chains, an optional
 /// device-owner chain, and the COSE_Sign1 report.
