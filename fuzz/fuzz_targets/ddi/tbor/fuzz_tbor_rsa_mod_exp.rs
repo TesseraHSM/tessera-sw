@@ -24,6 +24,7 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_mbor_types::DdiStatus;
+use tsra_ddi_tbor_codec::RequestView;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -305,9 +306,11 @@ fn shift_y_past_canonical_data(req: &TborRsaModExpReq) -> Vec<u8> {
         .encode_request(&mut storage)
         .expect("valid RSA request must encode")
         .to_vec();
-    let data_start = REQ_HEADER_LEN + 4 * TOC_ENTRY_LEN;
+    let data_start = RequestView::parse(&frame)
+        .expect("encoded RSA request must parse")
+        .data_start();
 
-    for toc_index in [1, 2] {
+    for toc_index in [1, 2, 3] {
         let entry_start = REQ_HEADER_LEN + toc_index * TOC_ENTRY_LEN;
         let word = u32::from_be_bytes(
             frame[entry_start..entry_start + TOC_ENTRY_LEN]
@@ -478,7 +481,6 @@ fuzz_target!(|input: FuzzInput| {
             input.key_scope,
             KeyScope::Session | KeyScope::Ephemeral | KeyScope::Local | KeyScope::SecurityDomain
         ) && valid_rsa_usage
-            && known_usage == requested_usage
             && input.key_label.len() <= TBOR_KEY_LABEL_MAX_LEN;
         if generate_valid_key && import_succeeded != import_expected_success {
             panic!(
