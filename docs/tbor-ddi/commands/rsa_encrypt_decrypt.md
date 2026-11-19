@@ -3,7 +3,7 @@ Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 -->
 
-# RsaEncryptDecrypt (Opcode 0x30)
+# RsaEncryptDecrypt (Opcode 0x34)
 
 **Handler:** `fw/core/lib/src/ddi/tbor/rsa_encrypt_decrypt.rs`  
 **Session:** InSession

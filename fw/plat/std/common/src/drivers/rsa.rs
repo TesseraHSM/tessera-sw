@@ -554,7 +554,7 @@ impl StdRsa {
             .pool
             .submit_with_result(async move {
                 let mut algo = RsaEncryptAlgo::with_oaep_padding(hash, label.as_deref());
-                let mut buf = vec![0u8; scratch_len];
+                let mut buf = Zeroizing::new(vec![0u8; scratch_len]);
                 let written = algo
                     .decrypt(&key, &ct_be, Some(&mut buf))
                     .map_err(|_| HsmError::RsaDecryptFailed)?;

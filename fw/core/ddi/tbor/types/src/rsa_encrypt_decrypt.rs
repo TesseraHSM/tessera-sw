@@ -15,7 +15,7 @@ pub use crate::rsa_mod_exp::RSA_MASKED_KEY_MAX_LEN;
 pub use crate::rsa_mod_exp::RSA_MASKED_KEY_MIN_LEN;
 
 /// TBOR opcode for `RsaEncryptDecrypt`.
-pub const TBOR_OP_RSA_ENCRYPT_DECRYPT: u8 = 0x30;
+pub const TBOR_OP_RSA_ENCRYPT_DECRYPT: u8 = 0x34;
 /// Maximum OAEP label length.
 pub const RSA_OAEP_LABEL_MAX_LEN: usize = 256;
 /// Maximum input/output length (RSA-4096 modulus size).
@@ -44,7 +44,7 @@ pub enum RsaEncryptPadding {
 }
 
 /// `RsaEncryptDecrypt` request schema.
-#[tbor(opcode = 0x30, pair = TborRsaEncryptDecryptResp)]
+#[tbor(opcode = 0x34, pair = TborRsaEncryptDecryptResp)]
 pub struct TborRsaEncryptDecryptReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -111,6 +111,7 @@ mod tests {
             .masked_key(&key)
             .unwrap()
             .finish();
+        assert_eq!(frame.as_bytes()[3], 0x34);
         assert!(frame.as_bytes().len() <= 4096);
     }
 

@@ -272,8 +272,11 @@ storage is zero.
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
-| `0x30` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
+| `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
+
+`0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
+the upcoming `RsaSign` and `RsaVerify` commands.
 
 ## Default-PSK gate
 

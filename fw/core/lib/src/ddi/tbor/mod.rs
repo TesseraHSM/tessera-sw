@@ -402,7 +402,7 @@ pub(crate) mod opcode {
     /// `RsaEncryptDecrypt` — perform padded RSA encryption or decryption
     /// with a caller-held masked private key. See
     /// [`super::rsa_encrypt_decrypt`].
-    pub(crate) const RSA_ENCRYPT_DECRYPT: u8 = 0x30;
+    pub(crate) const RSA_ENCRYPT_DECRYPT: u8 = 0x34;
 
     /// `VerifyKey` — authenticate a masked key of any kind without using
     /// it. See [`super::verify_key`].

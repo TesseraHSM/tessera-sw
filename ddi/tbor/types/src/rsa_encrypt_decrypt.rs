@@ -15,7 +15,7 @@ use open_enum::open_enum;
 use crate::tbor;
 
 /// TBOR opcode for `RsaEncryptDecrypt`.
-pub const TBOR_OP_RSA_ENCRYPT_DECRYPT: u8 = 0x30;
+pub const TBOR_OP_RSA_ENCRYPT_DECRYPT: u8 = 0x34;
 
 /// Maximum masked RSA private-key envelope length (RSA-4096-CRT).
 pub const RSA_ENCRYPT_DECRYPT_MASKED_KEY_MAX_LEN: usize = 3168;
@@ -115,6 +115,7 @@ mod tests {
     #[test]
     fn request_uses_in_session_control_and_stable_selectors() {
         let req = TborRsaEncryptDecryptReq::default();
+        assert_eq!(TborRsaEncryptDecryptReq::OPCODE, 0x34);
         assert_eq!(req.session_ctrl(), crate::SessionControlKind::InSession);
         assert_eq!(
             RsaEncryptDecryptOp::Encrypt.0,
