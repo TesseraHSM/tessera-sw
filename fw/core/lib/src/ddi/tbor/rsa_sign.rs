@@ -37,6 +37,7 @@ pub(super) fn validate_salt(
     key_len: usize,
     digest_len: usize,
 ) -> HsmResult<Option<usize>> {
+    validate_padding_salt_presence(padding, salt_len)?;
     match (padding, salt_len) {
         (RsaPadding::Pss, Some(salt_len)) => {
             let em_bits = key_len
@@ -59,6 +60,16 @@ pub(super) fn validate_salt(
     }
 }
 
+pub(super) fn validate_padding_salt_presence(
+    padding: RsaPadding,
+    salt_len: Option<u16>,
+) -> HsmResult<()> {
+    match (padding, salt_len) {
+        (RsaPadding::Pss, Some(_)) | (RsaPadding::Pkcs1v15, None) => Ok(()),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -71,6 +82,8 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidArg);
         }
         let algo = hash_algo(HashAlgo(req.hash_algo))?;
+        let padding = RsaPadding(req.padding);
+        validate_padding_salt_presence(padding, salt_len)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 
@@ -82,7 +95,7 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidPermissions);
         }
         let salt_len = validate_salt(
-            RsaPadding(req.padding),
+            padding,
             salt_len,
             key_type.modulus_len(),
             algo.digest_len(),
