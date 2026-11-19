@@ -11,6 +11,50 @@ fn dev() -> DdiWinDev {
 }
 
 #[test]
+fn discovery_preserves_uno_and_requires_secure_transport_for_duo() {
+    let uno = DdiWinDev::discover_with((0x1414, 0xc003), || {
+        panic!("legacy discovery must not issue a secure IOCTL")
+    })
+    .expect("legacy discovery");
+    assert_eq!(uno.model, DdiDeviceModel::Uno);
+    let mut probed = false;
+    let duo = DdiWinDev::discover_with((0x1414, 0xc008), || {
+        probed = true;
+        Ok(())
+    })
+    .expect("Gen2 discovery");
+    assert!(probed);
+    assert_eq!(duo.model, DdiDeviceModel::Duo);
+    for identity in [(0xffff, 0xc008), (0x1414, 0xffff)] {
+        assert!(matches!(
+            DdiWinDev::discover_with(identity, || panic!("unknown device must not be probed")),
+            Err(DdiError::DeviceNotFound)
+        ));
+    }
+}
+
+#[test]
+fn discovery_never_falls_back_to_uno_on_probe_errors() {
+    use winapi::shared::winerror::ERROR_ACCESS_DENIED;
+    use winapi::shared::winerror::ERROR_GEN_FAILURE;
+    use winapi::shared::winerror::ERROR_NOT_SUPPORTED;
+
+    for error in [
+        ERROR_INVALID_FUNCTION,
+        ERROR_NOT_SUPPORTED,
+        ERROR_ACCESS_DENIED,
+        ERROR_GEN_FAILURE,
+    ] {
+        assert!(matches!(
+            DdiWinDev::discover_with((0x1414, 0xc008), || {
+                Err(DdiError::IoError(std::io::Error::from_raw_os_error(error as i32)))
+            }),
+            Err(DdiError::IoError(actual)) if actual.raw_os_error() == Some(error as i32)
+        ));
+    }
+}
+
+#[test]
 fn secure_ioctl_round_trips_ciphertext_and_seals() {
     let request_seal = DdiTransportSeal {
         iv: [0x12; 12],
@@ -283,6 +327,7 @@ fn unsupported_driver_errors_reach_public_transport_methods() {
     let seal = DdiTransportSeal::default();
     let input = [0x12];
     for result in [
+        dev.discover().map(|_| ()),
         dev.check_secure_transport(),
         dev.flush_session(23),
         dev.exec_op_tbor_secure(23, b"sealed", seal, &mut [])

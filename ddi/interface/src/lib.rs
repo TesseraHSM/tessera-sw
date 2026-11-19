@@ -177,6 +177,19 @@ pub enum DdiDeviceModel {
     Duo,
 }
 
+impl DdiDeviceModel {
+    /// Identify supported physical devices by PCI vendor and device IDs.
+    ///
+    /// Unknown identities are not assumed to be legacy Uno devices.
+    pub fn from_pci_ids(vendor: u16, device: u16) -> Option<Self> {
+        match (vendor, device) {
+            (0x1414, 0xc003) => Some(Self::Uno),
+            (0x1414, 0xc008) => Some(Self::Duo),
+            _ => None,
+        }
+    }
+}
+
 /// Result of [`DdiDev::discover`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DdiDeviceInfo {

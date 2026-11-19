@@ -867,12 +867,7 @@ impl DdiWinDev {
         Ok(input)
     }
 
-    fn submit_secure_ioctl<T>(
-        &self,
-        function: u32,
-        input: &T,
-        output: &mut TborSecureIoctlOutData,
-    ) -> DdiResult<u32> {
+    fn submit_ioctl<T, U>(&self, function: u32, input: &T, output: &mut U) -> DdiResult<u32> {
         let ioctl_code = CTL_CODE(
             0x3F,
             function,
@@ -894,7 +889,7 @@ impl DdiWinDev {
                 ptr::from_ref(input) as *mut c_void,
                 mem::size_of::<T>() as DWORD,
                 ptr::from_mut(output).cast(),
-                mem::size_of::<TborSecureIoctlOutData>() as DWORD,
+                mem::size_of::<U>() as DWORD,
                 ptr::null_mut(),
                 &mut overlapped,
             )
@@ -902,7 +897,7 @@ impl DdiWinDev {
         if result == 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                tracing::warn!(?error, function, "Secure TBOR DeviceIoControl failed");
+                tracing::warn!(?error, function, "DeviceIoControl failed");
                 return Err(DdiError::IoError(error));
             }
         }
@@ -913,10 +908,34 @@ impl DdiWinDev {
             unsafe { GetOverlappedResult(handle, &mut overlapped, &mut bytes_returned, 1) };
         if result == 0 {
             let error = std::io::Error::last_os_error();
-            tracing::warn!(?error, function, "Secure TBOR GetOverlappedResult failed");
+            tracing::warn!(?error, function, "GetOverlappedResult failed");
             return Err(DdiError::IoError(error));
         }
         Ok(bytes_returned)
+    }
+
+    fn pci_identity(&self) -> DdiResult<(u16, u16)> {
+        let mut info = crate::ddi::TsraCpGetDeviceInfoIoctlOutData::default();
+        let returned = self.submit_ioctl(0x400, &(), &mut info)?;
+        if returned as usize != mem::size_of_val(&info) {
+            tracing::warn!(returned, "Invalid device-info completion size");
+            return Err(DdiError::DeviceInfoIoctlInvalidData);
+        }
+        crate::ddi::pci_identity(&info.pci_info)
+    }
+
+    fn discover_with(
+        (vendor, device): (u16, u16),
+        probe: impl FnOnce() -> DdiResult<()>,
+    ) -> DdiResult<DdiDeviceInfo> {
+        let model = DdiDeviceModel::from_pci_ids(vendor, device).ok_or_else(|| {
+            tracing::warn!(vendor, device, "Unrecognized PCI device identity");
+            DdiError::DeviceNotFound
+        })?;
+        if model == DdiDeviceModel::Duo {
+            probe()?;
+        }
+        Ok(DdiDeviceInfo { model })
     }
 
     fn exec_secure_ioctl(
@@ -927,7 +946,7 @@ impl DdiWinDev {
         seal: DdiTransportSeal,
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
         self.exec_secure_ioctl_with(op, session_id, payload, seal, |input, output| {
-            self.submit_secure_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE, input, output)
+            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE, input, output)
         })
     }
 
@@ -1445,6 +1464,10 @@ impl DdiDev for DdiWinDev {
         Ok(<T::OpResp>::decode_response(resp_bytes)?)
     }
 
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Self::discover_with(self.pci_identity()?, || self.check_secure_transport())
+    }
+
     fn exec_op_tbor_secure(
         &self,
         session_id: u16,
@@ -1456,7 +1479,7 @@ impl DdiDev for DdiWinDev {
             return self.exec_secure_ioctl(1, session_id, payload, seal);
         }
         self.exec_secure_data_xfer_with(session_id, payload, seal, oob_items, |input, output| {
-            self.submit_secure_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER, input, output)
+            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER, input, output)
         })
     }
 

@@ -16,6 +16,25 @@ Legacy MBOR, plaintext TBOR, fast-path, and DATA_XFER IOCTL layouts and function
 codes are unchanged. Plaintext and encrypted OOB paths share the same descriptor
 validation and explicit input/output direction flags.
 
+## Device-model discovery
+
+`DdiDev::discover()` identifies the PCI device associated with the existing
+open handle, rather than inheriting the interface's legacy Uno default.
+PCI vendor/device `1414:C003` identifies Uno; `1414:C008` identifies Duo.
+The mapping is shared with the Linux backend.
+
+On Windows, the existing device-info IOCTL (`0x400`) supplies the handle's
+`MCR:bus:device:function` location. SetupAPI matches that location to one present
+HSM device and reads its PCI hardware IDs. Missing, malformed, or ambiguous
+identity information is an error. This uses the existing device-info ABI; no
+new discovery IOCTL is required.
+
+Uno discovery does not issue a secure IOCTL. Duo discovery verifies the secure
+capability probe before returning, so unsupported drivers fail before the test
+harness starts its session handshake. Probe failures are never reinterpreted
+as Uno. On Linux, discovery reads PCI IDs from the sysfs PCI parent of the open
+character device, with the same model mapping and capability policy.
+
 ## Secure Windows ABI (64-bit)
 
 Both extensions use device type `0x3f`, `METHOD_BUFFERED`, and

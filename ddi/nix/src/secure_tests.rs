@@ -3,6 +3,100 @@
 
 use super::*;
 
+#[test]
+fn discovery_preserves_uno_and_requires_secure_transport_for_duo() {
+    let uno = DdiNixDev::discover_with((0x1414, 0xc003), || {
+        panic!("legacy discovery must not issue a secure IOCTL")
+    })
+    .expect("legacy discovery");
+    assert_eq!(uno.model, DdiDeviceModel::Uno);
+    let mut probed = false;
+    let duo = DdiNixDev::discover_with((0x1414, 0xc008), || {
+        probed = true;
+        Ok(())
+    })
+    .expect("Gen2 discovery");
+    assert!(probed);
+    assert_eq!(duo.model, DdiDeviceModel::Duo);
+    for identity in [(0xffff, 0xc008), (0x1414, 0xffff)] {
+        assert!(matches!(
+            DdiNixDev::discover_with(identity, || panic!("unknown device must not be probed")),
+            Err(DdiError::DeviceNotFound)
+        ));
+    }
+}
+
+#[test]
+fn discovery_never_falls_back_to_uno_on_probe_errors() {
+    for error in [
+        nix::errno::Errno::ENOTTY,
+        nix::errno::Errno::EOPNOTSUPP,
+        nix::errno::Errno::EACCES,
+        nix::errno::Errno::EIO,
+    ] {
+        assert!(matches!(
+            DdiNixDev::discover_with((0x1414, 0xc008), || Err(DdiError::NixError(error))),
+            Err(DdiError::NixError(actual)) if actual == error
+        ));
+    }
+    assert!(matches!(
+        dev().discover(),
+        Err(DdiError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+}
+
+#[test]
+fn discovery_reads_pci_identity_from_the_open_handle() {
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove owned sysfs fixture");
+        }
+    }
+    let root = std::env::temp_dir().join(format!("tsra_pci_discovery_{}", std::process::id()));
+    std::fs::create_dir(&root).expect("create owned sysfs fixture");
+    let fixture = Fixture(root);
+    let dev = dev();
+    let metadata = dev
+        .file
+        .read()
+        .metadata()
+        .expect("metadata of existing handle");
+    let rdev = metadata.rdev();
+    let pci = fixture.0.join(format!(
+        "{}:{}/device",
+        nix::libc::major(rdev),
+        nix::libc::minor(rdev)
+    ));
+    std::fs::create_dir_all(&pci).expect("create PCI parent");
+    std::fs::write(pci.join("vendor"), "0x1414\n").expect("write vendor");
+    for (text, expected) in [("0xc003\n", 0xc003), ("0xc008\n", 0xc008)] {
+        std::fs::write(pci.join("device"), text).expect("write device");
+        assert_eq!(
+            dev.pci_identity(&fixture.0).expect("read PCI identity"),
+            (0x1414, expected)
+        );
+    }
+    std::fs::write(pci.join("vendor"), "invalid\n").expect("write malformed vendor");
+    assert!(matches!(
+        dev.pci_identity(&fixture.0),
+        Err(DdiError::DeviceInfoIoctlInvalidData)
+    ));
+    std::fs::write(pci.join("vendor"), "0x1414\n").expect("restore vendor");
+    std::fs::remove_file(pci.join("device")).expect("remove device attribute");
+    assert!(matches!(
+        dev.pci_identity(&fixture.0),
+        Err(DdiError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    let regular = DdiNixDev::from_file(
+        File::create(fixture.0.join("regular")).expect("create non-device fixture"),
+    );
+    assert!(matches!(
+        regular.pci_identity(&fixture.0),
+        Err(DdiError::DeviceNotFound)
+    ));
+}
+
 fn dev() -> DdiNixDev {
     DdiNixDev::from_file(File::open("/dev/null").expect("open hardware-free test device"))
 }

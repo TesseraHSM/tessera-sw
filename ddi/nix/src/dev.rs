@@ -8,6 +8,8 @@
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::mem;
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
@@ -761,6 +763,48 @@ pub struct DdiNixDev {
 }
 
 impl DdiNixDev {
+    fn pci_identity(&self, sys_dev_char: &Path) -> DdiResult<(u16, u16)> {
+        let metadata = self.file.read().metadata().map_err(DdiError::IoError)?;
+        if !metadata.file_type().is_char_device() {
+            tracing::warn!("Device discovery requires a character-device handle");
+            return Err(DdiError::DeviceNotFound);
+        }
+        let dev = metadata.rdev();
+        let path = sys_dev_char
+            .join(format!(
+                "{}:{}",
+                nix::libc::major(dev),
+                nix::libc::minor(dev)
+            ))
+            .join("device");
+        let read_id = |name| -> DdiResult<u16> {
+            let value = std::fs::read_to_string(path.join(name)).map_err(DdiError::IoError)?;
+            value
+                .trim()
+                .strip_prefix("0x")
+                .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+                .ok_or_else(|| {
+                    tracing::warn!(name, "Invalid PCI identity in sysfs");
+                    DdiError::DeviceInfoIoctlInvalidData
+                })
+        };
+        Ok((read_id("vendor")?, read_id("device")?))
+    }
+
+    fn discover_with(
+        (vendor, device): (u16, u16),
+        probe: impl FnOnce() -> DdiResult<()>,
+    ) -> DdiResult<DdiDeviceInfo> {
+        let model = DdiDeviceModel::from_pci_ids(vendor, device).ok_or_else(|| {
+            tracing::warn!(vendor, device, "Unrecognized PCI device identity");
+            DdiError::DeviceNotFound
+        })?;
+        if model == DdiDeviceModel::Duo {
+            probe()?;
+        }
+        Ok(DdiDeviceInfo { model })
+    }
+
     /// Probe the Gen2 secure IOCTL without allocating a firmware session.
     ///
     /// Older drivers return an unsupported-IOCTL error (ENOTTY/EBADRQC);
@@ -1340,6 +1384,12 @@ impl DdiDev for DdiNixDev {
             })
             .collect();
         self.exec_tbor(req, &oob)
+    }
+
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Self::discover_with(self.pci_identity(Path::new("/sys/dev/char"))?, || {
+            self.check_secure_transport()
+        })
     }
 
     fn exec_op_tbor_secure(
