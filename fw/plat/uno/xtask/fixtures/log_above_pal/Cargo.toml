@@ -1,9 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# A host crate whose test checks the records of `error!` calls in code above
-# the PAL. `cargo xtask log-fixture` copies it outside `fw/plat/uno/`, to the
-# repository's `target/`, and runs the test there. It's its own workspace.
+# A host crate whose tests check the records and text of calls in code above
+# the PAL, and the tracing facade's text output on the host. `cargo xtask
+# log-fixture` copies it outside `fw/plat/uno/`, to the repository's
+# `target/`, and runs the tests there. It's its own workspace.
 
 [workspace]
 
@@ -18,4 +19,8 @@ bench = false
 doctest = false
 
 [dependencies]
+tsra_fw_hsm_core_tracing = { features = [
+  "debug-log",
+  "level-info",
+], path = "../../../../../core/tracing" }
 tsra_fw_uno_debug_log = { path = "../../../fw/crates/debug_log" }

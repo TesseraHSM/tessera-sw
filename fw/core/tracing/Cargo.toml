@@ -11,16 +11,17 @@ doctest = false
 test = false
 
 [features]
-## Debug-log output for Uno images: with no `level-*` feature and a bare-metal
-## target, `error!`, `warn!`, and `info!` go to the Uno log crate.
+## Debug-log output for Uno images: on a bare-metal target, `error!`,
+## `warn!`, and `info!` go to the Uno log crate, whatever the `level-*`
+## features.
 debug-log = ["dep:tsra_fw_uno_debug_log"]
 default = []
 
-## Log level threshold (compile-time). Only messages at or above the
-## selected level are compiled in. Default (no feature): error only.
-## Enable exactly one:
+## Log level threshold for text output (compile-time). Only messages at or
+## above the selected level print. With no level feature, nothing prints.
+## Enable at most one:
 level-debug = [] # debug + info + warn + error
-level-error = [] # error only (default when tracing is on)
+level-error = [] # error only
 level-info = []  # info + warn + error
 level-trace = [] # all levels
 level-warn = []  # warn + error

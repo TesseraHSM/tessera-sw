@@ -14,8 +14,8 @@
 //!
 //! `error_text!` takes the same arguments as `error!`. It prints with text
 //! output, which one of this crate's `level-*` features turns on, and
-//! compiles to nothing otherwise, for lines that no debug-log record can
-//! hold.
+//! compiles to nothing otherwise. It never records, so it suits lines that
+//! no debug-log record can hold.
 //!
 //! # Usage
 //!
@@ -36,6 +36,7 @@ mod emit;
 pub extern crate tsra_fw_hsm_core_tracing as tracing;
 
 /// Prints like `error!` with text output, and compiles to nothing otherwise.
+/// It never records.
 #[macro_export]
 #[cfg(any(
     feature = "level-trace",
@@ -45,9 +46,10 @@ pub extern crate tsra_fw_hsm_core_tracing as tracing;
     feature = "level-error"
 ))]
 macro_rules! error_text {
-    ($($t:tt)*) => { $crate::tracing::error!($($t)*) };
+    ($($t:tt)*) => { $crate::tracing::__text!(error, b'E', $($t)*) };
 }
 /// Prints like `error!` with text output, and compiles to nothing otherwise.
+/// It never records.
 #[macro_export]
 #[cfg(not(any(
     feature = "level-trace",

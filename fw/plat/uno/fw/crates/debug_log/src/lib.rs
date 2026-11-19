@@ -3,17 +3,22 @@
 
 //! Debug-log records for the Uno platform.
 //!
-//! With the tracing facade's `debug-log` feature, a bare-metal target
-//! (`target_os = "none"`), and no `level-*` feature, the facade passes each
-//! `error!`, `warn!`, and `info!` call to this crate's macro of the same
-//! name. The macro records the call, or drops it:
+//! With the tracing facade's `debug-log` feature and a bare-metal target
+//! (`target_os = "none"`), the facade passes each `error!`, `warn!`, and
+//! `info!` call to this crate's macro of the same name, whatever the
+//! `level-*` features. The macro records the call, or drops it:
 //!
 //! - **Record.** A call that fits a record (see "Calls that fit") passes one
 //!   record to the platform's `__hsm_log_record`.
 //! - **Drop.** Outside `fw/plat/uno/`, a call that doesn't fit leaves no
-//!   record and formats nothing. Where the compiler generates code for it,
-//!   it leaves a drop note, which the Uno xtask prints as a warning. Under
-//!   `fw/plat/uno/`, a call that doesn't fit is a compile error instead.
+//!   record. Where the compiler generates code for it, it leaves a drop note,
+//!   which the Uno xtask prints as a warning. Under `fw/plat/uno/`, a call
+//!   that doesn't fit is a compile error instead.
+//!
+//! When text output also prints the call's level, the facade passes the call
+//! in the `@text` form, with its text hook and the level first. The macro
+//! then records or drops the call, and prints it; see "Text output".
+//! Otherwise, a call formats nothing.
 //!
 //! ## Records
 //!
@@ -81,10 +86,10 @@
 //! the `.tsra_log_drops` section, which isn't loaded: the crate, the file
 //! and line, and the reason, separated by tabs. The file comes from
 //! `file!()`, and a note can't hold `\`, so build debug-log images on Linux
-//! or WSL, where paths use `/`. A call dropped for its shape, target,
-//! message, or placeholders evaluates none of its values. A call dropped for
-//! a value's or the code's type evaluates that value once, and formats
-//! nothing.
+//! or WSL, where paths use `/`. Without text output, a call dropped for its
+//! shape, target, message, or placeholders evaluates none of its values, and
+//! a call dropped for a value's or the code's type evaluates that value once
+//! and formats nothing.
 //!
 //! An untyped integer literal, such as `5`, has the type `i32`, so it doesn't
 //! fit. Two cases don't follow "record or drop":
@@ -95,6 +100,16 @@
 //! - A NUL character (`\0`) in a target or message stops the build, in every
 //!   crate. Each call names a symbol after its message, and the compiler
 //!   rejects a NUL in a symbol name.
+//!
+//! ## Text output
+//!
+//! In the `@text` form, such as `info!(@text(hook, b'I'); "iic", "depth={}",
+//! depth)`, a call records or drops as above, and then prints: it passes the
+//! level, the target, and the formatted message to `hook`, as text output
+//! alone does. An `error!` call's message ends with ` [err:<code>]`, with the
+//! code as eight hex digits. The call evaluates each value, and then the
+//! error, once for both outputs, whether it records or drops. Uno code has
+//! the same checks as without text output.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -111,10 +126,40 @@ unsafe extern "Rust" {
     pub fn __hsm_log_record(desc: u32, arg1: u32, arg2: u32);
 }
 
-/// `info!` with debug-log output: records the call, or drops it. See the
-/// crate docs.
+/// `info!` with debug-log output: records the call, or drops it. In the
+/// `@text` form, it also prints the call. See the crate docs.
 #[macro_export]
 macro_rules! info {
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $n:ident = $($rest:tt)*) => {{
+        $crate::__named!();
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, $n = $($rest)*));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr, $n:ident = $($rest:tt)*) => {{
+        $crate::__named!();
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, $a, $n = $($rest)*));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal $(,)?) => {{
+        $crate::__rec!(v0, "I", $tgt, $msg);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr $(,)?) => {{
+        let __text_a = &$a;
+        $crate::__rec!(v1, "I", $tgt, $msg, *__text_a);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, *__text_a));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr, $b:expr $(,)?) => {{
+        let __text_a = &$a;
+        let __text_b = &$b;
+        $crate::__rec!(v2, "I", $tgt, $msg, *__text_a, *__text_b);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, *__text_a, *__text_b));
+    }};
+    (@text($emit:path, $level:literal); $tgt:expr, $($t:tt)*) => {{
+        $crate::__drop!(
+            "with debug-log output, `info!` takes a literal target, a literal message, and at most two values",
+            "the call isn't a literal target, a literal message, and at most two values"
+        );
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($($t)*));
+    }};
     ($tgt:literal, $msg:literal, $n:ident = $($rest:tt)*) => {
         $crate::__named!()
     };
@@ -138,10 +183,40 @@ macro_rules! info {
     };
 }
 
-/// `warn!` with debug-log output: records the call, or drops it. See the
-/// crate docs.
+/// `warn!` with debug-log output: records the call, or drops it. In the
+/// `@text` form, it also prints the call. See the crate docs.
 #[macro_export]
 macro_rules! warn {
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $n:ident = $($rest:tt)*) => {{
+        $crate::__named!();
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, $n = $($rest)*));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr, $n:ident = $($rest:tt)*) => {{
+        $crate::__named!();
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, $a, $n = $($rest)*));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal $(,)?) => {{
+        $crate::__rec!(v0, "W", $tgt, $msg);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr $(,)?) => {{
+        let __text_a = &$a;
+        $crate::__rec!(v1, "W", $tgt, $msg, *__text_a);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, *__text_a));
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $msg:literal, $a:expr, $b:expr $(,)?) => {{
+        let __text_a = &$a;
+        let __text_b = &$b;
+        $crate::__rec!(v2, "W", $tgt, $msg, *__text_a, *__text_b);
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($msg, *__text_a, *__text_b));
+    }};
+    (@text($emit:path, $level:literal); $tgt:expr, $($t:tt)*) => {{
+        $crate::__drop!(
+            "with debug-log output, `warn!` takes a literal target, a literal message, and at most two values",
+            "the call isn't a literal target, a literal message, and at most two values"
+        );
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($($t)*));
+    }};
     ($tgt:literal, $msg:literal, $n:ident = $($rest:tt)*) => {
         $crate::__named!()
     };
@@ -167,9 +242,51 @@ macro_rules! warn {
 
 /// `error!` with debug-log output: records the call, or drops it. The code
 /// comes after the value: it's `arg1` when the call has no value, and `arg2`
-/// when it has one. See the crate docs.
+/// when it has one. In the `@text` form, it also prints the call. See the
+/// crate docs.
 #[macro_export]
 macro_rules! error {
+    (@text($emit:path, $level:literal); $tgt:literal, $err:expr, $msg:literal, $n:ident = $($rest:tt)*) => {{
+        $crate::__named!();
+        $crate::__print!(
+            $emit, $level, $tgt,
+            ::core::format_args!("{} [err:{:08x}]", ::core::format_args!($msg, $n = $($rest)*), $err.0)
+        );
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $err:expr, $msg:literal $(,)?) => {{
+        let __text_err = &$err;
+        $crate::__rec!(e0, "E+", $tgt, $msg, *__text_err);
+        $crate::__print!(
+            $emit, $level, $tgt,
+            ::core::format_args!("{} [err:{:08x}]", ::core::format_args!($msg), __text_err.0)
+        );
+    }};
+    (@text($emit:path, $level:literal); $tgt:literal, $err:expr, $msg:literal, $a:expr $(,)?) => {{
+        let __text_a = &$a;
+        let __text_err = &$err;
+        $crate::__rec!(e1, "E+", $tgt, $msg, *__text_err, *__text_a);
+        $crate::__print!(
+            $emit, $level, $tgt,
+            ::core::format_args!("{} [err:{:08x}]", ::core::format_args!($msg, *__text_a), __text_err.0)
+        );
+    }};
+    (@text($emit:path, $level:literal); $tgt:expr, $err:expr, $($t:tt)*) => {{
+        $crate::__drop!(
+            "with debug-log output, `error!` takes a literal target, an error code, a literal message, and at most one value",
+            "the call isn't a literal target, an error code, a literal message, and at most one value"
+        );
+        $crate::__print!(
+            $emit, $level, $tgt,
+            ::core::format_args!("{} [err:{:08x}]", ::core::format_args!($($t)*), $err.0)
+        );
+    }};
+    (@text($emit:path, $level:literal); $tgt:expr, $($t:tt)*) => {{
+        $crate::__drop!(
+            "with debug-log output, `error!` takes a literal target, an error code, a literal message, and at most one value",
+            "the call isn't a literal target, an error code, a literal message, and at most one value"
+        );
+        $crate::__print!($emit, $level, $tgt, ::core::format_args!($($t)*));
+    }};
     ($tgt:literal, $err:expr, $msg:literal, $n:ident = $($rest:tt)*) => {
         $crate::__named!()
     };
@@ -211,6 +328,21 @@ macro_rules! __drop {
         );
         $crate::__drop_note!($reason);
     }};
+}
+
+/// Prints a call in the `@text` form through `$emit`, the tracing facade's
+/// text hook.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __print {
+    ($emit:path, $level:literal, $tgt:expr, $args:expr) => {
+        #[allow(unsafe_code, unused_unsafe)]
+        // SAFETY: the facade passes its text hook, `__hsm_trace_emit`, which a
+        // platform with text output defines with this signature.
+        unsafe {
+            $emit($level, $tgt, $args)
+        }
+    };
 }
 
 /// Adds a drop note, `<crate>\t<file>:<line>\t<reason>`, to a section that
