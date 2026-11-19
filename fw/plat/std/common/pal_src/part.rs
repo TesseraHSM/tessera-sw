@@ -984,8 +984,8 @@ impl StdHsmPal {
 
     /// Disable a partition: clear internal keys, nonce, vault, sessions.
     ///
-    /// Preserves persistent BK3 provisioning across NSSR, like mainline
-    /// `PartState::disable` / `migrate`; only volatile credentials are cleared.
+    /// Preserves persistent BK3 provisioning across NSSR while clearing
+    /// volatile credentials.
     ///
     /// Transitions `Enabled → Disabled`.
     pub fn part_disable_internal(&self, pid: u8) -> HsmResult<()> {
@@ -1147,9 +1147,9 @@ impl StdHsmPal {
 
     /// Clear enable-time keys, credentials, nonce, vault and sessions.
     ///
-    /// Like mainline `PartState::disable` / `migrate`, retain masked BK_BOOT,
-    /// sealed BK3, launch identity and BK3 classification. Full partition
-    /// teardown clears those in `part_free_internal`. Does not change state.
+    /// Retains masked BK_BOOT, sealed BK3, launch GUID and BK3 classification.
+    /// Full partition teardown clears them in `part_free_internal`.
+    /// Does not change lifecycle state.
     fn clear_enabled_state(entry: &mut PartitionEntry) {
         // Drop a vault-backed key if present and best-effort delete its
         // backing slot.  Vault errors are ignored: the slot is about

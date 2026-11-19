@@ -20,7 +20,7 @@ use super::*;
 /// 1. **Body decode** — Decodes `DdiSetSealedBk3Req` with the blob.
 ///
 /// 2. **Already-set check** — Rejects a repeated write before checking size,
-///    preserving mainline's error precedence.
+///    so it returns `SealedBk3AlreadySet` even for an oversized payload.
 ///
 /// 3. **Size check** — Rejects blobs larger than
 ///    [`SEALED_BK3_MAX_LEN`] with `SealedBk3TooLarge` before the

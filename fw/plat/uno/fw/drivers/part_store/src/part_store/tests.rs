@@ -98,6 +98,36 @@ fn bk3_schema_upgrade_preserves_version_one_partition() {
 }
 
 #[test]
+fn bk3_schema_upgrade_resumes_after_state_is_copied() {
+    let mut p = Partition(57);
+    let enabled = HsmPartState::Enabled;
+    let identity_key = Some(HsmKeyId::from(0x1234));
+    for (state, old_byte, res_mask, key_id) in [
+        (enabled, enabled as u8, 1, identity_key),
+        (enabled, 0, 1, identity_key),
+        (HsmPartState::Unallocated, 0, 0, None),
+    ] {
+        p.reset();
+        p.set_res_mask(res_mask);
+        p.set_id_key_id(key_id);
+        // Resume after the copy, both before and after the old byte was
+        // cleared. A genuinely free v1 slot has both bytes zero.
+        let slot = p.slot_mut();
+        slot.version = 1;
+        slot.fips_status = old_byte;
+        slot.state = [state as u8, 0, 0];
+
+        p.upgrade_bk3_schema();
+
+        assert_eq!(p.slot().version, STORE_VERSION);
+        assert_eq!(p.state(), Ok(state));
+        assert_eq!(p.fips_status(), 0);
+        assert_eq!(p.res_mask(), res_mask);
+        assert_eq!(p.id_key_id(), key_id);
+    }
+}
+
+#[test]
 fn bk3_status_survives_migrate_and_is_revoked_on_disable() {
     let p = Partition(61);
     p.reset();

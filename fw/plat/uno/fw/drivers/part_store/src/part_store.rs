@@ -255,6 +255,14 @@ fn store_base() -> usize {
     PART_STORE_BASE
 }
 
+/// Wait for prior writes to uncached GSRAM to complete before advancing a
+/// restartable update. Host tests use ordinary RAM and model reset states.
+#[inline]
+fn complete_gsram_writes() {
+    #[cfg(target_arch = "arm")]
+    cortex_m::asm::dsb();
+}
+
 #[cfg(test)]
 fn store_base() -> usize {
     use core::mem::align_of;
@@ -394,8 +402,8 @@ struct Storage {
     // seven `[u8;2]` key handles — are placed last, before `reserved3`,
     // where misalignment is harmless. All fields are byte arrays (align 1)
     // so no implicit padding is introduced; accessors do the LE conversions.
-    // Mainline's status byte occupies the first byte of the old state
-    // word. Shrinking state keeps every other Uno field at its old offset.
+    // Pack the classification byte into the existing four-byte state word
+    // to keep all subsequent field offsets unchanged.
     fips_status: u8,
     state: [u8; 3],
     generation: [u8; 4],
@@ -515,15 +523,26 @@ impl PartStore {
 }
 
 impl Partition {
-    /// Upgrade the preserved version-1 state word without moving keys or
-    /// claiming approval for an older, unclassified BK3.
+    /// Upgrade the retained v1 slot, even if a warm reset interrupted
+    /// a previous attempt. Leave its BK3 classification unset.
     pub fn upgrade_bk3_schema(&mut self) {
         let slot = self.slot_mut();
-        if slot.version == 1 {
-            slot.state = [slot.fips_status, 0, 0];
-            slot.fips_status = 0;
-            slot.version = STORE_VERSION;
+        if slot.version != 1 {
+            return;
         }
+
+        // A nonzero v1 state is authoritative until its copy reaches GSRAM.
+        // Once the old byte is zero, the copy is authoritative; a genuinely
+        // unallocated v1 slot already has zero in both places.
+        if slot.fips_status != 0 {
+            slot.state = [slot.fips_status, 0, 0];
+            complete_gsram_writes();
+        }
+
+        slot.fips_status = 0;
+        // The v2 stamp must not expose the old state byte as a classification.
+        complete_gsram_writes();
+        slot.version = STORE_VERSION;
     }
 
     /// Persisted provisioning classification, unknown values fail closed.
@@ -1030,7 +1049,7 @@ impl Partition {
         slot.bk3_session_key.is_valid = false;
     }
 
-    /// Zeroize persistent BK3 state, matching mainline ClearBk3.
+    /// Zeroize persistent BK3 provisioning state.
     ///
     /// Application credentials, vault keys, sessions, and launch identity
     /// are deliberately untouched.

@@ -136,8 +136,8 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
         key_length: BK3_LEN as u16,
     };
 
-    // ClearBk3 must leave BK_BOOT zeroized. Recreate it during init, as in
-    // mainline, without publishing any replacement before the final commit.
+    // ClearBk3 leaves BK_BOOT zeroized. Recreate it during initialization
+    // and publish the replacement only at the final commit.
     let new_masked_boot = match crate::part_state::part_masked_bk_boot(pal, io) {
         Ok(_) => None,
         Err(HsmError::PartPropNotFound) => {

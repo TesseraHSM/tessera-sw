@@ -146,7 +146,7 @@ pub(crate) async fn secure_init_bk3<'p, P: HsmPal>(
     consume_tunnel_key(pal, io).await?;
     pal.part_prop_clear(io, HsmPartPropId::BK3_PROV_CREDENTIAL)?;
 
-    // Like mainline, failures after key/PIN consumption require a new
-    // provisioning handshake. Missing BK_BOOT is recreated by the init helper.
+    // Failures after key/PIN consumption require a new provisioning
+    // handshake. The init helper recreates a missing BK_BOOT.
     super::init_bk3::mask_bk3(pal, io, encrypted.encrypted_bk3, hdr, true).await
 }

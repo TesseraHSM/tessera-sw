@@ -36,7 +36,6 @@ use tsra_ddi_mbor_types::DdiStatus;
 
 /// Requires mock sealing; TPM-backed provisioning is not supported.
 #[test]
-#[ignore = "Destructive: clears BK3 provisioning; run last on a dedicated test device"]
 fn test_clear_bk3() {
     assert!(
         std::env::var("TSRA_USE_TPM").is_err(),
