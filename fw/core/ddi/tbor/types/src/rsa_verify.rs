@@ -6,9 +6,9 @@
 use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::rsa_sign::RsaPadding;
-pub use crate::rsa_sign::RSA_SIGN_MESSAGE_MAX_LEN;
 pub use crate::rsa_sign::RSA_MASKED_KEY_MAX_LEN;
 pub use crate::rsa_sign::RSA_SIGNATURE_MAX_LEN;
+pub use crate::rsa_sign::RSA_SIGN_MESSAGE_MAX_LEN;
 
 /// TBOR opcode for `RsaVerify`.
 pub const TBOR_OP_RSA_VERIFY: u8 = 0x36;

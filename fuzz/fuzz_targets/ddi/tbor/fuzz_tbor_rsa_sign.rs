@@ -53,14 +53,12 @@ fuzz_target!(|input: FuzzInput| {
         let (padding, hash_algo, salt_len) = match input.padding % 2 {
             0 => (
                 RSA_PADDING_PSS,
-                [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512]
-                    [input.hash_algo as usize % 3],
+                [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512][input.hash_algo as usize % 3],
                 Some(input.salt_len % 64),
             ),
             _ => (
                 RSA_PADDING_PKCS1_V15,
-                [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512]
-                    [input.hash_algo as usize % 3],
+                [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512][input.hash_algo as usize % 3],
                 None,
             ),
         };

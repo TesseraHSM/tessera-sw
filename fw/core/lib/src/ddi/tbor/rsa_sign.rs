@@ -84,6 +84,11 @@ pub(crate) async fn handle<P: HsmPal>(
         let algo = hash_algo(HashAlgo(req.hash_algo))?;
         let padding = RsaPadding(req.padding);
         validate_padding_salt_presence(padding, salt_len)?;
+        let message_len = usize::from(req.message_len);
+        let message_index = usize::from(req.message_index);
+        if message_len == 0 && message_index != 0 {
+            return Err(HsmError::InvalidArg);
+        }
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 
@@ -94,18 +99,7 @@ pub(crate) async fn handle<P: HsmPal>(
         if !view.key_attrs.sign() {
             return Err(HsmError::InvalidPermissions);
         }
-        let salt_len = validate_salt(
-            padding,
-            salt_len,
-            key_type.modulus_len(),
-            algo.digest_len(),
-        )?;
-        let message_len = usize::from(req.message_len);
-        let message_index = usize::from(req.message_index);
-
-        if message_len == 0 && message_index != 0 {
-            return Err(HsmError::InvalidArg);
-        }
+        let salt_len = validate_salt(padding, salt_len, key_type.modulus_len(), algo.digest_len())?;
         let digest = alloc.dma_alloc_zeroed(algo.digest_len())?;
         let digest_len = pal
             .hash_oob(
@@ -136,23 +130,14 @@ pub(crate) async fn handle<P: HsmPal>(
                 .await?
             }
             None => {
-                pal.rsa_pkcs1_sign(
-                    io,
-                    key_type,
-                    algo,
-                    view.target_key,
-                    digest,
-                    Some(signature),
-                )
-                .await?
+                pal.rsa_pkcs1_sign(io, key_type, algo, view.target_key, digest, Some(signature))
+                    .await?
             }
         };
         if written != key_type.modulus_len() {
             return Err(HsmError::InternalError);
         }
 
-        drop(view);
-        drop(req);
         cmd_buf.encode_response(|buf| {
             let frame = TborRsaSignResp::encode(buf, 0, false)?
                 .signature(&signature[..written])?

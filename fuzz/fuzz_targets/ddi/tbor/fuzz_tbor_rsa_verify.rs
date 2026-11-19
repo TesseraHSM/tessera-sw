@@ -69,8 +69,8 @@ fuzz_target!(|input: FuzzInput| {
         } else {
             RSA_PADDING_PKCS1_V15
         };
-        let hash_selector = [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512]
-            [input.hash_algo as usize % 3];
+        let hash_selector =
+            [RSA_HASH_SHA256, RSA_HASH_SHA384, RSA_HASH_SHA512][input.hash_algo as usize % 3];
         let hash = reference_hash(hash_selector);
         let salt_len = if padding == RSA_PADDING_PSS {
             let digest_len = match hash_selector {
@@ -88,8 +88,8 @@ fuzz_target!(|input: FuzzInput| {
         } else {
             RsaHashSignAlgo::with_pkcs1_padding(hash)
         };
-        let mut signature = Signer::sign_vec(&mut signer, &private_key, &message)
-            .expect("reference RSA signature");
+        let mut signature =
+            Signer::sign_vec(&mut signer, &private_key, &message).expect("reference RSA signature");
         if input.mutate_signature && !signature.is_empty() {
             signature[0] ^= 1;
         }

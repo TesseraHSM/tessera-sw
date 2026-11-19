@@ -52,8 +52,8 @@
 //! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
 //! ML-DSA and ML-KEM are.
 
-use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;

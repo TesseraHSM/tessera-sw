@@ -70,11 +70,11 @@ pub struct TborRsaSignResp {
 
 #[cfg(test)]
 mod tests {
-    use crate::codec::ResponseEncoder;
-    use crate::codec::PROTOCOL_VERSION;
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
+    use crate::codec::ResponseEncoder;
+    use crate::codec::PROTOCOL_VERSION;
 
     #[test]
     fn maximum_request_and_response_fit_exchange_frame() {

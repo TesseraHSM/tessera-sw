@@ -865,6 +865,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_rsa_inputs_are_rejected_without_writing_output() {
+        let (pal, io) = pal_and_io();
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let input = alloc.dma_alloc(0)?;
+            let output = alloc.dma_alloc(256)?;
+            output.fill(0xCC);
+            let mark = pal.iic.pool().dma_mark(io.slot).get();
+            for execute in [false, true] {
+                let key = HsmRsaKey::Rsa2048Priv;
+                let hash = HsmHashAlgo::Sha256;
+                for outcome in [
+                    pal.rsa_pkcs1_encrypt(&io, key, input, input, execute.then_some(&mut *output))
+                        .await,
+                    pal.rsa_pkcs1_decrypt(&io, key, input, input, execute.then_some(&mut *output))
+                        .await,
+                    pal.rsa_oaep_encrypt(
+                        &io,
+                        key,
+                        hash,
+                        input,
+                        input,
+                        input,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    pal.rsa_pkcs1_sign(
+                        &io,
+                        key,
+                        hash,
+                        input,
+                        input,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    pal.rsa_pss_sign(
+                        &io,
+                        key,
+                        hash,
+                        input,
+                        input,
+                        32,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                ] {
+                    assert_eq!(outcome, Err(HsmError::InvalidArg));
+                }
+                assert!(output.iter().all(|&b| b == 0xCC));
+                assert_eq!(pal.iic.pool().dma_mark(io.slot).get(), mark);
+            }
+            Ok(())
+        })
+        .await
+        .expect("invalid RSA inputs");
+    }
+
+    #[tokio::test]
     async fn sign_round_trips_through_verify() {
         let (pal, io) = pal_and_io();
         let key_size = HsmRsaKey::Rsa2048Priv;
