@@ -388,6 +388,8 @@ pub enum TborStatus {
     /// an empty response on success, so this status is how an invalid
     /// signature is surfaced.
     MlDsaVerifyFailed = 0x0870010D,
+    /// An RSA signature failed verification.
+    RsaVerifyFailed = 0x0870010E,
 }
 
 impl core::fmt::Debug for TborStatus {

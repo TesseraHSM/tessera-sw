@@ -58,15 +58,16 @@ impl StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let pk = vault_priv_key(key_size, priv_key)?;
-        let k = key_size.modulus_len();
-        let Some(output) = out else {
-            return Ok(k);
-        };
-        let output = output.get_mut(..k).ok_or(HsmError::InvalidArg)?;
         self.rsa
-            .sign(&pk, hash, message_hash, salt_len, output)
-            .await?;
-        Ok(k)
+            .sign(
+                key_size,
+                hash,
+                &pk,
+                message_hash,
+                salt_len,
+                out.map(|buf| &mut **buf),
+            )
+            .await
     }
 
     pub(crate) async fn rsa_pair_pct(

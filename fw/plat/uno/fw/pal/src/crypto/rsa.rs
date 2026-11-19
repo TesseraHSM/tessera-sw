@@ -869,6 +869,12 @@ impl HsmRsa for UnoHsmPal {
         if message_hash.len() != digest_len || signature.len() != k {
             return Err(HsmError::InvalidArg);
         }
+        if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if !mod_exp_input_in_range(&pub_key[..k], signature) {
+            return Ok(false);
+        }
 
         self.alloc_scoped_async(io, async |alloc| {
             let em = alloc.dma_alloc(k)?;
@@ -1177,6 +1183,12 @@ impl HsmRsa for UnoHsmPal {
         }
         if salt_len > k - h_len - 2 {
             return Err(HsmError::InvalidArg);
+        }
+        if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if !mod_exp_input_in_range(&pub_key[..k], signature) {
+            return Ok(false);
         }
 
         self.alloc_scoped_async(io, async |alloc| {
