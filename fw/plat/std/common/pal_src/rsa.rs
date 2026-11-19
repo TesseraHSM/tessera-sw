@@ -225,7 +225,9 @@ impl HsmRsa for StdHsmPal {
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let k = key_size.modulus_len();
-        let pub_key = RsaPublicKey::from_bytes(key).map_err(|_| HsmError::InvalidArg)?;
+        let public_be = crate::drivers::rsa::pub_key_be(key, StdHsmPal::BYTE_ORDER, k)?;
+        let pub_key = <RsaPublicKey as tsra_crypto::ImportableHsmKey>::from_hsm_bytes(&public_be)
+            .map_err(|_| HsmError::InvalidArg)?;
         if pub_key.n(None).map_err(|_| HsmError::InvalidArg)? != k || x.len() != k {
             return Err(HsmError::InvalidArg);
         }
@@ -246,8 +248,8 @@ impl HsmRsa for StdHsmPal {
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The std PAL's vault representation is HSM byte format (raw
-        // components): parse it, derive the public key, and emit the raw
-        // wire form `n_le || e_le`.  The BE->LE flip lives in the driver.
+        // components): parse it, derive the public key, and emit raw
+        // `n || e` in operand order.
         // In query mode (`pub_out == None`) only the wire length is returned.
         let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
         let pubk = pk.public_key().map_err(|_| HsmError::RsaGenerateError)?;
@@ -599,8 +601,13 @@ mod tests {
                 assert!(private[written.0..].iter().all(|&b| b == 0xCC));
                 assert!(public[written.1..].iter().all(|&b| b == 0xCC));
                 let private = &private[..written.0];
-                let public = &public[..written.1];
+                let _public_der = &public[..written.1];
                 let k = key_size.modulus_len();
+                let public_wire = alloc.dma_alloc(k + 4)?;
+                assert_eq!(
+                    pal.rsa_priv_pub_key(&io, private, Some(public_wire))?,
+                    k + 4
+                );
                 let input = alloc.dma_alloc_zeroed(k)?;
                 let low = if StdHsmPal::BYTE_ORDER == HsmByteOrder::Le {
                     0
@@ -628,7 +635,7 @@ mod tests {
                         k
                     );
                     assert_eq!(
-                        pal.mod_exp_pub(&io, key_size.pub_variant(), public, input, None)
+                        pal.mod_exp_pub(&io, key_size.pub_variant(), public_wire, input, None)
                             .await?,
                         k
                     );
@@ -644,7 +651,7 @@ mod tests {
                         pal.mod_exp_pub(
                             &io,
                             key_size.pub_variant(),
-                            public,
+                            public_wire,
                             input,
                             Some(&mut encrypted[..k - 1]),
                         )
@@ -671,8 +678,14 @@ mod tests {
                 assert!(encrypted.iter().all(|&b| b == 0xCC));
                 assert!(decrypted.iter().all(|&b| b == 0xCC));
                 assert_eq!(
-                    pal.mod_exp_pub(&io, key_size.pub_variant(), public, input, Some(encrypted))
-                        .await?,
+                    pal.mod_exp_pub(
+                        &io,
+                        key_size.pub_variant(),
+                        public_wire,
+                        input,
+                        Some(encrypted),
+                    )
+                    .await?,
                     k
                 );
                 assert_eq!(

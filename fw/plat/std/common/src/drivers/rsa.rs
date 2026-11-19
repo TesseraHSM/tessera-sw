@@ -125,6 +125,18 @@ pub fn rsa_pub_wire(
     Ok(wire_len)
 }
 
+/// Convert an operand-order raw public key `n || e(4)` to the big-endian
+/// HSM-import representation, converting the modulus and exponent separately.
+pub fn pub_key_be(key: &[u8], order: HsmByteOrder, modulus_len: usize) -> HsmResult<Vec<u8>> {
+    if !matches!(modulus_len, 256 | 384 | 512) || key.len() != modulus_len + RSA_PUB_EXP_WIRE_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let mut public = key.to_vec();
+    byte_order::int_to_be(order, &mut public[..modulus_len]);
+    byte_order::int_to_be(order, &mut public[modulus_len..]);
+    Ok(public)
+}
+
 /// Synchronous RSA-2048 PCT for lazy, await-free unwrapping-key provisioning.
 pub fn unwrapping_key_pct(key: &RsaPrivateKey) -> HsmResult<bool> {
     if key.size() != 256 {
@@ -309,11 +321,22 @@ impl StdRsa {
         x_input: &[u8],
         y: &mut [u8],
     ) -> HsmResult<()> {
+        let k = pub_key.size();
+        if !matches!(k, 256 | 384 | 512) || x_input.len() != k || y.len() != k {
+            return Err(HsmError::InvalidArg);
+        }
         let key = pub_key.clone();
         // Operands are in PAL order; OpenSSL is big-endian.
         let mut x_be = x_input.to_vec();
         byte_order::int_to_be(self.order, &mut x_be);
-        let out_len = y.len();
+        let mut n_be = vec![0u8; k];
+        pub_key
+            .n(Some(&mut n_be))
+            .map_err(|_| HsmError::InvalidArg)?;
+        if x_be.as_slice() >= n_be.as_slice() {
+            return Err(HsmError::InvalidArg);
+        }
+        let out_len = k;
 
         let result = self
             .pool
@@ -328,18 +351,6 @@ impl StdRsa {
 
         // `result` is big-endian; emit the operand-order form.
         byte_order::int_copy_from_be(self.order, y, &result)
-    }
-
-    /// Convert an operand-order `n || e(4)` public key to the big-endian
-    /// form [`RsaPublicKey::from_hsm_bytes`] parses.
-    fn pub_key_be(&self, k: usize, pub_key: &[u8]) -> HsmResult<Vec<u8>> {
-        if pub_key.len() != k + RSA_PUB_EXP_WIRE_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let mut public = pub_key.to_vec();
-        byte_order::int_to_be(self.order, &mut public[..k]);
-        byte_order::int_to_be(self.order, &mut public[k..]);
-        Ok(public)
     }
 
     /// Encrypt `message` under an operand-order `n || e(4)` key with
@@ -359,7 +370,7 @@ impl StdRsa {
         out: &mut [u8],
     ) -> HsmResult<()> {
         let k = key_size.modulus_len();
-        let public = self.pub_key_be(k, pub_key)?;
+        let public = pub_key_be(pub_key, self.order, k)?;
         let message = Zeroizing::new(message.to_vec());
         let result = self
             .pool
@@ -458,7 +469,7 @@ impl StdRsa {
         {
             return Err(HsmError::InvalidArg);
         }
-        let public = self.pub_key_be(k, pub_key)?;
+        let public = pub_key_be(pub_key, self.order, k)?;
         if salt_len.is_some() && public[0] & 0x80 == 0 {
             return Err(HsmError::InvalidArg);
         }
@@ -697,6 +708,27 @@ mod tests {
         // Length mismatch and empty inputs are rejected.
         assert!(!mod_exp_input_in_range(&n, &[0x00, 0x02]));
         assert!(!mod_exp_input_in_range(&[], &[]));
+    }
+
+    #[test]
+    fn public_key_components_convert_independently_for_both_orders() {
+        let modulus_len = 256;
+        let mut public_be = vec![0x21; modulus_len];
+        public_be[0] = 0x01;
+        public_be[modulus_len - 1] = 0x43;
+        public_be.extend([0x12, 0x34, 0x56, 0x78]);
+
+        for order in [HsmByteOrder::Le, HsmByteOrder::Be] {
+            let mut raw = public_be.clone();
+            if order == HsmByteOrder::Le {
+                raw[..modulus_len].reverse();
+                raw[modulus_len..].reverse();
+            }
+            assert_eq!(
+                pub_key_be(&raw, order, modulus_len).expect("convert raw key"),
+                public_be
+            );
+        }
     }
 
     // ── Key generation ──────────────────────────────────────────

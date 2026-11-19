@@ -254,7 +254,7 @@ storage is zero.
 | `0x18` | `EccSign` | InSession | [`commands/ecc_sign.md`](./commands/ecc_sign.md) |
 | `0x33` | `EccVerify` | InSession | [`commands/ecc_verify.md`](./commands/ecc_verify.md) |
 | `0x19` | `EcdhDerive` | InSession | [`commands/ecdh_derive.md`](./commands/ecdh_derive.md) |
-| `0x1A` | `RsaModExp` | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x1A` | `RsaModExp` (raw Decrypt/Sign/Encrypt/Verify) | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
 | `0x35` | `RsaSign` | InSession | [`commands/rsa_sign.md`](./commands/rsa_sign.md) |
 | `0x36` | `RsaVerify` | InSession | [`commands/rsa_verify.md`](./commands/rsa_verify.md) |
 | `0x1B` | `Hash` | InSession | [`commands/hash.md`](./commands/hash.md) |
