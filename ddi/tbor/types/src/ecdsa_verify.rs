@@ -5,9 +5,15 @@
 
 use alloc::vec::Vec;
 
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MAX_LEN;
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MIN_LEN;
 use crate::tbor;
+
 /// TBOR opcode for message-level `EcdsaVerify`.
 pub const TBOR_OP_ECDSA_VERIFY: u8 = 0x38;
+
+const _: () = assert!(MASKED_ECC_KEY_MIN_LEN == 264);
+const _: () = assert!(MASKED_ECC_KEY_MAX_LEN == 312);
 
 /// Host-facing TBOR `EcdsaVerify` request.
 #[tbor(opcode = TBOR_OP_ECDSA_VERIFY, session_ctrl = in_session)]
@@ -40,14 +46,14 @@ mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
-    use crate::ecdsa_sign::ECDSA_SIGNATURE_MAX_LEN;
     use crate::ecdsa_sign::ECDSA_MESSAGE_MAX_LEN;
+    use crate::ecdsa_sign::ECDSA_SIGNATURE_MAX_LEN;
 
     #[test]
     fn maximum_request_fits_exchange_capacity() {
         let req = TborEcdsaVerifyReq {
             session_id: 7,
-            masked_key: alloc::vec![0x11; 312],
+            masked_key: alloc::vec![0x11; MASKED_ECC_KEY_MAX_LEN],
             hash_algo: 3,
             message_index: 1,
             message_len: ECDSA_MESSAGE_MAX_LEN as u16,
@@ -56,6 +62,5 @@ mod tests {
         let mut req_buf = [0u8; 4096];
         let request = req.encode_request(&mut req_buf).expect("encode request");
         assert!(request.len() <= req_buf.len());
-
     }
 }

@@ -26,6 +26,8 @@ pub mod ecc_sign;
 pub mod ecc_sign_hw;
 pub mod ecc_verify;
 pub mod ecdh_derive;
+pub mod ecdsa_sign;
+pub mod ecdsa_verify;
 pub mod forward_compat;
 pub mod fw_error_decode;
 pub mod get_cert;

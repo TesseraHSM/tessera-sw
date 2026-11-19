@@ -5,6 +5,8 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
+pub use crate::ecdsa_sign::MASKED_ECC_KEY_MAX_LEN;
+pub use crate::ecdsa_sign::MASKED_ECC_KEY_MIN_LEN;
 use crate::key_props::HashAlgo;
 
 /// TBOR opcode for message-level `EcdsaVerify`.
@@ -12,6 +14,9 @@ pub const TBOR_OP_ECDSA_VERIFY: u8 = 0x38;
 /// Maximum raw message length accepted by the command.
 pub use crate::ecdsa_sign::ECDSA_MESSAGE_MAX_LEN;
 pub use crate::ecdsa_sign::ECDSA_SIGNATURE_MAX_LEN;
+
+const _: () = assert!(MASKED_ECC_KEY_MIN_LEN == 264);
+const _: () = assert!(MASKED_ECC_KEY_MAX_LEN == 312);
 
 /// `EcdsaVerify` request. The host must keep the referenced OOB memory
 /// accessible and unchanged until command completion.
@@ -50,7 +55,7 @@ mod tests {
     #[test]
     fn request_round_trips_required_fields() {
         let mut buf = [0u8; 1024];
-        let key = [0x11; 312];
+        let key = [0x11; MASKED_ECC_KEY_MAX_LEN];
         let sig = [0x22; ECDSA_SIGNATURE_MAX_LEN];
         let frame = TborEcdsaVerifyReq::encode(&mut buf)
             .unwrap()

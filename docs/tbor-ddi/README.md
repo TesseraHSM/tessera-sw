@@ -277,6 +277,8 @@ storage is zero.
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 | `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
+| `0x37` | `EcdsaSign` | InSession | [`commands/ecdsa_sign.md`](./commands/ecdsa_sign.md) |
+| `0x38` | `EcdsaVerify` | InSession | [`commands/ecdsa_verify.md`](./commands/ecdsa_verify.md) |
 
 `0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
 the upcoming `RsaSign` and `RsaVerify` commands.

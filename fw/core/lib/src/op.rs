@@ -106,6 +106,8 @@ pub(crate) fn sess_ctrl_from_tbor_opcode(opcode: u8) -> HsmSessCtrl {
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
         | opcode::ECC_VERIFY
+        | opcode::ECDSA_SIGN
+        | opcode::ECDSA_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
         | opcode::RSA_ENCRYPT_DECRYPT

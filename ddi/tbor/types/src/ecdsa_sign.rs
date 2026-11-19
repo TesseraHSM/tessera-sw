@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MAX_LEN;
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MIN_LEN;
 use crate::tbor;
 
 /// TBOR opcode for message-level `EcdsaSign`.
@@ -13,6 +15,9 @@ pub const TBOR_OP_ECDSA_SIGN: u8 = 0x37;
 pub const ECDSA_MESSAGE_MAX_LEN: usize = 8192;
 /// Maximum padded ECDSA signature length, including std Duo P-521.
 pub const ECDSA_SIGNATURE_MAX_LEN: usize = 144;
+
+const _: () = assert!(MASKED_ECC_KEY_MIN_LEN == 264);
+const _: () = assert!(MASKED_ECC_KEY_MAX_LEN == 312);
 
 /// Host-facing TBOR `EcdsaSign` request.
 #[tbor(opcode = TBOR_OP_ECDSA_SIGN, session_ctrl = in_session)]
@@ -51,7 +56,7 @@ mod tests {
     fn maximum_request_and_response_fit_exchange_capacity() {
         let req = TborEcdsaSignReq {
             session_id: 7,
-            masked_key: alloc::vec![0x11; 312],
+            masked_key: alloc::vec![0x11; MASKED_ECC_KEY_MAX_LEN],
             hash_algo: 3,
             message_index: 1,
             message_len: ECDSA_MESSAGE_MAX_LEN as u16,
