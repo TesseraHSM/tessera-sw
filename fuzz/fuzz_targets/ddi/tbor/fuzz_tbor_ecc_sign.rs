@@ -54,7 +54,13 @@ impl DigestAlgorithm {
             Self::Sha256 => HASH_ALGO_SHA256,
             Self::Sha384 => HASH_ALGO_SHA384,
             Self::Sha512 => HASH_ALGO_SHA512,
-            Self::Unknown(value) => *value as u8,
+            // Keep unknown selectors off the SHA-1/SHA-2 discriminants so a
+            // short digest padded into the lane cannot form a valid request
+            // that the expected result treats as invalid.
+            Self::Unknown(value) => match *value as u8 {
+                v @ HASH_ALGO_SHA1..=HASH_ALGO_SHA512 => 0x80 | v,
+                v => v,
+            },
         }
     }
 }
