@@ -5,8 +5,9 @@
 
 #![allow(dead_code)]
 
-use arbitrary::Arbitrary;
-use arbitrary::Unstructured;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::arbitrary::Unstructured;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;

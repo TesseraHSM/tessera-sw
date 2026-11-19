@@ -10,13 +10,11 @@ use common::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rand::Rng;
-use rand::SeedableRng;
+use rand::*;
 use rand::rngs::StdRng;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
-use tsra_ddi_mbor_test_helpers::helper_delete_key;
-use tsra_ddi_mbor_test_helpers::helper_rsa_mod_exp;
+use tsra_ddi_mbor_test_helpers::*;
 use tsra_ddi_mbor_types::*;
 
 /// Fuzz input for RSA Mod Exp DDI op.

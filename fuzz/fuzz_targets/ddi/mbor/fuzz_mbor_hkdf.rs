@@ -10,10 +10,7 @@ use common::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_ddi::*;
-use tsra_ddi_mbor_test_helpers::helper_delete_key;
-use tsra_ddi_mbor_test_helpers::helper_hkdf_derive;
-use tsra_ddi_mbor_test_helpers::helper_key_properties;
+use tsra_ddi_mbor_test_helpers::*;
 use tsra_ddi_mbor_types::*;
 
 /// Fuzz input for HKDF Derive DDI op.
