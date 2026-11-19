@@ -270,6 +270,32 @@ pub struct TsraCpGenericCmd {
     out_data: TsraCpGenericIoctlOutdata,
 }
 
+#[derive(Default)]
+#[repr(C)]
+struct TborTransport {
+    op: u32,
+    frame_id: u32,
+    key_index: u32,
+    aad_length: u32,
+    tag: [u8; 16],
+    iv: [u8; 12],
+    error: u16,
+    reserved: u16,
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct TborSecureCmd {
+    generic: TsraCpGenericCmd,
+    transport: TborTransport,
+}
+
+ioctl_readwrite!(tsra_tbor_secure_ioctl, b'B', 0x08, TborSecureCmd);
+
+#[cfg(test)]
+#[path = "secure_tests.rs"]
+mod secure_tests;
+
 /// IOCTL type defined by the Linux driver UAPI.
 const TSRA_HSM_IOC_MAGIC: u8 = b'B';
 
@@ -348,6 +374,20 @@ struct TsraCpDataXferCmd {
     generic_cmd: TsraCpGenericCmd,
     data_xfer: DataXferBuffers,
 }
+
+#[repr(C)]
+#[derive(Default)]
+struct TborSecureDataXferCmd {
+    data_xfer_cmd: TsraCpDataXferCmd,
+    transport: TborTransport,
+}
+
+ioctl_readwrite!(
+    tsra_tbor_secure_data_xfer_ioctl,
+    b'B',
+    0x09,
+    TborSecureDataXferCmd
+);
 
 /// IOCTL sequence for `TSRA_CTRL_PATH_DATA_XFER`.
 const TSRA_HSM_IOC_SEQ_DATA_XFER: u8 = 0x07;
@@ -721,6 +761,25 @@ pub struct DdiNixDev {
 }
 
 impl DdiNixDev {
+    /// Probe the Gen2 secure IOCTL without allocating a firmware session.
+    ///
+    /// Older drivers return an unsupported-IOCTL error (ENOTTY/EBADRQC);
+    /// callers must not start a handshake they cannot finish or flush.
+    pub fn check_secure_transport(&self) -> DdiResult<()> {
+        self.exec_secure_ioctl(0, 0, &[], DdiTransportSeal::default())
+            .map(|_| ())
+    }
+
+    /// Wrap an existing open file description without reopening the device.
+    ///
+    /// This preserves the driver's file ownership and per-file session state.
+    pub fn from_file(file: File) -> Self {
+        Self {
+            file: Arc::new(RwLock::new(file)),
+            device_kind: DdiDeviceKind::Physical,
+        }
+    }
+
     pub(crate) fn open(path: &str) -> DdiResult<Self> {
         tracing::debug!("{:?} {}", path, "Opening DdiNixDev");
 
@@ -813,6 +872,117 @@ impl DdiNixDev {
         self.map_ioctl_status(ioctl_status)
     }
 
+    fn exec_secure_ioctl(
+        &self,
+        op: u32,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        self.exec_secure_ioctl_with(op, session_id, payload, seal, |cmd| {
+            // SAFETY: cmd and its buffers remain valid until the synchronous IOCTL completes.
+            unsafe { tsra_tbor_secure_ioctl(self.file.read().as_raw_fd(), cmd) }
+        })
+    }
+
+    fn exec_secure_ioctl_with(
+        &self,
+        op: u32,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        submit: impl FnOnce(&mut TborSecureCmd) -> nix::Result<i32>,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if payload.len() > 8192 || (op == 1 && payload.is_empty()) {
+            return Err(DdiError::InvalidParameter);
+        }
+        let mut response = if op == 1 { vec![0u8; 8192] } else { Vec::new() };
+        let mut cmd = TborSecureCmd::default();
+        cmd.generic.hdr.ioctl_data_size = mem::size_of::<TborSecureCmd>() as u32;
+        cmd.generic.hdr.timeout = 100;
+        cmd.generic.in_data.rsvd1 = 2;
+        cmd.generic.in_data.session_control_flags = SessionControlFlags::new()
+            .with_kind(3)
+            .with_session_id_is_valid(true);
+        cmd.generic.in_data.session_id = session_id;
+        cmd.generic.in_data.src_length = payload.len() as u32;
+        cmd.generic.in_data.dst_length = response.len() as u32;
+        if !payload.is_empty() {
+            cmd.generic.in_data.src_buf = payload.as_ptr();
+        }
+        if !response.is_empty() {
+            cmd.generic.in_data.dst_buf = response.as_mut_ptr();
+        }
+        cmd.transport.op = op;
+        cmd.transport.tag = seal.tag;
+        cmd.transport.iv = seal.iv;
+        let result = submit(&mut cmd);
+        self.map_ioctl_status_tbor(cmd.generic.out_data.ioctl_status)?;
+        result.map_err(DdiError::NixError)?;
+        if cmd.generic.out_data.status != 0 {
+            return Err(DdiError::DdiError(cmd.generic.out_data.status));
+        }
+        if cmd.transport.error != 0 || cmd.generic.out_data.byte_count as usize > response.len() {
+            return Err(DdiError::InvalidParameter);
+        }
+        response.truncate(cmd.generic.out_data.byte_count as usize);
+        Ok((
+            response,
+            DdiTransportSeal {
+                iv: cmd.transport.iv,
+                tag: cmd.transport.tag,
+            },
+        ))
+    }
+
+    fn exec_secure_data_xfer_with(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob: &[OobRaw],
+        submit: impl FnOnce(&mut TborSecureDataXferCmd) -> nix::Result<i32>,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if oob.is_empty()
+            || oob.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob.iter().any(|item| {
+                item.addr.is_null()
+                    || item.len == 0
+                    || item.len > TSRA_MAX_DATA_XFER_PER_BUFFER as usize
+            })
+        {
+            return Err(DdiError::InvalidParameter);
+        }
+        self.exec_secure_ioctl_with(1, session_id, payload, seal, |inner| {
+            let mut cmd = TborSecureDataXferCmd {
+                data_xfer_cmd: TsraCpDataXferCmd {
+                    generic_cmd: mem::take(&mut inner.generic),
+                    ..Default::default()
+                },
+                transport: mem::take(&mut inner.transport),
+            };
+            cmd.data_xfer_cmd.generic_cmd.hdr.ioctl_data_size =
+                mem::size_of::<TborSecureDataXferCmd>() as u32;
+            cmd.data_xfer_cmd.generic_cmd.in_data.command_set = TsraCpCmdSet::DataXfer;
+            cmd.data_xfer_cmd.data_xfer.buffer_count = oob.len() as u32;
+            for (dst, item) in cmd.data_xfer_cmd.data_xfer.buffers.iter_mut().zip(oob) {
+                *dst = DataXferBuffer {
+                    xfer_length: item.len as u32,
+                    flags: if item.dev_write {
+                        TSRA_DATA_XFER_BUF_DEV_WRITE
+                    } else {
+                        0
+                    },
+                    buffer_addr: item.addr,
+                };
+            }
+            let result = submit(&mut cmd);
+            inner.generic = cmd.data_xfer_cmd.generic_cmd;
+            inner.transport = cmd.transport;
+            result
+        })
+    }
+
     /// Shared TBOR exec path (see [`DdiDev::exec_op_tbor`]). `oob` items
     /// must stay borrowed by the caller for the duration of the call.
     fn exec_tbor<T: TborOpReq>(&self, req: &T, oob: &[OobRaw]) -> DdiResult<T::OpResp> {
@@ -823,11 +993,12 @@ impl DdiNixDev {
         // Determine whether this TBOR call needs to route through
         // the driver's Large-Data-Transfer path.
         // When `oob` is non-empty, the driver
-        // pins those user buffers, builds per-buffer NVMe SGL
-        // segments, and attaches a 4 KB Metadata Page — reported to
+        // pins those user buffers and attaches a 4 KB Metadata Page — reported to
         // firmware via `sqe.src_data.metadata_with_session
         // .metadata_page_addr` and gated by
-        // `sqe.cmd.set == CP_CMD_SET_DATA_XFER (0x1)`.
+        // `sqe.cmd.set == CP_CMD_SET_DATA_XFER (0x1)`. Gen1 uses SGL segment
+        // descriptors; Gen2 translates to Duo's indexed Data Block descriptors
+        // and DW2-4 OOB fields, without changing this public IOCTL layout.
         if oob.len() > TSRA_MAX_DATA_XFER_BUFFERS
             || oob
                 .iter()
@@ -1169,6 +1340,35 @@ impl DdiDev for DdiNixDev {
             })
             .collect();
         self.exec_tbor(req, &oob)
+    }
+
+    fn exec_op_tbor_secure(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if oob_items.is_empty() {
+            return self.exec_secure_ioctl(1, session_id, payload, seal);
+        }
+        let oob: Vec<OobRaw> = oob_items
+            .iter_mut()
+            .map(|item| OobRaw {
+                dev_write: item.is_out(),
+                len: item.len(),
+                addr: item.dma_ptr(),
+            })
+            .collect();
+        self.exec_secure_data_xfer_with(session_id, payload, seal, &oob, |cmd| {
+            // SAFETY: cmd and the caller's input/output slices stay valid through completion.
+            unsafe { tsra_tbor_secure_data_xfer_ioctl(self.file.read().as_raw_fd(), cmd) }
+        })
+    }
+
+    fn flush_session(&self, session_id: u16) -> DdiResult<()> {
+        self.exec_secure_ioctl(2, session_id, &[], DdiTransportSeal::default())
+            .map(|_| ())
     }
 
     /// Execute AES GCM operation (encryption/decryption) with slice-based buffers
