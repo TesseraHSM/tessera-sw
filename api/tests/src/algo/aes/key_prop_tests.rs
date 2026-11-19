@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
+
 use super::*;
 
 const AES_VALID_KEY_SIZES_IN_BITS: [u32; 3] = [128, 192, 256];
@@ -14,6 +16,16 @@ fn test_aes_key_prop_gen_key(
 ) -> Result<HsmAesKey, HsmError> {
     let mut algo = HsmAesKeyGenAlgo::default();
     HsmKeyManager::generate_key(session, &mut algo, props)
+}
+
+fn aes_key_props_builder(bits: u32, is_session: bool) -> HsmKeyPropsBuilder {
+    HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(bits)
+        .is_session(is_session)
+        .can_encrypt(true)
+        .can_decrypt(true)
 }
 
 fn test_aes_xts_key_prop_gen_key(
@@ -130,6 +142,7 @@ fn test_aes_key_prop_sign_validation(session: HsmSession) {
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Aes)
         .bits(256)
+        .can_encrypt(true)
         .can_sign(true) // Invalid usage flag for AES key
         .can_decrypt(true)
         .build()
@@ -211,7 +224,7 @@ fn test_aes_key_prop_wrap_validation(session: HsmSession) {
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Aes)
         .bits(256)
-        .can_encrypt(false)
+        .can_encrypt(true)
         .can_decrypt(true)
         .can_wrap(true) // Key material must not be unwrappable/extractable
         .build()
@@ -305,6 +318,7 @@ fn test_aes_unwrap_invalid_props_sign_fails_fast(session: HsmSession) {
         .key_kind(HsmKeyKind::Aes)
         .bits(256)
         .can_sign(true)
+        .can_encrypt(true)
         .can_decrypt(true)
         .build()
         .expect("Failed to build key props");
@@ -426,6 +440,103 @@ fn test_aes_key_gen_non_session_succeeds(session: HsmSession) {
         !key.is_session(),
         "Generated key should not be a session key"
     );
+}
+
+/// Explicit TBOR scopes override either session-flag value and round-trip through generation.
+/// MBOR rejects explicit scope rather than silently generating a differently scoped key.
+#[session_test]
+fn test_aes_key_prop_explicit_scope(session: HsmSession) {
+    for bits in AES_VALID_KEY_SIZES_IN_BITS {
+        for scope in [
+            HsmKeyScope::Session,
+            HsmKeyScope::Ephemeral,
+            HsmKeyScope::Local,
+        ] {
+            for is_session in [false, true] {
+                let expected_session = scope == HsmKeyScope::Session;
+                let props = aes_key_props_builder(bits, is_session)
+                    .scope(scope)
+                    .build()
+                    .expect("Failed to build scoped AES props");
+                assert_eq!(props.is_session(), expected_session);
+
+                let result = test_aes_key_prop_gen_key(&session, props);
+                if crate::utils::session::api_rev_at_least(1, 1) {
+                    let key = result.expect("Explicit AES scope should be honored");
+                    assert_eq!(key.is_session(), expected_session);
+                    assert_eq!(key.kind(), HsmKeyKind::Aes);
+                    assert_eq!(key.bits(), bits);
+                    assert!(key.is_local());
+                    HsmKeyManager::delete_key(key).expect("Failed to delete scoped AES key");
+                } else {
+                    assert_eq!(result.err(), Some(HsmError::UnsupportedApiRevision));
+                }
+            }
+        }
+    }
+}
+
+/// Labels preserve their exact length and bytes for every AES size and key lifetime.
+#[session_test]
+fn test_aes_key_prop_label_roundtrip(session: HsmSession) {
+    for label in [
+        Vec::new(),
+        vec![b'L'],
+        vec![b'L'; TBOR_KEY_LABEL_MAX_LEN - 1],
+        vec![b'L'; TBOR_KEY_LABEL_MAX_LEN],
+        vec![0x00, 0x80, 0xff, b'A', 0x00],
+    ] {
+        for bits in AES_VALID_KEY_SIZES_IN_BITS {
+            for is_session in [false, true] {
+                let props = aes_key_props_builder(bits, is_session)
+                    .label(&label)
+                    .build()
+                    .expect("Failed to build labeled AES props");
+                let key = test_aes_key_prop_gen_key(&session, props)
+                    .expect("Supported AES label should be preserved");
+
+                assert_eq!(key.label(), label.as_slice());
+                assert_eq!(key.bits(), bits);
+                assert_eq!(key.is_session(), is_session);
+                assert!(!key.can_wrap());
+                assert_eq!(key.ecc_curve(), None);
+                HsmKeyManager::delete_key(key).expect("Failed to delete labeled AES key");
+            }
+        }
+    }
+}
+
+/// TBOR rejects oversized labels as invalid props; MBOR's field conversion reports InternalError.
+/// A maximum-length label succeeds first for the same size and lifetime.
+#[session_test]
+fn test_aes_key_prop_label_too_long(session: HsmSession) {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        HsmError::InvalidKeyProps
+    } else {
+        HsmError::InternalError
+    };
+    let max_label = vec![b'L'; TBOR_KEY_LABEL_MAX_LEN];
+    let oversized_label = vec![b'L'; TBOR_KEY_LABEL_MAX_LEN + 1];
+
+    for bits in AES_VALID_KEY_SIZES_IN_BITS {
+        for is_session in [false, true] {
+            let props = aes_key_props_builder(bits, is_session)
+                .label(&max_label)
+                .build()
+                .expect("Failed to build maximum-length AES label props");
+            let key = test_aes_key_prop_gen_key(&session, props)
+                .expect("Maximum-length AES label should succeed");
+            assert_eq!(key.label(), max_label.as_slice());
+            HsmKeyManager::delete_key(key).expect("Failed to delete AES label control key");
+
+            let props = aes_key_props_builder(bits, is_session)
+                .label(&oversized_label)
+                .build()
+                .expect("Failed to build oversized AES label props");
+            let result = test_aes_key_prop_gen_key(&session, props);
+            assert_eq!(result.err(), Some(expected_error));
+        }
+    }
 }
 
 /// Reject AES-XTS keys with invalid class.

@@ -18,11 +18,11 @@
 //! * `SecurityDomain` scope before `CreateSD` → `UnsupportedKeyScope`.
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 //! * Unknown key size → `InvalidArg`.
+//! * Exact masked metadata: AES kind, scope, local origin, encrypt/decrypt-only usage,
+//!   and the caller's label, including boundary lengths and arbitrary bytes.
+//! * Missing, forbidden, mixed, and unknown usage bits → `InvalidPermissions`.
 
-// The shared masked-key helpers/constants below stay available under any
-// backend (so the module isn't emu-limited), but only the emu-gated tests
-// exercise them today; suppress dead-code noise in non-emu builds.
-
+use tsra_crypto::aead_envelope;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -30,13 +30,92 @@ use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::KEY_KIND_AES128;
+use tsra_ddi_tbor_types::KEY_KIND_AES192;
+use tsra_ddi_tbor_types::KEY_KIND_AES256;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
+use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
+use zerocopy::little_endian::U16 as Le16;
+use zerocopy::little_endian::U64 as Le64;
+use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::KnownLayout;
+use zerocopy::Unaligned;
 
+use crate::commands::common::ENVELOPE_AAD_LEN;
 pub(crate) use crate::commands::common::SCOPE_EPHEMERAL;
 pub(crate) use crate::commands::common::SCOPE_LOCAL;
 pub(crate) use crate::commands::common::SCOPE_SECURITY_DOMAIN;
 pub(crate) use crate::commands::common::SCOPE_SESSION;
+
+/// Masked metadata uses vault-attribute bits, not the request's `KEY_USAGE_*` bits.
+const KEY_ATTR_LOCAL: u64 = 1 << 5;
+const KEY_ATTR_ENCRYPT: u64 = 1 << 10;
+const KEY_ATTR_DECRYPT: u64 = 1 << 11;
+const KEY_ATTR_SCOPE_SHIFT: u32 = 17;
+
+/// Fixed-layout authenticated metadata through the key-label slot.
+#[repr(C)]
+#[derive(FromBytes, Immutable, KnownLayout, Unaligned)]
+struct MaskedKeyMetadataPrefix {
+    magic: [u8; 4],
+    version: Le16,
+    key_kind: u8,
+    key_label_len: u8,
+    usage_flags: Le64,
+    _svn: Le64,
+    _owner_seed_id: Le16,
+    key_label: [u8; TBOR_KEY_LABEL_MAX_LEN],
+}
+
+/// Checks the exact generated AES attributes and caller-supplied label.
+pub(crate) fn assert_generated_aes_key(
+    masked_key: &[u8],
+    scope: u8,
+    key_kind: u8,
+    key_label: &[u8],
+) {
+    assert_aes_key_attrs(masked_key, scope, key_kind, key_label, true);
+}
+
+/// Checks exact AES metadata for either locally generated or imported keys.
+pub(crate) fn assert_aes_key_attrs(
+    masked_key: &[u8],
+    scope: u8,
+    key_kind: u8,
+    key_label: &[u8],
+    is_local: bool,
+) {
+    let envelope = aead_envelope::inspect(masked_key).expect("valid masked-key envelope");
+    assert!(matches!(envelope.alg, aead_envelope::AeadAlg::AesGcm256));
+    assert_eq!(envelope.aad.len(), ENVELOPE_AAD_LEN);
+    let (metadata, _) = MaskedKeyMetadataPrefix::ref_from_prefix(envelope.aad)
+        .expect("complete masked-key metadata prefix");
+    assert_eq!(metadata.magic, *b"MKEY");
+    assert_eq!(metadata.version.get(), 1);
+    assert_eq!(metadata.key_kind, key_kind, "AES key kind must match");
+    let local_attr = if is_local { KEY_ATTR_LOCAL } else { 0 };
+    assert_eq!(
+        metadata.usage_flags.get(),
+        local_attr
+            | KEY_ATTR_ENCRYPT
+            | KEY_ATTR_DECRYPT
+            | (u64::from(scope) << KEY_ATTR_SCOPE_SHIFT),
+        "AES key scope, encrypt/decrypt-only usage, and local origin must match",
+    );
+    assert_eq!(usize::from(metadata.key_label_len), key_label.len());
+    assert_eq!(metadata.key_label.get(..key_label.len()), Some(key_label));
+    assert!(
+        metadata
+            .key_label
+            .get(key_label.len()..)
+            .expect("label fits its metadata slot")
+            .iter()
+            .all(|&byte| byte == 0),
+        "unused label bytes must be zero",
+    );
+}
 
 /// Masked-key envelope length for a given AES key length: `header(8) ‖
 /// iv(16) ‖ aad(192) ‖ pt(key padded to 16 B) ‖ tag(16)`.
@@ -57,7 +136,15 @@ pub(crate) fn key_len_for_size(size: u8) -> usize {
 /// Generate a masked AES key of `(scope, size)` on `session_id`.
 pub(crate) fn generate_key(ctx: &TestCtx, session_id: u16, scope: u8, size: u8) -> Vec<u8> {
     let req = generate_key_req(session_id, scope, size);
-    ctx.tbor(&req).expect("AesGenerateKey").masked_key
+    let masked_key = ctx.tbor(&req).expect("AesGenerateKey").masked_key;
+    let key_kind = match size {
+        AES_KEY_SIZE_128 => KEY_KIND_AES128,
+        AES_KEY_SIZE_192 => KEY_KIND_AES192,
+        AES_KEY_SIZE_256 => KEY_KIND_AES256,
+        other => panic!("unexpected key-size discriminant {other}"),
+    };
+    assert_generated_aes_key(&masked_key, scope, key_kind, &req.key_label);
+    masked_key
 }
 
 /// Happy path for a `(scope, size)` pair: the masked key has the expected
@@ -99,6 +186,11 @@ mod tests {
     use tsra_ddi_tbor_types::AES_MODE_CBC;
     use tsra_ddi_tbor_types::AES_OP_DECRYPT;
     use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
+    use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
+    use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
+    use tsra_ddi_tbor_types::KEY_USAGE_UNWRAP;
+    use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
+    use tsra_ddi_tbor_types::KEY_USAGE_WRAP;
 
     use super::*;
     use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -124,6 +216,100 @@ mod tests {
 
         for size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
             roundtrip(&ctx, session.session_id, SCOPE_SESSION, size);
+        }
+    }
+
+    /// Requires exactly ENCRYPT+DECRYPT for every supported size and masking scope.
+    /// Each negative keeps the other request attributes valid and has a successful control.
+    #[test]
+    fn aes_generate_key_rejects_invalid_usage() {
+        let valid_usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
+        let invalid_usages = [
+            0,
+            KEY_USAGE_ENCRYPT,
+            KEY_USAGE_DECRYPT,
+            KEY_USAGE_SIGN,
+            KEY_USAGE_VERIFY,
+            KEY_USAGE_DERIVE,
+            KEY_USAGE_WRAP,
+            KEY_USAGE_UNWRAP,
+            valid_usage | KEY_USAGE_SIGN,
+            valid_usage | KEY_USAGE_VERIFY,
+            valid_usage | KEY_USAGE_DERIVE,
+            valid_usage | KEY_USAGE_WRAP,
+            valid_usage | KEY_USAGE_UNWRAP,
+            valid_usage | KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            valid_usage | KEY_USAGE_WRAP | KEY_USAGE_UNWRAP,
+            valid_usage | KEY_USAGE_DERIVE | KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            1 << 7,
+            valid_usage | (1 << 7),
+            1 << 63,
+            valid_usage | (1 << 63),
+            u64::MAX,
+        ];
+
+        for key_usage in invalid_usages {
+            for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+                for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+                    let ctx = TestCtx::new();
+                    let session = finalized_co_session(&ctx);
+                    let mut req = generate_key_req(session.session_id, scope, key_size);
+                    ctx.tbor(&req).expect("valid AES usage must succeed");
+
+                    req.key_usage = key_usage;
+                    ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+                }
+            }
+        }
+    }
+
+    /// Preserves empty, short, boundary-length, and binary labels in every AES kind and scope.
+    #[test]
+    fn aes_generate_key_labels_roundtrip() {
+        for key_label in [
+            Vec::new(),
+            vec![b'L'],
+            vec![b'L'; TBOR_KEY_LABEL_MAX_LEN - 1],
+            vec![b'L'; TBOR_KEY_LABEL_MAX_LEN],
+            vec![0x00, 0x80, 0xff, b'A', 0x00],
+        ] {
+            for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+                for (key_size, key_kind) in [
+                    (AES_KEY_SIZE_128, KEY_KIND_AES128),
+                    (AES_KEY_SIZE_192, KEY_KIND_AES192),
+                    (AES_KEY_SIZE_256, KEY_KIND_AES256),
+                ] {
+                    let ctx = TestCtx::new();
+                    let session = finalized_co_session(&ctx);
+                    let mut req = generate_key_req(session.session_id, scope, key_size);
+                    req.key_label.clone_from(&key_label);
+                    let resp = ctx.tbor(&req).expect("AES key with a supported label");
+
+                    assert_eq!(
+                        resp.masked_key.len(),
+                        masked_len(key_len_for_size(key_size))
+                    );
+                    assert_generated_aes_key(&resp.masked_key, scope, key_kind, &key_label);
+                }
+            }
+        }
+    }
+
+    /// Rejects 129-byte labels in firmware, with a successful 128-byte control per case.
+    #[test]
+    fn aes_generate_key_rejects_oversized_label() {
+        for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+            for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+                let ctx = TestCtx::new();
+                let session = finalized_co_session(&ctx);
+                let mut req = generate_key_req(session.session_id, scope, key_size);
+                req.key_label = vec![b'L'; TBOR_KEY_LABEL_MAX_LEN];
+                ctx.tbor(&req)
+                    .expect("maximum-length AES label must succeed");
+
+                req.key_label.push(b'L');
+                ctx.expect_fw_reject(&req, TborStatus::TborInvalidFixedLength);
+            }
         }
     }
 
