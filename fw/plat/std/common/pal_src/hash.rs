@@ -12,8 +12,32 @@
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOpContext;
 use tsra_crypto::HashStreamingOp;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use super::*;
+
+const OOB_HASH_MAX_LEN: usize = 8192;
+const OOB_HASH_CHUNK_LEN: usize = 1024;
+
+fn validate_oob_hash_desc(desc: &[u8; 16], message_len: usize) -> HsmResult<u64> {
+    let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+    if message_len == 0
+        || len != message_len
+        || desc[12..15] != [0, 0, 0]
+        || desc[15] != 0
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    let addr = u64::from_le_bytes([
+        desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
+    ]);
+    if addr == 0 || addr.checked_add(message_len as u64).is_none() {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(addr)
+}
 
 /// The OpenSSL hash for `algo`; fixed-length algorithms only, so the HMAC,
 /// KDF and RSA paths that share it reject SHAKE. SHA-3 is not supported yet.
@@ -49,6 +73,61 @@ pub struct StdHashCtx<'a> {
 
 impl HsmHash for StdHsmPal {
     type HashCtx<'a> = StdHashCtx<'a>;
+
+    async fn hash_oob(
+        &self,
+        io: &StdHsmIo,
+        algo: HsmHashAlgo,
+        message_index: usize,
+        message_len: usize,
+        form: HsmDigestForm,
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        self.hash_state_size(algo)?;
+        if message_len > OOB_HASH_MAX_LEN || (message_len == 0 && message_index != 0) {
+            return Err(HsmError::InvalidArg);
+        }
+        let digest_len = algo.digest_len();
+        let Some(digest) = digest else {
+            return Ok(digest_len);
+        };
+        if digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+        let desc = if message_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, message_index).await?;
+            validate_oob_hash_desc(&desc, message_len)?;
+            Some(desc)
+        };
+
+        self.alloc_scoped_async(io, async |alloc| {
+            let state = alloc.dma_alloc(self.hash_state_size(algo)?)?;
+            let mut ctx = self.hash_begin(io, algo, state)?;
+            if let Some(desc) = desc {
+                let base = validate_oob_hash_desc(&desc, message_len)?;
+                let staging = alloc.dma_alloc(OOB_HASH_CHUNK_LEN)?;
+                let mut offset = 0usize;
+                while offset < message_len {
+                    let chunk_len = (message_len - offset).min(OOB_HASH_CHUNK_LEN);
+                    let addr = base
+                        .checked_add(offset as u64)
+                        .ok_or(HsmError::InvalidArg)?;
+                    let mut chunk_desc = desc;
+                    chunk_desc[..8].copy_from_slice(&addr.to_le_bytes());
+                    chunk_desc[8..12].copy_from_slice(&(chunk_len as u32).to_le_bytes());
+                    let (chunk, _) = staging.split_at_mut(chunk_len);
+                    self.copy_mem_from_host_raw(io, &chunk_desc, chunk, false)
+                        .await?;
+                    self.hash_continue(io, &mut ctx, chunk).await?;
+                    offset += chunk_len;
+                }
+            }
+            self.hash_finish(io, &mut ctx, form, Some(digest)).await
+        })
+        .await
+    }
 
     async fn hash(
         &self,

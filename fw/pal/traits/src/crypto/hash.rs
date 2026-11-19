@@ -195,6 +195,45 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
         digest: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// Hashes an out-of-band SGL message without buffering the full message.
+    ///
+    /// Implementations snapshot and validate the referenced descriptor once,
+    /// then stream its contents through a bounded staging buffer. A zero
+    /// `message_len` hashes the empty string without reading an OOB descriptor
+    /// and requires `message_index == 0`. The host must keep the referenced
+    /// allocation accessible and unchanged until the operation completes;
+    /// descriptor snapshotting does not make the message bytes atomic.
+    ///
+    /// `None` queries the digest length without reading the descriptor or
+    /// performing hashing. `Some` must have room for the complete selected
+    /// digest, which is written in `form`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArg` for an oversized message, nonzero empty-message
+    /// index, malformed descriptor, length mismatch, or short digest output.
+    /// DMA and hashing failures are propagated.
+    async fn hash_oob(
+        &self,
+        io: &Self::Io,
+        algo: HsmHashAlgo,
+        message_index: usize,
+        message_len: usize,
+        form: HsmDigestForm,
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let _ = (io, form);
+        self.hash_state_size(algo)?;
+        if message_len > 8192 || (message_len == 0 && message_index != 0) {
+            return Err(HsmError::InvalidArg);
+        }
+        match digest {
+            None => Ok(algo.digest_len()),
+            Some(digest) if digest.len() < algo.digest_len() => Err(HsmError::InvalidArg),
+            Some(_) => Err(HsmError::UnsupportedCmd),
+        }
+    }
+
     /// Returns the backend's required DMA storage size for a multi-step hash.
     ///
     /// Validates algorithm support and limits without allocating or initializing
