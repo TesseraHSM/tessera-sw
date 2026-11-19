@@ -147,13 +147,15 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
     ctx.cert_chain_info()
         .unwrap_or_else(|e| panic!("after recovery: GetCertChainInfo failed: {e:?}"));
 
-    // Repeat the host provisioning flow on the recovered partition.
+    // Repeat the host provisioning flow on the recovered partition. The
+    // driver allows one open session per file handle, so close CO before
+    // opening CU.
     let co = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     provision_partition(&ctx, &co, &pota, "after recovery");
+    ctx.session_close(co.session_id)
+        .unwrap_or_else(|e| panic!("after recovery: CO session close failed: {e:?}"));
 
     let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     ctx.session_close(cu.session_id)
         .unwrap_or_else(|e| panic!("after recovery: CU session close failed: {e:?}"));
-    ctx.session_close(co.session_id)
-        .unwrap_or_else(|e| panic!("after recovery: CO session close failed: {e:?}"));
 }

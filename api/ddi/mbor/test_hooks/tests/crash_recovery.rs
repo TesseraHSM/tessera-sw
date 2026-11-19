@@ -346,6 +346,7 @@ fn trigger_crash(
         encrypt_userid_pin_for_open_session(&dev, TEST_CRED_ID, TEST_CRED_PIN, TEST_SESSION_SEED);
     let resp = helper_open_session(&dev, None, Some(REV), encrypted_credential, pub_key);
     assert!(resp.is_ok(), "resp {:?}", resp);
+    let recovered_session_id = resp.unwrap().hdr.sess_id.unwrap();
 
     // Read the API revision to confirm the firmware is healthy again.
     let resp = helper_get_api_rev(&dev, None, None).unwrap();
@@ -361,4 +362,10 @@ fn trigger_crash(
     assert_eq!(resp.data.min.minor, 0);
     assert_eq!(resp.data.max.major, 1);
     assert_eq!(resp.data.max.minor, 1);
+
+    // Close the recovered session. The cleanup NSSR keeps established
+    // sessions for renegotiation, so a leaked session would hold its slot
+    // (slot 0 is the only TBOR CO slot) into the next test.
+    let resp = helper_close_session(&dev, Some(recovered_session_id), Some(REV));
+    assert!(resp.is_ok(), "resp {:?}", resp);
 }
