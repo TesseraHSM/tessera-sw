@@ -10,7 +10,6 @@ use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tsra_cred_encrypt::DeviceCredKey;
-use tsra_ddi::Ddi;
 use tsra_ddi::DdiAesGcmParams;
 use tsra_ddi::DdiAesXtsParams;
 use tsra_ddi::DdiDev;
@@ -86,140 +85,137 @@ struct FuzzInput {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    let ddi = common::DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    let path = std::env::var("FUZZ_DEVICE")
-        .unwrap_or_else(|_| dev_infos.first().expect("No devices found").path.clone());
-    let mut dev = ddi.open_dev(&path).expect("Failed to open device");
-    common::cleanup(&ddi, &path, None);
-    common::helper_common_establish_credential(
-        &mut dev,
-        common::TEST_CRED_ID,
-        common::TEST_CRED_PIN,
-    );
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let encryption_key = helper_get_session_encryption_key(&dev, None, rev)
-        .expect("Failed to get session encryption key");
-    let key = DeviceCredKey::new(&encryption_key.data.pub_key, encryption_key.data.nonce)
-        .expect("Invalid session encryption key");
-    let (key, public_key) = key
-        .generate_ephemeral_encryption_key()
-        .expect("Failed to generate session encryption key");
-    let credential = key
-        .encrypt_session_credential(
+    common::common_fuzz_test(|dev| {
+        common::helper_common_establish_credential(
+            dev,
             common::TEST_CRED_ID,
             common::TEST_CRED_PIN,
-            [3; 48],
-            encryption_key.data.nonce,
-        )
-        .expect("Failed to encrypt session credential");
-    let session = helper_open_session(&dev, None, rev, credential, public_key)
-        .expect("Failed to open session");
-    let session_id = session.data.sess_id;
-    let short_app_id = session.data.short_app_id;
-    let mut keys = Vec::new();
-    let mut generate_key = |key_size| {
-        let response = helper_aes_generate(
-            &dev,
-            Some(session_id),
-            rev,
-            key_size,
-            helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
-        )
-        .expect("Failed to generate bulk AES key");
-        keys.push(response.data.key_id);
-        u32::from(response.data.bulk_key_id.expect("Missing bulk AES key ID"))
-    };
-
-    let mut source: Vec<u8> = input.source_buffers.into_iter().flatten().collect();
-    let mut destination: Vec<u8> = input.destination_buffers.into_iter().flatten().collect();
-    let mode = match input.aes_mode {
-        FuzzAesMode::Encrypt => DdiAesOp::Encrypt,
-        FuzzAesMode::Decrypt => DdiAesOp::Decrypt,
-    };
-    let mut fips_approved = false;
-
-    let result = match input.aes_type {
-        FuzzAesType::AesGcm => {
-            let mut request = input.gcm_request;
-            if input.use_valid_key {
-                request.key_id = generate_key(DdiAesKeySize::AesGcmBulk256Unapproved);
-                request.session_id = session_id;
-                request.short_app_id = short_app_id;
-                if let Some(aad) = &mut request.aad {
-                    aad.truncate(32);
-                }
-                // Bulk submissions allow 16 KiB including the aligned AAD.
-                source.resize(source.len().clamp(1, 16384 - 32), 0);
-                destination.resize(source.len(), 0);
-                if matches!(mode, DdiAesOp::Decrypt) {
-                    request.tag = Some(request.tag.unwrap_or_default());
-                }
-            }
-            let mut tag = None;
-            let mut iv = None;
-            dev.exec_op_fp_gcm_slice(
-                mode,
-                DdiAesGcmParams {
-                    key_id: request.key_id,
-                    iv: request.iv,
-                    aad: request.aad,
-                    tag: request.tag,
-                    session_id: request.session_id,
-                    short_app_id: request.short_app_id,
-                },
-                &source,
-                &mut destination,
-                &mut tag,
-                &mut iv,
-                &mut fips_approved,
-            )
-        }
-        FuzzAesType::AesXts => {
-            let mut request = input.xts_request;
-            if input.use_valid_key {
-                request.key_id1 = generate_key(DdiAesKeySize::AesXtsBulk256);
-                request.key_id2 = generate_key(DdiAesKeySize::AesXtsBulk256);
-                request.session_id = session_id;
-                request.short_app_id = short_app_id;
-                let len = source.len().clamp(16, 16384) / 16 * 16;
-                source.resize(len, 0);
-                destination.resize(len, 0);
-                request.data_unit_len = len;
-            }
-            dev.exec_op_fp_xts_slice(
-                mode,
-                DdiAesXtsParams {
-                    data_unit_len: request.data_unit_len,
-                    key_id1: request.key_id1,
-                    key_id2: request.key_id2,
-                    tweak: request.tweak,
-                    session_id: request.session_id,
-                    short_app_id: request.short_app_id,
-                },
-                &source,
-                &mut destination,
-                &mut fips_approved,
-            )
-        }
-    };
-    if let Err(err @ (DdiError::DriverError(_) | DdiError::IoError(_) | DdiError::DdiError(_))) =
-        &result
-    {
-        panic!("Crash Detected: {err:?}");
-    }
-    if input.use_valid_key
-        && (matches!(input.aes_type, FuzzAesType::AesXts) || matches!(mode, DdiAesOp::Encrypt))
-    {
-        assert_eq!(
-            result.expect("Valid bulk AES request failed"),
-            source.len(),
-            "Bulk AES output length must match input"
         );
-    }
-    for key_id in keys {
-        helper_delete_key(&dev, Some(session_id), rev, key_id)
-            .expect("Failed to delete bulk AES key");
-    }
-    common::cleanup_with_session(&dev, Some(session_id));
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let encryption_key = helper_get_session_encryption_key(dev, None, rev)
+            .expect("Failed to get session encryption key");
+        let key = DeviceCredKey::new(&encryption_key.data.pub_key, encryption_key.data.nonce)
+            .expect("Invalid session encryption key");
+        let (key, public_key) = key
+            .generate_ephemeral_encryption_key()
+            .expect("Failed to generate session encryption key");
+        let credential = key
+            .encrypt_session_credential(
+                common::TEST_CRED_ID,
+                common::TEST_CRED_PIN,
+                [3; 48],
+                encryption_key.data.nonce,
+            )
+            .expect("Failed to encrypt session credential");
+        let session = helper_open_session(dev, None, rev, credential, public_key)
+            .expect("Failed to open session");
+        let session_id = session.data.sess_id;
+        let short_app_id = session.data.short_app_id;
+        let mut keys = Vec::new();
+        let mut generate_key = |key_size| {
+            let response = helper_aes_generate(
+                dev,
+                Some(session_id),
+                rev,
+                key_size,
+                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
+            )
+            .expect("Failed to generate bulk AES key");
+            keys.push(response.data.key_id);
+            u32::from(response.data.bulk_key_id.expect("Missing bulk AES key ID"))
+        };
+
+        let mut source: Vec<u8> = input.source_buffers.into_iter().flatten().collect();
+        let mut destination: Vec<u8> = input.destination_buffers.into_iter().flatten().collect();
+        let mode = match input.aes_mode {
+            FuzzAesMode::Encrypt => DdiAesOp::Encrypt,
+            FuzzAesMode::Decrypt => DdiAesOp::Decrypt,
+        };
+        let mut fips_approved = false;
+
+        let result = match input.aes_type {
+            FuzzAesType::AesGcm => {
+                let mut request = input.gcm_request;
+                if input.use_valid_key {
+                    request.key_id = generate_key(DdiAesKeySize::AesGcmBulk256Unapproved);
+                    request.session_id = session_id;
+                    request.short_app_id = short_app_id;
+                    if let Some(aad) = &mut request.aad {
+                        aad.truncate(32);
+                    }
+                    // Bulk submissions allow 16 KiB including the aligned AAD.
+                    source.resize(source.len().clamp(1, 16384 - 32), 0);
+                    destination.resize(source.len(), 0);
+                    if matches!(mode, DdiAesOp::Decrypt) {
+                        request.tag = Some(request.tag.unwrap_or_default());
+                    }
+                }
+                let mut tag = None;
+                let mut iv = None;
+                dev.exec_op_fp_gcm_slice(
+                    mode,
+                    DdiAesGcmParams {
+                        key_id: request.key_id,
+                        iv: request.iv,
+                        aad: request.aad,
+                        tag: request.tag,
+                        session_id: request.session_id,
+                        short_app_id: request.short_app_id,
+                    },
+                    &source,
+                    &mut destination,
+                    &mut tag,
+                    &mut iv,
+                    &mut fips_approved,
+                )
+            }
+            FuzzAesType::AesXts => {
+                let mut request = input.xts_request;
+                if input.use_valid_key {
+                    request.key_id1 = generate_key(DdiAesKeySize::AesXtsBulk256);
+                    request.key_id2 = generate_key(DdiAesKeySize::AesXtsBulk256);
+                    request.session_id = session_id;
+                    request.short_app_id = short_app_id;
+                    let len = source.len().clamp(16, 16384) / 16 * 16;
+                    source.resize(len, 0);
+                    destination.resize(len, 0);
+                    request.data_unit_len = len;
+                }
+                dev.exec_op_fp_xts_slice(
+                    mode,
+                    DdiAesXtsParams {
+                        data_unit_len: request.data_unit_len,
+                        key_id1: request.key_id1,
+                        key_id2: request.key_id2,
+                        tweak: request.tweak,
+                        session_id: request.session_id,
+                        short_app_id: request.short_app_id,
+                    },
+                    &source,
+                    &mut destination,
+                    &mut fips_approved,
+                )
+            }
+        };
+        if let Err(
+            err @ (DdiError::DriverError(_) | DdiError::IoError(_) | DdiError::DdiError(_)),
+        ) = &result
+        {
+            panic!("Crash Detected: {err:?}");
+        }
+        if input.use_valid_key
+            && (matches!(input.aes_type, FuzzAesType::AesXts) || matches!(mode, DdiAesOp::Encrypt))
+        {
+            assert_eq!(
+                result.expect("Valid bulk AES request failed"),
+                source.len(),
+                "Bulk AES output length must match input"
+            );
+        }
+        for key_id in keys {
+            helper_delete_key(dev, Some(session_id), rev, key_id)
+                .expect("Failed to delete bulk AES key");
+        }
+        common::cleanup_with_session(dev, Some(session_id));
+    });
 });

@@ -43,98 +43,90 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    let mut dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("Failed to open device");
-
-    cleanup(&ddi, &dev_infos[0].path, None);
-    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
-
-    let sess_id = match helper_common_open_session(&mut dev) {
-        Ok(id) => id,
-        Err(err) => {
-            panic!("Could not open session: {}", err);
-        }
-    };
-
-    let mut cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let mut priv_key_id = cmdreq_data.priv_key_id;
-
-    let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
-
-    if input.use_valid_key_id {
-        let curve = match input.curve {
-            DdiEccCurve::P256 | DdiEccCurve::P384 | DdiEccCurve::P521 => input.curve,
-            _ => DdiEccCurve::P256,
-        };
-        let key_resp = helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, curve, key_props);
-
-        priv_key_id = match key_resp {
-            Ok(resp) => resp.data.private_key_id,
+        let sess_id = match helper_common_open_session(dev) {
+            Ok(id) => id,
             Err(err) => {
-                panic!("Could not generate ECC key pair: {}", err);
+                panic!("Could not open session: {}", err);
             }
         };
 
-        if input.use_valid_pub_key_der {
-            let pub_key_resp =
-                helper_ecc_generate_key_pair(&dev, Some(sess_id), rev, curve, key_props);
+        let mut cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut priv_key_id = cmdreq_data.priv_key_id;
 
-            // Extract both pub_key_der and the peer private key id from the same match,
-            let (pub_key_der, peer_priv_id) = match pub_key_resp {
-                Ok(resp) => {
-                    let der = MborByteArray::from_slice(resp.data.pub_key.der.as_slice())
-                        .expect("Could not convert generated ECC public key DER to request buffer");
-                    (der, resp.data.private_key_id)
-                }
+        let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
+
+        if input.use_valid_key_id {
+            let curve = match input.curve {
+                DdiEccCurve::P256 | DdiEccCurve::P384 | DdiEccCurve::P521 => input.curve,
+                _ => DdiEccCurve::P256,
+            };
+            let key_resp = helper_ecc_generate_key_pair(dev, Some(sess_id), rev, curve, key_props);
+
+            priv_key_id = match key_resp {
+                Ok(resp) => resp.data.private_key_id,
                 Err(err) => {
-                    panic!(
-                        "Could not generate ECC key pair for peer public key: {}",
-                        err
-                    );
+                    panic!("Could not generate ECC key pair: {}", err);
                 }
             };
 
-            cmdreq_data.pub_key_der = pub_key_der;
+            if input.use_valid_pub_key_der {
+                let pub_key_resp =
+                    helper_ecc_generate_key_pair(dev, Some(sess_id), rev, curve, key_props);
 
-            // Delete the peer key pair's private key now; we only need the DER public key.
-            helper_delete_key(&dev, Some(sess_id), rev, peer_priv_id)
-                .expect("Could not delete peer public key's private key");
-        } else {
-            // Deterministically generate buffer for `pub_key_der` using the provided seed.
-            let mut rng = StdRng::seed_from_u64(input.seed);
-            let mut buf = [0u8; 192];
-            rng.fill_bytes(&mut buf);
+                // Extract both pub_key_der and the peer private key id from the same match,
+                let (pub_key_der, peer_priv_id) =
+                    match pub_key_resp {
+                        Ok(resp) => {
+                            let der = MborByteArray::from_slice(resp.data.pub_key.der.as_slice())
+                        .expect("Could not convert generated ECC public key DER to request buffer");
+                            (der, resp.data.private_key_id)
+                        }
+                        Err(err) => {
+                            panic!(
+                                "Could not generate ECC key pair for peer public key: {}",
+                                err
+                            );
+                        }
+                    };
 
-            cmdreq_data.pub_key_der = MborByteArray::from_slice(&buf)
-                .expect("Could not convert seeded DER buffer to request buffer");
+                cmdreq_data.pub_key_der = pub_key_der;
+
+                // Delete the peer key pair's private key now; we only need the DER public key.
+                helper_delete_key(dev, Some(sess_id), rev, peer_priv_id)
+                    .expect("Could not delete peer public key's private key");
+            } else {
+                // Deterministically generate buffer for `pub_key_der` using the provided seed.
+                let mut rng = StdRng::seed_from_u64(input.seed);
+                let mut buf = [0u8; 192];
+                rng.fill_bytes(&mut buf);
+
+                cmdreq_data.pub_key_der = MborByteArray::from_slice(&buf)
+                    .expect("Could not convert seeded DER buffer to request buffer");
+            }
         }
-    }
 
-    let resp = helper_ecdh_key_exchange(
-        &dev,
-        Some(sess_id),
-        rev,
-        priv_key_id,
-        cmdreq_data.pub_key_der,
-        cmdreq_data.key_type,
-        key_props,
-    );
+        let resp = helper_ecdh_key_exchange(
+            dev,
+            Some(sess_id),
+            rev,
+            priv_key_id,
+            cmdreq_data.pub_key_der,
+            cmdreq_data.key_type,
+            key_props,
+        );
 
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
+        if let Err(err @ DdiError::DriverError(_)) = &resp {
+            panic!("Crash Detected: {err}");
+        }
 
-    if input.use_valid_key_id {
-        helper_delete_key(&dev, Some(sess_id), rev, priv_key_id).expect("Could not delete key");
-    }
+        if input.use_valid_key_id {
+            helper_delete_key(dev, Some(sess_id), rev, priv_key_id).expect("Could not delete key");
+        }
 
-    cleanup_with_session(&dev, Some(sess_id));
+        cleanup_with_session(dev, Some(sess_id));
+    });
 }
