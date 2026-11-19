@@ -64,6 +64,7 @@ use tsra_crypto::SignOp;
 use tsra_crypto::Verifier;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
+use zeroize::Zeroizing;
 
 use crate::worker::WorkerPool;
 
@@ -349,7 +350,7 @@ impl StdRsa {
     ) -> HsmResult<()> {
         let k = key_size.modulus_len();
         let public = self.pub_key_be(k, pub_key)?;
-        let message = message.to_vec();
+        let message = Zeroizing::new(message.to_vec());
         let result = self
             .pool
             .submit_with_result(async move {

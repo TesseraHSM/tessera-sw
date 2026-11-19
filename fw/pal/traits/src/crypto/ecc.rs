@@ -32,12 +32,13 @@
 //!
 //! ## Key buffer alignment
 //!
-//! Hardware engines require ECC key material to start
-//! at a **4-byte aligned** address, with **`roundup8(len)`** bytes of
-//! readable memory behind it. Callers must uphold this; implementations
-//! may rely on it. It holds for:
+//! Hardware engines require ECC key material to start at a **4-byte
+//! aligned** address, with **`roundup8(len)`** bytes of readable memory
+//! behind it. Callers must uphold this; implementations may rely on it.
+//! Four-byte alignment alone does not guarantee enough backing storage:
+//! callers must explicitly allocate at least `roundup8(len)` bytes and
+//! pass only the logical `len`-byte key slice to the PAL. This holds for:
 //!
-//! - PAL allocations, which are 4-byte aligned;
 //! - keys unmasked in place from a masked-key blob: the TBOR field is
 //!   `align = 4`, the key starts at a 4-byte aligned offset within the
 //!   blob, and the masked-key format pads the key to a multiple of 16
