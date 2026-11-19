@@ -10,6 +10,7 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary.workspace = true
 ddi_sock_server = { path = "../ddi/sock/server" }
 rand.workspace = true
 tokio = { features = ["rt-multi-thread", "time"], workspace = true }
@@ -38,6 +39,10 @@ minicbor = "0.19.1"
 default = []
 # Fuzz against an in-process simulated HSM reached over the sock transport.
 autostart-isolated = ["ddi_sock_server/autostart-isolated"]
+
+[lib]
+doctest = false
+path = "fuzz_targets/mbor_requests.rs"
 
 [[bin]]
 bench = false
