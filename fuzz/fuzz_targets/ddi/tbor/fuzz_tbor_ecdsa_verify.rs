@@ -98,7 +98,7 @@ fuzz_target!(|input: FuzzInput| {
             && supported_hash
             && !input.mutate_signature
             && input.message_index == 0
-            && input.length_delta == 0
+            && usize::from(req.message_len) == message.len()
             && req.masked_key.len() >= 264;
         match (&result, expect_success) {
             (Err(err @ DdiError::DriverError(_)), _) => panic!("Crash detected: {err}"),
