@@ -111,6 +111,49 @@ static void stage_free(CK_BYTE *staged, CK_ULONG len)
 }
 
 /*
+ * The device properties of an AES key the module creates. SENSITIVE /
+ * EXTRACTABLE / LOCAL are deliberately absent: the SDK rejects them as inputs
+ * (it sets them itself), which is why the template normaliser in
+ * tsra_pkcs11_template.c strips them before these calls. SESSION picks the
+ * masking key, so it is passed either way. ENCRYPT and DECRYPT are always both
+ * set: the SDK refuses an AES, GCM or XTS key with only one of them (see the
+ * header note). `list` points into the struct, which must not move once
+ * aes_props_init has filled it.
+ */
+typedef struct
+{
+    uint32_t cls;
+    uint32_t kind;
+    uint32_t bits;
+    uint8_t session;
+    uint8_t yes;
+    struct tsra_key_prop props[6];
+    struct tsra_key_prop_list list;
+} aes_props;
+
+static void aes_props_init(
+    aes_props *p,
+    uint32_t dev_kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope
+)
+{
+    p->cls = TSRA_KEY_CLASS_SECRET;
+    p->kind = dev_kind;
+    p->bits = bit_len;
+    p->session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    p->yes = 1;
+    p->props[0] = (struct tsra_key_prop){ TSRA_KEY_PROP_ID_CLASS, &p->cls, sizeof(p->cls) };
+    p->props[1] = (struct tsra_key_prop){ TSRA_KEY_PROP_ID_KIND, &p->kind, sizeof(p->kind) };
+    p->props[2] = (struct tsra_key_prop){ TSRA_KEY_PROP_ID_BIT_LEN, &p->bits, sizeof(p->bits) };
+    p->props[3] =
+        (struct tsra_key_prop){ TSRA_KEY_PROP_ID_SESSION, &p->session, sizeof(p->session) };
+    p->props[4] = (struct tsra_key_prop){ TSRA_KEY_PROP_ID_ENCRYPT, &p->yes, sizeof(p->yes) };
+    p->props[5] = (struct tsra_key_prop){ TSRA_KEY_PROP_ID_DECRYPT, &p->yes, sizeof(p->yes) };
+    p->list = (struct tsra_key_prop_list){ p->props, sizeof(p->props) / sizeof(p->props[0]) };
+}
+
+/*
  * Read a variable-length key property of `key` into a malloc'd buffer the
  * caller owns (two-call sizing). Masked blobs come through here, so a
  * failure wipes what it allocated.
@@ -167,30 +210,12 @@ CK_RV tsra_pkcs11_key_aes_generate(
         return CKR_ARGUMENTS_BAD;
     }
 
-    /*
-     * SENSITIVE / EXTRACTABLE / LOCAL are deliberately absent: the SDK rejects
-     * them as inputs (it sets them itself), which is why the template
-     * normaliser in tsra_pkcs11_template.c strips them before this call. SESSION
-     * picks the masking key, so it is passed either way. ENCRYPT and DECRYPT
-     * are always both set: the SDK refuses an AES, GCM or XTS key with only one
-     * of them (see the header note).
-     */
-    uint32_t class_secret = TSRA_KEY_CLASS_SECRET;
-    uint8_t yes = 1;
-    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
-    struct tsra_key_prop props[] = {
-        { TSRA_KEY_PROP_ID_CLASS, &class_secret, sizeof(class_secret) },
-        { TSRA_KEY_PROP_ID_KIND, &dev_kind, sizeof(dev_kind) },
-        { TSRA_KEY_PROP_ID_BIT_LEN, &bit_len, sizeof(bit_len) },
-        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
-        { TSRA_KEY_PROP_ID_ENCRYPT, &yes, sizeof(yes) },
-        { TSRA_KEY_PROP_ID_DECRYPT, &yes, sizeof(yes) },
-    };
-    struct tsra_key_prop_list prop_list = { props, sizeof(props) / sizeof(props[0]) };
+    aes_props props;
+    aes_props_init(&props, dev_kind, bit_len, scope);
     struct tsra_algo algo = { keygen_algo, NULL, 0 };
 
     tsra_handle key = 0;
-    tsra_status st = tsra_key_gen(hsm_session, &algo, &prop_list, &key);
+    tsra_status st = tsra_key_gen(hsm_session, &algo, &props.list, &key);
     if (st != TSRA_STATUS_SUCCESS)
     {
         TSRA_PKCS11_LOG("key_gen(kind %u, %u bits) failed: %d", dev_kind, bit_len, (int)st);
@@ -201,6 +226,136 @@ CK_RV tsra_pkcs11_key_aes_generate(
 
     /* Read back the masked blob, then drop the transient device handle: the
      * blob is the durable form of the key. */
+    CK_RV rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+    (void)tsra_key_delete(key);
+    return rv;
+}
+
+/* The SDK's ids for an OAEP hash tsra_pkcs11_unwrap_params_check accepted;
+ * false for any other. */
+static bool oaep_hash_ids(CK_MECHANISM_TYPE hash, uint32_t *out_hash, uint32_t *out_mgf1)
+{
+    switch (hash)
+    {
+    case CKM_SHA256:
+        *out_hash = TSRA_ALGO_ID_SHA256;
+        *out_mgf1 = TSRA_MGF1_ID_SHA256;
+        return true;
+    case CKM_SHA384:
+        *out_hash = TSRA_ALGO_ID_SHA384;
+        *out_mgf1 = TSRA_MGF1_ID_SHA384;
+        return true;
+    case CKM_SHA512:
+        *out_hash = TSRA_ALGO_ID_SHA512;
+        *out_mgf1 = TSRA_MGF1_ID_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+CK_RV tsra_pkcs11_key_unwrapping_pair(
+    uint32_t hsm_session,
+    uint32_t *out_priv,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    if ((out_spki == NULL) || (out_spki_len == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_spki = NULL;
+    *out_spki_len = 0;
+    if (out_priv != NULL)
+    {
+        *out_priv = 0;
+    }
+    /* The usage pair the SDK requires of this key, at the one size it has. */
+    uint32_t priv_cls = TSRA_KEY_CLASS_PRIVATE;
+    uint32_t pub_cls = TSRA_KEY_CLASS_PUBLIC;
+    uint32_t rsa = TSRA_KEY_KIND_RSA;
+    uint32_t bits = RSA_UNWRAP_KEY_BITS;
+    uint8_t yes = 1;
+    struct tsra_key_prop priv_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &priv_cls, sizeof(priv_cls) },
+        { TSRA_KEY_PROP_ID_KIND, &rsa, sizeof(rsa) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) },
+        { TSRA_KEY_PROP_ID_UNWRAP, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop pub_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &pub_cls, sizeof(pub_cls) },
+        { TSRA_KEY_PROP_ID_KIND, &rsa, sizeof(rsa) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) },
+        { TSRA_KEY_PROP_ID_WRAP, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list priv_list = { priv_props,
+                                            sizeof(priv_props) / sizeof(priv_props[0]) };
+    struct tsra_key_prop_list pub_list = { pub_props, sizeof(pub_props) / sizeof(pub_props[0]) };
+    struct tsra_algo algo = { TSRA_ALGO_ID_RSA_KEY_UNWRAPPING_KEY_PAIR_GEN, NULL, 0 };
+
+    tsra_handle priv = 0;
+    tsra_handle pub = 0;
+    tsra_status st = tsra_key_gen_pair(hsm_session, &algo, &priv_list, &pub_list, &priv, &pub);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("unwrapping key pair failed: %d", (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+    CK_RV rv = get_prop_alloc(pub, TSRA_KEY_PROP_ID_PUB_KEY_INFO, out_spki, out_spki_len);
+    (void)tsra_key_delete(pub);
+    if ((rv == CKR_OK) && (out_priv != NULL))
+    {
+        *out_priv = priv;
+    }
+    else
+    {
+        (void)tsra_key_delete(priv);
+    }
+    return rv;
+}
+
+CK_RV tsra_pkcs11_key_aes_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    uint32_t dev_kind = 0;
+    uint32_t keygen_algo = 0;
+    uint32_t hash = 0;
+    uint32_t mgf1 = 0;
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (wrapped == NULL) || (wrapped_len == 0) ||
+        (wrapped_len > (CK_ULONG)UINT32_MAX) || (aes_key_bits > (CK_ULONG)UINT32_MAX) ||
+        ((scope != TSRA_PKCS11_SCOPE_PARTITION) && (scope != TSRA_PKCS11_SCOPE_SESSION)) ||
+        !device_kind(kind, &dev_kind, &keygen_algo) || !oaep_hash_ids(oaep_hash, &hash, &mgf1))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    aes_props props;
+    aes_props_init(&props, dev_kind, bit_len, scope);
+    /* No OAEP label: the SDK's unwrap does not pass one to the device. */
+    struct tsra_algo_rsa_pkcs_oaep_params oaep = { hash, mgf1, NULL };
+    struct tsra_algo_rsa_aes_key_wrap_params params = { (uint32_t)aes_key_bits, &oaep };
+    struct tsra_algo algo = { TSRA_ALGO_ID_RSA_AES_KEY_WRAP, &params, sizeof(params) };
+    struct tsra_buffer blob = { (void *)wrapped, (uint32_t)wrapped_len };
+
+    tsra_handle key = 0;
+    tsra_status st = tsra_key_unwrap(&algo, unwrapping_key, &blob, &props.list, &key);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unwrap(kind %u, %u bits) failed: %d", dev_kind, bit_len, (int)st);
+        return CKR_WRAPPED_KEY_INVALID;
+    }
     CK_RV rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
     (void)tsra_key_delete(key);
     return rv;
@@ -992,6 +1147,46 @@ CK_RV tsra_pkcs11_key_aes_unmask(
 void tsra_pkcs11_key_release(uint32_t key_handle)
 {
     (void)key_handle;
+}
+
+CK_RV tsra_pkcs11_key_unwrapping_pair(
+    uint32_t hsm_session,
+    uint32_t *out_priv,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    (void)hsm_session;
+    (void)out_priv;
+    (void)out_spki;
+    (void)out_spki_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_aes_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    (void)unwrapping_key;
+    (void)oaep_hash;
+    (void)aes_key_bits;
+    (void)kind;
+    (void)bit_len;
+    (void)scope;
+    (void)wrapped;
+    (void)wrapped_len;
+    (void)out_blob;
+    (void)out_blob_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
 CK_RV tsra_pkcs11_key_aes_cbc(

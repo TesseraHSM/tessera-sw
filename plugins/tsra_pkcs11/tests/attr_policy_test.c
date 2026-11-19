@@ -9,7 +9,7 @@
  *
  *   gcc -I ../include/pkcs11-v3.1 -I ../src attr_policy_test.c \
  *       ../src/tsra_pkcs11_attr_policy.c ../src/tsra_pkcs11_attr_types.c \
- *       ../src/tsra_pkcs11_template.c \
+ *       ../src/tsra_pkcs11_template.c ../src/tsra_pkcs11_ec_template.c \
  *       -o attr_policy_test && ./attr_policy_test
  *
  * Covers the argument and handle checks, the read-only-session and
@@ -19,7 +19,9 @@
  * rejects, duplicates, the TYPE_INVALID vs READ_ONLY split for unlisted types,
  * and first-failure-wins ordering; and for C_CreateObject the ceilings, the
  * class rows (no class, key classes with and without key material), the
- * provenance rows and the per-attribute verdicts.
+ * provenance rows and the per-attribute verdicts, and the public keys (the
+ * key type, and for EC and RSA keys the curve, the point and the other
+ * attributes PKCS#11 requires).
  */
 
 #include "tsra_pkcs11_attr_policy.h"
@@ -59,6 +61,10 @@ static CK_OBJECT_CLASS g_cert = CKO_CERTIFICATE;
  * CKO_SECRET_KEY: read as a class it would wrongly unlock the key rules. */
 static CK_OBJECT_CLASS g_wide_class[2] = { CKO_SECRET_KEY, CKO_SECRET_KEY };
 static CK_KEY_TYPE g_aes = CKK_AES;
+static CK_KEY_TYPE g_rsa = CKK_RSA;
+/* Any non-empty value: the policy reads no number. */
+static CK_BYTE g_modulus[] = { 0xC1, 0x02, 0x03, 0x04 };
+static CK_BYTE g_e65537[] = { 0x01, 0x00, 0x01 };
 static CK_ULONG g_len32 = 32;
 static CK_BYTE g_secret_bytes[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
 static char g_label[] = "unit";
@@ -672,6 +678,19 @@ static CK_RV create_with(CK_OBJECT_CLASS cls, CK_ATTRIBUTE extra)
     return create(t, COUNT(t));
 }
 
+/* A complete RSA public key template plus one more attribute. */
+static CK_RV create_rsa_with(CK_ATTRIBUTE extra)
+{
+    CK_ATTRIBUTE t[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, g_rsa),
+        ATTR(CKA_MODULUS, g_modulus),
+        ATTR(CKA_PUBLIC_EXPONENT, g_e65537),
+        extra,
+    };
+    return create(t, COUNT(t));
+}
+
 static void test_create(void)
 {
     printf("== C_CreateObject: arguments and token ==\n");
@@ -755,7 +774,7 @@ static void test_create(void)
         "a certificate with CKA_VALUE"
     );
     CHECK(
-        create_with(g_public, (CK_ATTRIBUTE)ATTR(CKA_MODULUS, g_secret_bytes)) == CKR_OK,
+        create_rsa_with((CK_ATTRIBUTE)ATTR(CKA_LABEL, g_label)) == CKR_OK,
         "a public key without key material"
     );
     static const CK_OBJECT_CLASS unsupported[] = {
@@ -818,7 +837,7 @@ static void test_create(void)
             (create_with(g_data, (CK_ATTRIBUTE)BOOL_ATTR(provenance[i], g_true)) ==
              CKR_ATTRIBUTE_READ_ONLY);
         ok &=
-            (create_with(g_public, (CK_ATTRIBUTE)BOOL_ATTR(provenance[i], g_false)) ==
+            (create_rsa_with((CK_ATTRIBUTE)BOOL_ATTR(provenance[i], g_false)) ==
              CKR_ATTRIBUTE_READ_ONLY);
         ok &=
             (create_with(g_cert, (CK_ATTRIBUTE)BOOL_ATTR(provenance[i], g_true)) ==
@@ -834,13 +853,12 @@ static void test_create(void)
     );
     CHECK(
         (create_with(g_cert, (CK_ATTRIBUTE)BOOL_ATTR(CKA_TRUSTED, g_false)) == CKR_OK) &&
-            (create_with(g_public, (CK_ATTRIBUTE)BOOL_ATTR(CKA_TRUSTED, g_false)) == CKR_OK),
+            (create_rsa_with((CK_ATTRIBUTE)BOOL_ATTR(CKA_TRUSTED, g_false)) == CKR_OK),
         "CKA_TRUSTED=FALSE, the default -> OK"
     );
     CK_MECHANISM_TYPE kgm = CKM_AES_KEY_GEN;
     CHECK(
-        create_with(g_public, (CK_ATTRIBUTE)ATTR(CKA_KEY_GEN_MECHANISM, kgm)) ==
-            CKR_ATTRIBUTE_READ_ONLY,
+        create_rsa_with((CK_ATTRIBUTE)ATTR(CKA_KEY_GEN_MECHANISM, kgm)) == CKR_ATTRIBUTE_READ_ONLY,
         "CKA_KEY_GEN_MECHANISM -> READ_ONLY"
     );
     CHECK(
@@ -896,6 +914,202 @@ static void test_create(void)
     );
 }
 
+/* DER around a CKA_EC_POINT: the OCTET STRING tag, then its length, in one
+ * byte below DER_LONG_FORM, else DER_LEN_1 and one length byte (enough for
+ * every point here). */
+#define TAG_OCTET_STRING 0x04
+#define DER_LONG_FORM 0x80
+#define DER_LEN_1 (DER_LONG_FORM | 1)
+#define DER_LEN_2 (DER_LONG_FORM | 2)
+#define DER_HEADER_SHORT 2 /* the tag and a one-byte length */
+#define DER_HEADER_MAX 3   /* the tag, DER_LEN_1 and the length */
+/* The point inside (SEC 1): the first byte, then both coordinates. */
+#define POINT_UNCOMPRESSED 0x04
+#define POINT_COMPRESSED_EVEN 0x02
+#define POINT_LEN(coord) (1 + (2 * (coord)))
+#define POINT_FILL 0x5A /* any coordinate byte: whether it lies on the curve is not checked */
+/* The coordinate lengths of P-256, P-384 and P-521. */
+#define COORD_P256 32
+#define COORD_P384 48
+#define COORD_P521 66
+
+/* An EC public key template: class, type, the curve and the point. */
+static CK_RV create_ec(
+    const void *params,
+    CK_ULONG params_len,
+    const void *point,
+    CK_ULONG point_len
+)
+{
+    CK_KEY_TYPE ec = CKK_EC;
+    CK_ATTRIBUTE t[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, ec),
+        { CKA_EC_PARAMS, (void *)params, params_len },
+        { CKA_EC_POINT, (void *)point, point_len },
+    };
+    return create(t, COUNT(t));
+}
+
+/* `out` as a CKA_EC_POINT of `coord` bytes per coordinate: the DER OCTET
+ * STRING header, then 0x04 and both coordinates; returns the length. */
+static CK_ULONG ec_point(CK_BYTE *out, CK_ULONG coord)
+{
+    CK_ULONG len = POINT_LEN(coord);
+    CK_ULONG h = 0;
+    out[h++] = TAG_OCTET_STRING;
+    if (len >= DER_LONG_FORM)
+    {
+        out[h++] = DER_LEN_1;
+    }
+    out[h++] = (CK_BYTE)len;
+    out[h] = POINT_UNCOMPRESSED;
+    memset(out + h + 1, POINT_FILL, len - 1);
+    return h + len;
+}
+
+static void test_public_keys(void)
+{
+    printf("== C_CreateObject: EC and RSA public keys ==\n");
+    static const CK_BYTE p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+    static const CK_BYTE p521[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23 };
+    static const CK_BYTE k256[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a }; /* secp256k1 */
+    static const CK_BYTE cut[] = { 0x06, 0x05, 0x2b, 0x81, 0x04 };
+    CK_BYTE pt256[DER_HEADER_MAX + POINT_LEN(COORD_P256)];
+    CK_BYTE pt384[DER_HEADER_MAX + POINT_LEN(COORD_P384)];
+    CK_BYTE pt521[DER_HEADER_MAX + POINT_LEN(COORD_P521)];
+    CK_ULONG n256 = ec_point(pt256, COORD_P256);
+    CK_ULONG n384 = ec_point(pt384, COORD_P384);
+    CK_ULONG n521 = ec_point(pt521, COORD_P521);
+    CHECK(create_ec(p256, sizeof(p256), pt256, n256) == CKR_OK, "a P-256 key -> OK");
+    CHECK(
+        create_ec(p521, sizeof(p521), pt521, n521) == CKR_OK,
+        "a P-521 key (long-form length) -> OK"
+    );
+    CHECK(
+        create_ec(k256, sizeof(k256), pt256, n256) == CKR_CURVE_NOT_SUPPORTED,
+        "secp256k1 -> CURVE_NOT_SUPPORTED"
+    );
+    CHECK(
+        create_ec(cut, sizeof(cut), pt256, n256) == CKR_ATTRIBUTE_VALUE_INVALID,
+        "a truncated curve OID -> VALUE_INVALID"
+    );
+    CHECK(
+        create_ec(p256, sizeof(p256), pt384, n384) == CKR_ATTRIBUTE_VALUE_INVALID,
+        "a P-384 point on P-256 -> VALUE_INVALID"
+    );
+    CHECK(
+        create_ec(p256, sizeof(p256), pt256 + DER_HEADER_SHORT, n256 - DER_HEADER_SHORT) ==
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        "a bare point without its OCTET STRING -> VALUE_INVALID"
+    );
+    CK_BYTE compressed[sizeof(pt256)];
+    memcpy(compressed, pt256, n256);
+    compressed[DER_HEADER_SHORT] = POINT_COMPRESSED_EVEN;
+    CHECK(
+        create_ec(p256, sizeof(p256), compressed, n256) == CKR_ATTRIBUTE_VALUE_INVALID,
+        "a compressed point -> VALUE_INVALID"
+    );
+    CHECK(
+        create_ec(p256, sizeof(p256), pt256, n256 - 1) == CKR_ATTRIBUTE_VALUE_INVALID,
+        "a point one byte short -> VALUE_INVALID"
+    );
+    CK_BYTE longer[sizeof(pt256) + 1];
+    memcpy(longer, pt256, n256);
+    longer[n256] = 0;
+    CHECK(
+        create_ec(p256, sizeof(p256), longer, n256 + 1) == CKR_ATTRIBUTE_VALUE_INVALID,
+        "a byte after the OCTET STRING -> VALUE_INVALID"
+    );
+    /* The P-256 point with its length in a form DER does not allow: the long
+     * form below 128, and a leading zero length byte. Each is its header, then
+     * pt256 from its length byte on. */
+    static const CK_BYTE long_hdr[] = { TAG_OCTET_STRING, DER_LEN_1 };
+    static const CK_BYTE zero_hdr[] = { TAG_OCTET_STRING, DER_LEN_2, 0 };
+    CK_BYTE long_form[sizeof(long_hdr) + sizeof(pt256)];
+    CK_BYTE zero_len[sizeof(zero_hdr) + sizeof(pt256)];
+    memcpy(long_form, long_hdr, sizeof(long_hdr));
+    memcpy(long_form + sizeof(long_hdr), pt256 + 1, n256 - 1);
+    memcpy(zero_len, zero_hdr, sizeof(zero_hdr));
+    memcpy(zero_len + sizeof(zero_hdr), pt256 + 1, n256 - 1);
+    CHECK(
+        (create_ec(p256, sizeof(p256), long_form, sizeof(long_hdr) + n256 - 1) ==
+         CKR_ATTRIBUTE_VALUE_INVALID) &&
+            (create_ec(p256, sizeof(p256), zero_len, sizeof(zero_hdr) + n256 - 1) ==
+             CKR_ATTRIBUTE_VALUE_INVALID),
+        "a non-minimal DER length -> VALUE_INVALID"
+    );
+
+    CK_KEY_TYPE ec = CKK_EC;
+    CK_ATTRIBUTE no_point[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, ec),
+        ATTR(CKA_EC_PARAMS, p256),
+    };
+    CK_ATTRIBUTE no_params[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, ec),
+        { CKA_EC_POINT, pt256, n256 },
+    };
+    CHECK(
+        (create(no_point, COUNT(no_point)) == CKR_TEMPLATE_INCOMPLETE) &&
+            (create(no_params, COUNT(no_params)) == CKR_TEMPLATE_INCOMPLETE),
+        "an EC key without its point or its curve -> TEMPLATE_INCOMPLETE"
+    );
+    CHECK(
+        (create_ec(p256, sizeof(p256), NULL, 0) == CKR_ATTRIBUTE_VALUE_INVALID) &&
+            (create_ec(NULL, 0, pt256, n256) == CKR_ATTRIBUTE_VALUE_INVALID),
+        "an empty EC point or curve -> VALUE_INVALID"
+    );
+    CK_ATTRIBUTE no_point_bad_curve[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, ec),
+        ATTR(CKA_EC_PARAMS, k256),
+    };
+    CHECK(
+        create(no_point_bad_curve, COUNT(no_point_bad_curve)) == CKR_TEMPLATE_INCOMPLETE,
+        "a missing attribute is reported before a curve the token lacks"
+    );
+
+    CK_ATTRIBUTE rsa_ok[] = {
+        ATTR(CKA_CLASS, g_public),
+        ATTR(CKA_KEY_TYPE, g_rsa),
+        ATTR(CKA_MODULUS, g_modulus),
+        ATTR(CKA_PUBLIC_EXPONENT, g_e65537),
+    };
+    CHECK(create(rsa_ok, COUNT(rsa_ok)) == CKR_OK, "an RSA key with modulus and exponent -> OK");
+    CK_ATTRIBUTE rsa_no_modulus[] = { rsa_ok[0], rsa_ok[1], rsa_ok[3] };
+    CHECK(
+        (create(rsa_ok, 3) == CKR_TEMPLATE_INCOMPLETE) &&
+            (create(rsa_no_modulus, COUNT(rsa_no_modulus)) == CKR_TEMPLATE_INCOMPLETE),
+        "an RSA key without its exponent or its modulus -> TEMPLATE_INCOMPLETE"
+    );
+    CK_ATTRIBUTE rsa_empty_n[] = { rsa_ok[0], rsa_ok[1], { CKA_MODULUS, NULL, 0 }, rsa_ok[3] };
+    CK_ATTRIBUTE rsa_empty_e[] = { rsa_ok[0],
+                                   rsa_ok[1],
+                                   rsa_ok[2],
+                                   { CKA_PUBLIC_EXPONENT, NULL, 0 } };
+    CHECK(
+        (create(rsa_empty_n, COUNT(rsa_empty_n)) == CKR_ATTRIBUTE_VALUE_INVALID) &&
+            (create(rsa_empty_e, COUNT(rsa_empty_e)) == CKR_ATTRIBUTE_VALUE_INVALID),
+        "an empty RSA modulus or exponent -> VALUE_INVALID"
+    );
+    CK_KEY_TYPE dsa = CKK_DSA;
+    CK_ATTRIBUTE other[] = { ATTR(CKA_CLASS, g_public), ATTR(CKA_KEY_TYPE, dsa) };
+    CHECK(create(other, COUNT(other)) == CKR_OK, "another key type is stored as given");
+    CK_ATTRIBUTE untyped[] = { rsa_ok[0], rsa_ok[2], rsa_ok[3] };
+    CHECK(
+        create(untyped, COUNT(untyped)) == CKR_TEMPLATE_INCOMPLETE,
+        "a public key without CKA_KEY_TYPE -> TEMPLATE_INCOMPLETE"
+    );
+    CK_ATTRIBUTE data_ec[] = {
+        ATTR(CKA_CLASS, g_data),
+        ATTR(CKA_KEY_TYPE, ec),
+        ATTR(CKA_EC_PARAMS, k256),
+    };
+    CHECK(create(data_ec, COUNT(data_ec)) == CKR_OK, "only public keys are held to these rules");
+}
+
 int main(void)
 {
     test_arguments();
@@ -907,6 +1121,7 @@ int main(void)
     test_ec_usage();
     test_shapes_and_order();
     test_create();
+    test_public_keys();
     printf(
         g_fail ? "\nattr_policy_test: FAILED (%d checks)\n"
                : "\nattr_policy_test: all %d checks passed\n",
