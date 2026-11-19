@@ -202,7 +202,7 @@ allocation. Errors overwrite the response prefix in the same storage. Every publ
 including padding or gaps, must be initialized; overlapping crypto requires an
 explicitly supported in-place PAL operation.
 
-All 44 commands encode their compact responses directly into this shared
+All 46 commands encode their compact responses directly into this shared
 allocation; there is no legacy dispatch bridge or separately allocated encoded
 response. Existing cryptographic working buffers remain scoped independently.
 Hash consumes the input before reclaiming it for the digest.
@@ -255,6 +255,8 @@ storage is zero.
 | `0x33` | `EccVerify` | InSession | [`commands/ecc_verify.md`](./commands/ecc_verify.md) |
 | `0x19` | `EcdhDerive` | InSession | [`commands/ecdh_derive.md`](./commands/ecdh_derive.md) |
 | `0x1A` | `RsaModExp` | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x35` | `RsaSign` | InSession | [`commands/rsa_sign.md`](./commands/rsa_sign.md) |
+| `0x36` | `RsaVerify` | InSession | [`commands/rsa_verify.md`](./commands/rsa_verify.md) |
 | `0x1B` | `Hash` | InSession | [`commands/hash.md`](./commands/hash.md) |
 | `0x1C` | `HkdfDerive` | InSession | [`commands/hkdf_derive.md`](./commands/hkdf_derive.md) |
 | `0x1D` | `ConcatKdfDerive` | InSession | [`commands/concat_kdf_derive.md`](./commands/concat_kdf_derive.md) |

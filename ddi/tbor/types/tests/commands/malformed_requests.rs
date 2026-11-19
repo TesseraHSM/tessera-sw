@@ -57,6 +57,8 @@ use tsra_ddi_tbor_types::TBOR_OP_PART_INIT;
 use tsra_ddi_tbor_types::TBOR_OP_PSK_CHANGE;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_ENCRYPT_DECRYPT;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_MOD_EXP;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_PEER_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_REMOTE_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_RESEAL_REMOTE_BACKUP;
@@ -101,6 +103,8 @@ const OPCODES: &[u8] = &[
     TBOR_OP_ECDH_DERIVE,
     TBOR_OP_RSA_MOD_EXP,
     TBOR_OP_RSA_ENCRYPT_DECRYPT,
+    TBOR_OP_RSA_SIGN,
+    TBOR_OP_RSA_VERIFY,
     TBOR_OP_HASH,
     TBOR_OP_HKDF_DERIVE,
     TBOR_OP_CONCAT_KDF_DERIVE,

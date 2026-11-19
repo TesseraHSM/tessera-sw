@@ -195,6 +195,33 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
         digest: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// Hashes a raw message from an OOB SGL descriptor using bounded DMA
+    /// staging, returning its digest in the requested form.
+    ///
+    /// The caller must keep the host buffer unchanged and accessible until
+    /// command completion. The descriptor is captured once; this does not
+    /// make the referenced message bytes an atomic snapshot. The digest covers
+    /// the byte stream actually read by the platform transport.
+    ///
+    /// `expected_len` must be at most 8192 bytes. A zero-length message does
+    /// not read an OOB descriptor and hashes the empty byte string. The output
+    /// must hold at least `algo.digest_len()` bytes; only that prefix is
+    /// written. The method validates algorithm and output capacity before
+    /// reading message data.
+    ///
+    /// The platform validates the OOB SGL descriptor and its complete address
+    /// range, then reads successive chunks without materializing the full
+    /// message in firmware memory.
+    async fn hash_oob(
+        &self,
+        io: &Self::Io,
+        algo: HsmHashAlgo,
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
+
     /// Returns the backend's required DMA storage size for a multi-step hash.
     ///
     /// Validates algorithm support and limits without allocating or initializing
