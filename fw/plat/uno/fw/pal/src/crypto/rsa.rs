@@ -216,6 +216,14 @@ fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<&[u8]>
     Ok(&priv_key[n_off..end])
 }
 
+fn validate_pss_modulus_width(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<()> {
+    let modulus = rsa_modulus_le(key_size, priv_key)?;
+    if modulus.last().map_or(true, |byte| byte & 0x80 == 0) {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(())
+}
+
 /// Byte-wise check that the little-endian value `m` satisfies `1 < m < n - 1`,
 /// where `n` is the equal-length little-endian modulus.
 ///
@@ -774,7 +782,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        rsa_modulus_le(key_size, priv_key)?;
+        validate_pss_modulus_width(key_size, priv_key)?;
         let Some(output) = out else {
             return Ok(key_size.max_pkcs1_message());
         };
@@ -881,6 +889,9 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if pub_key[k - 1] & 0x80 == 0 {
             return Err(HsmError::InvalidArg);
         }
         if !mod_exp_input_in_range(&pub_key[..k], signature) {

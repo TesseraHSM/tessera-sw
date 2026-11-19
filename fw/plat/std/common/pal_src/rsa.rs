@@ -1358,4 +1358,50 @@ mod tests {
         .await
         .expect("RSA encrypt/decrypt");
     }
+
+    #[tokio::test]
+    async fn rsa_sign_queries_validate_hash_and_pss_salt() {
+        let (pal, io) = pal_and_io();
+        let key = RsaPrivateKey::generate(256).expect("RSA key");
+        let mut key_bytes = vec![0; key.hsm_bytes_len()];
+        key.to_hsm_bytes(&mut key_bytes).expect("serialize RSA key");
+
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let private = alloc.dma_alloc(key_bytes.len())?;
+            private.copy_from_slice(&key_bytes);
+            let digest = alloc.dma_alloc_zeroed(64)?;
+            let output = alloc.dma_alloc(256)?;
+
+            for execute in [false, true] {
+                assert_eq!(
+                    pal.rsa_pkcs1_sign(
+                        &io,
+                        HsmRsaKey::Rsa2048Priv,
+                        HsmHashAlgo::Sha3_256,
+                        private,
+                        &digest[..32],
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    Err(HsmError::UnsupportedDigestHashAlgorithm),
+                );
+                assert_eq!(
+                    pal.rsa_pss_sign(
+                        &io,
+                        HsmRsaKey::Rsa2048Priv,
+                        HsmHashAlgo::Sha256,
+                        private,
+                        &digest[..32],
+                        223,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    Err(HsmError::InvalidArg),
+                );
+            }
+            Ok(())
+        })
+        .await
+        .expect("RSA signing query validation");
+    }
 }
