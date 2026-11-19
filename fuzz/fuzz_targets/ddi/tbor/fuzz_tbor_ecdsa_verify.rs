@@ -38,7 +38,7 @@ fn hash_selector(value: u8) -> (u8, bool) {
         0 => (HASH_ALGO_SHA256, true),
         1 => (HASH_ALGO_SHA384, true),
         2 => (HASH_ALGO_SHA512, true),
-        _ => (2, false),
+        _ => (HASH_ALGO_SHA512.wrapping_add(1), false),
     }
 }
 
