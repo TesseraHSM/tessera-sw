@@ -483,6 +483,9 @@ pub struct UnoHsmPal {
     /// partitions.
     io_in_flight: Cell<u32>,
 
+    /// The bulk IOs among [`io_in_flight`](Self::io_in_flight).
+    bulk_io_in_flight: Cell<u32>,
+
     /// Per host IO slot: what finishing a detached IO still needs.
     pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
 
@@ -730,6 +733,7 @@ impl Default for UnoHsmPal {
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
+            bulk_io_in_flight: Cell::new(0),
             detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
@@ -779,18 +783,33 @@ impl UnoHsmPal {
     /// Called by [`accept_io`](Self::accept_io) for every IO received from
     /// the IIC driver. Saturating so it can never panic across the host
     /// trust boundary.
-    pub(crate) fn io_in_flight_inc(&self) {
+    pub(crate) fn io_in_flight_inc(&self, kind: HsmIoKind) {
         self.io_in_flight
             .set(self.io_in_flight.get().saturating_add(1));
+        if kind == HsmIoKind::Bulk {
+            self.bulk_io_in_flight
+                .set(self.bulk_io_in_flight.get().saturating_add(1));
+        }
     }
 
     /// Decrement the in-flight IO count.
     ///
     /// Called by `drop_io` right after the IO slot is returned to the ISQ.
     /// Saturating so it can never panic.
-    pub(crate) fn io_in_flight_dec(&self) {
+    pub(crate) fn io_in_flight_dec(&self, kind: HsmIoKind) {
         self.io_in_flight
             .set(self.io_in_flight.get().saturating_sub(1));
+        if kind == HsmIoKind::Bulk {
+            self.bulk_io_in_flight
+                .set(self.bulk_io_in_flight.get().saturating_sub(1));
+        }
+    }
+
+    /// Current number of host command (not bulk) IOs in flight.
+    pub(crate) fn cmd_io_in_flight(&self) -> u32 {
+        self.io_in_flight
+            .get()
+            .saturating_sub(self.bulk_io_in_flight.get())
     }
 
     /// Current number of host IOs in flight.

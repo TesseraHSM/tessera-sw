@@ -18,9 +18,11 @@
 //!
 //! # Status
 //!
-//! AES-256-CBC, AES-256-ECB, AES-256-KWP, HKDF, KBKDF, per-engine RSA-2048
-//! mod-exp (standard and CRT), ECDH-P384, ECDSA-P384, and the RNG/DRBG FW-mode
-//! KAT are implemented, pre-operationally and periodically (the periodic RNG
+//! AES-256-CBC, AES-256-ECB, AES-256-KWP, HKDF, KBKDF, bulk AES-256-GCM and
+//! AES-256-XTS on the BCP (default build only; with `bulk_crypto` the FP
+//! firmware owns that engine and Admin tests it), per-engine RSA-2048 mod-exp
+//! (standard and CRT), ECDH-P384, ECDSA-P384, and the RNG/DRBG FW-mode KAT
+//! are implemented, pre-operationally and periodically (the periodic RNG
 //! KAT runs only while Admin holds host IO quiesced; see
 //! [`run_rng_periodic`]). Further tests are appended to [`run_pre_op`] as they
 //! are added — each is a direct call, with per-PKA-engine tests wrapped in a
@@ -29,6 +31,8 @@
 mod aes_cbc;
 mod aes_ecb;
 mod aes_kwp;
+#[cfg(not(feature = "bulk_crypto"))]
+mod bulk;
 mod kdf;
 mod pka;
 mod vectors;
@@ -39,7 +43,6 @@ use embassy_time::Timer;
 use embassy_time::with_timeout;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_uno_drivers_aes::AesError;
 use tsra_fw_uno_drivers_sha::ShaError;
 use tsra_fw_uno_drivers_upka::UpkaError;
 
@@ -130,6 +133,12 @@ enum SelfTest {
     AesKwp,
     Hkdf,
     Kbkdf,
+    /// AES-256-GCM on the BCP, as host bulk IOs use it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    BulkAesGcm,
+    /// AES-256-XTS on the BCP, as host bulk IOs use it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    BulkAesXts,
     RsaModExp(u8),
     RsaModExpCrt(u8),
     Ecdh(u8),
@@ -141,12 +150,16 @@ enum SelfTest {
 }
 
 /// Tests without a per-engine instance, in execution order.
-const FIXED_TESTS: [SelfTest; 5] = [
+const FIXED_TESTS: &[SelfTest] = &[
     SelfTest::AesCbc,
     SelfTest::AesEcb,
     SelfTest::AesKwp,
     SelfTest::Hkdf,
     SelfTest::Kbkdf,
+    #[cfg(not(feature = "bulk_crypto"))]
+    SelfTest::BulkAesGcm,
+    #[cfg(not(feature = "bulk_crypto"))]
+    SelfTest::BulkAesXts,
 ];
 
 /// PKA tests per engine.
@@ -188,6 +201,10 @@ impl SelfTest {
             Self::Ecdh(e) => (8, e as u32),
             Self::Ecdsa(e) => (9, e as u32),
             Self::Rng => (10, 0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm => (11, 0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesXts => (12, 0),
         }
     }
 
@@ -199,6 +216,10 @@ impl SelfTest {
             Self::AesKwp => aes_kwp::run_aes_kwp(pal, io).await,
             Self::Hkdf => kdf::run_hkdf(pal, io).await,
             Self::Kbkdf => kdf::run_kbkdf(pal, io).await,
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm => bulk::run_aes_gcm(pal, io).await,
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesXts => bulk::run_aes_xts(pal, io).await,
             Self::RsaModExp(e) => pka::run_rsa_mod_exp_on_engine(pal, io, e).await,
             Self::RsaModExpCrt(e) => pka::run_rsa_mod_exp_crt_on_engine(pal, io, e).await,
             Self::Ecdh(e) => pka::run_ecdh_on_engine(pal, io, e).await,
@@ -248,7 +269,7 @@ fn notify_self_test_failure(test: SelfTest, err: HsmError) -> ! {
 /// as the reference firmware does when `preops_cast` fails. Mirrors
 /// the reference firmware's `preops_cast` — positive known-answer tests only.
 pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
-    for test in FIXED_TESTS {
+    for &test in FIXED_TESTS {
         test.run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
@@ -287,11 +308,7 @@ async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
         };
         match result {
             Ok(()) => return,
-            Err(e)
-                if e == AesError::QUEUE_FULL
-                    || e == ShaError::QUEUE_FULL
-                    || e == UpkaError::QUEUE_FULL =>
-            {
+            Err(e) if e == ShaError::QUEUE_FULL || e == UpkaError::QUEUE_FULL => {
                 let retry_at = (Instant::now() + Duration::from_secs(QUEUE_RETRY_INTERVAL_SECS))
                     .min(admission_deadline);
                 Timer::at(retry_at).await;

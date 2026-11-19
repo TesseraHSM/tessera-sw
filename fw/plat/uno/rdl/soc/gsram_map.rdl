@@ -18,7 +18,7 @@
 //   0x0F000 - 0x11824  Reserved: Admin (CP0) GDMA rings — do not place HSM data here
 //   0x11840 - 0x11E44  OIC queues (OSQ, OCQ, IO_CQ, OCQ tail shadow)
 //   0x12840 - 0x15064  GDMA queues
-//   0x15064 - 0x155A4  Crypto command buffers (AES, UPKA, SHA)
+//   0x15064 - 0x158A4  Crypto command buffers (AES, UPKA, SHA)
 //   0x16000 - 0x17400  BCP (CDMA) rings
 //   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
 //   0x19460 - 0x1A460  Bulk crypto per-IO scratch

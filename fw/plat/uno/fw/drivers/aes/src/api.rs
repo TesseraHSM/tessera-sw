@@ -8,6 +8,7 @@ use core::ops::AsyncFnOnce;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
+use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::with_timeout;
 use embassy_time::Duration;
@@ -37,6 +38,10 @@ const AES_Q: StaticRef<IoGsramRegs> =
 
 /// Status flag mask (read-side decode): COMPLETE, ERROR_CMD, ERROR_BUS, ERROR_FAULT.
 const STATUS_FLAGS_MASK: u32 = 0x1E;
+
+/// Tasks that can wait for a free slot before the oldest waiters are woken
+/// early to make room (they then register again).
+const SLOT_WAITERS: usize = 32;
 
 /// AES block size in bytes.
 pub const AES_BLOCK_SIZE: usize = 16;
@@ -157,6 +162,8 @@ struct AesState<const DEPTH: usize> {
     active: u8,
     /// Index of the next slot to allocate.
     tail: u8,
+    /// Tasks waiting for a free slot; woken when `head` advances.
+    slot_waiters: MultiWakerRegistration<SLOT_WAITERS>,
 }
 
 /// Async AES driver.
@@ -223,6 +230,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                 head: 0,
                 active: 0,
                 tail: 0,
+                slot_waiters: MultiWakerRegistration::new(),
             }),
         }
     }
@@ -231,7 +239,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
     ///
     /// Concurrent callers are queued (up to `DEPTH`) and served in FIFO
     /// order. While all slots are occupied the caller waits for one to free
-    /// (see `wait_for_slot`) rather than failing.
+    /// rather than failing.
     ///
     /// With `message: None`, input and output DMA addresses are identical.
     /// No overlapping Rust references are constructed.
@@ -252,7 +260,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                         return Poll::Ready(Err(AesError::INVALID_KEY_LEN));
                     };
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return wait_for_slot(cx);
+                        return wait_for_slot(&mut s.slot_waiters, cx);
                     }
 
                     let idx = (s.tail & Self::MASK) as usize;
@@ -276,11 +284,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                     let status = slot.status;
                     slot.status = 0;
 
-                    // Advance head past consecutive consumed slots.
-                    while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0
-                    {
-                        s.head = s.head.wrapping_add(1);
-                    }
+                    advance_head(s);
 
                     return Poll::Ready(map_status(status));
                 }
@@ -389,7 +393,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
             self.state.with(|s| {
                 if slot_idx.is_none() {
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return wait_for_slot(cx);
+                        return wait_for_slot(&mut s.slot_waiters, cx);
                     }
                     let idx = (s.tail & Self::MASK) as usize;
                     s.slots[idx].exclusive = true;
@@ -421,9 +425,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
             s.slots[idx].exclusive = false;
             s.slots[idx].status = 0;
             s.active = my.wrapping_add(1);
-            while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0 {
-                s.head = s.head.wrapping_add(1);
-            }
+            advance_head(s);
             if s.active != s.tail {
                 let next = (s.active & Self::MASK) as usize;
                 if !s.slots[next].exclusive {
@@ -580,16 +582,31 @@ fn map_status(status: u8) -> HsmResult<()> {
     Err(AesError::FAULT_ERROR)
 }
 
-/// Admission when every slot is occupied: yield and poll again on the next
-/// executor pass, until a slot frees.
+/// Admission when every slot is occupied: wait until [`advance_head`] frees
+/// one.
 ///
 /// The command and bulk IO tasks together can outnumber the slots, and a
 /// full queue is transient (each slot frees when its command completes), so
 /// waiting rather than failing keeps a valid request from failing on load
 /// alone. Nothing is claimed before admission, so the wait is cancel-safe.
-fn wait_for_slot<T>(cx: &mut core::task::Context<'_>) -> Poll<T> {
-    cx.waker().wake_by_ref();
+fn wait_for_slot<T>(
+    waiters: &mut MultiWakerRegistration<SLOT_WAITERS>,
+    cx: &mut core::task::Context<'_>,
+) -> Poll<T> {
+    waiters.register(cx.waker());
     Poll::Pending
+}
+
+/// Advance `head` past consecutive consumed slots, waking the tasks waiting
+/// for a slot if any was freed.
+fn advance_head<const DEPTH: usize>(s: &mut AesState<DEPTH>) {
+    let head = s.head;
+    while s.head != s.active && s.slots[(s.head as usize) & (DEPTH - 1)].status == 0 {
+        s.head = s.head.wrapping_add(1);
+    }
+    if s.head != head {
+        s.slot_waiters.wake();
+    }
 }
 
 #[cfg(test)]

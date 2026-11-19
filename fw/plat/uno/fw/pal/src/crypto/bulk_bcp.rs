@@ -26,13 +26,17 @@
 //! * tail: `T = (T' ⊕ E_K(J₀) ⊕ (L' ⊕ C_t)·H ⊕ L)·H ⊕ E_K(J₀)`, and the
 //!   tail itself is CTR with counter block `n/16 + 2`.
 //!
-//! The engine reports the tag it computed even when a decrypt's check
-//! fails, so every decrypt hands it a zero tag and the PAL checks `T`
-//! itself, wiping the destination on a mismatch.
+//! The PAL checks `T` itself on every decrypt, wiping the destination on
+//! a mismatch. With no tail, the engine is also given the tag it computes
+//! for a valid IO (`T' = T ⊕ (L ⊕ L')·H`), as the command path does: the
+//! engine fails a decrypt whose tag does not match, and a failed command
+//! costs an abort to free its engine slot, so only a forged IO pays for
+//! one. With a tail, `T'` would need `H⁻¹`, so the engine gets a zero tag
+//! and reports the tag it computed despite the mismatch.
 //!
 //! An AAD-only GCM (`n = 0`) runs on the engine too, which copies the AAD
 //! through and tags the padded AAD, and is corrected the same way (the FP
-//! firmware and Manticore's `gcm_tag_correct_aad_only` do likewise). Only
+//! firmware's `gcm_tag_correct_aad_only` does likewise). Only
 //! a GCM with no SGL data at all has its tag computed in software, over
 //! the tail alone.
 
@@ -259,6 +263,18 @@ fn sgl_desc(sqe: &[u32], dw: usize) -> HsmResult<[u8; 16]> {
     Ok(d)
 }
 
+/// Whether a bulk IO keyed with `kind` is a FIPS-approved service.
+///
+/// The bulk GCM and XTS self-tests run pre-operationally and periodically
+/// (`self_test::bulk`), and a failure stops the HSM, so no IO completes
+/// once one has failed.
+fn fips_approved(kind: HsmVaultKeyKind) -> bool {
+    matches!(
+        kind,
+        HsmVaultKeyKind::AesGcmBulk256 | HsmVaultKeyKind::AesXtsBulk256
+    )
+}
+
 /// Constant-time equality of two equal-length secrets.
 fn constant_time_eq_slice(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -337,13 +353,20 @@ impl UnoHsmPal {
             let tag = s.gmac(&g.f)?;
             return self.bulk_finish(io, &host, &g, tag, &s, &mut cqe).await;
         }
+        let engine_tag = if g.f.encrypt || g.f.tail_len != 0 {
+            [0; AES_BLOCK_SIZE]
+        } else if g.fix {
+            let l_eng = len_block(g.f.pad, g.f.text);
+            xor(&gcm.tag, &mul_h(s.out(0), &xor(&g.f.l, &l_eng))?)
+        } else {
+            gcm.tag
+        };
         let cipher = HostCipher::Gcm {
             key,
             iv: &g.iv,
             aad_len: g.f.pad,
             unpadded_aad_len: gcm.aad_len as usize,
-            // Every decrypt is checked here, not by the engine.
-            tag: &[0; AES_BLOCK_SIZE],
+            tag: &engine_tag,
         };
         let tag = self.bcp.host(host.request(cipher)).await.and_then(|done| {
             if !(done.ok() || (!g.f.encrypt && done.tag_mismatch_only())) {
@@ -373,7 +396,7 @@ impl UnoHsmPal {
         cqe: &mut BulkCqe,
     ) -> HsmResult<()> {
         const XTS: &[HsmVaultKeyKind] = &[HsmVaultKeyKind::AesXtsBulk256];
-        let (key1, _) = bulk_vault_key(io, xts.key_id1, host.session_id, XTS)?;
+        let (key1, kind) = bulk_vault_key(io, xts.key_id1, host.session_id, XTS)?;
         let (key2, _) = bulk_vault_key(io, xts.key_id2, host.session_id, XTS)?;
         let [slot1, slot2] = scratch_views(io, [(KEY, 2), (0, 2)])?;
         let key1 = snapshot(slot1, key1)?;
@@ -397,7 +420,7 @@ impl UnoHsmPal {
         if !done.ok() {
             return Err(BcpError::CMD_ERROR);
         }
-        cqe.fips_approved = true;
+        cqe.fips_approved = fips_approved(kind);
         cqe.write(&mut io.bulk_cqe().0)
     }
 
@@ -412,7 +435,7 @@ impl UnoHsmPal {
         kind: HsmVaultKeyKind,
         s: &mut Scratch<'_>,
     ) -> HsmResult<GcmIo<'p>> {
-        let approved = kind == HsmVaultKeyKind::AesGcmBulk256;
+        let approved = fips_approved(kind);
         let encrypt = host.op == BcpOp::Encrypt;
         let mut iv = gcm.iv;
         if encrypt && approved {

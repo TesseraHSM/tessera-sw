@@ -282,12 +282,12 @@ pub enum BcpOp {
 /// GCM direction.
 pub type GcmOp = BcpOp;
 
-/// Source and destination of a GCM command: `[padded_AAD | text]`, which
-/// the engine writes back whole, copying the padded AAD through. Buffers
-/// must be [`BCP_ADDR_ALIGN`]-aligned and live in GSRAM the CDMA may
-/// master (the PAL DMA heap does).
+/// Source and destination of a command on GSRAM buffers. For a GCM they
+/// hold `[padded_AAD | text]`, which the engine writes back whole, copying
+/// the padded AAD through. Buffers must be [`BCP_ADDR_ALIGN`]-aligned and
+/// live in GSRAM the CDMA may master (the PAL DMA heap does).
 #[derive(Debug)]
-pub enum GcmData<'a> {
+pub enum BcpData<'a> {
     /// Read `src`, write `dst`, which is at least as long.
     Copy {
         src: &'a HsmDmaBuf,
@@ -297,7 +297,7 @@ pub enum GcmData<'a> {
     InPlace(&'a mut HsmDmaBuf),
 }
 
-impl GcmData<'_> {
+impl BcpData<'_> {
     /// Source address and length.
     fn src(&self) -> (u32, usize) {
         match self {
@@ -333,7 +333,25 @@ pub struct GcmRequest<'a> {
     /// `[padded_AAD | text]`; the text is a non-empty multiple of
     /// [`BCP_TEXT_ALIGN`], and the whole source at most
     /// [`BCP_MAX_SRC_LEN`] bytes.
-    pub data: GcmData<'a>,
+    pub data: BcpData<'a>,
+}
+
+/// One AES-256-XTS command on GSRAM buffers.
+#[derive(Debug)]
+pub struct XtsRequest<'a> {
+    pub op: BcpOp,
+    /// Data key ([`BCP_KEY_LEN`] bytes).
+    pub key1: &'a [u8],
+    /// Tweak key ([`BCP_KEY_LEN`] bytes).
+    pub key2: &'a [u8],
+    /// Initial tweak.
+    pub tweak: &'a [u8; BCP_TWEAK_LEN],
+    /// Data unit length encoding, as in [`HostCipher::Xts`].
+    pub dul: u8,
+    /// The text: a non-zero multiple of [`BCP_TEXT_ALIGN`], at most
+    /// [`BCP_MAX_SRC_LEN`] bytes, with the same alignment and placement
+    /// rules as [`BcpData`].
+    pub data: BcpData<'a>,
 }
 
 /// Cipher of a [`HostRequest`].
@@ -518,6 +536,20 @@ impl BcpDriver {
         }
     }
 
+    /// Submit an AES-256-XTS command on GSRAM buffers and await its
+    /// completion. Behaves as [`gcm`](Self::gcm) otherwise, cancellation
+    /// included.
+    pub fn xts<'a>(
+        &'a self,
+        req: XtsRequest<'a>,
+    ) -> impl Future<Output = HsmResult<GcmCompletion>> + 'a {
+        CmdFuture {
+            bcp: self,
+            cmd: Cmd::local_xts(req),
+            id: None,
+        }
+    }
+
     /// Submit an AES-256-GCM or AES-256-XTS command on host memory and
     /// await its completion; see [`HostRequest`]. Behaves as
     /// [`gcm`](Self::gcm) otherwise, cancellation included.
@@ -623,6 +655,37 @@ impl<'a> Cmd<'a> {
         })
     }
 
+    /// An XTS command on GSRAM buffers, described as in
+    /// [`local`](Self::local).
+    fn local_xts(req: XtsRequest<'a>) -> HsmResult<Self> {
+        let (src, len) = req.data.src();
+        let (dst, dst_len) = req.data.dst();
+        if req.key1.len() != BCP_KEY_LEN || req.key2.len() != BCP_KEY_LEN {
+            return Err(BcpError::INVALID_KEY_LEN);
+        }
+        if len == 0
+            || !len.is_multiple_of(BCP_TEXT_ALIGN)
+            || len > BCP_MAX_SRC_LEN
+            || dst_len < len
+            || req.dul > 3
+            || !(src as usize).is_multiple_of(BCP_ADDR_ALIGN)
+            || !(dst as usize).is_multiple_of(BCP_ADDR_ALIGN)
+        {
+            return Err(BcpError::INVALID_DATA_LEN);
+        }
+        Ok(Self {
+            process_type: PROCESS_XTS_ENCRYPT + u8::from(req.op == BcpOp::Decrypt),
+            dul: req.dul,
+            key1: req.key1,
+            key2: Some(req.key2),
+            len,
+            src: data_block(src, len),
+            dst: data_block(dst, len),
+            if_sel: 0,
+            aux: Aux::Xts { tweak: req.tweak },
+        })
+    }
+
     /// A command on host memory.
     fn host(req: HostRequest<'a>) -> HsmResult<Self> {
         if req.len == 0
@@ -694,9 +757,10 @@ fn data_block(addr: u32, len: usize) -> [u8; 16] {
     d
 }
 
-/// The future [`BcpDriver::gcm`] and [`BcpDriver::host`] return. It owns
-/// its command from submission until the completion is consumed, so that
-/// dropping it mid-flight can wait for the engine before the buffers go.
+/// The future [`BcpDriver::gcm`], [`BcpDriver::xts`] and [`BcpDriver::host`]
+/// return. It owns its command from submission until the completion is
+/// consumed, so that dropping it mid-flight can wait for the engine before
+/// the buffers go.
 struct CmdFuture<'a> {
     bcp: &'a BcpDriver,
     /// The command, or why it is invalid.

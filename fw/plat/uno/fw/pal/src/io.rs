@@ -588,7 +588,7 @@ impl HsmIoController for UnoHsmPal {
                 // when the SQ is recreated (see `grant_credit`).
                 self.bulk_iic_for(io.index).free_io(io.index, queue_id);
             }
-            self.io_in_flight_dec();
+            self.io_in_flight_dec(HsmIoKind::Bulk);
             return Ok(());
         }
         // Scrub both per-IO scratch buffers *before* returning the slot to
@@ -596,7 +596,7 @@ impl HsmIoController for UnoHsmPal {
         // next IO that reuses the slot.
         self.scrub_io_slot(io.index).await;
         self.iic.free_io(io.index, queue_id);
-        self.io_in_flight_dec();
+        self.io_in_flight_dec(HsmIoKind::Cmd);
         Ok(())
     }
 }
@@ -729,7 +729,7 @@ impl UnoHsmPal {
             self.scrub_io_slot_cpu(index);
             self.iic
                 .free_io(index, self.detached[index as usize].get().queue_id);
-            self.io_in_flight_dec();
+            self.io_in_flight_dec(HsmIoKind::Cmd);
         }
     }
 
@@ -749,7 +749,7 @@ impl UnoHsmPal {
     /// marks a bulk slot busy.
     pub(crate) fn accept_io(&self, rx: Received, kind: HsmIoKind) -> UnoHsmIo {
         let index = rx.index;
-        self.io_in_flight_inc();
+        self.io_in_flight_inc(kind);
         match kind {
             HsmIoKind::Cmd => {
                 reset_io_alloc(self, index);
@@ -791,13 +791,16 @@ impl UnoHsmPal {
 }
 
 impl UnoHsmPal {
-    /// All accepted host IOs have completed and no inbound IO remains unclaimed.
+    /// All accepted host command IOs have completed and no inbound command IO
+    /// remains unclaimed.
+    ///
+    /// Bulk IOs are not counted: Admin quiesces only the command queues for
+    /// the RNG self-test, so under steady bulk traffic some bulk IO is
+    /// almost always in flight. They need not be: a bulk IO reads the DRBG
+    /// only synchronously (its GCM IV), and the engines it waits on (BCP,
+    /// GDMA, AES) do not draw from it.
     pub(crate) fn host_io_drained(&self) -> bool {
-        #[cfg(not(feature = "bulk_crypto"))]
-        if self.bulk_iic.has_pending_io() || self.bulk_fp2_iic.has_pending_io() {
-            return false;
-        }
-        self.io_in_flight() == 0 && !self.iic.has_pending_io()
+        self.cmd_io_in_flight() == 0 && !self.iic.has_pending_io()
     }
 
     /// Runs `f` as an *admin session* over the dedicated admin IO slot

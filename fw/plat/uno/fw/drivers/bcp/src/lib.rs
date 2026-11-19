@@ -8,8 +8,9 @@
 //!
 //! The PQC build gives the FP cores to PQC, so the HSM drives this engine
 //! directly: as the Uno PAL's AES-GCM ([`BcpDriver::gcm`], on GSRAM
-//! buffers) and for host bulk AES-GCM/XTS IOs ([`BcpDriver::host`], on
-//! the host's SGLs). With `bulk_crypto` the FP firmware owns the engine
+//! buffers), for host bulk AES-GCM/XTS IOs ([`BcpDriver::host`], on the
+//! host's SGLs), and for the bulk XTS self-test ([`BcpDriver::xts`], on
+//! GSRAM buffers). With `bulk_crypto` the FP firmware owns the engine
 //! for host bulk IOs, and the HSM must not touch it.
 //! The driver programs one 32-entry submission/completion queue pair and
 //! DFL list 0 in GSRAM, and submits AES-256 commands of up to four 4 KiB
@@ -38,7 +39,7 @@
 //!     unpadded_aad_len: 20,
 //!     tag: &[0; BCP_TAG_LEN],
 //!     // [padded_AAD | text] -> [padded_AAD | ciphertext]
-//!     data: GcmData::InPlace(buf),
+//!     data: BcpData::InPlace(buf),
 //! }).await?;
 //! ```
 

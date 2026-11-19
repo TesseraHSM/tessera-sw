@@ -34,7 +34,4 @@ impl AesError {
 
     /// AES engine reported a fault error.
     pub const FAULT_ERROR: HsmError = make_component_error(ComponentId::AES, 7);
-
-    /// All waiter queue slots are occupied.
-    pub const QUEUE_FULL: HsmError = make_component_error(ComponentId::AES, 8);
 }
