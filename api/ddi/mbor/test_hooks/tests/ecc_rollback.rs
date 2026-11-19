@@ -7,12 +7,12 @@
 //!
 //! Test flow:
 //! 1. Establish a fresh credential and open a session, then generate app-scoped
-//!    signing key pairs until the vault reports NotEnoughSpace.
+//!    signing key pairs until the vault is full.
 //! 2. Keep an existing key and delete another to free one key-pair allocation.
 //! 3. Arm TriggerIoFailure and generate again. Expect InvalidKeyType after key
 //!    creation, requiring rollback of the attempt-owned key pair.
 //! 4. Retry in the same session: one generation must succeed and the next must
-//!    report NotEnoughSpace, proving exactly one allocation was reclaimed.
+//!    report vault full, proving exactly one allocation was reclaimed.
 //! 5. Sign a digest with the retained key to check it survived rollback.
 //! 6. Delete every generated key, also attempting cleanup if an assertion panics.
 
@@ -55,7 +55,7 @@ fn test_ecc_generate_with_rollback_after_exhaust_keys() {
                 for _ in 0..=u16::MAX {
                     match generate(dev) {
                         Ok(resp) => keys.push(resp.data.private_key_id),
-                        Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace)) => {
+                        Err(err) if rollback::vault_full(&err) => {
                             full = true;
                             break;
                         }
@@ -92,10 +92,7 @@ fn test_ecc_generate_with_rollback_after_exhaust_keys() {
                     keys.push(resp.data.private_key_id);
                 }
                 assert!(
-                    matches!(
-                        full_again,
-                        Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace))
-                    ),
+                    full_again.as_ref().is_err_and(rollback::vault_full),
                     "Expected exactly one reclaimed allocation, got {full_again:?}"
                 );
 

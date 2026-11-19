@@ -8,10 +8,10 @@
 //! Test flow:
 //! 0. Probe TriggerIoFailure; skip on UnsupportedCmd, otherwise disarm it.
 //! 1. Prepare and track command-specific input keys, then create outputs until
-//!    NotEnoughSpace. Retain one output and delete another to free an allocation.
+//!    the vault is full (NotEnoughSpace or DefragmentationNeeded). Retain one output and delete another to free an allocation.
 //! 2. Arm TriggerIoFailure and require InvalidKeyType from the next creation.
 //! 3. Retry in the same session: exactly one creation must succeed before
-//!    NotEnoughSpace returns again, checking rollback before teardown can hide leaks.
+//!    the vault is full again, checking rollback before teardown can hide leaks.
 //! 4. Run the caller's retained/recovered-key verification. The ordinary AES
 //!    wrapper uses encrypt/decrypt round trips; bulk tests supply their own checks.
 //! 5. Attempt deletion of every tracked output and input, including on panic.
@@ -27,6 +27,15 @@ use tsra_ddi_mbor_test_hooks::TestActionRequest;
 use tsra_ddi_mbor_types::*;
 
 use crate::common::*;
+
+/// The vault cannot fit another key of this size. On a fragmented vault the
+/// firmware reports DefragmentationNeeded instead of NotEnoughSpace.
+pub fn vault_full(err: &DdiError) -> bool {
+    matches!(
+        err,
+        DdiError::DdiStatus(DdiStatus::NotEnoughSpace | DdiStatus::DefragmentationNeeded)
+    )
+}
 
 pub fn check_key_rollback<T>(
     dev: &mut <DdiTest as Ddi>::Dev,
@@ -68,7 +77,7 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
         for _ in 0..=u16::MAX {
             match create(dev, &input) {
                 Ok(key_id) => keys.push(key_id),
-                Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace)) => {
+                Err(err) if vault_full(&err) => {
                     full = true;
                     break;
                 }
@@ -101,10 +110,7 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
             keys.push(*key_id);
         }
         assert!(
-            matches!(
-                full_again,
-                Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace))
-            ),
+            full_again.as_ref().is_err_and(vault_full),
             "Expected exactly one reclaimed allocation, got {full_again:?}"
         );
         verify(dev, &input, retained, recovered);
@@ -227,7 +233,7 @@ pub fn measure_aes_capacity(dev: &<DdiTest as Ddi>::Dev, session_id: u16) -> usi
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             ) {
                 Ok(resp) => keys.push(resp.data.key_id),
-                Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace)) => return keys.len(),
+                Err(err) if vault_full(&err) => return keys.len(),
                 Err(err) => panic!("Unexpected capacity probe error: {err:?}"),
             }
         }

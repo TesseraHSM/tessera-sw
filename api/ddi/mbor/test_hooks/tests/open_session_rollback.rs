@@ -81,7 +81,8 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
                         Ok(resp) => sessions.push((candidate, resp.data.sess_id)),
                         Err(DdiError::DdiStatus(
                             status @ (DdiStatus::VaultSessionLimitReached
-                            | DdiStatus::NotEnoughSpace),
+                            | DdiStatus::NotEnoughSpace
+                            | DdiStatus::DefragmentationNeeded),
                         )) => {
                             exhaustion = Some(status);
                             target = Some((candidate, None));
@@ -142,7 +143,13 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
                     sessions.push((probe, resp.data.sess_id));
                 }
                 assert!(
-                    matches!(full_again, Err(DdiError::DdiStatus(status)) if status == exhaustion),
+                    match &full_again {
+                        Err(DdiError::DdiStatus(status)) if *status == exhaustion => true,
+                        Err(err) =>
+                            exhaustion != DdiStatus::VaultSessionLimitReached
+                                && rollback::vault_full(err),
+                        Ok(_) => false,
+                    },
                     "Expected exactly one reclaimed session, got {full_again:?}"
                 );
                 assert_eq!(

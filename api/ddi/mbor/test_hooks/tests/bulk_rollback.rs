@@ -19,7 +19,7 @@
 //! 4. Arm TriggerIoFailure and issue the command again. Expect InvalidKeyType
 //!    after output creation, exercising rollback of the attempt-owned bulk key.
 //! 5. Retry without resetting the device: one creation must succeed, and the next
-//!    must report NotEnoughSpace. This checks reclamation without losing other keys.
+//!    must report vault full. This checks reclamation without losing other keys.
 //! 6. Encrypt and decrypt with both the retained and recovered outputs. For
 //!    UnmaskKey, also verify that the original source key remains usable.
 //!    Approved GCM decryption uses the IV returned by encryption.

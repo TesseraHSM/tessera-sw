@@ -6,12 +6,12 @@
 //! Test flow:
 //! 1. Establish a fresh credential and open a session. Wait for the unwrapping
 //!    key to become available, then RSA-AES-wrap AES key material on the host.
-//! 2. Repeatedly unwrap that blob into app-scoped AES keys until NotEnoughSpace.
+//! 2. Repeatedly unwrap that blob into app-scoped AES keys until the vault is full.
 //!    Keep an existing output and delete another to free one allocation.
 //! 3. Arm TriggerIoFailure and unwrap again. Expect InvalidKeyType after output
 //!    creation, requiring rollback of the attempt-owned AES key.
 //! 4. Retry with the same unwrapping key and blob, without session cleanup. One
-//!    unwrap must succeed and the next must report NotEnoughSpace.
+//!    unwrap must succeed and the next must report vault full.
 //! 5. Encrypt and decrypt with the retained and recovered AES keys, then delete
 //!    all output keys, also attempting cleanup if an assertion panics.
 

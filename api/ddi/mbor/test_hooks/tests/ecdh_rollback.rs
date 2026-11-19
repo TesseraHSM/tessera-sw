@@ -9,11 +9,11 @@
 //! 1. Establish a fresh credential and open a session. Generate a private input
 //!    key and a peer key pair for ECDH.
 //! 2. Repeatedly derive app-scoped secrets from the same input and peer public
-//!    key until NotEnoughSpace, then delete one secret to free an allocation.
+//!    key until the vault is full, then delete one secret to free an allocation.
 //! 3. Arm TriggerIoFailure and derive again. Expect InvalidKeyType after secret
 //!    creation, requiring rollback of the attempt-owned secret.
 //! 4. Retry with the original input keys in the same session. One derivation
-//!    must succeed and the next must report NotEnoughSpace, checking allocation
+//!    must succeed and the next must report vault full, checking allocation
 //!    reclamation and preservation of the input private key.
 //! 5. Delete derived secrets and both input key pairs, also attempting cleanup
 //!    if an assertion panics.
@@ -78,7 +78,7 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
                 for _ in 0..=u16::MAX {
                     match derive(dev) {
                         Ok(resp) => secrets.push(resp.data.key_id),
-                        Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace)) => {
+                        Err(err) if rollback::vault_full(&err) => {
                             full = true;
                             break;
                         }
@@ -111,10 +111,7 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
                     secrets.push(resp.data.key_id);
                 }
                 assert!(
-                    matches!(
-                        full_again,
-                        Err(DdiError::DdiStatus(DdiStatus::NotEnoughSpace))
-                    ),
+                    full_again.as_ref().is_err_and(rollback::vault_full),
                     "Expected exactly one reclaimed allocation, got {full_again:?}"
                 );
             }));
