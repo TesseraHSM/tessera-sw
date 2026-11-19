@@ -32,13 +32,13 @@ variable-length data section.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `device_kind` | `uint8` (inline) | Device kind: `1` = Virtual, `2` = Physical. Unknown values round-trip as `DeviceKind(x)`. |
+| 8 | `device_kind` | `uint8` (inline) | Device kind: `1` = Virtual, `2` = Physical. Unknown values round-trip as `DeviceKind(x)`. |
 | 12 | `part_state` | `uint8` (inline) | Partition lifecycle state: `0` = Unallocated, `1` = Allocated, `2` = Enabled, `3` = Disabled, `4` = Initializing. |
 | 16 | `generation` | `uint32` (offset/len) | Monotonic partition generation counter. |
 | 20 | `owner_svn` | `uint64` (offset/len) | Owner-seed (BKS2) selector currently in effect. |
 | 24 | `mfgr_svn` | `uint64` (offset/len) | Manufacturer-seed (BKS1) selector — the current firmware SVN. |
 | 28 | `pid` | `buffer` (offset/len) | Opaque 16-byte partition identity (PID). |
-| 32 | `pid_pub_key` | `buffer` (offset/len) | Raw ECC-P384 identity public key (`x ‖ y`, 96 B, each 48-byte coordinate little-endian; SEC1 `0x04` prefix stripped). |
+| 32 | `pid_pub_key` | `buffer` (offset/len) | Raw ECC-P384 identity public key (`x ‖ y`, 96 B, each 48-byte coordinate big-endian on every device; SEC1 `0x04` prefix stripped). |
 
 ### Data section
 

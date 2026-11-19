@@ -45,6 +45,8 @@ use tsra_ddi_mbor_test_helpers::RsaParts;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P256;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P384;
 use tsra_ddi_mbor_test_helpers::ECC_TEST_P521;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
@@ -94,7 +96,7 @@ fn unwrap_wait() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Returns the unwrapping public key (`n_le ‖ e_le`), waiting while the
+/// Returns the unwrapping public key (`n ‖ e`, device byte order), waiting while the
 /// device reports `PendingKeyGeneration`.
 fn unwrapping_pub(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
     let deadline = Instant::now() + unwrap_wait();
@@ -125,6 +127,24 @@ fn import_rejected(
 }
 
 // ───────────────────────── host keys ─────────────────────────
+
+/// The device's public key for `key`: each coordinate in device byte
+/// order, zero-padded to the wire coordinate length.
+fn ecc_wire_pub(key: &HostEcc) -> Vec<u8> {
+    let coord = wire_coord_len(key.curve.raw);
+    let mut out = Vec::with_capacity(2 * coord);
+    for c in [&key.x, &key.y] {
+        let mut dev = dev_rev(c);
+        dev.resize(coord, 0);
+        out.extend(dev);
+    }
+    out
+}
+
+/// The device's public key for `parts`: `n ‖ e`, each in device byte order.
+fn rsa_wire_pub(parts: &RsaParts) -> Vec<u8> {
+    [dev_rev(&parts.n), dev_rev(&parts.e)].concat()
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Curve {
@@ -160,7 +180,13 @@ fn host_rsa(k: usize) -> (RsaPrivateKey, RsaParts) {
 /// Runs ECDH with `masked_key` against a fresh host peer key.
 fn assert_derives(ctx: &TestCtx, session_id: u16, curve: Curve, masked_key: Vec<u8>) {
     let peer = HostEcc::generate(curve.ecc);
-    let secret = derive(ctx, session_id, SCOPE_LOCAL, masked_key, peer.wire_pub());
+    let secret = derive(
+        ctx,
+        session_id,
+        SCOPE_LOCAL,
+        masked_key,
+        ecc_wire_pub(&peer),
+    );
     assert_eq!(
         secret.len(),
         232 + curve.ecc.raw.next_multiple_of(16),
@@ -219,7 +245,7 @@ fn import_ecc_roundtrip(curve: Curve, usage: u64) {
     );
     assert_eq!(
         resp.pub_key,
-        key.wire_pub(),
+        ecc_wire_pub(&key),
         "re-derived public key must match the host key"
     );
     assert_ecc_works(
@@ -290,7 +316,7 @@ fn import_rsa_altered(k: usize, crt: bool, usage: u64, alter: impl Fn(&mut RsaPa
     );
     assert_eq!(
         resp.pub_key,
-        parts.wire_pub(),
+        rsa_wire_pub(&parts),
         "re-derived n ‖ e must match the host key"
     );
     assert_rsa_works(&ctx, session.session_id, &key, resp.masked_key, usage);
@@ -814,7 +840,7 @@ fn reject_repeated_then_ecc_valid() {
             SIGN_VERIFY,
             &key.pkcs8(),
         );
-        assert_eq!(resp.pub_key, key.wire_pub(), "re-derived public key");
+        assert_eq!(resp.pub_key, ecc_wire_pub(&key), "re-derived public key");
         assert_ecc_signs(
             &ctx,
             session.session_id,
@@ -972,7 +998,7 @@ fn generate_roundtrip(curve: Curve, usage: u64) {
         .expect("EccGenerateKey");
     assert_eq!(
         resp.pub_key.len(),
-        2 * curve.ecc.wire_coord,
+        2 * wire_coord_len(curve.ecc.raw),
         "wire public key length"
     );
     assert_ecc_works(
@@ -1024,7 +1050,7 @@ fn unwrapping_key_available_and_stable() {
     let session = finalized_co_session(&ctx);
     let first = unwrapping_pub(&ctx, session.session_id);
     let second = unwrapping_pub(&ctx, session.session_id);
-    assert_eq!(first.len(), 260, "RSA-2048 n_le ‖ e_le");
+    assert_eq!(first.len(), 260, "RSA-2048 n ‖ e");
     assert_eq!(first, second, "the unwrapping key must be stable");
     assert!(first.iter().any(|&b| b != 0), "a published key is non-zero");
 }

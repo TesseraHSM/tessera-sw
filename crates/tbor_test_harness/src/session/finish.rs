@@ -16,13 +16,11 @@
 
 use tsra_crypto::AesKey;
 use tsra_crypto::Rng;
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
 use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::SEED_ENVELOPE_LEN;
 use tsra_ddi_tbor_types::SESSION_SEED_LEN;
 use tsra_session_ex_crypto::build_phase2_mac;
@@ -31,6 +29,7 @@ use tsra_session_ex_crypto::seal_seed_envelope;
 use zeroize::Zeroizing;
 
 use super::init::PendingHandshake;
+use crate::fixture::TestDev;
 
 /// Active session state carried through downstream in-session tests.
 ///
@@ -119,7 +118,7 @@ fn fresh_seed() -> Result<[u8; SESSION_SEED_LEN], DdiError> {
 /// so callers cannot accidentally reuse stale state for a second
 /// `SessionOpenFinish` against the same Pending slot.
 pub fn session_open_finish(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     pending: PendingHandshake,
 ) -> Result<SessionHandshake, DdiError> {
     let mac_fin = build_mac_fin(&pending)?;
@@ -132,7 +131,7 @@ pub fn session_open_finish(
 /// On Phase-2 MAC mismatch the FW returns an error that surfaces here
 /// as a [`DdiError`] from `exec_op_tbor`.
 pub fn session_open_finish_with_mac(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     pending: PendingHandshake,
     mac_fin: [u8; 48],
 ) -> Result<SessionHandshake, DdiError> {
@@ -149,8 +148,16 @@ pub fn session_open_finish_with_mac(
         mac_fin,
         seed_envelope,
     };
+    // On Duo this travels sealed under the transport registered at Phase 1.
     let mut cookie = None;
-    let resp: TborSessionOpenFinishResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
+    let resp: TborSessionOpenFinishResp =
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .inspect_err(|err| {
+                // Firmware reclaims the slot after an authentication failure.
+                if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
+                    dev.remove_session_transport(pending.session_id);
+                }
+            })?;
 
     Ok(SessionHandshake {
         session_id: pending.session_id,

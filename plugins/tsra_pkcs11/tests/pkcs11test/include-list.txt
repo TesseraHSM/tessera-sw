@@ -141,6 +141,7 @@ ReadOnlySessionTest.DigestInitInvalid
 ReadOnlySessionTest.DigestTestVectors
 ReadOnlySessionTest.EnumerateObjects
 ReadOnlySessionTest.GenerateKeyInvalid
+ReadOnlySessionTest.GenerateKeyPairInvalid
 ReadOnlySessionTest.GenerateRandom
 ReadOnlySessionTest.InvalidSessionInfo
 ReadOnlySessionTest.SeedRandom

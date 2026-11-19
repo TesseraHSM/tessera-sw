@@ -57,11 +57,11 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     super::key_attrs::check_session_key_tag(attrs, body.key_tag)?;
 
     // Generate the random AES key bytes into a scratch buffer.  The
-    // PAL's `aes_gen_key` wraps the CSPRNG and validates the buffer
+    // PAL's `aes_gen_key` wraps the CSPRNG and validates the requested
     // length, so the handler just sizes the buffer per the requested
     // key kind.
     let key_buf = pal.dma_alloc(io, key_len)?;
-    pal.aes_gen_key(io, key_buf).await?;
+    pal.aes_gen_key(io, key_len, Some(key_buf)).await?;
 
     // Bulk keys go through the platform bulk-crypto path, which also
     // assigns the `bulk_key_id`; non-bulk keys are stored directly.  A

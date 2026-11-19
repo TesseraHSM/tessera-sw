@@ -195,7 +195,7 @@ pub enum HsmVaultKeyKind {
     /// Partition Unique Secret — the 48 B HMAC-SHA-384-sized root of the
     /// partition key schedule.  Initially the Unique Machine Secret (UMS)
     /// derived in `PartInit` from `UDS` plus the request-side inputs
-    /// (`MachineSeed`, `PartPolicy`, `POTAThumbprint`); `PartFinal`
+    /// (`MachineSeed`, `PartPolicy`); `PartFinal`
     /// replaces it with the Unique Partition Secret (UPS).
     ///
     /// Persisted in the partition key vault for the lifetime of the
@@ -496,8 +496,15 @@ pub struct HsmVaultKeyAttrs {
     rsvd: u64,
 }
 
-/// RAII guard for a newly created vault key.
-///
+/// Consistency test required before storing a restored unwrapping key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmVaultPct {
+    /// Ordinary vault storage; asymmetric assurance is performed by its caller.
+    None,
+    /// RSA-2048 encrypt/decrypt PCT for the partition's unwrapping key.
+    UnwrappingKey,
+}
+
 /// HSM key vault interface.
 ///
 /// All accessor methods take an [`HsmIo`] handle, used to scope the
@@ -525,6 +532,8 @@ pub trait HsmVault: HsmIoTypes {
     ///   key.
     /// - `attrs` — PKCS#11-style permission bitfield (see
     ///   [`HsmVaultKeyAttrs`]).
+    /// - `pct` — explicitly selects the unwrapping-key PCT; ordinary keys
+    ///   use [`HsmVaultPct::None`]. A mismatched selector is rejected.
     ///
     /// # Returns
     ///
@@ -542,6 +551,7 @@ pub trait HsmVault: HsmIoTypes {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId>;
 
     /// Deletes a single key by ID.

@@ -211,6 +211,10 @@ impl<S: TableStorage> KeyVault<S> {
         key_id: HsmKeyId,
     ) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
+        // Key IDs carry an 8-bit slot, but only `ENTRIES_PER_TABLE` exist.
+        if slot >= ENTRIES_PER_TABLE {
+            return Err(HsmError::KeyNotFound);
+        }
         // Delete operates on any *present* key — live or disabled — so the
         // undo-log commit path can zeroize a soft-deleted (disabled) key.
         // Only a genuinely free slot is rejected (matches `delete_by_session`
@@ -263,6 +267,9 @@ impl<S: TableStorage> KeyVault<S> {
     ///   slot (a free slot cannot be enabled).
     pub fn enable(&mut self, key_id: HsmKeyId) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
+        if slot >= ENTRIES_PER_TABLE {
+            return Err(HsmError::KeyNotFound);
+        }
         // Disabled-aware lookup: a disabled entry is hidden from `entry`,
         // so read it raw and reject only a genuinely free slot.
         if self.storage.entry(table, slot)?.is_free() {

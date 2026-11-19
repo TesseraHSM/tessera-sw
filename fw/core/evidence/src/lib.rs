@@ -7,18 +7,19 @@
 //! Several TBOR SD commands (`SdCreateRemoteBackup`, `SdReseal`,
 //! `SdRestore*`, `SdCreatePeerBackup`) carry an attestation **evidence**
 //! context out of band: required manufacturer and partition-owner
-//! ECDSA-P384 X.509 chains, an optional device-owner chain, and a COSE_Sign1 key-
+//! X.509 chains with P-384 leaf keys, an optional device-owner chain, and a COSE_Sign1 key-
 //! attestation report. [`verify_evidence`] validates one such context and
 //! recovers the attested public key it vouches for.
 //!
 //! It enforces, in order:
 //!
 //! 1. the manufacturer and partition-owner chains are required; all supplied
-//!    chains validate as X.509 ECDSA chains;
+//!    chains validate as X.509 chains (ECDSA, RSA or pure ML-DSA issuers);
 //! 2. the manufacturer and optional owner chains are validated but **not** anchored;
 //! 3. the partition-owner chain is anchored to a **caller-selected**
-//!    key passed in [`TrustAnchors`] (a non-leaf certificate's public key
-//!    must equal it — the anchor endorses the leaf directly or
+//!    public-key thumbprint passed in [`TrustAnchors`] (a non-leaf
+//!    certificate's P-384 SPKI thumbprint must equal it — the anchor
+//!    endorses the leaf directly or
 //!    indirectly). The anchor is the POTA of the partition being attested:
 //!    the evidence-based `SdReseal`, `SdCreatePeerBackup`, and
 //!    `SdRestorePeerBackup` commands attest client/peer partitions and
@@ -41,14 +42,14 @@
 //! [`verify_receiver_cert_chain`]); the attestation evidence is optional
 //! and, when present, SAPOTA-anchored.
 //!
-//! The bulk DER/COSE items travel out of band as NVMe SGL Data Blocks; the
-//! caller passes the [`OobPtr`] locating them plus the per-item
-//! descriptors (see [`EvidenceRefs`]). Each certificate is copied into a
+//! The bulk DER/COSE items travel out of band; the caller passes the
+//! per-item descriptors (see [`EvidenceRefs`]) and each item is fetched
+//! with [`HsmIoController::recv_oob`]. Each certificate is copied into a
 //! nested, per-chain allocator scope that frees on return, so peak DMA use
 //! stays bounded regardless of chain depth.
 //!
-//! Keys and reports are P-384 / ES384 throughout (the SD sealing curve and
-//! the report signature algorithm).
+//! Leaf/attested keys and reports remain P-384 / ES384 (the SD sealing
+//! curve and report signature algorithm). Issuer keys may differ.
 
 #![no_std]
 
@@ -59,16 +60,16 @@ use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
 use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain as validate_cert_chain;
+use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_ddi_tbor_types::CertDescriptor;
 use tsra_fw_ddi_tbor_types::ReportDescriptor;
-use tsra_fw_hsm_oob::copy_oob;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmGdmaController;
+use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -87,13 +88,6 @@ pub const ATTESTED_KEY_LEN: usize = 1 + POINT_LEN;
 
 /// SEC1 uncompressed point tag (`0x04 ‖ X ‖ Y`).
 const SEC1_UNCOMPRESSED: u8 = 0x04;
-
-/// Reverse-copy `src` into `dst[..src.len()]` (LE↔BE per coordinate).
-fn reverse_copy(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
-        *d = *s;
-    }
-}
 
 /// Out-of-band locations of one attestation context's items: the three
 /// certificate-chain descriptor lists plus the attestation-report
@@ -117,8 +111,8 @@ pub struct EvidenceRefs<'a> {
 /// the partition-owner chain must be endorsed (directly or indirectly) by
 /// [`part_owner_anchor`](Self::part_owner_anchor).
 pub struct TrustAnchors<'a> {
-    /// Public key the partition-owner chain must chain to: raw `X ‖ Y`,
-    /// big-endian, exactly [`POINT_LEN`] bytes.  The **optional** evidence
+    /// Public-key thumbprint (SHA-384 of the canonical P-384 SPKI) the
+    /// partition-owner chain must chain to.  The **optional** evidence
     /// verified by [`SdCreateRemoteBackup`] and [`SdRestoreRemoteBackup`]
     /// anchors here to the policy **SAPOTA** key; the evidence-based
     /// `SdReseal`, `SdCreatePeerBackup`, and `SdRestorePeerBackup` commands
@@ -126,16 +120,16 @@ pub struct TrustAnchors<'a> {
     ///
     /// [`SdCreateRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupReq
     /// [`SdRestoreRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq
-    pub part_owner_anchor: &'a [u8],
+    pub part_owner_anchor: &'a [u8; SPKI_THUMBPRINT_LEN],
     /// Require an HSM-generated SD sealing key, not an ordinary attested key.
     pub require_sd_sealing: bool,
 }
 
 /// Validate a receiver key certificate chain and recover its leaf key.
 ///
-/// Validates `chain` as an X.509 ECDSA-P384 chain (root→leaf), requiring a
-/// **non-leaf** certificate's public key to byte-match `sata_anchor` (the
-/// policy SATA key), and writes the leaf public key — the receiver public
+/// Validates `chain` as an X.509 chain with a P-384 leaf (root→leaf),
+/// requiring a **non-leaf** certificate's public-key thumbprint to equal
+/// `sata_anchor` (the policy `sata_spki_thumbprint`), and writes the leaf public key — the receiver public
 /// key (`RcvrPub`) — into `rcvr_pub` in SEC1 uncompressed big-endian form
 /// (`0x04 ‖ X ‖ Y`, [`ATTESTED_KEY_LEN`] bytes).
 ///
@@ -145,30 +139,28 @@ pub struct TrustAnchors<'a> {
 ///
 /// # Errors
 ///
-/// * [`HsmError::InvalidArg`] — `sata_anchor` is not [`POINT_LEN`] bytes,
-///   `rcvr_pub` is too small, the chain is empty, or no non-leaf
+/// * [`HsmError::InvalidArg`] — `rcvr_pub` is too small, the chain is empty, or no non-leaf
 ///   certificate matches `sata_anchor`.
 /// * `X509…` errors — a certificate is malformed or its signature / chain
 ///   linkage is invalid (propagated from the chain validator).
 pub async fn verify_receiver_cert_chain<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     chain: &[CertDescriptor],
-    sata_anchor: &[u8],
+    sata_anchor: &[u8; SPKI_THUMBPRINT_LEN],
     rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
-    if sata_anchor.len() != POINT_LEN || rcvr_pub.len() < ATTESTED_KEY_LEN {
+    if rcvr_pub.len() < ATTESTED_KEY_LEN {
         return Err(HsmError::InvalidArg);
     }
 
     // The validated leaf point (`X ‖ Y`, big-endian) is the receiver key;
     // prefix the SEC1 uncompressed tag so it is ready for the HPKE seal.
     let mut leaf = [0u8; POINT_LEN];
-    validate_chain(pal, io, oob, chain, Some(sata_anchor), &mut leaf).await?;
+    validate_chain(pal, io, chain, Some(sata_anchor), &mut leaf).await?;
     rcvr_pub[0] = SEC1_UNCOMPRESSED;
     rcvr_pub[1..ATTESTED_KEY_LEN].copy_from_slice(&leaf);
     Ok(())
@@ -203,16 +195,15 @@ where
 pub async fn verify_evidence<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     refs: &EvidenceRefs<'_>,
     anchors: &TrustAnchors<'_>,
     attested_key: &mut HsmDmaBuf,
     policy_hash_out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
-    if anchors.part_owner_anchor.len() != POINT_LEN || attested_key.len() < ATTESTED_KEY_LEN {
+    if attested_key.len() < ATTESTED_KEY_LEN {
         return Err(HsmError::InvalidArg);
     }
     let coord = COORD_LEN;
@@ -220,24 +211,23 @@ where
     // Reqs 1–2: the manufacturer chain (no anchor) fixes the canonical leaf
     // key; an optional owner chain (no anchor) must share it (req 4).
     let mut canonical = [0u8; POINT_LEN];
-    validate_chain(pal, io, oob, refs.mfgr_chain, None, &mut canonical).await?;
+    validate_chain(pal, io, refs.mfgr_chain, None, &mut canonical).await?;
 
     let mut leaf = [0u8; POINT_LEN];
     if !refs.owner_chain.is_empty() {
-        validate_chain(pal, io, oob, refs.owner_chain, None, &mut leaf).await?;
+        validate_chain(pal, io, refs.owner_chain, None, &mut leaf).await?;
         if leaf != canonical {
             return Err(HsmError::InvalidArg);
         }
     }
 
     // Reqs 1, 3, 4: the partition-owner chain must validate, be anchored to
-    // the caller-selected `anchors.part_owner_anchor` (the policy POTA key
-    // for reseal/peer, the policy SAPOTA key for remote create/restore),
+    // the caller-selected `anchors.part_owner_anchor` (the policy POTA
+    // thumbprint for reseal/peer, SAPOTA for remote create/restore),
     // and share the canonical leaf key.
     validate_chain(
         pal,
         io,
-        oob,
         refs.part_owner_chain,
         Some(anchors.part_owner_anchor),
         &mut leaf,
@@ -260,16 +250,17 @@ where
 
     pal.alloc_scoped_async(io, async |ra| -> HsmResult<()> {
         let report = ra.dma_alloc(report_len)?;
-        copy_oob(pal, io, oob, report_index, report).await?;
+        pal.recv_oob(io, report_index, report).await?;
 
         // The leaf point is big-endian (X.509); `verify_key_report`'s
-        // `signer_pub` is the `ecc_verify` wire form (little-endian per
+        // `signer_pub` is the `ecc_verify` wire form (operand order per
         // coordinate).
-        let leaf_le = ra.dma_alloc(POINT_LEN)?;
-        reverse_copy(&mut leaf_le[..coord], &canonical[..coord]);
-        reverse_copy(&mut leaf_le[coord..2 * coord], &canonical[coord..2 * coord]);
+        let leaf = ra.dma_alloc(POINT_LEN)?;
+        let (leaf_x, leaf_y) = leaf.split_at_mut(coord);
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_x, &canonical[..coord])?;
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_y, &canonical[coord..2 * coord])?;
 
-        if !verify_key_report(pal, io, ra, report, leaf_le).await? {
+        if !verify_key_report(pal, io, ra, report, leaf).await? {
             return Err(HsmError::InvalidArg);
         }
 
@@ -313,23 +304,23 @@ where
 /// sources each certificate's DER from the OOB SGL page (by descriptor
 /// index) and runs the whole walk inside a nested allocator scope that
 /// frees on return, so only the caller's small `leaf_out` survives. The
-/// walker double-buffers, so peak DMA stays bounded regardless of chain
-/// depth. On success the validated leaf public point (`X ‖ Y`, big-endian)
+/// walker borrows adjacent DER views without issuer copies, so peak DMA
+/// stays bounded by the largest adjacent pair regardless of chain depth.
+/// On success the validated leaf public point (`X ‖ Y`, big-endian)
 /// is copied into `leaf_out`.
 ///
-/// When `anchor` is `Some`, at least one **non-leaf** certificate's public
-/// point must byte-match it (both big-endian) — the trust-anchor binding.
+/// When `anchor` is `Some`, at least one **non-leaf** certificate's P-384
+/// public-key thumbprint must equal it — the trust-anchor binding.
 /// A chain with no matching anchor is rejected with [`HsmError::InvalidArg`].
 async fn validate_chain<P>(
     pal: &P,
     io: &P::Io,
-    oob: &OobPtr,
     chain: &[CertDescriptor],
-    anchor: Option<&[u8]>,
+    anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     leaf_out: &mut [u8],
 ) -> HsmResult<()>
 where
-    P: HsmGdmaController + HsmAlloc + HsmCrypto,
+    P: HsmIoController + HsmAlloc + HsmCrypto,
 {
     pal.alloc_scoped_async(io, async |ca| -> HsmResult<()> {
         validate_cert_chain(
@@ -339,7 +330,7 @@ where
             chain,
             anchor,
             leaf_out,
-            async |index: usize, buf: &mut HsmDmaBuf| copy_oob(pal, io, oob, index, buf).await,
+            async |index: usize, buf: &mut HsmDmaBuf| pal.recv_oob(io, index, buf).await,
         )
         .await
     })

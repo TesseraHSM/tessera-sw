@@ -52,7 +52,7 @@ pub(crate) async fn hmac<'p, P: HsmPal>(
     let tag = pal.dma_alloc(io, tag_len)?;
     {
         let key = pal.vault_key(io, key_id)?;
-        pal.hmac_sign(io, algo, key, body.msg, tag).await?;
+        pal.hmac_sign(io, algo, key, body.msg, Some(tag)).await?;
     }
 
     let resp = pal.dma_alloc_var(io, |buf| {

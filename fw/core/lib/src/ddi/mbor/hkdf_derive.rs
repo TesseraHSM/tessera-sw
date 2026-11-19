@@ -75,7 +75,7 @@ pub(crate) async fn hkdf_derive<'p, P: HsmPal>(
 
     {
         let ikm = pal.vault_key(io, input_key_id)?;
-        pal.hkdf_extract(io, algo, body.salt.as_deref(), ikm, prk)
+        pal.hkdf_extract(io, algo, body.salt.as_deref(), ikm, Some(prk))
             .await?;
     }
 

@@ -8,14 +8,19 @@
 
 /// OpenSSL 3.0.0 as the packed `DEP_OPENSSL_VERSION_NUMBER` value.
 const OPENSSL_3_0_0: u64 = 0x3000_0000;
+const OPENSSL_3_5_0: u64 = 0x3050_0000;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(ossl300)");
+    println!("cargo::rustc-check-cfg=cfg(ossl350)");
     println!("cargo::rerun-if-env-changed=DEP_OPENSSL_VERSION_NUMBER");
     if let Ok(v) = std::env::var("DEP_OPENSSL_VERSION_NUMBER")
         && let Ok(n) = u64::from_str_radix(&v, 16)
         && n >= OPENSSL_3_0_0
     {
         println!("cargo::rustc-cfg=ossl300");
+        if n >= OPENSSL_3_5_0 {
+            println!("cargo::rustc-cfg=ossl350");
+        }
     }
 }

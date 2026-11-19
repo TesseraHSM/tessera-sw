@@ -205,15 +205,13 @@ pub trait HsmAesGcm: HsmIoTypes {
         data: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
-    /// AES-GCM encrypt host-to-host over raw SGL descriptors.
+    /// AES-GCM encrypt host-to-host over out-of-band items.
     ///
     /// The AES engine reads `len` bytes of `[padded_AAD | plaintext]`
-    /// from the host buffer described by `src` and writes
-    /// `[padded_AAD | ciphertext]` (same layout and length) to the host
-    /// buffer described by `dst`; the tag is written to `tag`. Nothing is
-    /// staged in HSM memory, so the message size is bounded only by the
-    /// descriptors (TBOR `AesGcmEncryptDecrypt` passes the in / out SGL
-    /// Data Blocks of its OOB descriptor page).
+    /// from `io`'s out-of-band item `src` and writes
+    /// `[padded_AAD | ciphertext]` (same layout and length) to item
+    /// `dst`; the tag is written to `tag`. Nothing is staged in HSM
+    /// memory, so the message size is bounded only by the items.
     ///
     /// The buffer layout follows the `pad_aad` convention of
     /// [`gcm_encrypt`](Self::gcm_encrypt).
@@ -228,32 +226,32 @@ pub trait HsmAesGcm: HsmIoTypes {
     /// - `aad_len` — **Unpadded** AAD length in bytes.
     /// - `len` — total bytes to transfer, `round_up_32(aad_len) +
     ///   text_len`.
-    /// - `src` — raw 16-byte NVMe SGL descriptor of the host input.
-    /// - `dst` — raw 16-byte NVMe SGL descriptor of the host output.
+    /// - `src` — index of the input out-of-band item.
+    /// - `dst` — index of the output out-of-band item.
     /// - `tag` — Output buffer for the 16-byte authentication tag.
     ///
     /// # Returns
     ///
     /// - `Ok(())` — output written to `dst`, `tag` set.
-    /// - `Err(HsmError::InvalidArg)` — a descriptor does not describe
-    ///   `len` bytes, IV not 12 bytes, or AAD layout malformed.
+    /// - `Err(HsmError::InvalidArg)` — `io` has no such item, an item is
+    ///   not `len` bytes, IV not 12 bytes, or AAD layout malformed.
     /// - `Err(HsmError)` — AES / DMA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn gcm_encrypt_sgl(
+    async fn gcm_encrypt_oob(
         &self,
         io: &Self::Io,
         key: &HsmDmaBuf,
         iv: &HsmDmaBuf,
         aad_len: usize,
         len: usize,
-        src: &[u8; 16],
-        dst: &[u8; 16],
+        src: usize,
+        dst: usize,
         tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
-    /// AES-GCM decrypt host-to-host over raw SGL descriptors.
+    /// AES-GCM decrypt host-to-host over out-of-band items.
     ///
-    /// The inverse of [`gcm_encrypt_sgl`](Self::gcm_encrypt_sgl): reads
+    /// The inverse of [`gcm_encrypt_oob`](Self::gcm_encrypt_oob): reads
     /// `[padded_AAD | ciphertext]` from `src`, verifies `tag`, and writes
     /// `[padded_AAD | plaintext]` to `dst`.
     ///
@@ -266,18 +264,18 @@ pub trait HsmAesGcm: HsmIoTypes {
     /// - `len` — total bytes to transfer, `round_up_32(aad_len) +
     ///   text_len`.
     /// - `tag` — the 16-byte authentication tag from encryption.
-    /// - `src` — raw 16-byte NVMe SGL descriptor of the host input.
-    /// - `dst` — raw 16-byte NVMe SGL descriptor of the host output.
+    /// - `src` — index of the input out-of-band item.
+    /// - `dst` — index of the output out-of-band item.
     ///
     /// # Returns
     ///
     /// - `Ok(())` — tag verified, plaintext written to `dst`.
-    /// - `Err(HsmError::InvalidArg)` — descriptor / IV / layout violation.
+    /// - `Err(HsmError::InvalidArg)` — item / IV / layout violation.
     /// - `Err(HsmError::AesGcmDecryptTagDoesNotMatch)` — authentication
     ///   tag does not match (the contents of `dst` are unspecified).
     /// - `Err(HsmError)` — AES / DMA failure.
     #[allow(clippy::too_many_arguments)]
-    async fn gcm_decrypt_sgl(
+    async fn gcm_decrypt_oob(
         &self,
         io: &Self::Io,
         key: &HsmDmaBuf,
@@ -285,7 +283,7 @@ pub trait HsmAesGcm: HsmIoTypes {
         aad_len: usize,
         len: usize,
         tag: &HsmDmaBuf,
-        src: &[u8; 16],
-        dst: &[u8; 16],
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()>;
 }

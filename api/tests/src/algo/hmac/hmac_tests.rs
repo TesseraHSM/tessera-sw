@@ -1541,28 +1541,42 @@ fn test_hmac_unwrap_legacy_rejected(session: HsmSession) {
     assert_hmac_unwrap_legacy_rejected(&session);
 }
 
-/// Negotiating API 1.1 does not add HMAC unwrap support to a legacy session.
+/// Negotiating API 1.1 or newer does not add HMAC unwrap support to a legacy
+/// session. From API 2.0 a legacy session cannot be opened at all.
 #[test]
 fn test_hmac_unwrap_legacy_rev_1_1() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
+    let legacy_supported = crate::utils::session::api_rev_at_most(1, 1);
+    let rev = if legacy_supported {
+        HsmApiRev { major: 1, minor: 1 }
+    } else {
+        HsmApiRev { major: 2, minor: 0 }
+    };
     let _guard = crate::utils::partition::PARTITION_LOCK.lock();
     let partitions = HsmPartitionManager::partition_info_list();
     assert!(!partitions.is_empty(), "No partitions found");
 
     for info in partitions {
-        drop(crate::utils::session::open_session_test_session(&info.path));
-        let rev = HsmApiRev { major: 1, minor: 1 };
-        let partition = HsmPartitionManager::open_partition(&info.path, rev)
-            .expect("Failed to open API 1.1 partition");
+        if legacy_supported {
+            drop(crate::utils::session::open_session_test_session(&info.path));
+        }
+        let partition =
+            HsmPartitionManager::open_partition(&info.path, rev).expect("Failed to open partition");
         let creds = HsmCredentials::new(
             &crate::utils::partition::APP_ID,
             &crate::utils::partition::APP_PIN,
         );
-        let session = partition
-            .open_session(rev, &creds, None)
-            .expect("Failed to open legacy session with API 1.1");
+        let result = partition.open_session(rev, &creds, None);
+        if !legacy_supported {
+            assert!(
+                matches!(result, Err(HsmError::DdiCmdFailure)),
+                "legacy session must be rejected from API 2.0"
+            );
+            continue;
+        }
+        let session = result.expect("Failed to open legacy session with API 1.1");
         assert_eq!(session.api_rev(), rev);
         assert_hmac_unwrap_legacy_rejected(&session);
     }

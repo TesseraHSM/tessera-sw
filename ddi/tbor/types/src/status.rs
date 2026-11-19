@@ -44,6 +44,8 @@ pub enum TborStatus {
     TborMissingField = 0x08680019,
     TborDuplicateField = 0x0868001A,
     TborInvalidEnumValue = 0x0868001B,
+    TborMisalignedField = 0x08680020,
+    TborNonCanonicalLayout = 0x08680021,
     // TBOR wire-encode failures (mirror of HsmError::Tbor*).
     TborBufferTooSmall = 0x0868001C,
     TborTooManyTocEntries = 0x0868001D,
@@ -260,6 +262,12 @@ pub enum TborStatus {
     DropIoFailure = 0x087000E5,
     DefaultPskMustRotate = 0x087000E6,
     UnsupportedSessionSuite = 0x087000E7,
+
+    /// An ML-DSA key pair failed its sign/verify PCT.
+    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+
+    /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
+    PctValidationMlKemGenKeyFailed = 0x087000E9,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,

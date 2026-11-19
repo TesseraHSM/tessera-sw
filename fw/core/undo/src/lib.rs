@@ -42,6 +42,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartPropKind;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
@@ -83,6 +84,7 @@ const KIND_VAULT_CREATE: u8 = 0;
 const KIND_VAULT_DISABLE: u8 = 1;
 const KIND_PROP_RESTORE: u8 = 2;
 const KIND_SESSION_DESTROY: u8 = 3;
+const KIND_SESSION_CLOSE: u8 = 4;
 
 const MODE_SHIFT: u8 = 3;
 const MODE_MASK: u8 = 0b0000_0011;
@@ -143,6 +145,15 @@ impl UndoEntry {
     fn session_destroy(id: HsmSessId) -> Self {
         Self {
             tag: KIND_SESSION_DESTROY,
+            aux: 0,
+            id: u16::from(id),
+            data: 0,
+        }
+    }
+
+    fn session_close(id: HsmSessId) -> Self {
+        Self {
+            tag: KIND_SESSION_CLOSE,
             aux: 0,
             id: u16::from(id),
             data: 0,
@@ -354,6 +365,15 @@ impl<'a> UndoLog<'a> {
         self.push_entry(UndoEntry::session_destroy(id))
     }
 
+    /// Record a session **close** whose teardown waits for the completion.
+    ///
+    /// undo → keep the session; commit → destroy it.  Deferring the destroy
+    /// lets the close response still be encrypted under the session's
+    /// transport key.
+    pub fn push_session_close(&mut self, id: HsmSessId) -> HsmResult<()> {
+        self.push_entry(UndoEntry::session_close(id))
+    }
+
     /// Record that a property was set while previously **absent**.
     ///
     /// undo → clear the slot; commit → keep.
@@ -472,6 +492,7 @@ impl<'a> UndoLog<'a> {
                 }
             }
             KIND_SESSION_DESTROY => verbs.session_destroy(io, HsmSessId::from(entry.id)).await,
+            KIND_SESSION_CLOSE => Ok(()),
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -485,6 +506,10 @@ impl<'a> UndoLog<'a> {
         match entry.kind() {
             // Finalise a soft-delete: zeroise the retired key.
             KIND_VAULT_DISABLE => verbs.vault_delete(io, HsmKeyId::from(entry.id)).await,
+            // Finalise a deferred close: tear the session down.
+            KIND_SESSION_CLOSE if V::DEFERRED_SESSION_CLOSE => {
+                verbs.session_destroy(io, HsmSessId::from(entry.id)).await
+            }
             // VaultCreate / PropRestore: the live writes already stand.
             _ => Ok(()),
         }
@@ -517,6 +542,10 @@ pub trait UndoVerbs {
     /// IO context accepted by these PAL verbs.
     type Io: HsmIo;
 
+    /// Whether session-close entries can be recorded, so the commit walk
+    /// must handle them. `false` lets the compiler drop that path.
+    const DEFERRED_SESSION_CLOSE: bool = true;
+
     /// Delete (zeroise) a vault key.
     async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()>;
     /// Re-enable a soft-deleted (disabled) vault key.
@@ -540,9 +569,11 @@ pub trait UndoVerbs {
 
 impl<P> UndoVerbs for P
 where
-    P: HsmVault + HsmPartitionManager + HsmSessionManager,
+    P: HsmVault + HsmPartitionManager + HsmSessionManager + HsmPalFeatures,
 {
     type Io = P::Io;
+
+    const DEFERRED_SESSION_CLOSE: bool = P::IO_PROTOCOL.secure_session();
 
     async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_delete(self, io, id).await
@@ -600,7 +631,9 @@ mod tests {
     use core::task::Waker;
 
     use tsra_fw_hsm_pal_traits::HsmCqe;
+    use tsra_fw_hsm_pal_traits::HsmCqeSession;
     use tsra_fw_hsm_pal_traits::HsmPartState;
+    use tsra_fw_hsm_pal_traits::HsmSessCtrl;
     use tsra_fw_hsm_pal_traits::HsmSqe;
 
     use super::*;
@@ -625,16 +658,40 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct FakeEntry;
+
+    impl HsmSqe for FakeEntry {
+        fn opcode(&self) -> u16 {
+            0
+        }
+        fn session_id(&self) -> Option<u16> {
+            None
+        }
+        fn session_ctrl(&self) -> HsmSessCtrl {
+            HsmSessCtrl::NoSession
+        }
+    }
+
+    impl HsmCqe for FakeEntry {
+        fn set_ok(&mut self, _len: u32) {}
+        fn set_ok_ex(&mut self, _len: u32, _sess: HsmCqeSession) {}
+        fn set_err(&mut self, _err: HsmError) {}
+    }
+
+    #[derive(Default)]
     struct FakeIo {
-        sqe: [u32; 16],
-        cqe: [u32; 4],
+        sqe: FakeEntry,
+        cqe: FakeEntry,
     }
 
     impl HsmIo for FakeIo {
-        fn sqe(&self) -> &HsmSqe {
+        type Sqe = FakeEntry;
+        type Cqe = FakeEntry;
+
+        fn sqe(&self) -> &FakeEntry {
             &self.sqe
         }
-        fn cqe(&mut self) -> &mut HsmCqe {
+        fn cqe(&mut self) -> &mut FakeEntry {
             &mut self.cqe
         }
     }
@@ -918,6 +975,22 @@ mod tests {
         m.fail_session_destroy.set(true);
         let io = FakeIo::default();
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
+    }
+
+    #[test]
+    fn session_close_destroys_on_commit_and_keeps_on_undo() {
+        let m = MockVerbs::new();
+        let io = FakeIo::default();
+
+        log!(undo_log);
+        undo_log.push_session_close(HsmSessId::from(5)).unwrap();
+        assert_eq!(run_undo(undo_log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 0, "undo must keep the session open");
+
+        log!(commit_log);
+        commit_log.push_session_close(HsmSessId::from(5)).unwrap();
+        assert_eq!(run_commit(commit_log, &m, &io), WalkOutcome::Ok);
+        m.assert_rec(0, OP_SESSION_DESTROY, 5, 0);
     }
 
     #[test]

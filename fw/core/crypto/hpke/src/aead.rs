@@ -551,7 +551,9 @@ mod cbc_impl {
         let full_tag = alloc.dma_alloc_zeroed(hash_len)?;
         let mac_key_dma = dma_copy_in(alloc, mac_key)?;
 
-        let mut ctx = pal.hmac_begin(io, algo, mac_key_dma, alloc).await?;
+        let state_len = pal.hmac_state_size(algo)?;
+        let state = alloc.dma_alloc(state_len)?;
+        let mut ctx = pal.hmac_begin(io, algo, mac_key_dma, state).await?;
         if !aad.is_empty() {
             let aad_dma = dma_copy_in(alloc, aad)?;
             pal.hmac_continue(io, &mut ctx, aad_dma).await?;
@@ -562,7 +564,7 @@ mod cbc_impl {
         pal.hmac_continue(io, &mut ctx, iv_dma).await?;
         pal.hmac_continue(io, &mut ctx, ct_dma).await?;
         pal.hmac_continue(io, &mut ctx, len_dma).await?;
-        pal.hmac_finish_into(io, ctx, full_tag).await?;
+        pal.hmac_finish_into(io, &mut ctx, Some(full_tag)).await?;
 
         dest[..tag_len].copy_from_slice(&full_tag[..tag_len]);
         Ok(())

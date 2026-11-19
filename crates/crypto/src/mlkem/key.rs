@@ -11,20 +11,6 @@
 //! Both types carry their [`MlKemVariant`] alongside the bytes so that an
 //! operation cannot silently pair a key with the wrong parameter set.
 //!
-//! # The expanded decapsulation key
-//!
-//! `ml-kem` deprecates the expanded key form in favour of the 64-byte seed, and
-//! for a new protocol the seed would be the right choice — it is smaller and
-//! cannot be internally inconsistent. This code uses the expanded form anyway
-//! because the HSM wire format already does: the masked key blob stores seed
-//! followed by expanded key, and decapsulation is handed only the expanded half.
-//! Switching would change the on-wire blob and break every key already issued,
-//! so the deprecation is acknowledged and overridden here rather than followed.
-#![allow(deprecated)]
-
-use ml_kem::ExpandedKeyEncoding;
-use ml_kem::Key as MlKemEncoded;
-use ml_kem::KeyExport;
 use zeroize::Zeroizing;
 
 use super::*;
@@ -55,18 +41,11 @@ impl MlKemPrivateKey {
     /// Returns [`CryptoError::MlKemKeyGenError`] if `seed` is not
     /// [`MLKEM_SEED_LEN`] bytes.
     pub fn from_seed(variant: MlKemVariant, seed: &[u8]) -> Result<Self, CryptoError> {
-        let expanded = dispatch!(variant, |p| {
-            let s = seed.try_into().map_err(|_| CryptoError::MlKemKeyGenError)?;
-            Ok::<_, CryptoError>(
-                p::DecapsulationKey::from_seed(s)
-                    .to_expanded_bytes()
-                    .to_vec(),
-            )
-        })?;
-        Ok(Self {
-            variant,
-            expanded: Zeroizing::new(expanded),
-        })
+        if seed.len() != MLKEM_SEED_LEN {
+            return Err(CryptoError::MlKemKeyGenError);
+        }
+        let expanded = platform::expand_key(variant, seed)?;
+        Ok(Self { variant, expanded })
     }
 
     /// Returns the parameter set this key belongs to.
@@ -75,6 +54,7 @@ impl MlKemPrivateKey {
     }
 
     /// Borrows the expanded key bytes.
+    #[cfg(any(target_os = "windows", ossl350))]
     pub(super) fn as_bytes(&self) -> &[u8] {
         &self.expanded
     }
@@ -108,14 +88,7 @@ impl PrivateKey for MlKemPrivateKey {
     /// Returns [`CryptoError::MlKemKeyGenError`] if the stored bytes are not a
     /// valid expanded key for this key's parameter set.
     fn public_key(&self) -> Result<Self::PublicKey, CryptoError> {
-        let expanded = &self.expanded;
-        let encoded = dispatch!(self.variant, |p| {
-            let enc = p::ExpandedDecapsulationKey::try_from(expanded.as_slice())
-                .map_err(|_| CryptoError::MlKemKeyGenError)?;
-            let dk = p::DecapsulationKey::from_expanded_bytes(&enc)
-                .map_err(|_| CryptoError::MlKemKeyGenError)?;
-            Ok::<_, CryptoError>(dk.encapsulation_key().to_bytes().to_vec())
-        })?;
+        let encoded = platform::public_key(self.variant, &self.expanded)?;
         Ok(MlKemPublicKey {
             variant: self.variant,
             encoded,
@@ -178,6 +151,7 @@ impl MlKemPublicKey {
     }
 
     /// Borrows the encoded key bytes.
+    #[cfg(any(target_os = "windows", ossl350))]
     pub(super) fn as_bytes(&self) -> &[u8] {
         &self.encoded
     }
@@ -215,12 +189,7 @@ impl ImportableKey for MlKemPublicKey {
     fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         let variant =
             MlKemVariant::from_pub_key_len(bytes.len()).ok_or(CryptoError::MlKemKeyImportError)?;
-        dispatch!(variant, |p| {
-            let enc = MlKemEncoded::<p::EncapsulationKey>::try_from(bytes)
-                .map_err(|_| CryptoError::MlKemKeyImportError)?;
-            p::EncapsulationKey::new(&enc).map_err(|_| CryptoError::MlKemKeyImportError)?;
-            Ok::<_, CryptoError>(())
-        })?;
+        platform::validate_public_key(variant, bytes)?;
         Ok(Self {
             variant,
             encoded: bytes.to_vec(),

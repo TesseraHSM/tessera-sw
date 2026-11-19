@@ -59,7 +59,7 @@ pub struct TborHmacReq<'a> {
     /// Marked `#[tbor(mutable)]` so the handler can `unmask` it **in place**
     /// in the request buffer (via `decode_mut`) — no scratch copy of the
     /// blob, and the recovered key is used straight from `target_key`.
-    #[tbor(buffer, min_len = 264, max_len = 360, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 360, mutable)]
     pub masked_key: &'a [u8],
 
     /// The message to MAC, up to [`HMAC_MSG_MAX_LEN`] (1024) bytes.

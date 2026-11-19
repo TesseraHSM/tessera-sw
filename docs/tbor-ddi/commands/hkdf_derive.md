@@ -47,15 +47,16 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived key. |
-| — | `hash_algo` | `u8` (inline) | [`HashAlgo`] HKDF hash / HMAC PRF (`0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512). |
-| — | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
-| — | `key_length` | `u8` (inline) | Output length in bytes for the `VarHmac*` types; `0` means absent (required for `VarHmac*`, ignored otherwise). |
-| 8 | `masked_secret` | `buffer` (260..=294 B) | The masked ECDH shared secret IKM; unmasked in place. |
-| — | `salt` | `buffer` (0..=256 B) | Optional HKDF-Extract salt; empty selects the RFC 5869 default salt. |
-| — | `info` | `buffer` (0..=256 B) | Optional HKDF-Expand context/application info; empty means none. |
-| — | `key_label` | `buffer` (0..=128 B) | Caller-supplied key label stamped into the derived key's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived key. |
+| 16 | `hash_algo` | `u8` (inline) | [`HashAlgo`] HKDF hash / HMAC PRF (`0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512). |
+| 20 | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
+| 24 | `key_length` | `u8` (inline) | Output length in bytes for the `VarHmac*` types; `0` means absent (required for `VarHmac*`, ignored otherwise). |
+| 28 | (padding) | `padding` (0..=3 B) | Places `masked_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 32 | `masked_secret` | `buffer` (260..=294 B) | The masked ECDH shared secret IKM; unmasked in place. |
+| 36 | `salt` | `buffer` (0..=256 B) | Optional HKDF-Extract salt; empty selects the RFC 5869 default salt. |
+| 40 | `info` | `buffer` (0..=256 B) | Optional HKDF-Expand context/application info; empty means none. |
+| 44 | `key_label` | `buffer` (0..=128 B) | Caller-supplied key label stamped into the derived key's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
 
 ### Data section
 
@@ -67,7 +68,8 @@ Carries the masked secret, followed by the salt, the info, and the key label.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_key` | `buffer` (244..=356 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (244..=356 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
 
 ### Data section
 

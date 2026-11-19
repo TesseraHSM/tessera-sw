@@ -8,11 +8,11 @@
 //! firmware handlers:
 //!
 //! * **`PartInit`** (opcode `0x07`) — derive the partition PTA keypair,
-//!   persist the caller-asserted unified `PartPolicy` plus the POTA /
-//!   SATA / optional SAPOTA thumbprints, and return the PTA CSR +
+//!   persist the caller-asserted partition policy (a CBOR document),
+//!   and return the PTA CSR +
 //!   COSE_Sign1 attestation report.
-//! * **`PartFinal`** (opcode `0x08`) — re-supply the unified
-//!   `PartPolicy` (for `POTAPubKey` recovery) and the PTA cert-chain
+//! * **`PartFinal`** (opcode `0x08`) — re-supply the partition policy
+//!   (for the POTA trust anchor) and the PTA cert-chain
 //!   descriptors, optionally restore a prior `local_mk` backup, and
 //!   return the current `local_mk` backup envelope.
 //!
@@ -126,8 +126,7 @@ fn seal_mach_seed_envelope(
 /// Issue `PartInit` (opcode `0x07`) on the active CO session.
 ///
 /// Seals `mach_seed` under the session `param_key` (AAD-bound to the
-/// session id), then ships it alongside the unified `part_policy` and
-/// the POTA / SATA / optional SAPOTA thumbprints. Returns the PTA CSR +
+/// session id), then ships it alongside `part_policy`. Returns the PTA CSR +
 /// attestation report the firmware produced.
 ///
 /// # Arguments
@@ -137,20 +136,13 @@ fn seal_mach_seed_envelope(
 /// * `param_key` - The session's per-session AES wrap key used to seal
 ///   `mach_seed`.
 /// * `mach_seed` - 32-byte machine seed ([`MACH_SEED_LEN`]).
-/// * `part_policy` - Caller-asserted unified [`PartPolicy`] image
-///   ([`PART_POLICY_LEN`] bytes).
-/// * `pota_thumbprint` - SHA-384 POTA thumbprint
-///   ([`POTA_THUMBPRINT_LEN`]).
-/// * `sata_thumbprint` - SHA-384 SATA thumbprint
-///   ([`SATA_THUMBPRINT_LEN`]).
-/// * `sapota_thumbprint` - Optional SHA-384 SAPOTA thumbprint
-///   ([`SAPOTA_THUMBPRINT_LEN`]); `None` when the security domain has
-///   no SAPOTA binding.
+/// * `part_policy` - Caller-asserted partition policy: a deterministic
+///   CBOR document of `1..=`[`PART_POLICY_MAX_LEN`] bytes.
 ///
 /// # Errors
 ///
-/// Returns [`HsmError::InvalidArgument`] when a thumbprint input has
-/// the wrong length, propagates
+/// Returns [`HsmError::InvalidArgument`] when `part_policy` is empty or
+/// longer than [`PART_POLICY_MAX_LEN`], propagates
 /// [`HsmError::InternalError`] on a `mach_seed` seal failure, and
 /// surfaces DDI/device failures from the round-trip.
 pub(crate) fn part_init_ex(
@@ -158,33 +150,17 @@ pub(crate) fn part_init_ex(
     session_id: u16,
     param_key: &AesKey,
     mach_seed: &[u8],
-    part_policy: &PartPolicy,
-    pota_thumbprint: &[u8],
-    sata_thumbprint: &[u8],
-    sapota_thumbprint: Option<&[u8]>,
+    part_policy: &[u8],
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmPartInitExResult> {
-    if pota_thumbprint.len() != POTA_THUMBPRINT_LEN || sata_thumbprint.len() != SATA_THUMBPRINT_LEN
-    {
-        return Err(HsmError::InvalidArgument);
-    }
-    if sapota_thumbprint.is_some_and(|s| s.len() != SAPOTA_THUMBPRINT_LEN) {
-        return Err(HsmError::InvalidArgument);
-    }
-
+    let part_policy = policy_wire(part_policy)?;
     let mach_seed_envelope = seal_mach_seed_envelope(param_key, session_id, mach_seed)?;
 
-    let mut req = TborPartInitReq {
+    let req = TborPartInitReq {
         session_id,
         mach_seed_envelope,
-        part_policy: part_policy.clone(),
-        ..Default::default()
+        part_policy,
     };
-    req.pota_thumbprint.copy_from_slice(pota_thumbprint);
-    req.sata_thumbprint.copy_from_slice(sata_thumbprint);
-    if let Some(s) = sapota_thumbprint {
-        req.sapota_thumbprint = s.to_vec();
-    }
 
     let inner = partition.inner().read();
     let dev = inner.dev();
@@ -205,7 +181,7 @@ pub(crate) fn part_init_ex(
 
 /// Issue `PartFinal` (opcode `0x08`) on the active CO session.
 ///
-/// Re-supplies the unified `part_policy` (for `POTAPubKey` recovery)
+/// Re-supplies the `part_policy` (for the POTA trust anchor)
 /// and the PTA cert-chain descriptors, optionally restoring a prior
 /// `local_mk` backup. Returns the current `local_mk` backup envelope.
 ///
@@ -213,8 +189,8 @@ pub(crate) fn part_init_ex(
 ///
 /// * `partition` - The HSM partition handle.
 /// * `session_id` - The active CO session id this request binds to.
-/// * `part_policy` - Caller-asserted unified [`PartPolicy`] image
-///   ([`PART_POLICY_LEN`] bytes), re-supplied from `PartInit`.
+/// * `part_policy` - Caller-asserted partition policy document
+///   (`1..=`[`PART_POLICY_MAX_LEN`] bytes), re-supplied from `PartInit`.
 /// * `pta_cert_chain` - PTA certificate chain as a list of
 ///   [`HsmCert`]s (`1..=`[`MAX_CERTS`] entries). Each cert's DER
 ///   bytes ship as their own out-of-band SGL Data Block; the wrapper
@@ -224,7 +200,8 @@ pub(crate) fn part_init_ex(
 ///
 /// # Errors
 ///
-/// Returns [`HsmError::InvalidArgument`] when `pta_cert_chain` is empty,
+/// Returns [`HsmError::InvalidArgument`] when `part_policy` is empty or
+/// too long, when `pta_cert_chain` is empty,
 /// exceeds [`MAX_CERTS`], contains an empty cert, or contains a cert
 /// whose length does not fit in the 16-bit descriptor field, or when a
 /// present `prev_local_mk_backup` is not exactly [`LOCAL_MK_BACKUP_LEN`]
@@ -234,7 +211,7 @@ pub(crate) fn part_init_ex(
 pub(crate) fn part_final_ex(
     partition: &HsmPartition,
     session_id: u16,
-    part_policy: &PartPolicy,
+    part_policy: &[u8],
     pta_cert_chain: &[HsmCert<'_>],
     prev_local_mk_backup: Option<&[u8]>,
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
@@ -253,7 +230,7 @@ pub(crate) fn part_final_ex(
     let mut req = TborPartFinalReq {
         session_id,
         cert_descriptors,
-        part_policy: part_policy.clone(),
+        part_policy: policy_wire(part_policy)?,
         ..Default::default()
     };
     if let Some(b) = prev_local_mk_backup {

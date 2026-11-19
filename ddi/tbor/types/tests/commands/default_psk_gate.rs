@@ -36,7 +36,6 @@
 //! begin at their canonical defaults.
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::assertions::assert_tbor_decode_error;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -50,7 +49,6 @@ use tsra_ddi_tbor_types::PSK_LEN;
 
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 
 /// First non-default CO PSK used by rotation tests.
 const GATE_ROTATED_PSK_A: [u8; PSK_LEN] = [
@@ -545,7 +543,7 @@ fn default_psk_gate_second_close_of_same_session_is_rejected() {
         .session_close(session_id)
         .expect_err("second SessionClose for the same session must be rejected");
 
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 
     let replacement = ctx
         .open_session(CO, SessionType::Authenticated)
@@ -568,12 +566,7 @@ fn default_psk_gate_part_init_rejected() {
         .expect("open_session must succeed");
 
     let err = ctx
-        .part_init(
-            session.handshake(),
-            &mach_seed(),
-            &known_good_part_policy(),
-            &pota_thumbprint(),
-        )
+        .part_init(session.handshake(), &mach_seed(), &known_good_part_policy())
         .expect_err("PartInit under default PSK must be gated");
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
 }

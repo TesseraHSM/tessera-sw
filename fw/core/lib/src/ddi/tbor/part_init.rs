@@ -28,18 +28,18 @@
 //!    `commonName` holding the fixed PTA name (`"Tessera Integrated HSM
 //!    PTA"`), a separating space, and the hex-encoded **PTAID**
 //!    (`SHA-384("TSRA-PTAID-v1" || sec1_pub)[..16]`), padded with
-//!    trailing spaces.  The TBS is hashed (LE digest) and signed via
-//!    [`HsmEcc::ecc_sign`]; the resulting LE `(r, s)` are byte-
-//!    reversed to BE for DER encoding.
+//!    trailing spaces.  The TBS is hashed (operand-order digest) and signed
+//!    via [`HsmEcc::ecc_sign`]; the resulting operand-order `(r, s)` are
+//!    converted to BE for DER encoding.
 //!
 //! 5. **PTAReport build** — produces a COSE_Sign1 key-attestation
 //!    report signed by the per-partition identity key (PID).  Claims
-//!    bind the PTA public key, the unified partition policy, and the
-//!    POTA / SATA / SAPOTA thumbprints via the `report_data` field.
+//!    bind the PTA public key and the unified partition policy (which
+//!    names the POTA / SATA / SAPOTA trust anchors by public-key
+//!    thumbprint) via the `report_data` field.
 //!
-//! 6. **Commit** — write-once persistence of PTA pubkey + key ID,
-//!    policy hash, and POTA/SATA/SAPOTA thumbprints into partition
-//!    state; vault the PartRoot and PTA private keys.
+//! 6. **Commit** — write-once persistence of the PTA key ID and
+//!    policy hash into partition state; vault the PartRoot and PTA private keys.
 //!    `part_mark_initializing` transitions `Enabled → Initializing`
 //!    only after the setters succeed.  PartInit deliberately does
 //!    **not** call `part_mark_initialized` — that transition is owned
@@ -66,7 +66,7 @@ use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
 use tsra_fw_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_fw_ddi_tbor_types::PTA_REPORT_MAX_LEN;
-use tsra_fw_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -88,7 +88,7 @@ use super::*;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// Length of a P-384 raw private scalar in bytes (LE on the PAL wire).
+/// Length of a P-384 raw private scalar in bytes (operand order on the PAL wire).
 const P384_PRIV_LEN: usize = 48;
 
 /// Length of a single P-384 coordinate (X or Y).
@@ -151,51 +151,34 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let _ = super::policy::from_bytes(policy_dma)?;
         let mach_seed_dma =
             open_mach_seed_envelope(pal, io, req.sess_id, req.mach_seed_envelope).await?;
-        let pota_thumb_dma = req.pota_thumb;
-        let sata_thumb_dma = req.sata_thumb;
-        let sapota_thumb_dma = req.sapota_thumb;
 
         // ── Single-root derivation ────────────────────────────────
         // PartRoot binds every request input; the PTA keypair fans out
         // from it.  (The security-domain local masking keys are derived
         // later in part-final, bound to the POTA-endorsed PTA cert
         // chain — see the module docs.)
-        let root_dma = derive_part_root(
-            pal,
-            io,
-            alloc,
-            mach_seed_dma,
-            policy_dma,
-            pota_thumb_dma,
-            sata_thumb_dma,
-            sapota_thumb_dma,
-        )
-        .await?;
+        let root_dma = derive_part_root(pal, io, alloc, mach_seed_dma, policy_dma).await?;
         let pta = derive_pta_keypair_buf(pal, io, alloc, root_dma).await?;
 
         // PTACSR + PTAReport: build everything before any partition-
         // state mutation so failures roll back cleanly.
         let (csr_dma, csr_len) =
             build_signed_csr(pal, io, alloc, pta.pub_sec1, pta.priv_scalar).await?;
-        let (report_dma, report_len) = build_pta_report(
-            pal,
-            io,
-            alloc,
-            req.sess_id,
-            pta.pub_sec1,
-            policy_dma,
-            pota_thumb_dma,
-            sata_thumb_dma,
-            sapota_thumb_dma,
-        )
-        .await?;
+        let (report_dma, report_len) =
+            build_pta_report(pal, io, alloc, req.sess_id, pta.pub_sec1, policy_dma).await?;
 
         // Persist only the SHA-384 hash of the policy blob; the full
         // PartPolicy is consumed transiently during PartRoot derivation
         // (above) and is never stored in the partition.
         let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
-        pal.hash(io, HsmHashAlgo::Sha384, policy_dma, policy_hash_dma, true)
-            .await?;
+        pal.hash(
+            io,
+            HsmHashAlgo::Sha384,
+            policy_dma,
+            HsmDigestForm::Standard,
+            Some(policy_hash_dma),
+        )
+        .await?;
 
         // Stage the partition's vault keys (async; independent slots) so the
         // commit below is a single await-free, atomic block.  Their
@@ -210,11 +193,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal,
             io,
             CommitInputs {
-                pta_pub_sec1: pta.pub_sec1,
                 policy_hash: policy_hash_dma,
-                pota_thumb: pota_thumb_dma,
-                sata_thumb: sata_thumb_dma,
-                sapota_thumb: sapota_thumb_dma,
             },
             root_key_id,
             pta_key_id,
@@ -235,13 +214,9 @@ struct ParsedRequest<'a> {
     sess_id: HsmSessId,
     mach_seed_envelope: &'a mut HsmDmaBuf,
     policy: &'a HsmDmaBuf,
-    pota_thumb: &'a HsmDmaBuf,
-    sata_thumb: &'a HsmDmaBuf,
-    sapota_thumb: Option<&'a HsmDmaBuf>,
 }
 
-/// Decode the wire request, enforce the CO-only role gate, and
-/// length-check the variable-length fields against the wire schema.
+/// Decode the wire request and enforce the CO-only role gate.
 fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborPartInitReq::decode_mut(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id));
@@ -253,35 +228,17 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
         return Err(HsmError::InvalidPermissions);
     }
 
-    // The fixed-length fields (`mach_seed_envelope` = 100 B,
-    // `part_policy` = 584 B, `pota_thumbprint` / `sata_thumbprint` =
-    // 48 B) are pinned by the schema, so a malformed length was already
-    // rejected at decode with `TborInvalidFixedLength`. Only the
-    // optional `sapota_thumbprint` (variable, empty = absent) needs a
-    // handler-side length check.
-
-    // SAPOTA thumbprint is optional: an empty field means absent;
-    // when present it must be exactly the fixed size.
-    let sapota_thumb = if req.sapota_thumbprint.is_empty() {
-        None
-    } else {
-        if req.sapota_thumbprint.len() != SAPOTA_THUMBPRINT_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        Some(req.sapota_thumbprint)
-    };
-
+    // `mach_seed_envelope` is pinned by the schema (a malformed length is
+    // rejected at decode); `part_policy` is bounded by the schema and
+    // fully validated by `policy::from_bytes`.
     Ok(ParsedRequest {
         sess_id,
         mach_seed_envelope: req.mach_seed_envelope,
         policy: req.part_policy,
-        pota_thumb: req.pota_thumbprint,
-        sata_thumb: req.sata_thumbprint,
-        sapota_thumb,
     })
 }
 
-/// Materialized PTA keypair: private scalar (LE) plus uncompressed
+/// Materialized PTA keypair: private scalar (operand order) plus uncompressed
 /// SEC1 public key (`0x04 || X || Y`).  All buffers live in the
 /// caller's scoped allocator.
 struct PtaKeypair<'a> {
@@ -345,16 +302,12 @@ async fn open_mach_seed_envelope<'a, P: HsmPal>(
 /// request-side inputs.  `kdf::derive_part_root` always emits
 /// [`kdf::PART_ROOT_LEN`] bytes, so the caller can size the output
 /// buffer directly without a query roundtrip.
-#[allow(clippy::too_many_arguments)]
 async fn derive_part_root<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     mach_seed: &HsmDmaBuf,
     policy: &HsmDmaBuf,
-    pota_thumb: &HsmDmaBuf,
-    sata_thumb: &HsmDmaBuf,
-    sapota_thumb: Option<&HsmDmaBuf>,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let src = crate::part_state::part_uds(pal);
 
@@ -366,19 +319,7 @@ async fn derive_part_root<'a, P: HsmPal>(
     pal.alloc_scoped_async(io, async |inner| -> HsmResult<()> {
         let uds = inner.dma_alloc(src.len())?;
         uds.copy_from_slice(src);
-        let _ = kdf::derive_part_root(
-            pal,
-            io,
-            inner,
-            uds,
-            mach_seed,
-            policy,
-            pota_thumb,
-            sata_thumb,
-            sapota_thumb,
-            Some(root),
-        )
-        .await?;
+        let _ = kdf::derive_part_root(pal, io, inner, uds, mach_seed, policy, Some(root)).await?;
         Ok(())
     })
     .await?;
@@ -398,15 +339,17 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     let pub_sec1 = alloc.dma_alloc(P384_PUB_SEC1_LEN)?;
     pub_sec1[0] = 0x04;
     let pub_xy = pub_sec1.split_at_mut(1).1;
-    let _ = kdf::derive_pta_keypair(pal, io, alloc, root, Some((priv_scalar, pub_xy))).await?;
-    // `ecc_gen_keypair_from_root` returns each coordinate in PAL-LE
-    // wire form, but every downstream consumer here (CSR SPKI,
-    // PTAID hash, KeyReport `pk_x`/`pk_y`) expects standard SEC1
-    // big-endian. Reverse each coordinate in place so `pub_sec1`
-    // is canonical SEC1 (`0x04 || X_be || Y_be`).
-    let (x_le, y_le) = pub_xy.split_at_mut(P384_COORD_LEN);
-    x_le.reverse();
-    y_le.reverse();
+    let _ = kdf::derive_pta_keypair(pal, io, root, Some((priv_scalar, pub_xy))).await?;
+    // `ecc_gen_keypair_from_root` returns each coordinate in operand
+    // order, but every downstream consumer here (CSR SPKI, PTAID hash,
+    // KeyReport `pk_x`/`pk_y`) expects standard SEC1 big-endian.
+    // Convert in place so `pub_sec1` is canonical SEC1
+    // (`0x04 || X_be || Y_be`).
+    byte_order::pair_to_be(
+        P::BYTE_ORDER,
+        tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
+        pub_xy,
+    )?;
     Ok(PtaKeypair {
         priv_scalar,
         pub_sec1,
@@ -429,8 +372,14 @@ async fn build_signed_csr<'a, P: HsmPal>(
     ptaid_input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
     ptaid_input[PTAID_LABEL.len()..].copy_from_slice(pub_sec1);
     let ptaid_digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, ptaid_input, ptaid_digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        ptaid_input,
+        HsmDigestForm::Standard,
+        Some(ptaid_digest),
+    )
+    .await?;
 
     let digest_bytes: &[u8] = ptaid_digest;
     let digest =
@@ -451,9 +400,7 @@ async fn build_signed_csr<'a, P: HsmPal>(
 }
 
 /// Build the PID-signed COSE_Sign1 PTAReport binding the PTA pubkey
-/// to the unified partition policy and the POTA / SATA / SAPOTA
-/// thumbprints.
-#[allow(clippy::too_many_arguments)]
+/// to the unified partition policy.
 async fn build_pta_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -461,9 +408,6 @@ async fn build_pta_report<'a, P: HsmPal>(
     sess_id: HsmSessId,
     pub_sec1: &HsmDmaBuf,
     policy: &HsmDmaBuf,
-    pota_thumb: &HsmDmaBuf,
-    sata_thumb: &HsmDmaBuf,
-    sapota_thumb: Option<&HsmDmaBuf>,
 ) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
     let pid_priv = pal.vault_key(io, crate::part_state::part_id_key_id(pal, io)?)?;
 
@@ -482,8 +426,7 @@ async fn build_pta_report<'a, P: HsmPal>(
         return Err(HsmError::InternalError);
     }
 
-    let report_data =
-        build_report_data(pal, io, alloc, policy, pota_thumb, sata_thumb, sapota_thumb).await?;
+    let report_data = build_report_data(pal, io, alloc, policy).await?;
 
     // PTA's only declared capability inside the attestation report
     // is `is_generated`; downstream policy uses the PartPolicy bytes
@@ -495,8 +438,14 @@ async fn build_pta_report<'a, P: HsmPal>(
     // (SHA-384, big-endian — the same digest persisted at commit and
     // surfaced later by the KeyReport command as the provisioned hash).
     let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, policy, policy_hash_dma, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        policy,
+        HsmDigestForm::Standard,
+        Some(policy_hash_dma),
+    )
+    .await?;
 
     let params = KeyReportParams {
         key: AttestedPubKey::Ecc {
@@ -531,10 +480,7 @@ async fn build_pta_report<'a, P: HsmPal>(
 }
 
 /// Build the 128-byte `report_data` field:
-/// `SHA-384(label ‖ lp(policy) ‖ lp(pota) ‖ lp(sata) ‖ lp(sapota))
-/// ‖ zeros[..80]`, where `lp(f) = u16_be(|f|) ‖ f` is a
-/// length-injective prefix and an absent SAPOTA contributes a
-/// zero-length field.
+/// `SHA-384(label ‖ u16_be(|policy|) ‖ policy) ‖ zeros[..80]`.
 ///
 /// The returned HsmDmaBuf is zero-initialised and sized to
 /// [`REPORT_DATA_LEN`]; `pal.hash` only writes the leading
@@ -545,50 +491,30 @@ async fn build_report_data<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     policy: &HsmDmaBuf,
-    pota_thumb: &HsmDmaBuf,
-    sata_thumb: &HsmDmaBuf,
-    sapota_thumb: Option<&HsmDmaBuf>,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let sapota_bytes: &[u8] = match sapota_thumb {
-        Some(t) => t,
-        None => &[],
-    };
-    let fields: [&[u8]; 4] = [policy, pota_thumb, sata_thumb, sapota_bytes];
-    let input_len = REPORT_DATA_LABEL.len()
-        + fields
-            .iter()
-            .map(|f| size_of::<u16>() + f.len())
-            .sum::<usize>();
-    let input = alloc.dma_alloc(input_len)?;
-
-    {
-        fn push<'a>(rest: &'a mut [u8], bytes: &[u8]) -> &'a mut [u8] {
-            let (head, tail) = rest.split_at_mut(bytes.len());
-            head.copy_from_slice(bytes);
-            tail
-        }
-
-        let mut rest: &mut [u8] = &mut input[..];
-        rest = push(rest, REPORT_DATA_LABEL);
-        for f in fields {
-            rest = push(rest, &(f.len() as u16).to_be_bytes());
-            rest = push(rest, f);
-        }
-    }
+    let policy_len = u16::try_from(policy.len()).map_err(|_| HsmError::InvalidArg)?;
+    let input = alloc.dma_alloc(REPORT_DATA_LABEL.len() + size_of::<u16>() + policy.len())?;
+    let (label, rest) = input.split_at_mut(REPORT_DATA_LABEL.len());
+    label.copy_from_slice(REPORT_DATA_LABEL);
+    let (len, body) = rest.split_at_mut(size_of::<u16>());
+    len.copy_from_slice(&policy_len.to_be_bytes());
+    body.copy_from_slice(policy);
 
     let report_data = alloc.dma_alloc_zeroed(REPORT_DATA_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, input, report_data, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        input,
+        HsmDigestForm::Standard,
+        Some(report_data),
+    )
+    .await?;
     Ok(report_data)
 }
 
 /// Write-once inputs committed by [`commit_partition_state`].
 struct CommitInputs<'a> {
-    pta_pub_sec1: &'a HsmDmaBuf,
     policy_hash: &'a HsmDmaBuf,
-    pota_thumb: &'a HsmDmaBuf,
-    sata_thumb: &'a HsmDmaBuf,
-    sapota_thumb: Option<&'a HsmDmaBuf>,
 }
 
 /// Create the partition's two vault keys — the PartRoot UPS secret and the
@@ -613,6 +539,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(root_key_id)?;
@@ -624,6 +551,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             PTA_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(pta_key_id)?;
@@ -631,8 +559,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
     Ok((root_key_id, pta_key_id))
 }
 
-/// Register the partition write-once fields (including the security-domain
-/// thumbprints) and publish the `Enabled → Initializing` transition, in a
+/// Register the partition write-once fields and publish the `Enabled → Initializing` transition, in a
 /// single **await-free** guards-first block.
 ///
 /// The two vault keys are already staged by [`stage_part_keys`]; only their
@@ -657,7 +584,7 @@ fn commit_partition_state<P: HsmPal>(
     // Guards-first: reject a racing PartInit (or a re-init) that already
     // published this partition's write-once provisioning, *before* any field
     // inverse is recorded — otherwise its restore-to-absent undo would clear
-    // the winner's just-set fields.  Mirrors `part_set_pta_key`'s one-shot
+    // the winner's just-set fields.  Mirrors `part_set_pta_key_id`'s one-shot
     // `PtaKeyAlreadySet` guard, hoisted ahead of the undo bookkeeping so the
     // whole commit stays atomic (await-free) and the loser mutates nothing.
     // Only a genuinely absent slot (`PartPropNotFound`) means "not set yet";
@@ -669,16 +596,11 @@ fn commit_partition_state<P: HsmPal>(
     // Record the write-once / STATE inverses *before* applying them: the
     // fields are absent now, so "restore to absent" is valid even if a
     // setter below fails partway (the clear is then a benign no-op).
-    record_field_undo(undo, inputs.sapota_thumb.is_some())?;
+    record_field_undo(undo)?;
 
-    crate::part_state::part_set_pta_key(pal, io, pta_key_id, inputs.pta_pub_sec1)?;
+    crate::part_state::part_set_pta_key_id(pal, io, pta_key_id)?;
     crate::part_state::part_set_ups_key_id(pal, io, root_key_id)?;
     crate::part_state::part_set_policy_hash(pal, io, inputs.policy_hash)?;
-    crate::part_state::part_set_pota_thumbprint(pal, io, inputs.pota_thumb)?;
-    crate::part_state::part_set_sata_thumbprint(pal, io, inputs.sata_thumb)?;
-    if let Some(sapota) = inputs.sapota_thumb {
-        crate::part_state::part_set_sapota_thumbprint(pal, io, sapota)?;
-    }
     crate::part_state::part_set_state(pal, io, HsmPartState::Initializing)?;
     Ok(())
 }
@@ -686,18 +608,11 @@ fn commit_partition_state<P: HsmPal>(
 /// Push the write-once / STATE undo actions for [`commit_partition_state`]
 /// in commit order (the dispatcher walks them LIFO).  Each write-once
 /// field restores to **absent** (it was unset before PartInit); STATE
-/// restores to its prior `Enabled`.  The two `part_set_pta_key` fields
-/// (`PTA_KEY_ID` + `PTA_ECC_PUB_KEY`) are recorded together.
-fn record_field_undo(undo: &mut UndoLog<'_>, has_sapota: bool) -> HsmResult<()> {
+/// restores to its prior `Enabled`.
+fn record_field_undo(undo: &mut UndoLog<'_>) -> HsmResult<()> {
     undo.push_prop_restore_absent(HsmPartPropId::PTA_KEY_ID)?;
-    undo.push_prop_restore_absent(HsmPartPropId::PTA_ECC_PUB_KEY)?;
     undo.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)?;
     undo.push_prop_restore_absent(HsmPartPropId::POLICY_HASH)?;
-    undo.push_prop_restore_absent(HsmPartPropId::POTA_THUMBPRINT)?;
-    undo.push_prop_restore_absent(HsmPartPropId::SATA_THUMBPRINT)?;
-    if has_sapota {
-        undo.push_prop_restore_absent(HsmPartPropId::SAPOTA_THUMBPRINT)?;
-    }
     undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
 }
 
@@ -773,8 +688,7 @@ pub(crate) mod kdf {
     //! Produces the per-partition **root secret (`PartRoot`)** and,
     //! from it, the per-partition PTA keypair, from the device's Unique
     //! Device Secret (UDS) plus operator-supplied binding inputs
-    //! (`MachineSeed`, the unified `PartPolicy`, and the POTA / SATA /
-    //! SAPOTA thumbprints).
+    //! (`MachineSeed` and the unified `PartPolicy`).
     //! All derivations are deterministic: identical inputs yield
     //! identical outputs, so a partition's identity keys can be
     //! reconstructed across reboots and NSSR cycles without persisting
@@ -791,8 +705,8 @@ pub(crate) mod kdf {
     //! - The first stage uses **NIST SP 800-108** Counter Mode KBKDF
     //!   with HMAC-SHA384 as the PRF to derive a single per-partition
     //!   root secret (`PartRoot`) binding *all* request inputs: the
-    //!   machine seed, the unified `PartPolicy`, and the POTA / SATA /
-    //!   SAPOTA certificate thumbprints.  Label
+    //!   machine seed and the unified `PartPolicy` (which names the
+    //!   trust anchors by public-key thumbprint).  Label
     //!   `b"TSRA-PartInit-PartRoot-v1"` ties the derivation to this
     //!   version of the PartInit protocol; rotating the label (e.g.
     //!   `v2`) retires all derived material.
@@ -866,8 +780,8 @@ pub(crate) mod kdf {
     /// Implements the single-root first stage of the PartInit KDF
     /// (UDS → PartRoot) via SP 800-108 Counter Mode KBKDF with
     /// HMAC-SHA384.  Every per-partition key is later fanned out from
-    /// this root, so the root binds the machine seed, the unified
-    /// `PartPolicy`, and the POTA / SATA / SAPOTA thumbprints.
+    /// this root, so the root binds the machine seed and the unified
+    /// `PartPolicy`.
     ///
     /// Follows the PAL query/copy convention:
     ///
@@ -892,10 +806,6 @@ pub(crate) mod kdf {
     ///   `MACHINE_SEED_MIN_LEN..=MACHINE_SEED_MAX_LEN`.
     /// - `part_policy` — unified `PartPolicy` bytes (any length up to
     ///   `u16::MAX`).
-    /// - `pota_thumb` / `sata_thumb` — POTA / SATA thumbprint bytes.
-    /// - `sapota_thumb` — optional SAPOTA thumbprint bytes; `None`
-    ///   contributes a zero-length field (the length-prefix keeps the
-    ///   absent and empty-present cases unambiguous).
     /// - `root_out` — `None` to query the required buffer size;
     ///   `Some(buf)` to derive.  When `Some`, `buf.len()` must be at
     ///   least [`PART_ROOT_LEN`].
@@ -908,7 +818,6 @@ pub(crate) mod kdf {
     ///   `root_out` is `Some` and shorter than [`PART_ROOT_LEN`].
     /// - `Err(HsmError::NotEnoughSpace)` — scoped alloc exhausted.
     /// - `Err(HsmError)` — PAL KDF driver failure.
-    #[allow(clippy::too_many_arguments)]
     pub async fn derive_part_root<P: HsmPal>(
         pal: &P,
         io: &P::Io,
@@ -916,21 +825,13 @@ pub(crate) mod kdf {
         uds: &HsmDmaBuf,
         machine_seed: &HsmDmaBuf,
         part_policy: &HsmDmaBuf,
-        pota_thumb: &HsmDmaBuf,
-        sata_thumb: &HsmDmaBuf,
-        sapota_thumb: Option<&HsmDmaBuf>,
         root_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         if !(MACHINE_SEED_MIN_LEN..=MACHINE_SEED_MAX_LEN).contains(&machine_seed.len()) {
             return Err(HsmError::InvalidArg);
         }
-        let sapota_len = sapota_thumb.map_or(0, |t| t.len());
         // Each field is u16-BE length-prefixed in the KBKDF context.
-        if part_policy.len() > u16::MAX as usize
-            || pota_thumb.len() > u16::MAX as usize
-            || sata_thumb.len() > u16::MAX as usize
-            || sapota_len > u16::MAX as usize
-        {
+        if part_policy.len() > u16::MAX as usize {
             return Err(HsmError::InvalidArg);
         }
 
@@ -945,18 +846,7 @@ pub(crate) mod kdf {
         label.copy_from_slice(PART_ROOT_LABEL);
 
         // Length-injective context: u16_be(|f|) ‖ f, for each field.
-        // SAPOTA is bound as a zero-length field when absent.
-        let sapota_bytes: &[u8] = match sapota_thumb {
-            Some(t) => t,
-            None => &[],
-        };
-        let fields: [&[u8]; 5] = [
-            machine_seed,
-            part_policy,
-            pota_thumb,
-            sata_thumb,
-            sapota_bytes,
-        ];
+        let fields: [&[u8]; 2] = [machine_seed, part_policy];
         let ctx_len: usize = fields.iter().map(|f| 2 + f.len()).sum();
         let context = alloc.dma_alloc(ctx_len)?;
         let mut off = 0usize;
@@ -1008,8 +898,6 @@ pub(crate) mod kdf {
     /// - `pal` — PAL providing
     ///   [`HsmEcc::ecc_gen_keypair_from_root`].
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `alloc` — scoped allocator forwarded to the PAL derive
-    ///   primitive.
     /// - `root` — `PartRoot` from [`derive_part_root`].  Length
     ///   must equal [`PART_ROOT_LEN`].
     /// - `out` — `None` to query buffer sizes; `Some((priv_out,
@@ -1028,13 +916,12 @@ pub(crate) mod kdf {
     pub async fn derive_pta_keypair<P: HsmPal>(
         pal: &P,
         io: &P::Io,
-        alloc: &impl HsmScopedAlloc,
         root: &HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let curve = HsmEccCurve::P384;
-        let priv_len = curve.wire_coord_len();
-        let pub_len = curve.wire_pub_key_len();
+        let priv_len = curve.wire_coord_len(P::BYTE_ORDER);
+        let pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
 
         if root.len() != PART_ROOT_LEN {
             return Err(HsmError::InvalidArg);
@@ -1053,11 +940,10 @@ pub(crate) mod kdf {
         // signs, so its derivation gets a sign/verify PCT.
         pal.ecc_gen_keypair_from_root(
             io,
-            alloc,
             curve,
             root,
-            Some((priv_out, pub_out)),
             HsmEccPct::SignVerify,
+            Some((priv_out, pub_out)),
         )
         .await
     }

@@ -28,16 +28,10 @@ use tsra_crypto::x509_builder::cert_builder::RootCertParams;
 use tsra_crypto::x509_builder::cert_builder::SN_LEN;
 use tsra_crypto::x509_builder::leaf_cert;
 use tsra_crypto::x509_builder::root_cert;
+use tsra_ddi_tbor_test_harness::policy::TestPolicy;
+use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POLICY_INFO_LEN;
-use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::PolicyKeyKind;
-use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
-use zerocopy::IntoBytes;
 
 use crate::utils::partition_ex_helpers::new_partition;
 
@@ -63,9 +57,8 @@ const PTA_SUBJECT_DER_PREFIX: [u8; 13] = [
 const LEAF_CN: &str = "TSRA Evidence Leaf";
 const LEAF_SN: &str = "EVLEAF001";
 
-/// Byte length of the backing-partition identifier carried in the
-/// `PartPolicy` (mirror of `fw/core/ddi/tbor/types/src/policy.rs`).
-const BACKUP_PART_ID_LEN: usize = 16;
+/// Opaque policy `info` bytes (mirrors the C++ `build_part_policy`).
+const POLICY_INFO: [u8; POLICY_INFO_MAX_LEN] = [0xAB; POLICY_INFO_MAX_LEN];
 
 /// A fixed non-default CO PSK used to clear the default-PSK gate.
 pub(crate) const ROTATED_CO_PSK: [u8; PSK_LEN] = [
@@ -408,27 +401,38 @@ fn patch_tbs_root(tbs: &mut [u8], params: &RootCertParams<'_>) {
         .copy_from_slice(params.subject_key_id);
 }
 
-/// Build a unified `PartPolicy` binding the real POTA public key, so
+/// Thumbprint of a raw P-384 public key (`X ‖ Y`) as bound in the policy.
+fn thumbprint(raw_pub: &[u8]) -> [u8; POLICY_THUMBPRINT_LEN] {
+    let raw: &[u8; RAW_PUB_LEN] = raw_pub.try_into().expect("raw P-384 public key");
+    spki_thumbprint(raw)
+}
+
+/// Policy flag bits for the given `allow_peer_cloning` setting.
+fn peer_cloning_flags(allow_peer_cloning: bool) -> u8 {
+    if allow_peer_cloning {
+        PolicyFlags::ALLOW_PEER_CLONING
+    } else {
+        0
+    }
+}
+
+/// Build a CBOR partition policy binding the real POTA public key, so
 /// `part_final_ex` can validate a chain anchored to it. SATA carries a
 /// filler key (not chain-validated in this flow).
-fn part_policy_with_pota(pota_raw: &[u8; RAW_PUB_LEN], allow_peer_cloning: bool) -> PartPolicy {
+fn part_policy_with_pota(pota_raw: &[u8; RAW_PUB_LEN], allow_peer_cloning: bool) -> Vec<u8> {
     let mut sata = [0u8; RAW_PUB_LEN];
     for (i, b) in sata.iter_mut().enumerate() {
         *b = (0x20u8.wrapping_add(i as u8)) | 0x80;
     }
-    PartPolicyBuilder::new()
-        .version(1, 0)
-        .pota_key(PolicyKeyKind::Ecc384, pota_raw)
-        .sata_key(PolicyKeyKind::Ecc384, &sata)
-        .info(&[0xAB; POLICY_INFO_LEN])
+    TestPolicy::new(thumbprint(pota_raw), thumbprint(&sata))
+        .with_info(&POLICY_INFO)
         // `allow_peer_cloning` gates the peer commands
         // (`SdCreatePeerBackup` / `SdRestorePeerBackup`); it is inert for
         // the non-peer commands (`SdCreateRemoteBackup`,
         // `SdResealRemoteBackup`, `SdRestoreRemoteBackup`,
         // `SdRestoreLocalBackup`), which don't gate on it.
-        .allow_peer_cloning(allow_peer_cloning)
-        .build()
-        .expect("policy fields fit")
+        .with_flags(peer_cloning_flags(allow_peer_cloning))
+        .encode()
 }
 
 /// Deterministic machine-seed fixture.
@@ -436,24 +440,6 @@ fn mach_seed() -> [u8; MACH_SEED_LEN] {
     let mut v = [0u8; MACH_SEED_LEN];
     for (i, b) in v.iter_mut().enumerate() {
         *b = 0x40 + i as u8;
-    }
-    v
-}
-
-/// Deterministic POTA thumbprint fixture (stored, not chain-validated).
-fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
-    let mut v = [0u8; POTA_THUMBPRINT_LEN];
-    for (i, b) in v.iter_mut().enumerate() {
-        *b = 0x80 ^ i as u8;
-    }
-    v
-}
-
-/// Deterministic SATA thumbprint fixture (stored, not chain-validated).
-fn sata_thumbprint() -> [u8; SATA_THUMBPRINT_LEN] {
-    let mut v = [0u8; SATA_THUMBPRINT_LEN];
-    for (i, b) in v.iter_mut().enumerate() {
-        *b = 0x40 ^ i as u8;
     }
     v
 }
@@ -510,13 +496,7 @@ pub(crate) fn provision_partition(session: &HsmSession) {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub(), true);
     let init = session
-        .part_init_ex(
-            &policy,
-            &mach_seed(),
-            &pota_thumbprint(),
-            &sata_thumbprint(),
-            None,
-        )
+        .part_init_ex(&policy, &mach_seed())
         .expect("part_init_ex");
 
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
@@ -546,20 +526,26 @@ fn backing_part_policy(
     sata_pub: &[u8; RAW_PUB_LEN],
     pota_pub: &[u8; RAW_PUB_LEN],
     allow_peer_cloning: bool,
-) -> PartPolicy {
+) -> Vec<u8> {
     // Anchor the policy to a real POTA key so `part_final_ex` can validate
     // a PTA certificate chain against it; bind the real SATA anchor and
     // name this partition as the backing partition.
-    PartPolicyBuilder::new()
-        .version(1, 0)
-        .pota_key(PolicyKeyKind::Ecc384, pota_pub)
-        .sata_key(PolicyKeyKind::Ecc384, sata_pub)
-        .backup_part_id(pid)
-        .backup_part_pub_key(PolicyKeyKind::Ecc384, pid_pub)
-        .info(&[0xAB; POLICY_INFO_LEN])
-        .allow_peer_cloning(allow_peer_cloning)
-        .build()
-        .expect("policy fields fit")
+    backing_test_policy(pid, pid_pub, sata_pub, pota_pub)
+        .with_flags(peer_cloning_flags(allow_peer_cloning))
+        .encode()
+}
+
+/// Common backing-partition [`TestPolicy`] (no flags set).
+fn backing_test_policy(
+    pid: &[u8],
+    pid_pub: &[u8],
+    sata_pub: &[u8; RAW_PUB_LEN],
+    pota_pub: &[u8; RAW_PUB_LEN],
+) -> TestPolicy {
+    let pid: [u8; POLICY_BACKUP_PART_ID_LEN] = pid.try_into().expect("backing partition ID");
+    TestPolicy::new(thumbprint(pota_pub), thumbprint(sata_pub))
+        .with_backup_part(pid, thumbprint(pid_pub))
+        .with_info(&POLICY_INFO)
 }
 
 /// Build a backing-partition policy that additionally **requires a trusted
@@ -577,19 +563,11 @@ fn backing_part_policy_trusted(
     sata_pub: &[u8; RAW_PUB_LEN],
     sapota_pub: &[u8; RAW_PUB_LEN],
     pota_pub: &[u8; RAW_PUB_LEN],
-) -> PartPolicy {
-    PartPolicyBuilder::new()
-        .version(1, 0)
-        .pota_key(PolicyKeyKind::Ecc384, pota_pub)
-        .sata_key(PolicyKeyKind::Ecc384, sata_pub)
-        .sapota_key(PolicyKeyKind::Ecc384, sapota_pub)
-        .backup_part_id(pid)
-        .backup_part_pub_key(PolicyKeyKind::Ecc384, pid_pub)
-        .info(&[0xAB; POLICY_INFO_LEN])
-        .allow_peer_cloning(true)
-        .require_trusted_sa_key(true)
-        .build()
-        .expect("policy fields fit")
+) -> Vec<u8> {
+    backing_test_policy(pid, pid_pub, sata_pub, pota_pub)
+        .with_sapota(thumbprint(sapota_pub))
+        .with_flags(PolicyFlags::ALLOW_PEER_CLONING | PolicyFlags::REQUIRE_TRUSTED_SA_KEY)
+        .encode()
 }
 
 /// Provision a backing partition under a **trusted-SA-key** policy
@@ -599,7 +577,7 @@ fn backing_part_policy_trusted(
 pub(crate) fn finalized_backing_session_trusted(
     sata_key: &CaKey,
     sapota_key: &CaKey,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN]) {
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN]) {
     let pota = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) =
         provision_backing_trusted(sata_key, sapota_key, &pota, None, None);
@@ -623,9 +601,9 @@ pub(crate) fn provision_backing_trusted(
     sata_key: &CaKey,
     sapota_key: &CaKey,
     pota: &CaKey,
-    policy_in: Option<&PartPolicy>,
+    policy_in: Option<&[u8]>,
     prev_local_mk: Option<&[u8]>,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN], Vec<u8>) {
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN], Vec<u8>) {
     provision_backing_core(pota, policy_in, prev_local_mk, |pid, pid_pub| {
         backing_part_policy_trusted(
             pid,
@@ -814,10 +792,10 @@ pub(crate) fn build_receiver_evidence_trusted(
 /// that finalize produced.
 fn provision_backing_core(
     pota: &CaKey,
-    policy_in: Option<&PartPolicy>,
+    policy_in: Option<&[u8]>,
     prev_local_mk: Option<&[u8]>,
-    build_policy: impl FnOnce(&[u8], &[u8]) -> PartPolicy,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN], Vec<u8>) {
+    build_policy: impl FnOnce(&[u8], &[u8]) -> Vec<u8>,
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN], Vec<u8>) {
     let (part, rev) = new_partition();
 
     // Bootstrap the CO session under the default PSK and rotate it; the
@@ -848,8 +826,8 @@ fn provision_backing_core(
     let pid_pub_vec = part.ex_pub_key().expect("PartInfo PID public key");
     assert_eq!(
         pid.len(),
-        BACKUP_PART_ID_LEN,
-        "PartInfo PID must be BACKUP_PART_ID_LEN bytes",
+        POLICY_BACKUP_PART_ID_LEN,
+        "PartInfo PID must be POLICY_BACKUP_PART_ID_LEN bytes",
     );
     assert_eq!(
         pid_pub_vec.len(),
@@ -860,18 +838,12 @@ fn provision_backing_core(
     pid_pub.copy_from_slice(&pid_pub_vec);
 
     let policy = match policy_in {
-        Some(policy) => policy.clone(),
+        Some(policy) => policy.to_vec(),
         None => build_policy(&pid, &pid_pub_vec),
     };
 
     let init = session
-        .part_init_ex(
-            &policy,
-            &mach_seed(),
-            &pota_thumbprint(),
-            &sata_thumbprint(),
-            None,
-        )
+        .part_init_ex(&policy, &mach_seed())
         .expect("part_init_ex");
 
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
@@ -902,10 +874,10 @@ fn provision_backing_core(
 pub(crate) fn provision_backing_ex(
     sata_key: &CaKey,
     pota: &CaKey,
-    policy_in: Option<&PartPolicy>,
+    policy_in: Option<&[u8]>,
     prev_local_mk: Option<&[u8]>,
     allow_peer_cloning: bool,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN], Vec<u8>) {
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN], Vec<u8>) {
     provision_backing_core(pota, policy_in, prev_local_mk, |pid, pid_pub| {
         backing_part_policy(
             pid,
@@ -923,9 +895,9 @@ pub(crate) fn provision_backing_ex(
 pub(crate) fn provision_backing(
     sata_key: &CaKey,
     pota: &CaKey,
-    policy_in: Option<&PartPolicy>,
+    policy_in: Option<&[u8]>,
     prev_local_mk: Option<&[u8]>,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN], Vec<u8>) {
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN], Vec<u8>) {
     provision_backing_ex(sata_key, pota, policy_in, prev_local_mk, true)
 }
 
@@ -937,7 +909,7 @@ pub(crate) fn provision_backing(
 /// every evidence leaf certificate must carry.
 pub(crate) fn finalized_backing_session(
     sata_key: &CaKey,
-) -> (HsmSession, PartPolicy, [u8; RAW_PUB_LEN]) {
+) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN]) {
     let pota = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) = provision_backing(sata_key, &pota, None, None);
     (session, policy, pid_pub)
@@ -990,21 +962,6 @@ pub(crate) fn masked_key_and_report(session: &HsmSession) -> (Vec<u8>, [u8; RAW_
     (masked, rcvr_pub, report)
 }
 
-/// Byte offset of the policy `data_pub_key` slot within the 584-byte
-/// policy image.
-const OFF_DATA_PUB_KEY: usize = 484;
-
-/// Overwrite the policy `data_pub_key` slot with `data_pub` (raw P-384
-/// `X ‖ Y`, big-endian), marking the DATA anchor present (`Ecc384` / 96).
-/// `DarcTmkExport` validates a target certificate chain against this
-/// anchor.
-fn set_data_anchor(bytes: &mut [u8; PART_POLICY_LEN], data_pub: &[u8; RAW_PUB_LEN]) {
-    let off = OFF_DATA_PUB_KEY;
-    bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-    bytes[off + 2..off + 4].copy_from_slice(&(POLICY_MAX_KEY_LEN as u16).to_le_bytes());
-    bytes[off + 4..off + 4 + RAW_PUB_LEN].copy_from_slice(data_pub);
-}
-
 /// A partition whose security domain is initialized and whose bound policy
 /// carries **both** a DATA anchor (for `darc_tmk_export` target chains) and
 /// a POTA anchor (for the `darc_tmk_import` sender chain), together with
@@ -1013,8 +970,8 @@ fn set_data_anchor(bytes: &mut [u8; PART_POLICY_LEN], data_pub: &[u8; RAW_PUB_LE
 pub(crate) struct DarcReady {
     /// Live Crypto-Officer security-domain (V2) session.
     pub(crate) session: HsmSession,
-    /// The exact 584-byte policy image bound at `part_init_ex`.
-    pub(crate) policy: [u8; PART_POLICY_LEN],
+    /// The exact CBOR policy bound at `part_init_ex`.
+    pub(crate) policy: Vec<u8>,
     /// Policy DATA CA — anchors the `darc_tmk_export` target chain.
     pub(crate) data: CaKey,
     /// Policy POTA CA — anchors the `darc_tmk_import` sender chain.
@@ -1060,25 +1017,14 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
     pid_pub.copy_from_slice(&pid_pub_vec);
 
     // Bind a policy anchoring both the POTA (PTA/import) and DATA (export)
-    // trust roots; inject the DATA anchor before `part_init_ex` so it is
-    // covered by the partition's bound `policy_hash`.
-    let policy = backing_part_policy(&pid, &pid_pub_vec, &sata.raw_pub(), &pota.raw_pub(), true);
-    let mut policy_bytes = [0u8; PART_POLICY_LEN];
-    policy_bytes.copy_from_slice(policy.as_bytes());
-    set_data_anchor(&mut policy_bytes, &data.raw_pub());
-    // Borrow the mutated wire image back as a typed policy for the typed
-    // init/final/create-backup APIs; the raw bytes are retained in
-    // `DarcReady` for the byte-oriented DARC key-transfer commands.
-    let policy = PartPolicy::ref_from_wire(&policy_bytes).expect("valid policy image");
+    // trust roots.
+    let policy = backing_test_policy(&pid, &pid_pub_vec, &sata.raw_pub(), &pota.raw_pub())
+        .with_flags(PolicyFlags::ALLOW_PEER_CLONING)
+        .with_data(thumbprint(&data.raw_pub()))
+        .encode();
 
     let init = session
-        .part_init_ex(
-            policy,
-            &mach_seed(),
-            &pota_thumbprint(),
-            &sata_thumbprint(),
-            None,
-        )
+        .part_init_ex(&policy, &mach_seed())
         .expect("part_init_ex");
 
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
@@ -1091,7 +1037,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
         },
     ];
     session
-        .part_final_ex(policy, &certs, None)
+        .part_final_ex(&policy, &certs, None)
         .expect("part_final_ex");
 
     // Provision the security domain (self-backup), marking the partition
@@ -1100,13 +1046,13 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
         })
         .expect("sd_create_remote_backup");
 
     DarcReady {
         session,
-        policy: policy_bytes,
+        policy,
         data,
         pota,
     }

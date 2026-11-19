@@ -27,7 +27,7 @@ CO session.
 
 ## Request
 
-Wire layout: 4-byte header, followed by two TOC entries, then the
+Wire layout: 8-byte header, followed by two TOC entries, then the
 variable-length data section carrying the AEAD-GCM envelope.
 
 ### TOC entries
@@ -37,14 +37,14 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session whose `param_key` wraps `psk_envelope`. |
-| 8 | `psk_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below); points into the data section. Length is pinned to exactly 104 B (`PSK_CHANGE_ENVELOPE_LEN`); a wrong length is rejected at decode. |
+| 8 | `session_id` | `session_id` (inline) | Session whose `param_key` wraps `psk_envelope`. |
+| 12 | `psk_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below); points into the data section. Length is pinned to exactly 104 B (`PSK_CHANGE_ENVELOPE_LEN`); a wrong length is rejected at decode. |
 
 ### Data section
 
 | Offset | Field | Description |
 |---|---|---|
-| 12 | `psk_envelope` bytes | Raw AEAD-GCM envelope; length stored in the TOC entry above. |
+| 16 | `psk_envelope` bytes | Raw AEAD-GCM envelope; length stored in the TOC entry above. |
 
 ### `psk_envelope` contents
 

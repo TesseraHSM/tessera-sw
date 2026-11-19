@@ -22,6 +22,10 @@ fn open_session_ex_co_authenticated() {
     }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
+    if crate::utils::session::api_rev_at_least(2, 0) {
+        // Exercise the encrypted session transport, not a 1.x fallback.
+        assert_eq!((rev.major, rev.minor), (2, 0));
+    }
 
     let session = part
         .open_session_ex(

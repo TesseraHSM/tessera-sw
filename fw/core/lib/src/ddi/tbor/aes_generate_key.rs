@@ -151,7 +151,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // straight into the reserved response slot.
             let key_buf = alloc.dma_alloc(key_len)?;
             let outcome = async {
-                pal.aes_gen_key(io, key_buf).await?;
+                pal.aes_gen_key(io, key_len, Some(key_buf)).await?;
                 let written = mask(
                     pal,
                     io,

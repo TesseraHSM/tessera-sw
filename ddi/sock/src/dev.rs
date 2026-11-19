@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -40,8 +41,11 @@ use tsra_ddi_interface::DdiAesXtsParams;
 use tsra_ddi_interface::DdiAesXtsResult;
 use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
+use tsra_ddi_interface::DdiDeviceInfo;
+use tsra_ddi_interface::DdiDeviceModel;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
+use tsra_ddi_interface::DdiTransportSeal;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
@@ -61,6 +65,30 @@ use tsra_ddi_mbor_types::DdiRespSessionId;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
+use tsra_ddi_sock_proto::bulk::BulkCqe;
+use tsra_ddi_sock_proto::bulk::BulkDir;
+use tsra_ddi_sock_proto::bulk::BulkParams;
+use tsra_ddi_sock_proto::bulk::BulkSqe;
+use tsra_ddi_sock_proto::bulk::GcmParams;
+use tsra_ddi_sock_proto::bulk::GcmTail;
+use tsra_ddi_sock_proto::bulk::RawBulkCqe;
+use tsra_ddi_sock_proto::bulk::XtsDul;
+use tsra_ddi_sock_proto::bulk::XtsParams;
+use tsra_ddi_sock_proto::bulk::BLOCK_LEN;
+use tsra_ddi_sock_proto::bulk::GCM_AAD_ALIGN;
+use tsra_ddi_sock_proto::cmd::CmdDword;
+use tsra_ddi_sock_proto::cmd::Cqe;
+use tsra_ddi_sock_proto::cmd::RawCqe;
+use tsra_ddi_sock_proto::cmd::SessionFlags;
+use tsra_ddi_sock_proto::cmd::SqeBuilder;
+use tsra_ddi_sock_proto::cmd::OP_MBOR;
+use tsra_ddi_sock_proto::cmd::OP_TBOR;
+use tsra_ddi_sock_proto::duo::DuoCqe;
+use tsra_ddi_sock_proto::duo::DuoOp;
+use tsra_ddi_sock_proto::duo::DuoRawCqe;
+use tsra_ddi_sock_proto::duo::DuoRawSqe;
+use tsra_ddi_sock_proto::duo::DuoSqeBuilder;
+use tsra_ddi_sock_proto::DeviceModel;
 use tsra_ddi_sock_proto::OobItem;
 use tsra_ddi_sock_proto::ProtoError;
 use tsra_ddi_sock_proto::Request;
@@ -74,24 +102,6 @@ use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
-use tsra_fw_hsm_bulk::BulkCqe;
-use tsra_fw_hsm_bulk::BulkDir;
-use tsra_fw_hsm_bulk::BulkParams;
-use tsra_fw_hsm_bulk::BulkSqe;
-use tsra_fw_hsm_bulk::GcmParams;
-use tsra_fw_hsm_bulk::GcmTail;
-use tsra_fw_hsm_bulk::RawBulkCqe;
-use tsra_fw_hsm_bulk::XtsDul;
-use tsra_fw_hsm_bulk::XtsParams;
-use tsra_fw_hsm_bulk::BLOCK_LEN;
-use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
-use tsra_fw_hsm_io::CmdDword;
-use tsra_fw_hsm_io::Cqe;
-use tsra_fw_hsm_io::RawCqe;
-use tsra_fw_hsm_io::SessionFlags;
-use tsra_fw_hsm_io::SqeBuilder;
-use tsra_fw_hsm_io::OP_MBOR;
-use tsra_fw_hsm_io::OP_TBOR;
 
 /// Default endpoint on Unix.
 #[cfg(unix)]
@@ -385,6 +395,8 @@ pub struct DdiSockDev {
     stream: Arc<Mutex<SocketStream>>,
     cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
+    // Device model, discovered from the server on first use.
+    model: Arc<OnceLock<DdiDeviceModel>>,
     // Set once a best-effort leaked-session cleanup exchange (see
     // `close_leaked_session_locked`) fails (timeout or any other error):
     // a late or partially-consumed response for that exchange may still
@@ -477,9 +489,54 @@ impl DdiSockDev {
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
+            model: Arc::new(OnceLock::new()),
             retired: Arc::new(AtomicBool::new(false)),
             retired_cause: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Lock the stream, failing if the connection has been retired.
+    fn lock_stream(&self) -> DdiResult<parking_lot::MutexGuard<'_, SocketStream>> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let stream = self.stream.lock();
+        // See `exchange`'s matching recheck.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        Ok(stream)
+    }
+
+    /// The server's device model, discovered once per connection.
+    fn model(&self) -> DdiResult<DdiDeviceModel> {
+        if let Some(model) = self.model.get() {
+            return Ok(*model);
+        }
+        let mut stream = self.lock_stream()?;
+        RequestFrame::Discover
+            .write_to(&mut *stream)
+            .map_err(map_proto_err)?;
+        let model = match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
+            ResponseFrame::Discover(info) => match info.model {
+                DeviceModel::Uno => DdiDeviceModel::Uno,
+                DeviceModel::Duo => DdiDeviceModel::Duo,
+            },
+            _ => {
+                return Err(map_proto_err(ProtoError::Malformed(
+                    "expected discover response",
+                )))
+            }
+        };
+        Ok(*self.model.get_or_init(|| model))
+    }
+
+    /// Fail with [`DdiError::UnsupportedEncoding`] unless the device is Uno.
+    fn require_uno(&self) -> DdiResult<()> {
+        match self.model()? {
+            DdiDeviceModel::Uno => Ok(()),
+            DdiDeviceModel::Duo => Err(DdiError::UnsupportedEncoding),
+        }
     }
 
     fn next_cmd_id(&self) -> u16 {
@@ -619,13 +676,7 @@ impl DdiSockDev {
         payload: Vec<u8>,
         oob_items: Vec<OobItem>,
     ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
-        if oob_items.len() > MAX_OOB_ITEMS
-            || oob_items
-                .iter()
-                .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
-        {
-            return Err(DdiError::InvalidParameter);
-        }
+        check_oob_items(&oob_items)?;
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
@@ -647,14 +698,27 @@ impl DdiSockDev {
         let resp = Self::exchange_locked(stream, &req)?;
 
         // Device-level status lives in the completion entry.
-        let mut cqe_raw: RawCqe = resp
+        let cqe_raw: RawCqe = resp
             .cqe
             .as_slice()
             .try_into()
             .map_err(|_| invalid_data("response CQE is not a command CQE"))?;
-        let cqe = Cqe::from(&mut cqe_raw);
-        if cqe.status() != 0 {
-            return Err(DdiError::DdiError(u32::from(cqe.status())));
+        let cqe = Cqe::decode(&cqe_raw);
+        let (status, dst_len) = (cqe.status.into(), cqe.dst_len.into());
+        Self::complete(&req, resp, status, dst_len)
+    }
+
+    /// Validate a command response against its request: map a failed CQE
+    /// `status`, check the output OOB items, and trim the payload to
+    /// `dst_len`.
+    fn complete(
+        req: &Request,
+        resp: Response,
+        status: u32,
+        dst_len: usize,
+    ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
+        if status != 0 {
+            return Err(DdiError::DdiError(status));
         }
 
         // Each output item must come back exactly once with its requested length.
@@ -671,7 +735,6 @@ impl DdiSockDev {
         // firmware wrote. Reject a short payload (the response can't satisfy the
         // reported length) and truncate any trailing bytes so callers never
         // decode past the firmware's output.
-        let dst_len = cqe.dst_len() as usize;
         let mut payload = resp.payload;
         // The client advertised a fixed destination capacity (`DST_CAP`) in the
         // SQE, so a CQE reporting more than that is a protocol integrity failure
@@ -765,6 +828,44 @@ impl DdiSockDev {
         }
     }
 
+    /// Exchange one Duo SQE and return the response payload, the bytes of
+    /// each [`OobItem::Out`], and the CQE's transport seal.
+    fn submit_duo(
+        &self,
+        sqe: DuoRawSqe,
+        payload: Vec<u8>,
+        oob_items: Vec<OobItem>,
+    ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>, DdiTransportSeal)> {
+        let req = Request {
+            sqe: sqe.to_vec(),
+            payload,
+            oob_items,
+            tail: Vec::new(),
+        };
+        let resp = Self::exchange_locked(&mut *self.lock_stream()?, &req)?;
+        let raw: DuoRawCqe = resp
+            .cqe
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid_data("response CQE is not a Duo CQE"))?;
+        let cqe = DuoCqe::decode(&raw);
+        let seal = DdiTransportSeal {
+            iv: cqe.iv,
+            tag: cqe.tag,
+        };
+        let (status, dst_len) = (cqe.status.into(), cqe.dst_len as usize);
+        let (payload, out_items) = Self::complete(&req, resp, status, dst_len)?;
+        Ok((payload, out_items, seal))
+    }
+
+    /// Start a Duo SQE for `op`.
+    fn duo_sqe(&self, op: DuoOp, session_id: u16, src_len: usize, dst_cap: u32) -> DuoSqeBuilder {
+        DuoSqeBuilder::new()
+            .cmd(op, self.next_cmd_id())
+            .session_id(session_id)
+            .buf_lens(src_len as u32, dst_cap)
+    }
+
     /// Encode a TBOR request, submit it with `oob_items`, and decode the
     /// response. Returns the bytes of each [`OobItem::Out`].
     fn exec_tbor<T: TborOpReq>(
@@ -784,8 +885,20 @@ impl DdiSockDev {
         buf.truncate(req_len);
 
         // ── 2. Build the SQE and exchange it over the socket.
-        let (resp_buf, out_items) =
-            self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf, oob_items)?;
+        let (resp_buf, out_items) = match self.model()? {
+            DdiDeviceModel::Uno => {
+                self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf, oob_items)?
+            }
+            DdiDeviceModel::Duo => {
+                check_oob_items(&oob_items)?;
+                let sqe = self
+                    .duo_sqe(DuoOp::Tbor, session_id.unwrap_or(0), buf.len(), DST_CAP)
+                    .oob_len((oob_items.len() * 16) as u32)
+                    .build();
+                let (payload, out_items, _) = self.submit_duo(sqe, buf, oob_items)?;
+                (payload, out_items)
+            }
+        };
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -808,6 +921,8 @@ impl DdiSockDev {
         payload: Vec<u8>,
         tail: Vec<u8>,
     ) -> DdiResult<(BulkCqe, Vec<u8>, Vec<u8>)> {
+        // A Duo server would read a 32-dword bulk SQE as a Duo command.
+        self.require_uno()?;
         let req = Request {
             sqe: sqe.encode().to_vec(),
             payload,
@@ -821,18 +936,14 @@ impl DdiSockDev {
             .try_into()
             .map_err(|_| invalid_data("response CQE is not a bulk CQE"))?;
         let cqe = BulkCqe::decode(&raw);
-        if !cqe.status.is_success() {
-            tracing::warn!(
-                sts = cqe.status.sts,
-                err = cqe.status.err,
-                "DdiSock bulk IO failed"
-            );
+        if !cqe.is_success() {
+            tracing::warn!(sts = cqe.sts, err = cqe.err, "DdiSock bulk IO failed");
         }
-        if cqe.status.sts != 0 {
-            Err(DdiError::FpError(u32::from(cqe.status.sts)))?;
+        if cqe.sts != 0 {
+            Err(DdiError::FpError(u32::from(cqe.sts)))?;
         }
-        if cqe.status.err != 0 {
-            Err(DdiError::FpCmdSpecificError(u32::from(cqe.status.err)))?;
+        if cqe.err != 0 {
+            Err(DdiError::FpCmdSpecificError(u32::from(cqe.err)))?;
         }
         if resp.payload.len() != sqe.dst_len as usize {
             return Err(invalid_data("bulk response payload length mismatch"));
@@ -906,6 +1017,7 @@ impl DdiDev for DdiSockDev {
         if self.retired.load(Ordering::Acquire) {
             return Err(self.retired_err());
         }
+        self.require_uno()?;
         let (pre_encode, post_decode) = match self.device_kind {
             DdiDeviceKind::Physical => (true, true),
             _ => (false, false),
@@ -1066,24 +1178,8 @@ impl DdiDev for DdiSockDev {
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        let items = oob_items
-            .iter()
-            .map(|item| match item {
-                TborOobItem::In(buf) => Ok(OobItem::In(buf.to_vec())),
-                TborOobItem::Out(buf) => u32::try_from(buf.len())
-                    .map(OobItem::Out)
-                    .map_err(|_| DdiError::InvalidParameter),
-            })
-            .collect::<DdiResult<Vec<_>>>()?;
-        let (resp, out_items) = self.exec_tbor(req, items)?;
-        let outputs = oob_items.iter_mut().filter_map(|item| match item {
-            TborOobItem::Out(buf) => Some(buf),
-            TborOobItem::In(_) => None,
-        });
-        // `submit` verified one item of the requested length per output.
-        for (buf, bytes) in outputs.zip(out_items) {
-            buf.copy_from_slice(&bytes);
-        }
+        let (resp, out_items) = self.exec_tbor(req, wire_oob_items(oob_items)?)?;
+        copy_oob_outputs(oob_items, out_items);
         Ok(resp)
     }
 
@@ -1270,10 +1366,85 @@ impl DdiDev for DdiSockDev {
         match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
             ResponseFrame::Reset { status: 0 } => Ok(()),
             ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
-            ResponseFrame::Submit(_) => Err(map_proto_err(ProtoError::Malformed(
+            _ => Err(map_proto_err(ProtoError::Malformed(
                 "expected reset response",
             ))),
         }
+    }
+
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Ok(DdiDeviceInfo {
+            model: self.model()?,
+        })
+    }
+
+    fn exec_op_tbor_secure(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if self.model()? != DdiDeviceModel::Duo {
+            return Err(DdiError::UnsupportedEncoding);
+        }
+        let items = wire_oob_items(oob_items)?;
+        check_oob_items(&items)?;
+        let sqe = self
+            .duo_sqe(DuoOp::TborSecure, session_id, payload.len(), DST_CAP)
+            .oob_len((items.len() * 16) as u32)
+            .gcm_tag(&seal.tag)
+            .iv(&seal.iv)
+            .build();
+        let (payload, out_items, seal) = self.submit_duo(sqe, payload.to_vec(), items)?;
+        copy_oob_outputs(oob_items, out_items);
+        Ok((payload, seal))
+    }
+
+    fn flush_session(&self, session_id: u16) -> DdiResult<()> {
+        if self.model()? != DdiDeviceModel::Duo {
+            return Err(DdiError::UnsupportedEncoding);
+        }
+        let sqe = self.duo_sqe(DuoOp::FlushSession, session_id, 0, 0).build();
+        self.submit_duo(sqe, Vec::new(), Vec::new()).map(|_| ())
+    }
+}
+
+/// Rejects more than [`MAX_OOB_ITEMS`] items, or an empty or oversized one.
+fn check_oob_items(items: &[OobItem]) -> DdiResult<()> {
+    if items.len() > MAX_OOB_ITEMS
+        || items
+            .iter()
+            .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
+    {
+        return Err(DdiError::InvalidParameter);
+    }
+    Ok(())
+}
+
+/// Converts out-of-band items to their wire form: inputs carry their
+/// bytes, outputs only their lengths.
+fn wire_oob_items(items: &[TborOobItem<'_>]) -> DdiResult<Vec<OobItem>> {
+    items
+        .iter()
+        .map(|item| match item {
+            TborOobItem::In(buf) => Ok(OobItem::In(buf.to_vec())),
+            TborOobItem::Out(buf) => u32::try_from(buf.len())
+                .map(OobItem::Out)
+                .map_err(|_| DdiError::InvalidParameter),
+        })
+        .collect()
+}
+
+/// Copies the returned output items into the caller's output buffers.
+fn copy_oob_outputs(items: &mut [TborOobItem<'_>], out_items: Vec<Vec<u8>>) {
+    let outputs = items.iter_mut().filter_map(|item| match item {
+        TborOobItem::Out(buf) => Some(buf),
+        TborOobItem::In(_) => None,
+    });
+    // `complete` verified one item of the requested length per output.
+    for (buf, bytes) in outputs.zip(out_items) {
+        buf.copy_from_slice(&bytes);
     }
 }
 
@@ -1496,6 +1667,7 @@ mod tests {
             stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
+            model: Arc::new(OnceLock::from(DdiDeviceModel::Uno)),
             retired: Arc::new(AtomicBool::new(false)),
             retired_cause: Arc::new(Mutex::new(None)),
         };
@@ -1563,6 +1735,7 @@ mod tests {
             ))),
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
+            model: Arc::new(OnceLock::from(DdiDeviceModel::Uno)),
             retired: Arc::new(AtomicBool::new(false)),
             retired_cause: Arc::new(Mutex::new(None)),
         };
@@ -1652,6 +1825,7 @@ mod tests {
             stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Virtual,
+            model: Arc::new(OnceLock::from(DdiDeviceModel::Uno)),
             retired: Arc::new(AtomicBool::new(false)),
             retired_cause: Arc::new(Mutex::new(None)),
         };

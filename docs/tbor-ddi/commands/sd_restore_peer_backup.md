@@ -60,22 +60,23 @@ report-signing PID key.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 8-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8  | `masked_sealing_key` | `buffer` (fixed 276 B) | The **receiver's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover `RcvrPriv`. Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
-| 12 | `policy` | `buffer` (fixed 584 B) | Caller-asserted unified `PartPolicy` describing the security domain being restored. Length pinned to `PART_POLICY_LEN` (584 B); its SHA-384 digest must equal the partition's bound `policy_hash` and each report's v2 `policy_hash`. |
-| 16 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
-| 20 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer owner certificate-chain descriptors. |
-| 24 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer partition-owner certificate-chain descriptors. |
-| 28 | `evidence` | `buffer` (single `&ReportDescriptor`, 4 B) | Source peer attestation-report (COSE_Sign1) descriptor. |
-| 32 | `pok_peer_backup` | `buffer` (fixed 161 B) | Peer backup to restore: an HPKE-Auth seal of BKS3 = `POK_REMOTE_BACKUP_LEN` (161 B). |
-| 36 | `prev_sd_mk_backup` | `buffer` (fixed 260 B) | Previous security-domain masking-key backup (SDMK masked under the derived SDBMK) = `SD_MK_BACKUP_LEN` (260 B); `SDMK` is recovered from it. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **receiver's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover `RcvrPriv`. Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
+| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being restored. Its SHA-384 digest must equal the partition's bound `policy_hash` and each report's v2 `policy_hash`. |
+| 24 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
+| 28 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer owner certificate-chain descriptors. |
+| 32 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source peer partition-owner certificate-chain descriptors. |
+| 36 | `evidence` | `buffer` (single `&ReportDescriptor`, 4 B) | Source peer attestation-report (COSE_Sign1) descriptor. |
+| 40 | `pok_peer_backup` | `buffer` (fixed 161 B) | Peer backup to restore: an HPKE-Auth seal of BKS3 = `POK_REMOTE_BACKUP_LEN` (161 B). |
+| 44 | `prev_sd_mk_backup` | `buffer` (fixed 260 B) | Previous security-domain masking-key backup (SDMK masked under the derived SDBMK) = `SD_MK_BACKUP_LEN` (260 B); `SDMK` is recovered from it. |
 
 The four `mfgr_cert_chain` … `evidence` entries are spliced in by the
 shared [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs)
@@ -85,7 +86,7 @@ COSE_Sign1 report travel **out of band**, referenced by these
 
 ### Data section
 
-Carries the 276-byte `masked_sealing_key`, the 584-byte `policy` image,
+Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
 the packed source cert-chain and report descriptors, the 161-byte
 `pok_peer_backup` seal, and the 260-byte `prev_sd_mk_backup` envelope.
 
@@ -98,7 +99,7 @@ section.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup (BKS3 re-masked under `PartLocalMK`), sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
+| 8 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup (BKS3 re-masked under `PartLocalMK`), sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
 | 12 | `sd_mk_backup` | `buffer` (fixed 260 B) | Refreshed security-domain masking-key backup envelope (SDMK re-masked under SDBMK) = `SD_MK_BACKUP_LEN` (260 B). |
 
 ### Data section
@@ -110,7 +111,7 @@ Carries the 276-byte `pok_local_backup` blob and the 260-byte
 
 | Error | Cause |
 |---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` ≠ 584 B, `pok_peer_backup` ≠ 161 B, or `prev_sd_mk_backup` ≠ 260 B (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` > 384 B, `pok_peer_backup` ≠ 161 B, or `prev_sd_mk_backup` ≠ 260 B (rejected at decode before the handler runs) |
 | `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `POTA` key is not P-384; the sender report's `policy_hash` ≠ `SHA-384(policy)`; or the opened backup is not a 48-byte BKS3 |
 | `SdAlreadyInitialized` | A security domain is already initialized on this partition incarnation (one-shot gate) |
 | `SdPeerCloningNotAllowed` | The partition's policy does not set `allow_peer_cloning` |

@@ -748,13 +748,36 @@ TEST_F(tsra_hmac_keygen, unwrap_legacy_rejected)
     });
 }
 
+// Negotiating API 1.1 or newer does not add HMAC unwrap support to a legacy
+// session. From API 2.0 a legacy session cannot be opened at all.
 TEST_F(tsra_hmac_keygen, unwrap_legacy_rev_1_1)
 {
     if (!api_rev_at_least(1, 1))
     {
         return;
     }
+    const bool legacy_supported = api_rev_at_most(1, 1);
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
+        if (!legacy_supported)
+        {
+            tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
+            tsra_handle raw_partition = 0;
+            ASSERT_EQ(
+                tsra_part_open(&path_str, &raw_partition, session_ex_test_api_rev()),
+                TSRA_STATUS_SUCCESS
+            );
+            auto partition = PartitionHandle::from_raw(raw_partition);
+            tsra_credentials creds{};
+            std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+            std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+            tsra_handle session = 0;
+            EXPECT_EQ(
+                tsra_sess_open(partition.get(), &creds, nullptr, &session),
+                TSRA_STATUS_DDI_CMD_FAILURE
+            );
+            EXPECT_EQ(session, 0u);
+            return;
+        }
         auto initialized_partition = PartitionHandle(path);
         tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
         tsra_handle raw_partition = 0;

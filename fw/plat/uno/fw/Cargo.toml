@@ -4,6 +4,7 @@
 [workspace]
 members = [
   "app",
+  "crates/aes_sgl",
   "crates/bulk_copy",
   "crates/cert_blob",
   "crates/crashdump",
@@ -50,6 +51,7 @@ tsra_fw_bulk_copy = { path = "crates/bulk_copy" }
 tsra_fw_single_cell = { path = "crates/single_cell" }
 tsra_fw_static_init = { path = "crates/static_init" }
 tsra_fw_static_ref = { path = "crates/static_ref" }
+tsra_fw_uno_aes_sgl = { path = "crates/aes_sgl" }
 tsra_fw_uno_cert_blob = { path = "crates/cert_blob" }
 tsra_fw_uno_crashdump = { path = "crates/crashdump" }
 tsra_fw_uno_reg_cortex_m = { path = "reg/cortex-m" }
@@ -92,10 +94,10 @@ tsra_fw_core_crypto_x509_builder = { path = "../../../core/crypto/x509-builder" 
 tsra_fw_ddi_mbor = { path = "../../../core/ddi/mbor/codec" }
 tsra_fw_ddi_mbor_derive = { path = "../../../core/ddi/mbor/derive" }
 tsra_fw_ddi_mbor_types = { path = "../../../core/ddi/mbor/types" }
-tsra_fw_hsm_bulk = { path = "../../../core/bulk" }
+tsra_fw_hsm_bulk = { path = "../../crates/bulk" }
 tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
 tsra_fw_hsm_core_tracing = { path = "../../../core/tracing" }
-tsra_fw_hsm_io = { path = "../../../core/io" }
+tsra_fw_hsm_io = { path = "../../crates/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"

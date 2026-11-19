@@ -33,7 +33,8 @@
 //! * `masked_key` — the recovered key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
 //! * `pub_key` — the recovered key's wire public key for RSA / ECC
-//!   (`n_le ‖ e_le` / `x ‖ y`); empty for symmetric (AES / HMAC) keys.
+//!   (`n ‖ e` / `x ‖ y`, device byte order); empty for symmetric
+//!   (AES / HMAC) keys.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -148,7 +149,7 @@ pub struct TborUnwrapKeyResp<'a> {
     /// recovered key straight into it (`decode_mut`) — avoiding a separate
     /// MAX-sized scratch buffer that would otherwise coexist with the
     /// (multi-KB, for RSA) unwrap material and blow the per-IO DMA budget.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The recovered key's wire public key for RSA / ECC; empty for
