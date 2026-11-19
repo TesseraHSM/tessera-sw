@@ -30,6 +30,8 @@ const LABEL_START: usize = 24 + 26;
 /// Scalars occupy thirteen bytes; payload bytes consume the remaining input.
 const CONTROL_LEN: usize = 13;
 
+const MASKED_KEY_ENVELOPE_LEN: usize = 232;
+
 /// Scalar controls stay ahead of optional bytes so small inputs execute commands.
 #[derive(Debug)]
 struct FuzzInput {
@@ -340,12 +342,12 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             let lengths = [
                 0,
                 1,
-                7,
-                8,
-                23,
-                24,
-                231,
-                232,
+                aead_envelope::HEADER_LEN - 1,
+                aead_envelope::HEADER_LEN,
+                aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len() - 1,
+                aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len(),
+                MASKED_KEY_ENVELOPE_LEN - 1,
+                MASKED_KEY_ENVELOPE_LEN,
                 p.masked_key_len - 1,
                 p.masked_key_len,
                 MASKED_MLDSA_KEY_MAX_LEN,
