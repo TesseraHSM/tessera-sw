@@ -46,11 +46,19 @@ pub enum HmacKeyType {
     VarHmac512(u8),
 }
 
+static DEVICE_DISPLAY: std::sync::Once = std::sync::Once::new();
+
 pub fn common_fuzz_test(test: impl FnOnce(&mut Dev)) {
     let ddi = DdiTest::default();
     let dev_infos = ddi.dev_info_list();
     let path = std::env::var("FUZZ_DEVICE")
         .unwrap_or_else(|_| dev_infos.first().expect("No devices found").path.clone());
+    DEVICE_DISPLAY.call_once(|| {
+        for dev_info in &dev_infos {
+            println!("Found device: {}", dev_info.path);
+        }
+        println!("Selected device: {}", path);
+    });
     let mut dev = ddi.open_dev(&path).expect("Failed to open device");
     cleanup(&ddi, &path, None);
     test(&mut dev);
