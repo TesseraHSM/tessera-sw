@@ -4,8 +4,9 @@
 //! A small image with debug-log output, for `cargo xtask log-fixture`. Its
 //! calls cover each macro and value type, and messages with colons, leading
 //! spaces, braces, and a percent sign. With `--cfg fail_case="<name>"`, it
-//! adds one call that a debug-log check must reject, or, for `text_loaded`,
-//! keeps a message's text, which reading the image must reject. With
+//! adds one call that a debug-log check must reject, or, for `text_loaded`
+//! and `text_hook`, keeps a message's text or the text hook, which reading
+//! the image must reject unless its build asks for text output. With
 //! `--cfg outside`, in a copy outside `fw/plat/uno/`, it adds calls that drop
 //! from the debug log.
 
@@ -58,8 +59,11 @@ impl core::fmt::Write for TextSink {
     }
 }
 
-/// The text-output hook, for builds with a `level-*` feature.
+/// The text-output hook, for builds with a `level-*` feature. Like the
+/// firmware's hook, it's never inlined, so the image keeps the symbol that
+/// the xtask's checks look for.
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn __hsm_trace_emit(level: u8, target: &str, args: core::fmt::Arguments<'_>) {
     let _ = core::fmt::Write::write_fmt(&mut TextSink, format_args!("{level} {target} {args}"));
 }
@@ -105,6 +109,10 @@ fn main() -> ! {
     // the call above, which reading the image must reject.
     #[cfg(fail_case = "text_loaded")]
     core::hint::black_box("  MemManage: IACCVIOL ");
+    // With `--cfg fail_case="text_hook"`, the image also keeps the text hook,
+    // which reading the image must reject.
+    #[cfg(fail_case = "text_hook")]
+    core::hint::black_box(__hsm_trace_emit as fn(u8, &str, core::fmt::Arguments<'_>));
     // Text output prints this line; debug-log output compiles it to nothing,
     // and doesn't evaluate its value (TEXT_ONLY in xtask/src/log_fixture.rs).
     error_text!(

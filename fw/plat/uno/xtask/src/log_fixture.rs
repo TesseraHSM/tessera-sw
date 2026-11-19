@@ -33,6 +33,8 @@ use crate::log_map::DroppedCall;
 use crate::log_map::ImageLog;
 use crate::log_map::MissingRows;
 use crate::log_map::Mode;
+use crate::log_map::Output;
+use crate::log_map::TEXT_HOOK;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -159,6 +161,24 @@ fn has_symbol(elf: &Elf, name: &str) -> bool {
     elf.symbols.iter().any(|symbol| symbol.name.contains(name))
 }
 
+/// The output that a fixture build with the Cargo arguments `args` asks for:
+/// text when one of them turns on a crate's `level-*` feature.
+fn fixture_output(args: &[&str]) -> Output {
+    let text = args
+        .iter()
+        .flat_map(|arg| arg.split([',', ' ']))
+        .any(|feature| {
+            feature
+                .rsplit_once('/')
+                .is_some_and(|(_, name)| name.starts_with("level-"))
+        });
+    if text {
+        Output::Text
+    } else {
+        Output::Records
+    }
+}
+
 /// The two values that the call whose token is `symbol` passes to its record,
 /// in macro-expanded source, without whitespace or the path of the Uno log
 /// crate's helpers: the last two fields of the tuple that the call's Uno
@@ -274,7 +294,7 @@ impl Fixture {
     }
 
     /// Builds the fixture with `cargo args` and the scratch map, and reads
-    /// and checks the image.
+    /// and checks the image, expecting the output that `args` asks for.
     fn build_with(&self, label: &str, args: &[&str], mode: Mode) -> anyhow::Result<ImageLog> {
         let envs = [("TSRA_LOG_MAP", self.scratch.as_os_str())];
         log_map::build_with_map(
@@ -287,7 +307,7 @@ impl Fixture {
             "cargo xtask log-fixture",
         )?;
         let map = Map::parse(&fs::read_to_string(&self.scratch)?)?;
-        log_map::read_image(label, &self.elf(), &map)
+        log_map::read_image(label, &self.elf(), &map, fixture_output(args))
     }
 
     /// Builds the fixture with the scratch map and `extra` Cargo arguments,
@@ -395,9 +415,14 @@ impl Xtask for LogFixture {
                 text != golden_text,
                 "the map edit for {problem:?} changed nothing"
             );
-            let error = log_map::read_image("default", &fixture.elf(), &Map::parse(&text)?)
-                .err()
-                .with_context(|| format!("the image passed with a map whose token {problem}"))?;
+            let error = log_map::read_image(
+                "default",
+                &fixture.elf(),
+                &Map::parse(&text)?,
+                Output::Records,
+            )
+            .err()
+            .with_context(|| format!("the image passed with a map whose token {problem}"))?;
             let expected = format!("token {} {problem}", row.key.symbol());
             anyhow::ensure!(
                 format!("{error:#}").contains(&expected),
@@ -580,6 +605,10 @@ impl Xtask for LogFixture {
                 image.tokens.is_empty() && image.sites.is_empty() && image.drops.is_empty() && text,
                 "the debug-log feature with level-{level} doesn't print text only"
             );
+            anyhow::ensure!(
+                elf.symbol(TEXT_HOOK).is_some(),
+                "the level-{level} image doesn't define the text hook {TEXT_HOOK}"
+            );
             // Given the default image's tokens, `loaded_texts`, the search
             // that reading an image runs, finds this printed text.
             let texts = log_map::loaded_texts(&elf, default.tokens.keys())?;
@@ -621,13 +650,34 @@ impl Xtask for LogFixture {
             "the text {kept:?} of token {} is in a loaded section",
             error_row.key.symbol()
         );
-        let error = log_map::read_image("text_loaded", &fixture.elf(), &golden)
+        let error = log_map::read_image("text_loaded", &fixture.elf(), &golden, Output::Records)
             .err()
             .context("the image passed with a message's text in a loaded section")?;
         anyhow::ensure!(
             format!("{error:#}").contains(&expected),
             "the image failed without {expected:?}: {error:#}"
         );
+        // A build that asks for text may keep it.
+        log_map::read_image("text_loaded", &fixture.elf(), &golden, Output::Text)
+            .context("the image with a message's text failed as a text image")?;
+
+        log::info!(
+            "--- reading an image fails when it defines the text hook, but its build asked for \
+             no text"
+        );
+        let cfg = "fail_case=\"text_hook\"";
+        let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &["--cfg", cfg])?;
+        anyhow::ensure!(ok, "case text_hook didn't build:\n{stderr}");
+        let expected = format!("the image defines the text hook {TEXT_HOOK}");
+        let error = log_map::read_image("text_hook", &fixture.elf(), &golden, Output::Records)
+            .err()
+            .context("the image passed with the text hook")?;
+        anyhow::ensure!(
+            format!("{error:#}").contains(&expected),
+            "the image failed without {expected:?}: {error:#}"
+        );
+        log_map::read_image("text_hook", &fixture.elf(), &golden, Output::Text)
+            .context("the image with the text hook failed as a text image")?;
 
         log::info!("--- each debug-log check rejects its bad call");
         for (case, expected) in FAIL_CASES {
@@ -675,7 +725,7 @@ impl Xtask for LogFixture {
             copy.display()
         );
         let path = copy.join("target/thumbv7em-none-eabi/release/tsra_log_fixture");
-        let outside = log_map::read_image("outside", &path, &golden)?;
+        let outside = log_map::read_image("outside", &path, &golden, Output::Records)?;
         log_map::report_drops(&outside, &fixture.repo);
         let source = fs::read_to_string(fixture.dir.join("src/main.rs"))?;
         let noted = |prefix: &str| -> BTreeSet<DroppedCall> {

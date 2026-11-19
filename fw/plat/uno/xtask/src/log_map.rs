@@ -468,6 +468,21 @@ fn longest_text(message: &str) -> String {
 /// Text shorter than this may occur in an image by chance.
 const MIN_TEXT: usize = 12;
 
+/// The tracing facade's text hook, which an image that prints defines.
+pub const TEXT_HOOK: &str = "__hsm_trace_emit";
+
+/// The output that an image's build asks for, which decides what the image
+/// may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Output {
+    /// No text output: debug-log records, or nothing. The image must not
+    /// define the text hook or hold a message's text.
+    Records,
+    /// Text output, which a `level-*` feature turns on: the image prints its
+    /// messages, so it may hold their text.
+    Text,
+}
+
 /// Each token whose message's text is in one of the image's loaded sections,
 /// with that text: the longest stretch between placeholders, when it's at
 /// least `MIN_TEXT` bytes.
@@ -551,10 +566,12 @@ fn boundary_problems(
 
 /// Reads an image's tokens, markers, drop notes, and boundary symbols, and
 /// checks them: each token has the value of its map row, the marker and
-/// drop-note sections aren't loaded, no message's text is loaded, and
-/// `cortex-m-rt`'s RAM boundary symbols agree with the `.bss` and `.uninit`
-/// sections.
-pub fn read_image(label: &str, path: &Path, map: &Map) -> anyhow::Result<ImageLog> {
+/// drop-note sections aren't loaded, and `cortex-m-rt`'s RAM boundary symbols
+/// agree with the `.bss` and `.uninit` sections. `output` is what the image's
+/// build asked for, not what the image holds: when it's
+/// [`Output::Records`], the image must not define the text hook, and no
+/// message's text may be loaded.
+pub fn read_image(label: &str, path: &Path, map: &Map, output: Output) -> anyhow::Result<ImageLog> {
     let elf = Elf::read(path)?;
     let mut problems = Vec::new();
     let mut tokens = BTreeMap::new();
@@ -585,10 +602,19 @@ pub fn read_image(label: &str, path: &Path, map: &Map) -> anyhow::Result<ImageLo
             ));
         }
     }
-    for (name, text) in loaded_texts(&elf, tokens.keys())? {
-        problems.push(format!(
-            "the text {text:?} of token {name} is in a loaded section"
-        ));
+    // An image that prints defines the text hook and keeps its messages' text.
+    if output == Output::Records {
+        if elf.symbol(TEXT_HOOK).is_some() {
+            problems.push(format!(
+                "the image defines the text hook {TEXT_HOOK}, but its build asked for no text \
+                 output"
+            ));
+        }
+        for (name, text) in loaded_texts(&elf, tokens.keys())? {
+            problems.push(format!(
+                "the text {text:?} of token {name} is in a loaded section"
+            ));
+        }
     }
     let boundary: BTreeMap<String, u32> = BOUNDARY_SYMBOLS
         .iter()

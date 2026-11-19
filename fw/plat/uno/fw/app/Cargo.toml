@@ -38,7 +38,10 @@ tsra_fw_uno_reg_soc = { workspace = true }
 tsra_log_map = { workspace = true }
 
 [features]
-#default = ["trace-uart"]
+# Build a trace flavor with, for example,
+# `cargo xtask build --features tsra_fw_uno_app/trace-uart`. Don't turn one
+# on here: the build's image check expects text output only when
+# `--features` names a trace flavor.
 default = []
 
 # Enable ARM semihosting integration for the emulator:
