@@ -127,13 +127,21 @@ fuzz_target!(|input: FuzzInput| {
                 packed[usize::from(input.index) % input.curve.coord_len()] ^= input.value | 1;
             }
             Mutation::S => {
-                let at = input.curve.wire_coord_len()
+                let at = verify_coord_len(input.curve)
                     + usize::from(input.index) % input.curve.coord_len();
                 packed[at] ^= input.value | 1;
             }
             Mutation::Digest => {
+                let digest_len = input.hash.digest_len();
+                let retained_len = digest_len.min(input.curve.coord_len());
+                let retained_start = if device_is_little_endian() {
+                    digest_len - retained_len
+                } else {
+                    0
+                };
                 let at = verify_coord_len(input.curve) * 2
-                    + usize::from(input.index) % input.hash.digest_len();
+                    + retained_start
+                    + usize::from(input.index) % retained_len;
                 packed[at] ^= input.value | 1;
             }
             Mutation::Hash => hash_algo = HASH_ALGO_SHA1,

@@ -91,13 +91,20 @@ pub(crate) async fn handle<P: HsmPal>(
         }
 
         let public_len = coord_len.checked_mul(2).ok_or(HsmError::InvalidArg)?;
+        let canonical_public_len = curve.wire_pub_key_len(P::BYTE_ORDER);
         pal.alloc_scoped_async(io, async |alloc| {
             let public_key = alloc.dma_alloc_zeroed(public_len)?;
             let written = pal
                 .ecc_priv_pub_key(io, view.target_key, Some(public_key))
                 .await?;
-            if written != public_len {
+            if written != canonical_public_len {
                 return Err(HsmError::InternalError);
+            }
+            if canonical_public_len < public_len {
+                let raw_coord_len = curve.priv_key_len();
+                public_key.copy_within(raw_coord_len..canonical_public_len, coord_len);
+                public_key[raw_coord_len..coord_len].fill(0);
+                public_key[coord_len + raw_coord_len..public_len].fill(0);
             }
 
             let signature = &req.input[..signature_len];
