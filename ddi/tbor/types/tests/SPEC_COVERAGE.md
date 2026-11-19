@@ -736,6 +736,28 @@ and `EcdhDerive` do.
 | Masked key is not an ML-DSA key → `InvalidKeyType` | ✅ | `mldsa_sign::mldsa_sign_wrong_key_class_rejected` | Supplies a valid masked ML-KEM-512 key, which also lacks `sign` |
 | Masked key is not an ML-KEM key → `InvalidKeyType` | ✅ | `mlkem_decapsulate::mlkem_decapsulate_wrong_key_class_rejected` | Supplies a valid masked ML-DSA-44 key, which also lacks `derive` |
 
+## `RsaEncryptDecrypt` (opcode in-session)
+
+The command uses a masked RSA private key and mandatory OAEP or PKCS#1 v1.5
+encryption padding. Ciphertexts are modulus-sized device-order operands;
+plaintext and labels are opaque bytes.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Independent PKCS#1 v1.5 encrypt/decrypt interoperability | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_pkcs1_independent_interop_all_sizes_and_layouts` | RSA-2048/3072/4096, CRT and non-CRT; host decrypts device ciphertext and device decrypts host ciphertext |
+| Independent OAEP/SHA-256 interoperability across sizes and layouts | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_oaep_independent_interop_all_sizes_and_layouts` | RSA-2048/3072/4096, CRT and non-CRT; exact maximum plaintext |
+| OAEP SHA-256/384/512, same-hash MGF1, labels, and per-hash maximums | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_oaep_hashes_labels_and_boundaries` | Includes 256-byte label, empty plaintext, label mismatch, and wrong decrypt hash |
+| PKCS#1 v1.5 accepts empty through exact maximum and rejects maximum plus one | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_pkcs1_plaintext_boundaries` | Includes host-generated ciphertext decrypting to empty plaintext |
+| Missing/inapplicable hash, nonempty PKCS#1 label, unknown selectors, malformed padding, and ciphertext widths | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers` | Cryptographic failures are `RsaDecryptFailed`; bad lengths/selectors are `InvalidArg`; valid key succeeds after failure |
+| Signing-only RSA permissions are rejected for both directions | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_signing_keys_are_not_encryption_keys` | Exact encrypt/decrypt permission required |
+| Non-RSA masked private key is rejected | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_non_rsa_private_keys` | Valid masked ECC key |
+| Tampered masked envelope rejected and original remains usable | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers` | Expects the existing AEAD authentication status |
+| Default-PSK session is rejected before command execution | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_default_psk_is_gated` | Uses a valid schema-shaped request with a placeholder key |
+| Closed session is rejected | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_closed_session_is_rejected` | Session is closed before the request |
+| All-`none` malformed request rejected | ✅ | `malformed_requests::malformed_requests_for_every_command_are_rejected_and_session_survives` | Opcode is included in the global malformed-request matrix |
+| Maximum host/firmware schema request fits in 4096-byte frame | ✅ | `rsa_encrypt_decrypt::maximum_request_fits_transport_frame`; firmware `rsa_encrypt_decrypt::maximum_request_schema_fits_4096_bytes` | Derive-generated maximum size and complete encoded frame are checked |
+| Decryption padding checks are constant-time | ⚠️ | — | No constant-time claim; explicit PKCS#1 v1.5 failures retain padding-oracle considerations |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:

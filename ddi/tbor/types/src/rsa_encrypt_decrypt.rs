@@ -9,6 +9,7 @@
 //! expose signatures or an unpadded mode.
 
 use alloc::vec::Vec;
+
 use open_enum::open_enum;
 
 use crate::tbor;
@@ -105,7 +106,9 @@ mod tests {
             masked_key: alloc::vec![0x53; RSA_ENCRYPT_DECRYPT_MASKED_KEY_MAX_LEN],
         };
         let mut frame = [0u8; 4096];
-        let encoded = req.encode_request(&mut frame).expect("maximum request encodes");
+        let encoded = req
+            .encode_request(&mut frame)
+            .expect("maximum request encodes");
         assert!(encoded.len() <= frame.len());
     }
 
@@ -113,8 +116,14 @@ mod tests {
     fn request_uses_in_session_control_and_stable_selectors() {
         let req = TborRsaEncryptDecryptReq::default();
         assert_eq!(req.session_ctrl(), crate::SessionControlKind::InSession);
-        assert_eq!(RsaEncryptDecryptOp::Encrypt.0, RSA_ENCRYPT_DECRYPT_OP_ENCRYPT);
-        assert_eq!(RsaEncryptDecryptOp::Decrypt.0, RSA_ENCRYPT_DECRYPT_OP_DECRYPT);
+        assert_eq!(
+            RsaEncryptDecryptOp::Encrypt.0,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT
+        );
+        assert_eq!(
+            RsaEncryptDecryptOp::Decrypt.0,
+            RSA_ENCRYPT_DECRYPT_OP_DECRYPT
+        );
         assert_eq!(RsaEncryptPadding::Oaep.0, RSA_ENCRYPT_PADDING_OAEP);
         assert_eq!(RsaEncryptPadding::Pkcs1v15.0, RSA_ENCRYPT_PADDING_PKCS1V15);
     }

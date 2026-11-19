@@ -33,13 +33,13 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
-    let (sess_id, op, padding, hash) = {
-        let base = cmd_buf.request().as_ptr() as usize;
-        let req = TborRsaEncryptDecryptReq::decode(cmd_buf.request())?;
-        let sess_id = HsmSessId::from(u16::from(req.session_id()));
-        validate_active_session(pal, io, sess_id)?;
+        let (sess_id, op, padding, hash) = {
+            let base = cmd_buf.request().as_ptr() as usize;
+            let req = TborRsaEncryptDecryptReq::decode(cmd_buf.request())?;
+            let sess_id = HsmSessId::from(u16::from(req.session_id()));
+            validate_active_session(pal, io, sess_id)?;
 
-        let op = match req.op() {
+            let op = match req.op() {
                 RsaEncryptDecryptOp::Encrypt => RsaEncryptDecryptOp::Encrypt,
                 RsaEncryptDecryptOp::Decrypt => RsaEncryptDecryptOp::Decrypt,
                 _ => return Err(HsmError::InvalidArg),
@@ -168,14 +168,8 @@ pub(crate) async fn handle<P: HsmPal>(
                 if written != pub_len {
                     return Err(HsmError::InternalError);
                 }
-                pal.rsa_pkcs1_encrypt(
-                    io,
-                    key_type.pub_variant(),
-                    public_key,
-                    input,
-                    Some(output),
-                )
-                .await
+                pal.rsa_pkcs1_encrypt(io, key_type.pub_variant(), public_key, input, Some(output))
+                    .await
             }
             (RsaEncryptDecryptOp::Decrypt, RsaEncryptPadding::Oaep) => {
                 let hash = hash.ok_or(HsmError::InvalidArg)?;

@@ -4,6 +4,8 @@
 //! End-to-end tests for padded RSA with caller-held masked private keys.
 
 use tsra_crypto::DecryptOp;
+use tsra_crypto::EccCurve;
+use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::HashAlgo;
@@ -15,8 +17,14 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::CO_PSK_ID;
+use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborRsaEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
+use tsra_ddi_tbor_types::HASH_ALGO_SHA384;
+use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
+use tsra_ddi_tbor_types::KEY_CLASS_ECC;
 use tsra_ddi_tbor_types::KEY_CLASS_RSA;
 use tsra_ddi_tbor_types::KEY_CLASS_RSA_CRT;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
@@ -27,9 +35,6 @@ use tsra_ddi_tbor_types::RSA_ENCRYPT_DECRYPT_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_ENCRYPT_DECRYPT_OP_ENCRYPT;
 use tsra_ddi_tbor_types::RSA_ENCRYPT_PADDING_OAEP;
 use tsra_ddi_tbor_types::RSA_ENCRYPT_PADDING_PKCS1V15;
-use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
-use tsra_ddi_tbor_types::HASH_ALGO_SHA384;
-use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap_with_usage;
@@ -43,7 +48,11 @@ fn import_rsa(
 ) -> (Vec<u8>, RsaPrivateKey, RsaPublicKey) {
     let private = RsaPrivateKey::generate(modulus_len).expect("generate RSA key");
     let der = private.to_vec().expect("export private key");
-    let class = if crt { KEY_CLASS_RSA_CRT } else { KEY_CLASS_RSA };
+    let class = if crt {
+        KEY_CLASS_RSA_CRT
+    } else {
+        KEY_CLASS_RSA
+    };
     let masked = unwrap_with_usage(ctx, session_id, class, usage, &der).masked_key;
     let public = private.public_key().expect("derive public key");
     (masked, private, public)
@@ -85,10 +94,8 @@ fn host_encrypt(
                 .expect("host PKCS#1 v1.5 encrypt")
         }
         RSA_ENCRYPT_PADDING_OAEP => {
-            let mut algorithm = RsaEncryptAlgo::with_oaep_padding(
-                hash.expect("OAEP hash"),
-                Some(label),
-            );
+            let mut algorithm =
+                RsaEncryptAlgo::with_oaep_padding(hash.expect("OAEP hash"), Some(label));
             algorithm
                 .encrypt(public, message, Some(&mut ciphertext))
                 .expect("host OAEP encrypt")
@@ -115,10 +122,8 @@ fn host_decrypt(
                 .expect("host PKCS#1 v1.5 decrypt")
         }
         RSA_ENCRYPT_PADDING_OAEP => {
-            let mut algorithm = RsaEncryptAlgo::with_oaep_padding(
-                hash.expect("OAEP hash"),
-                Some(label),
-            );
+            let mut algorithm =
+                RsaEncryptAlgo::with_oaep_padding(hash.expect("OAEP hash"), Some(label));
             algorithm
                 .decrypt(private, ciphertext, Some(&mut message))
                 .expect("host OAEP decrypt")
@@ -168,13 +173,8 @@ fn rsa_encrypt_decrypt_pkcs1_independent_interop_all_sizes_and_layouts() {
                 message,
             );
 
-            let host_ciphertext = host_encrypt(
-                &public,
-                RSA_ENCRYPT_PADDING_PKCS1V15,
-                None,
-                &[],
-                &message,
-            );
+            let host_ciphertext =
+                host_encrypt(&public, RSA_ENCRYPT_PADDING_PKCS1V15, None, &[], &message);
             let device_ciphertext = dev_rev(&host_ciphertext);
             let decrypted = ctx
                 .tbor(&request(
@@ -187,6 +187,70 @@ fn rsa_encrypt_decrypt_pkcs1_independent_interop_all_sizes_and_layouts() {
                     &device_ciphertext,
                 ))
                 .expect("device PKCS#1 v1.5 decrypt");
+            assert_eq!(decrypted.output, message);
+        }
+    }
+}
+
+#[test]
+fn rsa_encrypt_decrypt_oaep_independent_interop_all_sizes_and_layouts() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for modulus_len in [256, 384, 512] {
+        for crt in [false, true] {
+            let (masked, private, public) = import_rsa(
+                &ctx,
+                session.session_id,
+                modulus_len,
+                crt,
+                KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+            );
+            let max_len = modulus_len - 2 * 32 - 2;
+            let message = (0..max_len)
+                .map(|index| (index as u8).wrapping_mul(53))
+                .collect::<Vec<_>>();
+            let label = [0x00, 0xD4, 0x00, 0x27];
+            let encrypted = ctx
+                .tbor(&request(
+                    session.session_id,
+                    &masked,
+                    RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+                    RSA_ENCRYPT_PADDING_OAEP,
+                    Some(HASH_ALGO_SHA256),
+                    &label,
+                    &message,
+                ))
+                .expect("device OAEP encrypt at maximum");
+            assert_eq!(encrypted.output.len(), modulus_len);
+            assert_eq!(
+                host_decrypt(
+                    &private,
+                    RSA_ENCRYPT_PADDING_OAEP,
+                    Some(HashAlgo::sha256()),
+                    &label,
+                    &dev_rev(&encrypted.output),
+                ),
+                message,
+            );
+
+            let host_ciphertext = host_encrypt(
+                &public,
+                RSA_ENCRYPT_PADDING_OAEP,
+                Some(HashAlgo::sha256()),
+                &label,
+                &message,
+            );
+            let decrypted = ctx
+                .tbor(&request(
+                    session.session_id,
+                    &masked,
+                    RSA_ENCRYPT_DECRYPT_OP_DECRYPT,
+                    RSA_ENCRYPT_PADDING_OAEP,
+                    Some(HASH_ALGO_SHA256),
+                    &label,
+                    &dev_rev(&host_ciphertext),
+                ))
+                .expect("device decrypts host OAEP ciphertext");
             assert_eq!(decrypted.output, message);
         }
     }
@@ -323,11 +387,7 @@ fn rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers() {
             Some(HASH_ALGO_SHA256),
             &[][..],
         ),
-        (
-            RSA_ENCRYPT_PADDING_PKCS1V15,
-            None,
-            &b"not-empty"[..],
-        ),
+        (RSA_ENCRYPT_PADDING_PKCS1V15, None, &b"not-empty"[..]),
     ] {
         ctx.expect_fw_reject(
             &request(
@@ -339,6 +399,16 @@ fn rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers() {
                 label,
                 &input,
             ),
+            TborStatus::InvalidArg,
+        );
+    }
+    for (op, padding) in [
+        (0, RSA_ENCRYPT_PADDING_PKCS1V15),
+        (RSA_ENCRYPT_DECRYPT_OP_ENCRYPT, 0),
+        (RSA_ENCRYPT_DECRYPT_OP_DECRYPT, 3),
+    ] {
+        ctx.expect_fw_reject(
+            &request(session.session_id, &masked, op, padding, None, &[], &input),
             TborStatus::InvalidArg,
         );
     }
@@ -410,13 +480,7 @@ fn rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers() {
         );
     }
 
-    let valid_ciphertext = host_encrypt(
-        &public,
-        RSA_ENCRYPT_PADDING_PKCS1V15,
-        None,
-        &[],
-        &input,
-    );
+    let valid_ciphertext = host_encrypt(&public, RSA_ENCRYPT_PADDING_PKCS1V15, None, &[], &input);
     let recovered = ctx
         .tbor(&request(
             session.session_id,
@@ -429,6 +493,37 @@ fn rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers() {
         ))
         .expect("masked key remains reusable after rejection");
     assert_eq!(recovered.output, input);
+
+    let mut tampered = masked.clone();
+    let tag_offset = tampered.len() - 1;
+    tampered[tag_offset] ^= 0x80;
+    ctx.expect_fw_reject(
+        &request(
+            session.session_id,
+            &tampered,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+            RSA_ENCRYPT_PADDING_PKCS1V15,
+            None,
+            &[],
+            &input,
+        ),
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+    assert_eq!(
+        ctx.tbor(&request(
+            session.session_id,
+            &masked,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+            RSA_ENCRYPT_PADDING_PKCS1V15,
+            None,
+            &[],
+            &input,
+        ))
+        .expect("valid key remains usable after envelope tampering")
+        .output
+        .len(),
+        private.size(),
+    );
 }
 
 #[test]
@@ -465,6 +560,83 @@ fn rsa_encrypt_decrypt_signing_keys_are_not_encryption_keys() {
             &[],
         ),
         TborStatus::InvalidPermissions,
+    );
+}
+
+#[test]
+fn rsa_encrypt_decrypt_rejects_non_rsa_private_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let ecc = EccPrivateKey::from_curve(EccCurve::P256).expect("generate ECC key");
+    let der = ecc.to_vec().expect("export ECC key");
+    let masked = unwrap_with_usage(
+        &ctx,
+        session.session_id,
+        KEY_CLASS_ECC,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &der,
+    )
+    .masked_key;
+
+    ctx.expect_fw_reject(
+        &request(
+            session.session_id,
+            &masked,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+            RSA_ENCRYPT_PADDING_PKCS1V15,
+            None,
+            &[],
+            b"message",
+        ),
+        TborStatus::InvalidKeyType,
+    );
+}
+
+#[test]
+fn rsa_encrypt_decrypt_default_psk_is_gated() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(CO_PSK_ID, SessionType::Authenticated)
+        .expect("open default-PSK CO session");
+    let placeholder_key = vec![0; 264];
+    ctx.expect_fw_reject(
+        &request(
+            session.session_id(),
+            &placeholder_key,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+            RSA_ENCRYPT_PADDING_PKCS1V15,
+            None,
+            &[],
+            &[],
+        ),
+        TborStatus::DefaultPskMustRotate,
+    );
+}
+
+#[test]
+fn rsa_encrypt_decrypt_closed_session_is_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked, _, _) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+    );
+    ctx.session_close(session.session_id)
+        .expect("close CO session");
+    ctx.expect_session_reject(
+        &request(
+            session.session_id,
+            &masked,
+            RSA_ENCRYPT_DECRYPT_OP_ENCRYPT,
+            RSA_ENCRYPT_PADDING_PKCS1V15,
+            None,
+            &[],
+            b"message",
+        ),
+        TborStatus::SessionNotFound,
     );
 }
 
@@ -515,13 +687,7 @@ fn rsa_encrypt_decrypt_pkcs1_plaintext_boundaries() {
         TborStatus::InvalidArg,
     );
 
-    let host_ciphertext = host_encrypt(
-        &public,
-        RSA_ENCRYPT_PADDING_PKCS1V15,
-        None,
-        &[],
-        &[],
-    );
+    let host_ciphertext = host_encrypt(&public, RSA_ENCRYPT_PADDING_PKCS1V15, None, &[], &[]);
     let decrypted = ctx
         .tbor(&request(
             session.session_id,

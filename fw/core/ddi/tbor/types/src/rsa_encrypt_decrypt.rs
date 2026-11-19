@@ -87,7 +87,9 @@ mod tests {
 
     #[test]
     fn maximum_request_schema_fits_4096_bytes() {
-        assert!(TborRsaEncryptDecryptReq::MAX_ENCODED_SIZE <= 4096);
+        const {
+            assert!(TborRsaEncryptDecryptReq::MAX_ENCODED_SIZE <= 4096);
+        }
         let mut buf = [0u8; 4096];
         let label = [0x31; RSA_OAEP_LABEL_MAX_LEN];
         let input = [0x42; RSA_ENCRYPT_DECRYPT_MAX_LEN];

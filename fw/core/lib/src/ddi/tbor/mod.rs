@@ -55,8 +55,8 @@ pub mod part_init;
 pub mod policy;
 pub(crate) mod psk_change;
 pub(crate) mod pta;
-pub(crate) mod rsa_mod_exp;
 pub(crate) mod rsa_encrypt_decrypt;
+pub(crate) mod rsa_mod_exp;
 pub(crate) mod sd_backup;
 pub(crate) mod sd_create_peer_backup;
 pub(crate) mod sd_create_remote_backup;
@@ -610,9 +610,7 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::ECC_GENERATE_KEY => types::TborEccGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::ECDH_DERIVE => types::TborEcdhDeriveResp::MAX_ENCODED_SIZE,
         opcode::RSA_MOD_EXP => types::TborRsaModExpResp::MAX_ENCODED_SIZE,
-        opcode::RSA_ENCRYPT_DECRYPT => {
-            types::TborRsaEncryptDecryptResp::MAX_ENCODED_SIZE
-        }
+        opcode::RSA_ENCRYPT_DECRYPT => types::TborRsaEncryptDecryptResp::MAX_ENCODED_SIZE,
         opcode::HASH => types::TborHashResp::MAX_ENCODED_SIZE,
         opcode::HKDF_DERIVE => types::TborHkdfDeriveResp::MAX_ENCODED_SIZE,
         opcode::CONCAT_KDF_DERIVE => types::TborConcatKdfDeriveResp::MAX_ENCODED_SIZE,
@@ -787,9 +785,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
         opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
-        opcode::RSA_ENCRYPT_DECRYPT => {
-            rsa_encrypt_decrypt::handle(pal, io, cmd_buf).await
-        }
+        opcode::RSA_ENCRYPT_DECRYPT => rsa_encrypt_decrypt::handle(pal, io, cmd_buf).await,
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
         opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,
