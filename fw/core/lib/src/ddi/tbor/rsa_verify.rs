@@ -19,6 +19,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 
 use super::from_pal::rsa_key;
 use super::rsa_sign::hash_algo;
+use super::rsa_sign::validate_padding_salt_presence;
 use super::rsa_sign::validate_salt;
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -35,6 +36,8 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidArg);
         }
         let algo = hash_algo(HashAlgo(req.hash_algo))?;
+        let padding = RsaPadding(req.padding);
+        validate_padding_salt_presence(padding, salt_len)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 
@@ -46,7 +49,7 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidPermissions);
         }
         let salt_len = validate_salt(
-            RsaPadding(req.padding),
+            padding,
             salt_len,
             key_type.modulus_len(),
             algo.digest_len(),

@@ -350,6 +350,20 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_rsa_sign"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_sign.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_rsa_verify"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_verify.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_get_unwrapping_key"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_unwrapping_key.rs"
 test = false
