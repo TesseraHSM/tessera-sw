@@ -10,7 +10,6 @@ use common::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_hmac;
 use tsra_ddi_mbor_types::*;
@@ -37,56 +36,47 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_hmac(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    let mut dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("Failed to open device");
-
-    cleanup(&ddi, &dev_infos[0].path, None);
-    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
-
-    let sess_id = match helper_common_open_session(&mut dev) {
-        Ok(id) => id,
-        Err(err) => {
-            panic!("Could not open session: {}", err);
-        }
-    };
-
-    let cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let mut key_id = cmdreq_data.key_id;
-
-    if input.use_valid_key_id {
-        let key_resp = helper_create_hmac_key(
-            &dev,
-            sess_id,
-            rev,
-            input.key_availability,
-            input.key_curve,
-            input.hmac_key_type,
-            input.hash_algorithm,
-        );
-
-        key_id = match key_resp {
+        let sess_id = match helper_common_open_session(dev) {
             Ok(id) => id,
             Err(err) => {
-                panic!("Could not create HMAC key: {:?}", err);
+                panic!("Could not open session: {}", err);
             }
         };
-    }
 
-    let resp = helper_hmac(&dev, Some(sess_id), rev, key_id, cmdreq_data.msg);
+        let cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut key_id = cmdreq_data.key_id;
 
-    check_driver_error(resp);
+        if input.use_valid_key_id {
+            let key_resp = helper_create_hmac_key(
+                dev,
+                sess_id,
+                rev,
+                input.key_availability,
+                input.key_curve,
+                input.hmac_key_type,
+                input.hash_algorithm,
+            );
 
-    if input.use_valid_key_id {
-        helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");
-    }
+            key_id = match key_resp {
+                Ok(id) => id,
+                Err(err) => {
+                    panic!("Could not create HMAC key: {:?}", err);
+                }
+            };
+        }
 
-    cleanup_with_session(&dev, Some(sess_id));
+        let resp = helper_hmac(dev, Some(sess_id), rev, key_id, cmdreq_data.msg);
+
+        check_driver_error(resp);
+
+        if input.use_valid_key_id {
+            helper_delete_key(dev, Some(sess_id), rev, key_id).expect("Could not delete key");
+        }
+
+        cleanup_with_session(dev, Some(sess_id));
+    });
 }

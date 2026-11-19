@@ -39,56 +39,47 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_rsa_mod_exp(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    let mut dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("Failed to open device");
+        let sess_id = match helper_common_open_session(dev) {
+            Ok(id) => id,
+            Err(err) => {
+                panic!("Could not open session: {}", err);
+            }
+        };
 
-    cleanup(&ddi, &dev_infos[0].path, None);
-    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
+        let cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut key_id = cmdreq_data.key_id;
 
-    let sess_id = match helper_common_open_session(&mut dev) {
-        Ok(id) => id,
-        Err(err) => {
-            panic!("Could not open session: {}", err);
+        if input.use_valid_key_id {
+            let key_resp = import_rsa_key(
+                dev,
+                sess_id,
+                input.key_availability,
+                rev,
+                input.key_size as u16,
+            );
+
+            key_id = key_resp.expect("Could not get RSA key ID");
         }
-    };
+        let mut rng = StdRng::seed_from_u64(input.rand_seed);
+        let mut y_buf = vec![0u8; usize::from(input.key_size as u16) / 8];
+        rng.fill_bytes(&mut y_buf);
 
-    let cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let mut key_id = cmdreq_data.key_id;
+        let y = MborByteArray::from_slice(&y_buf).expect("Failed to create y buffer");
 
-    if input.use_valid_key_id {
-        let key_resp = import_rsa_key(
-            &dev,
-            sess_id,
-            input.key_availability,
-            rev,
-            input.key_size as u16,
-        );
+        let resp = helper_rsa_mod_exp(dev, Some(sess_id), rev, key_id, y, cmdreq_data.op_type);
 
-        key_id = key_resp.expect("Could not get RSA key ID");
-    }
-    let mut rng = StdRng::seed_from_u64(input.rand_seed);
-    let mut y_buf = vec![0u8; usize::from(input.key_size as u16) / 8];
-    rng.fill_bytes(&mut y_buf);
+        if let Err(err @ DdiError::DriverError(_)) = &resp {
+            panic!("Crash Detected: {err}");
+        }
 
-    let y = MborByteArray::from_slice(&y_buf).expect("Failed to create y buffer");
+        if input.use_valid_key_id {
+            helper_delete_key(dev, Some(sess_id), rev, key_id).expect("Could not delete RSA key");
+        }
 
-    let resp = helper_rsa_mod_exp(&dev, Some(sess_id), rev, key_id, y, cmdreq_data.op_type);
-
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
-
-    if input.use_valid_key_id {
-        helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete RSA key");
-    }
-
-    cleanup_with_session(&dev, Some(sess_id));
+        cleanup_with_session(dev, Some(sess_id));
+    });
 }

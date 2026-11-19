@@ -36,64 +36,55 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_kbkdf_counter_hmac_derive(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    let mut dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("Failed to open device");
-
-    cleanup(&ddi, &dev_infos[0].path, None);
-    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
-
-    let sess_id = match helper_common_open_session(&mut dev) {
-        Ok(id) => id,
-        Err(err) => {
-            panic!("Could not open session: {}", err);
-        }
-    };
-
-    let cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let mut key_id = cmdreq_data.key_id;
-
-    if input.use_valid_key_id {
-        let key_resp =
-            create_secret_key(&dev, sess_id, rev, input.key_curve, input.key_availability);
-
-        key_id = match key_resp {
+        let sess_id = match helper_common_open_session(dev) {
             Ok(id) => id,
             Err(err) => {
-                panic!("Could not create secret key: {}", err);
+                panic!("Could not open session: {}", err);
             }
         };
-    }
 
-    let key_props = helper_key_properties(input.key_usage, input.key_availability);
+        let cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut key_id = cmdreq_data.key_id;
 
-    let resp = helper_kbkdf_derive(
-        &dev,
-        Some(sess_id),
-        rev,
-        key_id,
-        cmdreq_data.hash_algorithm,
-        cmdreq_data.label,
-        cmdreq_data.context,
-        cmdreq_data.key_type,
-        key_props,
-        cmdreq_data.key_length,
-    );
+        if input.use_valid_key_id {
+            let key_resp =
+                create_secret_key(dev, sess_id, rev, input.key_curve, input.key_availability);
 
-    if let Err(err @ DdiError::DriverError(_)) = &resp {
-        panic!("Crash Detected: {err}");
-    }
+            key_id = match key_resp {
+                Ok(id) => id,
+                Err(err) => {
+                    panic!("Could not create secret key: {}", err);
+                }
+            };
+        }
 
-    if input.use_valid_key_id {
-        helper_delete_key(&dev, Some(sess_id), rev, key_id).expect("Could not delete key");
-    }
+        let key_props = helper_key_properties(input.key_usage, input.key_availability);
 
-    cleanup_with_session(&dev, Some(sess_id));
+        let resp = helper_kbkdf_derive(
+            dev,
+            Some(sess_id),
+            rev,
+            key_id,
+            cmdreq_data.hash_algorithm,
+            cmdreq_data.label,
+            cmdreq_data.context,
+            cmdreq_data.key_type,
+            key_props,
+            cmdreq_data.key_length,
+        );
+
+        if let Err(err @ DdiError::DriverError(_)) = &resp {
+            panic!("Crash Detected: {err}");
+        }
+
+        if input.use_valid_key_id {
+            helper_delete_key(dev, Some(sess_id), rev, key_id).expect("Could not delete key");
+        }
+
+        cleanup_with_session(dev, Some(sess_id));
+    });
 }

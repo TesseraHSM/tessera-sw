@@ -10,7 +10,6 @@ use common::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_establish_credential;
 use tsra_ddi_mbor_types::*;
@@ -37,64 +36,54 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_establish_credential(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        // Note: This test case to fuzz "EstablishCredential" does not need prior credential
 
-    let dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("Failed to open device");
+        let mut cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
 
-    cleanup(&ddi, &dev_infos[0].path, None);
+        let (encrypted_credential, pub_key) =
+            encrypt_userid_pin_for_establish_cred(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    // Note: This test case to fuzz "EstablishCredential" does not need prior credential
+        if input.use_valid_pub_key {
+            cmdreq_data.pub_key = pub_key;
+        }
 
-    let mut cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        if input.use_valid_encrypted_credential {
+            cmdreq_data.encrypted_credential = encrypted_credential;
+        }
 
-    let (encrypted_credential, pub_key) =
-        encrypt_userid_pin_for_establish_cred(&dev, TEST_CRED_ID, TEST_CRED_PIN);
+        if input.use_valid_masked_bk3 {
+            cmdreq_data.masked_bk3 = helper_get_or_init_bk3(dev);
+        }
 
-    if input.use_valid_pub_key {
-        cmdreq_data.pub_key = pub_key;
-    }
+        let (signature, pota_pub_key) = get_pota_endorsement(dev);
+        if input.use_valid_pota_pub_key {
+            cmdreq_data.pota_pub_key = DdiDerPublicKey {
+                der: MborByteArray::from_slice(&pota_pub_key)
+                    .expect("Failed to create MborByteArray from POTA ECC public key"),
+                key_kind: DdiKeyType::Ecc384Public,
+            };
+        }
 
-    if input.use_valid_encrypted_credential {
-        cmdreq_data.encrypted_credential = encrypted_credential;
-    }
+        if input.use_valid_pota_sig {
+            cmdreq_data.pota_sig = MborByteArray::from_slice(&signature)
+                .expect("Failed to create MborByteArray from POTA signature");
+        }
 
-    if input.use_valid_masked_bk3 {
-        cmdreq_data.masked_bk3 = helper_get_or_init_bk3(&dev);
-    }
+        let resp = helper_establish_credential(
+            dev,
+            None,
+            rev,
+            cmdreq_data.encrypted_credential,
+            cmdreq_data.pub_key,
+            cmdreq_data.masked_bk3,
+            cmdreq_data.bmk,
+            cmdreq_data.masked_unwrapping_key,
+            cmdreq_data.pota_sig,
+            cmdreq_data.pota_pub_key,
+        );
 
-    let (signature, pota_pub_key) = get_pota_endorsement(&dev);
-    if input.use_valid_pota_pub_key {
-        cmdreq_data.pota_pub_key = DdiDerPublicKey {
-            der: MborByteArray::from_slice(&pota_pub_key)
-                .expect("Failed to create MborByteArray from POTA ECC public key"),
-            key_kind: DdiKeyType::Ecc384Public,
-        };
-    }
-
-    if input.use_valid_pota_sig {
-        cmdreq_data.pota_sig = MborByteArray::from_slice(&signature)
-            .expect("Failed to create MborByteArray from POTA signature");
-    }
-
-    let resp = helper_establish_credential(
-        &dev,
-        None,
-        rev,
-        cmdreq_data.encrypted_credential,
-        cmdreq_data.pub_key,
-        cmdreq_data.masked_bk3,
-        cmdreq_data.bmk,
-        cmdreq_data.masked_unwrapping_key,
-        cmdreq_data.pota_sig,
-        cmdreq_data.pota_pub_key,
-    );
-
-    check_driver_error(resp);
+        check_driver_error(resp);
+    });
 }
