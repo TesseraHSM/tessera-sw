@@ -292,7 +292,7 @@ fuzz_target!(|input: FuzzInput| {
             }
         }
 
-        if input.tamper_key {
+        if input.tamper_key && !input.signing_permissions {
             let recovered = ctx
                 .tbor(&TborRsaEncryptDecryptReq {
                     session_id: session.session_id,

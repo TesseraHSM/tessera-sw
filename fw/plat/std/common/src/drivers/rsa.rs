@@ -70,6 +70,18 @@ use crate::worker::WorkerPool;
 /// public-key encoding (`n || e`).
 pub const RSA_PUB_EXP_WIRE_LEN: usize = 4;
 
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    core::hint::black_box(diff) == 0
+}
+
+fn ct_is_zero(value: u8) -> u8 {
+    ((value | value.wrapping_neg()) >> 7) ^ 1
+}
+
 /// Serialize an RSA public-key handle into the raw wire form `n || e`
 /// in operand order `order` — the modulus followed by a fixed 4-byte
 /// exponent, the raw layout the host's `DdiDerPublicKey` post-decode
@@ -400,15 +412,21 @@ impl StdRsa {
             Err(HsmError::InvalidArg) => return Err(HsmError::RsaDecryptFailed),
             Err(error) => return Err(error),
         };
-        if encoded.len() != k || encoded[0] != 0 || encoded[1] != 2 {
+        if encoded.len() != k {
             return Err(HsmError::RsaDecryptFailed);
         }
-        let separator = encoded[2..]
-            .iter()
-            .position(|byte| *byte == 0)
-            .map(|offset| offset + 2)
-            .filter(|offset| *offset >= 10)
-            .ok_or(HsmError::RsaDecryptFailed)?;
+        let header_valid = ct_eq(&encoded[..2], &[0, 2]);
+        let mut separator = 0usize;
+        let mut found = 0u8;
+        for (offset, &byte) in encoded[2..].iter().enumerate() {
+            let is_zero = ct_is_zero(byte);
+            let take = is_zero & (found ^ 1);
+            separator |= (offset + 2) & 0usize.wrapping_sub(take as usize);
+            found |= is_zero;
+        }
+        if !(header_valid & (found == 1) & (separator >= 10)) {
+            return Err(HsmError::RsaDecryptFailed);
+        }
         let message = &encoded[separator + 1..];
         if output.len() < message.len() {
             return Err(HsmError::InvalidArg);
