@@ -33,6 +33,8 @@ pub(crate) mod darc_tmk_import;
 pub(crate) mod ecc_generate_key;
 pub(crate) mod ecc_sign;
 pub(crate) mod ecdh_derive;
+pub(crate) mod ecdsa_sign;
+pub(crate) mod ecdsa_verify;
 pub(crate) mod from_pal;
 pub(crate) mod get_cert;
 pub(crate) mod get_cert_chain_info;
@@ -401,6 +403,12 @@ pub(crate) mod opcode {
     /// `VerifyKey` — authenticate a masked key of any kind without using
     /// it. See [`super::verify_key`].
     pub(crate) const VERIFY_KEY: u8 = 0x32;
+
+    /// `EcdsaSign` — sign a raw OOB message with internal hashing.
+    pub(crate) const ECDSA_SIGN: u8 = 0x37;
+
+    /// `EcdsaVerify` — verify a raw OOB message with internal hashing.
+    pub(crate) const ECDSA_VERIFY: u8 = 0x38;
 }
 
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
@@ -625,6 +633,8 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::AES_XTS_GENERATE_KEY => types::TborAesXtsGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::GET_PUBLIC_KEY => types::TborGetPublicKeyResp::MAX_ENCODED_SIZE,
         opcode::VERIFY_KEY => types::TborVerifyKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECDSA_SIGN => types::TborEcdsaSignResp::MAX_ENCODED_SIZE,
+        opcode::ECDSA_VERIFY => types::TborEcdsaVerifyResp::MAX_ENCODED_SIZE,
         // These handlers reclaim response space within every valid request.
         opcode::AES_ENCRYPT_DECRYPT | opcode::AES_GCM_ENCRYPT_DECRYPT | opcode::ECC_SIGN => {
             request_len
@@ -745,6 +755,8 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::HASH => hash::handle(pal, io, cmd_buf).await,
         opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, cmd_buf).await,
         opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf).await,
+        opcode::ECDSA_SIGN => ecdsa_sign::handle(pal, io, cmd_buf).await,
+        opcode::ECDSA_VERIFY => ecdsa_verify::handle(pal, io, cmd_buf).await,
         opcode::SESSION_OPEN_INIT => {
             session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
@@ -839,6 +851,8 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::AES_ENCRYPT_DECRYPT
             | opcode::ECC_GENERATE_KEY
             | opcode::ECC_SIGN
+            | opcode::ECDSA_SIGN
+            | opcode::ECDSA_VERIFY
             | opcode::ECDH_DERIVE
             | opcode::RSA_MOD_EXP
             | opcode::HASH
@@ -907,6 +921,8 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECDSA_SIGN
+        | opcode::ECDSA_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
         | opcode::HASH
@@ -977,6 +993,8 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECDSA_SIGN
+        | opcode::ECDSA_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
         | opcode::HASH

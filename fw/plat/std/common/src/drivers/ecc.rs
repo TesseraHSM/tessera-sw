@@ -199,7 +199,7 @@ impl StdEcc {
         if sig_out.len() != wire_coord_len(curve, self.form) * 2 {
             return Err(HsmError::EccSignFailed);
         }
-        if hash.len() > 64 {
+        if !matches!(hash.len(), 32 | 48 | 64) {
             return Err(HsmError::InvalidArg);
         }
 

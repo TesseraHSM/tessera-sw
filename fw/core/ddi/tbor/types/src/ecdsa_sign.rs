@@ -5,6 +5,8 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MAX_LEN;
+pub use crate::ecc_generate_key::MASKED_ECC_KEY_MIN_LEN;
 use crate::key_props::HashAlgo;
 
 /// TBOR opcode for message-level `EcdsaSign`.
@@ -13,6 +15,9 @@ pub const TBOR_OP_ECDSA_SIGN: u8 = 0x37;
 pub const ECDSA_MESSAGE_MAX_LEN: usize = 8192;
 /// Maximum signature length, including std Duo P-521's padded lanes.
 pub const ECDSA_SIGNATURE_MAX_LEN: usize = 144;
+
+const _: () = assert!(MASKED_ECC_KEY_MIN_LEN == 264);
+const _: () = assert!(MASKED_ECC_KEY_MAX_LEN == 312);
 
 /// `EcdsaSign` request. The host must keep the referenced OOB memory
 /// accessible and unchanged until command completion.
@@ -52,7 +57,7 @@ mod tests {
     #[test]
     fn request_round_trips_required_fields() {
         let mut buf = [0u8; 1024];
-        let key = [0x11; 312];
+        let key = [0x11; MASKED_ECC_KEY_MAX_LEN];
         let frame = TborEcdsaSignReq::encode(&mut buf)
             .unwrap()
             .session_id(SessionId(9))
