@@ -194,12 +194,8 @@ fn import_rsa(ctx: &TestCtx, session_id: u16, scope: u8, input: &Input<'_>) -> V
         }
     };
     let modulus_len = wire.len() - core::mem::size_of::<u32>();
-    let public_be: Vec<u8> = wire[..modulus_len]
-        .iter()
-        .rev()
-        .chain(wire[modulus_len..].iter().rev())
-        .copied()
-        .collect();
+    let mut public_be = dev_rev(&wire[..modulus_len]);
+    public_be.extend(dev_rev(&wire[modulus_len..]));
     let public = RsaPublicKey::from_hsm_bytes(&public_be).expect("unwrapping public key");
     let kek_bytes = Rng::rand_vec(32).expect("host KEK generation");
     let mut wrapped = Encrypter::encrypt_vec(
@@ -208,7 +204,7 @@ fn import_rsa(ctx: &TestCtx, session_id: u16, scope: u8, input: &Input<'_>) -> V
         &kek_bytes,
     )
     .expect("OAEP fixture wrapping");
-    wrapped.reverse();
+    dev_rev_in_place(&mut wrapped);
     let kek = AesKey::from_bytes(&kek_bytes).expect("AES fixture KEK");
     wrapped.extend(
         Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, der)
@@ -594,7 +590,11 @@ fn run_case(ctx: &TestCtx, input: &Input<'_>) {
     } else {
         expected_blob(&req.masked_key, &original, scope, changed_session_key)
     };
-    check_result(ctx.tbor(&req), expected, scenario);
+    check_result(
+        ctx.tbor(&req),
+        expected.map(|status| ctx.device_status(&req, status)),
+        scenario,
+    );
     if live_session.is_some() && !changed_session_key {
         let pristine = TborVerifyKeyReq {
             session_id: active,
