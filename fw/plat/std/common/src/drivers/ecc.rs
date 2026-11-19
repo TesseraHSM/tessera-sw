@@ -270,7 +270,7 @@ impl StdEcc {
     ) -> HsmResult<()> {
         let pk = priv_key.clone();
         let pubk = pub_key.clone();
-        let result: HsmResult<Vec<u8>> = self
+        let result: HsmResult<Zeroizing<Vec<u8>>> = self
             .pool
             .submit_with_result(async move {
                 let derived_len = EccKeyOp::curve(&pk).point_size();
@@ -278,7 +278,10 @@ impl StdEcc {
                 let derived = ecdh
                     .derive(&pk, derived_len)
                     .map_err(|_| HsmError::EccDeriveError)?;
-                derived.to_vec().map_err(|_| HsmError::EccDeriveError)
+                derived
+                    .to_vec()
+                    .map(Zeroizing::new)
+                    .map_err(|_| HsmError::EccDeriveError)
             })
             .await;
         let bytes = result?;

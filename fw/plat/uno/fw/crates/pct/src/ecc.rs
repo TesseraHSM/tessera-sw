@@ -11,7 +11,6 @@
 //!   the same shared secret. Only the X coordinate is compared. A public key
 //!   under test that fails validation fails the test.
 
-use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
@@ -31,8 +30,30 @@ const MESSAGE_BYTE: u8 = 100;
 /// Length of the sign/verify test message: the widest ECC operand.
 const MESSAGE_LEN: usize = 68;
 
-/// Length of the status word that `ecc_verify` writes.
-const VERIFY_RESULT_LEN: usize = 4;
+/// PCT operations whose backend needs additional workspace.
+pub enum EccPctOperation<'a> {
+    Verify {
+        public: &'a HsmDmaBuf,
+        digest: &'a HsmDmaBuf,
+        signature: &'a HsmDmaBuf,
+        valid: &'a mut bool,
+    },
+    Derive {
+        private: &'a HsmDmaBuf,
+        public: &'a HsmDmaBuf,
+        secret: &'a mut HsmDmaBuf,
+    },
+}
+
+/// PCT-owned storage, excluding the backend's verification/ECDH workspace.
+pub fn ecc_pct_workspace_len<P: HsmEcc>(curve: HsmEccCurve, pct: &HsmEccPct) -> usize {
+    let coord = curve.wire_coord_len(P::BYTE_ORDER);
+    match pct {
+        HsmEccPct::None => 0,
+        HsmEccPct::SignVerify => MESSAGE_LEN + 3 * coord,
+        HsmEccPct::KeyAgreement => 7 * coord,
+    }
+}
 
 /// Runs the ECC pairwise consistency test that `pct` selects.
 ///
@@ -55,10 +76,94 @@ pub async fn ecc_pct<P: HsmEcc + HsmHash>(
     priv_key: &HsmDmaBuf,
     pub_key: &HsmDmaBuf,
 ) -> HsmResult<bool> {
+    let len = ecc_pct_workspace_len::<P>(curve, pct);
+    if len == 0 {
+        return Ok(true);
+    }
+    let workspace = crate::scratch(alloc, len)?;
+    ecc_pct_in_workspace(
+        pal,
+        io,
+        curve,
+        pct,
+        priv_key,
+        pub_key,
+        workspace,
+        async |operation, _: &mut HsmDmaBuf| match operation {
+            EccPctOperation::Verify {
+                public,
+                digest,
+                signature,
+                valid,
+            } => {
+                *valid = pal.ecc_verify(io, curve, public, digest, signature).await?;
+                Ok(())
+            }
+            EccPctOperation::Derive {
+                private,
+                public,
+                secret,
+            } => pal
+                .ecdh_derive(io, curve, private, public, Some(secret))
+                .await
+                .map(|_| ()),
+        },
+    )
+    .await
+}
+
+/// Run a PCT using caller-owned storage and workspace-aware backend operations.
+///
+/// The workspace begins with [`ecc_pct_workspace_len`] bytes for the test;
+/// the remainder is passed to `operation` and reused between backend calls.
+/// A verification operation must set `valid` to its boolean verification result.
+#[allow(clippy::too_many_arguments)]
+pub async fn ecc_pct_in_workspace<P, F>(
+    pal: &P,
+    io: &P::Io,
+    curve: HsmEccCurve,
+    pct: &HsmEccPct,
+    priv_key: &HsmDmaBuf,
+    pub_key: &HsmDmaBuf,
+    workspace: &mut HsmDmaBuf,
+    mut operation: F,
+) -> HsmResult<bool>
+where
+    P: HsmEcc + HsmHash,
+    F: for<'a> AsyncFnMut(EccPctOperation<'a>, &'a mut HsmDmaBuf) -> HsmResult<()>,
+{
+    let len = ecc_pct_workspace_len::<P>(curve, pct);
+    if workspace.len() < len {
+        return Err(HsmError::NotEnoughSpace);
+    }
+    let (scratch, backend) = workspace.split_at_mut(len);
     match pct {
         HsmEccPct::None => Ok(true),
-        HsmEccPct::SignVerify => sign_verify(pal, io, alloc, curve, priv_key, pub_key).await,
-        HsmEccPct::KeyAgreement => key_agreement(pal, io, alloc, curve, priv_key, pub_key).await,
+        HsmEccPct::SignVerify => {
+            sign_verify(
+                pal,
+                io,
+                curve,
+                priv_key,
+                pub_key,
+                scratch,
+                backend,
+                &mut operation,
+            )
+            .await
+        }
+        HsmEccPct::KeyAgreement => {
+            key_agreement(
+                curve,
+                curve.wire_coord_len(P::BYTE_ORDER),
+                priv_key,
+                pub_key,
+                scratch,
+                backend,
+                &mut operation,
+            )
+            .await
+        }
     }
 }
 
@@ -71,64 +176,85 @@ fn digest_algo(curve: HsmEccCurve) -> HsmHashAlgo {
     }
 }
 
-async fn sign_verify<P: HsmEcc + HsmHash>(
+#[allow(clippy::too_many_arguments)]
+async fn sign_verify<P, F>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
     curve: HsmEccCurve,
     priv_key: &HsmDmaBuf,
     pub_key: &HsmDmaBuf,
-) -> HsmResult<bool> {
+    scratch: &mut HsmDmaBuf,
+    backend: &mut HsmDmaBuf,
+    operation: &mut F,
+) -> HsmResult<bool>
+where
+    P: HsmEcc + HsmHash,
+    F: for<'a> AsyncFnMut(EccPctOperation<'a>, &'a mut HsmDmaBuf) -> HsmResult<()>,
+{
     let algo = digest_algo(curve);
-    let message = crate::scratch(alloc, MESSAGE_LEN)?;
+    let (message, scratch) = scratch.split_at_mut(MESSAGE_LEN);
     message.fill(MESSAGE_BYTE);
 
     // The PKA reads a full field-width digest operand (68 bytes for P-521),
     // so the little-endian digest sits in a zeroed buffer of that width. The
     // PAL receives the ECDSA digest width, which is at most 64 bytes.
-    let digest = crate::scratch_zeroed(alloc, curve.wire_coord_len(P::BYTE_ORDER))?;
+    let (digest, scratch) = scratch.split_at_mut(curve.wire_coord_len(P::BYTE_ORDER));
+    digest.fill(0);
     pal.hash(
         io,
         algo,
         message,
-        &mut digest[..algo.digest_len()],
         HsmDigestForm::Operand,
+        Some(&mut digest[..algo.digest_len()]),
     )
     .await?;
     let digest = &digest[..curve.ecdsa_digest_len()];
 
-    let signature = crate::scratch_zeroed(alloc, curve.wire_sig_len(P::BYTE_ORDER))?;
-    pal.ecc_sign(io, curve, priv_key, digest, signature).await?;
-
-    // Start from "invalid" so a verify that writes nothing can't pass.
-    let result = crate::scratch(alloc, VERIFY_RESULT_LEN)?;
-    result.fill(0xFF);
-    pal.ecc_verify(io, curve, pub_key, digest, signature, result)
+    let signature = &mut scratch[..curve.wire_sig_len(P::BYTE_ORDER)];
+    signature.fill(0);
+    pal.ecc_sign(io, curve, priv_key, digest, Some(signature))
         .await?;
-    Ok(result[0] & 1 == 0)
+
+    let mut valid = false;
+    operation(
+        EccPctOperation::Verify {
+            public: pub_key,
+            digest,
+            signature,
+            valid: &mut valid,
+        },
+        backend,
+    )
+    .await?;
+    Ok(valid)
 }
 
-async fn key_agreement<P: HsmEcc>(
-    pal: &P,
-    io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+async fn key_agreement<F>(
     curve: HsmEccCurve,
+    coord: usize,
     priv_key: &HsmDmaBuf,
     pub_key: &HsmDmaBuf,
-) -> HsmResult<bool> {
-    let coord = curve.wire_coord_len(P::BYTE_ORDER);
+    scratch: &mut HsmDmaBuf,
+    backend: &mut HsmDmaBuf,
+    operation: &mut F,
+) -> HsmResult<bool>
+where
+    F: for<'a> AsyncFnMut(EccPctOperation<'a>, &'a mut HsmDmaBuf) -> HsmResult<()>,
+{
     let test = vectors::ecdh_test_pair(curve);
 
-    let test_priv = test_private_key(alloc, curve)?;
-    let test_pub = crate::scratch_zeroed(alloc, 2 * coord)?;
+    let (test_priv, scratch) = scratch.split_at_mut(coord);
+    test_private_key_into(curve, test_priv);
+    let (test_pub, scratch) = scratch.split_at_mut(2 * coord);
+    test_pub.fill(0);
     vectors::be_to_le(test.qx, &mut test_pub[..test.qx.len()]);
     vectors::be_to_le(test.qy, &mut test_pub[coord..coord + test.qy.len()]);
 
     // The PKA may write the whole shared point, so each output holds X and
     // Y. The two outputs start different, so they can only match if both
     // derivations write them.
-    let from_key = crate::scratch_zeroed(alloc, 2 * coord)?;
-    let from_test_key = crate::scratch(alloc, 2 * coord)?;
+    let (from_key, from_test_key) = scratch.split_at_mut(2 * coord);
+    from_key.fill(0);
     from_test_key.fill(0xFF);
 
     // Both derivations share one await point, which keeps the compiled
@@ -141,7 +267,16 @@ async fn key_agreement<P: HsmEcc>(
             (priv_key, &*test_pub, &mut *from_key, false),
             (&*test_priv, pub_key, &mut *from_test_key, true),
         ] {
-            match pal.ecdh_derive(io, curve, d, q, out).await {
+            match operation(
+                EccPctOperation::Derive {
+                    private: d,
+                    public: q,
+                    secret: out,
+                },
+                backend,
+            )
+            .await
+            {
                 Err(
                     HsmError::EccPublicKeyValidationFailed | HsmError::EccPointValidationFailed,
                 ) if under_test => {
@@ -168,12 +303,8 @@ async fn key_agreement<P: HsmEcc>(
 ///
 /// The test vectors hold only the raw scalar, so the key is built directly
 /// instead of through the PAL's DER conversion.
-pub(crate) fn test_private_key(
-    alloc: &impl HsmScopedAlloc,
-    curve: HsmEccCurve,
-) -> HsmResult<&mut HsmDmaBuf> {
+fn test_private_key_into(curve: HsmEccCurve, test_priv: &mut HsmDmaBuf) {
     let d = vectors::ecdh_test_pair(curve).d;
-    let test_priv = crate::scratch_zeroed(alloc, curve.wire_coord_len(HsmByteOrder::Le))?;
+    test_priv.fill(0);
     vectors::be_to_le(d, &mut test_priv[..d.len()]);
-    Ok(test_priv)
 }

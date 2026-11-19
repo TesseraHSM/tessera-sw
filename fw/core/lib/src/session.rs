@@ -55,8 +55,8 @@ pub(crate) async fn capture_auth_binding<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         psk,
-        &mut binding[4 + APP_ID_LEN..],
         HsmDigestForm::Standard,
+        Some(&mut binding[4 + APP_ID_LEN..]),
     )
     .await?;
     Ok(binding)
@@ -83,8 +83,8 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         psk,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
     if binding[4 + APP_ID_LEN..] != digest[..] {

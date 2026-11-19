@@ -115,7 +115,7 @@ pub(crate) async fn ecc_sign<'p, P: HsmPal>(
         curve,
         priv_key,
         &body.digest[..sign_len],
-        frame.signature,
+        Some(frame.signature),
     )
     .await?;
 

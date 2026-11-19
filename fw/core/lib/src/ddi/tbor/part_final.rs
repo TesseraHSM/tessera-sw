@@ -422,8 +422,8 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         part_policy,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
 
@@ -567,6 +567,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionLocalMaskingKey,
             None,
             PART_LOCAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(local_id)?;
@@ -578,6 +579,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionEphemeralMaskingKey,
             None,
             EPHEMERAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ephemeral_id)?;
@@ -589,6 +591,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ups_id)?;

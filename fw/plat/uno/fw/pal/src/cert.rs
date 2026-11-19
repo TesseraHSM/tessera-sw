@@ -173,7 +173,7 @@ impl UnoHsmPal {
                 .1;
             uncompressed[0] = 0x04;
             let public = uncompressed.split_at_mut(1).1;
-            if self.ecc_vault_pub_key(io, key_id, public).await? != P384_PUB_XY_LEN {
+            if self.ecc_vault_pub_key(io, key_id, Some(public)).await? != P384_PUB_XY_LEN {
                 return Err(HsmError::InternalError);
             }
             public[..P384_FIELD].reverse();
@@ -185,8 +185,8 @@ impl UnoHsmPal {
                 io,
                 HsmHashAlgo::Sha1,
                 uncompressed,
-                ski,
                 HsmDigestForm::Standard,
+                Some(ski),
             )
             .await?;
             let uncompressed: &[u8; P384_UNCOMPRESSED_LEN] = (&**uncompressed)
@@ -263,8 +263,14 @@ impl UnoHsmPal {
             // compute cert thumbprints over natural SHA-256; `Operand` here
             // would byte-reverse the digest (the PKA operand order) and the
             // chain thumbprint would never match.
-            self.hash(io, HsmHashAlgo::Sha256, inp, outd, HsmDigestForm::Standard)
-                .await?;
+            self.hash(
+                io,
+                HsmHashAlgo::Sha256,
+                inp,
+                HsmDigestForm::Standard,
+                Some(outd),
+            )
+            .await?;
             let mut out = [0u8; SHA256_LEN];
             out.copy_from_slice(&outd[..SHA256_LEN]);
             Ok(out)

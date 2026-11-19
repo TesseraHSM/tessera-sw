@@ -75,7 +75,8 @@ pub(crate) async fn handle<P: HsmPal>(
             // request buffer) is used directly — no copy.
             let tag_len = algo.digest_len();
             let tag = alloc.dma_alloc(tag_len)?;
-            pal.hmac_sign(io, algo, view.target_key, msg, tag).await?;
+            pal.hmac_sign(io, algo, view.target_key, msg, Some(tag))
+                .await?;
             Ok::<_, HsmError>((tag, tag_len))
         }
         .await?;

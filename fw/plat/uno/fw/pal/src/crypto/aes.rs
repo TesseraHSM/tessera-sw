@@ -15,6 +15,7 @@
 
 use core::slice;
 
+use tsra_fw_hsm_pal_traits::HSM_AES_XTS_KEY_LEN;
 use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmAesGcm;
 use tsra_fw_hsm_pal_traits::HsmAesKw;
@@ -433,22 +434,29 @@ impl UnoHsmPal {
 // validation and the building blocks each method delegates to.
 
 impl HsmAes for UnoHsmPal {
-    /// Generate a random AES key by filling `key` from the on-chip
-    /// hardware RNG.
-    ///
-    /// The key size is taken from `key.len()`: 16 / 24 / 32 bytes for
-    /// AES-128 / 192 / 256 respectively. Any other length is rejected
-    /// before touching the RNG.
+    /// Query the AES key length or fill its prefix from the on-chip RNG.
+    /// Invalid lengths and short output buffers are rejected before RNG use.
     ///
     /// # Errors
-    /// * [`HsmError::InvalidArg`] — `key.len()` is not 16, 24, or 32.
+    /// * [`HsmError::InvalidArg`] — invalid key length or output too short.
     /// * Any [`HsmError`] surfaced by the RNG driver.
-    async fn aes_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
-        match key.len() {
-            16 | 24 | 32 => {}
-            _ => return Err(HsmError::InvalidArg),
+    async fn aes_gen_key(
+        &self,
+        io: &UnoHsmIo,
+        key_len: usize,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        if !matches!(key_len, 16 | 24 | 32) {
+            return Err(HsmError::InvalidArg);
         }
-        self.rng_fill_bytes(io, key)
+        let Some(key) = key else {
+            return Ok(key_len);
+        };
+        if key.len() < key_len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.rng_fill_bytes(io, &mut key[..key_len])?;
+        Ok(key_len)
     }
 
     /// Validates lengths before touching `output`; in query mode returns
@@ -873,8 +881,19 @@ impl HsmAesKw for UnoHsmPal {
 
 // AES-XTS runs on the CP AES core in both build configs; see [`super::xts`].
 impl HsmAesXts for UnoHsmPal {
-    async fn aes_xts_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
-        self.xts_gen_key_impl(io, key)
+    async fn aes_xts_gen_key(
+        &self,
+        io: &UnoHsmIo,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let Some(key) = key else {
+            return Ok(HSM_AES_XTS_KEY_LEN);
+        };
+        if key.len() < HSM_AES_XTS_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.xts_gen_key_impl(io, &mut key[..HSM_AES_XTS_KEY_LEN])?;
+        Ok(HSM_AES_XTS_KEY_LEN)
     }
 
     async fn aes_xts_enc_dec_oob(

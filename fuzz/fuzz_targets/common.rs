@@ -13,6 +13,7 @@ use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::AesKey;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::aead_envelope::{self};
+use tsra_crypto::*;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_tbor_codec::Encoder;
@@ -28,14 +29,17 @@ use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::TestPolicy;
-use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::policy::TestBackupPart;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
+use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
@@ -60,6 +64,7 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::*;
 
 pub type DdiTest = TsraDdi;
 
@@ -170,12 +175,16 @@ impl EccCurve {
     /// Raw (unpadded) coordinate length in bytes; also the length of an
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).1
+        match self {
+            Self::P256 => 32,
+            Self::P384 => 48,
+            Self::P521 => 66,
+        }
     }
 
-    /// Wire coordinate length in bytes, including padding (P-521: 66 -> 68 bytes).
+    /// Device coordinate width, including Uno's P-521 padding.
     pub fn wire_coord_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).0
+        wire_coord_len(self.coord_len())
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
@@ -189,17 +198,27 @@ impl EccCurve {
 
     /// Wire `r ‖ s` length, each component padded to the coordinate width.
     pub fn wire_sig_len(self) -> usize {
-        coord_sizes(self.wire_pub_key_len()).0 * 2
+        self.wire_coord_len() * 2
     }
 
     /// Wire `x ‖ y` public-key length, each coordinate padded to the wire
-    /// coordinate width (P-521: 66 -> 68 bytes).
+    /// coordinate width (P-521: 68 bytes on Uno, 66 on Duo).
     pub fn wire_pub_key_len(self) -> usize {
-        match self {
-            Self::P256 => 64,
-            Self::P384 => 96,
-            Self::P521 => 136,
+        self.wire_coord_len() * 2
+    }
+
+    /// Convert a wire `x || y` or `r || s` pair to unpadded big-endian bytes.
+    pub fn wire_pair_to_be(self, wire: &[u8]) -> Vec<u8> {
+        assert_eq!(wire.len(), self.wire_coord_len() * 2, "wire pair length");
+        let mut result = Vec::with_capacity(self.coord_len() * 2);
+        for component in wire.chunks_exact(self.wire_coord_len()) {
+            assert!(
+                component[self.coord_len()..].iter().all(|&b| b == 0),
+                "wire component padding"
+            );
+            result.extend(dev_rev(&component[..self.coord_len()]));
         }
+        result
     }
 }
 
@@ -617,10 +636,92 @@ pub struct SecurityDomainFixture {
     pub policy: Vec<u8>,
 }
 
+/// Import a host-known TMK through the POTA-authenticated DARC transfer flow.
+///
+/// The fixture must belong to this initialized security domain. Keeping the
+/// plaintext TMK on the host enables independent KWP output checks.
+pub fn import_darc_tmk(
+    ctx: &TestCtx,
+    session_id: u16,
+    fixture: &SecurityDomainFixture,
+    tmk: &[u8; tsra_ddi_tbor_types::TMK_LEN],
+) -> [u8; tsra_ddi_tbor_types::MASKED_TMK_LEN] {
+    let kex = ctx
+        .tbor(&TborDarcKexKeyGenReq {
+            session_id,
+            scope: KEY_SCOPE_LOCAL,
+        })
+        .expect("DarcKexKeyGen");
+    let mut recipient_be = kex.pub_key;
+    dev_rev_in_place(&mut recipient_be[..COORD_LEN]);
+    dev_rev_in_place(&mut recipient_be[COORD_LEN..]);
+    let recipient = EccPublicKey::from_hsm_bytes(&recipient_be).expect("recipient public key");
+    let sender = EccPrivateKey::from_curve(tsra_crypto::EccCurve::P384).expect("sender key");
+    let (x, y) = sender.coord_vec().expect("sender public coordinates");
+    let mut sender_pub = [0; RAW_PUB_LEN];
+    sender_pub[..COORD_LEN].copy_from_slice(&x);
+    sender_pub[COORD_LEN..].copy_from_slice(&y);
+    let chain = make_chain(&fixture.pota, &sender_pub);
+    let sealed = seal_vec(
+        &HpkeSealConfig::auth(
+            HpkeSuite::DHKemP384Sha384AesGcm256,
+            &recipient,
+            &[],
+            &[],
+            &sender,
+        ),
+        tmk,
+    )
+    .expect("seal known TMK");
+    let (ex, ey) = sealed
+        .enc
+        .coord_vec()
+        .expect("encapsulated public coordinates");
+    let mut sealed_tmk = [0; SEALED_TMK_LEN];
+    sealed_tmk[0] = 4;
+    sealed_tmk[1..1 + COORD_LEN].copy_from_slice(&ex);
+    sealed_tmk[1 + COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
+    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let mut evidence = Vec::new();
+    let remote_cert_chain = chain
+        .der_items()
+        .iter()
+        .map(|der| add_evidence_item(&mut evidence, der))
+        .collect();
+    let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    ctx.tbor_oob(
+        &TborDarcTmkImportReq {
+            session_id,
+            masked_kex_key: kex.masked_key,
+            policy: fixture.policy.clone(),
+            sealed_tmk,
+            remote_cert_chain,
+        },
+        &oob,
+    )
+    .expect("import known TMK")
+    .masked_tmk
+    .try_into()
+    .expect("TMK envelope length")
+}
+
 /// Initialize the security domain and retain its exact policy and POTA signer.
 pub fn create_test_security_domain_with_policy(
     ctx: &TestCtx,
     session: &SessionHandshake,
+) -> SecurityDomainFixture {
+    create_test_security_domain_with_custom_policy(ctx, session, |_| {})
+}
+
+/// Initialize the security domain with command-specific policy claims bound
+/// before `PartInit`, retaining the exact policy and its POTA signer.
+///
+/// The callback must preserve the required POTA, SATA, and backup identity
+/// claims. Existing callers retain the default policy through the wrapper.
+pub fn create_test_security_domain_with_custom_policy(
+    ctx: &TestCtx,
+    session: &SessionHandshake,
+    configure: impl FnOnce(&mut TestPolicy),
 ) -> SecurityDomainFixture {
     let info = ctx
         .tbor(&TborPartInfoReq::new())
@@ -632,7 +733,9 @@ pub fn create_test_security_domain_with_policy(
         .expect("PartInfo PID public key should have the expected length");
     let pota = CaKey::generate();
     let sata = CaKey::generate();
-    let policy = backup_test_policy(&pota, &sata, &info.pid, &pid_pub).encode();
+    let mut policy = backup_test_policy(&pota, &sata, &info.pid, &pid_pub);
+    configure(&mut policy);
+    let policy = policy.encode();
 
     let init = ctx
         .part_init(session, &mach_seed(), &policy)
@@ -656,20 +759,9 @@ pub fn create_test_security_domain_with_policy(
         })
         .expect("sealing-key report generation should succeed");
 
-    let mut receiver_pub = [0u8; RAW_PUB_LEN];
-    let coord_len = EccCurve::P384.coord_len();
-    for (dst, src) in receiver_pub[..coord_len]
-        .iter_mut()
-        .zip(sealing_key.pub_key[..coord_len].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in receiver_pub[coord_len..]
-        .iter_mut()
-        .zip(sealing_key.pub_key[coord_len..].iter().rev())
-    {
-        *dst = *src;
-    }
+    let mut receiver_pub = sealing_key.pub_key;
+    dev_rev_in_place(&mut receiver_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut receiver_pub[COORD_LEN..]);
     let receiver = make_chain(&sata, &receiver_pub);
     let mfgr = make_chain(&CaKey::generate(), &pid_pub);
     let owner = make_chain(&CaKey::generate(), &pid_pub);

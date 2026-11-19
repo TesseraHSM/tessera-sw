@@ -121,7 +121,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // response slot.
         let secret = alloc.dma_alloc(secret_len)?;
         let derived = pal
-            .ecdh_derive(io, curve, view.target_key, req.peer_pub_key, secret)
+            .ecdh_derive(io, curve, view.target_key, req.peer_pub_key, Some(secret))
             .await;
         let derive_and_mask = async {
             derived?;

@@ -140,8 +140,8 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 HsmHashAlgo::Sha384,
                 policy,
-                expected,
                 HsmDigestForm::Standard,
+                Some(expected),
             )
             .await?;
 
@@ -204,7 +204,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Sender public key (`SndrPub`) in SEC1 BE, derived on-device
             // from the recovered private key.
             let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
             byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;

@@ -29,21 +29,23 @@ pub const HSM_AES_XTS_TWEAK_LEN: usize = 8;
 pub trait HsmAesXts: HsmIoTypes {
     /// Generate a random AES-256-XTS key (`K1 || K2`).
     ///
-    /// Fills `key` with random bytes and ensures `K1 != K2`, as
+    /// Fills the key prefix with random bytes and ensures `K1 != K2`, as
     /// IEEE 1619 requires distinct data and tweak keys.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `key` — output buffer; must be exactly [`HSM_AES_XTS_KEY_LEN`]
-    ///   bytes.
+    /// - `key` — `None` queries [`HSM_AES_XTS_KEY_LEN`] without allocation
+    ///   or RNG use. `Some` must hold at least that many bytes; only the
+    ///   key prefix is filled, leaving any tail unchanged.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `key` populated, `K1 != K2`.
-    /// - `Err(HsmError::InvalidArg)` — `key.len() != 64`.
+    /// - `Ok(len)` — required key length or bytes written (64).
+    /// - `Err(HsmError::InvalidArg)` — output is shorter than 64 bytes.
     /// - `Err(HsmError)` — propagated from the CSPRNG.
-    async fn aes_xts_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
+    async fn aes_xts_gen_key(&self, io: &Self::Io, key: Option<&mut HsmDmaBuf>)
+    -> HsmResult<usize>;
 
     /// AES-256-XTS encrypt or decrypt host-to-host over out-of-band
     /// items.

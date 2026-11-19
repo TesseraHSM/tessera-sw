@@ -24,7 +24,6 @@ tracing = { optional = true, workspace = true }
 
 [dev-dependencies]
 bitflags.workspace = true
-chrono.workspace = true
 ddi_sock_server = { features = ["autostart"], workspace = true }
 minicbor.workspace = true
 parking_lot.workspace = true
@@ -42,6 +41,9 @@ x509.workspace = true
 
 [lib]
 doctest = false
+
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { features = ["libloaderapi", "minwindef"], workspace = true }
 
 [[test]]
 name = "tsra_ddi_tests"

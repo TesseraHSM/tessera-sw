@@ -12,8 +12,10 @@
 #include <gtest/gtest.h>
 #include <vector>
 
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 #include "utils/aes_helpers.hpp"
+#include "utils/ec_helpers.hpp"
 #include "utils/module.hpp"
 
 class smoke : public PublicSession
@@ -154,6 +156,8 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
     ASSERT_CKR_OK(gen_aes_key(s_, 32, CK_TRUE, CK_TRUE, "init-cbc", &cbc));
     ASSERT_CKR_OK(gen_gcm_key(s_, "init-gcm", &gcm));
     ASSERT_CKR_OK(gen_xts_key(s_, "init-xts", &xts));
+    CK_OBJECT_HANDLE ec_pub = 0, ec_priv = 0;
+    ASSERT_CKR_OK(gen_p256(s_, &ec_pub, &ec_priv));
     CK_BYTE iv[kAesBlock] = { 0 };
     CK_GCM_PARAMS gcm_params{};
     gcm_params.pIv = iv;
@@ -161,13 +165,16 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
     gcm_params.ulIvBits = AES_GCM_IV_LEN * 8;
     gcm_params.ulTagBits = AES_GCM_TAG_LEN * 8;
 
-    const CK_FLAGS driven = CKF_DIGEST | CKF_GENERATE | CKF_ENCRYPT | CKF_DECRYPT;
+    const CK_FLAGS driven = CKF_DIGEST | CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_ENCRYPT |
+                            CKF_DECRYPT | CKF_SIGN | CKF_VERIFY;
     for (CK_MECHANISM_TYPE m : mechs)
     {
         SCOPED_TRACE(::testing::Message() << "mechanism 0x" << std::hex << m);
         CK_MECHANISM_INFO info{};
         ASSERT_CKR_OK(p11()->C_GetMechanismInfo(kSlot, m, &info));
-        EXPECT_EQ(0u, info.flags & ~driven) << "an entry point this test does not drive";
+        // The EC capability flags describe a mechanism and name no entry point.
+        EXPECT_EQ(0u, info.flags & ~(driven | EC_MECH_FLAGS))
+            << "an entry point this test does not drive";
 
         CK_MECHANISM mech = { m, nullptr, 0 };
         if ((info.flags & CKF_DIGEST) != 0)
@@ -181,6 +188,41 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
             CK_ATTRIBUTE tmpl[] = { { CKA_VALUE_LEN, &len, sizeof(len) } };
             CK_OBJECT_HANDLE key = 0;
             EXPECT_CKR_OK(p11()->C_GenerateKey(s_, &mech, tmpl, 1, &key));
+        }
+        if ((info.flags & CKF_GENERATE_KEY_PAIR) != 0)
+        {
+            CK_OBJECT_HANDLE pub = 0, priv = 0;
+            switch (m)
+            {
+            case CKM_EC_KEY_PAIR_GEN:
+                EXPECT_CKR_OK(gen_p256(s_, &pub, &priv));
+                break;
+            default:
+                ADD_FAILURE() << "no template for this key-pair mechanism";
+                break;
+            }
+        }
+        if ((info.flags & (CKF_SIGN | CKF_VERIFY)) != 0)
+        {
+            CK_OBJECT_HANDLE priv = 0, pub = 0;
+            switch (m)
+            {
+            case CKM_ECDSA:
+            case CKM_ECDSA_SHA1:
+            case CKM_ECDSA_SHA256:
+            case CKM_ECDSA_SHA384:
+            case CKM_ECDSA_SHA512:
+                priv = ec_priv;
+                pub = ec_pub;
+                break;
+            default:
+                ADD_FAILURE() << "no key for this sign mechanism";
+                continue;
+            }
+            EXPECT_CKR_OK(p11()->C_SignInit(s_, &mech, priv));
+            EXPECT_CKR_OK(p11()->C_SignInit(s_, nullptr, priv));
+            EXPECT_CKR_OK(p11()->C_VerifyInit(s_, &mech, pub));
+            EXPECT_CKR_OK(p11()->C_VerifyInit(s_, nullptr, pub));
         }
         if ((info.flags & (CKF_ENCRYPT | CKF_DECRYPT)) != 0)
         {

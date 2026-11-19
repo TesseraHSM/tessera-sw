@@ -11,6 +11,7 @@ use xshell::cmd;
 use xshell::Shell;
 
 use crate::fw_util::FwPaths;
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -31,12 +32,13 @@ impl Xtask for Build {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let sh = Shell::new()?;
         let fw = FwPaths::new(&ctx)?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
 
         // SP firmware workspace, honouring the requested feature selection.
         {
             let _dir = sh.push_dir(&fw.fw_dir);
 
-            let mut args = vec!["+nightly", "build", "--release"];
+            let mut args = vec![toolchain.as_str(), "build", "--release"];
             if self.no_default_features {
                 args.push("--no-default-features");
             }
@@ -58,7 +60,7 @@ impl Xtask for Build {
         {
             let _dir = sh.push_dir(&fw.pqc_dir);
             log::info!("Building fastpath PQC firmware...");
-            cmd!(sh, "cargo +nightly build --release").run()?;
+            cmd!(sh, "cargo {toolchain} build --release").run()?;
             log::info!("Fastpath PQC firmware build complete.");
         }
 

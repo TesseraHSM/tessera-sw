@@ -34,6 +34,15 @@ For both Linux and Windows systems, run the following to install all other requi
 cargo xtask precheck --setup
 ```
 
+Host-side ML-DSA and ML-KEM use native cryptography, not RustCrypto.
+Linux PQC requires OpenSSL 3.5 or newer; native Linux CI uses Ubuntu 26.04's
+system OpenSSL packages without building OpenSSL. Older OpenSSL builds still
+support classical algorithms but report PQC as unavailable. Windows PQC requires an
+updated Windows Server 2025 or Windows 11 24H2 (or newer) with CNG PQC support.
+Signing is hedged by default on both platforms. Explicit deterministic ML-DSA
+signing is supported by OpenSSL and Uno hardware, but fails explicitly on
+Windows CNG; verification accepts either signature variant.
+
 ## Build Commands
 
 Before running any commands below, ensure you have finished the initial setup steps.
