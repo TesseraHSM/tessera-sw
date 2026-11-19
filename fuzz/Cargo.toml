@@ -224,6 +224,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_ecc_verify"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_verify.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_ecdh_key_exchange"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecdh_key_exchange.rs"
 test = false

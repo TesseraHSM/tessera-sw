@@ -640,8 +640,7 @@ impl HsmEcc for StdHsmPal {
         if pub_out.len() < len {
             return Err(HsmError::InvalidArg);
         }
-        self.ecc_public_point(import_priv(priv_key)?, Some(pub_out))
-            .await
+        self.ecc_public_point(import_priv(priv_key)?, Some(pub_out)).await
     }
 
     async fn ecc_vault_pub_key(

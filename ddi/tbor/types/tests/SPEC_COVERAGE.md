@@ -420,6 +420,23 @@ invalid requests, and CU authorization. SHA-1 HMAC is unsupported.
 | Imported HMAC keys with SIGN and VERIFY permissions compute valid MACs | ✅ 🔁 | `hmac::hmac_accepts_key_with_sign_permission` | Tests SHA-256, SHA-384, and SHA-512 using `UnwrapKey` with `KEY_USAGE_SIGN \| KEY_USAGE_VERIFY`; verifies correct MAC tag lengths |
 
 
+## `EccVerify` (opcode in-session, gated)
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Host schema encodes aligned request fields and typed empty response | ✅ | `ecc_verify::tests::ecc_verify_request_encodes_aligned_fields`, `ecc_verify::tests::ecc_verify_empty_response_decodes` | Includes decoding `EccVerifyFailed` through the host response path. |
+| Device-generated signatures verify for all nine curve/SHA-2 pairs | ✅ 🔁 | `ecc_verify::ecc_verify_all_curve_hash_pairs` | P-256/P-384/P-521 with SHA-256/384/512; generated sign-only keys. |
+| Active CO and CU sessions may verify | ✅ | `ecc_verify::ecc_verify_all_curve_hash_pairs`, `ecc_verify::ecc_verify_crypto_user_session` | CO and CU use active sessions and normal dispatcher policy. |
+| Default-PSK session is rejected by the normal in-session gate | ✅ | `malformed_requests::malformed_ecc_verify_is_rejected_by_default_psk_gate` | Uses a raw all-`none` request to reach dispatch without requiring a valid key envelope. |
+| Imported private key verifies an independently generated host signature | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Key imported through `UnwrapKey`; verifies without `EccSign`. |
+| SHA-384 truncation retains the leading P-256 bits and discards trailing bits | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Changing discarded bits still verifies; changing retained bits returns `EccVerifyFailed`. |
+| Invalid signature returns `EccVerifyFailed`; subsequent valid request succeeds | ✅ | `ecc_verify::ecc_verify_invalid_signature_then_recovers` | Exercises ordinary status propagation and session recovery. |
+| Unsupported hash and incorrect packed length are rejected | ✅ | `ecc_verify::ecc_verify_rejects_unsupported_hash_and_input_length` | Wrong length remains within broad schema bounds to reach handler validation. |
+| P-521 nonzero signature and digest padding are rejected | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Uses platform-specific P-521 wire lanes. |
+| Non-ECC key kinds and derive-only ECC keys are rejected | ✅ | `ecc_verify::ecc_verify_rejects_non_ecc_key_kind`, `ecc_verify::ecc_verify_rejects_derive_only_key` | Non-ECC kind is checked before usage permission. |
+| Misaligned/noncanonical masked-key request layout is rejected | ✅ | `ecc_verify::ecc_verify_rejects_bad_masked_key_layout` | Uses existing codec fault wrappers. |
+| Derive-only key is rejected | ✅ | `ecc_verify::ecc_verify_rejects_derive_only_key` | Expects `InvalidPermissions`. |
+
 ## `EccGenerateKey` (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `EccGenerateKey` command. These tests exercise

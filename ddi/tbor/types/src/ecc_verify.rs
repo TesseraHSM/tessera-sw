@@ -43,9 +43,9 @@ pub struct TborEccVerifyResp;
 
 #[cfg(test)]
 mod tests {
+    use tsra_ddi_tbor_types::codec::ResponseEncoder;
     use tsra_ddi_tbor_types::TborOpReq;
     use tsra_ddi_tbor_types::TborResp;
-    use tsra_ddi_tbor_types::codec::ResponseEncoder;
 
     use super::*;
 
@@ -61,7 +61,8 @@ mod tests {
         let frame = req.encode_request(&mut buf).expect("encode");
         assert_eq!(frame.len(), 560);
         assert_eq!(
-            frame.windows(ECC_VERIFY_INPUT_MAX_LEN)
+            frame
+                .windows(ECC_VERIFY_INPUT_MAX_LEN)
                 .filter(|window| *window == [0x22; ECC_VERIFY_INPUT_MAX_LEN])
                 .count(),
             1
@@ -92,7 +93,9 @@ mod tests {
             .expect("finish");
         assert!(matches!(
             TborEccVerifyResp::decode_response(frame),
-            Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(0x0870_0024))
+            Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(
+                0x0870_0024
+            ))
         ));
     }
 }

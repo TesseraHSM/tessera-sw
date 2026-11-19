@@ -8,10 +8,9 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
-use crate::key_props::HashAlgo;
-
 pub use crate::ecc_generate_key::MASKED_ECC_KEY_MAX_LEN;
 pub use crate::ecc_generate_key::MASKED_ECC_KEY_MIN_LEN;
+use crate::key_props::HashAlgo;
 
 /// TBOR opcode for `EccVerify`.
 pub const TBOR_OP_ECC_VERIFY: u8 = 0x33;
