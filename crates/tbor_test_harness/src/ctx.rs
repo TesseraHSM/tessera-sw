@@ -122,6 +122,13 @@ impl TestCtx {
         self.dev.path()
     }
 
+    /// The underlying device handle, for issuing non-TBOR requests (such as
+    /// a test-hook `TestAction`) through the same handle that owns this
+    /// ctx's sessions.
+    pub fn dev(&self) -> &TestDev {
+        &self.dev
+    }
+
     /// The device model this ctx talks to.
     pub fn model(&self) -> tsra_ddi_interface::DdiDeviceModel {
         self.dev.model()

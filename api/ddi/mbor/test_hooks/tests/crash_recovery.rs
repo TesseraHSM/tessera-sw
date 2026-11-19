@@ -313,7 +313,7 @@ fn trigger_crash(
 
     // Inject the crash. Parameters ride in the opaque `TestAction` payload.
     let resp = helper_test_action_cmd(
-        &mut dev,
+        &dev,
         session_id,
         TestActionRequest::TriggerCrash(DdiTestActionCrashReqInfo { crash_type, cpu_id }),
     );
