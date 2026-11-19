@@ -18,10 +18,10 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 
 use super::from_pal::rsa_key;
+use super::resolve_masking_key;
 use super::rsa_sign::hash_algo;
 use super::rsa_sign::validate_padding_salt_presence;
 use super::rsa_sign::validate_salt;
-use super::resolve_masking_key;
 use super::validate_active_session;
 
 pub(crate) async fn handle<P: HsmPal>(
@@ -38,6 +38,11 @@ pub(crate) async fn handle<P: HsmPal>(
         let algo = hash_algo(HashAlgo(req.hash_algo))?;
         let padding = RsaPadding(req.padding);
         validate_padding_salt_presence(padding, salt_len)?;
+        let message_len = usize::from(req.message_len);
+        let message_index = usize::from(req.message_index);
+        if message_len == 0 && message_index != 0 {
+            return Err(HsmError::InvalidArg);
+        }
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 
@@ -48,21 +53,10 @@ pub(crate) async fn handle<P: HsmPal>(
         if !view.key_attrs.verify() {
             return Err(HsmError::InvalidPermissions);
         }
-        let salt_len = validate_salt(
-            padding,
-            salt_len,
-            key_type.modulus_len(),
-            algo.digest_len(),
-        )?;
+        let salt_len = validate_salt(padding, salt_len, key_type.modulus_len(), algo.digest_len())?;
         if req.signature.len() != key_type.modulus_len() {
             return Err(HsmError::InvalidArg);
         }
-        let message_len = usize::from(req.message_len);
-        let message_index = usize::from(req.message_index);
-        if message_len == 0 && message_index != 0 {
-            return Err(HsmError::InvalidArg);
-        }
-
         let digest = alloc.dma_alloc_zeroed(algo.digest_len())?;
         let digest_len = pal
             .hash_oob(
@@ -119,8 +113,6 @@ pub(crate) async fn handle<P: HsmPal>(
         if !valid {
             return Err(HsmError::RsaVerifyFailed);
         }
-        drop(view);
-        drop(req);
         let frame = TborRsaVerifyResp::encode(cmd_buf.buffer_mut(), 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })

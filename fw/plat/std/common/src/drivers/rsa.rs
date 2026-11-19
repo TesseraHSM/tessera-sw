@@ -512,13 +512,8 @@ impl StdRsa {
                     Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
                     None => RsaSignAlgo::with_pkcs1_padding(hash),
                 };
-                let written = Signer::sign(
-                    &mut algorithm,
-                    &key,
-                    &digest,
-                    Some(&mut signature),
-                )
-                .map_err(|_| HsmError::RsaSignFailed)?;
+                let written = Signer::sign(&mut algorithm, &key, &digest, Some(&mut signature))
+                    .map_err(|_| HsmError::RsaSignFailed)?;
                 if written != k {
                     return Err(HsmError::InternalError);
                 }

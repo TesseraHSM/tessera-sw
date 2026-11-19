@@ -20,6 +20,7 @@ use tsra_ddi_tbor_types::RSA_PADDING_PKCS1_V15;
 use tsra_ddi_tbor_types::RSA_PADDING_PSS;
 
 use crate::commands::common::rev;
+use crate::commands::rsa_sign::import_rsa;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap_with_usage;
 
@@ -39,19 +40,81 @@ fn rsa_verify_rejects_different_explicit_pss_salt_length() {
     )
     .masked_key;
     let message = b"salt length is exact";
-    let mut signer = RsaHashSignAlgo::with_pss_padding(HashAlgo::sha256(), 32);
+    let mut signer = RsaHashSignAlgo::with_pss_padding(HashAlgo::sha256(), 222);
     let signature = Signer::sign_vec(&mut signer, &private, message).expect("host PSS sign");
     let req = TborRsaVerifyReq {
         session_id: session.session_id,
         masked_key,
         padding: RSA_PADDING_PSS,
         hash_algo: RSA_HASH_SHA256,
-        salt_len: Some(31),
+        salt_len: Some(222),
         message_index: 0,
         message_len: message.len() as u16,
         signature: rev(&signature),
     };
-    ctx.expect_fw_reject_oob(&req, &[message], TborStatus::RsaVerifyFailed);
+    ctx.tbor_oob(&req, &[message])
+        .expect("maximum explicit salt length is accepted");
+    let mut changed_message = message.to_vec();
+    changed_message[0] ^= 1;
+    ctx.expect_fw_reject_oob(&req, &[&changed_message], TborStatus::RsaVerifyFailed);
+    let mut mismatched_salt = req;
+    mismatched_salt.salt_len = Some(221);
+    ctx.expect_fw_reject_oob(&mismatched_salt, &[message], TborStatus::RsaVerifyFailed);
+}
+
+#[test]
+fn rsa_verify_accepts_all_key_sizes_forms_hashes_and_paddings() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let message = b"host reference signature\0message";
+    let hashes = [
+        (RSA_HASH_SHA256, HashAlgo::sha256(), 32usize),
+        (
+            tsra_ddi_tbor_types::RSA_HASH_SHA384,
+            HashAlgo::sha384(),
+            48usize,
+        ),
+        (
+            tsra_ddi_tbor_types::RSA_HASH_SHA512,
+            HashAlgo::sha512(),
+            64usize,
+        ),
+    ];
+
+    for modulus_len in [256, 384, 512] {
+        for crt in [false, true] {
+            let (masked_key, private_key, _) =
+                import_rsa(&ctx, session.session_id, modulus_len, crt);
+            for (hash_selector, hash, digest_len) in &hashes {
+                for padding in [RSA_PADDING_PKCS1_V15, RSA_PADDING_PSS] {
+                    let salt_len = (padding == RSA_PADDING_PSS).then_some(*digest_len as u16);
+                    let mut signer = if padding == RSA_PADDING_PSS {
+                        RsaHashSignAlgo::with_pss_padding(hash.clone(), *digest_len)
+                    } else {
+                        RsaHashSignAlgo::with_pkcs1_padding(hash.clone())
+                    };
+                    let signature =
+                        Signer::sign_vec(&mut signer, &private_key, message).expect("host sign");
+                    let req = TborRsaVerifyReq {
+                        session_id: session.session_id,
+                        masked_key: masked_key.clone(),
+                        padding,
+                        hash_algo: *hash_selector,
+                        salt_len,
+                        message_index: 0,
+                        message_len: message.len() as u16,
+                        signature: rev(&signature),
+                    };
+                    ctx.tbor_oob(&req, &[message])
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "host signature verifies for {modulus_len}-byte key, CRT={crt}, hash={hash_selector}, padding={padding}: {error}"
+                            )
+                        });
+                }
+            }
+        }
+    }
 }
 
 /// The request schema preserves optional salt presence, and the handler
@@ -101,4 +164,7 @@ fn rsa_verify_rejects_invalid_selectors_and_salt_presence() {
 
     let zero_signature = request(RSA_PADDING_PSS, RSA_HASH_SHA256, Some(32));
     ctx.expect_fw_reject(&zero_signature, TborStatus::RsaVerifyFailed);
+    let mut all_ff_signature = zero_signature;
+    all_ff_signature.signature.fill(0xFF);
+    ctx.expect_fw_reject(&all_ff_signature, TborStatus::RsaVerifyFailed);
 }

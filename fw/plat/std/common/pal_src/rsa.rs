@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_padded_rsa_inputs_are_rejected_without_writing_output() {
+    async fn invalid_rsa_inputs_are_rejected_without_writing_output() {
         let (pal, io) = pal_and_io();
         pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
             let input = alloc.dma_alloc(0)?;
@@ -1069,6 +1069,25 @@ mod tests {
                         execute.then_some(&mut *output),
                     )
                     .await,
+                    pal.rsa_pkcs1_sign(
+                        &io,
+                        key,
+                        hash,
+                        input,
+                        input,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    pal.rsa_pss_sign(
+                        &io,
+                        key,
+                        hash,
+                        input,
+                        input,
+                        32,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
                 ] {
                     assert_eq!(outcome, Err(HsmError::InvalidArg));
                 }
@@ -1078,7 +1097,7 @@ mod tests {
             Ok(())
         })
         .await
-        .expect("invalid padded RSA inputs");
+        .expect("invalid RSA inputs");
     }
 
     #[tokio::test]
