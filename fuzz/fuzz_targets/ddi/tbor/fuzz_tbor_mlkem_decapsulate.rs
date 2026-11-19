@@ -271,25 +271,25 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         }
     }
     match scenario {
-        // 0..=5: Decapsulate a valid ciphertext produced by the fixture.
+        // Decapsulate a valid ciphertext produced by the fixture.
         0..=5 => {}
-        // 18: Keep the pristine key and generated-pattern ciphertext.
+        // Keep the pristine key and generated-pattern ciphertext.
         18 => {}
-        // 19: Use the envelope byte flip applied above.
+        // Use the envelope byte flip applied above.
         19 => {}
-        // 20: Use the envelope truncation applied above.
+        // Use the envelope truncation applied above.
         20 => {}
-        // 21: Use the envelope extension applied above.
+        // Use the envelope extension applied above.
         21 => {}
-        // 6: Flip at least one bit in a valid ciphertext.
+        // Flip at least one bit in a valid ciphertext.
         6 => req.ciphertext[usize::from(input.offset) % params.ciphertext_len] ^= input.mask | 1,
-        // 7: Submit an all-zero ciphertext of the correct length.
+        // Submit an all-zero ciphertext of the correct length.
         7 => req.ciphertext.fill(0),
-        // 8: Submit generated-pattern ciphertext of the correct length.
+        // Submit generated-pattern ciphertext of the correct length.
         8 => {}
-        // 9: Replace the ciphertext with raw fuzz bytes.
+        // Replace the ciphertext with raw fuzz bytes.
         9 => req.ciphertext = input.raw_ciphertext.0.clone(),
-        // 10: Exercise boundary lengths and lengths from all parameter sets.
+        // Exercise boundary lengths and lengths from all parameter sets.
         10 => {
             let lengths = [
                 0,
@@ -304,33 +304,33 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             ];
             req.ciphertext = ciphertext(input, lengths[usize::from(input.length) % lengths.len()]);
         }
-        // 11: Choose any ciphertext length through the schema maximum plus one.
+        // Choose any ciphertext length through the schema maximum plus one.
         11 => {
             req.ciphertext = ciphertext(
                 input,
                 usize::from(input.length) % (MLKEM_CIPHERTEXT_MAX_LEN + 2),
             );
         }
-        // 12: Submit an arbitrary session ID, possibly the valid one.
+        // Submit an arbitrary session ID, possibly the valid one.
         12 => req.session_id = input.session_id,
-        // 13: Submit a session ID guaranteed to differ from the fixture's.
+        // Submit a session ID guaranteed to differ from the fixture's.
         13 => req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX),
-        // 14: Exercise the minimum and maximum session IDs.
+        // Exercise the minimum and maximum session IDs.
         14 => req.session_id = if input.mask & 1 == 0 { 0 } else { u16::MAX },
-        // 15: Leave the request intact and close its session before submission below.
+        // Leave the request intact and close its session before submission below.
         15 => {}
-        // 16: Request an arbitrary output scope.
+        // Request an arbitrary output scope.
         16 => req.scope = input.scope,
-        // 17: Request a recognized output scope without provisioning persisted scopes.
+        // Request a recognized output scope without provisioning persisted scopes.
         17 => req.scope = common::derive_valid_key_scope(input.scope),
-        // 22: Corrupt the authentication tag with a guaranteed nonzero mask.
+        // Corrupt the authentication tag with a guaranteed nonzero mask.
         22 => {
             let last = req.masked_key.len() - 1;
             req.masked_key[last] ^= input.mask | 1;
         }
-        // 23: Replace the masked key with raw fuzz bytes.
+        // Replace the masked key with raw fuzz bytes.
         23 => req.masked_key = input.raw_key.0.clone(),
-        // 24: Resize the masked key to fixture and schema boundary lengths.
+        // Resize the masked key to fixture and schema boundary lengths.
         24 => {
             let lengths = [
                 0,
@@ -347,25 +347,25 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 input.mask,
             );
         }
-        // 25..=29: Mutate one byte in a selected envelope region.
+        // Mutate one byte in a selected envelope region.
         25..=29 => {
             let payload_at = aead::payload_offset(aead::AeadAlg::AesGcm256);
             let tag_at = pristine.len() - aead::AeadAlg::AesGcm256.tag_len();
             let (start, end) = match scenario {
-                // 25: Target the envelope header.
+                // Target the envelope header.
                 25 => (0, aead_envelope::HEADER_LEN),
-                // 26: Target the authenticated nonce bytes.
+                // Target the authenticated nonce bytes.
                 26 => (aead_envelope::HEADER_LEN, NONCE_END),
-                // 27: Target the authenticated key metadata.
+                // Target the authenticated key metadata.
                 27 => (IV_END, payload_at),
-                // 28: Target the encrypted key payload.
+                // Target the encrypted key payload.
                 28 => (payload_at, tag_at),
-                // 29: Target the ignored stored-IV suffix.
+                // Target the ignored stored-IV suffix.
                 _ => (NONCE_END, IV_END),
             };
             req.masked_key[start + usize::from(input.offset) % (end - start)] ^= input.mask;
         }
-        // 30 | 31: Use a local | ephemeral input key with a provisioned output scope.
+        // Use a local | ephemeral input key with a provisioned output scope.
         30 | 31 => {
             req.scope = [
                 common::KEY_SCOPE_SESSION,
@@ -373,7 +373,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 common::KEY_SCOPE_EPHEMERAL,
             ][usize::from(input.scope) % 3];
         }
-        // 32: Convert a session-scoped input key to a provisioned local or ephemeral scope.
+        // Convert a session-scoped input key to a provisioned local or ephemeral scope.
         32 => {
             req.scope = if input.mask & 1 == 0 {
                 common::KEY_SCOPE_LOCAL
@@ -381,7 +381,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 common::KEY_SCOPE_EPHEMERAL
             };
         }
-        // 33: Use a security-domain input key with any provisioned output scope.
+        // Use a security-domain input key with any provisioned output scope.
         33 => {
             req.scope = [
                 common::KEY_SCOPE_SECURITY_DOMAIN,
@@ -390,9 +390,9 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 common::KEY_SCOPE_EPHEMERAL,
             ][usize::from(input.scope) % 4];
         }
-        // 34: Submit the authenticated ML-DSA key generated above as the wrong key type.
+        // Submit the authenticated ML-DSA key generated above as the wrong key type.
         34 => {}
-        // 35: Combine independently enabled envelope, session, scope, and buffer mutations.
+        // Combine independently enabled envelope, session, scope, and buffer mutations.
         35 => {
             if input.switches & 2 != 0 {
                 req.session_id = input.session_id;
@@ -407,18 +407,18 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
-        // 36: Leave the request unchanged as an explicit no-op control.
+        // Leave the request unchanged as an explicit no-op control.
         36 => {}
-        // 37: Truncate the masked key to its existing length as a no-op.
+        // Truncate the masked key to its existing length as a no-op.
         37 => {
             common::EnvelopeMutation::Truncate {
                 len: pristine.len() as u16,
             }
             .apply(&mut req.masked_key);
         }
-        // 38: Append no bytes to the masked key as a no-op.
+        // Append no bytes to the masked key as a no-op.
         38 => common::EnvelopeMutation::Append(Vec::new()).apply(&mut req.masked_key),
-        // 39: Request a recognized persisted scope without provisioning it.
+        // Request a recognized persisted scope without provisioning it.
         39 => {
             req.scope = [
                 common::KeyScope::Local,
