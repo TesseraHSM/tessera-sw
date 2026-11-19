@@ -47,7 +47,6 @@
 //! On real Cortex-M7 hardware, these operations would be offloaded
 //! to a PKA (Public Key Accelerator) engine via DMA.
 
-use tsra_crypto::DecodeOp;
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::HashAlgo;
@@ -56,7 +55,6 @@ use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaKeyOp;
-use tsra_crypto::RsaPadPkcs1EncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
@@ -388,26 +386,35 @@ impl StdRsa {
     /// - [`HsmError::RsaDecryptFailed`] — padding check failed.
     pub async fn pkcs1_decrypt(
         &self,
+        key_size: HsmRsaKey,
         priv_key: &RsaPrivateKey,
         ciphertext: &[u8],
         output: &mut [u8],
     ) -> HsmResult<usize> {
-        let em = self
-            .mod_exp_priv_result(priv_key, ciphertext, ciphertext.len())
-            .await?;
-        let mut decoded = <RsaPadPkcs1EncryptAlgo as DecodeOp>::from_bytes(&em, ())
-            .map_err(|_| HsmError::RsaDecryptFailed)?;
-        let message = decoded.message_mut();
-        let len = message.len();
-        let result = match output.get_mut(..len) {
-            Some(dst) => {
-                dst.copy_from_slice(message);
-                Ok(len)
-            }
-            None => Err(HsmError::InvalidArg),
+        let k = key_size.modulus_len();
+        if ciphertext.len() != k || priv_key.size() != k {
+            return Err(HsmError::InvalidArg);
+        }
+        let encoded = match self.mod_exp_priv_result(priv_key, ciphertext, k).await {
+            Ok(encoded) => encoded,
+            Err(HsmError::InvalidArg) => return Err(HsmError::RsaDecryptFailed),
+            Err(error) => return Err(error),
         };
-        zeroize::Zeroize::zeroize(message);
-        result
+        if encoded.len() != k || encoded[0] != 0 || encoded[1] != 2 {
+            return Err(HsmError::RsaDecryptFailed);
+        }
+        let separator = encoded[2..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|offset| offset + 2)
+            .filter(|offset| *offset >= 10)
+            .ok_or(HsmError::RsaDecryptFailed)?;
+        let message = &encoded[separator + 1..];
+        if output.len() < message.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        output[..message.len()].copy_from_slice(message);
+        Ok(message.len())
     }
 
     /// Sign a pre-computed `digest` with PKCS#1 v1.5 padding, or PSS

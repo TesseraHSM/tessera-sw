@@ -742,6 +742,8 @@ impl HsmRsa for UnoHsmPal {
             em[k - m_len - 1] = 0x00;
             em[k - m_len..].copy_from_slice(message);
 
+            // RFC 8017 encodes EM big-endian; the PKA operands are LE.
+            em.reverse();
             self.rsa_mod_exp_pub_in_workspace(
                 key_size,
                 pub_key,
@@ -776,6 +778,9 @@ impl HsmRsa for UnoHsmPal {
             let em = scope.dma_alloc(k)?;
             self.mod_exp_priv(io, key_size, priv_key, ciphertext, Some(em))
                 .await?;
+            // The private operation returns the PKA-native LE operand;
+            // PKCS#1 v1.5 unpadding uses the standard BE encoded block.
+            em.reverse();
 
             // Verify EM = 0x00 || 0x02 || PS || 0x00 || M
             if em[0] != 0x00 || em[1] != 0x02 {
@@ -979,6 +984,8 @@ impl HsmRsa for UnoHsmPal {
                 self.mgf1_xor_in_workspace(algo, db, seed, scratch).await?;
             }
 
+            // Keep RFC 8017's encoded message BE until the PKA boundary.
+            em.reverse();
             self.rsa_mod_exp_pub_in_workspace(key_size, pub_key, em, &mut output[..k], scratch)
                 .await?;
             Ok(k)
