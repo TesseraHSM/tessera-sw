@@ -782,7 +782,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        validate_pss_modulus_width(key_size, priv_key)?;
+        rsa_modulus_le(key_size, priv_key)?;
         let Some(output) = out else {
             return Ok(key_size.max_pkcs1_message());
         };
@@ -889,9 +889,6 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         if pub_key.len() != k + EXP_WIRE_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        if pub_key[k - 1] & 0x80 == 0 {
             return Err(HsmError::InvalidArg);
         }
         if !mod_exp_input_in_range(&pub_key[..k], signature) {
@@ -1137,7 +1134,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        rsa_modulus_le(key_size, priv_key)?;
+        validate_pss_modulus_width(key_size, priv_key)?;
         let Some(signature) = out else {
             return Ok(k);
         };
@@ -1215,6 +1212,9 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if pub_key[k - 1] & 0x80 == 0 {
             return Err(HsmError::InvalidArg);
         }
         if !mod_exp_input_in_range(&pub_key[..k], signature) {
