@@ -269,6 +269,8 @@ storage is zero.
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
+| `0x37` | `EcdsaSign` | InSession | [`commands/ecdsa_sign.md`](./commands/ecdsa_sign.md) |
+| `0x38` | `EcdsaVerify` | InSession | [`commands/ecdsa_verify.md`](./commands/ecdsa_verify.md) |
 
 ## Default-PSK gate
 
