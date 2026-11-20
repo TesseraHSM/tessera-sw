@@ -24,26 +24,9 @@ use tsra_fw_uno_reg_soc::part_store_t::PART_STORE_T_BASE;
 /// Number of partition slots in the persistent store.
 pub const NUM_PARTITIONS: usize = 65;
 
-/// Per partition, what has been found of whether each PSK still holds its
-/// well-known default (see [`Partition::psk_default_memo`]), so the
-/// default-PSK gate need not read a PSK back out of GSRAM, which the CPU
-/// reads uncached, for every command. Every write to the partition's slot
-/// clears it (see [`Partition::slot_mut`]), so no answer outlives a change
-/// to either PSK.
-static PSK_DEFAULT: [AtomicU8; NUM_PARTITIONS] = [const { AtomicU8::new(0) }; NUM_PARTITIONS];
-
-/// Per partition, whether its unwrapping-key slot has been read as
-/// [`UnwrappingKeySlot::PctPassed`], which every command checks for a key
-/// awaiting its test. The SP only ever writes an empty slot, so a passed one
-/// changes only when the HSM writes the slot, which clears this (see
-/// [`Partition::slot_mut`]); until then the slot need not be read out of
-/// GSRAM again.
-static UNWRAP_PASSED: [AtomicBool; NUM_PARTITIONS] =
-    [const { AtomicBool::new(false) }; NUM_PARTITIONS];
-
-/// The [`PSK_DEFAULT`] bits of the crypto-officer (`co`) or crypto-user
-/// PSK: whether it has been compared with its default, and whether it
-/// matched.
+/// The [`Shadow::psk_default`] bits of the crypto-officer (`co`) or
+/// crypto-user PSK: whether it has been compared with its default, and
+/// whether it matched.
 const fn psk_memo_bits(co: bool) -> (u8, u8) {
     if co {
         (1 << 0, 1 << 1)
@@ -169,27 +152,49 @@ impl TryFrom<u8> for UnwrappingKeySlot {
     }
 }
 
-/// Bytes in each of a [`Shadow`]'s two runs of slot fields: `state ‖
-/// generation ‖ res_mask`, and the key handles followed by `valid_flags`.
+/// Bytes in each of a [`Shadow`]'s first two runs of slot fields: `state ‖
+/// generation ‖ res_mask`, and the key handles followed by `valid_flags`
+/// and `session_meta`.
 const SHADOW_RUN: usize = 24;
 
-/// Words in a [`Shadow`].
-const SHADOW_WORDS: usize = 2 * SHADOW_RUN / 4;
+/// Words of a [`Shadow`]'s third run, the session table: its 18 bytes and
+/// the two SP gate bytes after them, which are never read from the shadow.
+const SESSION_WORDS: usize = SESSION_TABLE_LEN.div_ceil(4);
+
+/// Words in a [`Shadow`], and where its session-table run starts.
+const SHADOW_WORDS: usize = SESSION_WORD0 + SESSION_WORDS;
+const SESSION_WORD0: usize = 2 * SHADOW_RUN / 4;
 
 /// Where each [`Shadow`] run starts in [`Storage`].
 const SHADOW_HEAD: usize = offset_of!(Storage, state);
 const SHADOW_TAIL: usize = offset_of!(Storage, id_key_id);
+const SHADOW_SESSION: usize = offset_of!(Storage, session_table);
 
-/// A DTCM copy of a partition slot's small, read-mostly fields (lifecycle
-/// state, generation, resource mask, key handles and presence flags),
-/// which nearly every command reads and CP1 would otherwise read from
-/// GSRAM uncached, a load at a time. Loaded on first use; every write to
-/// the slot drops it (see [`Partition::slot_mut`]). Only fields written
-/// solely through [`Partition`]'s setters, never through a `&mut` the
-/// store hands out (which could be written after the drop), belong here.
+/// A partition slot's DTCM state:
+/// - a copy of its small, read-mostly fields (lifecycle state, generation,
+///   resource mask, key handles, presence flags, and the session table and
+///   metadata), which nearly every command reads, an in-session one several
+///   times, and the HSM would otherwise read from GSRAM uncached, a load at
+///   a time. Loaded on first use. Only fields written solely through
+///   [`Partition`]'s setters or a [`SessionFieldMut`], never through a
+///   plain `&mut` the store hands out (which could be written after the
+///   drop), belong here;
+/// - what has been found of the slot's PSKs and its unwrapping-key slot.
+///
+/// Every write to the slot drops all of it (see [`Partition::slot_mut`]).
 struct Shadow {
     valid: AtomicBool,
     words: [AtomicU32; SHADOW_WORDS],
+    /// Whether each PSK still holds its well-known default, as far as
+    /// compared (see [`Partition::psk_default_memo`]), so the default-PSK
+    /// gate need not read a PSK back out of GSRAM for every command.
+    psk_default: AtomicU8,
+    /// Whether the unwrapping-key slot has been read as
+    /// [`UnwrappingKeySlot::PctPassed`], which every command checks for a
+    /// key awaiting its test. The SP only ever writes an empty slot, so a
+    /// passed one changes only when the HSM writes the slot; until then it
+    /// need not be read out of GSRAM again.
+    unwrap_passed: AtomicBool,
 }
 
 impl Shadow {
@@ -197,15 +202,54 @@ impl Shadow {
         Self {
             valid: AtomicBool::new(false),
             words: [const { AtomicU32::new(0) }; SHADOW_WORDS],
+            psk_default: AtomicU8::new(0),
+            unwrap_passed: AtomicBool::new(false),
         }
+    }
+
+    /// Forgets all of it, for a write to the slot.
+    #[inline]
+    fn clear(&self) {
+        self.valid.store(false, Relaxed);
+        self.psk_default.store(0, Relaxed);
+        self.unwrap_passed.store(false, Relaxed);
     }
 }
 
 /// Per partition, its [`Shadow`].
 static SHADOWS: [Shadow; NUM_PARTITIONS] = [const { Shadow::new() }; NUM_PARTITIONS];
 
-/// The [`Shadow`] word holding the [`Storage`] byte at `off`, which a run
-/// covers, and the byte's shift within it.
+/// Exclusive access to a partition's session table or session metadata,
+/// which its [`Shadow`] copies. Taking it drops the copy, as every write to
+/// the slot does; dropping it drops the copy again, in case a read in
+/// between reloaded it before the writes landed.
+pub struct SessionFieldMut<'a, const N: usize> {
+    field: &'a mut [u8; N],
+    shadow: &'static Shadow,
+}
+
+impl<const N: usize> core::ops::Deref for SessionFieldMut<'_, N> {
+    type Target = [u8; N];
+
+    fn deref(&self) -> &[u8; N] {
+        self.field
+    }
+}
+
+impl<const N: usize> core::ops::DerefMut for SessionFieldMut<'_, N> {
+    fn deref_mut(&mut self) -> &mut [u8; N] {
+        self.field
+    }
+}
+
+impl<const N: usize> Drop for SessionFieldMut<'_, N> {
+    fn drop(&mut self) {
+        self.shadow.valid.store(false, Relaxed);
+    }
+}
+
+/// The [`Shadow`] word holding the [`Storage`] byte at `off`, which the
+/// first or second run covers, and the byte's shift within it.
 const fn shadow_word(off: usize) -> (usize, u32) {
     let at = if off >= SHADOW_TAIL {
         SHADOW_RUN + off - SHADOW_TAIL
@@ -213,6 +257,17 @@ const fn shadow_word(off: usize) -> (usize, u32) {
         off - SHADOW_HEAD
     };
     (at / 4, 8 * (at % 4) as u32)
+}
+
+/// Where [`Shadow`] word `i` comes from in [`Storage`].
+const fn shadow_word_off(i: usize) -> usize {
+    if i < SHADOW_RUN / 4 {
+        SHADOW_HEAD + 4 * i
+    } else if i < 2 * SHADOW_RUN / 4 {
+        SHADOW_TAIL + 4 * i - SHADOW_RUN
+    } else {
+        SHADOW_SESSION + 4 * (i - SESSION_WORD0)
+    }
 }
 
 /// Sentinel stored in a key-handle field meaning "no key".
@@ -582,22 +637,70 @@ impl Partition {
         (self.shadow(word) >> shift) as u16
     }
 
-    /// Load this slot's [`Shadow`] with two burst reads.
+    /// Word `i` of this slot's [`Shadow`] if it is loaded. Session lookups
+    /// read through this, falling back to GSRAM, rather than load the shadow
+    /// themselves (the shadow getters every command calls load it): with
+    /// plain loads and no writes, they leave their many callers' state in
+    /// registers.
+    #[inline]
+    fn shadow_if_loaded(self, i: usize) -> Option<u32> {
+        let shadow = &SHADOWS[self.0];
+        // SAFETY: plain reads of the shadow, which only this single-threaded
+        // executor touches (no interrupt handler does).
+        unsafe {
+            if shadow.valid.as_ptr().read() {
+                Some(shadow.words[i].as_ptr().read())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Byte `off` of this slot's session table.
+    #[inline]
+    pub fn session_table_byte(self, off: usize) -> u8 {
+        debug_assert!(off < SESSION_TABLE_LEN);
+        match self.shadow_if_loaded(SESSION_WORD0 + off / 4) {
+            Some(word) => (word >> (8 * (off % 4))) as u8,
+            None => self.slot().session_table[off],
+        }
+    }
+
+    /// The little-endian 16-bit field at even offset `off` of this slot's
+    /// session table (so within one word).
+    #[inline]
+    pub fn session_table_u16(self, off: usize) -> u16 {
+        debug_assert!(off.is_multiple_of(2) && off + 2 <= SESSION_TABLE_LEN);
+        match self.shadow_if_loaded(SESSION_WORD0 + off / 4) {
+            Some(word) => (word >> (8 * (off % 4))) as u16,
+            None => {
+                let table = &self.slot().session_table;
+                u16::from_le_bytes([table[off], table[off + 1]])
+            }
+        }
+    }
+
+    /// This slot's Pending mask (byte 0 of the session metadata).
+    #[inline]
+    pub fn session_pending_mask(self) -> u8 {
+        let (word, shift) = shadow_word(offset_of!(Storage, session_meta));
+        match self.shadow_if_loaded(word) {
+            Some(word) => (word >> shift) as u8,
+            None => self.slot().session_meta[0],
+        }
+    }
+
+    /// Load this slot's [`Shadow`] with three burst reads.
     #[cold]
     #[inline(never)]
     fn load_shadow(self) {
         let slot = self.slot() as *const Storage as *const u8;
         let shadow = &SHADOWS[self.0];
         for (i, word) in shadow.words.iter().enumerate() {
-            let off = if i < SHADOW_RUN / 4 {
-                SHADOW_HEAD + 4 * i
-            } else {
-                SHADOW_TAIL + 4 * i - SHADOW_RUN
-            };
-            // SAFETY: both runs are word-aligned and lie within the slot
+            // SAFETY: the runs are word-aligned and lie within the slot
             // (asserted in `layout_asserts`), which `slot` borrows for
             // `'static`.
-            let v = unsafe { slot.add(off).cast::<u32>().read() };
+            let v = unsafe { slot.add(shadow_word_off(i)).cast::<u32>().read() };
             word.store(u32::from_le(v), Relaxed);
         }
         shadow.valid.store(true, Relaxed);
@@ -617,10 +720,8 @@ impl Partition {
     /// other task observes a slot mid-mutation.
     #[inline]
     fn slot_mut(&mut self) -> &mut Storage {
-        // Any write may change a PSK or a shadowed field: forget them.
-        PSK_DEFAULT[self.0].store(0, Relaxed);
-        SHADOWS[self.0].valid.store(false, Relaxed);
-        UNWRAP_PASSED[self.0].store(false, Relaxed);
+        // Any write may change a PSK or a field the shadow holds: forget them.
+        SHADOWS[self.0].clear();
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
         // partition-store GSRAM region. The `&mut self` receiver scopes the
@@ -776,7 +877,7 @@ impl Partition {
     /// since the slot was last written (see [`Self::memo_psk_default`]).
     pub fn psk_default_memo(self, co: bool) -> Option<bool> {
         let (checked, default) = psk_memo_bits(co);
-        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        let known = SHADOWS[self.0].psk_default.load(Relaxed);
         (known & checked != 0).then_some(known & default != 0)
     }
 
@@ -790,8 +891,8 @@ impl Partition {
         } else {
             checked
         };
-        let known = PSK_DEFAULT[self.0].load(Relaxed);
-        PSK_DEFAULT[self.0].store(known | found, Relaxed);
+        let memo = &SHADOWS[self.0].psk_default;
+        memo.store(memo.load(Relaxed) | found, Relaxed);
     }
 
     /// Bakes the default pre-shared keys into the slot.
@@ -1357,10 +1458,10 @@ impl Partition {
     /// non-zero value as occupied, so the HSM can advance the slot to
     /// `PctPassed` without the SP noticing. A slot once read as passed is
     /// remembered as such until the HSM next writes it (see
-    /// [`UNWRAP_PASSED`]).
+    /// [`Shadow::unwrap_passed`]).
     #[inline(never)]
     pub fn unwrapping_key_slot(self) -> Option<UnwrappingKeySlot> {
-        if UNWRAP_PASSED[self.0].load(Relaxed) {
+        if SHADOWS[self.0].unwrap_passed.load(Relaxed) {
             return Some(UnwrappingKeySlot::PctPassed);
         }
         // Volatile read: the SP writes this mailbox byte from another processor,
@@ -1373,7 +1474,7 @@ impl Partition {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         let slot = UnwrappingKeySlot::try_from(value).ok();
         if slot == Some(UnwrappingKeySlot::PctPassed) {
-            UNWRAP_PASSED[self.0].store(true, Relaxed);
+            SHADOWS[self.0].unwrap_passed.store(true, Relaxed);
         }
         slot
     }
@@ -1657,7 +1758,8 @@ impl Partition {
 
     // ── session table (raw region; typed view in drivers/session_store) ──
 
-    /// Borrows the raw 18-byte session-table region.
+    /// Borrows the raw 18-byte session-table region, out of GSRAM (lookups
+    /// read [`Self::session_table_byte`] and [`Self::session_table_u16`]).
     #[inline(never)]
     pub fn session_table(self) -> &'static [u8; SESSION_TABLE_LEN] {
         &self.slot().session_table
@@ -1665,12 +1767,17 @@ impl Partition {
 
     /// Mutably borrows the raw session-table region.
     #[inline(never)]
-    pub fn session_table_mut(&mut self) -> &mut [u8; SESSION_TABLE_LEN] {
-        &mut self.slot_mut().session_table
+    pub fn session_table_mut(&mut self) -> SessionFieldMut<'_, SESSION_TABLE_LEN> {
+        let shadow = &SHADOWS[self.0];
+        SessionFieldMut {
+            field: &mut self.slot_mut().session_table,
+            shadow,
+        }
     }
 
     /// Borrows the volatile Pending mask and one reserved byte for the
-    /// TBOR session slots.
+    /// TBOR session slots, out of GSRAM (lookups read
+    /// [`Self::session_pending_mask`]).
     #[inline(never)]
     pub fn session_meta(self) -> &'static [u8; 2] {
         &self.slot().session_meta
@@ -1678,8 +1785,12 @@ impl Partition {
 
     /// Mutably borrows the session metadata region.
     #[inline(never)]
-    pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
-        &mut self.slot_mut().session_meta
+    pub fn session_meta_mut(&mut self) -> SessionFieldMut<'_, 2> {
+        let shadow = &SHADOWS[self.0];
+        SessionFieldMut {
+            field: &mut self.slot_mut().session_meta,
+            shadow,
+        }
     }
 
     /// Session masking-key fingerprints and rotation flags retained across LM.
