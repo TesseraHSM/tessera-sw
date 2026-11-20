@@ -544,40 +544,6 @@ impl<const DEPTH: usize, const TAGS: usize> Drop for GdmaCopyFuture<'_, DEPTH, T
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dropping_completed_copy_releases_tag_for_reuse() {
-        let driver = GdmaDriver::<4, 3>::new(ChannelConfig {
-            channel: 0,
-            sq_base: 0,
-            cq_base: 0,
-            cq_tail_shadow: 0,
-            sq_head_shadow: 0,
-            interrupt: false,
-        });
-        driver.state.with(|s| {
-            s.tag_free &= !1;
-            s.tags[0].completed = true;
-        });
-
-        drop(GdmaCopyFuture {
-            driver: &driver,
-            tag: 0,
-            released: false,
-        });
-
-        let reused = driver.state.with(|s| {
-            let tag = s.tag_free.trailing_zeros() as u16;
-            s.tag_free &= !(1u64 << tag);
-            tag
-        });
-        assert_eq!(reused, 0);
-    }
-}
-
 /// Words 0 and 4 from `p`, read with one five-word burst: the status
 /// words of two consecutive 16-byte ring entries, which sit in memory the
 /// CPU reads uncached, where a burst costs about as much as one load.
@@ -609,5 +575,85 @@ unsafe fn read_pair(p: *const u32) -> (u32, u32) {
     // SAFETY: per the function contract.
     unsafe {
         (p.read_volatile(), p.add(4).read_volatile())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::boxed::Box;
+
+    use super::*;
+
+    #[test]
+    fn dropping_pending_copy_reaps_completion_before_releasing_tag() {
+        // SAFETY: the register overlay consists of integer MMIO cells; leaked
+        // zeroed storage supplies permanent, aligned fake registers.
+        let regs = Box::leak(Box::new(unsafe {
+            core::mem::MaybeUninit::<GdmaRegs>::zeroed().assume_init()
+        }));
+        // SAFETY: the CQ overlay also contains only integer MMIO cells.
+        let ring = unsafe { core::mem::MaybeUninit::<[GdmaCqEntry; 4]>::zeroed().assume_init() };
+        ring[0].status.write(GDMA_CQ_STATUS::SUCCESS.val(1));
+        let tail = 1u32;
+        let mut driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        // SAFETY: the fake register storage is leaked and has the overlay's alignment.
+        driver.regs = unsafe { StaticRef::new(regs) };
+        driver.cq_ring = ring.as_ptr();
+        driver.cq_tail_shadow = &tail;
+        driver.state.with(|s| {
+            s.tag_free &= !1;
+            assert!(!s.tags[0].completed);
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 0,
+            released: false,
+        });
+
+        driver.state.with(|s| {
+            assert_eq!(s.cq_head, 1);
+            assert_ne!(s.tag_free & 1, 0);
+            assert!(!s.tags[0].completed);
+        });
+        assert_eq!(driver.regs.cq[0].head.read(CQ_CHANNEL_HEAD::HEAD), 1);
+    }
+
+    #[test]
+    fn dropping_completed_copy_releases_tag_for_reuse() {
+        let driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        driver.state.with(|s| {
+            s.tag_free &= !1;
+            s.tags[0].completed = true;
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 0,
+            released: false,
+        });
+
+        let reused = driver.state.with(|s| {
+            let tag = s.tag_free.trailing_zeros() as u16;
+            s.tag_free &= !(1u64 << tag);
+            tag
+        });
+        assert_eq!(reused, 0);
     }
 }

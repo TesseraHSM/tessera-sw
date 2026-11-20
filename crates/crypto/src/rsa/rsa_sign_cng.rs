@@ -23,6 +23,8 @@
 //! - PKCS#1 v1.5 is deterministic and may be vulnerable to certain attacks
 //! - Always hash messages before signing (this module expects pre-computed digests)
 
+use windows::Win32::Foundation::NTSTATUS;
+use windows::Win32::Foundation::STATUS_INVALID_SIGNATURE;
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
@@ -246,6 +248,10 @@ impl VerifyOp for CngRsaSignAlgo {
             return Ok(constant_time_eq(&recovered, data));
         }
 
+        if signature.len() != key.size() {
+            return Ok(false);
+        }
+
         // SAFETY: Calling Windows CNG BCryptVerifySignature API.
         // - key.handle() is a valid BCRYPT_KEY_HANDLE obtained from a CNG public key object
         //   that remains valid for the lifetime of the key reference
@@ -257,8 +263,16 @@ impl VerifyOp for CngRsaSignAlgo {
         // The function performs read-only operations and returns a status code
         let status =
             unsafe { BCryptVerifySignature(key.handle(), pad_ptr, data, signature, flags) };
-        Ok(status.is_ok())
+        map_verify_status(status)
     }
+}
+
+fn map_verify_status(status: NTSTATUS) -> Result<bool, CryptoError> {
+    if status == STATUS_INVALID_SIGNATURE {
+        return Ok(false);
+    }
+    status.ok().map_err(|_| CryptoError::RsaVerifyError)?;
+    Ok(true)
 }
 
 impl VerifyRecoverOp for CngRsaSignAlgo {
@@ -453,5 +467,23 @@ fn pad_ptr(pad: &PaddingInfo) -> Option<*const std::ffi::c_void> {
         PaddingInfo::None => None,
         PaddingInfo::Pkcs1(info) => Some(info as *const _ as *const std::ffi::c_void),
         PaddingInfo::Pss(info) => Some(info as *const _ as *const std::ffi::c_void),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::STATUS_INVALID_PARAMETER;
+    use windows::Win32::Foundation::STATUS_NO_MEMORY;
+    use windows::Win32::Foundation::STATUS_SUCCESS;
+
+    use super::*;
+
+    #[test]
+    fn verify_status_distinguishes_invalid_signature_from_operational_errors() {
+        assert_eq!(map_verify_status(STATUS_SUCCESS), Ok(true));
+        assert_eq!(map_verify_status(STATUS_INVALID_SIGNATURE), Ok(false));
+        for status in [STATUS_INVALID_PARAMETER, STATUS_NO_MEMORY] {
+            assert_eq!(map_verify_status(status), Err(CryptoError::RsaVerifyError));
+        }
     }
 }

@@ -36,8 +36,12 @@ enforces the exact supplied salt length. Its maximum is
 sent in this request. PKCS#1 v1.5 checks the selected hash's DigestInfo.
 
 For an empty message, `message_index` must be zero and no OOB descriptor is
-read. For nonempty messages, the descriptor length must exactly equal
-`message_len`.
+read. For nonempty messages, a direct Data Block descriptor's length must
+equal `message_len`. On Uno, Segment/Last Segment descriptors are submitted
+unchanged to GDMA; hardware walks the SGL and gathers `message_len` bytes.
+Firmware does not walk SGLs or PRPs. The scoped DMA allocation is exactly
+`message_len` bytes, at most 8192, within the existing per-IO heap, and is
+released after hashing and before RSA execution.
 
 ## Response and OOB lifetime
 
