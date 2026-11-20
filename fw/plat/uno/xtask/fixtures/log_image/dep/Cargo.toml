@@ -1,0 +1,15 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_log_fixture_dep"
+publish = false
+version = "0.1.0"
+
+[lib]
+bench = false
+test = false
+
+[dependencies]
+tsra_fw_hsm_core_tracing = { path = "../../../../../../core/tracing" }

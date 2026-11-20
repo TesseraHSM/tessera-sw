@@ -51,7 +51,21 @@ impl Xtask for Clippy {
             }
         }
 
-        // Top platform workspace (xtask + reggen + systemrdl, host target).
+        // Log fixture workspace (nightly, thumb target).
+        {
+            let _dir = sh.push_dir(&fw.log_fixture_dir);
+            log::info!("Running clippy on log fixture workspace...");
+            cmd!(sh, "cargo {toolchain} clippy -- -D warnings").run()?;
+        }
+
+        // Log fixture's host crate for code above the PAL (nightly, host target).
+        {
+            let _dir = sh.push_dir(&fw.log_above_pal_dir);
+            log::info!("Running clippy on log fixture's host crate...");
+            cmd!(sh, "cargo {toolchain} clippy --all-targets -- -D warnings").run()?;
+        }
+
+        // Top platform workspace (xtask + log_map + reggen + systemrdl, host target).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running clippy on platform workspace...");

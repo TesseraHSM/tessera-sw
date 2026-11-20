@@ -3,12 +3,13 @@
 
 [workspace]
 exclude = ["fw", "pqc"]
-members = ["crates/reggen", "crates/systemrdl", "xtask"]
+members = ["crates/log_map", "crates/reggen", "crates/systemrdl", "xtask"]
 resolver = "2"
 
 [workspace.dependencies]
 
 # workspace members
+tsra_log_map = { path = "crates/log_map" }
 tsra_reggen = { path = "crates/reggen" }
 tsra_systemrdl = { path = "crates/systemrdl" }
 

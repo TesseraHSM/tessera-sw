@@ -1,0 +1,47 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# A small image with debug-log output, for `cargo xtask log-fixture`. It's
+# its own workspace, so that its `debug-log` feature can't reach the firmware.
+
+[workspace]
+members = ["dep"]
+
+[package]
+edition = "2024"
+name = "tsra_log_fixture"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+bench = false
+name = "tsra_log_fixture"
+test = false
+
+[features]
+debug-log = ["tsra_fw_hsm_core_tracing/debug-log"]
+default = ["debug-log"]
+# The two variant images log the same message from different lines.
+variant_a = []
+variant_b = []
+
+[dependencies]
+cortex-m-rt = "0.7.5"
+tsra_fw_hsm_core_tracing = { path = "../../../../../core/tracing" }
+tsra_fw_uno_debug_log = { path = "../../../fw/crates/debug_log" }
+tsra_fw_uno_trace = { path = "../../../fw/crates/trace" }
+tsra_log_fixture_dep = { path = "dep" }
+
+[build-dependencies]
+tsra_log_map = { path = "../../../crates/log_map" }
+
+# The firmware's release profile (fw/plat/uno/fw/Cargo.toml).
+[profile.release]
+codegen-units = 1
+debug = true
+lto = true
+opt-level = 2
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

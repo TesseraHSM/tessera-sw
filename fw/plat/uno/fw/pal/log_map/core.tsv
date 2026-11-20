@@ -1,0 +1,13 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# The message map's rows for the core component, for debug-log output: one
+# row per message, which gives the message its number in the component.
+# Each component has its own file in this directory, and each row names its
+# file's component. Rows are append-only. Never edit, delete, or reorder
+# one, so that each number keeps its meaning for every decoder. `cargo
+# xtask build` in fw/plat/uno appends the rows for new messages to their
+# component's file, and `cargo xtask log-map` also updates
+# ../log_messages.h. Commit both with the code that adds the messages.
+#
+# number	component	kind	crate	target	message

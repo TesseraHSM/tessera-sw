@@ -1,0 +1,7 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# The fixture image's message map. `cargo xtask log-fixture` starts from these
+# comment lines alone, and checks that fix mode adds exactly these rows.
+#
+# number	component	kind	crate	target	message
