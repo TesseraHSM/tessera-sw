@@ -218,7 +218,7 @@ fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<&[u8]>
 
 fn validate_pss_modulus_width(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<()> {
     let modulus = rsa_modulus_le(key_size, priv_key)?;
-    if modulus.last().map_or(true, |byte| byte & 0x80 == 0) {
+    if modulus.last().is_none_or(|byte| byte & 0x80 == 0) {
         return Err(HsmError::InvalidArg);
     }
     Ok(())

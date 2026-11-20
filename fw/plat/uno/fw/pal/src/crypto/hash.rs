@@ -326,7 +326,7 @@ impl HsmHash for UnoHsmPal {
             let state = scope.dma_alloc_zeroed(state_len)?;
             let staging = scope.dma_alloc_zeroed(OOB_HASH_CHUNK_LEN)?;
             let mut ctx = self.hash_begin(io, algo, state)?;
-            let result = async {
+            async {
                 if let Some((root, base_addr)) = root_desc {
                     let mut offset = 0usize;
                     while offset < expected_len {
@@ -349,9 +349,7 @@ impl HsmHash for UnoHsmPal {
                 }
                 self.hash_finish(io, &mut ctx, form, Some(digest)).await
             }
-            .await;
-            drop(ctx);
-            result
+            .await
         })
         .await
     }

@@ -207,18 +207,6 @@ fn map_verify_result(result: c_int) -> Result<bool, CryptoError> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verify_result_distinguishes_invalid_signature_from_operational_error() {
-        assert_eq!(map_verify_result(OSSL_SUCCESS), Ok(true));
-        assert_eq!(map_verify_result(0), Ok(false));
-        assert_eq!(map_verify_result(-1), Err(CryptoError::RsaVerifyError));
-    }
-}
-
 impl VerifyRecoverOp for OsslRsaSignAlgo {
     type Key = RsaPublicKey;
 
@@ -440,5 +428,17 @@ impl OsslRsaSignAlgo {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_result_distinguishes_invalid_signature_from_operational_error() {
+        assert_eq!(map_verify_result(OSSL_SUCCESS), Ok(true));
+        assert_eq!(map_verify_result(0), Ok(false));
+        assert_eq!(map_verify_result(-1), Err(CryptoError::RsaVerifyError));
     }
 }
