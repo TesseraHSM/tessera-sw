@@ -395,6 +395,7 @@ impl<P: HsmPal> Hsm<P> {
                     | ddi::tbor::opcode::SESSION_CLOSE
                     | ddi::tbor::opcode::SESSION_OPEN_FINISH
                     | ddi::tbor::opcode::KEY_REPORT
+                    | ddi::tbor::opcode::PART_INIT_WITH_OBK
             )
         {
             *credential_guard = Some(

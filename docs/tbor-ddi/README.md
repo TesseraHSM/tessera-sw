@@ -269,6 +269,7 @@ storage is zero.
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
+| `0x30` | `PartInitWithObk` | InSession | [`commands/part_init_with_obk.md`](./commands/part_init_with_obk.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 
 ## Default-PSK gate
@@ -305,6 +306,13 @@ authentication.
 1. Open a session for the role under the default PSK.
 2. Issue `PskChange` as the first in-session command.
 3. Continue normal work on the same session; no close/reopen is required.
+
+A session authenticates with the credential it was opened under. Commands
+that check the credential (`PartInitWithObk`, `KeyReport`, `PskChange`)
+reject, with `SessionAuthFailure`, a session opened under a PSK that has since
+been rotated. The session that performs the rotation is rebound to the new
+credential, so it can go on to provision with
+[`PartInitWithObk`](./commands/part_init_with_obk.md) without reopening.
 
 The CU PSK is shared across the partition's seven CU slots. Rotation uses
 the partition credential transaction lock and a per-session consumed bit.

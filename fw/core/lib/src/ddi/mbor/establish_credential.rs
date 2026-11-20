@@ -25,15 +25,6 @@ use tsra_fw_hsm_byte_order as byte_order;
 
 use super::*;
 
-// ── Field sizes ──────────────────────────────────────────────────────
-
-/// BK3 plaintext length in bytes — matches `BK3_LEN` in
-/// [`init_bk3`](super::init_bk3).
-const BK3_LEN: usize = 48;
-
-/// Length of a raw P-384 identity public key (`x || y`, 48-byte coordinates).
-const P384_PUB_RAW_LEN: usize = 2 * 48;
-
 // ── Labels and metadata ──────────────────────────────────────────────
 
 /// KBKDF label for the BK3 session key derivation.
@@ -89,7 +80,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // SHA-384(0x04 || part_id_pub_key) with the POTA private key that
     // corresponds to `pota_pub_key`; `part_id_pub_key` is read back over the
     // DDI.
-    verify_pota_signature(pal, io, body.pota_pub_key.raw, body.pota_sig).await?;
+    crate::ddi::verify_pota_signature(pal, io, body.pota_pub_key.raw, body.pota_sig).await?;
 
     // ── Steps 3-4: ECDH + HKDF → 80-byte OKM (aes_key ‖ hmac_key) ────
     let okm = pal.dma_alloc(io, BK_LEN)?;
@@ -147,11 +138,11 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // encryption key.
 
     // ── Step 8: Unmask BK3 ───────────────────────────────────────────
-    let bk3 = pal.dma_alloc(io, BK3_LEN)?;
-    unmask_partition_bk3(pal, io, body.masked_bk3, bk3).await?;
+    let bk3 = pal.dma_alloc(io, crate::ddi::BK3_LEN)?;
+    crate::ddi::unmask_partition_bk3(pal, io, body.masked_bk3, bk3).await?;
 
     // ── Step 9: Derive BK3 session key ───────────────────────────────
-    let bk3_session = pal.dma_alloc(io, BK3_LEN)?;
+    let bk3_session = pal.dma_alloc(io, crate::ddi::BK3_LEN)?;
     derive_bk3_session(pal, io, bk3, bk3_session).await?;
     // Note: `part_set_bk3_session` is deferred to the final atomic
     // commit below so a failure in steps 10-13 leaves the partition's
@@ -367,52 +358,6 @@ fn check_fail_fast<P: HsmPal>(
     Ok(())
 }
 
-/// Verifies the POTA signature over the partition identity public key.
-///
-/// The signature is computed by the host over
-/// `SHA-384( 0x04 ‖ x ‖ y )`, the 97-byte SEC1-uncompressed form of
-/// the partition identity P-384 public key, where `x`/`y` are the raw
-/// coordinates in natural **big-endian** order (as used in DER / X.509).
-/// We materialize the same 97-byte form locally from `part_id_pub_key`
-/// and verify the supplied signature against it.
-async fn verify_pota_signature<P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    signer_pub_key_raw: &HsmDmaBuf,
-    signature_raw: &HsmDmaBuf,
-) -> HsmResult<()> {
-    let id_uncompressed = pal.dma_alloc(io, P384_PUB_RAW_LEN + 4)?.split_at_mut(3).1;
-    id_uncompressed[0] = 0x04;
-    crate::part_state::part_id_pub_key(pal, io, id_uncompressed.split_at_mut(1).1).await?;
-
-    // `ecc_verify` consumes `r ‖ s ‖ digest` with the digest in operand
-    // order.
-    let curve = HsmEccCurve::P384;
-    let hash = HsmHashAlgo::Sha384;
-    let input = pal.dma_alloc(io, curve.ecdsa_verify_input_len(hash, P::ECC_COORD_PAD))?;
-    let (signature, digest) = input.split_at_mut(curve.wire_sig_len(P::ECC_COORD_PAD));
-    if signature_raw.len() != signature.len() {
-        return Err(HsmError::InvalidArg);
-    }
-    signature.copy_from_slice(signature_raw);
-    pal.hash(
-        io,
-        hash,
-        id_uncompressed,
-        HsmDigestForm::Operand,
-        Some(digest),
-    )
-    .await?;
-
-    if !pal
-        .ecc_verify(io, curve, hash, signer_pub_key_raw, input)
-        .await?
-    {
-        return Err(HsmError::EccVerifyFailed);
-    }
-    Ok(())
-}
-
 /// Derives the AES-256 ‖ HMAC-SHA-384 OKM used to authenticate and
 /// decrypt the credential payload, writing the result into `okm_out`.
 ///
@@ -556,46 +501,12 @@ async fn decrypt_credential<P: HsmPal>(
     .await
 }
 
-/// Unmasks the partition `BK3` blob in place using `BK_BOOT` and
-/// writes the 48-byte recovered plaintext into `bk3_out`.
-///
-/// `masked_bk3` is the envelope produced by a prior `InitBk3` call:
-/// BK3 plaintext sealed under the partition's `BK_BOOT` (an 80-byte
-/// AES-CBC-256 + HMAC-SHA-384 masking key).
-///
-/// `unmask` decrypts the ciphertext slot inside the
-/// blob in place, so this helper takes the blob as `&mut HsmDmaBuf` and
-/// the caller passes `body.masked_bk3` (whose decoded byte-slice
-/// field is mutable — see the MBOR mut-decoder refactor) directly.
-/// No staging allocation or input copy is needed.  After unmask, the
-/// 48-byte BK3 plaintext is copied out to `bk3_out` so the caller
-/// can hold it for the remaining handler steps.
-///
-/// `bk3_out` must be exactly [`BK3_LEN`] (48) bytes.
-async fn unmask_partition_bk3<P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
-    masked_bk3: &mut HsmDmaBuf,
-    bk3_out: &mut HsmDmaBuf,
-) -> HsmResult<()> {
-    let bk_boot = pal.dma_alloc(io, BK_BOOT_LEN)?;
-    crate::ddi::recover_bk_boot(pal, io, bk_boot).await?;
-
-    let layout = unmask(pal, io, bk_boot, masked_bk3).await?;
-    if layout.plaintext_max_len < BK3_LEN {
-        return Err(HsmError::MaskedKeyDecodeFailed);
-    }
-    bk3_out
-        .copy_from_slice(&masked_bk3[layout.plaintext_offset..layout.plaintext_offset + BK3_LEN]);
-    Ok(())
-}
-
 /// Derives the 48-byte BK3 session key into `bk3_session_out`.
 ///
 /// SP 800-108 KBKDF with HMAC-SHA-384 keyed on `bk3`,
 /// `label = "SESSION_BK3"`, empty `context`, 48-byte output.
 ///
-/// `bk3_session_out` must be exactly [`BK3_LEN`] (48) bytes.
+/// `bk3_session_out` must be exactly [`BK3_LEN`](crate::ddi::BK3_LEN) (48) bytes.
 async fn derive_bk3_session<P: HsmPal>(
     pal: &P,
     io: &P::Io,

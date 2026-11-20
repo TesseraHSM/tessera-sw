@@ -8,6 +8,8 @@
 //! the ABI-compatible interface.
 
 use super::*;
+use crate::partition::TsraOwnerBackupKeyConfig;
+use crate::partition::TsraPotaEndorsement;
 
 /// PSK credential for opening a security-domain session.
 ///
@@ -370,6 +372,116 @@ pub unsafe extern "C" fn tsra_sess_ex_part_final(
         let result = session.part_final_ex(part_policy, &certs, prev_local_mk_backup)?;
 
         copy_to_buffer(local_mk_backup, &result.local_mk_backup)?;
+
+        Ok(())
+    })
+}
+
+/// Input buffers for [`tsra_sess_ex_part_init_with_obk`].
+///
+/// Groups the owner-backup-key provisioning inputs into a single struct so
+/// the call site does not pass them as separate arguments. The first two
+/// fields are the same configuration structs `tsra_part_init` takes.
+/// `prev_local_mk_backup` is optional and may be NULL to omit it.
+#[repr(C)]
+pub struct TsraSessExPartInitWithObkParams {
+    /// Owner backup key source and material: a raw OBK or an MOBK from the
+    /// caller, or the TPM-sealed BK3 (see `tsra_owner_backup_key_config`).
+    pub owner_backup_key_config: *const TsraOwnerBackupKeyConfig,
+    /// Partition-owner endorsement of the partition identity: from the
+    /// caller or signed with the TPM (see `tsra_pota_endorsement`).
+    pub pota_endorsement: *const TsraPotaEndorsement,
+    /// Optional previous `local_mk` backup envelope to restore; NULL to omit.
+    pub prev_local_mk_backup: *const TsraBuffer,
+}
+
+/// @brief Provision a partition from the owner backup key
+///
+/// Provisions the partition in place of `tsra_sess_ex_part_init` +
+/// `tsra_sess_ex_part_final`, for deployments where UEFI sealed the owner
+/// backup key with the TPM: the session is opened first, then the partition
+/// is provisioned from the owner backup key and the partition owner's
+/// endorsement of the partition identity, optionally restoring a prior
+/// `local_mk` backup. Returns the masked owner backup key (MOBK) and the
+/// current `local_mk` backup envelope.
+///
+/// The CO PSK must have been rotated first (`tsra_sess_ex_psk_change`): the
+/// device rejects the command under the default PSK. The session that rotated
+/// it can provision without being reopened; a session authenticated under a
+/// PSK that has since been rotated is rejected.
+///
+/// If the device rejects the call after masking a raw owner backup key, the
+/// MOBK stays readable through the partition's
+/// `TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` property; retry with it
+/// instead of the raw key.
+///
+/// @param[in] sess_handle Handle to the security-domain session
+/// @param[in] params Provisioning inputs
+///            (see `tsra_sess_ex_part_init_with_obk_params`)
+/// @param[in,out] masked_owner_backup_key Output buffer for the MOBK, at
+///                most 512 bytes. With a raw owner backup key the device
+///                masks it on first use (a one-shot per power cycle), so
+///                persist the returned MOBK for later calls. On input `len`
+///                is the capacity; on success it is set to the number of
+///                bytes written. Same probe contract as `local_mk_backup`.
+/// @param[in,out] local_mk_backup Output buffer for the `local_mk` backup
+///                envelope. On input `len` is the capacity; on success it is
+///                set to the number of bytes written. If either output
+///                buffer is too small (or its `ptr` is NULL with
+///                `len == 0`), **both** `len`s are set to the maximum
+///                possible output sizes and `TSRA_STATUS_BUFFER_TOO_SMALL`
+///                is returned **before** the partition is provisioned, so
+///                the standard two-call probe is safe for this one-shot
+///                command. A NULL `ptr` with a non-zero `len` is rejected
+///                with `TSRA_STATUS_INVALID_ARGUMENT`.
+///
+/// @return `TsraStatus` indicating the result of the operation
+///
+/// # Safety
+///
+/// - `sess_handle` must be a valid security-domain session handle.
+/// - `params` must be a valid pointer to an
+///   `tsra_sess_ex_part_init_with_obk_params` whose
+///   `owner_backup_key_config` and `pota_endorsement` are valid pointers to
+///   their structs (with valid `tsra_buffer` members), and whose
+///   `prev_local_mk_backup` is NULL or a valid `tsra_buffer` pointer.
+/// - `masked_owner_backup_key` and `local_mk_backup` must be valid pointers
+///   to distinct `tsra_buffer` structures with writable backing storage of
+///   the advertised length.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_sess_ex_part_init_with_obk(
+    sess_handle: TsraHandle,
+    params: *const TsraSessExPartInitWithObkParams,
+    masked_owner_backup_key: *mut TsraBuffer,
+    local_mk_backup: *mut TsraBuffer,
+) -> TsraStatus {
+    abi_boundary(|| {
+        let session = api::HsmSession::try_from(sess_handle)?;
+        let params = deref_ptr(params)?;
+
+        let obk_config = deref_ptr(params.owner_backup_key_config)?;
+        let obk_config = api::HsmOwnerBackupKeyConfig::try_from(obk_config)?;
+        let pota_endorsement = deref_ptr(params.pota_endorsement)?;
+        let pota_endorsement = api::HsmPotaEndorsement::try_from(pota_endorsement)?;
+        let prev_local_mk_backup = buffer_to_optional_slice(params.prev_local_mk_backup)?;
+
+        // Validate both outputs up-front (aliasing on the raw pointers, then
+        // sizes against the fixed wire-schema bounds) so one probe advertises
+        // both capacities before the one-shot provisioning runs.
+        validate_distinct_output_buffers(&[masked_owner_backup_key, local_mk_backup])?;
+        let mobk_out = deref_mut_ptr(masked_owner_backup_key)?;
+        let local_out = deref_mut_ptr(local_mk_backup)?;
+        validate_output_sizes(&mut [
+            (&mut *mobk_out, api::OBK_MOBK_MAX_LEN),
+            (&mut *local_out, api::LOCAL_MK_BACKUP_LEN),
+        ])?;
+
+        let result =
+            session.part_init_with_obk(&obk_config, &pota_endorsement, prev_local_mk_backup)?;
+
+        copy_to_buffer(mobk_out, &result.mobk)?;
+        copy_to_buffer(local_out, &result.local_mk_backup)?;
 
         Ok(())
     })

@@ -341,6 +341,101 @@ struct tsra_sess_ex_part_final_params {
  | pta_cert_chain_len   | uint32_t                         | number of certificates in the chain             |
  | prev_local_mk_backup | [tsra_buffer*](#tsra_buffer)     | optional prior local_mk backup (may be NULL)    |
 
+## tsra_sess_ex_part_init_with_obk
+
+Provision a partition from the owner backup key over a security-domain
+session.
+
+Provisions the partition in place of
+[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init) +
+[`tsra_sess_ex_part_final`](#tsra_sess_ex_part_final), for deployments
+where UEFI sealed the owner backup key with the TPM: the session is opened
+first, then the partition is provisioned from the owner backup key and the
+partition owner's endorsement of the partition identity, optionally
+restoring a prior `local_mk` backup. Returns the masked owner backup key
+(MOBK) and the current `local_mk` backup envelope. The owner backup key and
+the endorsement are supplied exactly as for `tsra_part_init`
+([`tsra_owner_backup_key_config`](#tsra_owner_backup_key_config),
+[`tsra_pota_endorsement`](#tsra_pota_endorsement)), and the partition owner's
+trust anchor is the POTA key rather than a partition policy and PTA chain.
+
+The CO PSK must have been rotated first
+([`tsra_sess_ex_psk_change`](#tsra_sess_ex_psk_change)): the device rejects
+the command under the default PSK. The session that rotated it can provision
+without being reopened; a session authenticated under a PSK that has since
+been rotated is rejected. The
+partition must be freshly enabled: provisioning is a one-shot, exclusive
+with `tsra_sess_ex_part_init`, and unavailable at API revision 2.0, which has
+no owner backup key.
+
+An OBK-provisioned partition has no PTA key, root secret or policy hash, so
+the attestation report ([`tsra_generate_key_report`](#tsra_generate_key_report)),
+the slot-2 PID certificate and the security-domain APIs are not supported on
+it; key generation and use under the Local and Ephemeral scopes are.
+
+With a raw owner backup key the device masks it on first use, a one-shot per
+power cycle, so persist the returned MOBK and present it
+(`masked_owner_backup_key` in the configuration) on later calls. Inputs the
+SDK can reject without device state (a malformed endorsement or backup) are
+rejected before that one-shot runs. If the device rejects the call after
+masking the key (for example because the CO PSK was not rotated), the MOBK
+stays readable through the partition's
+[`TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY`](#tsra_part_prop_id) property;
+retry with it instead of the raw key.
+
+The inputs are grouped into an
+[`tsra_sess_ex_part_init_with_obk_params`](#tsra_sess_ex_part_init_with_obk_params)
+structure. `masked_owner_backup_key` (at most 512 bytes) and
+`local_mk_backup` are caller-provided output buffers with the same
+capacity/length contract as the `tsra_sess_ex_part_init` outputs: an
+undersized buffer (or a NULL `ptr` with `len == 0`) is rejected with
+`TSRA_STATUS_BUFFER_TOO_SMALL` and **both** `len`s are set to their maximum
+**before** the partition is provisioned, so the two-call size probe is safe
+for this one-shot command. A NULL `ptr` with a non-zero `len` is rejected
+with `TSRA_STATUS_INVALID_ARGUMENT`.
+
+```cpp
+tsra_status tsra_sess_ex_part_init_with_obk(
+    tsra_handle sess_handle,
+    const struct tsra_sess_ex_part_init_with_obk_params *params,
+    struct tsra_buffer *masked_owner_backup_key,
+    struct tsra_buffer *local_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                      | Name                                                                                  | Description                                          |
+ | ------------------------------ | ------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+ | [in] sess_handle               | [tsra_handle](#tsra_handle)                                                           | security-domain session handle                       |
+ | [in] params                    | [tsra_sess_ex_part_init_with_obk_params*](#tsra_sess_ex_part_init_with_obk_params)    | provisioning inputs                                  |
+ | [in, out] masked_owner_backup_key | [tsra_buffer *](#tsra_buffer)                                                      | output buffer for the MOBK (at most 512 B)           |
+ | [in, out] local_mk_backup      | [tsra_buffer *](#tsra_buffer)                                                         | output buffer for the local_mk backup &nbsp;         |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sess_ex_part_init_with_obk_params
+
+Provisioning inputs for
+[`tsra_sess_ex_part_init_with_obk`](#tsra_sess_ex_part_init_with_obk).
+`prev_local_mk_backup` is optional and may be NULL to omit it.
+
+```cpp
+struct tsra_sess_ex_part_init_with_obk_params {
+    const struct tsra_owner_backup_key_config *owner_backup_key_config;
+    const struct tsra_pota_endorsement *pota_endorsement;
+    const struct tsra_buffer *prev_local_mk_backup;
+};
+```
+
+ | Field                   | Name                                                         | Description                                                |
+ | ----------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- |
+ | owner_backup_key_config | [tsra_owner_backup_key_config*](#tsra_owner_backup_key_config) | owner backup key source and material (OBK, MOBK or TPM)  |
+ | pota_endorsement        | [tsra_pota_endorsement*](#tsra_pota_endorsement)             | partition owner endorsement (caller-supplied or TPM)       |
+ | prev_local_mk_backup    | [tsra_buffer*](#tsra_buffer)                                 | optional prior local_mk backup (may be NULL)               |
+
 ## Partition policy builder
 
 The builder assembles the [partition policy](#partition-policy) from typed

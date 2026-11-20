@@ -180,6 +180,28 @@ full native certificate-chain validation remains M1.5 work.
 | Second `PartFinal` is rejected without leaving `Initialized` | ✅ | `part_final::part_final_rejects_second_finalize` | Also verifies a reopened CO session still works |
 | Concurrent valid `PartFinal` requests → exactly one success; every loser gets `InvalidArg` | ✅ | `part_final::part_final_multi_threaded_single_winner` | Runs on emulator and hardware using the same active CO session; the lifecycle transition to `Initialized` is what serialises the race, not any in-FSM flag |
 
+## `PartInitWithObk` (opcode in-session, gated)
+
+Uno only: the MOBK comes from MBOR `InitBk3`, so each test returns early on a
+Duo. A device `erase` stands in for NSSR, with a fresh MOBK (same BK3) and a
+fresh POTA endorsement minted for each incarnation.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Provisions an `Enabled` partition: returns a 264-byte `local_mk_backup`, reaches `Initialized`, and the Local / Ephemeral masking keys then work | ✅ 🔁 | `part_init_with_obk::part_init_with_obk_provisions_the_partition` | Loop over `[Ephemeral, Local]` scopes via `HmacGenerateKey` + `Hmac` |
+| Replaying the backup on a reset device continues the Local masking key | ✅ | `part_init_with_obk::part_init_with_obk_restore_continues_the_local_key` | A key masked before the reset still unmasks and MACs identically |
+| Provisioning without a backup mints a new Local masking key | ✅ | `part_init_with_obk::part_init_with_obk_without_a_backup_mints_a_new_local_key` | A key masked under the previous Local key no longer unmasks |
+| A restore is bound to the backup length, its tag, and the POTA | ✅ | `part_init_with_obk::part_init_with_obk_restore_is_bound_to_the_backup_and_the_pota` | Wrong length → `InvalidArg`; tampered tag and another POTA → `AesGcmDecryptTagDoesNotMatch`; the genuine inputs then restore |
+| Bad POTA signature (bit flip, or key and signature of different POTAs) → `EccVerifyFailed`, partition unchanged | ✅ 🔁 | `part_init_with_obk::part_init_with_obk_rejects_a_bad_pota_signature` | The good endorsement then provisions |
+| Tampered MOBK envelope → `AeadEnvelopeAuthFailed` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_tampered_envelope` |  |
+| Envelope bound to another session id or another command's AAD → `AeadEnvelopeAuthFailed` | ✅ 🔁 | `part_init_with_obk::part_init_with_obk_rejects_an_envelope_bound_elsewhere` | Second case replays a `PskChange` AAD |
+| MOBK that `BK_BOOT` did not mask → `MaskedKeyDecodeFailed`, partition unchanged | ✅ | `part_init_with_obk::part_init_with_obk_rejects_an_unmaskable_mobk` |  |
+| CU session → `InvalidPermissions` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_crypto_user_session` |  |
+| Default CO PSK → `DefaultPskMustRotate` | ✅ | `part_init_with_obk::part_init_with_obk_requires_a_rotated_psk` |  |
+| The session that rotated the CO PSK is rebound and provisions without reopening | ✅ | `part_init_with_obk::part_init_with_obk_accepts_the_session_that_rotated_the_psk` | Rotates inside the bootstrap session, then provisions on it. A CO session left on the old PSK cannot be built (one CO slot; `PskChange` rebinds the rotating session), so the handler's `SessionAuthFailure` arm is the shared `validate_auth_binding` check covered by the `PskChange` / `KeyReport` credential tests |
+| Second call → `PartitionAlreadyProvisioned`; `PartInit` after it → `PartitionAlreadyProvisioned`, state stays `Initialized` | ✅ | `part_init_with_obk::part_init_with_obk_is_exclusive_with_the_other_provisioning_flows` | The `PartInit` guard sits after its PTA-key guard, so its existing statuses are unchanged |
+| After `PartInit` → `PartitionAlreadyProvisioned` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_partition_already_in_part_init` |  |
+
 ## Default-PSK dispatcher gate (cross-cutting)
 
 The gate (see `fw/core/lib/src/ddi/tbor/mod.rs::dispatch`) rejects

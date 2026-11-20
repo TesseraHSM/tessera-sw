@@ -62,6 +62,9 @@
 | 11/13/2026 | Replaced `tsra_session_ex_type` with `tsra_session_suite`        |
 |            | (`ECDH_P384`); every security-domain session is                 |
 |            | encrypted on every device model                                  |
+| 11/18/2026 | Added `tsra_sess_ex_part_init_with_obk` and                      |
+|            | `tsra_sess_ex_part_init_with_obk_params`: provision a partition  |
+|            | from the owner backup key inside a security-domain session       |
 
 | Unreleased | `tsra_sess_ex_open` requires a 48-byte trusted-root SPKI SHA-384 |
 |            | digest and authenticates the PID path before the handshake;    |

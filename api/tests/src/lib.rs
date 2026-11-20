@@ -15,6 +15,7 @@ mod session_tests;
 mod utils;
 
 mod darc;
+mod part_init_with_obk_tests;
 mod partition_ex_tests;
 mod sd;
 mod session_ex_tests;

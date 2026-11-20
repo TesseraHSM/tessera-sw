@@ -17,6 +17,7 @@ mod hmac;
 mod kbkdf;
 mod key;
 mod masked_key;
+mod part_init_with_obk;
 mod part_policy;
 mod partition;
 mod partition_ex;
@@ -50,6 +51,7 @@ pub(crate) use hmac::*;
 pub(crate) use kbkdf::*;
 pub(crate) use key::*;
 pub(crate) use masked_key::*;
+pub(crate) use part_init_with_obk::*;
 pub use part_policy::PartPolicyBuilder;
 pub use part_policy::PolicyKeyFormat;
 pub use part_policy::policy_key_thumbprint;
@@ -94,6 +96,9 @@ pub use tsra_ddi_tbor_types::MASKED_SD_LEN;
 pub use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 /// Maximum number of certificates in a `part_final` PTA chain.
 pub use tsra_ddi_tbor_types::MAX_CERTS;
+/// Maximum size, in bytes, of the masked owner backup key (MOBK) that
+/// `part_init_with_obk` accepts and returns.
+pub use tsra_ddi_tbor_types::OBK_MOBK_MAX_LEN;
 /// Partition policy (CBOR) schema: maximum encoded length.
 pub use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 /// Exact length of the remote partition-owner-key backup (`SdCreate`/`SdReseal`).

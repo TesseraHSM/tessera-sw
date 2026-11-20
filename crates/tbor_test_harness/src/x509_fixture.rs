@@ -107,6 +107,16 @@ impl CaKey {
         self.pub_sec1
     }
 
+    /// POTA endorsement of a partition identity key: ECDSA-P384 / SHA-384
+    /// over the SEC1 uncompressed form (`0x04 ‖ X ‖ Y`) of `pid_pub`, the raw
+    /// big-endian identity key.  Returns `(r, s)`, 48 big-endian bytes each.
+    pub fn endorse(&self, pid_pub: &[u8; RAW_PUB_LEN]) -> ([u8; 48], [u8; 48]) {
+        let mut sec1 = [0u8; SEC1_PUB_LEN];
+        sec1[0] = 0x04;
+        sec1[1..].copy_from_slice(pid_pub);
+        self.sign(&sec1)
+    }
+
     /// SHA-1 of the SEC1 public key — the Subject Key Identifier.
     fn ski(&self) -> [u8; 20] {
         sha1_ski(&self.pub_sec1)

@@ -89,6 +89,7 @@ pub(crate) fn sess_ctrl_from_tbor_opcode(opcode: u8) -> HsmSessCtrl {
         | opcode::PSK_CHANGE
         | opcode::PART_INIT
         | opcode::PART_FINAL
+        | opcode::PART_INIT_WITH_OBK
         | opcode::SD_SEALING_KEY_GEN
         | opcode::SD_CREATE_REMOTE_BACKUP
         | opcode::SD_RESEAL_REMOTE_BACKUP

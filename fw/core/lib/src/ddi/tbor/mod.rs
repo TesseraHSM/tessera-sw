@@ -53,6 +53,7 @@ pub(crate) mod mlkem_generate_key;
 pub(crate) mod part_final;
 pub mod part_info;
 pub mod part_init;
+pub(crate) mod part_init_with_obk;
 pub mod policy;
 pub(crate) mod psk_change;
 pub(crate) mod pta;
@@ -410,6 +411,12 @@ pub(crate) mod opcode {
     /// private key. See [`super::get_public_key`].
     pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
 
+    /// `PartInitWithObk` — provision an `Enabled` partition from the masked
+    /// owner backup key (MOBK) and a POTA endorsement inside a CO session:
+    /// the OBK analogue of `PartInit` + `PartFinal`, returning the
+    /// `local_mk` backup.  See [`super::part_init_with_obk`].
+    pub(crate) const PART_INIT_WITH_OBK: u8 = 0x30;
+
     /// `VerifyKey` — authenticate a masked key of any kind without using
     /// it. See [`super::verify_key`].
     pub(crate) const VERIFY_KEY: u8 = 0x32;
@@ -583,6 +590,7 @@ pub(crate) fn records_undo(opcode: u8) -> bool {
             | opcode::PSK_CHANGE
             | opcode::PART_INIT
             | opcode::PART_FINAL
+            | opcode::PART_INIT_WITH_OBK
             | opcode::SD_CREATE_REMOTE_BACKUP
             | opcode::SD_RESTORE_REMOTE_BACKUP
             | opcode::SD_RESTORE_LOCAL_BACKUP
@@ -603,6 +611,7 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::PSK_CHANGE => types::TborPskChangeResp::MAX_ENCODED_SIZE,
         opcode::PART_INIT => types::TborPartInitResp::MAX_ENCODED_SIZE,
         opcode::PART_FINAL => types::TborPartFinalResp::MAX_ENCODED_SIZE,
+        opcode::PART_INIT_WITH_OBK => types::TborPartInitWithObkResp::MAX_ENCODED_SIZE,
         opcode::PART_INFO => types::TborPartInfoResp::MAX_ENCODED_SIZE,
         opcode::SD_SEALING_KEY_GEN => types::TborSdSealingKeyGenResp::MAX_ENCODED_SIZE,
         opcode::SD_CREATE_REMOTE_BACKUP => types::TborSdCreateRemoteBackupResp::MAX_ENCODED_SIZE,
@@ -771,6 +780,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::PSK_CHANGE => psk_change::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_INIT => part_init::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_FINAL => part_final::handle(pal, io, cmd_buf, undo).await,
+        opcode::PART_INIT_WITH_OBK => part_init_with_obk::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_INFO => part_info::handle(pal, io, cmd_buf).await,
         opcode::SD_SEALING_KEY_GEN => sd_sealing_key_gen::handle(pal, io, cmd_buf).await,
         opcode::SD_CREATE_REMOTE_BACKUP => {
@@ -840,6 +850,7 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::PSK_CHANGE
             | opcode::PART_INIT
             | opcode::PART_FINAL
+            | opcode::PART_INIT_WITH_OBK
             | opcode::PART_INFO
             | opcode::SD_SEALING_KEY_GEN
             | opcode::SD_CREATE_REMOTE_BACKUP
@@ -910,6 +921,7 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::PSK_CHANGE
         | opcode::PART_INIT
         | opcode::PART_FINAL
+        | opcode::PART_INIT_WITH_OBK
         | opcode::SD_SEALING_KEY_GEN
         | opcode::SD_CREATE_REMOTE_BACKUP
         | opcode::SD_RESEAL_REMOTE_BACKUP
@@ -981,6 +993,7 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::PSK_CHANGE
         | opcode::PART_INIT
         | opcode::PART_FINAL
+        | opcode::PART_INIT_WITH_OBK
         | opcode::SD_SEALING_KEY_GEN
         | opcode::SD_CREATE_REMOTE_BACKUP
         | opcode::SD_RESEAL_REMOTE_BACKUP
@@ -1221,6 +1234,7 @@ mod tests {
             opcode::PART_INIT,
             opcode::PART_INFO,
             opcode::PART_FINAL,
+            opcode::PART_INIT_WITH_OBK,
             opcode::SD_SEALING_KEY_GEN,
             opcode::SD_CREATE_REMOTE_BACKUP,
             opcode::SD_RESEAL_REMOTE_BACKUP,
@@ -1301,6 +1315,18 @@ mod tests {
     #[test]
     fn key_report_is_in_session() {
         assert!(is_in_session(opcode::KEY_REPORT));
+    }
+
+    #[test]
+    fn part_init_with_obk_is_a_gated_in_session_undo_recording_command() {
+        let op = opcode::PART_INIT_WITH_OBK;
+        assert!(is_known_opcode(op));
+        assert!(is_in_session(op));
+        assert!(needs_session_id_cross_check(op));
+        assert!(!allowed_with_default_psk(op));
+        // The handler stages vault keys and mutates lifecycle state, so the
+        // IO layer must bind an undo log for it.
+        assert!(records_undo(op));
     }
 
     #[test]

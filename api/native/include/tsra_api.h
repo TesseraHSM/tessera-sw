@@ -1574,6 +1574,32 @@ struct tsra_sess_ex_part_final_params
 };
 
 /*
+ Input buffers for [`tsra_sess_ex_part_init_with_obk`].
+
+ Groups the owner-backup-key provisioning inputs into a single struct so
+ the call site does not pass them as separate arguments. The first two
+ fields are the same configuration structs `tsra_part_init` takes.
+ `prev_local_mk_backup` is optional and may be NULL to omit it.
+ */
+struct tsra_sess_ex_part_init_with_obk_params
+{
+    /*
+     Owner backup key source and material: a raw OBK or an MOBK from the
+     caller, or the TPM-sealed BK3 (see `tsra_owner_backup_key_config`).
+     */
+    const struct tsra_owner_backup_key_config *owner_backup_key_config;
+    /*
+     Partition-owner endorsement of the partition identity: from the
+     caller or signed with the TPM (see `tsra_pota_endorsement`).
+     */
+    const struct tsra_pota_endorsement *pota_endorsement;
+    /*
+     Optional previous `local_mk` backup envelope to restore; NULL to omit.
+     */
+    const struct tsra_buffer *prev_local_mk_backup;
+};
+
+/*
  Session property structure for querying session attributes.
 
  # Safety
@@ -3506,6 +3532,68 @@ tsra_status tsra_sess_ex_part_init(
 tsra_status tsra_sess_ex_part_final(
     tsra_handle sess_handle,
     const struct tsra_sess_ex_part_final_params *params,
+    struct tsra_buffer *local_mk_backup
+);
+
+/*
+ @brief Provision a partition from the owner backup key
+
+ Provisions the partition in place of `tsra_sess_ex_part_init` +
+ `tsra_sess_ex_part_final`, for deployments where UEFI sealed the owner
+ backup key with the TPM: the session is opened first, then the partition
+ is provisioned from the owner backup key and the partition owner's
+ endorsement of the partition identity, optionally restoring a prior
+ `local_mk` backup. Returns the masked owner backup key (MOBK) and the
+ current `local_mk` backup envelope.
+
+ The CO PSK must have been rotated first (`tsra_sess_ex_psk_change`): the
+ device rejects the command under the default PSK. The session that rotated
+ it can provision without being reopened; a session authenticated under a
+ PSK that has since been rotated is rejected.
+
+ If the device rejects the call after masking a raw owner backup key, the
+ MOBK stays readable through the partition's
+ `TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` property; retry with it
+ instead of the raw key.
+
+ @param[in] sess_handle Handle to the security-domain session
+ @param[in] params Provisioning inputs
+            (see `tsra_sess_ex_part_init_with_obk_params`)
+ @param[in,out] masked_owner_backup_key Output buffer for the MOBK, at
+                most 512 bytes. With a raw owner backup key the device
+                masks it on first use (a one-shot per power cycle), so
+                persist the returned MOBK for later calls. On input `len`
+                is the capacity; on success it is set to the number of
+                bytes written. Same probe contract as `local_mk_backup`.
+ @param[in,out] local_mk_backup Output buffer for the `local_mk` backup
+                envelope. On input `len` is the capacity; on success it is
+                set to the number of bytes written. If either output
+                buffer is too small (or its `ptr` is NULL with
+                `len == 0`), **both** `len`s are set to the maximum
+                possible output sizes and `TSRA_STATUS_BUFFER_TOO_SMALL`
+                is returned **before** the partition is provisioned, so
+                the standard two-call probe is safe for this one-shot
+                command. A NULL `ptr` with a non-zero `len` is rejected
+                with `TSRA_STATUS_INVALID_ARGUMENT`.
+
+ @return `TsraStatus` indicating the result of the operation
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `params` must be a valid pointer to an
+   `tsra_sess_ex_part_init_with_obk_params` whose
+   `owner_backup_key_config` and `pota_endorsement` are valid pointers to
+   their structs (with valid `tsra_buffer` members), and whose
+   `prev_local_mk_backup` is NULL or a valid `tsra_buffer` pointer.
+ - `masked_owner_backup_key` and `local_mk_backup` must be valid pointers
+   to distinct `tsra_buffer` structures with writable backing storage of
+   the advertised length.
+ */
+tsra_status tsra_sess_ex_part_init_with_obk(
+    tsra_handle sess_handle,
+    const struct tsra_sess_ex_part_init_with_obk_params *params,
+    struct tsra_buffer *masked_owner_backup_key,
     struct tsra_buffer *local_mk_backup
 );
 

@@ -161,12 +161,15 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
 /// Wraps [`HsmPartPropId::PART_STATE`].  **Transition policy lives here, in the
 /// upper layer:** the generic PAL `part_prop_set_u8(STATE)` is a raw
 /// mechanism (it writes the discriminant directly), so the undo log can
-/// restore any prior state through it.  This wrapper accepts only the two
+/// restore any prior state through it.  This wrapper accepts only the
 /// caller-facing transitions — `Enabled → Initializing` (`PartInit`,
 /// which additionally requires the three write-once provisioning fields —
-/// PTA key, UPS key, policy hash — to be present) and
-/// `Initializing → Initialized` (`PartFinal`).  A same-state write is a
-/// no-op; any other pair is rejected with [`HsmError::InvalidArg`].
+/// PTA key, UPS key, policy hash — to be present),
+/// `Initializing → Initialized` (`PartFinal`), and `Enabled → Initialized`
+/// (`PartInitWithObk`, which provisions from the owner backup key and so
+/// has no PTA / UPS / policy; it requires both masking-key ids to be
+/// present).  A same-state write is a no-op; any other pair is rejected with
+/// [`HsmError::InvalidArg`].
 pub fn part_set_state<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
@@ -179,6 +182,13 @@ pub fn part_set_state<P: HsmPartitionManager>(
                 && prop_present(part_ups_key_id(pal, io))?
                 && prop_present(part_policy_hash(pal, io))?;
             if !provisioned {
+                return Err(HsmError::InvalidArg);
+            }
+        }
+        (HsmPartState::Enabled, HsmPartState::Initialized) => {
+            let masking_keys = prop_present(part_local_mk_key_id(pal, io))?
+                && prop_present(part_ephemeral_mk_key_id(pal, io))?;
+            if !masking_keys {
                 return Err(HsmError::InvalidArg);
             }
         }
