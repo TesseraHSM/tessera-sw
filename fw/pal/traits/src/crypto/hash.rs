@@ -195,44 +195,33 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
         digest: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
-    /// Hashes an out-of-band SGL message without buffering the full message.
+    /// Hashes a raw message from an OOB SGL descriptor using bounded DMA
+    /// staging, returning its digest in the requested form.
     ///
-    /// Implementations snapshot and validate the referenced descriptor once,
-    /// then stream its contents through a bounded staging buffer. A zero
-    /// `message_len` hashes the empty string without reading an OOB descriptor
-    /// and requires `message_index == 0`. The host must keep the referenced
-    /// allocation accessible and unchanged until the operation completes;
-    /// descriptor snapshotting does not make the message bytes atomic.
+    /// The caller must keep the host buffer unchanged and accessible until
+    /// command completion. The descriptor is captured once; this does not
+    /// make the referenced message bytes an atomic snapshot. The digest covers
+    /// the byte stream actually read by the platform transport.
     ///
-    /// `None` queries the digest length without reading the descriptor or
-    /// performing hashing. `Some` must have room for the complete selected
-    /// digest, which is written in `form`.
+    /// `expected_len` must be at most 8192 bytes. A zero-length message does
+    /// not read an OOB descriptor and hashes the empty byte string. The output
+    /// must hold at least `algo.digest_len()` bytes; only that prefix is
+    /// written. The method validates algorithm and output capacity before
+    /// reading message data.
     ///
-    /// # Errors
-    ///
-    /// Returns `InvalidArg` for an oversized message, nonzero empty-message
-    /// index, malformed descriptor, length mismatch, or short digest output.
-    /// DMA and hashing failures are propagated.
+    /// The platform validates the root descriptor and its address range.
+    /// Uno submits it unchanged to GDMA, which traverses any SGL segments,
+    /// gathering exactly `expected_len` bytes into a scoped DMA allocation
+    /// of that size. Other platforms may stream the message in smaller chunks.
     async fn hash_oob(
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        message_index: usize,
-        message_len: usize,
+        expected_len: usize,
+        index: usize,
         form: HsmDigestForm,
-        digest: Option<&mut HsmDmaBuf>,
-    ) -> HsmResult<usize> {
-        let _ = (io, form);
-        self.hash_state_size(algo)?;
-        if message_len > 8192 || (message_len == 0 && message_index != 0) {
-            return Err(HsmError::InvalidArg);
-        }
-        match digest {
-            None => Ok(algo.digest_len()),
-            Some(digest) if digest.len() < algo.digest_len() => Err(HsmError::InvalidArg),
-            Some(_) => Err(HsmError::UnsupportedCmd),
-        }
-    }
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
 
     /// Returns the backend's required DMA storage size for a multi-step hash.
     ///

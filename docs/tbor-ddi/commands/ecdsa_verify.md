@@ -33,13 +33,10 @@ the active session.
 | `message_len` | `u16` | Raw message length, 0..=8192 bytes inclusive. |
 | `signature` | bytes, at most 144 B | Raw padded `r ‖ s`, in device operand order and with the exact curve-specific length. |
 
-For nonempty input, the referenced descriptor must identify exactly
-`message_len` accessible bytes. Empty input requires `message_index = 0`;
-the device hashes the empty byte string without reading a descriptor.
-The host must keep the message allocation accessible and unchanged until
-the command completes. The descriptor is snapshotted once, but this does
-not make the message bytes an atomic snapshot. OOB data does not gain
-confidentiality or integrity from session sealing.
+OOB descriptor handling and host buffer lifetime requirements are the same
+as for [`EcdsaSign`](./ecdsa_sign.md#request). Empty input requires
+`message_index = 0`; the device hashes the empty byte string without reading
+a descriptor.
 
 Each signature component begins at the start of its own lane, followed by
 zero padding. P-256/P-384 use 32/48-byte lanes; P-521 uses 68-byte lanes

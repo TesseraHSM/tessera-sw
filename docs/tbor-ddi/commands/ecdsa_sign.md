@@ -30,12 +30,17 @@ nonce internally; the request has no nonce field or nonce mode.
 | `message_index` | `u8` | Index of the message's input OOB SGL descriptor. Must be zero for an empty message. |
 | `message_len` | `u16` | Raw message length, 0..=8192 bytes inclusive. |
 
-For nonempty input, the referenced descriptor must identify exactly
-`message_len` accessible bytes. Empty input requires `message_index = 0`;
-the device hashes the empty byte string without reading a descriptor.
-The host must keep the message allocation accessible and unchanged until
-the command completes. The descriptor is snapshotted once, but this does
-not make the message bytes an atomic snapshot. OOB data does not gain
+For nonempty input, the host OOB descriptor page supplies the root SGL
+descriptor at `message_index`. A Data Block descriptor length must equal
+`message_len`. On Uno, a Segment or Last Segment descriptor length describes
+the list itself; GDMA gathers exactly `message_len` payload bytes. Uno submits
+the captured root unchanged to GDMA and uses scoped DMA scratch sized to the
+message. std Uno and std Duo stream Data Blocks in 1024-byte chunks.
+
+Empty input requires `message_index = 0`; the device hashes the empty byte
+string without reading a descriptor. The host must keep the OOB buffers
+accessible and unchanged until the command completes. Capturing the root
+does not make the message bytes an atomic snapshot. OOB data does not gain
 confidentiality or integrity from session sealing.
 
 ## Response

@@ -70,48 +70,17 @@ use tsra_fw_uno_drivers_sha::ShaRequest;
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
-/// Maximum message length handled by the bounded OOB hashing path.
-const OOB_HASH_MAX_LEN: usize = 8192;
-/// Fixed DMA staging size for OOB hash streaming.
-const OOB_HASH_CHUNK_LEN: usize = 1024;
-
-fn validate_oob_hash_desc(desc: &[u8; 16], message_len: usize) -> HsmResult<u64> {
+fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<()> {
+    crate::gdma::raw_sgl_len(desc, expected_len)?;
     let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
-    if message_len == 0 || len != message_len || desc[12..15] != [0, 0, 0] || desc[15] != 0 {
-        return Err(HsmError::InvalidArg);
-    }
     let addr = u64::from_le_bytes([
         desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
     ]);
-    if addr == 0 || addr.checked_add(message_len as u64).is_none() {
+    if desc[12..15].iter().any(|&byte| byte != 0) || desc[15] & 0x0F != 0 || addr == 0 {
         return Err(HsmError::InvalidArg);
     }
-    Ok(addr)
-}
-
-#[cfg(test)]
-mod oob_descriptor_tests {
-    use super::*;
-
-    #[test]
-    fn oob_hash_descriptor_checks_length_format_and_address_range() {
-        let mut desc = [0u8; 16];
-        desc[..8].copy_from_slice(&0x1000u64.to_le_bytes());
-        desc[8..12].copy_from_slice(&8u32.to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Ok(0x1000));
-
-        assert_eq!(validate_oob_hash_desc(&desc, 7), Err(HsmError::InvalidArg));
-        desc[12] = 1;
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[12] = 0;
-        desc[15] = 1;
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[15] = 0;
-        desc[..8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[..8].copy_from_slice(&(u64::MAX - 7).to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-    }
+    addr.checked_add(len as u64).ok_or(HsmError::InvalidArg)?;
+    Ok(())
 }
 
 /// Multi-step hash context for the Uno SHA hardware accelerator.
@@ -252,62 +221,6 @@ fn shake_available() -> HsmResult<()> {
 impl HsmHash for UnoHsmPal {
     type HashCtx<'a> = HsmHashContext<'a>;
 
-    async fn hash_oob(
-        &self,
-        io: &UnoHsmIo,
-        algo: HsmHashAlgo,
-        message_index: usize,
-        message_len: usize,
-        form: HsmDigestForm,
-        digest: Option<&mut HsmDmaBuf>,
-    ) -> HsmResult<usize> {
-        self.hash_state_size(algo)?;
-        if message_len > OOB_HASH_MAX_LEN || (message_len == 0 && message_index != 0) {
-            return Err(HsmError::InvalidArg);
-        }
-        let digest_len = algo.digest_len();
-        let Some(digest) = digest else {
-            return Ok(digest_len);
-        };
-        if digest.len() < digest_len {
-            return Err(HsmError::InvalidArg);
-        }
-        let desc = if message_len == 0 {
-            None
-        } else {
-            let desc = self.oob_desc(io, message_index).await?;
-            validate_oob_hash_desc(&desc, message_len)?;
-            Some(desc)
-        };
-
-        self.alloc_scoped_async(io, async |alloc| {
-            let state_len = self.hash_state_size(algo)?;
-            let state = alloc.dma_alloc(state_len)?;
-            let mut ctx = self.hash_begin(io, algo, state)?;
-            if let Some(desc) = desc {
-                let base = validate_oob_hash_desc(&desc, message_len)?;
-                let staging = alloc.dma_alloc(OOB_HASH_CHUNK_LEN)?;
-                let mut offset = 0usize;
-                while offset < message_len {
-                    let chunk_len = (message_len - offset).min(OOB_HASH_CHUNK_LEN);
-                    let addr = base
-                        .checked_add(offset as u64)
-                        .ok_or(HsmError::InvalidArg)?;
-                    let mut chunk_desc = desc;
-                    chunk_desc[..8].copy_from_slice(&addr.to_le_bytes());
-                    chunk_desc[8..12].copy_from_slice(&(chunk_len as u32).to_le_bytes());
-                    let (chunk, _) = staging.split_at_mut(chunk_len);
-                    self.copy_mem_from_host_raw(io, &chunk_desc, chunk, false)
-                        .await?;
-                    self.hash_continue(io, &mut ctx, chunk).await?;
-                    offset += chunk_len;
-                }
-            }
-            self.hash_finish(io, &mut ctx, form, Some(digest)).await
-        })
-        .await
-    }
-
     /// Computes a one-shot hash of the entire message.
     ///
     /// Delegates to [`sha_oneshot`](Self::sha_oneshot) with the hardware mode
@@ -366,6 +279,40 @@ impl HsmHash for UnoHsmPal {
             digest[..digest_len].reverse();
         }
         Ok(digest_len)
+    }
+
+    async fn hash_oob(
+        &self,
+        io: &UnoHsmIo,
+        algo: HsmHashAlgo,
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.hash_state_size(algo)?;
+        let digest_len = algo.digest_len();
+        if expected_len > 8192 || digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let root_desc = if expected_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, index).await?;
+            validate_oob_hash_desc(&desc, expected_len)?;
+            Some(desc)
+        };
+
+        self.alloc_scoped_async(io, async |scope| -> HsmResult<usize> {
+            let message = scope.dma_alloc(expected_len)?;
+            if let Some(desc) = root_desc {
+                self.copy_mem_from_host_raw(io, &desc, message, false)
+                    .await?;
+            }
+            self.hash(io, algo, message, form, Some(digest)).await
+        })
+        .await
     }
 
     fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {

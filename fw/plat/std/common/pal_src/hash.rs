@@ -18,21 +18,37 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use super::*;
 
-const OOB_HASH_MAX_LEN: usize = 8192;
 const OOB_HASH_CHUNK_LEN: usize = 1024;
+const OOB_SGL_DATA_BLOCK: u8 = 0;
 
-fn validate_oob_hash_desc(desc: &[u8; 16], message_len: usize) -> HsmResult<u64> {
+fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<u64> {
     let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
-    if message_len == 0 || len != message_len || desc[12..15] != [0, 0, 0] || desc[15] != 0 {
-        return Err(HsmError::InvalidArg);
-    }
     let addr = u64::from_le_bytes([
         desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
     ]);
-    if addr == 0 || addr.checked_add(message_len as u64).is_none() {
+    if len != expected_len
+        || desc[12..15].iter().any(|&byte| byte != 0)
+        || desc[15] != OOB_SGL_DATA_BLOCK
+    {
         return Err(HsmError::InvalidArg);
     }
+    if expected_len != 0 {
+        if addr == 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        let host_addr = usize::try_from(addr).map_err(|_| HsmError::InvalidArg)?;
+        host_addr
+            .checked_add(expected_len)
+            .ok_or(HsmError::InvalidArg)?;
+    }
     Ok(addr)
+}
+
+fn oob_hash_chunk_desc(mut desc: [u8; 16], addr: u64, len: usize) -> HsmResult<[u8; 16]> {
+    let len = u32::try_from(len).map_err(|_| HsmError::InvalidArg)?;
+    desc[..8].copy_from_slice(&addr.to_le_bytes());
+    desc[8..12].copy_from_slice(&len.to_le_bytes());
+    Ok(desc)
 }
 
 /// The OpenSSL hash for `algo`; fixed-length algorithms only, so the HMAC,
@@ -70,61 +86,6 @@ pub struct StdHashCtx<'a> {
 impl HsmHash for StdHsmPal {
     type HashCtx<'a> = StdHashCtx<'a>;
 
-    async fn hash_oob(
-        &self,
-        io: &StdHsmIo,
-        algo: HsmHashAlgo,
-        message_index: usize,
-        message_len: usize,
-        form: HsmDigestForm,
-        digest: Option<&mut HsmDmaBuf>,
-    ) -> HsmResult<usize> {
-        self.hash_state_size(algo)?;
-        if message_len > OOB_HASH_MAX_LEN || (message_len == 0 && message_index != 0) {
-            return Err(HsmError::InvalidArg);
-        }
-        let digest_len = algo.digest_len();
-        let Some(digest) = digest else {
-            return Ok(digest_len);
-        };
-        if digest.len() < digest_len {
-            return Err(HsmError::InvalidArg);
-        }
-        let desc = if message_len == 0 {
-            None
-        } else {
-            let desc = self.oob_desc(io, message_index).await?;
-            validate_oob_hash_desc(&desc, message_len)?;
-            Some(desc)
-        };
-
-        self.alloc_scoped_async(io, async |alloc| {
-            let state = alloc.dma_alloc(self.hash_state_size(algo)?)?;
-            let mut ctx = self.hash_begin(io, algo, state)?;
-            if let Some(desc) = desc {
-                let base = validate_oob_hash_desc(&desc, message_len)?;
-                let staging = alloc.dma_alloc(OOB_HASH_CHUNK_LEN)?;
-                let mut offset = 0usize;
-                while offset < message_len {
-                    let chunk_len = (message_len - offset).min(OOB_HASH_CHUNK_LEN);
-                    let addr = base
-                        .checked_add(offset as u64)
-                        .ok_or(HsmError::InvalidArg)?;
-                    let mut chunk_desc = desc;
-                    chunk_desc[..8].copy_from_slice(&addr.to_le_bytes());
-                    chunk_desc[8..12].copy_from_slice(&(chunk_len as u32).to_le_bytes());
-                    let (chunk, _) = staging.split_at_mut(chunk_len);
-                    self.copy_mem_from_host_raw(io, &chunk_desc, chunk, false)
-                        .await?;
-                    self.hash_continue(io, &mut ctx, chunk).await?;
-                    offset += chunk_len;
-                }
-            }
-            self.hash_finish(io, &mut ctx, form, Some(digest)).await
-        })
-        .await
-    }
-
     async fn hash(
         &self,
         _io: &StdHsmIo,
@@ -148,6 +109,63 @@ impl HsmHash for StdHsmPal {
             digest[..digest_len].reverse();
         }
         Ok(digest_len)
+    }
+
+    async fn hash_oob(
+        &self,
+        io: &StdHsmIo,
+        algo: HsmHashAlgo,
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let state_len = self.hash_state_size(algo)?;
+        let digest_len = algo.digest_len();
+        if expected_len > 8192 || digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let root_desc = if expected_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, index).await?;
+            let addr = validate_oob_hash_desc(&desc, expected_len)?;
+            Some((desc, addr))
+        };
+
+        self.alloc_scoped_async(io, async |scope| -> HsmResult<usize> {
+            let state = scope.dma_alloc_zeroed(state_len)?;
+            let staging = scope.dma_alloc_zeroed(OOB_HASH_CHUNK_LEN)?;
+            let mut ctx = self.hash_begin(io, algo, state)?;
+            let result = async {
+                if let Some((root, base_addr)) = root_desc {
+                    let mut offset = 0usize;
+                    while offset < expected_len {
+                        let chunk_len = (expected_len - offset).min(OOB_HASH_CHUNK_LEN);
+                        let chunk_addr = base_addr
+                            .checked_add(offset as u64)
+                            .ok_or(HsmError::InvalidArg)?;
+                        let chunk_desc = oob_hash_chunk_desc(root, chunk_addr, chunk_len)?;
+                        self.copy_mem_from_host_raw(
+                            io,
+                            &chunk_desc,
+                            &mut staging[..chunk_len],
+                            false,
+                        )
+                        .await?;
+                        self.hash_continue(io, &mut ctx, &staging[..chunk_len])
+                            .await?;
+                        offset += chunk_len;
+                    }
+                }
+                self.hash_finish(io, &mut ctx, form, Some(digest)).await
+            }
+            .await;
+            drop(ctx);
+            result
+        })
+        .await
     }
 
     fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
@@ -324,7 +342,7 @@ mod tests {
         let io = oob_io(desc);
         let digest = pal.dma_alloc(&io, algo.digest_len())?;
         let len = pal
-            .hash_oob(&io, algo, message_index, message_len, form, Some(digest))
+            .hash_oob(&io, algo, message_len, message_index, form, digest)
             .await?;
         Ok(digest[..len].to_vec())
     }
@@ -408,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn oob_hash_streams_boundary_lengths_in_both_digest_forms() {
-        for len in [0, 1023, 1024, 1025, OOB_HASH_MAX_LEN] {
+        for len in [0, 1023, 1024, 1025, 8192] {
             let msg: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
             let desc = (!msg.is_empty()).then(|| sgl_desc(&msg, msg.len()));
             for algo in [
@@ -488,18 +506,6 @@ mod tests {
                 1,
                 msg.len(),
                 Some(&valid_desc),
-                HsmDigestForm::Standard,
-            )
-            .await,
-            Err(HsmError::InvalidArg)
-        );
-        assert_eq!(
-            pal_hash_oob(
-                HsmHashAlgo::Sha256,
-                &[],
-                1,
-                0,
-                None,
                 HsmDigestForm::Standard,
             )
             .await,
