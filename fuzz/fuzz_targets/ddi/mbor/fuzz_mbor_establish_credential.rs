@@ -28,7 +28,7 @@ pub struct FuzzInput {
     /// If 'true', the fuzz test will generate a valid value for pota_sig field
     pub use_valid_pota_sig: bool,
     /// A fuzzed `DdiEstablishCredentialReq` structure that provides the base for request parameters for the Establish Credential operation
-    pub cmdreq_data: DdiEstablishCredentialReq,
+    pub cmdreq_data: Bounded<DdiEstablishCredentialReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -39,7 +39,7 @@ pub fn fuzz_ddi_establish_credential(input: FuzzInput) {
     common_fuzz_test(|dev| {
         // Note: This test case to fuzz "EstablishCredential" does not need prior credential
 
-        let mut cmdreq_data = input.cmdreq_data;
+        let mut cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
 
         let (encrypted_credential, pub_key) =

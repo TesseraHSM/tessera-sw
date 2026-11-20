@@ -170,6 +170,7 @@ pub fn import_rsa_key(
     availability: DdiKeyAvailability,
     rev: Option<DdiApiRev>,
     bits: u16,
+    usage: DdiKeyUsage,
 ) -> Result<u16, DdiError> {
     let deadline = Instant::now() + Duration::from_secs(30 * 60);
     let interval = Duration::from_secs(5);
@@ -202,7 +203,7 @@ pub fn import_rsa_key(
         DdiKeyClass::Rsa,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        helper_key_properties(DdiKeyUsage::SignVerify, availability),
+        helper_key_properties(usage, availability),
     )
     .map(|resp| resp.data.key_id)
 }
@@ -290,6 +291,8 @@ fn check_driver_failure(err: &DdiError) {
     match err {
         DdiError::DriverError(_)
         | DdiError::DdiError(_)
+        | DdiError::DdiDecodingFault(_)
+        | DdiError::MborError(MborError::DecodeError)
         | DdiError::IoError(_)
         | DdiError::DeviceNotFound
         | DdiError::DeviceNotReady

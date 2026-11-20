@@ -25,7 +25,7 @@ pub struct FuzzInput {
     /// Selects the elliptic curve to be used for ECC key generation
     pub key_curve: DdiEccCurve,
     /// A fuzzed `DdiHkdfDeriveReq` structure that provides the base for request parameters for the HKDF derive operation
-    pub cmdreq_data: DdiHkdfDeriveReq,
+    pub cmdreq_data: Bounded<DdiHkdfDeriveReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -43,7 +43,7 @@ pub fn fuzz_ddi_hkdf_derive(input: FuzzInput) {
             }
         };
 
-        let cmdreq_data = input.cmdreq_data;
+        let cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 

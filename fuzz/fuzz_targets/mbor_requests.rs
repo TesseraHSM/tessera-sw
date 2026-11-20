@@ -21,15 +21,24 @@ use tsra_ddi_mbor_types::*;
 const REQUEST_BUFFER_SIZE: usize = 16 * 1024;
 
 // Keep bounded generation local to fuzzing, including nested and optional arrays.
-trait BoundedArbitrary: Sized {
+pub trait BoundedArbitrary: Sized {
     fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self>;
+}
+
+// Unlike #[arbitrary(with)], this does not impose size_of::<T>() as a minimum input size.
+#[derive(Debug)]
+pub struct Bounded<T>(pub T);
+
+impl<'a, T: BoundedArbitrary> Arbitrary<'a> for Bounded<T> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        T::bounded_arbitrary(u).map(Self)
+    }
 }
 
 impl<const N: usize> BoundedArbitrary for MborByteArray<N> {
     fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let data = u.arbitrary()?;
         let len = u.int_in_range(0..=N)?;
-        Self::new(data, len).map_err(|_| arbitrary::Error::IncorrectFormat)
+        Self::from_slice(u.bytes(len)?).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -39,6 +48,16 @@ impl<T: BoundedArbitrary> BoundedArbitrary for Option<T> {
             Ok(Some(T::bounded_arbitrary(u)?))
         } else {
             Ok(None)
+        }
+    }
+}
+
+impl BoundedArbitrary for DdiRsaOpType {
+    fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        match u.int_in_range(0..=2)? {
+            0 => Ok(Self::Sign),
+            1 => Ok(Self::Decrypt),
+            _ => Ok(Self(u.arbitrary()?)),
         }
     }
 }
@@ -238,7 +257,9 @@ requests! {
         key_id, wrapped_blob => bounded, wrapped_blob_key_class, wrapped_blob_padding,
         wrapped_blob_hash_algorithm, key_tag, key_properties => bounded,
     },
-    RsaModExp => (DdiRsaModExpReq, DdiRsaModExpCmdReq) { key_id, y => bounded, op_type },
+    RsaModExp => (DdiRsaModExpReq, DdiRsaModExpCmdReq) {
+        key_id, y => bounded, op_type => bounded,
+    },
     AttestKey => (DdiAttestKeyReq, DdiAttestKeyCmdReq) { key_id, report_data => bounded },
 }
 

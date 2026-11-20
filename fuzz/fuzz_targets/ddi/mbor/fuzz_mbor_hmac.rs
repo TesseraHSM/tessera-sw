@@ -27,7 +27,7 @@ pub struct FuzzInput {
     /// Specifies the hash algorithm to use for HMAC operations
     pub hash_algorithm: DdiHashAlgorithm,
     /// A fuzzed `DdiHmacReq` structure that provides the base for request parameters for the HMAC operation
-    pub cmdreq_data: DdiHmacReq,
+    pub cmdreq_data: Bounded<DdiHmacReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -45,7 +45,7 @@ pub fn fuzz_ddi_hmac(input: FuzzInput) {
             }
         };
 
-        let cmdreq_data = input.cmdreq_data;
+        let cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 
