@@ -17,11 +17,9 @@ and returns the derived key as a **masked** blob under the requested
 scope's masking key.
 
 The HKDF PRF supports SHA-1, SHA-256, SHA-384, and SHA-512. SHA-1 is
-available for legacy compatibility; prefer SHA-2 for new applications.
+available; prefer SHA-2 for new applications.
 The PRF is independent of the output key type: HKDF-SHA1 can derive the
 existing AES or SHA-2 HMAC keys without adding an HMAC-SHA1 key type.
-Firmware without SHA-1 support rejects hash selector `0` with `InvalidArg`;
-existing SHA-2 selectors and wire layouts are unchanged.
 
 The device unmasks the input secret **in place** in the request buffer,
 checks that its kind is an ECDH shared secret (`Secret256` / `Secret384` /
@@ -36,8 +34,8 @@ An **empty** `salt` selects the RFC 5869 default (all-zero) salt; an empty
 shorter-than-block key with zeros).
 
 The derived-key blob records the output key kind, `local` usage plus
-`encrypt`/`decrypt` (AES) or `sign`/`verify` (HMAC), the requested scope,
-and the platform `{svn, owner}` identity.
+the requested `key_usage` permissions, the requested scope, and the
+platform `{svn, owner}` identity. Key type and usage are independent fields.
 
 Available to **both Crypto-Officer and Crypto-User** sessions.
 
@@ -50,17 +48,37 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived key. |
 | 16 | `hash_algo` | `u8` (inline) | [`HashAlgo`] HKDF hash / HMAC PRF (`0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512). |
-| 20 | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
+| 20 | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; fixed HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
 | 24 | `key_length` | `u8` (inline) | Output length in bytes for the `VarHmac*` types; `0` means absent (required for `VarHmac*`, ignored otherwise). |
-| 28 | (padding) | `padding` (0..=3 B) | Places `masked_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 32 | `masked_secret` | `buffer` (260..=294 B) | The masked ECDH shared secret IKM; unmasked in place. |
-| 36 | `salt` | `buffer` (0..=256 B) | Optional HKDF-Extract salt; empty selects the RFC 5869 default salt. |
-| 40 | `info` | `buffer` (0..=256 B) | Optional HKDF-Expand context/application info; empty means none. |
-| 44 | `key_label` | `buffer` (0..=128 B) | Caller-supplied key label stamped into the derived key's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
+| 28 | `key_usage` | `u64` (data section) | Required output permissions using the existing `KeyUsage` bits; see [Output Usage](#output-usage). |
+| 32 | (padding) | `padding` (0..=3 B) | Places `masked_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 36 | `masked_secret` | `buffer` (264..=312 B) | The masked ECDH shared secret IKM; unmasked in place. |
+| 40 | `salt` | `buffer` (0..=256 B) | Optional HKDF-Extract salt; empty selects the RFC 5869 default salt. |
+| 44 | `info` | `buffer` (0..=256 B) | Optional HKDF-Expand context/application info; empty means none. |
+| 48 | `key_label` | `buffer` (0..=128 B) | Caller-supplied key label stamped into the derived key's `MaskedKeyMetadata.key_label`; empty for an unlabeled key. |
 
 ### Data section
 
-Carries the masked secret, followed by the salt, the info, and the key label.
+Carries `key_usage`, then alignment padding, the masked secret, the salt,
+the info, and the key label.
+
+### Output Usage
+
+The caller supplies `key_usage` independently of `key_type`. Firmware
+accepts exactly one supported usage group:
+
+| Key Type | Allowed `key_usage` |
+|---|---|
+| AES-128 / AES-192 / AES-256 | `ENCRYPT` + `DECRYPT` |
+| Fixed or variable HMAC-SHA-256 / HMAC-SHA-384 / HMAC-SHA-512 | `SIGN` + `VERIFY`, or `DERIVE` only |
+
+Empty, partial, mixed, or unknown usage masks are rejected with
+`InvalidPermissions`. A derive-only HMAC key grants neither `sign` nor
+`verify`, and the `Hmac` command rejects it with `InvalidPermissions`.
+No additional key types or key classes are introduced.
+
+This changes output permissions only. HKDF inputs must still be ECDH
+shared secrets; a derive-only HMAC output is not accepted as HKDF IKM.
 
 ## Response
 
@@ -69,11 +87,14 @@ Carries the masked secret, followed by the salt, the info, and the key label.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_key` | `buffer` (244..=356 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
+| 12 | `masked_key` | `buffer` (248..=360 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
+
+Remaining TOC entries are `None`, matching the paired request footprint.
 
 ### Data section
 
-Carries the masked derived key.  The masked length is `228 + okm_len`,
+Carries the masked derived key. The masked length is a 232-byte overhead
+plus `okm_len` rounded up to a multiple of 16 bytes,
 where `okm_len` is the derived key length (16 / 24 / 32 for AES-128/192/256;
 32 / 48 / 64 for HMAC-SHA-256/384/512; `key_length` for `VarHmac*`).
 
@@ -85,7 +106,7 @@ where `okm_len` is the derived key length (16 / 24 / 32 for AES-128/192/256;
 | `InvalidArg` | Unknown `hash_algo`, or a non-`Session` scope requested before the partition is `Initialized` |
 | `InvalidKeyType` | Unknown / unsupported `key_type`, a `VarHmac*` output with `key_length = 0`, or the input blob is not an ECDH shared secret |
 | `InvalidKeyLength` | A `VarHmac*` `key_length` outside the per-variant range (256: 32..=64, 384: 48..=128, 512: 64..=128) |
-| `InvalidPermissions` | The input secret's `derive` usage attribute is not set |
+| `InvalidPermissions` | Output `key_usage` is empty, partial, mixed, unknown, or unsupported for its key type; or the input secret lacks `derive` permission |
 | `UnsupportedKeyScope` | The requested target scope's masking key is not provisioned |
 | `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The masked secret is malformed or fails authentication (wrong scope / tampered) |
 | `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |

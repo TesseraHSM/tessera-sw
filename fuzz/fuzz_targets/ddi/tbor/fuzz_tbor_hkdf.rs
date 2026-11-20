@@ -30,6 +30,7 @@ struct FuzzHkdfDeriveReq {
     key_type: u8,
     key_label: Vec<u8>,
     key_length: u8,
+    key_usage: u64,
 }
 
 /// Fuzz input for the TBOR `HkdfDerive` command. TBOR has no independent
@@ -117,6 +118,7 @@ fuzz_target!(|input: FuzzInput| {
             hash_algo: input.cmdreq_data.hash_algo,
             key_type: input.cmdreq_data.key_type,
             key_length: input.cmdreq_data.key_length,
+            key_usage: input.cmdreq_data.key_usage,
             masked_secret,
             salt: input.cmdreq_data.salt.clone(),
             info: input.cmdreq_data.info.clone(),
@@ -134,8 +136,12 @@ fuzz_target!(|input: FuzzInput| {
             )
             && input.key_usage == KEY_USAGE_DERIVE
             && input.key_label.len() <= TBOR_KEY_LABEL_MAX_LEN
-            && matches!(input.cmdreq_data.hash_algo, 1..=3)
+            && matches!(
+                input.cmdreq_data.hash_algo,
+                HASH_ALGO_SHA1 | HASH_ALGO_SHA256 | HASH_ALGO_SHA384 | HASH_ALGO_SHA512
+            )
             && valid_key_length(input.cmdreq_data.key_type, input.cmdreq_data.key_length)
+            && valid_key_usage(input.cmdreq_data.key_type, input.cmdreq_data.key_usage)
             && input.cmdreq_data.salt.len() <= HKDF_SALT_MAX_LEN
             && input.cmdreq_data.info.len() <= HKDF_INFO_MAX_LEN
             && input.cmdreq_data.key_label.len() <= TBOR_KEY_LABEL_MAX_LEN;
@@ -173,6 +179,23 @@ fn valid_key_length(key_type: u8, key_length: u8) -> bool {
         KDF_KEY_TYPE_VAR_HMAC256 => (32..=64).contains(&key_length),
         KDF_KEY_TYPE_VAR_HMAC384 => (48..=128).contains(&key_length),
         KDF_KEY_TYPE_VAR_HMAC512 => (64..=128).contains(&key_length),
+        _ => false,
+    }
+}
+
+fn valid_key_usage(key_type: u8, key_usage: u64) -> bool {
+    match key_type {
+        KDF_KEY_TYPE_AES128 | KDF_KEY_TYPE_AES192 | KDF_KEY_TYPE_AES256 => {
+            key_usage == (KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT)
+        }
+        KDF_KEY_TYPE_HMAC_SHA256
+        | KDF_KEY_TYPE_HMAC_SHA384
+        | KDF_KEY_TYPE_HMAC_SHA512
+        | KDF_KEY_TYPE_VAR_HMAC256
+        | KDF_KEY_TYPE_VAR_HMAC384
+        | KDF_KEY_TYPE_VAR_HMAC512 => {
+            key_usage == (KEY_USAGE_SIGN | KEY_USAGE_VERIFY) || key_usage == KEY_USAGE_DERIVE
+        }
         _ => false,
     }
 }

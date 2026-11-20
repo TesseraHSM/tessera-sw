@@ -1,12 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <gtest/gtest.h>
+#include <limits>
 #include <string>
 #include <tsra_api.h>
+#include <utility>
 #include <vector>
 
+#include "algo/ecc/helpers.hpp"
 #include "handle/part_list_handle.hpp"
 #include "utils/auto_key.hpp"
 #include "utils/kdf_derive.hpp"
@@ -32,6 +37,631 @@ static key_props valid_hkdf_aes_props()
     props.encrypt = 1;
     props.decrypt = 1;
     return props;
+}
+
+struct HkdfOutputCase
+{
+    tsra_key_kind kind;
+    uint32_t bits;
+    const char *name;
+};
+
+static constexpr HkdfOutputCase HKDF_OUTPUTS[] = {
+    { TSRA_KEY_KIND_AES, 128, "AES128" },          { TSRA_KEY_KIND_AES, 192, "AES192" },
+    { TSRA_KEY_KIND_AES, 256, "AES256" },          { TSRA_KEY_KIND_HMAC_SHA256, 256, "HMAC256" },
+    { TSRA_KEY_KIND_HMAC_SHA384, 384, "HMAC384" }, { TSRA_KEY_KIND_HMAC_SHA512, 512, "HMAC512" },
+};
+
+enum class HkdfOutputFamily
+{
+    All,
+    Aes,
+    Hmac,
+};
+
+struct HkdfAttributeContext
+{
+    HkdfAttributeContext() = default;
+    HkdfAttributeContext(const HkdfAttributeContext &) = delete;
+    HkdfAttributeContext &operator=(const HkdfAttributeContext &) = delete;
+
+    tsra_handle session = 0;
+    tsra_ecc_curve curve = TSRA_ECC_CURVE_P256;
+    auto_key secret;
+    auto_key peer_secret;
+    key_props props{};
+    std::vector<tsra_key_prop> properties;
+    tsra_key_prop_list property_list{};
+    tsra_algo_hkdf_params params{};
+    tsra_algo algo{};
+    std::array<uint32_t, 2> storage{};
+
+    void init(
+        tsra_handle handle,
+        tsra_ecc_curve input_curve,
+        const HkdfOutputCase &output,
+        bool session_key
+    )
+    {
+        session = handle;
+        curve = input_curve;
+        ASSERT_NO_FATAL_FAILURE(derive_ecdh_shared_secrets(session, curve, secret, peer_secret));
+        ASSERT_NE(secret.get(), 0u);
+        ASSERT_NE(peer_secret.get(), 0u);
+        const bool aes = output.kind == TSRA_KEY_KIND_AES;
+        props.key_class = TSRA_KEY_CLASS_SECRET;
+        props.key_kind = output.kind;
+        props.key_size_bits = output.bits;
+        props.session_key = session_key;
+        props.encrypt = aes;
+        props.decrypt = aes;
+        props.sign = !aes;
+        props.verify = !aes;
+        property_list = build_key_prop_list(props, properties);
+        build_hkdf_algo(params, algo, TSRA_ALGO_ID_HMAC_SHA256, nullptr, nullptr);
+    }
+
+    void refresh_properties()
+    {
+        property_list = { properties.data(), static_cast<uint32_t>(properties.size()) };
+    }
+
+    tsra_key_prop *property(tsra_key_prop_id id)
+    {
+        auto found =
+            std::find_if(properties.begin(), properties.end(), [id](const tsra_key_prop &prop) {
+                return prop.id == id;
+            });
+        return found == properties.end() ? nullptr : &*found;
+    }
+
+    tsra_status derive(auto_key &key)
+    {
+        return tsra_key_derive(session, &algo, secret.get(), &property_list, key.get_ptr());
+    }
+};
+
+template <typename Check>
+static void for_each_hkdf_output(
+    PartitionListHandle &part_list,
+    HkdfOutputFamily family,
+    Check check
+)
+{
+    for (const auto &output : HKDF_OUTPUTS)
+    {
+        if ((family == HkdfOutputFamily::Aes && output.kind != TSRA_KEY_KIND_AES) ||
+            (family == HkdfOutputFamily::Hmac && output.kind == TSRA_KEY_KIND_AES))
+        {
+            continue;
+        }
+        SCOPED_TRACE(output.name);
+        for (const auto &curve : ECC_CURVES)
+        {
+            SCOPED_TRACE(curve.test_name);
+            for (bool session_key : { true, false })
+            {
+                SCOPED_TRACE(session_key);
+                part_list.for_each_session([&](tsra_handle session) {
+                    HkdfAttributeContext ctx;
+                    ASSERT_NO_FATAL_FAILURE(ctx.init(session, curve.curve, output, session_key));
+                    check(ctx);
+                });
+            }
+        }
+    }
+}
+
+static void expect_hkdf_output_properties(tsra_handle key, const key_props &expected)
+{
+    ASSERT_NE(key, 0u);
+    tsra_key_class key_class = TSRA_KEY_CLASS_PUBLIC;
+    tsra_key_kind kind = TSRA_KEY_KIND_ECC;
+    uint32_t bits = 0;
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_CLASS, key_class), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_KIND, kind), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_BIT_LEN, bits), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(key_class, TSRA_KEY_CLASS_SECRET);
+    ASSERT_EQ(kind, expected.key_kind);
+    ASSERT_EQ(bits, expected.key_size_bits);
+    for (const auto &[id, value] : {
+             std::pair{ TSRA_KEY_PROP_ID_SESSION, expected.session_key },
+             std::pair{ TSRA_KEY_PROP_ID_LOCAL, true },
+             std::pair{ TSRA_KEY_PROP_ID_SENSITIVE, true },
+             std::pair{ TSRA_KEY_PROP_ID_EXTRACTABLE, true },
+             std::pair{ TSRA_KEY_PROP_ID_ENCRYPT, expected.encrypt },
+             std::pair{ TSRA_KEY_PROP_ID_DECRYPT, expected.decrypt },
+             std::pair{ TSRA_KEY_PROP_ID_SIGN, expected.sign },
+             std::pair{ TSRA_KEY_PROP_ID_VERIFY, expected.verify },
+             std::pair{ TSRA_KEY_PROP_ID_DERIVE, false },
+             std::pair{ TSRA_KEY_PROP_ID_WRAP, false },
+             std::pair{ TSRA_KEY_PROP_ID_UNWRAP, false },
+         })
+    {
+        SCOPED_TRACE(id);
+        uint8_t actual = 0;
+        ASSERT_EQ(get_key_prop(key, id, actual), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(actual, static_cast<uint8_t>(value));
+    }
+    tsra_ecc_curve curve = TSRA_ECC_CURVE_P256;
+    ASSERT_EQ(
+        get_key_prop(key, TSRA_KEY_PROP_ID_EC_CURVE, curve),
+        TSRA_STATUS_PROPERTY_NOT_PRESENT
+    );
+}
+
+TEST_F(tsra_hkdf, output_properties)
+{
+    for_each_hkdf_output(part_list_, HkdfOutputFamily::All, [](HkdfAttributeContext &ctx) {
+        auto_key key;
+        ASSERT_EQ(ctx.derive(key), TSRA_STATUS_SUCCESS);
+        expect_hkdf_output_properties(key.get(), ctx.props);
+    });
+}
+
+TEST_F(tsra_hkdf, output_labels_preserved)
+{
+    constexpr size_t documented_label_capacity = 128;
+    for (auto label : {
+             std::vector<uint8_t>{},
+             std::vector<uint8_t>{ 'h', 'k', 'd', 'f' },
+             std::vector<uint8_t>(documented_label_capacity - 1, 'x'),
+         })
+    {
+        SCOPED_TRACE(label.size());
+        for_each_hkdf_output(part_list_, HkdfOutputFamily::All, [&](HkdfAttributeContext &ctx) {
+            ctx.properties.push_back({ TSRA_KEY_PROP_ID_LABEL,
+                                       label.empty() ? ctx.storage.data()
+                                                     : static_cast<void *>(label.data()),
+                                       static_cast<uint32_t>(label.size()) });
+            ctx.refresh_properties();
+            auto_key key;
+            ASSERT_EQ(ctx.derive(key), TSRA_STATUS_SUCCESS);
+            ASSERT_NO_FATAL_FAILURE(expect_hkdf_output_properties(key.get(), ctx.props));
+            std::vector<uint8_t> actual(label.size() + sizeof(uint8_t));
+            tsra_key_prop prop{ TSRA_KEY_PROP_ID_LABEL,
+                                actual.data(),
+                                static_cast<uint32_t>(actual.size()) };
+            ASSERT_EQ(tsra_key_get_prop(key.get(), &prop), TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(prop.len, label.size());
+            actual.resize(prop.len);
+            ASSERT_EQ(actual, label);
+        });
+    }
+}
+
+template <typename Change>
+static void expect_hkdf_property_rejected(
+    PartitionListHandle &part_list,
+    HkdfOutputFamily family,
+    tsra_status expected,
+    Change change
+)
+{
+    for_each_hkdf_output(part_list, family, [&](HkdfAttributeContext &ctx) {
+        {
+            auto_key control;
+            ASSERT_EQ(ctx.derive(control), TSRA_STATUS_SUCCESS);
+            ASSERT_NO_FATAL_FAILURE(expect_hkdf_output_properties(control.get(), ctx.props));
+        }
+        ASSERT_NO_FATAL_FAILURE(change(ctx));
+        auto_key rejected;
+        ASSERT_EQ(ctx.derive(rejected), expected);
+        ASSERT_EQ(rejected.get(), 0u);
+    });
+}
+
+static void expect_hkdf_forbidden_flag(
+    PartitionListHandle &part_list,
+    HkdfOutputFamily family,
+    tsra_key_prop_id flag
+)
+{
+    expect_hkdf_property_rejected(
+        part_list,
+        family,
+        TSRA_STATUS_INVALID_KEY_PROPS,
+        [flag](HkdfAttributeContext &ctx) {
+            auto property = ctx.property(flag);
+            ASSERT_NE(property, nullptr);
+            ASSERT_FALSE(*static_cast<bool *>(property->val));
+            *static_cast<bool *>(property->val) = true;
+        }
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_aes_sign_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Aes, TSRA_KEY_PROP_ID_SIGN);
+}
+
+TEST_F(tsra_hkdf, attribute_aes_verify_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Aes, TSRA_KEY_PROP_ID_VERIFY);
+}
+
+TEST_F(tsra_hkdf, attribute_aes_derive_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Aes, TSRA_KEY_PROP_ID_DERIVE);
+}
+
+TEST_F(tsra_hkdf, attribute_aes_wrap_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Aes, TSRA_KEY_PROP_ID_WRAP);
+}
+
+TEST_F(tsra_hkdf, attribute_aes_unwrap_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Aes, TSRA_KEY_PROP_ID_UNWRAP);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_encrypt_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Hmac, TSRA_KEY_PROP_ID_ENCRYPT);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_decrypt_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Hmac, TSRA_KEY_PROP_ID_DECRYPT);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_derive_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Hmac, TSRA_KEY_PROP_ID_DERIVE);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_wrap_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Hmac, TSRA_KEY_PROP_ID_WRAP);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_unwrap_rejected)
+{
+    expect_hkdf_forbidden_flag(part_list_, HkdfOutputFamily::Hmac, TSRA_KEY_PROP_ID_UNWRAP);
+}
+
+static void expect_hkdf_required_usages(PartitionListHandle &part_list, HkdfOutputFamily family)
+{
+    const auto first =
+        family == HkdfOutputFamily::Aes ? TSRA_KEY_PROP_ID_ENCRYPT : TSRA_KEY_PROP_ID_SIGN;
+    const auto second =
+        family == HkdfOutputFamily::Aes ? TSRA_KEY_PROP_ID_DECRYPT : TSRA_KEY_PROP_ID_VERIFY;
+    for (auto absent :
+         { std::pair{ true, false }, std::pair{ false, true }, std::pair{ true, true } })
+    {
+        for (bool omit : { true, false })
+        {
+            SCOPED_TRACE(omit);
+            expect_hkdf_property_rejected(
+                part_list,
+                family,
+                TSRA_STATUS_INVALID_KEY_PROPS,
+                [=](HkdfAttributeContext &ctx) {
+                    for (auto id : { first, second })
+                    {
+                        if ((id == first && !absent.first) || (id == second && !absent.second))
+                        {
+                            continue;
+                        }
+                        if (omit)
+                        {
+                            remove_prop_by_id(ctx.properties, id);
+                        }
+                        else
+                        {
+                            auto property = ctx.property(id);
+                            ASSERT_NE(property, nullptr);
+                            *static_cast<bool *>(property->val) = false;
+                        }
+                    }
+                    ctx.refresh_properties();
+                }
+            );
+        }
+    }
+}
+
+TEST_F(tsra_hkdf, attribute_aes_required_usages)
+{
+    expect_hkdf_required_usages(part_list_, HkdfOutputFamily::Aes);
+}
+
+TEST_F(tsra_hkdf, attribute_hmac_required_usages)
+{
+    expect_hkdf_required_usages(part_list_, HkdfOutputFamily::Hmac);
+}
+
+TEST_F(tsra_hkdf, attribute_output_class_rejected)
+{
+    for (auto key_class : { TSRA_KEY_CLASS_PRIVATE, TSRA_KEY_CLASS_PUBLIC })
+    {
+        SCOPED_TRACE(key_class);
+        expect_hkdf_property_rejected(
+            part_list_,
+            HkdfOutputFamily::All,
+            TSRA_STATUS_INVALID_KEY_PROPS,
+            [key_class](HkdfAttributeContext &ctx) { ctx.props.key_class = key_class; }
+        );
+    }
+}
+
+TEST_F(tsra_hkdf, attribute_output_curve_rejected)
+{
+    expect_hkdf_property_rejected(
+        part_list_,
+        HkdfOutputFamily::All,
+        TSRA_STATUS_INVALID_KEY_PROPS,
+        [](HkdfAttributeContext &ctx) {
+            ctx.storage[0] = ctx.curve;
+            ctx.properties.push_back(
+                { TSRA_KEY_PROP_ID_EC_CURVE, ctx.storage.data(), sizeof(uint32_t) }
+            );
+            ctx.refresh_properties();
+        }
+    );
+}
+
+static void expect_hkdf_missing_property(
+    PartitionListHandle &part_list,
+    tsra_key_prop_id id,
+    tsra_status expected
+)
+{
+    expect_hkdf_property_rejected(
+        part_list,
+        HkdfOutputFamily::All,
+        expected,
+        [id](HkdfAttributeContext &ctx) {
+            remove_prop_by_id(ctx.properties, id);
+            ctx.refresh_properties();
+        }
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_missing_class)
+{
+    expect_hkdf_missing_property(
+        part_list_,
+        TSRA_KEY_PROP_ID_CLASS,
+        TSRA_STATUS_KEY_CLASS_NOT_SPECIFIED
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_missing_kind)
+{
+    expect_hkdf_missing_property(
+        part_list_,
+        TSRA_KEY_PROP_ID_KIND,
+        TSRA_STATUS_KEY_KIND_NOT_SPECIFIED
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_missing_bits)
+{
+    expect_hkdf_missing_property(
+        part_list_,
+        TSRA_KEY_PROP_ID_BIT_LEN,
+        TSRA_STATUS_PROPERTY_NOT_PRESENT
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_invalid_enum)
+{
+    for (auto id : { TSRA_KEY_PROP_ID_CLASS, TSRA_KEY_PROP_ID_KIND, TSRA_KEY_PROP_ID_EC_CURVE })
+    {
+        SCOPED_TRACE(id);
+        expect_hkdf_property_rejected(
+            part_list_,
+            HkdfOutputFamily::All,
+            TSRA_STATUS_INVALID_ARGUMENT,
+            [id](HkdfAttributeContext &ctx) {
+                remove_prop_by_id(ctx.properties, id);
+                ctx.storage[0] = std::numeric_limits<uint32_t>::max();
+                ctx.properties.push_back({ id, ctx.storage.data(), sizeof(uint32_t) });
+                ctx.refresh_properties();
+            }
+        );
+    }
+}
+
+enum class HkdfEncodingProblem
+{
+    Null,
+    Empty,
+    Short,
+    Long,
+};
+
+static void expect_hkdf_bad_encoding(PartitionListHandle &part_list, HkdfEncodingProblem problem)
+{
+    for (auto id : {
+             TSRA_KEY_PROP_ID_CLASS,
+             TSRA_KEY_PROP_ID_KIND,
+             TSRA_KEY_PROP_ID_BIT_LEN,
+             TSRA_KEY_PROP_ID_EC_CURVE,
+             TSRA_KEY_PROP_ID_SESSION,
+             TSRA_KEY_PROP_ID_ENCRYPT,
+             TSRA_KEY_PROP_ID_DECRYPT,
+             TSRA_KEY_PROP_ID_SIGN,
+             TSRA_KEY_PROP_ID_VERIFY,
+             TSRA_KEY_PROP_ID_DERIVE,
+             TSRA_KEY_PROP_ID_WRAP,
+             TSRA_KEY_PROP_ID_UNWRAP,
+             TSRA_KEY_PROP_ID_LABEL,
+         })
+    {
+        const uint32_t width = id == TSRA_KEY_PROP_ID_CLASS || id == TSRA_KEY_PROP_ID_KIND ||
+                                       id == TSRA_KEY_PROP_ID_BIT_LEN ||
+                                       id == TSRA_KEY_PROP_ID_EC_CURVE
+                                   ? sizeof(uint32_t)
+                                   : sizeof(uint8_t);
+        if ((id == TSRA_KEY_PROP_ID_LABEL && problem != HkdfEncodingProblem::Null) ||
+            (width == sizeof(uint8_t) && problem == HkdfEncodingProblem::Short))
+        {
+            continue;
+        }
+        SCOPED_TRACE(id);
+        expect_hkdf_property_rejected(
+            part_list,
+            HkdfOutputFamily::All,
+            TSRA_STATUS_INVALID_ARGUMENT,
+            [=](HkdfAttributeContext &ctx) {
+                remove_prop_by_id(ctx.properties, id);
+                tsra_key_prop property{ id, ctx.storage.data(), width };
+                switch (problem)
+                {
+                case HkdfEncodingProblem::Null:
+                    property.val = nullptr;
+                    break;
+                case HkdfEncodingProblem::Empty:
+                    property.len = 0;
+                    break;
+                case HkdfEncodingProblem::Short:
+                    property.len = width - 1;
+                    break;
+                case HkdfEncodingProblem::Long:
+                    property.len = width + 1;
+                    break;
+                }
+                ASSERT_LE(property.len, sizeof(ctx.storage));
+                ctx.properties.push_back(property);
+                ctx.refresh_properties();
+            }
+        );
+    }
+}
+
+TEST_F(tsra_hkdf, attribute_null_value)
+{
+    expect_hkdf_bad_encoding(part_list_, HkdfEncodingProblem::Null);
+}
+
+TEST_F(tsra_hkdf, attribute_empty_value)
+{
+    expect_hkdf_bad_encoding(part_list_, HkdfEncodingProblem::Empty);
+}
+
+TEST_F(tsra_hkdf, attribute_short_value)
+{
+    expect_hkdf_bad_encoding(part_list_, HkdfEncodingProblem::Short);
+}
+
+TEST_F(tsra_hkdf, attribute_long_value)
+{
+    expect_hkdf_bad_encoding(part_list_, HkdfEncodingProblem::Long);
+}
+
+TEST_F(tsra_hkdf, attribute_null_array)
+{
+    expect_hkdf_property_rejected(
+        part_list_,
+        HkdfOutputFamily::All,
+        TSRA_STATUS_INVALID_ARGUMENT,
+        [](HkdfAttributeContext &ctx) { ctx.property_list.props = nullptr; }
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_empty_list)
+{
+    expect_hkdf_property_rejected(
+        part_list_,
+        HkdfOutputFamily::All,
+        TSRA_STATUS_INVALID_ARGUMENT,
+        [](HkdfAttributeContext &ctx) { ctx.property_list.count = 0; }
+    );
+}
+
+TEST_F(tsra_hkdf, attribute_null_list)
+{
+    for_each_hkdf_output(part_list_, HkdfOutputFamily::All, [](HkdfAttributeContext &ctx) {
+        {
+            auto_key control;
+            ASSERT_EQ(ctx.derive(control), TSRA_STATUS_SUCCESS);
+            ASSERT_NO_FATAL_FAILURE(expect_hkdf_output_properties(control.get(), ctx.props));
+        }
+        auto_key rejected;
+        ASSERT_EQ(
+            tsra_key_derive(ctx.session, &ctx.algo, ctx.secret.get(), nullptr, rejected.get_ptr()),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(rejected.get(), 0u);
+    });
+}
+
+TEST_F(tsra_hkdf, attribute_device_owned_properties)
+{
+    for (auto id :
+         { TSRA_KEY_PROP_ID_LOCAL, TSRA_KEY_PROP_ID_SENSITIVE, TSRA_KEY_PROP_ID_EXTRACTABLE })
+    {
+        SCOPED_TRACE(id);
+        expect_hkdf_property_rejected(
+            part_list_,
+            HkdfOutputFamily::All,
+            TSRA_STATUS_INVALID_ARGUMENT,
+            [id](HkdfAttributeContext &ctx) {
+                ctx.properties.push_back({ id, ctx.storage.data(), sizeof(uint8_t) });
+                ctx.refresh_properties();
+            }
+        );
+    }
+}
+
+enum class HkdfBitsProblem
+{
+    Zero,
+    One,
+    Short,
+    Long,
+    Maximum,
+};
+
+TEST_F(tsra_hkdf, attribute_invalid_output_bits)
+{
+    for (auto problem : { HkdfBitsProblem::Zero,
+                          HkdfBitsProblem::One,
+                          HkdfBitsProblem::Short,
+                          HkdfBitsProblem::Long,
+                          HkdfBitsProblem::Maximum })
+    {
+        SCOPED_TRACE(static_cast<int>(problem));
+        for_each_hkdf_output(
+            part_list_,
+            HkdfOutputFamily::All,
+            [problem](HkdfAttributeContext &ctx) {
+                {
+                    auto_key control;
+                    ASSERT_EQ(ctx.derive(control), TSRA_STATUS_SUCCESS);
+                    ASSERT_NO_FATAL_FAILURE(expect_hkdf_output_properties(control.get(), ctx.props)
+                    );
+                }
+                switch (problem)
+                {
+                case HkdfBitsProblem::Zero:
+                    ctx.props.key_size_bits = 0;
+                    break;
+                case HkdfBitsProblem::One:
+                    ctx.props.key_size_bits = 1;
+                    break;
+                case HkdfBitsProblem::Short:
+                    --ctx.props.key_size_bits;
+                    break;
+                case HkdfBitsProblem::Long:
+                    ++ctx.props.key_size_bits;
+                    break;
+                case HkdfBitsProblem::Maximum:
+                    ctx.props.key_size_bits = std::numeric_limits<uint32_t>::max();
+                    break;
+                }
+                const auto expected =
+                    ctx.props.key_size_bits == 0 || ctx.props.key_kind != TSRA_KEY_KIND_AES
+                        ? TSRA_STATUS_INVALID_KEY_PROPS
+                        : TSRA_STATUS_INVALID_ARGUMENT;
+                auto_key rejected;
+                ASSERT_EQ(ctx.derive(rejected), expected);
+                ASSERT_EQ(rejected.get(), 0u);
+            }
+        );
+    }
 }
 
 static tsra_status hkdf_derive_with_algo(tsra_handle session, tsra_algo *algo, key_props props)

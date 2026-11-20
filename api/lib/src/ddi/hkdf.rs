@@ -126,6 +126,20 @@ fn hkdf_derive_tbor(
     }
 
     let scope = derived_key_props.tbor_scope();
+    let mut key_usage = 0;
+    for (enabled, flag) in [
+        (derived_key_props.can_encrypt(), KEY_USAGE_ENCRYPT),
+        (derived_key_props.can_decrypt(), KEY_USAGE_DECRYPT),
+        (derived_key_props.can_sign(), KEY_USAGE_SIGN),
+        (derived_key_props.can_verify(), KEY_USAGE_VERIFY),
+        (derived_key_props.can_derive(), KEY_USAGE_DERIVE),
+        (derived_key_props.can_wrap(), KEY_USAGE_WRAP),
+        (derived_key_props.can_unwrap(), KEY_USAGE_UNWRAP),
+    ] {
+        if enabled {
+            key_usage |= flag;
+        }
+    }
     let req = TborHkdfDeriveReq {
         session_id: shared_secret.session().ex_session_id()?,
         scope,
@@ -134,6 +148,7 @@ fn hkdf_derive_tbor(
         // Fixed canonical AES / HMAC output; the variable-length HMAC
         // `key_length` is unused for these key types.
         key_length: 0,
+        key_usage,
         masked_secret,
         salt: salt.unwrap_or(&[]).to_vec(),
         info: info.unwrap_or(&[]).to_vec(),

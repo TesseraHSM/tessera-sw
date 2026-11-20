@@ -71,6 +71,10 @@ pub struct TborHkdfDeriveReq {
     /// means absent (required for `VarHmac*`, ignored otherwise).
     pub key_length: u8,
 
+    /// Output-key permissions using the existing `KEY_USAGE_*` bits.
+    /// AES accepts encrypt/decrypt; HMAC accepts sign/verify or derive-only.
+    pub key_usage: u64,
+
     /// The masked ECDH shared secret IKM (from `EcdhDerive`).
     #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_secret: Vec<u8>,
@@ -115,6 +119,7 @@ mod tests {
             hash_algo: 2,
             key_type: KDF_KEY_TYPE_AES256,
             key_length: 0,
+            key_usage: crate::KEY_USAGE_ENCRYPT | crate::KEY_USAGE_DECRYPT,
             masked_secret: alloc::vec![0x11u8; HKDF_MASKED_SECRET_MIN_LEN],
             salt: alloc::vec![0x22u8; 16],
             info: alloc::vec![0x33u8; 8],
