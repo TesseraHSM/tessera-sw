@@ -17,6 +17,8 @@ use tsra_ddi_tbor_types::TborRsaSignReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::KEY_CLASS_RSA;
 use tsra_ddi_tbor_types::KEY_CLASS_RSA_CRT;
+use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::RSA_HASH_SHA256;
@@ -51,6 +53,32 @@ pub(super) fn import_rsa(
     )
     .masked_key;
     (masked, private, public)
+}
+
+#[test]
+fn rsa_sign_rejects_cipher_only_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let private = RsaPrivateKey::generate(256).expect("generate RSA key");
+    let der = private.to_vec().expect("export RSA private key");
+    let masked_key = unwrap_with_usage(
+        &ctx,
+        session.session_id,
+        KEY_CLASS_RSA,
+        KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+        &der,
+    )
+    .masked_key;
+    ctx.expect_fw_reject(
+        &TborRsaSignReq {
+            session_id: session.session_id,
+            masked_key,
+            padding: RSA_PADDING_PKCS1_V15,
+            hash_algo: RSA_HASH_SHA256,
+            ..Default::default()
+        },
+        TborStatus::InvalidPermissions,
+    );
 }
 
 /// Device PSS signing hashes the raw OOB bytes once and emits a signature

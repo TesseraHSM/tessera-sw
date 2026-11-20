@@ -13,6 +13,8 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::KEY_CLASS_RSA;
+use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::RSA_HASH_SHA256;
@@ -23,6 +25,35 @@ use crate::commands::common::rev;
 use crate::commands::rsa_sign::import_rsa;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap_with_usage;
+
+#[test]
+fn rsa_verify_rejects_cipher_only_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let private = RsaPrivateKey::generate(256).expect("generate RSA key");
+    let der = private.to_vec().expect("export RSA private key");
+    let masked_key = unwrap_with_usage(
+        &ctx,
+        session.session_id,
+        KEY_CLASS_RSA,
+        KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+        &der,
+    )
+    .masked_key;
+    let mut signer = RsaHashSignAlgo::with_pkcs1_padding(HashAlgo::sha256());
+    let signature = Signer::sign_vec(&mut signer, &private, &[]).expect("host PKCS#1 sign");
+    ctx.expect_fw_reject(
+        &TborRsaVerifyReq {
+            session_id: session.session_id,
+            masked_key,
+            padding: RSA_PADDING_PKCS1_V15,
+            hash_algo: RSA_HASH_SHA256,
+            signature: rev(&signature),
+            ..Default::default()
+        },
+        TborStatus::InvalidPermissions,
+    );
+}
 
 /// A wrong explicit PSS salt length is a verification failure, not success.
 #[test]
