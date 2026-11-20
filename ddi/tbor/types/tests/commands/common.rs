@@ -277,7 +277,7 @@ pub(crate) fn sign_req(
         session_id,
         hash_algo: ecc_sign_hash_algo(digest.len()).expect("SHA-2 digest length"),
         masked_key,
-        input: ecc_sign_input(coord, wire_coord_len(1), digest),
+        input: ecc_sign_input(coord, wire_coord_len(1), digest).expect("valid ECC layout"),
     }
 }
 

@@ -56,7 +56,7 @@ pub enum EncodeError {
     DataTooLarge,
     /// Data section total exceeds the 13-bit offset range.
     DataOffsetOverflow,
-    /// Requested alignment is zero.
+    /// Requested alignment is zero or unsupported by the operand layout.
     InvalidAlignment,
 }
 
@@ -88,7 +88,7 @@ impl core::fmt::Display for EncodeError {
             Self::MissingTocEntries => f.write_str("missing required TOC entries"),
             Self::DataTooLarge => f.write_str("data too large (max 8191 bytes)"),
             Self::DataOffsetOverflow => f.write_str("data offset overflow (max 8191)"),
-            Self::InvalidAlignment => f.write_str("alignment must be non-zero"),
+            Self::InvalidAlignment => f.write_str("invalid alignment"),
         }
     }
 }

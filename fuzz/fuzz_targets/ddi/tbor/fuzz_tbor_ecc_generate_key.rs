@@ -294,7 +294,8 @@ fn check_signing_key(
             session_id: req.session_id,
             hash_algo: HASH_ALGO_SHA256,
             masked_key: resp.masked_key.clone(),
-            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &digest),
+            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &digest)
+                .expect("bounded ECC signing layout"),
         })
         .expect("generated signing key must be usable")
         .signature;
@@ -333,7 +334,8 @@ fn check_derivation_key(
             session_id: req.session_id,
             hash_algo: HASH_ALGO_SHA256,
             masked_key: resp.masked_key.clone(),
-            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &[0; 32]),
+            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &[0; 32])
+                .expect("bounded ECC signing layout"),
         },
         TborStatus::InvalidPermissions,
     );

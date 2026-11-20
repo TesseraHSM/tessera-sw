@@ -608,11 +608,20 @@ impl<'e> Worker<'e> {
         let (k, m) = self.rotate(keys.len(), self.pools.digests.len());
         let key = &keys[k];
         let digest = &self.pools.digests[m][..len];
+        let input = match ecc_sign_input(key.pub_le.len() / 2, wire_coord_len(1), digest) {
+            Ok(input) => input,
+            Err(error) => {
+                return (
+                    Duration::ZERO,
+                    Err(format!("invalid ECC signing input: {error}")),
+                )
+            }
+        };
         let req = TborEccSignReq {
             session_id: env.session_id,
             hash_algo: ecc_sign_hash_algo(len).expect("SHA-2 digest length"),
             masked_key: key.masked.clone(),
-            input: ecc_sign_input(key.pub_le.len() / 2, wire_coord_len(1), digest),
+            input,
         };
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
         let result = resp.and_then(|r| {

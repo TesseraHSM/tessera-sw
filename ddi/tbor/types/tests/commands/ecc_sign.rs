@@ -290,7 +290,8 @@ fn ecc_sign_unsupported_hash_algo_rejected() {
                         session_id,
                         hash_algo,
                         masked_key: masked_key.clone(),
-                        input: ecc_sign_input(coord, wire_coord_len(1), &vec![0xAB; digest_len]),
+                        input: ecc_sign_input(coord, wire_coord_len(1), &vec![0xAB; digest_len])
+                            .expect("valid ECC layout"),
                     },
                     TborStatus::InvalidArg,
                 );
@@ -313,7 +314,7 @@ fn ecc_sign_input_length_mismatch_rejected() {
                 good[..good.len() - pad].to_vec(),
                 long,
                 // A SHA-512 sized input labelled SHA-256.
-                ecc_sign_input(coord, pad, &[0xAB; 64]),
+                ecc_sign_input(coord, pad, &[0xAB; 64]).expect("valid ECC layout"),
             ];
             // Inputs over the field's max_len fail TBOR decode, not the handler.
             for input in inputs

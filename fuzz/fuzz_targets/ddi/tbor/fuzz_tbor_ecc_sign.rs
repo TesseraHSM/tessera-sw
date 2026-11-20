@@ -183,7 +183,8 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             hash_algo,
             masked_key,
-            input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest),
+            input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest)
+                .expect("bounded ECC signing layout"),
         };
         let result = ctx.tbor(&req);
 

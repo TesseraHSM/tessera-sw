@@ -333,7 +333,8 @@ pub(crate) fn ecc_sign_masked_tbor(
         order.coord_len(curve.component_size()),
         order.coord_len(1),
         &digest,
-    );
+    )
+    .map_hsm_err(HsmError::InvalidArgument)?;
 
     let req = TborEccSignReq {
         session_id: session.ex_session_id()?,

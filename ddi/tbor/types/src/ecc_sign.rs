@@ -11,6 +11,7 @@
 
 use alloc::vec::Vec;
 
+use crate::codec::EncodeError;
 use crate::tbor;
 use crate::HASH_ALGO_SHA256;
 use crate::HASH_ALGO_SHA384;
@@ -69,11 +70,33 @@ pub fn ecc_sign_hash_algo(digest_len: usize) -> Option<u8> {
 /// The `k` lane is zero (the device generates `k`); the digest sits at the
 /// head of a zero-padded lane of `max(coord_len, digest rounded up to
 /// lane_pad)` bytes.
-pub fn ecc_sign_input(coord_len: usize, lane_pad: usize, digest: &[u8]) -> Vec<u8> {
-    let lane = coord_len.max(digest.len().next_multiple_of(lane_pad));
-    let mut input = alloc::vec![0u8; coord_len + lane];
+///
+/// # Errors
+///
+/// Returns [`EncodeError::InvalidAlignment`] unless `lane_pad` is 4 or 8,
+/// or [`EncodeError::DataTooLarge`] if the packed input exceeds
+/// [`ECC_SIGN_INPUT_MAX_LEN`] or its length cannot be represented.
+pub fn ecc_sign_input(
+    coord_len: usize,
+    lane_pad: usize,
+    digest: &[u8],
+) -> Result<Vec<u8>, EncodeError> {
+    if !matches!(lane_pad, 4 | 8) {
+        return Err(EncodeError::InvalidAlignment);
+    }
+    let lane = coord_len.max(
+        digest
+            .len()
+            .checked_next_multiple_of(lane_pad)
+            .ok_or(EncodeError::DataTooLarge)?,
+    );
+    let len = coord_len
+        .checked_add(lane)
+        .filter(|&len| len <= ECC_SIGN_INPUT_MAX_LEN)
+        .ok_or(EncodeError::DataTooLarge)?;
+    let mut input = alloc::vec![0u8; len];
     input[coord_len..coord_len + digest.len()].copy_from_slice(digest);
-    input
+    Ok(input)
 }
 
 /// Host-facing TBOR `EccSign` response.
@@ -98,7 +121,7 @@ mod tests {
             session_id: 7,
             hash_algo: HASH_ALGO_SHA256,
             masked_key: alloc::vec![0x11u8; 264],
-            input: ecc_sign_input(32, 4, &[0x22u8; 32]),
+            input: ecc_sign_input(32, 4, &[0x22u8; 32]).expect("valid ECC layout"),
         };
         let mut buf = [0u8; 512];
         let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
@@ -111,12 +134,43 @@ mod tests {
     #[test]
     fn input_pads_digest_lane() {
         // P-521 on a big-endian device: 72-byte lanes, SHA-256 digest.
-        let input = ecc_sign_input(72, 8, &[0x33u8; 32]);
+        let input = ecc_sign_input(72, 8, &[0x33u8; 32]).expect("valid ECC layout");
         assert_eq!(input.len(), 144);
         assert!(input[..72].iter().all(|&b| b == 0));
         assert_eq!(&input[72..104], &[0x33u8; 32]);
         assert!(input[104..].iter().all(|&b| b == 0));
         // SHA-512 with P-256: the digest lane widens to the digest.
-        assert_eq!(ecc_sign_input(32, 4, &[1u8; 64]).len(), 96);
+        assert_eq!(
+            ecc_sign_input(32, 4, &[1u8; 64])
+                .expect("valid ECC layout")
+                .len(),
+            96
+        );
+    }
+
+    #[test]
+    fn input_rejects_unsupported_padding() {
+        for pad in [0, 1, 2, 3, 5, 16, usize::MAX] {
+            assert_eq!(
+                ecc_sign_input(32, pad, &[0; 32]),
+                Err(EncodeError::InvalidAlignment),
+            );
+        }
+    }
+
+    #[test]
+    fn input_rejects_unrepresentable_or_oversized_lengths() {
+        for pad in [4, 8] {
+            for coord in [usize::MAX, usize::MAX / 2 + 1] {
+                assert_eq!(
+                    ecc_sign_input(coord, pad, &[0; 32]),
+                    Err(EncodeError::DataTooLarge),
+                );
+            }
+            assert_eq!(
+                ecc_sign_input(32, pad, &[0; ECC_SIGN_INPUT_MAX_LEN]),
+                Err(EncodeError::DataTooLarge),
+            );
+        }
     }
 }

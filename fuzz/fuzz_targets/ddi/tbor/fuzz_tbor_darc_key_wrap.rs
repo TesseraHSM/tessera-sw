@@ -506,7 +506,8 @@ fn assert_success(
                 session_id: req.session_id,
                 hash_algo: ecc_sign_hash_algo(digest.len()).expect("SHA-2 digest length"),
                 masked_key: recovered.masked_key,
-                input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest),
+                input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest)
+                    .expect("bounded ECC signing layout"),
             })
             .expect("sign with round-tripped key")
             .signature;
