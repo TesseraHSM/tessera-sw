@@ -1232,10 +1232,10 @@ mod tests {
                 .await?;
             let private = alloc.dma_alloc(priv_len)?;
             let public = alloc.dma_alloc(pub_len)?;
-            let (priv_len, pub_len) = pal
+            let (priv_len, _) = pal
                 .rsa_gen_keypair(&io, key_size, HsmRsaPct::None, Some((private, public)))
                 .await?;
-            let (private, der) = (&private[..priv_len], &public[..pub_len]);
+            let private = &private[..priv_len];
             let public = alloc.dma_alloc(pal.rsa_priv_pub_key(&io, private, None)?)?;
             pal.rsa_priv_pub_key(&io, private, Some(&mut *public))?;
             let public = &*public;
@@ -1297,7 +1297,7 @@ mod tests {
                 k - 1
             };
             block[low] = 2;
-            pal.mod_exp_pub(&io, pub_size, der, block, Some(&mut *ciphertext))
+            pal.mod_exp_pub(&io, pub_size, public, block, Some(&mut *ciphertext))
                 .await?;
             assert_eq!(
                 pal.rsa_pkcs1_decrypt(&io, key_size, private, ciphertext, Some(&mut *plaintext))
