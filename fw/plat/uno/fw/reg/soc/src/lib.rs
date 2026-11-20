@@ -4,6 +4,7 @@
 
 #![no_std]
 #![allow(clippy::modulo_one)]
+#![recursion_limit = "256"]
 
 /// Register access type aliases.
 ///

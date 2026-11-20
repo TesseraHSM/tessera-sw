@@ -11,6 +11,8 @@
 //! count and task ID. The output destination is selected by the
 //! mutually-exclusive `backend-uart` / `backend-semihosting` features;
 //! with neither enabled the emitter compiles to a no-op (output disabled).
+//! With `backend-uart`, each line holds the UART lock that CP1 shares with
+//! CP0.
 //!
 //! `error_text!` takes the same arguments as `error!`. It prints with text
 //! output, which one of this crate's `level-*` features turns on, and
@@ -32,6 +34,10 @@
 #[cfg(feature = "tracing")]
 #[allow(unsafe_code)]
 mod emit;
+
+#[cfg(all(feature = "tracing", feature = "backend-uart"))]
+#[allow(unsafe_code)]
+mod lock;
 
 pub extern crate tsra_fw_hsm_core_tracing as tracing;
 

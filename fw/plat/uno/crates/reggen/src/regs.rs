@@ -484,8 +484,10 @@ pub fn generate(schema: &SocSchema) -> Vec<(String, String)> {
     ]
     .join("\n");
     let formatted_mods = crate::run_rustfmt(&crate::fixup_quote_spacing(&mod_code.to_string()));
+    // `io_gsram`'s register struct has enough fields that checking its
+    // layout passes the compiler's default query depth of 128.
     let mod_str = format!(
-        "{}\n#![no_std]\n#![allow(clippy::modulo_one)]\n\n{}\n{}",
+        "{}\n#![no_std]\n#![allow(clippy::modulo_one)]\n#![recursion_limit = \"256\"]\n\n{}\n{}",
         HEADER, access_aliases, formatted_mods,
     );
     files.push(("lib".to_string(), mod_str));

@@ -26,7 +26,9 @@ backend-semihosting = [
   "tsra_fw_uno_drivers_profile/trace",
 ]
 backend-uart = [
+  "dep:cortex-m",
   "dep:tsra_fw_uno_drivers_uart",
+  "dep:tsra_fw_uno_reg_soc",
   "tsra_fw_uno_drivers_profile/backend-uart",
 ]
 # Output pass-throughs to the tracing facade. `debug-log` makes `error!`,
@@ -42,11 +44,13 @@ level-trace = ["tsra_fw_hsm_core_tracing/level-trace"]
 level-warn = ["tsra_fw_hsm_core_tracing/level-warn"]
 
 [dependencies]
+cortex-m = { optional = true, workspace = true }
 embassy-time = { optional = true, workspace = true }
 tsra_fw_hsm_core_tracing.workspace = true
 tsra_fw_uno_drivers_profile = { optional = true, workspace = true }
 tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
 tsra_fw_uno_drivers_uart = { optional = true, workspace = true }
+tsra_fw_uno_reg_soc = { optional = true, workspace = true }
 
 [lints]
 workspace = true
