@@ -111,8 +111,12 @@ impl TborOpReq for SignRequest<'_> {
     }
 
     /// Keep offsets monotonic but displace both buffers by one unused data byte.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let len = self.req.encode_request(buf)?.len();
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let len = self.req.encode_request(buf, api_rev)?.len();
         if !self.shifted {
             return Ok(&buf[..len]);
         }

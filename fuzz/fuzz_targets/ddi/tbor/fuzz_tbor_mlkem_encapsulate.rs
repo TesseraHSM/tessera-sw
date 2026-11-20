@@ -128,7 +128,7 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput) -> SessionGuard<'a> {
     };
     if lifecycle == Lifecycle::DefaultPsk {
         return ctx
-            .open_session(role.psk_id(), role.session_type())
+            .open_session(role.psk_id(), role.suite())
             .expect("open default-PSK session");
     }
     if matches!(lifecycle, Lifecycle::Finalized | Lifecycle::SecurityDomain) {
@@ -282,11 +282,15 @@ impl TborOpReq for EncapsulateRequest {
     /// The remaining key offset still points past the unreferenced gap. The
     /// ordinary codec accepts this frame, but the handler must reject its
     /// noncanonical in-place location before invoking encapsulation.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> core::result::Result<&'b [u8], EncodeError> {
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> core::result::Result<&'b [u8], EncodeError> {
         if self.gap == 0 {
-            return self.req.encode_request(buf);
+            return self.req.encode_request(buf, api_rev);
         }
-        let len = RequestEncoder::new(buf, PROTOCOL_VERSION, Self::OPCODE)
+        let len = RequestEncoder::new(buf, api_rev, Self::OPCODE)
             .with_toc_slots(4)?
             .session_id(self.req.session_id)?
             .uint8(self.req.scope)?
@@ -296,7 +300,7 @@ impl TborOpReq for EncapsulateRequest {
             .len();
         let padding_toc = REQ_HEADER_LEN + 2 * TOC_ENTRY_LEN;
         buf.copy_within(padding_toc + TOC_ENTRY_LEN..len, padding_toc);
-        Request::write_header(buf, &Request::new(Self::OPCODE), 3);
+        Request::write_header(buf, &Request::new(api_rev, Self::OPCODE), 3);
         let frame = &buf[..len - TOC_ENTRY_LEN];
         let view = RequestView::parse(frame).expect("relocated request must be structurally valid");
         assert_eq!(view.toc_count(), 3);
