@@ -199,7 +199,7 @@ impl StdEcc {
         if sig_out.len() != wire_coord_len(curve, self.form) * 2 {
             return Err(HsmError::EccSignFailed);
         }
-        if !matches!(hash.len(), 32 | 48 | 64) {
+        if hash.len() > 64 {
             return Err(HsmError::InvalidArg);
         }
 
@@ -681,11 +681,7 @@ mod tests {
             .pub_coords(&pub_key, form, &mut pub_op[..sig_len])
             .await
             .expect("pub coords");
-        let digest_len = match curve {
-            EccCurve::P256 => 32,
-            EccCurve::P384 => 48,
-            EccCurve::P521 => 64,
-        };
+        let digest_len = ecc_digest_len(curve);
         let hash: Vec<u8> = (1..=digest_len as u8).collect();
         let mut sig = [0u8; 144];
         driver

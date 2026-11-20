@@ -45,24 +45,6 @@ use tsra_fw_uno_drivers_upka::mont_operand_size;
 use tsra_fw_uno_pct::ecc_pct;
 use zeroize::Zeroize;
 
-fn valid_ecdsa_digest_len(len: usize) -> bool {
-    matches!(len, 32 | 48 | 64)
-}
-
-fn normalize_ecdsa_digest(hash: &HsmDmaBuf, out: &mut HsmDmaBuf) -> HsmResult<()> {
-    if !valid_ecdsa_digest_len(hash.len()) {
-        return Err(HsmError::InvalidArg);
-    }
-    out.fill(0);
-    let out_len = out.len();
-    if hash.len() >= out_len {
-        out.copy_from_slice(&hash[hash.len() - out_len..]);
-    } else {
-        out[..hash.len()].copy_from_slice(hash);
-    }
-    Ok(())
-}
-
 use super::ecc_det::ORDER384_BE;
 use super::ecc_det::ct_in_range;
 use super::ecc_det::ct_in_range_le;
@@ -753,7 +735,7 @@ impl HsmEcc for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the PKA driver.
     async fn ecc_sign(
         &self,
-        io: &UnoHsmIo,
+        _io: &UnoHsmIo,
         curve: HsmEccCurve,
         hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,

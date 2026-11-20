@@ -60,7 +60,9 @@ mod tests {
             signature: alloc::vec![0x22; ECDSA_SIGNATURE_MAX_LEN],
         };
         let mut req_buf = [0u8; 4096];
-        let request = req.encode_request(&mut req_buf).expect("encode request");
+        let request = req
+            .encode_request(&mut req_buf, (1, 1))
+            .expect("encode request");
         assert!(request.len() <= req_buf.len());
     }
 }

@@ -9,9 +9,9 @@ use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::TborEcdsaSignReq;
 use tsra_fw_ddi_tbor_types::TborEcdsaSignResp;
 use tsra_fw_ddi_tbor_types::ECDSA_MESSAGE_MAX_LEN;
-use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -28,14 +28,6 @@ fn hash_algo(algo: HashAlgo) -> HsmResult<HsmHashAlgo> {
         HashAlgo::Sha384 => Ok(HsmHashAlgo::Sha384),
         HashAlgo::Sha512 => Ok(HsmHashAlgo::Sha512),
         _ => Err(HsmError::InvalidArg),
-    }
-}
-
-fn signature_lane_len(curve: tsra_fw_hsm_pal_traits::HsmEccCurve, order: HsmByteOrder) -> usize {
-    if curve == tsra_fw_hsm_pal_traits::HsmEccCurve::P521 && order == HsmByteOrder::Be {
-        72
-    } else {
-        curve.wire_coord_len(order)
     }
 }
 
@@ -61,7 +53,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
         let view = unmask(pal, io, masking_key, req.masked_key).await?;
         let curve = ecc_private_curve(view.key_kind)?;
-        if view.target_key.len() != curve.wire_priv_key_len(P::BYTE_ORDER) {
+        if view.target_key.len() != curve.wire_priv_key_len(P::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         if !view.key_attrs.sign() {
@@ -80,21 +72,19 @@ pub(crate) async fn handle<P: HsmPal>(
         )
     };
 
-    let digest = pal.dma_alloc_zeroed(io, algo.digest_len())?;
+    let lane_len = curve.wire_coord_len(P::ECC_COORD_PAD);
+    let input = pal.dma_alloc_zeroed(io, curve.ecdsa_sign_input_len(algo, P::ECC_COORD_PAD))?;
     pal.hash_oob(
         io,
         algo,
         message_len,
         message_index,
         HsmDigestForm::Operand,
-        digest,
+        &mut input[lane_len..lane_len + algo.digest_len()],
     )
     .await?;
 
-    let pal_signature_len = curve.wire_sig_len(P::BYTE_ORDER);
-    let signature_lane_len = signature_lane_len(curve, P::BYTE_ORDER);
-    let signature_len = signature_lane_len * 2;
-    let pal_signature = pal.dma_alloc_zeroed(io, pal_signature_len)?;
+    let signature_len = curve.wire_sig_len(P::ECC_COORD_PAD);
     let signature = pal.dma_alloc_zeroed(io, signature_len)?;
     let key_end = key_at.checked_add(key_len).ok_or(HsmError::InvalidArg)?;
     let buffer = cmd_buf.buffer_mut();
@@ -104,18 +94,21 @@ pub(crate) async fn handle<P: HsmPal>(
     let (_, after_key_start) = buffer.split_at(key_at);
     let (key, _) = after_key_start.split_at(key_len);
     let written = pal
-        .ecc_sign(io, curve, key, digest, Some(pal_signature))
+        .ecc_sign(
+            io,
+            curve,
+            algo,
+            key,
+            HsmEcdsaNonce::Generated,
+            input,
+            Some(signature),
+        )
         .await?;
-    if written != pal_signature_len {
+    if written != signature_len {
         return Err(HsmError::InternalError);
     }
-    let pal_lane_len = curve.wire_coord_len(P::BYTE_ORDER);
-    let raw_len = curve.priv_key_len();
-    signature[..raw_len].copy_from_slice(&pal_signature[..raw_len]);
-    signature[signature_lane_len..signature_lane_len + raw_len]
-        .copy_from_slice(&pal_signature[pal_lane_len..pal_lane_len + raw_len]);
     cmd_buf.encode_response(|buf| {
-        let frame = TborEcdsaSignResp::encode(buf, 0, false)?
+        let frame = TborEcdsaSignResp::encode_for_request(buf, 0, false)?
             .signature(&signature[..signature_len])?
             .finish();
         Ok(frame.as_bytes().len())
