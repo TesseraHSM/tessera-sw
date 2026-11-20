@@ -718,7 +718,7 @@ impl UnoHsmPal {
     /// Returns `()`.
     ///
     /// # Side Effects
-    /// - Initializes IIC, OIC, and GDMA hardware drivers.
+    /// - Initializes the IIC and OIC hardware drivers.
     /// - Moves boot phase to [`BootPhase::Running`].
     /// - Publishes `Run` to shared boot-status memory.
     /// - Optionally emits semihosting `SYS_READY` when feature-enabled.
@@ -728,11 +728,10 @@ impl UnoHsmPal {
         // update; the drivers attach (resume from the hardware indices) rather
         // than reprogram. Every other reset type performs a full program. Each
         // driver reads the SP-published reset reason itself in `init`. GDMA is
-        // re-initialised unconditionally, mirroring the reference Admin's
+        // initialised by the caller beforehand, mirroring the reference Admin's
         // unconditional `GdmaController::new_with_enable`.
         self.iic.init();
         self.oic.init();
-        self.gdma.init();
         self.boot_phase.set(BootPhase::Running);
         boot_status::set(BootStatus::Run);
 
@@ -868,6 +867,11 @@ impl UnoHsmPal {
                     panic!("pre-operational self-test failed");
                 }
                 info!("selftest", "pre-operational self-test PASSED");
+                // After a warm reset, restore the identities dropped with the
+                // wiped vault before host IO is enabled. Vault inserts use
+                // GDMA, so it is initialised first.
+                self.gdma.init();
+                self.reprovision_after_warm_reset().await;
                 self.on_boot_complete()
             }
             BootPhase::Running => {
@@ -1326,10 +1330,14 @@ impl HsmPal for UnoHsmPal {
         // itself is armed only when sending a crash notification.
         Tcon::disable_wakeup_timer1();
         // Recovery boot: only a cold (power-on) boot wipes the partition
-        // store. On a warm / fw-update reset the GSRAM-resident store survived,
-        // so preserve every partition's persisted state (res_mask, keys, creds,
-        // sessions) and only re-arm Gate 1. Mirrors the reference `HsmEnv::new`
-        // constructor selection on `SocInfo::reset_type` (`env.rs`).
+        // store. On a warm / fw-update reset the GSRAM-resident store survived
+        // and Gate 1 is re-armed. A non-graceful warm reset also wipes the
+        // key vault (SP `NON_GRACEFUL_RESET_ERASE_SRAM`), so the store's vault
+        // key handles are dropped too, while a graceful fw-update keeps the
+        // vault and every partition's state. Mirrors the reference
+        // `HsmEnv::new` constructor selection on `SocInfo::reset_type`
+        // (`env.rs`): `new_with_resource_table` for warm, `restore` for
+        // fw-update.
         match tsra_fw_uno_drivers_soc::reset_type() {
             SocResetType::Por => {
                 info!("boot", "init: reset=POR -> partition store init_default");
@@ -1337,14 +1345,19 @@ impl HsmPal for UnoHsmPal {
                 // FP slot map: SP zeroes GSRAM on POR; kept across
                 // warm/fw-update with the vault.
             }
-            SocResetType::WarmReset | SocResetType::FwUpdateWarmReset => {
+            SocResetType::WarmReset => {
+                info!(
+                    "boot",
+                    "init: reset=warm -> keep store, drop vault state, rearm gate1"
+                );
+                crate::part::drop_vault_state_after_warm_reset();
+                tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
+            }
+            SocResetType::FwUpdateWarmReset => {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
                 // preserved as-is and only Gate 1 is re-armed.
-                info!(
-                    "boot",
-                    "init: reset=warm/fwupdate -> keep store, rearm gate1"
-                );
+                info!("boot", "init: reset=fwupdate -> keep store, rearm gate1");
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
             }
         }

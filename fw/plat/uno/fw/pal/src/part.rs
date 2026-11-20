@@ -43,6 +43,33 @@ use crate::io::UnoHsmIo;
 /// Number of partition slots (one per global key-vault table index).
 pub const NUM_PARTITIONS: usize = 65;
 
+/// Drops the vault-backed state of every allocated partition after a
+/// non-graceful warm reset.
+///
+/// The SP wipes the GSRAM key vault on a non-graceful warm reset but keeps
+/// the partition store, so every vault key handle in the store would point
+/// at wiped storage. Mirrors the reference `HsmEnv::new`, which builds a
+/// warm-reset partition with `new_with_resource_table`: only the resource
+/// mask and the persistent store survive, and vault-backed keys are
+/// recreated. Established sessions are kept for renegotiation, as their
+/// session-blob keys are gone. The identity is re-provisioned by
+/// [`UnoHsmPal::reprovision_after_warm_reset`] once the boot self-tests pass.
+pub(crate) fn drop_vault_state_after_warm_reset() {
+    for idx in 0..NUM_PARTITIONS {
+        let pid = HsmPartId::from(idx as u8);
+        let Ok(part) = PartStore::partition(pid) else {
+            continue;
+        };
+        if matches!(part.state(), Ok(HsmPartState::Unallocated) | Err(_)) {
+            continue;
+        }
+        part.drop_vault_state();
+        if let Ok(mut sessions) = SessionStore::partition(pid) {
+            sessions.mark_all_needs_renego();
+        }
+    }
+}
+
 /// Length of the identity ECC P-384 public key (X ‖ Y), in bytes.
 pub const ID_PUB_KEY_LEN: usize = 96;
 
@@ -200,6 +227,58 @@ impl UnoHsmPal {
     async fn provision_allocation(&self, pid: HsmPartId) -> HsmResult<()> {
         self.provision_identity(pid).await?;
         self.provision_masked_bk_boot(pid).await
+    }
+
+    /// Re-provisions every partition whose vault-backed state was dropped by
+    /// [`drop_vault_state_after_warm_reset`]: a fresh identity, plus the
+    /// enable-time keys if the partition is `Enabled` (otherwise
+    /// `part_enable` provisions them).
+    ///
+    /// Runs once at boot, after the pre-operational self-tests and before
+    /// host IO is enabled. It cannot wait for a `SetResource` replay: after a
+    /// warm reset Admin restores its resource table and completes a same-count
+    /// `SetResCnt` without sending the IPC. A partition that fails is left
+    /// without an identity and logged.
+    pub(crate) async fn reprovision_after_warm_reset(&self) {
+        for idx in 0..NUM_PARTITIONS {
+            let pid = HsmPartId::from(idx as u8);
+            let Ok(part) = PartStore::partition(pid) else {
+                continue;
+            };
+            let Ok(state) = part.state() else {
+                continue;
+            };
+            if matches!(state, HsmPartState::Unallocated | HsmPartState::Faulted)
+                || part.res_mask() == 0
+                || part.id_key_id().is_some()
+            {
+                continue;
+            }
+            if let Err(_e) = self.reprovision_partition(pid, state).await {
+                tsra_fw_uno_trace::tracing::error!("boot", _e, "warm reset: re-provision failed");
+            }
+        }
+    }
+
+    /// Re-provisions one partition for [`Self::reprovision_after_warm_reset`].
+    /// On failure no identity is left behind.
+    async fn reprovision_partition(&self, pid: HsmPartId, state: HsmPartState) -> HsmResult<()> {
+        self.provision_identity(pid).await?;
+        if state != HsmPartState::Enabled {
+            return Ok(());
+        }
+        if let Err(e) = self.provision_enabled_keys(pid).await {
+            let part = PartStore::partition(pid)?;
+            if let Some(key_id) = part.id_key_id() {
+                self.with_admin_io(pid, async |admin_io, _alloc| {
+                    self.delete_key(admin_io, key_id).await;
+                })
+                .await;
+            }
+            part.clear_identity();
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Reverts a failed [`part_alloc`]: deletes the identity vault key (if

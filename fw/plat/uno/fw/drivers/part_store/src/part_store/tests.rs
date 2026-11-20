@@ -248,6 +248,92 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
     );
 }
 
+/// After a non-graceful warm reset the SP wipes the key vault, so
+/// `drop_vault_state` must drop the identity, every vault key handle, the SD
+/// gate, and the credential, while keeping the non-vault provisioning
+/// material, lifecycle state, resource mask, and session table.
+#[test]
+fn drop_vault_state_clears_vault_handles_and_keeps_provisioning() {
+    let pid = 20usize;
+    let psk_co = [0x11u8; PSK_LEN];
+    let guid = [0x33u8; GUID_LEN];
+    let cred = [0x66u8; CREDENTIAL_LEN];
+    let bk3 = [0x77u8; BK3_KEY_LEN];
+    let policy = PinPolicy {
+        state: PinPolicyState::Lockout,
+        delay_factor: 5,
+        allowed_attempts: 3,
+        lockout_time: [9u8; 8],
+    };
+
+    {
+        let mut p = Partition(pid);
+        p.set_id(buf(&[0x5Au8; ID_LEN])).unwrap();
+        p.set_id_key_id(Some(HsmKeyId::from(0x0001u16)));
+        p.set_ec_key_id(Some(HsmKeyId::from(0x0102u16)));
+        p.set_se_key_id(Some(HsmKeyId::from(0x0304u16)));
+        p.set_mk_key_id(Some(HsmKeyId::from(0x0506u16)));
+        p.set_ups_key_id(Some(HsmKeyId::from(0x0708u16)));
+        p.set_pta_key_id(Some(HsmKeyId::from(0x090au16)));
+        p.set_unwrapping_key_id(Some(HsmKeyId::from(0x0b0cu16)));
+        p.set_local_mk_key_id(Some(HsmKeyId::from(0x0d0eu16)));
+        p.set_ephemeral_mk_key_id(Some(HsmKeyId::from(0x0f10u16)));
+        p.set_sd_mk_key_id(Some(HsmKeyId::from(0x1112u16)));
+        p.set_sd_initialized(true);
+        p.set_credential(buf(&cred)).unwrap();
+        p.set_psk_co(buf(&psk_co)).unwrap();
+        p.set_vm_launch_guid(&guid);
+        p.set_bk3_session(buf(&bk3)).unwrap();
+        p.set_bk3_initialized(true);
+        p.set_pin_policy(policy);
+        p.set_res_mask(0x3);
+        p.set_state(HsmPartState::Enabled);
+        p.session_table_mut().fill(0xAB);
+    }
+
+    Partition(pid).drop_vault_state();
+
+    let p = Partition(pid);
+    for (name, key) in [
+        ("id", p.id_key_id()),
+        ("ec", p.ec_key_id()),
+        ("se", p.se_key_id()),
+        ("mk", p.mk_key_id()),
+        ("ups", p.ups_key_id()),
+        ("pta", p.pta_key_id()),
+        ("unwrapping", p.unwrapping_key_id()),
+        ("local mk", p.local_mk_key_id()),
+        ("ephemeral mk", p.ephemeral_mk_key_id()),
+        ("sd mk", p.sd_mk_key_id()),
+    ] {
+        assert!(key.is_none(), "{name} key handle must be dropped");
+    }
+    assert_eq!(&p.id()[..], &[0u8; ID_LEN][..], "id must be zeroed");
+    assert!(!p.sd_initialized(), "SD gate must follow its key");
+    assert!(!p.credential_valid(), "credential must be cleared");
+
+    assert_eq!(&p.psk_co()[..], &psk_co[..], "PSK must survive");
+    assert_eq!(&p.vm_launch_guid()[..], &guid[..], "VM GUID must survive");
+    assert!(p.bk3_session_valid(), "BK3 session key must survive");
+    assert!(p.bk3_initialized(), "BK3 incarnation flag must survive");
+    assert_eq!(
+        p.pin_policy().state,
+        PinPolicyState::Lockout,
+        "PIN policy must survive"
+    );
+    assert_eq!(p.res_mask(), 0x3, "resource mask must survive");
+    assert_eq!(
+        p.state().unwrap(),
+        HsmPartState::Enabled,
+        "state must survive"
+    );
+    assert_eq!(
+        p.session_table(),
+        &[0xABu8; SESSION_TABLE_LEN],
+        "session table is left to the PAL"
+    );
+}
+
 #[test]
 fn sealed_bk3_raw_setter_overwrites_and_bounds_length() {
     let p = Partition(10);

@@ -747,6 +747,33 @@ impl Partition {
         }
     }
 
+    /// Drops this partition's vault-backed state after a non-graceful warm
+    /// reset, in which the SP wipes the key vault but preserves this store.
+    ///
+    /// Clears the identity and every vault key handle, the `SD_INITIALIZED`
+    /// gate that follows the SDMK, and the caller-presented credential. This
+    /// mirrors the reference `PartState::new_with_resource_table`, whose
+    /// in-memory key IDs and credentials start empty on a warm reset while
+    /// its persistent store survives. Provisioning material that does not
+    /// live in the vault (sealed BK3, BK3 session key, `Masked_BK_BOOT`, VM
+    /// launch GUID, policy hash, PSKs, PIN policy), the resource mask, the
+    /// lifecycle state, and the unwrapping-key slot are preserved. The PAL
+    /// handles the session table and re-provisions the identity.
+    #[inline(never)]
+    pub fn drop_vault_state(self) {
+        self.clear_identity();
+        self.clear_enabled_keys();
+        self.set_mk_key_id(None);
+        self.set_ups_key_id(None);
+        self.set_pta_key_id(None);
+        self.set_local_mk_key_id(None);
+        self.set_ephemeral_mk_key_id(None);
+        self.set_sd_mk_key_id(None);
+        self.set_unwrapping_key_id(None);
+        self.set_sd_initialized(false);
+        self.clear_credential();
+    }
+
     /// What has been found of whether the crypto-officer (`co`) or
     /// crypto-user PSK still holds its default, if it has been compared
     /// since the slot was last written (see [`Self::memo_psk_default`]).
