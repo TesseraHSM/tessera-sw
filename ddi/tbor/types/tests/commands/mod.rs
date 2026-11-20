@@ -24,6 +24,7 @@ pub mod default_psk_gate;
 pub mod ecc_generate_key;
 pub mod ecc_sign;
 pub mod ecc_sign_hw;
+pub mod ecc_verify;
 pub mod ecdh_derive;
 pub mod forward_compat;
 pub mod fw_error_decode;

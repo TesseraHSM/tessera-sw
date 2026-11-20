@@ -63,7 +63,7 @@ single `none` TOC placeholder and no typed body fields.
 
 Header and framing integers (`U16`/`U32`/`U64` fields, descriptors) are
 always little-endian. Crypto operands — ECC coordinates and signature
-components, digests passed to `EccSign`, RSA moduli, exponents and
+components, digests passed to `EccSign` / `EccVerify`, RSA moduli, exponents and
 `RsaModExp` / OAEP integers — are carried in the **device byte order**, the
 native order of the device's crypto engine, so firmware never copies an
 operand just to convert it:
@@ -71,7 +71,7 @@ operand just to convert it:
 | API revision | Device | Order | P-521 coordinate |
 | --- | --- | --- | --- |
 | 1.x | Uno (and std Uno) | little-endian | 68 B (66 B value + 2 zero pad bytes above it) |
-| 2.0 | Duo (and std Duo) | big-endian | 66 B (exact) |
+| 2.0 | Duo (and std Duo) | big-endian | 72 B (66 B value + 6 zero pad bytes after it) |
 
 P-256 / P-384 coordinates are 32 / 48 B in both orders. The host derives
 the order from the selected API revision and converts at the DDI
@@ -198,7 +198,7 @@ allocation. Errors overwrite the response prefix in the same storage. Every publ
 including padding or gaps, must be initialized; overlapping crypto requires an
 explicitly supported in-place PAL operation.
 
-All 43 commands encode their compact responses directly into this shared
+All 44 commands encode their compact responses directly into this shared
 allocation; there is no legacy dispatch bridge or separately allocated encoded
 response. Existing cryptographic working buffers remain scoped independently.
 Hash consumes the input before reclaiming it for the digest.
@@ -248,6 +248,7 @@ storage is zero.
 | `0x16` | `AesEncryptDecrypt` | InSession | [`commands/aes_encrypt_decrypt.md`](./commands/aes_encrypt_decrypt.md) |
 | `0x17` | `EccGenerateKey` | InSession | [`commands/ecc_generate_key.md`](./commands/ecc_generate_key.md) |
 | `0x18` | `EccSign` | InSession | [`commands/ecc_sign.md`](./commands/ecc_sign.md) |
+| `0x33` | `EccVerify` | InSession | [`commands/ecc_verify.md`](./commands/ecc_verify.md) |
 | `0x19` | `EcdhDerive` | InSession | [`commands/ecdh_derive.md`](./commands/ecdh_derive.md) |
 | `0x1A` | `RsaModExp` | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
 | `0x1B` | `Hash` | InSession | [`commands/hash.md`](./commands/hash.md) |
