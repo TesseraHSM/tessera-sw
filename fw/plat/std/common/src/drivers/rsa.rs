@@ -327,7 +327,7 @@ impl StdRsa {
         }
         let key = pub_key.clone();
         // Operands are in PAL order; OpenSSL is big-endian.
-        let mut x_be = x_input.to_vec();
+        let mut x_be = Zeroizing::new(x_input.to_vec());
         byte_order::int_to_be(self.order, &mut x_be);
         let mut n_be = vec![0u8; k];
         pub_key
