@@ -26,6 +26,7 @@ use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::device_is_little_endian;
@@ -239,7 +240,17 @@ fuzz_target!(|input: FuzzInput| {
             (Ok(response), true) => assert_eq!(response.output, message),
             (Ok(_), false) => panic!("invalid RSA encrypt/decrypt request unexpectedly succeeded"),
             (Err(err), true) => panic!("valid RSA encrypt/decrypt request failed: {err}"),
-            (Err(_), false) => {}
+            (Err(error), false) => {
+                // Only valid requests have their keys tampered; parameter checks precede permissions.
+                let expected = if valid {
+                    TborStatus::AesGcmDecryptTagDoesNotMatch
+                } else if padding_valid && hash_valid && label_valid && op_valid {
+                    TborStatus::InvalidPermissions
+                } else {
+                    TborStatus::InvalidArg
+                };
+                assert_fw_rejects(&error, expected);
+            }
         }
 
         if !input.signing_permissions {

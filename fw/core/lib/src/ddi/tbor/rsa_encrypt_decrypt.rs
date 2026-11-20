@@ -21,6 +21,7 @@ use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use zeroize::Zeroize;
 
 use super::from_pal::rsa_key;
 use super::resolve_masking_key;
@@ -33,7 +34,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
-        let (sess_id, op, padding, hash) = {
+        let (api_rev, sess_id, op, padding, hash) = {
             let base = cmd_buf.request().as_ptr() as usize;
             let req = TborRsaEncryptDecryptReq::decode(cmd_buf.request())?;
             let sess_id = HsmSessId::from(u16::from(req.session_id()));
@@ -90,7 +91,7 @@ pub(crate) async fn handle<P: HsmPal>(
             if label_at != payload_start || input_at != expected_input || key_at != expected_key {
                 return Err(HsmError::TborNonCanonicalLayout);
             }
-            (sess_id, op, padding, hash)
+            (req.api_rev(), sess_id, op, padding, hash)
         };
 
         let (label, input, private_key) = {
@@ -206,9 +207,9 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InternalError);
         }
 
-        private_key.fill(0);
+        cmd_buf.request_mut().zeroize();
         cmd_buf.encode_response(|buf| {
-            let frame = TborRsaEncryptDecryptResp::encode_for_request(buf, 0, false)?
+            let frame = TborRsaEncryptDecryptResp::encode(buf, api_rev, 0, false)?
                 .output(&output[..actual_len])?
                 .finish();
             Ok(frame.as_bytes().len())
