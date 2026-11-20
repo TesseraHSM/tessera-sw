@@ -16,9 +16,9 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborRsaEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
@@ -596,7 +596,7 @@ fn rsa_encrypt_decrypt_rejects_non_rsa_private_keys() {
 fn rsa_encrypt_decrypt_default_psk_is_gated() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
+        .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
     let placeholder_key = vec![0; 264];
     ctx.expect_fw_reject(

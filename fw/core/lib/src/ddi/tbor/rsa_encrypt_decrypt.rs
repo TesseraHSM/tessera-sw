@@ -208,7 +208,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
         private_key.fill(0);
         cmd_buf.encode_response(|buf| {
-            let frame = TborRsaEncryptDecryptResp::encode(buf, 0, false)?
+            let frame = TborRsaEncryptDecryptResp::encode_for_request(buf, 0, false)?
                 .output(&output[..actual_len])?
                 .finish();
             Ok(frame.as_bytes().len())

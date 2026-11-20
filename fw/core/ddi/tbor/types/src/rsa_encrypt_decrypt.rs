@@ -94,7 +94,7 @@ mod tests {
         let label = [0x31; RSA_OAEP_LABEL_MAX_LEN];
         let input = [0x42; RSA_ENCRYPT_DECRYPT_MAX_LEN];
         let key = [0x53; 3168];
-        let frame = TborRsaEncryptDecryptReq::encode(&mut buf)
+        let frame = TborRsaEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -111,14 +111,14 @@ mod tests {
             .masked_key(&key)
             .unwrap()
             .finish();
-        assert_eq!(frame.as_bytes()[3], 0x34);
+        assert_eq!(frame.as_bytes()[5], 0x34);
         assert!(frame.as_bytes().len() <= 4096);
     }
 
     #[test]
     fn response_allows_empty_plaintext() {
         let mut buf = [0u8; 64];
-        let frame = TborRsaEncryptDecryptResp::encode(&mut buf, 0, true)
+        let frame = TborRsaEncryptDecryptResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .output(&[])
             .unwrap()

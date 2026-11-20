@@ -393,9 +393,9 @@ impl StdRsa {
     /// whereas the PAL contract (and the hardware PAL) report an error.
     ///
     /// # Errors
-    /// - [`HsmError::InvalidArg`] — ciphertext out of range, or `output`
-    ///   too small for the recovered message.
-    /// - [`HsmError::RsaDecryptFailed`] — padding check failed.
+    /// - [`HsmError::InvalidArg`] — key or ciphertext length mismatch, or
+    ///   `output` too small for the recovered message.
+    /// - [`HsmError::RsaDecryptFailed`] — ciphertext out of range or invalid padding.
     pub async fn pkcs1_decrypt(
         &self,
         key_size: HsmRsaKey,

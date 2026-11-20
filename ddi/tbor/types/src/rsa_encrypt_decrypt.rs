@@ -107,7 +107,7 @@ mod tests {
         };
         let mut frame = [0u8; 4096];
         let encoded = req
-            .encode_request(&mut frame)
+            .encode_request(&mut frame, (1, 1))
             .expect("maximum request encodes");
         assert!(encoded.len() <= frame.len());
     }
