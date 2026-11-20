@@ -150,12 +150,8 @@ fn prepare_fixture<'ctx>(
     let mut partition = Partition::Uninitialized;
 
     let session = if default_psk {
-        let (psk_id, session_type) = if crypto_officer {
-            (CO_PSK_ID, SessionType::Authenticated)
-        } else {
-            (CU_PSK_ID, SessionType::PlainText)
-        };
-        ctx.open_session(psk_id, session_type)
+        let psk_id = if crypto_officer { CO_PSK_ID } else { CU_PSK_ID };
+        ctx.open_session(psk_id, SessionSuite::EcdhP384)
             .expect("open default-PSK session")
     } else {
         let setup_as_co = crypto_officer || desired_partition != Partition::Uninitialized;

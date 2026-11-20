@@ -213,7 +213,11 @@ pub trait TborOpReq: Sized {
 
     /// Encode this request into `buf` and return the encoded message
     /// slice. The slice borrows from `buf` for the duration of the call.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError>;
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError>;
 }
 
 /// Trait implemented by owned TBOR response value types.
@@ -227,6 +231,15 @@ pub trait TborResp: Sized {
 
     /// Decode an owned response value from the wire buffer.
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError>;
+
+    /// Validate the echoed revision before decoding the response body.
+    fn decode_response_for_api_rev(
+        buf: &[u8],
+        api_rev: (u16, u16),
+    ) -> Result<Self, codec::DecodeError> {
+        codec::ResponseView::parse(buf)?.require_api_rev(api_rev)?;
+        Self::decode_response(buf)
+    }
 }
 
 /// Session id carried in a TBOR response body, if any.

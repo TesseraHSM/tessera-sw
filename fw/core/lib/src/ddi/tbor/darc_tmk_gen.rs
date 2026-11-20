@@ -104,7 +104,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcTmkGen` response around the masked TMK.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, masked_tmk: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkGenResp::encode(buf, 0, false)?
+        let frame = TborDarcTmkGenResp::encode_for_request(buf, 0, false)?
             .masked_tmk(masked_tmk)?
             .finish();
         Ok(frame.as_bytes().len())

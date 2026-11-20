@@ -80,23 +80,57 @@ opened with [`tsra_part_open`](#tsra_part_open). `psk` must be a non-NULL
 pointer to an [`tsra_session_psk`](#tsra_session_psk) selecting the role
 slot; only its inner `psk` buffer may be NULL, which selects the partition
 default PSK for the slot. A NULL `psk` pointer is rejected with
-`TSRA_STATUS_INVALID_ARGUMENT`. The `session_type` selects the channel
-integrity profile pinned for the session (see
-[tsra_session_ex_type](#tsra_session_ex_type)), and a handle to the new
-session is returned.
+`TSRA_STATUS_INVALID_ARGUMENT`. The `suite` selects the key-establishment
+suite (see [tsra_session_suite](#tsra_session_suite)); an unknown value is
+rejected with `TSRA_STATUS_INVALID_ARGUMENT`. A handle to the new session
+is returned.
 
-At API revision 2.0 (Duo), the handshake also derives per-direction
-AES-256-GCM transport keys. The SDK encrypts the handshake's second
-message, every in-session command and the session close with them, and
-the device encrypts each response; this applies to both session types.
+`root_spki_thumbprint` is mandatory: a non-NULL buffer containing exactly
+48 bytes, the SHA-384 digest of the trusted root certificate's **DER-encoded
+SubjectPublicKeyInfo** (not the whole certificate and not raw EC coordinates).
+Provision it from an independently trusted manufacturer/enrollment source;
+hashing the root just received from an untrusted device is not authentication.
+The trusted thumbprint is always required; there is no automatic trust-on-first-use.
+
+Before sending `SessionOpenInit`, the SDK validates the PID certificate's
+signatures, validity and CA constraints, authenticates the resulting path's root
+against this thumbprint, and requires a **non-PID certificate on that validated path**
+with both DICE TCB Info (`2.23.133.5.4.1`) explicitly declaring `layer = 0`
+and EKU `1.3.6.1.4.1.311.102.1.50.1`. The DICE layer is context-specific tag
+`[4]`; an absent layer is not layer zero. Unused certificates in the supplied
+chain do not qualify. The same validated PID key verifies the handshake.
+This proves Tessera provenance under the trusted root, not a particular unit's
+identity or fresh firmware attestation.
+
+Every security-domain session is encrypted. The handshake authenticates
+the device with its partition identity key (an ECDSA P-384 signature over
+the handshake transcript) and the caller with the role PSK, and derives
+per-direction AES-256-GCM transport keys. The SDK encrypts the handshake's
+second message, every in-session command and the session close with them,
+and the device encrypts each response. This holds on every device model.
 Out-of-band data is not covered by this encryption. The transport is
-transparent to callers: no API or parameter changes.
+transparent to callers.
+
+The selected API major/minor appear in the common TBOR header and are
+authenticated in the Init signature and session-key derivation, without
+duplicate Init body fields. Finish and all subsequent session commands use
+that same revision. The SDK rejects a response carrying a different revision.
+This binds the selected revision; discovery does not cryptographically
+negotiate or guarantee selection of the highest supported revision.
+
+Implicit 32-byte AAD binds each response to the original request IV and
+transport context. The SDK retains the expected context locally and checks
+authentication before decoding the result; responses may complete out of
+order. This adds no wire fields and does not provide exactly-once request
+execution or authenticate out-of-band data. Both SDK and firmware must support
+this binding format.
 
 ```cpp
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
+    const tsra_buffer *root_spki_thumbprint,
     const tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
     );
 ```
@@ -106,13 +140,18 @@ tsra_status tsra_sess_ex_open(
  | Parameter         | Name                                                | Description                                    |
  | ----------------- | --------------------------------------------------- | ---------------------------------------------- |
  | [in] dev_handle   | [tsra_handle](#tsra_handle)                     | partition handle                               |
+ | [in] root_spki_thumbprint | const tsra_buffer *               | Required 48-byte trusted-root SPKI SHA-384 digest |
  | [in] psk          | const tsra_session_psk *                          | PSK credential (non-NULL); inner `psk` buffer NULL = default |
- | [in] session_type | [tsra_session_ex_type](#tsra_session_ex_type)   | channel integrity profile to pin               |
+ | [in] suite        | [tsra_session_suite](#tsra_session_suite)       | key-establishment suite                        |
  | [out] sess_handle | [tsra_handle *](#tsra_handle)                   | new security-domain session handle      &nbsp; |
 
 **Returns**
 
-`TSRA_STATUS_SUCCESS` on success, error code otherwise
+`TSRA_STATUS_SUCCESS` on success. A NULL root buffer, NULL data pointer or a
+length other than 48 returns `TSRA_STATUS_INVALID_ARGUMENT` before device
+activity. An untrusted root, invalid certificate path or missing/invalid
+Tessera profile returns `TSRA_STATUS_INVALID_SIGNATURE`. Other errors are
+propagated; no session is established on failure.
 
 ### tsra_session_psk
 
@@ -122,6 +161,15 @@ the partition **default** PSK for the slot is used — required for the first
 session, before the default is rotated via
 [`tsra_sess_ex_psk_change`](#tsra_sess_ex_psk_change). After rotation,
 point `psk` at the rotated 32-byte secret.
+
+CU sessions opened with the default PSK are bootstrap-only. Before rotation,
+normal session commands return `TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE`; only PSK
+change and close are permitted. Once any session rotates the partition CU PSK,
+all default-authenticated CU sessions, including the rotating session, return
+`TSRA_STATUS_DEFAULT_PSK_CHANGED` except when closing. Close and explicitly
+open a new session with the rotated credential. The SDK does not automatically
+upgrade or reopen the old session. The same changed-default status can be
+returned if rotation occurs between Init and Finish during session open.
 
 ```cpp
 struct tsra_session_psk {

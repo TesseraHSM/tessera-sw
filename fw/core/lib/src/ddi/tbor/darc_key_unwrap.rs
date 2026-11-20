@@ -51,6 +51,7 @@ use tsra_fw_ddi_tbor_types::DARC_UNWRAP_PUB_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -126,21 +127,21 @@ fn attrs_for_ecc(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
 }
 
 /// Verify that the operand-order public key `wire_pub` (`x ‖ y`, each
-/// `curve.wire_coord_len(order)` bytes) re-derived from the recovered
+/// `curve.wire_coord_len(P::ECC_COORD_PAD)` bytes) re-derived from the recovered
 /// scalar equals the big-endian COSE coordinates `x` / `y` — the COSE
 /// private/public consistency requirement (spec §4.1, §10.9).
 ///
 /// Public-key material, so an ordinary (non-constant-time) comparison is
 /// appropriate.
-fn pub_key_matches(
-    order: HsmByteOrder,
+fn pub_key_matches<P: HsmCryptoOrder>(
     curve: HsmEccCurve,
     x: &HsmDmaBuf,
     y: &HsmDmaBuf,
     wire_pub: &HsmDmaBuf,
 ) -> bool {
     let coord_raw = curve.priv_key_len();
-    let wc = curve.wire_coord_len(order);
+    let order = P::BYTE_ORDER;
+    let wc = curve.wire_coord_len(P::ECC_COORD_PAD);
     if wire_pub.len() != 2 * wc {
         return false;
     }
@@ -275,17 +276,16 @@ pub(crate) async fn handle<P: HsmPal>(
                     let attrs = attrs_for_ecc(out_scope, effective)?;
                     let key_kind = ecc_vault_kind(curve);
 
-                    let vault = alloc.dma_alloc(curve.wire_coord_len(P::BYTE_ORDER))?;
+                    let vault = alloc.dma_alloc(curve.wire_coord_len(P::ECC_COORD_PAD))?;
                     let vault_res = async {
                         pal.ecc_priv_to_vault(io, curve, parsed.d, Some(vault))?;
 
                         // Re-derive the wire public key and enforce COSE
                         // private/public consistency against `x` / `y`.
-                        let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+                        let wire_pub_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
                         pal.ecc_pub_from_priv(io, curve, vault, Some(&mut pub_out[..wire_pub_len]))
                             .await?;
-                        if !pub_key_matches(
-                            P::BYTE_ORDER,
+                        if !pub_key_matches::<P>(
                             curve,
                             parsed.x,
                             parsed.y,
@@ -347,7 +347,7 @@ fn encode_response(
     pub_key: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcKeyUnwrapResp::encode(buf, 0, false)?
+        let frame = TborDarcKeyUnwrapResp::encode_for_request(buf, 0, false)?
             .key_kind(key_kind)?
             .masked_key(masked_key)?
             .pub_key(pub_key)?

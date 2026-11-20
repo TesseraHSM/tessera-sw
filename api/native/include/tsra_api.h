@@ -115,6 +115,18 @@ enum tsra_status
      Authentication of a masked key's AES-GCM envelope failed.
      */
     TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED = -78,
+    /*
+     Bootstrap sessions must rotate the public default PSK before use.
+     */
+    TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE = -79,
+    /*
+     The CU default PSK changed; close and reopen with the new credential.
+     */
+    TSRA_STATUS_DEFAULT_PSK_CHANGED = -80,
+    /*
+     This session already committed its one permitted PSK change.
+     */
+    TSRA_STATUS_PSK_CHANGE_ALREADY_USED = -81,
     TSRA_STATUS_PANIC = INT32_MIN,
 };
 #ifndef __cplusplus
@@ -604,30 +616,27 @@ typedef uint32_t tsra_part_prop_id;
 #endif // __cplusplus
 
 /*
- Channel-level integrity profile for a security-domain (TBOR) session,
- selected by the caller when opening a session via `open_session_ex`.
+ Key-establishment suite of a security-domain (TBOR) session, selected
+ by the caller when opening a session via `open_session_ex`.
 
- API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
- separate `#[open_enum]` so the public API surface does not leak the
- DDI-layer wire type.
+ Every such session encrypts its in-session traffic; the suite picks
+ how the session keys are agreed. The suite authenticates the HSM with
+ its partition identity key (ECDSA P-384 over the handshake transcript)
+ and the caller with the role PSK. The discriminant is the wire
+ `suite_id`.
  */
-enum tsra_session_ex_type
+enum tsra_session_suite
 #ifdef __cplusplus
     : uint32_t
 #endif // __cplusplus
 {
     /*
-     Channel transports bodies without per-message MAC.
+     Ephemeral ECDH P-384 key agreement.
      */
-    TSRA_SESSION_EX_TYPE_PLAIN_TEXT = 0,
-    /*
-     Channel transports bodies wrapped in an outer per-message HMAC
-     envelope.
-     */
-    TSRA_SESSION_EX_TYPE_AUTHENTICATED = 1,
+    TSRA_SESSION_SUITE_ECDH_P384 = 1,
 };
 #ifndef __cplusplus
-typedef uint32_t tsra_session_ex_type;
+typedef uint32_t tsra_session_suite;
 #endif // __cplusplus
 
 /*
@@ -1510,7 +1519,7 @@ struct tsra_session_psk
     const struct tsra_buffer *psk;
 };
 
-typedef tsra_session_ex_type tsra_session_ex_type;
+typedef tsra_session_suite tsra_session_suite;
 
 /*
  Input buffers for [`tsra_sess_ex_part_init`].
@@ -3354,13 +3363,18 @@ tsra_status tsra_sess_close(tsra_handle handle);
  Opens a security-domain session using the API revision negotiated when
  the partition was opened, and returns a handle to the resulting
  session. `psk` selects the role slot and (optionally) the PSK, and
- `session_type` selects the channel integrity profile pinned for the
- session.
+ `suite` selects the key-establishment suite. Every session encrypts
+ its in-session traffic under keys agreed during the handshake.
 
  @param[in] dev_handle Handle to the HSM partition
+ @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the
+            trusted root certificate's DER SubjectPublicKeyInfo, obtained
+            independently of this connection. The verified PID path must
+            contain a non-PID certificate with DICE TCB Info layer zero and
+            Tessera EKU `1.3.6.1.4.1.311.102.1.50.1`.
  @param[in] psk PSK credential — slot plus optional PSK
             (see `tsra_session_psk`)
- @param[in] session_type Channel integrity profile to pin for the session
+ @param[in] suite Key-establishment suite (`tsra_session_suite`)
  @param[out] sess_handle Pointer to the session handle to be allocated
 
  @return `TsraStatus` indicating the result of the operation
@@ -3368,6 +3382,8 @@ tsra_status tsra_sess_close(tsra_handle handle);
  # Safety
 
  - `dev_handle` must be a valid partition handle.
+ - `root_spki_thumbprint` must point to a valid `tsra_buffer` containing
+   exactly 48 bytes.
  - `psk` must be a valid pointer to an `tsra_session_psk` whose `psk`
    field is NULL or a valid `tsra_buffer` holding exactly `TSRA_PSK_LEN`
    bytes.
@@ -3376,9 +3392,30 @@ tsra_status tsra_sess_close(tsra_handle handle);
  */
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
     const struct tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
+);
+
+/*
+ @brief Recover a migrated security-domain session in place
+
+ Establishes fresh channel keys while restoring the original session
+ masking key. Uses the session's existing role and the current role PSK.
+ Does not replay an interrupted command or reset the PSK-change allowance.
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+ - `psk` must be NULL (default PSK) or identify a valid buffer containing
+   exactly `TSRA_PSK_LEN` bytes.
+ */
+tsra_status tsra_sess_ex_reopen(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
+    const struct tsra_buffer *psk
 );
 
 /*

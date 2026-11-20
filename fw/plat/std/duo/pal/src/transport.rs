@@ -6,17 +6,20 @@
 //! [`DuoOp::Tbor`] requests and responses travel in plaintext over the
 //! SQE's PRP pair. [`DuoOp::TborSecure`] ones are AES-256-GCM protected
 //! under the SQE session's transport keys: the request with the VM→HSM key
-//! (IV and tag in the SQE), the response with the HSM→VM key (a fresh IV
-//! and the tag in the CQE).
+//! (IV and tag in the SQE), the response with the HSM→VM key (IV and tag
+//! in the CQE). Each sender builds its IV as `salt ‖ be64(seq)` from its
+//! direction's salt and message counter; the receiver uses the IV it is
+//! given. Implicit 32-byte AAD binds responses to the authenticated
+//! request IV and session context, independently of completion order.
 
 use tsra_fw_hsm_io::duo::DuoCqeEntry;
 use tsra_fw_hsm_io::duo::DuoOp;
 use tsra_fw_hsm_io::duo::DuoSqeEntry;
+use tsra_fw_hsm_io::sealed::SessionTransportBinding;
 use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_pal_traits::*;
 use zeroize::Zeroizing;
 
-use crate::session::TransportDir;
 use crate::StdHsmIo;
 use crate::StdHsmPal;
 
@@ -64,10 +67,18 @@ impl StdHsmPal {
         }
         let key = if secure {
             let id = HsmSessId::from(sqe.session_id());
+            if matches!(
+                self.session_state(io, id),
+                tsra_fw_hsm_pal_traits::HsmSessionState::NeedsRenegotiation
+            ) {
+                return Err(HsmError::SessionNeedsRenegotiation);
+            }
             let key = self
-                .session_transport_key(io, id, TransportDir::H2m)
+                .session_transport_key(io, id, HsmSessionTransportDir::H2m)
                 .map_err(|_| HsmError::SessionTransportError)?;
-            Some(Zeroizing::new(*key))
+            let mut copy = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
+            copy.copy_from_slice(key.key());
+            Some(copy)
         } else {
             None
         };
@@ -79,11 +90,21 @@ impl StdHsmPal {
             .await
             .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
         if let Some(key) = key {
+            let binding = SessionTransportBinding::duo(sqe.session_id(), sqe.iv());
+            let aad = binding.aad(false);
             let ciphertext = data.to_vec();
             self.aes
-                .gcm_decrypt(&key[..], &sqe.iv(), None, &sqe.gcm_tag(), &ciphertext, data)
+                .gcm_decrypt(
+                    &key[..],
+                    &sqe.iv(),
+                    Some(&aad),
+                    &sqe.gcm_tag(),
+                    &ciphertext,
+                    data,
+                )
                 .await
                 .map_err(|_| HsmError::SessionTransportError)?;
+            io.transport_binding.set(Some(binding));
         }
         Ok(HsmRequest {
             buf,
@@ -110,17 +131,24 @@ impl StdHsmPal {
         }
 
         let id = HsmSessId::from(sqe.session_id());
-        let key = Zeroizing::new(
-            *self
-                .session_transport_key(io, id, TransportDir::M2h)
-                .map_err(|_| HsmError::SessionTransportError)?,
-        );
-        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        let xport = self
+            .session_transport_key(io, id, HsmSessionTransportDir::M2h)
+            .map_err(|_| HsmError::SessionTransportError)?;
+        let mut key = Zeroizing::new([0u8; SESSION_TRANSPORT_KEY_LEN]);
+        key.copy_from_slice(xport.key());
+        let seq = self
+            .session_transport_next_seq(io, id)
+            .map_err(|_| HsmError::SessionTransportError)?;
+        let iv = xport.nonce(seq);
+        let binding = io
+            .transport_binding
+            .take()
+            .ok_or(HsmError::SessionTransportError)?;
+        let aad = binding.aad(true);
         let mut tag = [0u8; SESSION_TRANSPORT_TAG_LEN];
-        self.rng_fill_bytes(io, &mut iv)?;
         let ciphertext = self.dma_alloc(io, resp.len())?;
         self.aes
-            .gcm_encrypt(&key[..], &iv, None, resp, ciphertext, &mut tag)
+            .gcm_encrypt(&key[..], &iv, Some(&aad), resp, ciphertext, &mut tag)
             .await
             .map_err(|_| HsmError::SessionTransportError)?;
         self.copy_mem_to_host(io, ciphertext, sqe.dst_prp1(), sqe.dst_prp2(), true)

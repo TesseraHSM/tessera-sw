@@ -22,6 +22,14 @@
 //! `owner_seed_id`, `key_label`, and the entire reserved tail of
 //! [`MaskedKeyMetadata`]. Any single-bit flip is caught at
 //! [`unmask`](crate::aead::unmask) before the `target_key` is exposed.
+//!
+//! ## Target key alignment
+//!
+//! The target key starts at offset 216, a multiple of 8, so a blob placed
+//! at a 4-byte aligned address (TBOR `align = 4`) yields a 4-byte aligned
+//! key. The ciphertext is zero-padded to a multiple of 16 bytes, so at
+//! least `roundup8(target_key_len)` bytes of the blob follow the key's
+//! start. PAL ECC and RSA operations rely on both properties.
 
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_hsm_pal_traits::HsmError;

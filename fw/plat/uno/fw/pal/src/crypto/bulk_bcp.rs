@@ -4,9 +4,10 @@
 //! Host bulk AES-GCM / AES-XTS IOs on the BCP (default build).
 //!
 //! The engine walks the host's SGLs itself over the function's host
-//! interface, as the FP firmware had it do. A bulk IO never reaches the
-//! per-IO allocator: its key, few AES blocks and GCM tail live in the IO's
-//! `BULK_SCRATCH` slot.
+//! interface, as the FP firmware had it do. Its key, few AES blocks and
+//! GCM tail live in the IO's `BULK_SCRATCH` slot, which is also the IO's
+//! allocator heap for the work core does before calling the PAL (see
+//! [`crate::alloc`]); that work has released it by then.
 //!
 //! The IO's keys are copied out of the vault before its first await, and
 //! the engines read the copies, so a key deleted or replaced while the IO

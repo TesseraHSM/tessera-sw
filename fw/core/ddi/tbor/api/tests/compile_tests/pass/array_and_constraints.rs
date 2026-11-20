@@ -21,7 +21,7 @@ pub struct ArrayReq<'a> {
 fn main() {
     let nonce = [0u8; 16];
     let mut buf = [0u8; 256];
-    let frame = ArrayReq::encode(&mut buf)
+    let frame = ArrayReq::encode(&mut buf, (1, 1))
         .unwrap()
         .nonce(&nonce)
         .unwrap()

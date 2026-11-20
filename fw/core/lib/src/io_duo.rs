@@ -175,6 +175,17 @@ impl<P: HsmPal> Hsm<P> {
         undo: &mut Option<UndoLog<'s>>,
         credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> HsmResult<DuoReply<'s>> {
+        // A replacement recovery Init must not race an authenticated Finish.
+        if channel == DuoOp::TborSecure
+            && io.sqe().session_id().is_some_and(|id| {
+                matches!(
+                    self.pal().session_state(io, HsmSessId::from(id)),
+                    HsmSessionState::Pending
+                )
+            })
+        {
+            *credential_guard = Some(self.pal().partition_lock(io).await?);
+        }
         let HsmRequest {
             buf: mut allocation,
             len: src_len,
@@ -200,10 +211,13 @@ impl<P: HsmPal> Hsm<P> {
             body_sess_id,
         );
 
-        if policy.is_ok()
+        if credential_guard.is_none()
+            && policy.is_ok()
             && matches!(
                 opcode,
                 ddi::tbor::opcode::PSK_CHANGE
+                    | ddi::tbor::opcode::SESSION_OPEN_INIT
+                    | ddi::tbor::opcode::SESSION_CLOSE
                     | ddi::tbor::opcode::SESSION_OPEN_FINISH
                     | ddi::tbor::opcode::KEY_REPORT
             )
@@ -222,7 +236,7 @@ impl<P: HsmPal> Hsm<P> {
                 .dma_grow(io, &mut allocation, capacity)
                 .log_as("core", HsmError::NotEnoughSpace)?;
         }
-        let undo = undo.insert(if policy.is_ok() && ddi::tbor::records_undo::<P>(opcode) {
+        let undo = undo.insert(if policy.is_ok() && ddi::tbor::records_undo(opcode) {
             self.duo_bind_undo(io)?
         } else {
             UndoLog::new(
@@ -301,7 +315,8 @@ impl<P: HsmPal> Hsm<P> {
 /// Checks that a TBOR command arrived on the channel its session control
 /// requires.
 ///
-/// - [`DuoOp::Tbor`] carries only `NoSession` and `Open` commands.
+/// - [`DuoOp::Tbor`] carries `NoSession`, `Open`, or explicit stale-slot
+///   `Close`; the close handler checks authoritative lifecycle state.
 /// - [`DuoOp::TborSecure`] carries only `InSession` and `Close` commands,
 ///   and the SQE `session_id` must equal the body's session id.
 fn duo_channel_policy(
@@ -312,7 +327,8 @@ fn duo_channel_policy(
 ) -> HsmResult<()> {
     match (op, ctrl) {
         (DuoOp::Tbor, HsmSessCtrl::NoSession | HsmSessCtrl::Open) => Ok(()),
-        (DuoOp::TborSecure, HsmSessCtrl::InSession | HsmSessCtrl::Close) => match body_sess_id {
+        (DuoOp::TborSecure, HsmSessCtrl::InSession | HsmSessCtrl::Close)
+        | (DuoOp::Tbor, HsmSessCtrl::Close) => match body_sess_id {
             Some(id) if u16::from(id) == sqe_session_id => Ok(()),
             Some(_) => Err(HsmError::InvalidArg),
             None => Err(HsmError::SessionExpected),
@@ -346,16 +362,37 @@ mod tests {
     const SID: u16 = 3;
 
     #[test]
-    fn plain_channel_accepts_only_sessionless_and_open() {
+    fn plain_channel_accepts_sessionless_open_and_explicit_close() {
         for ctrl in [HsmSessCtrl::NoSession, HsmSessCtrl::Open] {
             assert_eq!(duo_channel_policy(DuoOp::Tbor, ctrl, 0, None), Ok(()));
         }
-        for ctrl in [HsmSessCtrl::InSession, HsmSessCtrl::Close] {
-            assert_eq!(
-                duo_channel_policy(DuoOp::Tbor, ctrl, SID, Some(HsmSessId::from(SID))),
-                Err(HsmError::InvalidSessionControlOpcode)
-            );
-        }
+        assert_eq!(
+            duo_channel_policy(
+                DuoOp::Tbor,
+                HsmSessCtrl::InSession,
+                SID,
+                Some(HsmSessId::from(SID))
+            ),
+            Err(HsmError::InvalidSessionControlOpcode)
+        );
+        assert_eq!(
+            duo_channel_policy(
+                DuoOp::Tbor,
+                HsmSessCtrl::Close,
+                SID,
+                Some(HsmSessId::from(SID))
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            duo_channel_policy(
+                DuoOp::Tbor,
+                HsmSessCtrl::Close,
+                SID,
+                Some(HsmSessId::from(SID + 1))
+            ),
+            Err(HsmError::InvalidArg)
+        );
     }
 
     #[test]

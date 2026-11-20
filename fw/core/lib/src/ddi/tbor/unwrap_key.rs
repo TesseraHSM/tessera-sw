@@ -344,7 +344,7 @@ async fn encode_and_mask<P: HsmPal>(
 
     // Build the response with both data slots reserved (sized exactly).
     let len = cmd_buf.encode_response(|buf| {
-        Ok(TborUnwrapKeyResp::encode(buf, 0, false)?
+        Ok(TborUnwrapKeyResp::encode_for_request(buf, 0, false)?
             .key_kind(kind.0)?
             .masked_key_reserve(masked_len)?
             .pub_key_reserve(pub_len)?

@@ -73,13 +73,11 @@ pub(crate) mod verify_key;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
-use tsra_fw_ddi_tbor::PROTOCOL_VERSION;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
@@ -557,15 +555,14 @@ pub(crate) struct DispatchResult {
 /// log's storage for these only; any other command gets an empty log over
 /// no storage, so teardown has none of it to scrub, and on which any push
 /// fails -- so a command missing here fails rather than runs unrecorded.
-pub(crate) fn records_undo<P: HsmPalFeatures>(opcode: u8) -> bool {
-    // With secure sessions, `SessionClose` defers its destroy to the commit
-    // walk so the response can still be encrypted.
-    if P::IO_PROTOCOL.secure_session() && opcode == opcode::SESSION_CLOSE {
-        return true;
-    }
+///
+/// `SessionClose` defers its destroy to the commit walk so its response
+/// can still be sealed under the session's transport key.
+pub(crate) fn records_undo(opcode: u8) -> bool {
     matches!(
         opcode,
-        opcode::SESSION_OPEN_INIT
+        opcode::SESSION_CLOSE
+            | opcode::SESSION_OPEN_INIT
             | opcode::SESSION_OPEN_FINISH
             | opcode::PSK_CHANGE
             | opcode::PART_INIT
@@ -652,6 +649,9 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     body_sess_id: Option<HsmSessId>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<DispatchResult> {
+    let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(cmd_buf.request())?;
+    validate_api_rev::<P>(api_rev)?;
+
     // Reject unknown opcodes with the canonical error *before*
     // applying any gating logic so the gate cannot leak existence of
     // unsupported opcodes through a different error code.
@@ -700,6 +700,19 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
             if needs_cross_check && u16::from(sess_id) != sqe_session_id {
                 return Err(HsmError::InvalidArg);
             }
+            if needs_cross_check {
+                let stale_close = opcode == opcode::SESSION_CLOSE
+                    && matches!(
+                        pal.session_state(io, sess_id),
+                        HsmSessionState::NeedsRenegotiation
+                    );
+                if !stale_close {
+                    let selected = pal.session_api_revision(io, sess_id)?;
+                    if api_rev != (selected.major, selected.minor) {
+                        return Err(HsmError::UnsupportedRevision);
+                    }
+                }
+            }
 
             // Default-PSK gate: applies only to in-session commands
             // that are not on the allow-list.
@@ -708,6 +721,19 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
                 if crate::part_state::part_psk_is_default(pal, io, psk_id)? {
                     return Err(HsmError::DefaultPskMustRotate);
                 }
+            }
+            if is_in_session(opcode)
+                && opcode != opcode::SESSION_CLOSE
+                && sess_id.role() == HsmSessionRole::CryptoUser
+            {
+                // Rotation does not upgrade existing bootstrap sessions.
+                // All CU work, including PskChange, requires the captured
+                // credential to remain current; close is always available.
+                pal.alloc_scoped_async(io, async |alloc| {
+                    let binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
+                    crate::session::validate_auth_binding(pal, io, alloc, sess_id, binding).await
+                })
+                .await?;
             }
         }
     }
@@ -1043,11 +1069,12 @@ fn extract_session_id(view: &RequestView<'_>) -> HsmResult<HsmSessId> {
 /// Encode a TBOR error response: header with `status = err.0` and a
 /// single `none` placeholder TOC entry (the wire format requires
 /// `toc_count >= 1`).
-///
-/// `opcode` is included only in trace context — TBOR responses do not
-/// carry the opcode (it's implicit from the request/response pairing).
-pub(crate) fn encode_tbor_err(_opcode: u8, err: HsmError, out: &mut [u8]) -> HsmResult<usize> {
-    let bytes = ResponseEncoder::new(out, PROTOCOL_VERSION, err.0, false)
+pub(crate) fn encode_tbor_err(
+    api_rev: (u16, u16),
+    err: HsmError,
+    out: &mut [u8],
+) -> HsmResult<usize> {
+    let bytes = ResponseEncoder::new(out, api_rev, err.0, false)
         .none()?
         .finish()?;
     Ok(bytes.len())
@@ -1055,11 +1082,23 @@ pub(crate) fn encode_tbor_err(_opcode: u8, err: HsmError, out: &mut [u8]) -> Hsm
 
 /// Replace the response prefix with a fully initialized TBOR error frame.
 pub(crate) fn encode_exchange_err(
-    opcode: u8,
+    _opcode: u8,
     err: HsmError,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    encode_tbor_err(opcode, err, cmd_buf.buffer_mut())
+    let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(cmd_buf.request())?;
+    encode_tbor_err(api_rev, err, cmd_buf.buffer_mut())
+}
+
+fn validate_api_rev<P: HsmPalFeatures>(api_rev: (u16, u16)) -> HsmResult<()> {
+    if api_rev < (1, 1)
+        || api_rev < (P::API_REV_MIN.major, P::API_REV_MIN.minor)
+        || api_rev > (P::API_REV_MAX.major, P::API_REV_MAX.minor)
+        || api_rev.0 != P::API_REV_MAX.major
+    {
+        return Err(HsmError::UnsupportedRevision);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1085,7 +1124,7 @@ mod tests {
     fn exchange_api_rev_reuses_the_request_allocation() {
         let mut storage = [0xA5; 32];
         let address = storage.as_ptr();
-        let len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage)
+        let len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage, (1, 1))
             .unwrap()
             .finish()
             .len();
@@ -1128,19 +1167,20 @@ mod tests {
             let fill = storage[0];
             let (undo, buffer) = storage.split_at_mut(32);
             let address = buffer.as_ptr();
-            let mut cmd_buf = HsmCmdBuf::new(dma(buffer), 16, 12).unwrap();
+            buffer[..4].copy_from_slice(&[1, 0, 1, 0]);
+            let mut cmd_buf = HsmCmdBuf::new(dma(buffer), 16, 16).unwrap();
             let len =
                 encode_exchange_err(opcode::API_REV, HsmError::InvalidArg, &mut cmd_buf).unwrap();
             let bytes = cmd_buf.response(len).unwrap();
             assert_eq!(bytes.as_ptr(), address);
-            assert_eq!(len, 12);
+            assert_eq!(len, 16);
             let response = tsra_fw_ddi_tbor::ResponseView::parse(bytes).unwrap();
             assert_eq!(response.status(), HsmError::InvalidArg.0);
             assert_eq!(response.toc_count(), 1);
             assert!(cmd_buf.buffer_mut()[len..].iter().all(|&b| b == fill));
             assert!(undo.iter().all(|&b| b == fill));
         }
-        assert_eq!(storage[0][32..44], storage[1][32..44]);
+        assert_eq!(storage[0][32..48], storage[1][32..48]);
     }
 
     /// Synthetic opcode used to exercise the "future in-session

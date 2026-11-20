@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn request_round_trips_scope() {
         let mut buf = [0u8; 256];
-        let frame = TborSdSealingKeyGenReq::encode(&mut buf)
+        let frame = TborSdSealingKeyGenReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -114,7 +114,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0xCDu8; MASKED_SEALING_KEY_LEN];
         let pub_key = [0xABu8; SD_SEALING_PUB_KEY_LEN];
-        let frame = TborSdSealingKeyGenResp::encode(&mut buf, 0, true)
+        let frame = TborSdSealingKeyGenResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

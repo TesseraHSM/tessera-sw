@@ -290,14 +290,18 @@ impl TborOpReq for WireRequest<'_> {
     }
 
     /// Build valid framing around exactly one fuzz-controlled buffer length.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError> {
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError> {
         let mut fields = [
             self.req.masked_sender_key.to_vec(),
             self.req.masked_tmk.to_vec(),
             self.req.target_cert_chain.as_slice().as_bytes().to_vec(),
         ];
         fields[self.field].resize(self.len, 0);
-        codec::RequestEncoder::new(buf, codec::PROTOCOL_VERSION, Self::OPCODE)
+        codec::RequestEncoder::new(buf, api_rev, Self::OPCODE)
             .with_toc_slots(7)?
             .session_id(self.req.session_id)?
             .align_to(4)?
@@ -409,7 +413,7 @@ fn early_case(ctx: &TestCtx, input: &FuzzInput<'_>) -> bool {
     }
     let session = match input.scenario {
         Scenario::DefaultPsk => ctx
-            .open_session(CO_PSK_ID, SessionType::Authenticated)
+            .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
             .expect("default-PSK session"),
         Scenario::CryptoUser => SessionGuard::new(ctx, bootstrap_rotated_cu(ctx, &ROTATED_CU_PSK)),
         _ => SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK)),

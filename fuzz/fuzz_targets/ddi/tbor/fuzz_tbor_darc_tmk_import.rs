@@ -712,10 +712,10 @@ fn check(
 fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
     let session = match input.scenario {
         Scenario::DefaultCo => ctx
-            .open_session(CO_PSK_ID, SessionType::Authenticated)
+            .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
             .expect("default CO session"),
         Scenario::DefaultCu => ctx
-            .open_session(CU_PSK_ID, SessionType::PlainText)
+            .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
             .expect("default CU session"),
         Scenario::CryptoUser => SessionGuard::new(ctx, bootstrap_rotated_cu(ctx, &ROTATED_CU_PSK)),
         _ => SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK)),

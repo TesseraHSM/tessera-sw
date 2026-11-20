@@ -111,40 +111,40 @@ fn gen_header_parts(schema: &Schema) -> (TokenStream, TokenStream, TokenStream, 
         MessageKind::Request { opcode } => (
             quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
             quote! {
-                let hdr = u32::from_le_bytes([
-                    tsra_fw_ddi_tbor::PROTOCOL_VERSION,
-                    0x00,
+                self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+                self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+                self.buf[4..8].copy_from_slice(&[
                     (TOC_COUNT - 1) as u8,
                     #opcode,
+                    0, 0,
                 ]);
-                self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
-                self.buf[4..8].fill(0);
+                self.buf[8..12].fill(0);
             },
         ),
         MessageKind::Response => (
             quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
             quote! {
-                let hdr0 = u32::from_le_bytes([
-                    tsra_fw_ddi_tbor::PROTOCOL_VERSION,
-                    self.flags,
+                self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+                self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+                self.buf[4..8].copy_from_slice(&[
                     (TOC_COUNT - 1) as u8,
-                    0x00,
+                    self.flags,
+                    0, 0,
                 ]);
-                self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
-                self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
+                self.buf[8..12].copy_from_slice(&self.status.to_le_bytes());
             },
         ),
         MessageKind::Fields => unreachable!(),
     };
     let resp_extra_fields = if matches!(schema.kind, MessageKind::Response) {
-        quote! { status: u32, flags: u8, }
+        quote! { api_rev: (u16, u16), status: u32, flags: u8, }
     } else {
-        quote! {}
+        quote! { api_rev: (u16, u16), }
     };
     let resp_extra_pass = if matches!(schema.kind, MessageKind::Response) {
-        quote! { status: self.status, flags: self.flags, }
+        quote! { api_rev: self.api_rev, status: self.status, flags: self.flags, }
     } else {
-        quote! {}
+        quote! { api_rev: self.api_rev, }
     };
     (
         header_len_tokens,
@@ -187,7 +187,7 @@ fn gen_new_fn(
     match schema.kind {
         MessageKind::Request { .. } => quote! {
             /// Create a new encoder, validating that `buf` is large enough.
-            pub fn new(buf: &'a mut [u8]) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+            pub fn new(buf: &'a mut [u8], api_rev: (u16, u16)) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
                 const HEADER_LEN: usize = #header_len_tokens;
                 const TOC_COUNT: usize = #toc_count_expr;
                 const MIN_SIZE: usize = HEADER_LEN + TOC_COUNT * 4;
@@ -195,12 +195,12 @@ fn gen_new_fn(
                     return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
                 }
                 #write_empty_placeholder
-                Ok(#enc_name { buf, data_offset: 0, _state: core::marker::PhantomData })
+                Ok(#enc_name { buf, api_rev, data_offset: 0, _state: core::marker::PhantomData })
             }
         },
         MessageKind::Response => quote! {
             /// Create a new response encoder with the given status and FIPS flag.
-            pub fn new(buf: &'a mut [u8], status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+            pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
                 const HEADER_LEN: usize = #header_len_tokens;
                 const TOC_COUNT: usize = #toc_count_expr;
                 const MIN_SIZE: usize = HEADER_LEN + TOC_COUNT * 4;
@@ -209,7 +209,7 @@ fn gen_new_fn(
                 }
                 let flags = if fips_approved { 0x01u8 } else { 0x00u8 };
                 #write_empty_placeholder
-                Ok(#enc_name { buf, data_offset: 0, status, flags, _state: core::marker::PhantomData })
+                Ok(#enc_name { buf, api_rev, data_offset: 0, status, flags, _state: core::marker::PhantomData })
             }
         },
         MessageKind::Fields => unreachable!(),
@@ -964,7 +964,7 @@ fn gen_frame_accessor(field: &SchemaField, toc_index: TokenStream, schema: &Sche
         WireType::Uint32 | WireType::Uint64 | WireType::Buffer | WireType::SealedKey => {
             let ds = quote! {
                 {
-                    let tc = (self.buf[2] & 0x1F) as usize + 1;
+                    let tc = (self.buf[4] & 0x1F) as usize + 1;
                     #header_len + tc * 4
                 }
             };

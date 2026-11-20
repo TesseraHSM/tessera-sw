@@ -16,6 +16,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -33,9 +34,9 @@ const MESSAGE_LEN: usize = 68;
 /// PCT operations whose backend needs additional workspace.
 pub enum EccPctOperation<'a> {
     Verify {
+        hash: HsmHashAlgo,
         public: &'a HsmDmaBuf,
-        digest: &'a HsmDmaBuf,
-        signature: &'a HsmDmaBuf,
+        input: &'a HsmDmaBuf,
         valid: &'a mut bool,
     },
     Derive {
@@ -47,10 +48,12 @@ pub enum EccPctOperation<'a> {
 
 /// PCT-owned storage, excluding the backend's verification/ECDH workspace.
 pub fn ecc_pct_workspace_len<P: HsmEcc>(curve: HsmEccCurve, pct: &HsmEccPct) -> usize {
-    let coord = curve.wire_coord_len(P::BYTE_ORDER);
+    let coord = curve.wire_coord_len(P::ECC_COORD_PAD);
     match pct {
         HsmEccPct::None => 0,
-        HsmEccPct::SignVerify => MESSAGE_LEN + 3 * coord,
+        HsmEccPct::SignVerify => {
+            MESSAGE_LEN + curve.ecdsa_verify_input_len(digest_algo(curve), P::ECC_COORD_PAD)
+        }
         HsmEccPct::KeyAgreement => 7 * coord,
     }
 }
@@ -91,12 +94,12 @@ pub async fn ecc_pct<P: HsmEcc + HsmHash>(
         workspace,
         async |operation, _: &mut HsmDmaBuf| match operation {
             EccPctOperation::Verify {
+                hash,
                 public,
-                digest,
-                signature,
+                input,
                 valid,
             } => {
-                *valid = pal.ecc_verify(io, curve, public, digest, signature).await?;
+                *valid = pal.ecc_verify(io, curve, hash, public, input).await?;
                 Ok(())
             }
             EccPctOperation::Derive {
@@ -155,7 +158,7 @@ where
         HsmEccPct::KeyAgreement => {
             key_agreement(
                 curve,
-                curve.wire_coord_len(P::BYTE_ORDER),
+                curve.wire_coord_len(P::ECC_COORD_PAD),
                 priv_key,
                 pub_key,
                 scratch,
@@ -192,41 +195,60 @@ where
     F: for<'a> AsyncFnMut(EccPctOperation<'a>, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     let algo = digest_algo(curve);
-    let (message, scratch) = scratch.split_at_mut(MESSAGE_LEN);
+    let (message, input) = scratch.split_at_mut(MESSAGE_LEN);
     message.fill(MESSAGE_BYTE);
 
-    // The PKA reads a full field-width digest operand (68 bytes for P-521),
-    // so the little-endian digest sits in a zeroed buffer of that width. The
-    // PAL receives the ECDSA digest width, which is at most 64 bytes.
-    let (digest, scratch) = scratch.split_at_mut(curve.wire_coord_len(P::BYTE_ORDER));
-    digest.fill(0);
-    pal.hash(
+    // Sign `k ‖ digest` in place, leaving `r ‖ s` in the first two lanes,
+    // then hash again into the digest lane after them to form the verify
+    // input `r ‖ s ‖ digest`.
+    let coord = curve.wire_coord_len(P::ECC_COORD_PAD);
+    let sign_len = curve.ecdsa_sign_input_len(algo, P::ECC_COORD_PAD);
+    input.fill(0);
+    hash_into_lane(pal, io, algo, message, &mut input[coord..sign_len]).await?;
+    pal.ecc_sign_in_place(
         io,
+        curve,
         algo,
-        message,
-        HsmDigestForm::Operand,
-        Some(&mut digest[..algo.digest_len()]),
+        priv_key,
+        HsmEcdsaNonce::Generated,
+        &mut input[..sign_len],
     )
     .await?;
-    let digest = &digest[..curve.ecdsa_digest_len()];
-
-    let signature = &mut scratch[..curve.wire_sig_len(P::BYTE_ORDER)];
-    signature.fill(0);
-    pal.ecc_sign(io, curve, priv_key, digest, Some(signature))
-        .await?;
+    hash_into_lane(pal, io, algo, message, &mut input[2 * coord..]).await?;
 
     let mut valid = false;
     operation(
         EccPctOperation::Verify {
+            hash: algo,
             public: pub_key,
-            digest,
-            signature,
+            input,
             valid: &mut valid,
         },
         backend,
     )
     .await?;
     Ok(valid)
+}
+
+/// Hashes `message` into the start of a zero-filled digest lane, in the
+/// operand form that ECDSA consumes.
+async fn hash_into_lane<P: HsmHash>(
+    pal: &P,
+    io: &P::Io,
+    algo: HsmHashAlgo,
+    message: &HsmDmaBuf,
+    lane: &mut HsmDmaBuf,
+) -> HsmResult<()> {
+    lane.fill(0);
+    pal.hash(
+        io,
+        algo,
+        message,
+        HsmDigestForm::Operand,
+        Some(&mut lane[..algo.digest_len()]),
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn key_agreement<F>(

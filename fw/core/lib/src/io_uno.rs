@@ -192,7 +192,10 @@ impl<P: HsmPal> Hsm<P> {
         // rather than dropped: a platform may return the IO's inbound-queue
         // credit only with its completion.
         let result = if self.partition_enabled(&io) {
-            self.pal().bulk_crypt(&mut io).await
+            match crate::session::validate_bulk_session(self.pal(), &io).await {
+                Ok(()) => self.pal().bulk_crypt(&mut io).await,
+                Err(err) => Err(err),
+            }
         } else {
             Err(HsmError::PartitionNotEnabled)
         };
@@ -364,6 +367,15 @@ impl<P: HsmPal> Hsm<P> {
         undo: &mut Option<UndoLog<'s>>,
         credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> HsmResult<UnoReply<'s>> {
+        // Pin Pending channel keys through decrypt, promotion, and completion.
+        if io.sqe().session_id().is_some_and(|id| {
+            matches!(
+                self.pal().session_state(io, HsmSessId::from(id)),
+                HsmSessionState::Pending
+            )
+        }) {
+            *credential_guard = Some(self.pal().partition_lock(io).await?);
+        }
         let HsmRequest {
             buf: mut allocation,
             len: src_len,
@@ -385,12 +397,16 @@ impl<P: HsmPal> Hsm<P> {
             (op, sid)
         };
 
-        if matches!(
-            opcode,
-            ddi::tbor::opcode::PSK_CHANGE
-                | ddi::tbor::opcode::SESSION_OPEN_FINISH
-                | ddi::tbor::opcode::KEY_REPORT
-        ) {
+        if credential_guard.is_none()
+            && matches!(
+                opcode,
+                ddi::tbor::opcode::PSK_CHANGE
+                    | ddi::tbor::opcode::SESSION_OPEN_INIT
+                    | ddi::tbor::opcode::SESSION_CLOSE
+                    | ddi::tbor::opcode::SESSION_OPEN_FINISH
+                    | ddi::tbor::opcode::KEY_REPORT
+            )
+        {
             *credential_guard = Some(
                 self.pal()
                     .partition_lock(io)
@@ -408,7 +424,7 @@ impl<P: HsmPal> Hsm<P> {
         // A command that can record undo entries gets its log now, before
         // it can mutate anything; any other gets an empty one over no
         // storage, which leaves teardown nothing of it to scrub.
-        let undo = undo.insert(if ddi::tbor::records_undo::<P>(opcode) {
+        let undo = undo.insert(if ddi::tbor::records_undo(opcode) {
             self.bind_undo(io)?
         } else {
             UndoLog::new(
@@ -436,12 +452,17 @@ impl<P: HsmPal> Hsm<P> {
                 .await
             };
         // Session ids are exposed only after successful dispatch and response
-        // validation. Preserve the existing close/open CQE semantics.
+        // validation. Preserve the existing close/open CQE semantics. A
+        // successful `SessionOpenFinish` also reports its id: the request is
+        // sealed, so this is how the driver learns the slot is now Active.
         let ddi_failed = dispatch_result.is_err();
         let (id, closed) = match &dispatch_result {
             Ok(out) => match session_ctrl {
                 HsmSessCtrl::Open => (out.session_id, false),
                 HsmSessCtrl::Close => (sqe_session_id, true),
+                HsmSessCtrl::InSession if opcode == ddi::tbor::opcode::SESSION_OPEN_FINISH => {
+                    (sqe_session_id, false)
+                }
                 _ => (None, false),
             },
             Err(_) => (None, false),
@@ -545,6 +566,12 @@ impl<P: HsmPal> Hsm<P> {
         sqe_ctrl: HsmSessCtrl,
         sqe_session_id: Option<u16>,
     ) -> HsmResult<()> {
+        if expected == HsmSessCtrl::Close
+            && sqe_ctrl == HsmSessCtrl::NoSession
+            && sqe_session_id.is_some()
+        {
+            return Ok(());
+        }
         if sqe_ctrl != expected {
             return Err(HsmError::InvalidArg);
         }

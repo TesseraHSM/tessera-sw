@@ -6,6 +6,7 @@ use core::task::Context;
 use core::task::Poll;
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_uno_error::HsmError;
 use tsra_fw_uno_error::HsmResult;
 
@@ -133,16 +134,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts (see [`ecdsa_operand_at`]).
     /// - `priv_key`: DMA-capable private key buffer.
-    /// - `hash`: DMA-capable digest buffer. The engine DMA-reads a
-    ///   **word-aligned, field-width operand** — one `hsm_point_size(curve)`
-    ///   (32 / 48 / 68) — regardless of `hash.len()`. The length check below
-    ///   only enforces the digest **value** width (`hash_size`, 32 / 48 / 64),
-    ///   which is a lower bound; for P-521 the read extends past it (66-byte
-    ///   field padded to 68), so **the caller must ensure `hash` is backed to
-    ///   the operand width and zero-padded there** (the DDI `EccSign` handler
-    ///   enforces this against the full request buffer). A shorter backing
-    ///   over-reads adjacent memory and produces a wrong signature.
+    /// - `input`: DMA-capable packed `k ‖ digest` operand: a
+    ///   `hsm_point_size(curve)` lane for `k` (unused, the engine generates
+    ///   it) followed by the little-endian digest lane.
     /// - `signature`: DMA-capable output buffer for `r || s`.
     ///
     /// # Returns
@@ -153,11 +150,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_sign(
         &mut self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.execute(ecc_sign_cmd(curve, priv_key, hash, signature)?)
+        self.execute(ecc_sign_cmd(curve, hash, priv_key, input, signature)?)
             .await
     }
 
@@ -174,9 +172,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts (see [`ecdsa_operand_at`]).
     /// - `pub_key`: DMA-capable public key buffer.
-    /// - `hash`: DMA-capable digest buffer.
-    /// - `signature`: DMA-capable signature buffer.
+    /// - `input`: DMA-capable packed `r ‖ s ‖ digest` operand: two
+    ///   `hsm_point_size(curve)` signature lanes followed by the
+    ///   little-endian digest lane.
     /// - `result`: DMA-capable output buffer that receives the 4-byte
     ///   hardware status word.
     /// - `prime`: DMA-capable curve prime buffer (LE).
@@ -195,22 +196,21 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_verify(
         &mut self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         result: &mut HsmDmaBuf,
         prime: &HsmDmaBuf,
         mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        // pub_key (X || Y) and signature (R || S) are consumed by the PKA in
+        // pub_key (X || Y) and the R || S lanes are consumed by the PKA in
         // wire format: two coordinates each padded to `hsm_point_size` (P-521
         // = 68, not the 66-byte field width). Validate against the full wire
         // width so an undersized buffer cannot make the hardware DMA read past
         // the caller's allocation.
+        let hash_at = ecdsa_operand_at(curve, hash, 2, input.len())?;
         Self::ensure_cmd_input(
             pub_key.len() >= hsm_point_size(curve) * 2
-                && hash.len() >= hash_size(curve)
-                && signature.len() >= hsm_point_size(curve) * 2
                 && result.len() >= Self::RESULT_WORD_LEN
                 && prime.len() >= hsm_point_size(curve)
                 && mont_result.len() >= hsm_point_size(curve),
@@ -234,9 +234,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         self.execute_cmd(
             ecc_verify_opcode(curve),
             result.as_mut_ptr() as u32,
-            hash.as_ptr() as u32,
+            input.as_ptr() as u32 + hash_at as u32,
             pub_key.as_ptr() as u32,
-            signature.as_ptr() as u32,
+            input.as_ptr() as u32,
         )
         .await
     }
@@ -967,22 +967,59 @@ fn ensure_input(valid: bool) -> HsmResult<()> {
     }
 }
 
+/// Returns where the UPKA digest operand starts in a packed ECDSA input
+/// of `input_len` bytes whose digest lane follows `lanes` coordinate lanes.
+///
+/// The engine reads one `hsm_point_size(curve)` operand and does not
+/// truncate it. A digest longer than the field is truncated to its leftmost
+/// bits (FIPS 186-5), which in little-endian are its last bytes, so the
+/// operand starts past the excess. The operand must fit in the input.
+pub(crate) fn ecdsa_operand_at(
+    curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
+    lanes: usize,
+    input_len: usize,
+) -> HsmResult<usize> {
+    let at = lanes * hsm_point_size(curve) + hash.digest_len().saturating_sub(point_size(curve));
+    ensure_input(input_len.saturating_sub(at) >= hsm_point_size(curve))?;
+    Ok(at)
+}
+
 /// The command of [`UpkaEngine::ecc_sign`], after checking its operands.
 pub(crate) fn ecc_sign_cmd(
     curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
     priv_key: &HsmDmaBuf,
-    hash: &HsmDmaBuf,
+    input: &HsmDmaBuf,
     signature: &mut HsmDmaBuf,
 ) -> HsmResult<StagedCmd> {
-    ensure_input(
-        !priv_key.is_empty()
-            && hash.len() >= hash_size(curve)
-            && signature.len() >= signature_size(curve),
-    )?;
+    let hash_at = ecdsa_operand_at(curve, hash, 1, input.len())?;
+    ensure_input(!priv_key.is_empty() && signature.len() >= signature_size(curve))?;
     Ok(StagedCmd {
         opcode: ecc_sign_opcode(curve),
         result: signature.as_mut_ptr() as u32,
-        arg1: hash.as_ptr() as u32,
+        arg1: input.as_ptr() as u32 + hash_at as u32,
+        arg2: priv_key.as_ptr() as u32,
+        arg3: 0,
+    })
+}
+
+/// The command of [`UpkaDriver::ecc_sign_in_place`], after checking its
+/// operands: the digest operand is read from the digest lane of `k_sig`
+/// and `r || s` is written over its start.
+pub(crate) fn ecc_sign_in_place_cmd(
+    curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
+    priv_key: &HsmDmaBuf,
+    k_sig: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let hash_at = ecdsa_operand_at(curve, hash, 1, k_sig.len())?;
+    ensure_input(!priv_key.is_empty() && k_sig.len() >= signature_size(curve))?;
+    let data = k_sig.as_mut_ptr() as u32;
+    Ok(StagedCmd {
+        opcode: ecc_sign_opcode(curve),
+        result: data,
+        arg1: data + hash_at as u32,
         arg2: priv_key.as_ptr() as u32,
         arg3: 0,
     })

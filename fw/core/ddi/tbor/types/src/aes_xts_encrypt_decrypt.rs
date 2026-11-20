@@ -102,7 +102,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let tweak = 0x0102_0304_0506_0708u64.to_le_bytes();
         let masked = [0x11u8; MASKED_AES_XTS_KEY_LEN];
-        let frame = TborAesXtsEncryptDecryptReq::encode(&mut buf)
+        let frame = TborAesXtsEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn request_rejects_16_byte_tweak() {
         let mut buf = [0u8; 512];
-        let err = TborAesXtsEncryptDecryptReq::encode(&mut buf)
+        let err = TborAesXtsEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()

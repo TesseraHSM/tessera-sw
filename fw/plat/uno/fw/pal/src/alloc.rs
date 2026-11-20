@@ -6,6 +6,12 @@
 //! Bump allocator over per-IO DTCM (NonDma) and SRAM (Dma) regions.
 //! One watermark per (IO slot, heap) pair lives in the PAL struct.
 //!
+//! A bulk IO has its own allocator slot past the command slots (see
+//! [`UnoHsmIo::alloc_index`]): a DMA heap over its 128-byte
+//! `BULK_SCRATCH` slot and no NonDma heap. Core code that runs before the
+//! bulk crypto (the bulk session check) allocates there; the crypto takes
+//! the scratch only once that scope has ended.
+//!
 //! No atomics — single-core Cortex-M7 with cooperative scheduling.
 
 use core::mem;
@@ -18,6 +24,10 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_single_cell::SingleCell;
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_COUNT;
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_SIZE;
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_STRIDE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_OFFSET;
@@ -33,6 +43,9 @@ const DMA: usize = 1;
 const HEAPS: usize = 2;
 
 pub(crate) const IO_SLOTS: usize = SRAM_IO_BUF_COUNT as usize;
+
+/// Allocator slots of bulk IOs, which follow the [`IO_SLOTS`] command slots.
+pub(crate) const BULK_ALLOC_SLOTS: usize = BULK_SCRATCH_COUNT as usize;
 
 /// Dedicated admin/internal IO slot.
 ///
@@ -67,11 +80,11 @@ const DTCM_IO_BUF_STRIDE: u32 = tsra_fw_uno_reg_soc::hsm_dtcm::DTCM_IO_BUF_STRID
 const DTCM_IO_BUF_SIZE: u32 = tsra_fw_uno_reg_soc::hsm_dtcm::DTCM_IO_BUF_SIZE;
 
 /// Per-IO × per-heap bump watermarks, stored in the PAL.
-pub(crate) type IoAllocTable = [[SingleCell<usize>; HEAPS]; IO_SLOTS];
+pub(crate) type IoAllocTable = [[SingleCell<usize>; HEAPS]; IO_SLOTS + BULK_ALLOC_SLOTS];
 
 #[allow(clippy::declare_interior_mutable_const)]
 pub(crate) const IO_ALLOC_INIT: IoAllocTable =
-    [const { [const { SingleCell::new(0) }; HEAPS] }; IO_SLOTS];
+    [const { [const { SingleCell::new(0) }; HEAPS] }; IO_SLOTS + BULK_ALLOC_SLOTS];
 
 /// Scoped allocator implementation for [`UnoHsmPal`].
 pub struct UnoScopedAlloc<'a> {
@@ -164,6 +177,16 @@ impl UnoHsmPal {
 #[inline(always)]
 fn heap_base_cap(io_index: u16, heap: usize) -> (*mut u8, usize) {
     let index = io_index as usize;
+    if let Some(bulk) = index.checked_sub(IO_SLOTS) {
+        // A bulk IO: its scratch slot, and no NonDma heap.
+        if heap == NONDMA || bulk >= BULK_ALLOC_SLOTS {
+            return (core::ptr::null_mut(), 0);
+        }
+        let addr = IO_GSRAM_BASE as usize
+            + BULK_SCRATCH_OFFSET as usize
+            + bulk * BULK_SCRATCH_STRIDE as usize;
+        return (addr as *mut u8, BULK_SCRATCH_SIZE as usize);
+    }
     if heap == NONDMA {
         let addr = DTCM_IO_BUF_BASE as usize + index * DTCM_IO_BUF_STRIDE as usize;
         (addr as *mut u8, DTCM_IO_BUF_SIZE as usize)
@@ -277,6 +300,10 @@ fn bump(
     // computing a DTCM address past the buffer region, which would overlap the
     // crashdump/status area.
     if heap == NONDMA && io_index == SELF_TEST_IO_INDEX {
+        return Err(HsmError::InvalidArg);
+    }
+    // Bulk IOs have no NonDma heap either (see `heap_base_cap`).
+    if heap == NONDMA && io_index as usize >= IO_SLOTS {
         return Err(HsmError::InvalidArg);
     }
 
@@ -408,7 +435,7 @@ impl HsmAlloc for UnoHsmPal {
     /// # Returns
     /// Mutable byte slice, or [`HsmError::NotEnoughSpace`].
     fn alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut [u8]> {
-        bump(self, io.index(), NONDMA, size, 4).map(|(_, s)| s)
+        bump(self, io.alloc_index(), NONDMA, size, 4).map(|(_, s)| s)
     }
 
     #[inline(always)]
@@ -438,7 +465,7 @@ impl HsmAlloc for UnoHsmPal {
     fn alloc_val<T: Sized>(&self, io: &UnoHsmIo, value: T) -> HsmResult<&mut T> {
         let (_, s) = bump(
             self,
-            io.index(),
+            io.alloc_index(),
             NONDMA,
             mem::size_of::<T>(),
             mem::align_of::<T>(),
@@ -461,13 +488,13 @@ impl HsmAlloc for UnoHsmPal {
     /// # Returns
     /// Mutable [`HsmDmaBuf`], or [`HsmError::NotEnoughSpace`].
     fn dma_alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut HsmDmaBuf> {
-        let s = bump(self, io.index(), DMA, size, 4).map(|(_, s)| s)?;
+        let s = bump(self, io.alloc_index(), DMA, size, 4).map(|(_, s)| s)?;
         // SAFETY: SRAM region returned by `bump` is DMA-accessible.
         Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
     }
 
     fn dma_alloc_exchange(&self, io: &UnoHsmIo, size: usize) -> HsmResult<HsmDmaAllocation<'_>> {
-        let index = io.index();
+        let index = io.alloc_index();
         let (start, _) = bump(self, index, DMA, size, 4)?;
         let (base, _) = heap_base_cap(index, DMA);
         // SAFETY: bump reserved this exclusive SRAM range; retain the heap's
@@ -481,7 +508,7 @@ impl HsmAlloc for UnoHsmPal {
         allocation: &mut HsmDmaAllocation<'_>,
         size: usize,
     ) -> HsmResult<()> {
-        let index = io.index();
+        let index = io.alloc_index();
         let (base, capacity) = heap_base_cap(index, DMA);
         let start = (allocation.as_ptr() as usize)
             .checked_sub(base as usize)
@@ -556,7 +583,7 @@ impl HsmAlloc for UnoHsmPal {
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
     {
-        let io_index = io.index();
+        let io_index = io.alloc_index();
         let (_, cap) = heap_base_cap(io_index, DMA);
         let w = wm(self, io_index, DMA);
         let mark = w.with(|v| *v).min(cap);
@@ -617,7 +644,7 @@ impl HsmAlloc for UnoHsmPal {
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,
     {
-        let io_index = io.index();
+        let io_index = io.alloc_index();
         let (_, cap) = heap_base_cap(io_index, DMA);
         let w = wm(self, io_index, DMA);
         let mark = w.with(|v| *v).min(cap);
@@ -663,10 +690,10 @@ impl HsmAlloc for UnoHsmPal {
     fn alloc_scoped<R>(&self, io: &UnoHsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R {
         let scope = UnoScopedAlloc {
             pal: self,
-            io_index: io.index(),
+            io_index: io.alloc_index(),
             marks: [
-                wm(self, io.index(), NONDMA).with(|v| *v),
-                wm(self, io.index(), DMA).with(|v| *v),
+                wm(self, io.alloc_index(), NONDMA).with(|v| *v),
+                wm(self, io.alloc_index(), DMA).with(|v| *v),
             ],
         };
         f(&scope)
@@ -686,10 +713,10 @@ impl HsmAlloc for UnoHsmPal {
     {
         let scope = UnoScopedAlloc {
             pal: self,
-            io_index: io.index(),
+            io_index: io.alloc_index(),
             marks: [
-                wm(self, io.index(), NONDMA).with(|v| *v),
-                wm(self, io.index(), DMA).with(|v| *v),
+                wm(self, io.alloc_index(), NONDMA).with(|v| *v),
+                wm(self, io.alloc_index(), DMA).with(|v| *v),
             ],
         };
         f(&scope).await

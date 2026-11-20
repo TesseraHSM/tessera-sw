@@ -36,12 +36,12 @@
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_session_ex_crypto::SessionSuite;
 
 use crate::api_rev::helper_api_rev_tbor;
 use crate::assertions::assert_fw_rejects;
@@ -127,11 +127,11 @@ impl TestCtx {
         self.dev.model()
     }
 
-    /// Whether the device is a Duo (API revision 2.x): in-session
-    /// commands travel under the session transport, crypto operands are
-    /// big-endian, and MBOR is unavailable.
+    /// Whether the device is a Duo (API revision 2.x): crypto operands
+    /// are big-endian, MBOR is unavailable, and the session transport
+    /// travels in the SQE/CQE rather than in-band.
     pub fn is_duo(&self) -> bool {
-        self.dev.uses_session_transport()
+        self.dev.is_duo()
     }
 
     /// DER partition-ID (leaf) certificate of cert slot 0, read over
@@ -147,6 +147,20 @@ impl TestCtx {
     /// the crate root.
     pub fn erase(&self) -> DdiResult<()> {
         self.dev.erase()
+    }
+
+    /// Simulate NSSR while keeping the host's stale channel keys.
+    pub fn migrate(&self) -> DdiResult<()> {
+        self.dev.migrate()
+    }
+
+    /// Complete a recovery handshake with saved masking-key material.
+    pub fn session_reopen_finish(
+        &self,
+        pending: PendingHandshake,
+        original: &SessionHandshake,
+    ) -> DdiResult<SessionHandshake> {
+        crate::session::session_reopen_finish(&self.dev, pending, original)
     }
 
     /// Issue an `OP_TBOR` request and return the raw `DdiResult`.
@@ -189,17 +203,13 @@ impl TestCtx {
     /// The status the device reports for `req` when firmware would
     /// reject it with `expected`.
     ///
-    /// A session lookup failure becomes `InvalidSessionControlOpcode` on
-    /// Duo when the harness holds no transport keys for the session: the
-    /// command then travels unsealed, and Duo's channel policy rejects it
-    /// before any session lookup.
+    /// When the harness holds no transport keys for the session of an
+    /// in-session or close command, the command travels unsealed and the
+    /// transport rejects it before any session lookup (see
+    /// [`Self::unknown_session_status`]).
     pub fn device_status<R: TborOpReq>(&self, req: &R, expected: TborStatus) -> TborStatus {
-        if matches!(
-            expected,
-            TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
-        ) && self.dev.sends_unsealed_session_cmd(req)
-        {
-            TborStatus::InvalidSessionControlOpcode
+        if self.dev.sends_unsealed_session_cmd(req) {
+            self.unknown_session_status(expected)
         } else {
             expected
         }
@@ -208,14 +218,15 @@ impl TestCtx {
     /// The status the device reports for an in-session or close command
     /// addressed to a session this handle holds no transport keys for
     /// (unknown, closed, erased, or opened elsewhere), when firmware would
-    /// reject it with `expected`. Duo receives such a command unsealed and
-    /// rejects it as `InvalidSessionControlOpcode` before any session
-    /// lookup; Uno reports `expected`.
-    pub fn unknown_session_status(&self, expected: TborStatus) -> TborStatus {
+    /// reject it with `expected`. The device receives such a command
+    /// unsealed and rejects it before any session lookup: Duo's channel
+    /// policy as `InvalidSessionControlOpcode`, Uno's frame check as
+    /// `SessionTransportError`.
+    pub fn unknown_session_status(&self, _expected: TborStatus) -> TborStatus {
         if self.is_duo() {
             TborStatus::InvalidSessionControlOpcode
         } else {
-            expected
+            TborStatus::SessionTransportError
         }
     }
 
@@ -224,6 +235,13 @@ impl TestCtx {
     /// [`Self::unknown_session_status`]).
     #[track_caller]
     pub fn assert_unknown_session_rejects(&self, err: &DdiError, expected: TborStatus) {
+        // Plaintext close now reaches the stale-slot policy on Duo.
+        if self.is_duo()
+            && expected == TborStatus::SessionNotFound
+            && matches!(err, DdiError::TborStatus(TborStatus::SessionNotFound))
+        {
+            return;
+        }
         assert_session_rejects(err, self.unknown_session_status(expected));
     }
 
@@ -348,13 +366,13 @@ impl TestCtx {
     pub fn session_open_init(
         &self,
         psk_id: u8,
-        session_type: SessionType,
+        suite: SessionSuite,
     ) -> DdiResult<PendingHandshake> {
-        session_open_init_helper(&self.dev, psk_id, session_type)
+        session_open_init_helper(&self.dev, psk_id, suite)
     }
 
     /// Full-control Phase 1 entry point: honours every override in
-    /// `opts` (PSK, ephemeral, suite id).
+    /// `opts` (PSK, suite id).
     pub fn session_open_init_with_options(
         &self,
         opts: SessionOpenInitOptions<'_>,
@@ -363,7 +381,7 @@ impl TestCtx {
     }
 
     /// Run Phase 2 of the TBOR session handshake with the canonical
-    /// confirm MAC. Consumes `pending` so callers cannot reuse stale
+    /// host confirmation. Consumes `pending` so callers cannot reuse stale
     /// state.
     pub fn session_open_finish(&self, pending: PendingHandshake) -> DdiResult<SessionHandshake> {
         session_open_finish_helper(&self.dev, pending)
@@ -387,9 +405,9 @@ impl TestCtx {
     pub(crate) fn open_session_raw(
         &self,
         psk_id: u8,
-        session_type: SessionType,
+        suite: SessionSuite,
     ) -> DdiResult<SessionHandshake> {
-        session_open_helper(&self.dev, psk_id, session_type)
+        session_open_helper(&self.dev, psk_id, suite)
     }
 
     /// Issue `SessionClose(session_id)`. Used by negative-path

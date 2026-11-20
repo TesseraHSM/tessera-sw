@@ -140,8 +140,9 @@ fn hkdf_derive_tbor(
         key_label: key_label.to_vec(),
     };
     let mut cookie = None;
+    let rev = shared_secret.api_rev();
     let resp = shared_secret.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -174,7 +175,7 @@ fn tbor_hkdf_key_type(props: &HsmKeyProps) -> HsmResult<u8> {
 }
 
 /// Maps `HsmHashAlgo` to the 1-byte TBOR `HashAlgo` discriminant.
-fn tbor_hash_algo(algo: HsmHashAlgo) -> u8 {
+pub(crate) fn tbor_hash_algo(algo: HsmHashAlgo) -> u8 {
     match algo {
         HsmHashAlgo::Sha1 => HASH_ALGO_SHA1,
         HsmHashAlgo::Sha256 => HASH_ALGO_SHA256,

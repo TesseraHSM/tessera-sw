@@ -12,16 +12,15 @@
 //! path (same underlying cert store), and confirm an invalid slot is
 //! rejected.
 
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_types::codec::DecodeError;
 use tsra_ddi_tbor_types::codec::ResponseEncoder;
 use tsra_ddi_tbor_types::codec::MAX_TOC_ENTRIES;
-use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
 use tsra_ddi_tbor_types::codec::RESP_HEADER_LEN;
 use tsra_ddi_tbor_types::codec::TOC_ENTRY_LEN;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_ddi_tbor_types::TborGetCertReq;
@@ -245,7 +244,7 @@ fn stable_across_co_session_activity() {
         .expect("GetCertChainInfo before CO session activity");
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     session.close().expect("close CO authenticated session");
@@ -271,7 +270,7 @@ fn callable_while_co_session_active() {
         .expect("GetCertChainInfo before opening CO session");
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     let during = ctx
@@ -308,7 +307,7 @@ fn truncated_response_rejected() {
     //   1. num_certs
     //   2. thumbprint
     // Encode only num_certs.
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(4)
         .expect("encode num_certs")
         .finish()
@@ -326,7 +325,7 @@ fn max_toc_response_decodes_known_fields() {
     let mut buf = [0u8; 512];
     let thumbprint = [0xA5u8; CERT_THUMBPRINT_LEN];
 
-    let mut encoder = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let mut encoder = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(4)
         .expect("encode num_certs")
         .buffer(&thumbprint)
@@ -353,7 +352,7 @@ fn wrong_num_certs_type_rejected() {
     let thumbprint = [0xA5u8; CERT_THUMBPRINT_LEN];
 
     // num_certs expects Uint8; deliberately encode Uint16.
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint16(4)
         .expect("encode wrong num_certs type")
         .buffer(&thumbprint)
@@ -373,7 +372,7 @@ fn wrong_thumbprint_type_rejected() {
     let mut buf = [0u8; 128];
 
     // thumbprint expects Buffer; deliberately encode Uint8.
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(4)
         .expect("encode num_certs")
         .uint8(0xA5)
@@ -400,7 +399,7 @@ fn stable_across_cu_session_activity() {
     // CU bootstrap sessions use PlainText while the CU PSK is still
     // the compiled-in default.
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU plaintext session");
 
     session.close().expect("close CU plaintext session");
@@ -428,7 +427,7 @@ fn callable_while_cu_session_active() {
     // CU bootstrap sessions use PlainText while the CU PSK is still
     // the compiled-in default.
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU plaintext session");
 
     let during = ctx
@@ -451,7 +450,7 @@ fn trailing_unknown_toc_type_is_ignored() {
     let thumbprint = [0x5Au8; CERT_THUMBPRINT_LEN];
 
     let len = {
-        let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
             .uint8(2)
             .expect("encode num_certs")
             .buffer(&thumbprint)
@@ -612,7 +611,7 @@ fn wrong_thumbprint_length_rejected() {
     let mut buf = [0u8; 512];
     let thumbprint = [0xA5u8; CERT_THUMBPRINT_LEN - 1];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(4)
         .expect("encode num_certs")
         .buffer(&thumbprint)
@@ -632,7 +631,7 @@ fn oversized_thumbprint_rejected() {
     let mut buf = [0u8; 512];
     let thumbprint = [0xA5u8; CERT_THUMBPRINT_LEN + 1];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(4)
         .expect("encode num_certs")
         .buffer(&thumbprint)

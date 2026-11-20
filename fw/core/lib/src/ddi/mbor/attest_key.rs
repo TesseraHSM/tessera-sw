@@ -100,7 +100,7 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
     let key = if let Ok(curve) = super::from_pal::ecc_curve(kind) {
         let priv_key = pal.vault_key(io, key_id)?;
         let coord_raw = curve.priv_key_len();
-        let wire_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+        let wire_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
         let pub_key = pal.dma_alloc(io, wire_len)?;
         // The serialize pass must write the full wire key; a short write
         // would leave stale DMA bytes in the tail of `pub_key` that must not
@@ -113,7 +113,7 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
             return Err(HsmError::InternalError);
         }
         // Convert in place to the exact-width big-endian `x ‖ y`.
-        byte_order::pair_to_be(P::BYTE_ORDER, curve, pub_key)?;
+        byte_order::pair_to_be::<P>(curve, pub_key)?;
         let pub_key: &'p HsmDmaBuf = pub_key;
         let (x, y) = pub_key[..2 * coord_raw].split_at(coord_raw);
         AttestedPubKey::Ecc { curve, x, y }

@@ -20,6 +20,7 @@ use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborEcdhDeriveReq;
+use tsra_ddi_tbor_types::ecc_sign_input;
 
 use super::*;
 
@@ -134,8 +135,9 @@ fn ecc_generate_key_tbor(
         key_label: key_label.to_vec(),
     };
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -267,7 +269,7 @@ pub(crate) fn ecc_sign(
     // the caller-held masked key; a V1 (MBOR) session signs with the
     // device-resident key id.
     if key.session().is_ex() {
-        ecc_sign_tbor(key, curve, hash, sig)
+        ecc_sign_tbor(key, curve, hash, hash_algo, sig)
     } else {
         ecc_sign_mbor(key, curve, hash, hash_algo, sig)
     }
@@ -306,10 +308,11 @@ fn ecc_sign_tbor(
     key: &HsmEccPrivateKey,
     curve: HsmEccCurve,
     hash: &[u8],
+    hash_algo: HsmHashAlgo,
     sig: &mut [u8],
 ) -> HsmResult<usize> {
     let masked = key.masked_key_vec()?;
-    ecc_sign_masked_tbor(&key.session(), &masked, curve, hash, sig)
+    ecc_sign_masked_tbor(&key.session(), &masked, curve, hash, hash_algo, sig)
 }
 
 pub(crate) fn ecc_sign_masked_tbor(
@@ -317,22 +320,32 @@ pub(crate) fn ecc_sign_masked_tbor(
     masked: &[u8],
     curve: HsmEccCurve,
     hash: &[u8],
+    hash_algo: HsmHashAlgo,
     sig: &mut [u8],
 ) -> HsmResult<usize> {
     // Firmware reads the digest as an integer in its native order; the
-    // host holds it big-endian.
+    // host holds it big-endian. It goes in the packed `k ‖ digest` input
+    // whose lanes are padded like the curve's coordinates.
     let order = WireOrder::of(session);
     let mut digest = hash.to_vec();
     order.convert_in_place(&mut digest);
+    let input = ecc_sign_input(
+        order.coord_len(curve.component_size()),
+        order.coord_len(1),
+        &digest,
+    )
+    .map_hsm_err(HsmError::InvalidArgument)?;
 
     let req = TborEccSignReq {
         session_id: session.ex_session_id()?,
+        hash_algo: tbor_hash_algo(hash_algo),
         masked_key: masked.to_vec(),
-        digest,
+        input,
     };
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -472,8 +485,9 @@ fn ecdh_derive_tbor(
         key_label: key_label.to_vec(),
     };
     let mut cookie = None;
+    let rev = base_key.api_rev();
     let resp = base_key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

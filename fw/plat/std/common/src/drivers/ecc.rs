@@ -14,7 +14,7 @@
 //! | Method | Operation | Input | Output |
 //! |--------|-----------|-------|--------|
 //! | [`gen_keypair`] | Key generation | `EccCurve` | `(EccPrivateKey, EccPublicKey)` |
-//! | [`pub_coords`] | Serialize pub key | `&EccPublicKey`, `big_endian`, `&mut [u8]` out | `x ∥ y` bytes |
+//! | [`pub_coords`] | Serialize pub key | `&EccPublicKey`, [`EccForm`], `&mut [u8]` out | `x ∥ y` bytes |
 //! | [`ecc_sign`] | Raw EC sign | `&EccPrivateKey`, `&[u8]` hash | `Vec<u8>` (r∥s) |
 //! | [`ecc_verify`] | Raw EC verify | `&EccPublicKey`, `&[u8]` hash, `&[u8]` sig | `bool` |
 //! | [`ecdh_derive`] | ECDH agreement | `&EccPrivateKey`, `&EccPublicKey` | writes `&mut [u8]` |
@@ -46,21 +46,50 @@ use zeroize::Zeroizing;
 
 use crate::worker::WorkerPool;
 
+/// Layout of serialized ECC components: byte order and lane padding.
+///
+/// Each component sits at the head of a lane of its raw length rounded up
+/// to `pad` bytes, in `order`, with a zero tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EccForm {
+    /// Component byte order.
+    pub order: HsmByteOrder,
+
+    /// Lane padding in bytes.
+    pub pad: usize,
+}
+
+impl EccForm {
+    /// Exact-width big-endian components (SEC1, X.509, COSE).
+    pub const BE: Self = Self {
+        order: HsmByteOrder::Be,
+        pad: 1,
+    };
+
+    /// The PAL operand form of `P`.
+    pub const fn of<P: HsmCryptoOrder>() -> Self {
+        Self {
+            order: P::BYTE_ORDER,
+            pad: P::ECC_COORD_PAD,
+        }
+    }
+}
+
 /// Std ECC driver — software ECC via OpenSSL with async worker dispatch.
 ///
 /// The `_op` methods exchange keys, digests, signatures and secrets in
-/// the PAL's operand byte order; the driver converts to and from the
+/// the PAL's operand form; the driver converts to and from the
 /// big-endian components OpenSSL uses.
 pub struct StdEcc {
     pool: WorkerPool,
-    order: HsmByteOrder,
+    form: EccForm,
 }
 
 impl StdEcc {
     /// Create a new ECC driver backed by the given worker pool, using the
-    /// PAL operand byte order `order`.
-    pub fn new(pool: WorkerPool, order: HsmByteOrder) -> Self {
-        Self { pool, order }
+    /// PAL operand form `form`.
+    pub fn new(pool: WorkerPool, form: EccForm) -> Self {
+        Self { pool, form }
     }
 
     /// Generate an ECC key pair asynchronously, returning the
@@ -84,24 +113,23 @@ impl StdEcc {
     }
 
     /// Serialize a public-key handle's coordinates to raw `x ∥ y` bytes
-    /// in `order`.  The curve is taken from the handle.
+    /// in `form`.  The curve is taken from the handle.
     ///
-    /// [`HsmByteOrder::Be`] yields the exact-width big-endian form used
-    /// by internal consumers (cert generation, POTA hashing); the PAL
-    /// operand order yields the DDI wire form.  Each coordinate occupies
-    /// a `wire_coord_len(curve, order)` slot (P-521 is padded to 68 bytes
-    /// on little-endian).
+    /// [`EccForm::BE`] yields the exact-width big-endian form used by
+    /// internal consumers (cert generation, POTA hashing); the PAL
+    /// operand form yields the DDI wire form.  Each coordinate occupies
+    /// a `wire_coord_len(curve, form)` lane.
     ///
-    /// `out.len()` must be `2 * wire_coord_len(curve, order)`.
+    /// `out.len()` must be `2 * wire_coord_len(curve, form)`.
     pub async fn pub_coords(
         &self,
         pub_key: &EccPublicKey,
-        order: HsmByteOrder,
+        form: EccForm,
         out: &mut [u8],
     ) -> HsmResult<()> {
         let curve = pub_key.curve();
         let coord_len = priv_key_len(curve);
-        let wire_coord = wire_coord_len(curve, order);
+        let wire_coord = wire_coord_len(curve, form);
         if out.len() != wire_coord * 2 {
             return Err(HsmError::EccGetCoordinatesError);
         }
@@ -120,7 +148,7 @@ impl StdEcc {
             })
             .await?;
 
-        write_pair(order, curve, &x_be[..coord_len], &y_be[..coord_len], out)
+        write_pair(form, curve, &x_be[..coord_len], &y_be[..coord_len], out)
     }
 
     /// Raw EC sign over a pre-computed hash digest.
@@ -157,7 +185,7 @@ impl StdEcc {
     /// write the operand-order signature (`r || s`, each in a
     /// `wire_coord_len` slot) into `sig_out`.
     ///
-    /// `sig_out.len()` must be `wire_sig_len(curve, order)`.
+    /// `sig_out.len()` must be `2 * wire_coord_len(curve, form)`.
     /// `hash.len()` must not exceed SHA-512 (64 bytes); longer inputs are
     /// rejected rather than silently truncated.
     pub async fn ecc_sign_op(
@@ -168,7 +196,7 @@ impl StdEcc {
     ) -> HsmResult<()> {
         let curve = EccKeyOp::curve(priv_key);
         let coord_len = priv_key_len(curve);
-        if sig_out.len() != wire_coord_len(curve, self.order) * 2 {
+        if sig_out.len() != wire_coord_len(curve, self.form) * 2 {
             return Err(HsmError::EccSignFailed);
         }
         if hash.len() > 64 {
@@ -176,14 +204,14 @@ impl StdEcc {
         }
 
         let mut hash_be = [0u8; 64];
-        byte_order::int_copy_to_be(self.order, &mut hash_be[..hash.len()], hash)?;
+        byte_order::int_copy_to_be(self.form.order, &mut hash_be[..hash.len()], hash)?;
 
         let sig_be = self.ecc_sign(priv_key, &hash_be[..hash.len()]).await?;
         if sig_be.len() < coord_len * 2 {
             return Err(HsmError::EccSignFailed);
         }
         let (r_be, s_be) = sig_be.split_at(coord_len);
-        write_pair(self.order, curve, r_be, &s_be[..coord_len], sig_out)
+        write_pair(self.form, curve, r_be, &s_be[..coord_len], sig_out)
     }
 
     /// Raw EC verify a signature over a pre-computed hash digest.
@@ -210,13 +238,13 @@ impl StdEcc {
     /// Verify an operand-order signature using a public key supplied as
     /// operand-order `x || y` coordinates.  The driver constructs the
     /// OpenSSL pub-key handle and converts byte order (plus P-521
-    /// per-coordinate de-padding on little-endian) internally.
+    /// per-coordinate lane de-padding) internally.
     ///
-    /// `hash` is the operand-order digest, symmetric with
-    /// [`Self::ecc_sign_op`].
+    /// `hash` is the operand-order digest of at most 64 bytes, symmetric
+    /// with [`Self::ecc_sign_op`].
     ///
     /// `pub_op` and `sig_op` must each be at least
-    /// `2 * wire_coord_len(curve, order)` bytes.
+    /// `2 * wire_coord_len(curve, form)` bytes.
     pub async fn ecc_verify_op(
         &self,
         curve: EccCurve,
@@ -225,25 +253,24 @@ impl StdEcc {
         sig_op: &[u8],
     ) -> HsmResult<bool> {
         let coord_len = priv_key_len(curve);
-        let (x_be, y_be) = read_pair(self.order, curve, pub_op)?;
+        let (x_be, y_be) = read_pair(self.form, curve, pub_op)?;
         let key = EccPublicKey::from_coordinates(curve, &x_be[..coord_len], &y_be[..coord_len])
             .map_err(|_| HsmError::InvalidArg)?;
 
-        let (r_be, s_be) = read_pair(self.order, curve, sig_op)?;
+        let (r_be, s_be) = read_pair(self.form, curve, sig_op)?;
         let sig_len = coord_len * 2;
         let mut sig_be = [0u8; 132];
         sig_be[..coord_len].copy_from_slice(&r_be[..coord_len]);
         sig_be[coord_len..sig_len].copy_from_slice(&s_be[..coord_len]);
 
-        // The PAL trait allows a `hash` buffer larger than the curve digest;
-        // verify only the leading curve-digest bytes (matching the uno PAL,
-        // which feeds the PKA exactly `hash_size(curve)`).
-        let digest_len = ecc_digest_len(curve);
-        let digest = hash.get(..digest_len).ok_or(HsmError::InvalidArg)?;
+        // OpenSSL truncates a digest longer than the curve order, as on sign.
+        if hash.len() > 64 {
+            return Err(HsmError::InvalidArg);
+        }
         let mut hash_be = [0u8; 64];
-        byte_order::int_copy_to_be(self.order, &mut hash_be[..digest_len], digest)?;
+        byte_order::int_copy_to_be(self.form.order, &mut hash_be[..hash.len()], hash)?;
 
-        self.ecc_verify(&key, &hash_be[..digest_len], &sig_be[..sig_len])
+        self.ecc_verify(&key, &hash_be[..hash.len()], &sig_be[..sig_len])
             .await
     }
 
@@ -295,9 +322,9 @@ impl StdEcc {
     /// ECDH key agreement using a public key supplied as operand-order
     /// `x || y` coordinates.  The driver constructs the OpenSSL pub-key
     /// handle internally, including stripping P-521 per-coordinate
-    /// padding on little-endian.
+    /// lane padding.
     ///
-    /// `pub_op` must be at least `2 * wire_coord_len(curve, order)` bytes.
+    /// `pub_op` must be at least `2 * wire_coord_len(curve, form)` bytes.
     /// The shared secret is written to the head of `secret_out` in
     /// operand order; the DDI handler converts to the consumer's byte
     /// order (e.g. to big-endian before an openssl-matching HKDF).
@@ -309,7 +336,7 @@ impl StdEcc {
         secret_out: &mut [u8],
     ) -> HsmResult<()> {
         let coord_len = priv_key_len(curve);
-        let (x_be, y_be) = read_pair(self.order, curve, pub_op)?;
+        let (x_be, y_be) = read_pair(self.form, curve, pub_op)?;
 
         // Peer-key validation (FIPS 186-5 / SP 800-56A) and peer-key
         // construction are OpenSSL/CNG operations, so run them on the worker
@@ -343,7 +370,7 @@ impl StdEcc {
         let secret = secret_out
             .get_mut(..coord_len)
             .ok_or(HsmError::EccDeriveError)?;
-        byte_order::int_from_be(self.order, secret);
+        byte_order::int_from_be(self.form.order, secret);
         Ok(())
     }
 
@@ -355,7 +382,7 @@ impl StdEcc {
     /// `Q = d · G`), public-point extraction, and coordinate readout —
     /// runs on the worker pool.
     ///
-    /// `priv_vault.len()` must be `wire_coord_len(curve, order)` and
+    /// `priv_vault.len()` must be `wire_coord_len(curve, form)` and
     /// `out.len()` twice that.
     pub async fn pub_from_priv_op(
         &self,
@@ -364,7 +391,7 @@ impl StdEcc {
         out: &mut [u8],
     ) -> HsmResult<()> {
         let coord_len = priv_key_len(curve);
-        let wire_coord = wire_coord_len(curve, self.order);
+        let wire_coord = wire_coord_len(curve, self.form);
         if priv_vault.len() != wire_coord || out.len() != wire_coord * 2 {
             return Err(HsmError::InvalidArg);
         }
@@ -390,7 +417,7 @@ impl StdEcc {
             .await?;
 
         write_pair(
-            self.order,
+            self.form,
             curve,
             &x_be[..coord_len],
             &y_be[..coord_len],
@@ -399,51 +426,67 @@ impl StdEcc {
     }
 }
 
+/// Curve of a vault-format private key of `len` bytes: the raw scalar
+/// length padded to a 4- or 8-byte lane (P-521: 66, 68 or 72).
+pub fn vault_curve(len: usize) -> Option<EccCurve> {
+    match len {
+        32 => Some(EccCurve::P256),
+        48 => Some(EccCurve::P384),
+        66 | 68 | 72 => Some(EccCurve::P521),
+        _ => None,
+    }
+}
+
 /// Import a vault-format ECC private key: the big-endian scalar, left
-/// zero-padded to the PAL's `wire_coord_len` (P-521 is 68 bytes on
-/// little-endian PALs and 66 on big-endian ones).
+/// zero-padded to the PAL's `wire_coord_len` (P-521: 68 bytes with a 4-byte
+/// pad, 72 with an 8-byte pad).
 ///
 /// # Errors
-/// [`HsmError::InvalidArg`] if the length or scalar is invalid.
+/// [`HsmError::InvalidArg`] if the length, padding or scalar is invalid.
 pub fn import_priv(vault: &[u8]) -> HsmResult<EccPrivateKey> {
-    let key = if vault.len() == priv_key_len(EccCurve::P521) {
-        EccPrivateKey::from_scalar(EccCurve::P521, vault)
-    } else {
-        EccPrivateKey::from_hsm_bytes(vault)
-    };
-    key.map_err(|_| HsmError::InvalidArg)
+    let curve = vault_curve(vault.len()).ok_or(HsmError::InvalidArg)?;
+    let (pad, scalar) = vault.split_at(vault.len() - priv_key_len(curve));
+    if pad.iter().any(|&b| b != 0) {
+        return Err(HsmError::InvalidArg);
+    }
+    EccPrivateKey::from_scalar(curve, scalar).map_err(|_| HsmError::InvalidArg)
 }
 
 /// Export `pk` in vault format (see [`import_priv`]) filling all of
-/// `out`, which must be `wire_coord_len` for the key's curve.
+/// `out`, which must be at least the key's raw scalar length.
 ///
 /// # Errors
 /// [`HsmError::EccExportError`] if `out` cannot hold the scalar.
 pub fn export_priv(pk: &EccPrivateKey, out: &mut [u8]) -> HsmResult<()> {
+    let raw = priv_key_len(EccKeyOp::curve(pk));
     let mut full = Zeroizing::new([0u8; 68]);
     let n = pk
         .to_hsm_bytes(&mut full[..])
         .map_err(|_| HsmError::EccExportError)?;
-    let skip = n.checked_sub(out.len()).ok_or(HsmError::EccExportError)?;
-    let (pad, scalar) = full[..n].split_at(skip);
-    if pad.iter().any(|&b| b != 0) {
+    let (high, scalar) = full[..n]
+        .split_at_checked(n.checked_sub(raw).ok_or(HsmError::EccExportError)?)
+        .ok_or(HsmError::EccExportError)?;
+    if high.iter().any(|&b| b != 0) {
         return Err(HsmError::EccExportError);
     }
-    out.copy_from_slice(scalar);
+    let skip = out.len().checked_sub(raw).ok_or(HsmError::EccExportError)?;
+    out[..skip].fill(0);
+    out[skip..].copy_from_slice(scalar);
     Ok(())
 }
 
 /// Lay the exact-width big-endian components `a_be`, `b_be` out in
-/// `order` as two `wire_coord_len` slots filling `out`, zeroing padding.
+/// `form` as two `wire_coord_len` lanes filling `out`, zeroing padding.
 fn write_pair(
-    order: HsmByteOrder,
+    form: EccForm,
     curve: EccCurve,
     a_be: &[u8],
     b_be: &[u8],
     out: &mut [u8],
 ) -> HsmResult<()> {
+    let order = form.order;
     let coord_len = priv_key_len(curve);
-    let wire_coord = wire_coord_len(curve, order);
+    let wire_coord = wire_coord_len(curve, form);
     if out.len() != wire_coord * 2 {
         return Err(HsmError::InvalidArg);
     }
@@ -455,9 +498,10 @@ fn write_pair(
 
 /// Read the two operand-order components at the head of `wire` into
 /// exact-width big-endian scratch.
-fn read_pair(order: HsmByteOrder, curve: EccCurve, wire: &[u8]) -> HsmResult<([u8; 66], [u8; 66])> {
+fn read_pair(form: EccForm, curve: EccCurve, wire: &[u8]) -> HsmResult<([u8; 66], [u8; 66])> {
+    let order = form.order;
     let coord_len = priv_key_len(curve);
-    let wire_coord = wire_coord_len(curve, order);
+    let wire_coord = wire_coord_len(curve, form);
     let wire = wire.get(..wire_coord * 2).ok_or(HsmError::InvalidArg)?;
     let (a, b) = wire.split_at(wire_coord);
     let mut a_be = [0u8; 66];
@@ -480,6 +524,7 @@ fn priv_key_len(curve: EccCurve) -> usize {
 }
 
 /// ECDSA digest length for the curve's standard hash (SHA-256/384/512).
+#[cfg(test)]
 fn ecc_digest_len(curve: EccCurve) -> usize {
     match curve {
         EccCurve::P256 => 32,
@@ -488,15 +533,10 @@ fn ecc_digest_len(curve: EccCurve) -> usize {
     }
 }
 
-/// Per-coordinate operand slot length: exact on big-endian PALs; on
-/// little-endian PALs padded to 32-bit words (P-521: 66 → 68).
-fn wire_coord_len(curve: EccCurve, order: HsmByteOrder) -> usize {
-    match curve {
-        EccCurve::P256 => 32,
-        EccCurve::P384 => 48,
-        EccCurve::P521 if order.is_be() => 66,
-        EccCurve::P521 => 68,
-    }
+/// Per-component lane length: the raw length rounded up to `form.pad`
+/// (P-521: 66 → 68 with a 4-byte pad, 72 with an 8-byte pad).
+fn wire_coord_len(curve: EccCurve, form: EccForm) -> usize {
+    priv_key_len(curve).next_multiple_of(form.pad)
 }
 
 #[cfg(test)]
@@ -505,12 +545,21 @@ mod tests {
 
     use super::*;
 
+    const LE4: EccForm = EccForm {
+        order: HsmByteOrder::Le,
+        pad: 4,
+    };
+    const BE8: EccForm = EccForm {
+        order: HsmByteOrder::Be,
+        pad: 8,
+    };
+
     fn make_driver() -> StdEcc {
-        make_driver_with(HsmByteOrder::Le)
+        make_driver_with(LE4)
     }
 
-    fn make_driver_with(order: HsmByteOrder) -> StdEcc {
-        StdEcc::new(WorkerPool::new(Handle::current()), order)
+    fn make_driver_with(form: EccForm) -> StdEcc {
+        StdEcc::new(WorkerPool::new(Handle::current()), form)
     }
 
     // ── Key generation ──────────────────────────────────────────
@@ -548,11 +597,11 @@ mod tests {
         let mut be = [0u8; 96];
         let mut le = [0u8; 96];
         driver
-            .pub_coords(&pub_key, HsmByteOrder::Be, &mut be)
+            .pub_coords(&pub_key, EccForm::BE, &mut be)
             .await
             .expect("be coords");
         driver
-            .pub_coords(&pub_key, HsmByteOrder::Le, &mut le)
+            .pub_coords(&pub_key, LE4, &mut le)
             .await
             .expect("le coords");
         // Each 48-byte coordinate in LE is the byte-reverse of BE.
@@ -569,32 +618,32 @@ mod tests {
     // ── Public-key derivation from private scalar ───────────────
 
     async fn pub_from_priv_roundtrip(
-        order: HsmByteOrder,
+        form: EccForm,
         curve: EccCurve,
         priv_len: usize,
         pub_len: usize,
     ) {
-        let driver = make_driver_with(order);
+        let driver = make_driver_with(form);
         let (priv_key, pub_key) = driver.gen_keypair(curve).await.expect("keygen");
 
         // Export the private scalar in the vault format the mask /
         // unmask pipeline round-trips.
-        let mut priv_vault = [0u8; 68];
+        let mut priv_vault = [0u8; 72];
         export_priv(&priv_key, &mut priv_vault[..priv_len]).expect("export");
         let reimported = import_priv(&priv_vault[..priv_len]).expect("import");
         assert_eq!(EccKeyOp::curve(&reimported), curve);
 
         // Derive the public key from the private scalar.
-        let mut derived = [0u8; 136];
+        let mut derived = [0u8; 144];
         driver
             .pub_from_priv_op(curve, &priv_vault[..priv_len], &mut derived[..pub_len])
             .await
             .expect("pub from priv");
 
         // It must equal the generated public key in operand order.
-        let mut expected = [0u8; 136];
+        let mut expected = [0u8; 144];
         driver
-            .pub_coords(&pub_key, order, &mut expected[..pub_len])
+            .pub_coords(&pub_key, form, &mut expected[..pub_len])
             .await
             .expect("pub coords");
 
@@ -603,38 +652,38 @@ mod tests {
 
     #[tokio::test]
     async fn pub_from_priv_matches_gen_p256() {
-        pub_from_priv_roundtrip(HsmByteOrder::Le, EccCurve::P256, 32, 64).await;
+        pub_from_priv_roundtrip(LE4, EccCurve::P256, 32, 64).await;
     }
 
     #[tokio::test]
     async fn pub_from_priv_matches_gen_p384() {
-        pub_from_priv_roundtrip(HsmByteOrder::Le, EccCurve::P384, 48, 96).await;
+        pub_from_priv_roundtrip(LE4, EccCurve::P384, 48, 96).await;
     }
 
     #[tokio::test]
     async fn pub_from_priv_matches_gen_p521() {
-        pub_from_priv_roundtrip(HsmByteOrder::Le, EccCurve::P521, 68, 136).await;
+        pub_from_priv_roundtrip(LE4, EccCurve::P521, 68, 136).await;
     }
 
     #[tokio::test]
     async fn pub_from_priv_matches_gen_p521_be() {
-        pub_from_priv_roundtrip(HsmByteOrder::Be, EccCurve::P521, 66, 132).await;
+        pub_from_priv_roundtrip(BE8, EccCurve::P521, 72, 144).await;
     }
 
     /// Operand-order sign/verify round-trips in both orders, and a
     /// big-endian signature is the per-component reverse of a
     /// little-endian one over the reversed digest.
-    async fn sign_verify_op_roundtrip(order: HsmByteOrder, curve: EccCurve, sig_len: usize) {
-        let driver = make_driver_with(order);
+    async fn sign_verify_op_roundtrip(form: EccForm, curve: EccCurve, sig_len: usize) {
+        let driver = make_driver_with(form);
         let (priv_key, pub_key) = driver.gen_keypair(curve).await.expect("keygen");
-        let mut pub_op = [0u8; 136];
+        let mut pub_op = [0u8; 144];
         driver
-            .pub_coords(&pub_key, order, &mut pub_op[..sig_len])
+            .pub_coords(&pub_key, form, &mut pub_op[..sig_len])
             .await
             .expect("pub coords");
         let digest_len = ecc_digest_len(curve);
         let hash: Vec<u8> = (1..=digest_len as u8).collect();
-        let mut sig = [0u8; 136];
+        let mut sig = [0u8; 144];
         driver
             .ecc_sign_op(&priv_key, &hash, &mut sig[..sig_len])
             .await
@@ -653,28 +702,28 @@ mod tests {
 
     #[tokio::test]
     async fn sign_verify_op_both_orders() {
-        for order in [HsmByteOrder::Le, HsmByteOrder::Be] {
-            sign_verify_op_roundtrip(order, EccCurve::P256, 64).await;
-            sign_verify_op_roundtrip(order, EccCurve::P384, 96).await;
+        for form in [LE4, BE8] {
+            sign_verify_op_roundtrip(form, EccCurve::P256, 64).await;
+            sign_verify_op_roundtrip(form, EccCurve::P384, 96).await;
         }
-        sign_verify_op_roundtrip(HsmByteOrder::Le, EccCurve::P521, 136).await;
-        sign_verify_op_roundtrip(HsmByteOrder::Be, EccCurve::P521, 132).await;
+        sign_verify_op_roundtrip(LE4, EccCurve::P521, 136).await;
+        sign_verify_op_roundtrip(BE8, EccCurve::P521, 144).await;
     }
 
     /// ECDH secrets agree across orders: the big-endian secret is the
     /// byte reverse of the little-endian one.
     #[tokio::test]
     async fn ecdh_op_secret_order() {
-        let le = make_driver_with(HsmByteOrder::Le);
-        let be = make_driver_with(HsmByteOrder::Be);
+        let le = make_driver_with(LE4);
+        let be = make_driver_with(BE8);
         let (priv_a, _) = le.gen_keypair(EccCurve::P521).await.expect("keygen a");
         let (_, pub_b) = le.gen_keypair(EccCurve::P521).await.expect("keygen b");
         let mut pub_le = [0u8; 136];
-        let mut pub_be = [0u8; 132];
-        le.pub_coords(&pub_b, HsmByteOrder::Le, &mut pub_le)
+        let mut pub_be = [0u8; 144];
+        le.pub_coords(&pub_b, LE4, &mut pub_le)
             .await
             .expect("le coords");
-        be.pub_coords(&pub_b, HsmByteOrder::Be, &mut pub_be)
+        be.pub_coords(&pub_b, BE8, &mut pub_be)
             .await
             .expect("be coords");
         let mut s_le = [0u8; 66];

@@ -18,8 +18,8 @@ use tsra_api::HsmPartition;
 use tsra_api::HsmPartitionManager;
 use tsra_api::HsmPskId;
 use tsra_api::HsmSession;
-use tsra_api::HsmSessionExType;
 use tsra_api::HsmSessionPsk;
+use tsra_api::HsmSessionSuite;
 use tsra_api::PSK_LEN;
 
 /// A fixed non-default Crypto-Officer PSK, rotated in during bring-up to
@@ -51,11 +51,13 @@ impl SealingSession {
     /// Open a new authenticated CO session on an already-initialized
     /// partition without resetting it or rotating its PSK.
     pub fn open_co_session(partition: &HsmPartition, rev: HsmApiRev) -> Result<HsmSession> {
+        let root_pin = trusted_root_pin()?;
         partition
             .open_session_ex(
                 rev,
+                &root_pin,
                 HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .context("open rotated CO session")
     }
@@ -91,6 +93,7 @@ impl SealingSession {
 /// Locate the backend's first partition and open it at its maximum
 /// supported API revision, optionally factory-resetting it first.
 fn open_partition(reset: bool) -> Result<(HsmPartition, HsmApiRev)> {
+    trusted_root_pin()?;
     let info = HsmPartitionManager::partition_info_list()
         .into_iter()
         .next()
@@ -109,12 +112,14 @@ fn open_partition(reset: bool) -> Result<(HsmPartition, HsmApiRev)> {
 /// Open the default-PSK CO session, rotate its PSK to [`ROTATED_CO_PSK`],
 /// and reopen under the rotated PSK. Returns the rotated CO session.
 fn open_rotated_co_session(part: &HsmPartition, rev: HsmApiRev) -> Result<HsmSession> {
+    let root_pin = trusted_root_pin()?;
     {
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &root_pin,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .context("open bootstrap CO session")?;
         bootstrap
@@ -122,4 +127,22 @@ fn open_rotated_co_session(part: &HsmPartition, rev: HsmApiRev) -> Result<HsmSes
             .context("rotate CO PSK")?;
     }
     SealingSession::open_co_session(part, rev)
+}
+
+/// This pin must be provisioned from a trusted source, not learned from the
+/// connection whose identity the session is about to authenticate.
+fn trusted_root_pin() -> Result<[u8; 48]> {
+    let encoded = std::env::var("TSRA_ROOT_SPKI_SHA384").context(
+        "set TSRA_ROOT_SPKI_SHA384 to the trusted root's 96-digit SPKI SHA-384 hex hash",
+    )?;
+    anyhow::ensure!(
+        encoded.len() == 96 && encoded.is_ascii(),
+        "root pin must be 96 hex digits"
+    );
+    let mut pin = [0; 48];
+    for (byte, pair) in pin.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)
+            .context("root pin must contain only hex digits")?;
+    }
+    Ok(pin)
 }

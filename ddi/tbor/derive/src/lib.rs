@@ -215,13 +215,14 @@ fn gen_request(
             fn encode_request<'__b>(
                 &self,
                 __buf: &'__b mut [u8],
+                __api_rev: (u16, u16),
             ) -> ::core::result::Result<&'__b [u8], ::tsra_ddi_tbor_codec::EncodeError> {
                 let __slots = (#field_toc_count).max(
                     <#resp_ty as ::tsra_ddi_tbor_types::TborResp>::FIELD_TOC_COUNT,
                 );
                 let __enc = ::tsra_ddi_tbor_codec::RequestEncoder::new(
                     __buf,
-                    ::tsra_ddi_tbor_codec::PROTOCOL_VERSION,
+                    __api_rev,
                     <Self as ::tsra_ddi_tbor_types::TborOpReq>::OPCODE,
                 ).with_toc_slots(__slots)?;
                 #encode_chain

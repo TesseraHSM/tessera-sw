@@ -27,9 +27,11 @@
 //! Bulk (fast-path) IOs arrive on the fast-path controller's FP1 and FP2
 //! IIC/OIC channel pairs and use their own `BULK_IO_SQ` (128B),
 //! `BULK_IO_CQ` (64B) and `BULK_IO_META` arrays, shared by both channels:
-//! each posts its own range of the slots. They have no per-IO heaps: a bulk
-//! IO must not reach the allocator, whose tables are indexed by command slot.
+//! each posts its own range of the slots. They have no per-IO heaps; a bulk
+//! IO's allocator slot (see [`UnoHsmIo::alloc_index`]) is a small DMA heap
+//! over its `BULK_SCRATCH` slot, for core work before the bulk crypto.
 
+use core::cell::Cell;
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
@@ -52,6 +54,7 @@ use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SqeEntry;
 use tsra_fw_hsm_io::oob_entry_addr;
+use tsra_fw_hsm_io::sealed;
 use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCqe;
@@ -175,6 +178,7 @@ pub struct UnoHsmIo {
     pid: HsmPartId,
     /// Source queue, from its routing (see [`Self::queue_id`]).
     queue_id: u16,
+    transport_binding: Cell<Option<sealed::SessionTransportBinding>>,
 }
 
 impl UnoHsmIo {
@@ -184,6 +188,16 @@ impl UnoHsmIo {
     /// [`kind`](HsmIo::kind)); only command slots own per-IO heaps.
     pub fn index(&self) -> u16 {
         self.index
+    }
+
+    /// Returns this IO's allocator slot: its slot index for a command IO,
+    /// and one past the command slots for a bulk IO, whose heap is its
+    /// `BULK_SCRATCH` slot (see [`crate::alloc`]).
+    pub(crate) fn alloc_index(&self) -> u16 {
+        match self.kind {
+            HsmIoKind::Bulk => crate::alloc::IO_SLOTS as u16 + self.index,
+            _ => self.index,
+        }
     }
 
     /// Returns this bulk IO's scratch region (`BULK_SCRATCH[index]`), in
@@ -216,6 +230,7 @@ impl UnoHsmIo {
                 kind: HsmIoKind::Cmd,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
+                transport_binding: Cell::new(None),
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
@@ -242,6 +257,7 @@ impl UnoHsmIo {
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
             queue_id,
+            transport_binding: Cell::new(None),
         }
     }
 
@@ -432,6 +448,8 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
+        let sealed_id = sealed::sealed_session(io.cmd_sqe())?;
+        let control = io.cmd_sqe().session_ctrl();
         let sqe = io.cmd_sqe().view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -445,24 +463,58 @@ impl HsmIoController for UnoHsmPal {
             sqe.oob_prp(),
         )?;
         let len = sqe.src_len() as usize;
-        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+        let headroom = sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN);
+        let mut buf = self.dma_alloc_exchange(io, headroom + len.next_multiple_of(4))?;
         self.copy_mem_from_host(
             io,
             sqe.src_prp1(),
             sqe.src_prp2(),
-            &mut buf.buffer_mut()[..len],
+            &mut buf.buffer_mut()[headroom..headroom + len],
             true,
         )
         .await
         .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+        let resp_capacity = sqe.dst_len() as usize;
+        let Some(id) = sealed_id else {
+            return Ok(HsmRequest {
+                buf,
+                len,
+                resp_capacity,
+            });
+        };
+        let (len, binding) = sealed::sealed_open(
+            self,
+            io,
+            id,
+            control,
+            &mut buf.buffer_mut()[..headroom + len],
+        )
+        .await?;
+        io.transport_binding.set(Some(binding));
+        let buf = buf.skip_prefix(headroom)?;
         Ok(HsmRequest {
             buf,
             len,
-            resp_capacity: sqe.dst_len() as usize,
+            resp_capacity: sealed::sealed_msg_capacity(resp_capacity),
         })
     }
 
+    /// Copies the response to the host, sealing an in-session TBOR one
+    /// (see [`sealed`]) and setting the CQE length to the frame's.
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
+        let resp = match sealed::sealed_session(io.cmd_sqe())? {
+            Some(id) => {
+                let binding = io
+                    .transport_binding
+                    .take()
+                    .ok_or(HsmError::SessionTransportError)?;
+                let frame = sealed::sealed_seal(self, io, id, binding, resp).await?;
+                let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
+                slot_cqe(io.index).view().set_dst_len(frame_len);
+                frame
+            }
+            None => resp,
+        };
         let sqe = io.cmd_sqe().view();
         if resp.len() > sqe.dst_len() as usize {
             return Err(HsmError::InvalidArg);
@@ -524,10 +576,13 @@ impl HsmIoController for UnoHsmPal {
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
     /// [`drop_io`](HsmIoController::drop_io). Declines bulk, admin and
-    /// self-test IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
+    /// self-test IOs, sealed IOs (whose reply [`send_response`] must seal),
+    /// and IOs whose dirty SRAM is too large to scrub with the CPU.
+    ///
+    /// [`send_response`]: HsmIoController::send_response
     fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io> {
         let index = io.index;
-        if io.kind != HsmIoKind::Cmd {
+        if io.kind != HsmIoKind::Cmd || sealed::sqe_is_sealed(io.cmd_sqe()) {
             return Err(io);
         }
         let sqe = io.cmd_sqe().view();
@@ -583,6 +638,7 @@ impl HsmIoController for UnoHsmPal {
                 // SAFETY: the IO's own scratch region, writable over its
                 // whole length, and no longer in use.
                 unsafe { crate::gdma::cpu_zeroize(ptr, len) };
+                crate::alloc::clear_io_peak(self, io.alloc_index());
                 // Returns only the buffer: a bulk IO's credit comes back
                 // with its completion, or, for an IO dropped without one,
                 // when the SQ is recreated (see `grant_credit`).
@@ -766,6 +822,7 @@ impl UnoHsmPal {
             // failure can be recorded in it (`HsmCqe::set_err`).
             #[cfg(not(feature = "bulk_crypto"))]
             HsmIoKind::Bulk => {
+                reset_io_alloc(self, crate::alloc::IO_SLOTS as u16 + index);
                 *slot_bulk_cqe(index) = BulkCqeEntry::for_sqe(&slot_bulk_sqe(index).0)
             }
             #[cfg(feature = "bulk_crypto")]

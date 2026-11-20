@@ -19,9 +19,9 @@ use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_fw_ddi_tbor_types::TborGetCertReq;
 use tsra_fw_ddi_tbor_types::TborGetCertResp;
+use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoResp;
-use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::PID_LEN;
 use tsra_fw_ddi_tbor_types::PID_PUB_KEY_LEN;
 use tsra_fw_hsm_io::duo::DuoCmdDword;
@@ -162,7 +162,7 @@ async fn tbor_io(
 }
 
 fn encode_api_rev(buf: &mut [u8]) -> usize {
-    TborApiRevReq::encode(buf)
+    TborApiRevReq::encode(buf, (2, 0))
         .expect("encode")
         .finish()
         .as_bytes()
@@ -270,7 +270,7 @@ async fn tbor_part_info() {
     ensure_io_part().await;
 
     let (c, resp) = tbor_io(IO_PID, DuoOp::Tbor, 800, 0, 0, |buf| {
-        TborPartInfoReq::encode(buf)
+        TborPartInfoReq::encode(buf, (2, 0))
             .expect("encode")
             .finish()
             .as_bytes()
@@ -342,7 +342,7 @@ async fn in_session_command_on_plain_tbor_is_rejected() {
     ensure_io_part().await;
 
     let (c, resp) = tbor_io(IO_PID, DuoOp::Tbor, 701, 1, 0, |buf| {
-        TborSessionCloseReq::encode(buf)
+        TborGetUnwrappingKeyReq::encode(buf, (2, 0))
             .expect("encode")
             .session_id(SessionId(1))
             .expect("session_id")
@@ -501,7 +501,7 @@ async fn part_resource_accounting_after_free() {
 /// Submit `GetCertChainInfo` for `slot_id` on partition `pid`.
 async fn get_cert_chain_info(pid: u8, slot_id: u8) -> (DuoRawCqe, Vec<u8>) {
     tbor_io(pid, DuoOp::Tbor, 1108, 0, 0, |buf| {
-        TborGetCertChainInfoReq::encode(buf)
+        TborGetCertChainInfoReq::encode(buf, (2, 0))
             .expect("encode")
             .slot_id(slot_id)
             .expect("slot_id")
@@ -515,7 +515,7 @@ async fn get_cert_chain_info(pid: u8, slot_id: u8) -> (DuoRawCqe, Vec<u8>) {
 /// Submit `GetCertificate` for slot 0, `cert_id`.
 async fn get_cert(cert_id: u8) -> (DuoRawCqe, Vec<u8>) {
     tbor_io(IO_PID, DuoOp::Tbor, 1109, 0, 0, |buf| {
-        TborGetCertReq::encode(buf)
+        TborGetCertReq::encode(buf, (2, 0))
             .expect("encode")
             .slot_id(0)
             .expect("slot_id")

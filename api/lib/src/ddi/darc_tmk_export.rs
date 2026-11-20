@@ -74,8 +74,9 @@ pub(crate) fn darc_tmk_export(
 
     let mut cookie = None;
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, oob_items, &mut cookie)
+        dev.exec_op_tbor(rev, &req, oob_items, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

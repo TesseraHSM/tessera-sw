@@ -97,7 +97,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // The host emits a fixed-length peer public key for the curve; the
         // PAL requires exactly `wire_pub_key_len` bytes — reject any
         // non-exact length so trailing junk is not silently accepted.
-        if req.peer_pub_key.len() != curve.wire_pub_key_len(P::BYTE_ORDER) {
+        if req.peer_pub_key.len() != curve.wire_pub_key_len(P::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
 
@@ -128,7 +128,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // The private key and peer input are consumed; only the
             // preexisting derived-secret scratch remains live.
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborEcdhDeriveResp::encode(buf, 0, false)?
+                Ok(TborEcdhDeriveResp::encode_for_request(buf, 0, false)?
                     .masked_secret_reserve(masked_len)?
                     .finish()
                     .as_bytes()

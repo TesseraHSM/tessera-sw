@@ -88,7 +88,7 @@ mod tests {
             masked_key: alloc::vec![0xA5u8; 120],
         };
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.len() > MASKED_TMK_LEN + 120,
             "encoded frame must carry the masked TMK and masked key",

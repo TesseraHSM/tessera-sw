@@ -57,22 +57,22 @@ leaf key. Existing three-chain evidence remains supported without a wire change.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | Sender's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `SndrPriv`. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 20 | `receiver_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Receiver key certificate-chain descriptors (spec `RcvrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `RcvrPub`. |
-| 24 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Manufacturer certificate-chain descriptors (from the `Evidence` field group). Optional (see below). |
-| 28 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Owner certificate-chain descriptors. Optional. |
-| 32 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Partition-owner certificate-chain descriptors. Optional. |
-| 36 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Receiver attestation-report (COSE_Sign1) descriptor. Optional. |
-| 40 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document. Must match the policy bound at `PartInit` (`SHA-384` re-check) and name this partition as the backing partition (`backup_part_id` = PID, `backup_part_spki_thumbprint` = SPKI thumbprint of the PID public key). |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_sealing_key` | `buffer` (fixed 276 B) | Sender's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `SndrPriv`. `MASKED_SEALING_KEY_LEN` (276 B). |
+| 24 | `receiver_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Receiver key certificate-chain descriptors (spec `RcvrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `RcvrPub`. |
+| 28 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Manufacturer certificate-chain descriptors (from the `Evidence` field group). Optional (see below). |
+| 32 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Owner certificate-chain descriptors. Optional. |
+| 36 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Partition-owner certificate-chain descriptors. Optional. |
+| 40 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Receiver attestation-report (COSE_Sign1) descriptor. Optional. |
+| 44 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document. Must match the policy bound at `PartInit` (`SHA-384` re-check) and name this partition as the backing partition (`backup_part_id` = PID, `backup_part_spki_thumbprint` = SPKI thumbprint of the PID public key). |
 
 The four `mfgr_cert_chain` … `evidence` entries are spliced in by the
 shared [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs)
@@ -95,16 +95,16 @@ certificate-chain and report payloads travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
+Wire layout: 12-byte header, followed by the TOC entry, then the data
 section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pok_remote_backup` | `buffer` (fixed 161 B) | Remote partition-owner-key backup: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
-| 12 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup: BKS3 masked under `PartLocalMK`. `MASKED_SD_LEN` (276 B). |
-| 16 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup: `SDMK` masked under the derived `SDBMK`. `LOCAL_MK_BACKUP_LEN` (260 B). |
+| 12 | `pok_remote_backup` | `buffer` (fixed 161 B) | Remote partition-owner-key backup: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
+| 16 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup: BKS3 masked under `PartLocalMK`. `MASKED_SD_LEN` (276 B). |
+| 20 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup: `SDMK` masked under the derived `SDBMK`. `LOCAL_MK_BACKUP_LEN` (260 B). |
 
 ### Data section
 

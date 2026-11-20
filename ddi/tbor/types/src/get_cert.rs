@@ -73,7 +73,7 @@ mod tests {
     fn request_encodes_fields() {
         let req = TborGetCertReq::new(1, 2);
         let mut buf = [0u8; 64];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&1u8) && frame.contains(&2u8),
             "encoded frame must carry the slot and cert ids",

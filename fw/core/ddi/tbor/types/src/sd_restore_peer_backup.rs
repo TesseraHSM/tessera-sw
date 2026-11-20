@@ -163,7 +163,7 @@ mod tests {
         };
         let chain = [cert];
         let mut buf = [0u8; 2048];
-        let frame = TborSdRestorePeerBackupReq::encode(&mut buf)
+        let frame = TborSdRestorePeerBackupReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -194,7 +194,7 @@ mod tests {
         let pok_local = [0xABu8; MASKED_SD_LEN];
         let sd_mk = [0xCDu8; SD_MK_BACKUP_LEN];
         let mut buf = [0u8; 1024];
-        let frame = TborSdRestorePeerBackupResp::encode(&mut buf, 0, true)
+        let frame = TborSdRestorePeerBackupResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .pok_local_backup(&pok_local)
             .unwrap()

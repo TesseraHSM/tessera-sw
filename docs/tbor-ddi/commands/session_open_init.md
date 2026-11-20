@@ -10,141 +10,103 @@ Licensed under the MIT License.
 
 ## Description
 
-Phase 1 of the session-establishment handshake.  The host VM supplies
-its per-handshake ephemeral public key, a PSK identifier asserting
-its role (`0` = Crypto Officer, `1` = Crypto User), the
-**`session_type`** it wants to establish (`0` = PlainText,
-`1` = Authenticated), and the **`suite_id`** selecting the
-cryptographic suite (today only `0x01` —
-`P384HkdfSha384AesGcm256` — is implemented).  The HSM runs HPKE
-`mode_auth_psk` `send_export` against the partition identity key,
-reserves a `Pending` session slot, and returns the HSM's HPKE
-response ephemeral together with a Phase-1 confirmation MAC.
+Phase 1 of session establishment. The host supplies a fresh ephemeral public
+key, PSK identifier (`0` = Crypto Officer, `1` = Crypto User), encrypted
+session type (`0`), and cryptographic suite. Both roles use AES-256-GCM
+protected session traffic, including Finish while the slot is Pending.
 
-**Role ↔ session-type pairing.**  The two are pinned per role; any
-other pairing is rejected with `InvalidSessionType`:
-
-| `psk_id` (role) | Required `session_type` |
-|---|---|
-| `0` (Crypto Officer) | `1` (Authenticated) |
-| `1` (Crypto User)    | `0` (PlainText) |
-
-A `PlainText` session derives only `param_key` (per-parameter
-AEAD-GCM encryption under [`aead_envelope`](
-../../../fw/core/crypto/aead-envelope/src/lib.rs)) and `masking_key`.
-An `Authenticated` session also derives `mac_tx_key` / `mac_rx_key`
-so subsequent command and response bodies carry an outer per-message
-HMAC envelope (see [`session_open_finish.md`](./session_open_finish.md)
-for the full key schedule).
-
-The HPKE suite is `DHKEM(P-384, HKDF-SHA-384) + AES-256-GCM`, with
-`info = "tsra-session-v2" ‖ psk_id ‖ session_type ‖ suite_id` and
-`exporter_context = "session-exporter"`.  Mixing `psk_id`,
-`session_type` and `suite_id` into the HPKE `info` field domain-
-separates each role/type/suite combination and makes any attempt to
-downgrade `session_type` or `suite_id` produce a different `exported`
-on the HSM side — the Phase-1 confirm MAC then fails to verify on
-the host.
+The selected API revision is carried only in the common 12-byte TBOR header,
+not duplicated in the Init body. Firmware validates its support, reserves a
+Pending slot, and returns a fresh KEM output and a PID-key signature over the
+revision-bound transcript. The host verifies the PID certificate chain against
+an independently provisioned root SPKI thumbprint before trusting that signature.
 
 ### Suite registry
 
-The `suite_id` byte selects every other cryptographic primitive used
-by the handshake (KEM, KDF, AEAD, MAC).  It is also persisted in the
-HSM's Pending slot so `SessionOpenFinish` can recover the negotiated
-suite without trusting any client-side state.
+| `suite_id` | KEM | `pk_init` | `enc` | Authentication |
+|---|---|---|---|---|
+| `0x01` | Ephemeral ECDH P-384 | 97-byte uncompressed SEC1 point | 97-byte device ephemeral SEC1 point | ECDSA P-384 with PID key |
 
-| `suite_id` | Suite | KEM | KDF | AEAD | MAC |
-|---|---|---|---|---|---|
-| `0x01` | `P384HkdfSha384AesGcm256` | HPKE DHKEM(P-384) | HKDF-SHA-384 | AES-256-GCM | HMAC-SHA-384 (48 B) |
-
-`0x01` is the only currently registered suite; any other value is
-rejected with `UnsupportedSessionSuite`.  The `suite_id` byte exists
-so future suites can be added without a wire-format break — when one
-is added it will receive its own row above, and its `pk_init` /
-`pk_resp` / `mac_resp` lengths may differ from the values shown for
-`0x01`.
-
-Resume is **not** a TBOR concern: a host that wants to reuse a prior
-session's masking-key blob does so via the MBOR `ReopenSession`
-command.  Every `SessionOpenInit` here is therefore a fresh open.
+The suite uses HKDF-SHA-384, HMAC-SHA-384 Finish confirmation, and
+AES-256-GCM transport. The selected suite and API revision remain pinned for
+the session lifetime.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
-data section.  Buffer payloads pack contiguously in TOC order.
-
-### TOC entries
+The 12-byte header is followed by five TOC entries. Variable-length data begins
+at byte 32.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `psk_id` | `uint8` (inline) | PSK identifier asserting the caller role.  `0` = Crypto Officer, `1` = Crypto User.  Any other value → `InvalidPskId`. |
-| 12 | `session_type` | `uint8` (inline) | Channel-level integrity profile.  `0` = PlainText, `1` = Authenticated.  Any other value → `InvalidSessionType`.  Pairing with `psk_id` is enforced (see table above). |
-| 16 | `suite_id` | `uint8` (inline) | Cryptographic suite identifier (see [Suite registry](#suite-registry)).  Today only `0x01` is accepted; any other value → `UnsupportedSessionSuite`. |
-| 20 | `pk_init` | `buffer` (ref) | References the `pk_init` payload below.  TOC word carries `(data_offset = 20, length = Npk)`.  For `suite_id = 0x01` `Npk = 97`. |
-
-### Data section
-
-| Offset | Length | Field | Description |
-|---|---|---|---|
-| 24 | `Npk` (97 B for `0x01`) | `pk_init` | VM's per-handshake ephemeral key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed public key (`0x04 ‖ x(48) ‖ y(48)`).  Used as the HPKE recipient key in `auth_psk` send/receive export. |
+| 12 | `reopen_id` | `uint16` (inline) | `65535` for fresh open; otherwise existing stale slot. |
+| 16 | `psk_id` | `uint8` (inline) | `0` = Crypto Officer; `1` = Crypto User. |
+| 20 | `session_type` | `uint8` (inline) | `0` = Encrypted; all other values are rejected. |
+| 24 | `suite_id` | `uint8` (inline) | `0x01`; all other identifiers are unsupported. |
+| 28 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97. |
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
-data section.
-
-### TOC entries
+The header echoes the request's API revision. Five TOC slots preserve the
+request footprint; variable-length data begins at byte 32.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Reserved Pending slot index (`0` for CO, `1..=7` for CU). |
-| 12 | `pk_resp` | `buffer` (ref) | References the `pk_resp` payload below.  TOC word carries `(data_offset = 20, length = Npk)`. |
-| 16 | `mac_resp` | `buffer` (ref) | References the `mac_resp` payload below.  TOC word carries `(data_offset = 20 + Npk, length = Nh)`. |
+| 12 | `session_id` | `session_id` (inline) | Reserved Pending slot: CO 0, CU 1..=7. |
+| 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97. |
+| 20 | `sig` | `buffer` (ref) | Data-relative offset `len(enc)`; 96-byte raw ECDSA signature. |
+| 24 | Reserved | `none` | Paired TOC placeholder. |
+| 28 | Reserved | `none` | Paired TOC placeholder. |
 
-### Data section
+## Transcript and key binding
 
-| Offset | Length | Field | Description |
-|---|---|---|---|
-| 24 | `Npk` (97 B for `0x01`) | `pk_resp` | HSM's HPKE response ephemeral public key.  For `suite_id = 0x01` this is a P-384 SEC1 uncompressed point (distinct from the long-term `pk_hsm` — this is the per-handshake `enc` value from `auth_encap`). |
-| 24 + `Npk` | `Nh` (48 B for `0x01`) | `mac_resp` | Phase-1 confirmation MAC, HMAC over the suite's KDF hash keyed on the HPKE `exported` value.  See [Phase-1 confirmation MAC](#phase-1-confirmation-mac-mac_resp) below. |
-
-## Phase-1 confirmation MAC (`mac_resp`)
-
+```text
+M1 = "TSRA-SESSION-v1"
+     || BE16(api_major) || BE16(api_minor)
+     || suite_id || psk_id || session_type
+     || pk_pid(97)
+     || BE16(len(pk_init)) || pk_init
+     || BE16(len(enc)) || enc
+T1 = SHA-384(M1)
+sig = ECDSA-P384.SignDigest(sk_pid, T1)
 ```
-mac_resp = HMAC-SHA-384(
-    key = exported,
-    msg = "phase1-confirm" ‖ session_id_be ‖ pk_init ‖ pk_hsm ‖ pk_resp,
-)
-```
 
-- `exported` is the 48-byte HPKE export produced by `send_export` /
-  `receive_export`.
-- `session_id_be` is the 2-byte big-endian wire encoding of `session_id`.
-- `pk_hsm` is the partition identity public key (SEC1 uncompressed,
-  97 bytes).
+For reopen only, append `"TSRA-REOPEN-v1:" || BE16(reopen_id)` to `M1`
+before hashing. Fresh-open transcripts are unchanged. Reopen uses the same
+establishment pipeline, authenticates the current role PSK, and reserves the
+same migrated slot. Active and fresh Pending targets are rejected. An abandoned
+recovery Pending may be replaced; fresh opens cannot evict it. Recovery lineage
+is authenticated by Finish using the saved envelope and retained fingerprint.
 
-A successful verify by the VM proves the responder holds `sk_hsm` and
-the correct PSK.
+The revision integers come from the header but are encoded big-endian in the
+transcript, unlike their little-endian wire representation. The host verifies
+using its original local revision, suite, role, type, and ephemeral public key.
+`T1` also enters handshake-secret derivation, so changing either revision
+component invalidates authentication and changes the session keys.
 
-The HSM captures the authenticated role, PSK AppId and SHA-384 PSK digest
-in its opaque Pending state. `SessionOpenFinish` rejects this handshake
-if the role's credential has changed before completion.
+This binds the selected context; capability discovery is not authenticated
+version negotiation and does not guarantee highest-version selection.
+
+The Pending state contains the selected revision, handshake secret, transcript
+hash, role/AppId/PSK-digest binding, type, suite, and directional transport
+secrets. Finish requires this same revision and a still-current credential.
+The [session design](../session-design.md) specifies the complete trust checks,
+transcript, key derivation, transport, and storage layouts.
 
 ## Errors
 
 | Error | Cause |
 |---|---|
-| `InvalidPskId` | `psk_id` is neither `0` nor `1` |
-| `InvalidSessionType` | `session_type` is not `0`/`1`, or pairing with `psk_id` is not the required one (CO must be `Authenticated`, CU must be `PlainText`) |
-| `UnsupportedSessionSuite` | `suite_id` is not a value implemented by this firmware build (see [Suite registry](#suite-registry)) |
-| `InvalidArg` | `pk_init` malformed (wrong length for the negotiated suite, not SEC1 uncompressed) |
-| `EccPointValidationFailed` | `pk_init` off-curve or identity |
-| `PartitionNotEnabled` | Partition is not in `Enabled` state |
-| `PartitionNotProvisioned` | Identity key not present |
-| `VaultSessionLimitReached` | No eligible Pending slot available for the asserted role |
+| `UnsupportedRevision` | Header revision is unsupported by this platform. |
+| `InvalidPskId` | `psk_id` is neither 0 nor 1. |
+| `InvalidSessionType` | `session_type` is not 0. |
+| `UnsupportedSessionSuite` | Suite is not implemented. |
+| `InvalidArg` | Malformed ephemeral public key or incorrect length. |
+| `EccPointValidationFailed` | Invalid P-384 point. |
+| `PartitionNotEnabled` | Partition is not enabled. |
+| `PartitionNotProvisioned` | Identity key is unavailable. |
+| `VaultSessionLimitReached` | No eligible Pending slot. |
 
 ## See also
 
-- Wire encoding: [TBOR specification](../../../fw/core/ddi/tbor/docs/spec.md)
-- Wire schema: `fw/core/ddi/tbor/types/src/session_open_init.rs`
-- Phase 2: [`session_open_finish.md`](./session_open_finish.md)
+- [TBOR specification](../../../fw/core/ddi/tbor/docs/spec.md)
+- [SessionOpenFinish](./session_open_finish.md)
