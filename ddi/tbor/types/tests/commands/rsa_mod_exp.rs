@@ -9,8 +9,10 @@
 //! tests import host-generated keys, exercise both CRT and non-CRT vault
 //! forms, and compare results with independent host operations.
 
+use tsra_crypto::testvectors::rsa::RSA_PKCS1_TEST_VECTORS;
 use tsra_crypto::Encrypter;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::ImportableKey;
 use tsra_crypto::Key;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
@@ -113,12 +115,60 @@ fn public_operation_matches_host(
     usage: u64,
 ) {
     let (masked_key, pubkey, modulus_len) = import_rsa(ctx, session_id, modulus_bytes, crt, usage);
+    assert_public_operation_matches_host(
+        ctx,
+        session_id,
+        masked_key,
+        &pubkey,
+        modulus_len,
+        op_type,
+    );
+}
+
+fn assert_public_operation_matches_host(
+    ctx: &TestCtx,
+    session_id: u16,
+    masked_key: Vec<u8>,
+    pubkey: &RsaPublicKey,
+    modulus_len: usize,
+    op_type: u8,
+) {
     let input = test_integer(modulus_len);
-    let expected = Encrypter::encrypt_vec(&mut RsaEncryptAlgo::with_no_padding(), &pubkey, &input)
+    let expected = Encrypter::encrypt_vec(&mut RsaEncryptAlgo::with_no_padding(), pubkey, &input)
         .expect("independent host raw RSA public operation");
     let result = mod_exp(ctx, session_id, masked_key, op_type, rev(&input));
     assert_eq!(result.len(), modulus_len);
     assert_eq!(rev(&result), expected);
+}
+
+fn non_default_exponent_matches_host(op_type: u8, usage: u64) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let vector = RSA_PKCS1_TEST_VECTORS.first().expect("RSA NIST fixture");
+    let key = RsaPrivateKey::from_bytes(vector.priv_der).expect("import NIST RSA key");
+    let pubkey = key.public_key().expect("derive NIST public key");
+    assert_ne!(pubkey.e_vec().expect("public exponent"), [1, 0, 1]);
+    for class in [KEY_CLASS_RSA, KEY_CLASS_RSA_CRT] {
+        let imported = unwrap_with_usage(&ctx, session.session_id, class, usage, vector.priv_der);
+        assert_public_operation_matches_host(
+            &ctx,
+            session.session_id,
+            imported.masked_key,
+            &pubkey,
+            key.size(),
+            op_type,
+        );
+    }
+}
+
+#[test]
+fn rsa_mod_exp_encrypt_uses_non_default_exponent() {
+    non_default_exponent_matches_host(RSA_OP_ENCRYPT, KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT);
+}
+
+#[test]
+fn rsa_mod_exp_verify_uses_non_default_exponent() {
+    non_default_exponent_matches_host(RSA_OP_VERIFY, KEY_USAGE_SIGN | KEY_USAGE_VERIFY);
 }
 
 /// Verify raw RSA-2048 signing with a non-CRT key.

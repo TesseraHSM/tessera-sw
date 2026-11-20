@@ -531,7 +531,7 @@ fuzz_target!(|input: FuzzInput| {
             }
             (Ok(_), false) => panic!("invalid RsaModExp request unexpectedly succeeded"),
             (Err(err), true) => panic!("valid RsaModExp request failed: {err}"),
-            (Err(err @ DdiError::TborStatus(_)), false) if input.invalid_session => {
+            (Err(err), false) if input.invalid_session => {
                 ctx.assert_unknown_session_rejects(err, TborStatus::SessionNotFound);
             }
             (Err(err), false) if is_expected_validation_error(err) => {}
