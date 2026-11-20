@@ -13,14 +13,19 @@
 //! - Requires a **physical** device; virtual devices are skipped.
 //! - Requires firmware built with `tsra_test_hooks`; otherwise `TriggerCrash`
 //!   returns [`DdiStatus::UnsupportedCmd`] and the case is skipped.
-//! - The crash is sent as an MBOR `TestAction` on the TBOR CO session, through
+//! - The crash is sent as an MBOR `TestAction` on a TBOR CU session, through
 //!   the same device handle that owns that session.
+//! - Holds the test-hook suite's cross-process lock, so it never resets or
+//!   crashes the device under another test-hook binary.
 
 #![allow(clippy::unwrap_used)]
+
+mod common;
 
 use std::thread;
 use std::time::Duration;
 
+use common::HardwareTestLock;
 use test_with_tracing::test;
 use tsra_ddi::DdiError;
 use tsra_ddi_mbor_test_hooks::helper_test_action_cmd;
@@ -100,6 +105,7 @@ fn provision_partition(
 /// host can provision the partition again and open CO and CU sessions.
 #[test]
 fn test_tbor_crash_recovery_hard_fault_admin() {
+    let _hardware_test_lock = HardwareTestLock::acquire();
     let ctx = TestCtx::new();
 
     if part_info(&ctx, "before crash").device_kind != DEVICE_KIND_PHYSICAL {
@@ -107,15 +113,20 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
         return;
     }
 
-    // Provision through TBOR: rotated CO session, PartInit, PartFinal.
+    // Provision through TBOR: rotated CO session, PartInit, PartFinal. The
+    // driver allows one open session per file handle, so close CO before
+    // opening the CU session used to inject the crash.
     let pota = PotaFixture::generate();
     let co = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     provision_partition(&ctx, &co, &pota, "before crash");
+    ctx.session_close(co.session_id)
+        .unwrap_or_else(|e| panic!("before crash: CO session close failed: {e:?}"));
+    let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
-    // Inject the crash through the handle that owns the CO session.
+    // Inject the crash through the handle that owns the CU session.
     let resp = helper_test_action_cmd(
         ctx.dev(),
-        co.session_id,
+        cu.session_id,
         TestActionRequest::TriggerCrash(DdiTestActionCrashReqInfo {
             crash_type: DdiTestActionCrashType::HardFault,
             cpu_id: DdiTestActionSocCpuId::Admin,
@@ -123,6 +134,8 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
     );
     if let Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) = &resp {
         println!("TriggerCrash for Admin not supported by this firmware; skipping.");
+        ctx.session_close(cu.session_id)
+            .unwrap_or_else(|e| panic!("skip: CU session close failed: {e:?}"));
         return;
     }
     assert!(
@@ -134,8 +147,8 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
 
     // The crashed session is gone or needs renegotiation; closing it is
     // best-effort and its result is reported rather than asserted.
-    let close = ctx.session_close(co.session_id);
-    println!("Close of pre-crash CO session after recovery: {close:?}");
+    let close = ctx.session_close(cu.session_id);
+    println!("Close of pre-crash CU session after recovery: {close:?}");
 
     // After the host's recovery (Disable then Enable) the partition must be
     // back to Enabled, ready to be provisioned again.
