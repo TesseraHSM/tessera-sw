@@ -269,7 +269,10 @@ fn pci_location(pci_info: &[u8]) -> DdiResult<(u32, u32, u32)> {
 }
 
 fn pci_ids(hardware_ids: &[u8]) -> DdiResult<(u16, u16)> {
-    if hardware_ids.len() < 4 || hardware_ids.len() % 2 != 0 || !hardware_ids.ends_with(&[0; 4]) {
+    if hardware_ids.len() < 4
+        || !hardware_ids.len().is_multiple_of(2)
+        || !hardware_ids.ends_with(&[0; 4])
+    {
         return Err(DdiError::DeviceInfoIoctlInvalidData);
     }
     let words: Vec<_> = hardware_ids

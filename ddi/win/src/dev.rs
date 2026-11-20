@@ -1327,8 +1327,10 @@ impl DdiDev for DdiWinDev {
         let mut resp_buf = Box::<[u8; RESP_BUF_LEN]>::new([0u8; RESP_BUF_LEN]);
 
         // -- 2. Build the ioctl command --------------------------------
-        let mut ioctl_in_buffer = TsraCpDataXferIoctlIndata::default();
-        ioctl_in_buffer.input_data = input_data;
+        let mut ioctl_in_buffer = TsraCpDataXferIoctlIndata {
+            input_data,
+            ..Default::default()
+        };
         let mut ioctl_out_buffer = TsraCpGenericIoctlOutData::default();
 
         let ioctl_input_size = if use_data_xfer {
