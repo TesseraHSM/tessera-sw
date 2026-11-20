@@ -261,10 +261,7 @@ TEST_F(tsra_sha_digest, streaming_multiple_updates_all_algorithms)
 // Verifies SHA-256 one-shot digest succeeds for empty input.
 TEST_F(tsra_sha_digest, empty_data_sha256)
 {
-    part_list_.for_each_part([](std::vector<tsra_char> &path) {
-        auto partition = PartitionHandle(path);
-        auto session = SessionHandle(partition.get());
-
+    part_list_.for_each_session([](tsra_handle session) {
         tsra_algo algo{};
         algo.id = TSRA_ALGO_ID_SHA256;
         algo.params = nullptr;
@@ -280,7 +277,7 @@ TEST_F(tsra_sha_digest, empty_data_sha256)
         digest_buf.ptr = digest.data();
         digest_buf.len = static_cast<uint32_t>(digest.size());
 
-        auto err = tsra_crypt_digest(session.get(), &algo, &data_buf, &digest_buf);
+        auto err = tsra_crypt_digest(session, &algo, &data_buf, &digest_buf);
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
         ASSERT_EQ(digest_buf.len, 32u);
     });

@@ -30,21 +30,18 @@ use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdRestoreRemoteBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backing_part_policy_trusted;
 use crate::commands::sd_create_remote_backup::backup_request;
@@ -62,7 +59,7 @@ struct RemoteBackup {
     /// self-backup this is the same evidence `CreateSD` used.
     evidence: ReceiverEvidence,
     /// The 584-byte `PartPolicy` image.
-    policy: [u8; PART_POLICY_LEN],
+    policy: Vec<u8>,
     /// `pok_remote_backup` from `CreateSD` — the HPKE seal to restore.
     src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
     /// `sd_mk_backup` from `CreateSD` — the previous SDMK backup.
@@ -87,9 +84,7 @@ fn create_remote_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> RemoteBackup
         &pota.raw_pub(),
     );
 
-    let init = ctx
-        .part_init(&session, seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, seed, &policy).expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -133,7 +128,7 @@ fn create_remote_backup_trusted(sata: &CaKey, sapota: &CaKey, pota: &CaKey) -> R
     );
 
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
@@ -176,7 +171,7 @@ fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRe
             .as_slice()
             .try_into()
             .expect("masked sealing key is exactly MASKED_SEALING_KEY_LEN bytes"),
-        policy: PartPolicy::try_read_from_bytes(&backup.policy).expect("policy image is canonical"),
+        policy: backup.policy.clone(),
         sender_cert_chain: backup.evidence.receiver.clone(),
         sender_mfgr_cert_chain: backup.evidence.mfgr.clone(),
         sender_owner_cert_chain: backup.evidence.owner.clone(),
@@ -201,7 +196,7 @@ fn sd_restore_remote_backup_roundtrip() {
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(&session, &seed, &backup.policy, &pota_thumbprint())
+        .part_init(&session, &seed, &backup.policy)
         .expect("PartInit (device 2)");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
@@ -249,7 +244,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(&session, &mach_seed(), &backup.policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &backup.policy)
         .expect("PartInit (device 2)");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
@@ -297,9 +292,7 @@ fn sd_restore_remote_backup_is_one_shot() {
         &sata.raw_pub(),
         &pota.raw_pub(),
     );
-    let init = ctx
-        .part_init(&session, &seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, &seed, &policy).expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
@@ -336,7 +329,7 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
     let req = TborSdRestoreRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: Vec::new(),
         sender_cert_chain: Vec::new(),
         sender_mfgr_cert_chain: Vec::new(),
         sender_owner_cert_chain: Vec::new(),
@@ -346,4 +339,295 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+/// Rejects a misaligned masked sealing key and one without its padding
+/// entry; the decoder rejects before the OOB evidence is read.
+#[test]
+fn sd_restore_remote_backup_rejects_bad_masked_key_layout() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_remote_backup(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let init = ctx
+        .part_init(&session, &seed, &backup.policy)
+        .expect("PartInit (device 2)");
+    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("PartFinal must restore PartLocalMK from the prior backup");
+
+    assert_masked_key_layout_rejected(&ctx, &restore_remote_req(session.session_id, &backup));
+}
+
+/// Prepare a finalized destination partition with its original PartLocalMK
+/// restored, but without an initialized security domain.
+fn remote_restore_destination(backup: &RemoteBackup, seed: &[u8], pota: &CaKey) -> (TestCtx, u16) {
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+
+    let init = ctx
+        .part_init(&session, seed, &backup.policy)
+        .expect("destination PartInit");
+
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
+
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("destination PartFinal");
+
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    (ctx, session.session_id)
+}
+
+/// A rejected remote restore must return the expected firmware status
+/// and must not initialize the security domain.
+fn assert_remote_restore_rejected(
+    ctx: &TestCtx,
+    req: &TborSdRestoreRemoteBackupReq,
+    backup: &RemoteBackup,
+    expected_status: TborStatus,
+) {
+    ctx.expect_fw_reject_oob(req, &backup.evidence.oob(), expected_status);
+
+    assert_part_state(ctx, PART_STATE_INITIALIZED, false);
+}
+
+#[test]
+fn sd_restore_remote_backup_accepts_zero_session_id() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+
+    let (ctx, _) = remote_restore_destination(&backup, &seed, &pota);
+
+    let req = restore_remote_req(0, &backup);
+
+    let resp = ctx
+        .tbor_oob(&req, &backup.evidence.oob())
+        .expect("SdRestoreRemoteBackup accepts zero session ID");
+
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+
+    assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
+    assert!(resp.pok_local_backup.iter().any(|&b| b != 0));
+
+    assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+    assert!(resp.sd_mk_backup.iter().any(|&b| b != 0));
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_max_session_id() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, _) = remote_restore_destination(&backup, &seed, &pota);
+
+    let req = restore_remote_req(u16::MAX, &backup);
+
+    // Unknown sessions may be rejected by firmware or the socket ownership gate.
+    let err = ctx
+        .tbor_oob(&req, &backup.evidence.oob())
+        .expect_err("u16::MAX session ID must be rejected");
+
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_masked_sealing_key() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.masked_sealing_key.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_masked_sealing_key() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.masked_sealing_key[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_remote_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.src_remote_backup.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_remote_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.src_remote_backup[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_remote_backup_tail() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    let last = req.src_remote_backup.len() - 1;
+    req.src_remote_backup[last] ^= 0x80;
+
+    assert_remote_restore_rejected(
+        &ctx,
+        &req,
+        &backup,
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_prev_sd_mk_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.prev_sd_mk_backup.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.prev_sd_mk_backup[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup_tail() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    let last = req.prev_sd_mk_backup.len() - 1;
+    req.prev_sd_mk_backup[last] ^= 0x80;
+
+    assert_remote_restore_rejected(
+        &ctx,
+        &req,
+        &backup,
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_chain() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_mfgr_chain_trusted() {
+    let sata = CaKey::generate();
+    let sapota = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
+
+    let seed = mach_seed();
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_mfgr_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_part_owner_chain_trusted() {
+    let sata = CaKey::generate();
+    let sapota = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
+
+    let seed = mach_seed();
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_part_owner_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }

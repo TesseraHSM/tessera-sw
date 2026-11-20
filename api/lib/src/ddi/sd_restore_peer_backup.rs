@@ -39,13 +39,14 @@ impl From<TborSdRestorePeerBackupResp> for HsmSdRestoreResult {
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the backup, exactly
 ///   [`MASKED_SEALING_KEY_LEN`] bytes.
 /// * `src_evidence` - Source (peer) attestation evidence (cert chains and
 ///   report), transmitted out of band.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `pok_peer_backup` - The peer backup to restore, exactly
 ///   [`POK_REMOTE_BACKUP_LEN`] bytes.
 /// * `prev_sd_mk_backup` - The previous security-domain masking-key backup,
@@ -60,6 +61,7 @@ impl From<TborSdRestorePeerBackupResp> for HsmSdRestoreResult {
 /// `allow_peer_cloning`).
 pub(crate) fn sd_restore_peer_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
     src_evidence: &HsmSdEvidence<'_>,
@@ -77,7 +79,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     let prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN] = prev_sd_mk_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Flatten the source evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
@@ -102,7 +104,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)
     })

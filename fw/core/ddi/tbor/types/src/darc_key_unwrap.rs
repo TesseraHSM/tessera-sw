@@ -39,7 +39,7 @@
 //!   discriminant (one of `Ecc{256,384,521}Private`).
 //! * `masked_key` — the recovered EC private key, masked (AEAD-GCM-256)
 //!   under the scope's masking key.
-//! * `pub_key` — the recovered key's wire public key (`x ‖ y`, wire-LE).
+//! * `pub_key` — the recovered key's wire public key (`x ‖ y`, device byte order).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -64,7 +64,7 @@ pub const DARC_UNWRAP_WRAPPED_KEY_MAX_LEN: usize = 512;
 /// [`TborDarcKeyUnwrapResp::masked_key`].
 pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
-/// Max recovered public-key length (P-521 wire `x ‖ y`, each 68 B).
+/// Max recovered public-key length (P-521 wire `x ‖ y`, each up to 68 B).
 /// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
 /// [`TborDarcKeyUnwrapResp::pub_key`].
 pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 2 * 68;
@@ -100,7 +100,7 @@ pub struct TborDarcKeyUnwrapReq<'a> {
     /// The masked TMK envelope from `DarcTmkImport`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`, up to
@@ -122,10 +122,10 @@ pub struct TborDarcKeyUnwrapResp<'a> {
     ///
     /// `#[tbor(mutable)]` so the handler can reserve the slot and mask the
     /// recovered key straight into it (`decode_mut`) — no scratch buffer.
-    #[tbor(buffer, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The recovered key's wire public key (`x ‖ y`, wire-LE).
+    /// The recovered key's wire public key (`x ‖ y`, device byte order).
     ///
     /// `#[tbor(mutable)]` so the handler can reserve the slot and derive
     /// the wire public key straight into it (`decode_mut`) — no scratch
@@ -147,7 +147,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked_tmk = [0x5Au8; MASKED_TMK_LEN];
         let wrapped = [0xA5u8; 240];
-        let frame = TborDarcKeyUnwrapReq::encode(&mut buf)
+        let frame = TborDarcKeyUnwrapReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -175,7 +175,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked = [0xABu8; 200];
         let pub_key = [0xCDu8; 136];
-        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, 0, true)
+        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .key_kind(14)
             .unwrap()

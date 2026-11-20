@@ -55,15 +55,13 @@ use tsra_fw_core_evidence::verify_receiver_cert_chain;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
 use tsra_fw_core_evidence::ATTESTED_KEY_LEN;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -110,7 +108,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
@@ -144,7 +141,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // The sender certificate chain (and, when the policy requires a trusted
     // Sealing Authority key, the sender attestation evidence) are side-band
     // data carried in the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the two fixed-size response backups in the IO scope so they
     // survive the crypto scratch allocator's reset.
@@ -168,24 +164,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // The re-supplied policy must match the one bound at `PartInit`.
             verify_policy_hash(pal, io, alloc, policy).await?;
             let part_policy = super::policy::from_bytes(policy)?;
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
-                return Err(HsmError::InvalidArg);
-            }
+            let sata = part_policy.sata_spki_thumbprint;
 
             // Sender key authorization: validate the sender certificate
             // chain, anchor it to the policy SATA key, and recover the
             // sender public key (`SndrPub`) into `pk_sndr`.  This is the
             // sole source of the HPKE-Auth sender key, always required.
-            verify_receiver_cert_chain(
-                pal,
-                io,
-                &oob,
-                req.sender_cert_chain(),
-                &sata.data[..POLICY_MAX_KEY_LEN],
-                pk_sndr,
-            )
-            .await?;
+            verify_receiver_cert_chain(pal, io, req.sender_cert_chain(), sata, pk_sndr).await?;
 
             // Sender attestation: required only when the policy demands a
             // trusted Sealing Authority key. Validate the
@@ -195,10 +180,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // clear the evidence group is ignored (spec `Option<SndrEvidence>`
             // absent).
             if part_policy.flags.require_trusted_sa_key() {
-                let sapota = &part_policy.sapota_pub_key;
-                if sapota.kind() != PolicyKeyKind::Ecc384 || sapota.len() != POLICY_MAX_KEY_LEN {
-                    return Err(HsmError::InvalidArg);
-                }
+                let sapota = part_policy
+                    .sapota_spki_thumbprint
+                    .ok_or(HsmError::InvalidArg)?;
 
                 // Retain the v2-report requirement, but do not equate an
                 // external sealing authority's policy with the restored SD's.
@@ -209,7 +193,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                     verify_evidence(
                         pal,
                         io,
-                        &oob,
                         &EvidenceRefs {
                             mfgr_chain: ev.mfgr_cert_chain(),
                             owner_chain: ev.owner_cert_chain(),
@@ -217,7 +200,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                             report: ev.evidence(),
                         },
                         &TrustAnchors {
-                            part_owner_anchor: &sapota.data[..POLICY_MAX_KEY_LEN],
+                            part_owner_anchor: sapota,
                             require_sd_sealing: false,
                         },
                         report_pk,
@@ -268,11 +251,10 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // Receiver public key (`RcvrPub`) in SEC1 BE, derived on-device
             // from the recovered private key.
             let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            pk_r[1..1 + coord].reverse();
-            pk_r[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3
@@ -330,7 +312,7 @@ fn encode_response(
     sd_mk: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdRestoreRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdRestoreRemoteBackupResp::encode_for_request(buf, 0, false)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk)?
             .finish();

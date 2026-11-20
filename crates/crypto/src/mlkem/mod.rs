@@ -26,21 +26,16 @@
 //!
 //! # Platform Support
 //!
-//! Unlike the classical algorithms in this crate there is no platform backend to
-//! select between: neither OpenSSL nor CNG exposes ML-KEM, so it comes from the
-//! pure-Rust `ml-kem` crate and behaves identically on every host.
-//!
-//! That is a deliberate choice as well as a constraint. The Cortex-M firmware
-//! runs its own implementation on the fastpath cores, so this one is independent
-//! of it: the known-answer tests in this module are generated from that
-//! implementation, so they compare two unrelated codebases and a mistake in
-//! either shows up as a disagreement rather than as agreement on a wrong answer.
+//! Linux uses OpenSSL 3.5+ in the crate-private default-provider libctx.
+//! Windows uses the Microsoft CNG provider on PQC-capable systems (updated
+//! Windows Server 2025 or Windows 11 24H2 and newer). Both backends draw
+//! fresh encapsulation entropy internally and implement implicit rejection.
+//! Older OpenSSL builds retain classical crypto support but return
+//! [`CryptoError::PqcUnavailable`] for PQC operations.
 //!
 //! # Randomness
 //!
-//! The encapsulation message is drawn from the platform generator by default;
-//! see [`MlKemAlgo`] for the constructor that pins it instead, and why two
-//! callers need that.
+//! Each encapsulation draws a fresh message from the platform generator.
 //!
 //! The key-generation seed is different: it cannot be drawn here, because the
 //! seed *is* the private key. It is what the HSM stores in the masked blob and
@@ -68,6 +63,20 @@
 
 mod kem;
 mod key;
+
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "linux")] {
+        mod key_ossl;
+        mod kem_ossl;
+        use key_ossl as platform;
+    } else if #[cfg(target_os = "windows")] {
+        mod key_cng;
+        mod kem_cng;
+        use key_cng as platform;
+    } else {
+        compile_error!("Unsupported target OS for ML-KEM");
+    }
+}
 
 pub use kem::MlKemAlgo;
 pub use key::MlKemPrivateKey;
@@ -145,32 +154,25 @@ impl MlKemVariant {
             .into_iter()
             .find(|v| v.sec_key_len() == len)
     }
-}
 
-#[cfg(test)]
-mod tests;
-
-/// Runs `$body` with `$p` bound to the module for `$variant`.
-///
-/// Unlike ML-DSA this cannot be a generic function: the bound the key types
-/// require is private to `ml-kem`, so the parameter sets can only be named
-/// through their per-variant modules.
-macro_rules! dispatch {
-    ($variant:expr, | $p:ident | $body:block) => {
-        match $variant {
-            MlKemVariant::MlKem512 => {
-                use ml_kem::ml_kem_512 as $p;
-                $body
-            }
-            MlKemVariant::MlKem768 => {
-                use ml_kem::ml_kem_768 as $p;
-                $body
-            }
-            MlKemVariant::MlKem1024 => {
-                use ml_kem::ml_kem_1024 as $p;
-                $body
-            }
+    #[cfg(target_os = "windows")]
+    pub(super) fn parameter_name(self) -> &'static str {
+        match self {
+            Self::MlKem512 => "512",
+            Self::MlKem768 => "768",
+            Self::MlKem1024 => "1024",
         }
-    };
+    }
+
+    #[cfg(all(target_os = "linux", ossl350))]
+    pub(super) fn name(self) -> &'static std::ffi::CStr {
+        match self {
+            Self::MlKem512 => c"ML-KEM-512",
+            Self::MlKem768 => c"ML-KEM-768",
+            Self::MlKem1024 => c"ML-KEM-1024",
+        }
+    }
 }
-use dispatch;
+
+#[cfg(all(test, any(target_os = "windows", ossl350)))]
+mod tests;

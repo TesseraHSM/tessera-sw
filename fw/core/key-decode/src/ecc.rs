@@ -36,10 +36,10 @@ pub(super) async fn decode<'p, P: HsmPal>(
     // serialize into a freshly allocated buffer that becomes the vault
     // material.  The query converts nothing, so it takes no PCT.
     let (vault_len, curve) = pal
-        .ecc_priv_der_to_vault(io, material, None, HsmEccPct::None)
+        .ecc_priv_der_to_vault(io, material, HsmEccPct::None, None)
         .await?;
     let vault_buf = pal.dma_alloc(io, vault_len)?;
-    pal.ecc_priv_der_to_vault(io, material, Some(&mut *vault_buf), pct)
+    pal.ecc_priv_der_to_vault(io, material, pct, Some(&mut *vault_buf))
         .await?;
 
     let kind = vault_kind(curve);

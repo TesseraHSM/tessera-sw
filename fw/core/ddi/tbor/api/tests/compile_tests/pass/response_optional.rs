@@ -15,13 +15,13 @@ fn main() {
     let mut buf = [0u8; 256];
 
     // With tag.
-    let _ = MyResp::encode(&mut buf, 0, true).unwrap()
+    let _ = MyResp::encode(&mut buf, (1, 1), 0, true).unwrap()
         .data(b"ciphertext").unwrap()
         .opt_tag(Some(b"tag")).unwrap()
         .finish();
 
     // Without tag — early finish.
-    let _ = MyResp::encode(&mut buf, 0, false).unwrap()
+    let _ = MyResp::encode(&mut buf, (1, 1), 0, false).unwrap()
         .data(b"ciphertext").unwrap()
         .finish();
 }

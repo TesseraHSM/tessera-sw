@@ -815,7 +815,12 @@ impl DdiNixDev {
 
     /// Shared TBOR exec path (see [`DdiDev::exec_op_tbor`]). `oob` items
     /// must stay borrowed by the caller for the duration of the call.
-    fn exec_tbor<T: TborOpReq>(&self, req: &T, oob: &[OobRaw]) -> DdiResult<T::OpResp> {
+    fn exec_tbor<T: TborOpReq>(
+        &self,
+        api_rev: (u16, u16),
+        req: &T,
+        oob: &[OobRaw],
+    ) -> DdiResult<T::OpResp> {
         /// SQE opcode that routes the command through the firmware's
         /// TBOR dispatcher (see `fw/core/lib/src/op.rs::OP_TBOR`).
         const OP_TBOR: u16 = 2;
@@ -842,7 +847,7 @@ impl DdiNixDev {
 
         // ── 1. Encode the TBOR request ───────────────────────────
         let mut req_buf = [0u8; REQ_BUF_LEN];
-        let req_bytes = req.encode_request(&mut req_buf)?;
+        let req_bytes = req.encode_request(&mut req_buf, api_rev)?;
         let req_len = req_bytes.len();
 
         // Do not log raw request bytes: TBOR requests can carry
@@ -947,8 +952,8 @@ impl DdiNixDev {
             )
         };
         let _ = ioctl_status;
-        if status != 0 {
-            return Err(DdiError::DdiError(status));
+        if let Some(error) = DdiError::from_tbor_completion_status(status) {
+            return Err(error);
         }
 
         // ── 4. Decode the typed response ─────────────────────────
@@ -965,7 +970,9 @@ impl DdiNixDev {
         // sensitive data depending on opcode.
         tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
 
-        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+        Ok(<T::OpResp>::decode_response_for_api_rev(
+            resp_bytes, api_rev,
+        )?)
     }
 }
 
@@ -1134,6 +1141,7 @@ impl DdiDev for DdiNixDev {
     /// no driver change is required to route TBOR.
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
@@ -1147,7 +1155,7 @@ impl DdiDev for DdiNixDev {
                 dev_write: false,
             })
             .collect();
-        self.exec_tbor(req, &oob)
+        self.exec_tbor(api_rev, req, &oob)
     }
 
     /// TBOR exec path with device-writable out-of-band items:
@@ -1156,6 +1164,7 @@ impl DdiDev for DdiNixDev {
     /// `DMA_FROM_DEVICE`.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
@@ -1168,7 +1177,7 @@ impl DdiDev for DdiNixDev {
                 addr: item.dma_ptr(),
             })
             .collect();
-        self.exec_tbor(req, &oob)
+        self.exec_tbor(api_rev, req, &oob)
     }
 
     /// Execute AES GCM operation (encryption/decryption) with slice-based buffers

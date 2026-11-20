@@ -353,9 +353,9 @@ impl Schema {
     /// Compute MAX_ENCODED_SIZE (header + TOC + worst-case data).
     pub fn max_encoded_size(&self) -> proc_macro2::TokenStream {
         let header_len: usize = match self.kind {
-            MessageKind::Request { .. } => 8, // REQ_HEADER_LEN
-            MessageKind::Response => 8,       // RESP_HEADER_LEN
-            MessageKind::Fields => 0,         // no header
+            MessageKind::Request { .. } => 12, // REQ_HEADER_LEN
+            MessageKind::Response => 12,       // RESP_HEADER_LEN
+            MessageKind::Fields => 0,          // no header
         };
         let toc_count = self.toc_count_expr();
         let data = self.worst_case_data_size();
@@ -417,6 +417,17 @@ pub fn parse_struct_schema(
     // as a placeholder; see [`TocLayout::compute`] and the codegen
     // empty-schema branches in `codegen_enc::gen_new_fn` and
     // `codegen_view::gen_validation`.
+
+    // Alignment is measured from the message start, which a field group's
+    // standalone validator cannot see.
+    if matches!(kind, MessageKind::Fields) {
+        if let Some(f) = fields.iter().find(|f| f.align > 0) {
+            return Err(syn::Error::new(
+                f.name.span(),
+                "#[tbor(align = N)] is not supported in field groups",
+            ));
+        }
+    }
 
     // Validate total TOC count doesn't exceed protocol limit.
     let layout = TocLayout::compute(&fields);

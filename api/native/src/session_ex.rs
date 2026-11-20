@@ -30,13 +30,18 @@ pub struct TsraSessionPsk {
 /// Opens a security-domain session using the API revision negotiated when
 /// the partition was opened, and returns a handle to the resulting
 /// session. `psk` selects the role slot and (optionally) the PSK, and
-/// `session_type` selects the channel integrity profile pinned for the
-/// session.
+/// `suite` selects the key-establishment suite. Every session encrypts
+/// its in-session traffic under keys agreed during the handshake.
 ///
 /// @param[in] dev_handle Handle to the HSM partition
+/// @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the
+///            trusted root certificate's DER SubjectPublicKeyInfo, obtained
+///            independently of this connection. The verified PID path must
+///            contain a non-PID certificate with DICE TCB Info layer zero and
+///            Tessera EKU `1.3.6.1.4.1.311.102.1.50.1`.
 /// @param[in] psk PSK credential — slot plus optional PSK
 ///            (see `tsra_session_psk`)
-/// @param[in] session_type Channel integrity profile to pin for the session
+/// @param[in] suite Key-establishment suite (`tsra_session_suite`)
 /// @param[out] sess_handle Pointer to the session handle to be allocated
 ///
 /// @return `TsraStatus` indicating the result of the operation
@@ -44,6 +49,8 @@ pub struct TsraSessionPsk {
 /// # Safety
 ///
 /// - `dev_handle` must be a valid partition handle.
+/// - `root_spki_thumbprint` must point to a valid `tsra_buffer` containing
+///   exactly 48 bytes.
 /// - `psk` must be a valid pointer to an `tsra_session_psk` whose `psk`
 ///   field is NULL or a valid `tsra_buffer` holding exactly `TSRA_PSK_LEN`
 ///   bytes.
@@ -53,12 +60,16 @@ pub struct TsraSessionPsk {
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_sess_ex_open(
     dev_handle: TsraHandle,
+    root_spki_thumbprint: *const TsraBuffer,
     psk: *const TsraSessionPsk,
-    session_type: TsraSessionExType,
+    suite: TsraSessionSuite,
     sess_handle: *mut TsraHandle,
 ) -> TsraStatus {
     abi_boundary(|| {
         validate_ptr(sess_handle)?;
+        let root_spki_thumbprint: &[u8; 48] = <&[u8]>::try_from(deref_ptr(root_spki_thumbprint)?)?
+            .try_into()
+            .map_err(|_| TsraStatus::InvalidArgument)?;
 
         let psk = deref_ptr(psk)?;
         let psk_id = match psk.psk_id {
@@ -81,8 +92,9 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
         let partition = &api::HsmPartition::try_from(dev_handle)?;
         let session = Box::new(partition.open_session_ex(
             partition.api_rev(),
+            root_spki_thumbprint,
             session_psk,
-            api::HsmSessionExType::from(session_type),
+            api::HsmSessionSuite::from(suite),
         )?);
 
         let handle = HANDLE_TABLE.alloc_handle(HandleType::Session, session);
@@ -94,33 +106,58 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
     })
 }
 
+/// @brief Recover a migrated security-domain session in place
+///
+/// Establishes fresh channel keys while restoring the original session
+/// masking key. Uses the session's existing role and the current role PSK.
+/// Does not replay an interrupted command or reset the PSK-change allowance.
+///
+/// # Safety
+///
+/// - `sess_handle` must be a valid security-domain session handle.
+/// - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+/// - `psk` must be NULL (default PSK) or identify a valid buffer containing
+///   exactly `TSRA_PSK_LEN` bytes.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_sess_ex_reopen(
+    sess_handle: TsraHandle,
+    root_spki_thumbprint: *const TsraBuffer,
+    psk: *const TsraBuffer,
+) -> TsraStatus {
+    abi_boundary(|| {
+        let session = api::HsmSession::try_from(sess_handle)?;
+        let root: &[u8; 48] = <&[u8]>::try_from(deref_ptr(root_spki_thumbprint)?)?
+            .try_into()
+            .map_err(|_| TsraStatus::InvalidArgument)?;
+        let psk: Option<&[u8; api::PSK_LEN]> = buffer_to_optional_slice(psk)?
+            .map(|bytes| bytes.try_into().map_err(|_| TsraStatus::InvalidArgument))
+            .transpose()?;
+        session.reopen_ex(root, psk)?;
+        Ok(())
+    })
+}
+
 /// Input buffers for [`tsra_sess_ex_part_init`].
 ///
 /// Groups the security-domain provisioning inputs into a single struct so
 /// the call site does not pass them as separate arguments. Each field
-/// points to an `tsra_buffer`; `sapota_thumbprint` is optional and may
-/// be NULL to omit it.
+/// points to an `tsra_buffer`.
 #[repr(C)]
 pub struct TsraSessExPartInitParams {
-    /// Unified partition policy image buffer.
+    /// Partition policy buffer: a deterministic CBOR document of at most
+    /// 384 bytes that names the POTA, SATA, and optional SAPOTA trust
+    /// anchors by public-key thumbprint.
     pub part_policy: *const TsraBuffer,
     /// Machine seed plaintext buffer.
     pub mach_seed: *const TsraBuffer,
-    /// POTA public-key thumbprint buffer.
-    pub pota_thumbprint: *const TsraBuffer,
-    /// SATA public-key thumbprint buffer.
-    pub sata_thumbprint: *const TsraBuffer,
-    /// Optional SAPOTA thumbprint buffer; NULL to omit.
-    pub sapota_thumbprint: *const TsraBuffer,
 }
 
 /// @brief Provision a partition's security domain
 ///
-/// Initializes the partition from the machine seed and unified partition
-/// policy, together with the partition-owner (POTA), security-administrator
-/// (SATA), and optional secondary-owner (SAPOTA) trust-anchor thumbprints,
-/// returning the partition's certificate-signing request and attestation
-/// report.
+/// Initializes the partition from the machine seed and the partition
+/// policy, returning the partition's certificate-signing request and
+/// attestation report.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Provisioning input buffers
@@ -152,9 +189,7 @@ pub struct TsraSessExPartInitParams {
 ///
 /// - `sess_handle` must be a valid security-domain session handle.
 /// - `params` must be a valid pointer to an `tsra_sess_ex_part_init_params`
-///   whose `mach_seed`, `part_policy`, `pota_thumbprint`, and
-///   `sata_thumbprint` are valid `tsra_buffer` pointers, and whose
-///   `sapota_thumbprint` is NULL or a valid `tsra_buffer` pointer.
+///   whose `mach_seed` and `part_policy` are valid `tsra_buffer` pointers.
 /// - `pta_csr` and `pta_report` must be valid pointers to distinct
 ///   `tsra_buffer` structures with writable backing storage of the
 ///   advertised length.
@@ -172,9 +207,6 @@ pub unsafe extern "C" fn tsra_sess_ex_part_init(
 
         let mach_seed: &[u8] = deref_ptr(params.mach_seed)?.try_into()?;
         let part_policy: &[u8] = deref_ptr(params.part_policy)?.try_into()?;
-        let pota_thumbprint: &[u8] = deref_ptr(params.pota_thumbprint)?.try_into()?;
-        let sata_thumbprint: &[u8] = deref_ptr(params.sata_thumbprint)?.try_into()?;
-        let sapota_thumbprint = buffer_to_optional_slice(params.sapota_thumbprint)?;
 
         // Validate the output buffers before calling into the session
         validate_ptr(pta_csr)?;
@@ -222,19 +254,10 @@ pub unsafe extern "C" fn tsra_sess_ex_part_init(
         csr_check?;
         report_check?;
 
-        // Parse the opaque policy image into a typed `PartPolicy`. This
-        // runs after the output-buffer probe so a size probe still reports
-        // `BUFFER_TOO_SMALL`; a wrong-length policy is rejected here.
-        let part_policy =
-            api::PartPolicy::ref_from_wire(part_policy).ok_or(TsraStatus::InvalidArgument)?;
-
-        let result = session.part_init_ex(
-            part_policy,
-            mach_seed,
-            pota_thumbprint,
-            sata_thumbprint,
-            sapota_thumbprint,
-        )?;
+        // The policy length is checked by `part_init_ex`, after the
+        // output-buffer probe above, so a size probe still reports
+        // `BUFFER_TOO_SMALL`.
+        let result = session.part_init_ex(part_policy, mach_seed)?;
 
         copy_to_buffer(pta_csr, &result.pta_csr)?;
         copy_to_buffer(pta_report, &result.pta_report)?;
@@ -252,8 +275,8 @@ pub unsafe extern "C" fn tsra_sess_ex_part_init(
 /// optional and may be NULL to omit it.
 #[repr(C)]
 pub struct TsraSessExPartFinalParams {
-    /// Unified partition policy image buffer, re-supplied for `POTAPubKey`
-    /// recovery; must match the policy given to `part_init`.
+    /// Partition policy buffer, re-supplied for the POTA trust anchor;
+    /// must match the policy given to `part_init`.
     pub part_policy: *const TsraBuffer,
     /// Pointer to an array of `pta_cert_chain_len` `tsra_buffer`s, each a
     /// DER-encoded PTA certificate (root to leaf).
@@ -267,7 +290,7 @@ pub struct TsraSessExPartFinalParams {
 /// @brief Finalize a partition's security domain
 ///
 /// Completes provisioning started by `tsra_sess_ex_part_init`: re-supplies
-/// the unified partition policy and the PTA certificate chain (root to leaf),
+/// the partition policy and the PTA certificate chain (root to leaf),
 /// optionally restoring a prior `local_mk` backup, and returns the current
 /// `local_mk` backup envelope the firmware produced.
 ///
@@ -309,7 +332,7 @@ pub unsafe extern "C" fn tsra_sess_ex_part_final(
         let session = api::HsmSession::try_from(sess_handle)?;
         let params = deref_ptr(params)?;
 
-        let part_policy_bytes: &[u8] = deref_ptr(params.part_policy)?.try_into()?;
+        let part_policy: &[u8] = deref_ptr(params.part_policy)?.try_into()?;
         let prev_local_mk_backup = buffer_to_optional_slice(params.prev_local_mk_backup)?;
 
         // Build the PTA cert chain (borrowing, not copying) from the C
@@ -340,14 +363,10 @@ pub unsafe extern "C" fn tsra_sess_ex_part_final(
         let local_mk_backup = deref_mut_ptr(local_mk_backup)?;
         validate_output_buffer(local_mk_backup, api::LOCAL_MK_BACKUP_LEN)?;
 
-        // Parse the opaque policy image into a typed `PartPolicy` at the
-        // untrusted C boundary. Done after the output-buffer probe so a
-        // size query with a wrong-length policy still reports
-        // `TSRA_BUFFER_TOO_SMALL` (matching `part_init`) rather than
-        // `TSRA_INVALID_ARGUMENT`.
-        let part_policy =
-            api::PartPolicy::ref_from_wire(part_policy_bytes).ok_or(TsraStatus::InvalidArgument)?;
-
+        // The policy length is checked by `part_final_ex`, after the
+        // output-buffer probe above, so a size query with a wrong-length
+        // policy still reports `TSRA_BUFFER_TOO_SMALL` (matching
+        // `part_init`).
         let result = session.part_final_ex(part_policy, &certs, prev_local_mk_backup)?;
 
         copy_to_buffer(local_mk_backup, &result.local_mk_backup)?;

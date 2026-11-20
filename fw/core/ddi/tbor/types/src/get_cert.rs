@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn request_round_trips_fields() {
         let mut buf = [0u8; 64];
-        let frame = TborGetCertReq::encode(&mut buf)
+        let frame = TborGetCertReq::encode(&mut buf, (1, 1))
             .unwrap()
             .slot_id(1)
             .unwrap()
@@ -85,7 +85,7 @@ mod tests {
     fn response_round_trips_certificate() {
         let mut buf = [0u8; 512];
         let cert = [0xC7u8; 300];
-        let frame = TborGetCertResp::encode(&mut buf, 0, false)
+        let frame = TborGetCertResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .certificate(&cert)
             .unwrap()

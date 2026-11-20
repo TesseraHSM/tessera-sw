@@ -11,10 +11,10 @@
 //! each against the MBOR path (same underlying cert store), and confirm
 //! that an out-of-range index or slot is rejected.
 
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_ddi_tbor_types::TborGetCertReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -62,6 +62,10 @@ fn all_indices_round_trip() {
 #[test]
 fn matches_mbor_path() {
     let ctx = TestCtx::new();
+    if ctx.is_duo() {
+        // Duo has no MBOR channel.
+        return;
+    }
     let count = num_certs(&ctx);
 
     for cert_id in 0..count {
@@ -174,7 +178,7 @@ fn callable_while_session_active() {
     let before = ctx.tbor(&request).expect("certificate before session");
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
     let during = ctx
         .tbor(&request)
@@ -247,7 +251,7 @@ fn stable_across_session_lifecycle() {
         .expect("certificate before opening session");
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     let during = ctx
@@ -367,6 +371,10 @@ fn first_and_last_valid_indices_succeed() {
 #[test]
 fn mbor_tbor_interleaved_reads_remain_identical() {
     let ctx = TestCtx::new();
+    if ctx.is_duo() {
+        // Duo has no MBOR channel.
+        return;
+    }
 
     for cert_id in 0..num_certs(&ctx) {
         let tbor_before = ctx
@@ -435,7 +443,7 @@ fn callable_while_cu_session_active() {
     let before = ctx.tbor(&request).expect("certificate before CU session");
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU PlainText session");
 
     let during = ctx
@@ -471,10 +479,7 @@ fn entire_chain_stable_across_co_and_cu_session_lifecycles() {
         })
         .collect();
 
-    for (role, session_type) in [
-        (CO, SessionType::Authenticated),
-        (CU, SessionType::PlainText),
-    ] {
+    for (role, session_type) in [(CO, SessionSuite::EcdhP384), (CU, SessionSuite::EcdhP384)] {
         let session = ctx
             .open_session(role, session_type)
             .unwrap_or_else(|e| panic!("open session role {role} type {session_type:?}: {e:?}"));

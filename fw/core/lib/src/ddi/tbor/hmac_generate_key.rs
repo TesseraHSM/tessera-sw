@@ -151,7 +151,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let key_label = alloc.dma_alloc(caller_label.len())?;
         key_label.copy_from_slice(caller_label);
         let len = cmd_buf.encode_response(|buf| {
-            Ok(TborHmacGenerateKeyResp::encode(buf, 0, false)?
+            Ok(TborHmacGenerateKeyResp::encode_for_request(buf, 0, false)?
                 .masked_key_reserve(masked_len)?
                 .finish()
                 .as_bytes()
@@ -164,7 +164,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Generate the random HMAC key into scratch.
             let key_buf = alloc.dma_alloc(key_len)?;
             let mask_res = async {
-                pal.hmac_gen_key(io, algo, key_buf).await?;
+                pal.hmac_gen_key(io, algo, key_len, Some(key_buf)).await?;
                 let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
                 let params = MaskParams {
                     key_kind: kind,

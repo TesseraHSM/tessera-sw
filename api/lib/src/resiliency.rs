@@ -932,11 +932,29 @@ mod tests {
         let rev = info.api_rev_range.expect("API revision range").max();
         let part = HsmPartitionManager::open_partition(&info.path, rev).expect("open partition");
         part.reset().expect("reset partition");
+        // Controlled test enrollment; production pins must come from provisioning.
+        use tsra_crypto::HashAlgo;
+        use tsra_crypto::Hasher;
+        use x509::X509Certificate;
+        use x509::X509CertificateOp;
+        let pem = part.cert_chain(0).expect("test chain");
+        let certificates =
+            X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
+        let spki = certificates
+            .last()
+            .expect("test root")
+            .subject_public_key_info_der()
+            .expect("test root SPKI");
+        let root_pin: [u8; 48] = Hasher::hash_vec(&mut HashAlgo::sha384(), spki)
+            .expect("test root hash")
+            .try_into()
+            .expect("SHA-384 length");
         let session = part
             .open_session_ex(
                 rev,
+                &root_pin,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open EX session");
         session.change_psk(&[0xA5; PSK_LEN]).expect("rotate CO PSK");

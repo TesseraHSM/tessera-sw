@@ -85,7 +85,7 @@ mod tests {
             msg: alloc::vec![0x61u8; 64],
         };
         let mut buf = [0u8; 512];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&HASH_ALGO_SHA384),
             "encoded frame must carry the sha-mode discriminant",
@@ -102,8 +102,8 @@ mod tests {
             msg: alloc::vec![0x61u8; HASH_MSG_MAX_LEN],
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
-        // header(8) + 4 TOC entries * 4 + data(3072).
-        assert_eq!(frame.len(), 3096);
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
+        // header(12) + 4 TOC entries * 4 + data(3072).
+        assert_eq!(frame.len(), 3100);
     }
 }

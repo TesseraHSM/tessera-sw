@@ -166,11 +166,8 @@ pub enum HsmVaultKeyKind {
     /// Session-establishment-protocol blob for TBOR sessions (both CO
     /// and CU).
     ///
-    /// Length-discriminated by session type:
-    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)
-    ///   ‖ auth_binding(68)]` = 140 B.
-    /// * **Authenticated (CO):** the above ‖ `mac_tx(48) ‖ mac_rx(48)`
-    ///   = 236 B.
+    /// `[api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)
+    /// ‖ h2m(36) ‖ m2h(36)]` = 212 B, identical for CO and CU.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used
@@ -195,7 +192,7 @@ pub enum HsmVaultKeyKind {
     /// Partition Unique Secret — the 48 B HMAC-SHA-384-sized root of the
     /// partition key schedule.  Initially the Unique Machine Secret (UMS)
     /// derived in `PartInit` from `UDS` plus the request-side inputs
-    /// (`MachineSeed`, `PartPolicy`, `POTAThumbprint`); `PartFinal`
+    /// (`MachineSeed`, `PartPolicy`); `PartFinal`
     /// replaces it with the Unique Partition Secret (UPS).
     ///
     /// Persisted in the partition key vault for the lifetime of the
@@ -496,8 +493,15 @@ pub struct HsmVaultKeyAttrs {
     rsvd: u64,
 }
 
-/// RAII guard for a newly created vault key.
-///
+/// Consistency test required before storing a restored unwrapping key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmVaultPct {
+    /// Ordinary vault storage; asymmetric assurance is performed by its caller.
+    None,
+    /// RSA-2048 encrypt/decrypt PCT for the partition's unwrapping key.
+    UnwrappingKey,
+}
+
 /// HSM key vault interface.
 ///
 /// All accessor methods take an [`HsmIo`] handle, used to scope the
@@ -525,6 +529,8 @@ pub trait HsmVault: HsmIoTypes {
     ///   key.
     /// - `attrs` — PKCS#11-style permission bitfield (see
     ///   [`HsmVaultKeyAttrs`]).
+    /// - `pct` — explicitly selects the unwrapping-key PCT; ordinary keys
+    ///   use [`HsmVaultPct::None`]. A mismatched selector is rejected.
     ///
     /// # Returns
     ///
@@ -542,6 +548,7 @@ pub trait HsmVault: HsmIoTypes {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId>;
 
     /// Deletes a single key by ID.

@@ -250,7 +250,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let prk = alloc.dma_alloc(algo.digest_len())?;
         let okm = alloc.dma_alloc(target.out_len)?;
         let derived = async {
-            pal.hkdf_extract(io, algo, salt, view.target_key, prk)
+            pal.hkdf_extract(io, algo, salt, view.target_key, Some(prk))
                 .await?;
             pal.hkdf_expand(io, algo, prk, info, okm).await
         }
@@ -258,7 +258,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let derive_and_mask = async {
             derived?;
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborHkdfDeriveResp::encode(buf, 0, false)?
+                Ok(TborHkdfDeriveResp::encode_for_request(buf, 0, false)?
                     .masked_key_reserve(masked_len)?
                     .finish()
                     .as_bytes()

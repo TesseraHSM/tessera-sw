@@ -41,7 +41,7 @@ pub(super) async fn run_hkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
         let prk = scope.dma_alloc_zeroed(algo.digest_len())?;
 
         // HKDF-Extract: PRK = HMAC-Hash(salt, IKM).
-        pal.hkdf_extract(io, algo, Some(&*salt), &*ikm, &mut *prk)
+        pal.hkdf_extract(io, algo, Some(&*salt), &*ikm, Some(&mut *prk))
             .await?;
 
         // HKDF-Expand: OKM = Expand(PRK, info, L).

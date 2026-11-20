@@ -103,19 +103,15 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // Generate the keypair into IO-scoped buffers sized from the curve's
         // wire lengths (the single source of truth for PAL-boundary buffers).
-        let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len())?;
-        let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len())?;
+        let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len(P::BYTE_ORDER))?;
+        let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len(P::BYTE_ORDER))?;
         let generated = pal
-            .alloc_scoped_async(io, async |a| -> HsmResult<(usize, usize)> {
-                pal.ecc_gen_keypair(
-                    io,
-                    a,
-                    curve,
-                    Some((&mut *priv_key, &mut *pub_key)),
-                    ecc_pct_for(attrs),
-                )
-                .await
-            })
+            .ecc_gen_keypair(
+                io,
+                curve,
+                ecc_pct_for(attrs),
+                Some((&mut *priv_key, &mut *pub_key)),
+            )
             .await;
         // End the last request borrow before entering the response phase.
         let key_label = (|| -> HsmResult<_> {
@@ -129,7 +125,9 @@ pub(crate) async fn handle<P: HsmPal>(
         let outcome: HsmResult<usize> = async {
             let (priv_len, pub_len) = generated?;
             // The wire lengths are fixed per curve; a mismatch is an internal bug.
-            if priv_len != curve.wire_priv_key_len() || pub_len != curve.wire_pub_key_len() {
+            if priv_len != curve.wire_priv_key_len(P::BYTE_ORDER)
+                || pub_len != curve.wire_pub_key_len(P::BYTE_ORDER)
+            {
                 return Err(HsmError::InternalError);
             }
             let key_label = key_label?;
@@ -139,7 +137,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // Build the response with the masked-key slot reserved and the
             // public key copied in; the masked private key is filled in place.
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborEccGenerateKeyResp::encode(buf, 0, false)?
+                Ok(TborEccGenerateKeyResp::encode_for_request(buf, 0, false)?
                     .masked_key_reserve(masked_len)?
                     .pub_key(&pub_key[..pub_len])?
                     .finish()

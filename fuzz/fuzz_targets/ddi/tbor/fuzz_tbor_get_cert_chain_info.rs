@@ -55,8 +55,12 @@ impl TborOpReq for MalformedRequest {
     type OpResp = TborGetCertChainInfoResp;
 
     /// Encode a valid envelope whose body violates one firmware schema rule.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let encoder = RequestEncoder::new(buf, PROTOCOL_VERSION, Self::OPCODE);
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let encoder = RequestEncoder::new(buf, api_rev, Self::OPCODE);
         match self {
             Self::MissingSlot => encoder.none()?.none()?.finish(),
             Self::WrongType(slot_id) => encoder.uint16(u16::from(*slot_id))?.none()?.finish(),
@@ -88,14 +92,9 @@ fn prepare_partition(ctx: &TestCtx, selector: u8) -> Lifecycle {
         common::finalize_partition(ctx, &session);
     } else {
         let pota = CaKey::generate();
-        let policy = common::known_good_part_policy(pota.raw_pub());
-        ctx.part_init(
-            &session,
-            &common::mach_seed(),
-            &policy,
-            &common::pota_thumbprint(),
-        )
-        .expect("PartInit setup must succeed");
+        let policy = common::known_good_part_policy(pota.spki_thumbprint());
+        ctx.part_init(&session, &common::mach_seed(), &policy)
+            .expect("PartInit setup must succeed");
     }
     ctx.session_close(session.session_id)
         .expect("close lifecycle setup session");

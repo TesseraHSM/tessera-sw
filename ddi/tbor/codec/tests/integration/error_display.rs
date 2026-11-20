@@ -9,12 +9,19 @@ use super::common::*;
 fn decode_error_display_strings_are_distinct_and_descriptive() {
     let cases: &[(DecodeError, &str)] = &[
         (DecodeError::BufferTooShort, "buffer too short"),
-        (DecodeError::UnsupportedVersion(0x02), "0x02"),
+        (
+            DecodeError::ApiRevisionMismatch {
+                expected: (1, 1),
+                actual: (2, 0),
+            },
+            "2.0",
+        ),
         (DecodeError::MessageTruncated, "truncated"),
         (DecodeError::OffsetLengthOutOfBounds, "out of bounds"),
         (DecodeError::InvalidFixedLength, "invalid length"),
         (DecodeError::UnexpectedTocType, "unexpected TOC"),
         (DecodeError::InvalidNonePayload, "reserved bits"),
+        (DecodeError::MisalignedField, "misaligned"),
         (DecodeError::FwError(0x0870_00DD), "0x087000DD"),
     ];
     for (err, expected) in cases {
@@ -40,6 +47,7 @@ fn encode_error_display_strings_are_distinct_and_descriptive() {
         ),
         (EncodeError::DataTooLarge, "data too large"),
         (EncodeError::DataOffsetOverflow, "data offset overflow"),
+        (EncodeError::InvalidAlignment, "alignment"),
     ];
     for (err, expected) in cases {
         let rendered = std::format!("{}", err);

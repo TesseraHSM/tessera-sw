@@ -7,7 +7,7 @@
 //! (`SessionOpenInit` + `SessionOpenFinish`) against a [`DdiDev`] and
 //! returns a [`SessionHandshake`] carrier whose fields are everything
 //! a per-command test needs to drive subsequent in-session commands
-//! (param_key for the AEAD-GCM envelope, session_id, session_type,
+//! (param_key for the AEAD-GCM envelope, session_id, suite,
 //! bmk_session for later resume tests).
 //!
 //! [`session_close`] is the matching teardown: a thin wrapper around
@@ -20,33 +20,38 @@
 //! so negative-path tests can intercept the handshake — e.g., tamper with
 //! `mac_fin` to drive the Phase-2 MAC mismatch arm in the FW.
 
-use tsra_ddi::TsraDdi;
-use tsra_ddi_interface::Ddi;
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionCloseReq;
 use tsra_ddi_tbor_types::TborSessionCloseResp;
+use tsra_session_ex_crypto::SessionSuite;
 
 use super::finish::session_open_finish;
 use super::finish::SessionHandshake;
 use super::init::session_open_init;
+use crate::fixture::TestDev;
 
 /// One-shot helper: run both phases of the session handshake against
 /// `dev`. Equivalent to `session_open_init(...)? → session_open_finish(...)`.
 pub fn session_open(
-    dev: &<TsraDdi as Ddi>::Dev,
+    dev: &TestDev,
     psk_id: u8,
-    session_type: SessionType,
+    suite: SessionSuite,
 ) -> Result<SessionHandshake, DdiError> {
-    let pending = session_open_init(dev, psk_id, session_type)?;
+    let pending = session_open_init(dev, psk_id, suite)?;
     session_open_finish(dev, pending)
 }
 
 /// Issue `SessionClose(session_id)` and return on success.
-pub fn session_close(dev: &<TsraDdi as Ddi>::Dev, session_id: u16) -> Result<(), DdiError> {
+pub fn session_close(dev: &TestDev, session_id: u16) -> Result<(), DdiError> {
     let req = TborSessionCloseReq { session_id };
     let mut cookie = None;
-    let _resp: TborSessionCloseResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
-    Ok(())
+    let result = dev
+        .exec_op_tbor::<TborSessionCloseReq>(&req, None, &mut cookie)
+        .map(|_: TborSessionCloseResp| ());
+    // A failed close leaves the session alive, so keep its transport keys
+    // for a retry.
+    if result.is_ok() {
+        dev.remove_session_transport(session_id);
+    }
+    result
 }

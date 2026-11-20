@@ -29,8 +29,10 @@
 
 pub mod api_rev;
 pub mod assertions;
+pub mod byte_order;
 pub mod ctx;
 pub mod fixture;
+pub mod policy;
 pub mod pqc;
 pub mod session;
 pub mod session_guard;
@@ -44,6 +46,11 @@ pub mod x509_fixture;
 // instead of `crate::ctx::TestCtx`. Only items actually used
 // from test files are re-exported here; helpers only reached through
 // `TestCtx` methods stay behind their submodule.
+pub use byte_order::dev_coord_to_host_be;
+pub use byte_order::dev_rev;
+pub use byte_order::dev_rev_in_place;
+pub use byte_order::device_is_little_endian;
+pub use byte_order::wire_coord_len;
 pub use ctx::TestCtx;
 pub use fixture::bootstrap_rotated_co;
 pub use fixture::bootstrap_rotated_cu;
@@ -51,6 +58,7 @@ pub use fixture::CO_PSK_ID;
 pub use fixture::CU_PSK_ID;
 pub use fixture::ROTATED_CO_PSK;
 pub use fixture::ROTATED_CU_PSK;
+pub use policy::TestPolicy;
 pub use session::build_mac_fin;
 pub use session::build_part_init_mach_seed_aad;
 pub use session::coord_sizes;
@@ -61,3 +69,4 @@ pub use session::SessionOpenInitOptions;
 pub use session_guard::SessionGuard;
 pub use tsra_ddi_tbor_types::build_psk_change_aad;
 pub use tsra_ddi_tbor_types::TborPskChangeReq;
+pub use tsra_session_ex_crypto::SessionSuite;

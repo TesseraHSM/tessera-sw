@@ -262,20 +262,40 @@ impl DdiDev for TsraDdiDev {
 
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        dispatch!(self, dev => dev.exec_op_tbor(req, oob_items, cookie))
+        dispatch!(self, dev => dev.exec_op_tbor(api_rev, req, oob_items, cookie))
     }
 
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        dispatch!(self, dev => dev.exec_op_tbor_oob(req, oob_items, cookie))
+        dispatch!(self, dev => dev.exec_op_tbor_oob(api_rev, req, oob_items, cookie))
+    }
+
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        dispatch!(self, dev => dev.discover())
+    }
+
+    fn exec_op_tbor_secure(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        dispatch!(self, dev => dev.exec_op_tbor_secure(session_id, payload, seal, oob_items))
+    }
+
+    fn flush_session(&self, session_id: u16) -> DdiResult<()> {
+        dispatch!(self, dev => dev.flush_session(session_id))
     }
 }
 

@@ -51,12 +51,13 @@ pub struct TborDarcKeyWrapReq {
 
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The local masked EC private key to export (from `EccGenerateKey` /
     /// `DarcKeyUnwrap`); its masked-key kind must be one of
     /// `Ecc{256,384,521}Private`.
-    #[tbor(max_len = 312)]
+    #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 }
 
@@ -87,7 +88,7 @@ mod tests {
             masked_key: alloc::vec![0xA5u8; 120],
         };
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.len() > MASKED_TMK_LEN + 120,
             "encoded frame must carry the masked TMK and masked key",

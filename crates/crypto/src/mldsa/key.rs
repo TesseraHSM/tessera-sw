@@ -10,24 +10,6 @@
 //! Both types carry their [`MlDsaVariant`] alongside the bytes so that an
 //! operation cannot silently pair a key with the wrong parameter set.
 //!
-//! # The expanded signing key
-//!
-//! `ml-dsa` deprecates the expanded key form in favour of the 32-byte seed.
-//! This code uses it anyway because the HSM wire format already does: the masked
-//! key blob stores seed followed by expanded key, and signing is handed only the
-//! expanded half, so that it does not repeat the key expansion on every call.
-//! Switching would change the on-wire blob and break every key already issued,
-//! so the deprecation is acknowledged and overridden here rather than followed.
-#![allow(deprecated)]
-
-use ml_dsa::EncodedVerifyingKey;
-use ml_dsa::ExpandedSigningKey;
-use ml_dsa::ExpandedSigningKeyBytes;
-use ml_dsa::MlDsa44;
-use ml_dsa::MlDsa65;
-use ml_dsa::MlDsa87;
-use ml_dsa::MlDsaParams;
-use ml_dsa::SigningKey as MlDsaSigningKey;
 use zeroize::Zeroizing;
 
 use super::*;
@@ -58,19 +40,11 @@ impl MlDsaPrivateKey {
     /// Returns [`CryptoError::MlDsaKeyGenError`] if `seed` is not
     /// [`MLDSA_SEED_LEN`] bytes.
     pub fn from_seed(variant: MlDsaVariant, seed: &[u8]) -> Result<Self, CryptoError> {
-        fn inner<P: MlDsaParams>(seed: &[u8]) -> Result<Vec<u8>, CryptoError> {
-            let xi = seed.try_into().map_err(|_| CryptoError::MlDsaKeyGenError)?;
-            Ok(MlDsaSigningKey::<P>::from_seed(xi)
-                .expanded_key()
-                .to_expanded()
-                .to_vec())
+        if seed.len() != MLDSA_SEED_LEN {
+            return Err(CryptoError::MlDsaKeyGenError);
         }
-
-        let expanded = dispatch!(variant, inner(seed))?;
-        Ok(Self {
-            variant,
-            expanded: Zeroizing::new(expanded),
-        })
+        let expanded = platform::expand_key(variant, seed)?;
+        Ok(Self { variant, expanded })
     }
 
     /// Returns the parameter set this key belongs to.
@@ -79,6 +53,7 @@ impl MlDsaPrivateKey {
     }
 
     /// Borrows the expanded key bytes.
+    #[cfg(any(target_os = "windows", ossl350))]
     pub(super) fn as_bytes(&self) -> &[u8] {
         &self.expanded
     }
@@ -112,14 +87,7 @@ impl PrivateKey for MlDsaPrivateKey {
     /// Returns [`CryptoError::MlDsaKeyGenError`] if the stored bytes are not a
     /// valid expanded key for this key's parameter set.
     fn public_key(&self) -> Result<Self::PublicKey, CryptoError> {
-        fn inner<P: MlDsaParams>(expanded: &[u8]) -> Result<Vec<u8>, CryptoError> {
-            let enc = ExpandedSigningKeyBytes::<P>::try_from(expanded)
-                .map_err(|_| CryptoError::MlDsaKeyGenError)?;
-            let sk = ExpandedSigningKey::<P>::from_expanded(&enc);
-            Ok(sk.verifying_key().encode().to_vec())
-        }
-
-        let encoded = dispatch!(self.variant, inner(&self.expanded))?;
+        let encoded = platform::public_key(self.variant, &self.expanded)?;
         Ok(MlDsaPublicKey {
             variant: self.variant,
             encoded,
@@ -217,15 +185,9 @@ impl ImportableKey for MlDsaPublicKey {
     /// Returns [`CryptoError::MlDsaKeyImportError`] if `bytes` is not a valid
     /// encoded verifying key for any parameter set.
     fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        fn inner<P: MlDsaParams>(bytes: &[u8]) -> Result<(), CryptoError> {
-            EncodedVerifyingKey::<P>::try_from(bytes)
-                .map(|_| ())
-                .map_err(|_| CryptoError::MlDsaKeyImportError)
-        }
-
         let variant =
             MlDsaVariant::from_pub_key_len(bytes.len()).ok_or(CryptoError::MlDsaKeyImportError)?;
-        dispatch!(variant, inner(bytes))?;
+        platform::validate_public_key(variant, bytes)?;
         Ok(Self {
             variant,
             encoded: bytes.to_vec(),

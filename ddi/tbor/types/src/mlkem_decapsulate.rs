@@ -48,7 +48,7 @@ pub struct TborMlKemDecapsulateReq {
     /// The masked ML-KEM decapsulation key (from `MlKemGenerateKey`).
     /// Carries the seed and expanded decapsulation key. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(max_len = 3464)]
+    #[tbor(align = 4, max_len = 3464)]
     pub masked_key: Vec<u8>,
 
     /// ML-KEM ciphertext bytes.
@@ -61,7 +61,7 @@ pub struct TborMlKemDecapsulateReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborMlKemDecapsulateResp {
     /// The 32-byte shared secret, masked under the requested scope's masking key.
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub masked_shared_secret: Vec<u8>,
 }
 
@@ -80,7 +80,7 @@ mod tests {
             ciphertext: alloc::vec![0x22u8; 64],
         };
         let mut buf = [0u8; 8192];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.windows(4).any(|w| w == [0x22u8; 4]),
             "encoded frame must carry the ciphertext bytes",

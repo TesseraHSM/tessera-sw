@@ -134,6 +134,21 @@ impl<'a> HsmDmaAllocation<'a> {
         self.len == 0
     }
 
+    /// Discard a prefix without moving bytes or changing the allocation's end.
+    ///
+    /// The allocator still owns and scrubs the discarded memory. Tail growth
+    /// remains possible; callers must preserve any alignment they require.
+    pub fn skip_prefix(mut self, len: usize) -> HsmResult<Self> {
+        if len > self.len {
+            return Err(HsmError::InvalidArg);
+        }
+        // SAFETY: the checked offset stays within the owned initialized range,
+        // preserving the backing heap's provenance for subsequent growth.
+        self.ptr = unsafe { self.ptr.add(len) };
+        self.len -= len;
+        Ok(self)
+    }
+
     /// Give up the handle for a view of the whole allocation that lives as
     /// long as the allocation itself. With the handle gone it can no longer
     /// grow, so the view stays valid.
@@ -841,9 +856,13 @@ pub trait HsmAlloc: HsmIoTypes {
     /// allocation made through that handle when `f` returns.
     ///
     /// Scopes may nest; nested scopes see the parent's watermark
-    /// and roll back to it on return.  Allocations made through the
-    /// outer PAL trait (e.g. [`dma_alloc`](Self::dma_alloc)) are
-    /// **not** freed by scope exit.
+    /// and roll back to it on return. Scopes for the same IO must be
+    /// strictly nested, not interleaved or run concurrently.
+    ///
+    /// Current backends restore the shared per-IO watermarks, including
+    /// allocations made through the outer PAL trait while the scope is active.
+    /// Allocate all buffers that must outlive the scope before entering it.
+    /// Inside the scope, allocate temporary storage through its handle.
     ///
     /// # Type Parameters
     ///

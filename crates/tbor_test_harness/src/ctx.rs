@@ -33,16 +33,15 @@
 //! `get_certificate`). This forces every test path through the
 //! shared assertion funnel.
 
-use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::TborPartInitResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_session_ex_crypto::SessionSuite;
 
 use crate::api_rev::helper_api_rev_tbor;
 use crate::assertions::assert_fw_rejects;
@@ -64,11 +63,6 @@ use crate::session::session_open_init_with_options as session_open_init_with_opt
 use crate::session::PendingHandshake;
 use crate::session::SessionHandshake;
 use crate::session::SessionOpenInitOptions;
-
-/// Fixed default 48-byte SATA thumbprint used by the convenience
-/// [`TestCtx::part_init`] wrapper, whose callers don't exercise the
-/// security-domain inputs.
-const DEFAULT_SATA_THUMBPRINT: [u8; 48] = [0x5A; 48];
 
 /// One-test fixture: an opened backend device handle (with the
 /// process-global test lock held for its lifetime) plus a thin layer
@@ -128,6 +122,24 @@ impl TestCtx {
         self.dev.path()
     }
 
+    /// The device model this ctx talks to.
+    pub fn model(&self) -> tsra_ddi_interface::DdiDeviceModel {
+        self.dev.model()
+    }
+
+    /// Whether the device is a Duo (API revision 2.x): crypto operands
+    /// are big-endian, MBOR is unavailable, and the session transport
+    /// travels in the SQE/CQE rather than in-band.
+    pub fn is_duo(&self) -> bool {
+        self.dev.is_duo()
+    }
+
+    /// DER partition-ID (leaf) certificate of cert slot 0, read over
+    /// MBOR on Uno and TBOR on Duo.
+    pub fn leaf_certificate(&self) -> DdiResult<Vec<u8>> {
+        crate::session::fetch_leaf_cert_der(&self.dev)
+    }
+
     /// Factory-reset the partition. Used by the
     /// `commands::part_init` determinism test for cold-restart
     /// iterations. Available on every backend the harness compiles
@@ -135,6 +147,20 @@ impl TestCtx {
     /// the crate root.
     pub fn erase(&self) -> DdiResult<()> {
         self.dev.erase()
+    }
+
+    /// Simulate NSSR while keeping the host's stale channel keys.
+    pub fn migrate(&self) -> DdiResult<()> {
+        self.dev.migrate()
+    }
+
+    /// Complete a recovery handshake with saved masking-key material.
+    pub fn session_reopen_finish(
+        &self,
+        pending: PendingHandshake,
+        original: &SessionHandshake,
+    ) -> DdiResult<SessionHandshake> {
+        crate::session::session_reopen_finish(&self.dev, pending, original)
     }
 
     /// Issue an `OP_TBOR` request and return the raw `DdiResult`.
@@ -174,6 +200,51 @@ impl TestCtx {
         self.dev.exec_op_tbor_oob(req, oob_items, &mut cookie)
     }
 
+    /// The status the device reports for `req` when firmware would
+    /// reject it with `expected`.
+    ///
+    /// When the harness holds no transport keys for the session of an
+    /// in-session or close command, the command travels unsealed and the
+    /// transport rejects it before any session lookup (see
+    /// [`Self::unknown_session_status`]).
+    pub fn device_status<R: TborOpReq>(&self, req: &R, expected: TborStatus) -> TborStatus {
+        if self.dev.sends_unsealed_session_cmd(req) {
+            self.unknown_session_status(expected)
+        } else {
+            expected
+        }
+    }
+
+    /// The status the device reports for an in-session or close command
+    /// addressed to a session this handle holds no transport keys for
+    /// (unknown, closed, erased, or opened elsewhere), when firmware would
+    /// reject it with `expected`. The device receives such a command
+    /// unsealed and rejects it before any session lookup: Duo's channel
+    /// policy as `InvalidSessionControlOpcode`, Uno's frame check as
+    /// `SessionTransportError`.
+    pub fn unknown_session_status(&self, _expected: TborStatus) -> TborStatus {
+        if self.is_duo() {
+            TborStatus::InvalidSessionControlOpcode
+        } else {
+            TborStatus::SessionTransportError
+        }
+    }
+
+    /// [`assert_session_rejects`] for a command addressed to a session this
+    /// handle holds no transport keys for (see
+    /// [`Self::unknown_session_status`]).
+    #[track_caller]
+    pub fn assert_unknown_session_rejects(&self, err: &DdiError, expected: TborStatus) {
+        // Plaintext close now reaches the stale-slot policy on Duo.
+        if self.is_duo()
+            && expected == TborStatus::SessionNotFound
+            && matches!(err, DdiError::TborStatus(TborStatus::SessionNotFound))
+        {
+            return;
+        }
+        assert_session_rejects(err, self.unknown_session_status(expected));
+    }
+
     /// [`Self::expect_fw_reject`] for a request carrying in / out
     /// out-of-band SGL items (see [`Self::tbor_oob_io`]).
     #[track_caller]
@@ -189,7 +260,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }
@@ -214,7 +285,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }
@@ -229,7 +300,7 @@ impl TestCtx {
         let err = self
             .tbor(req)
             .expect_err("session command must be rejected");
-        assert_session_rejects(&err, expected);
+        assert_session_rejects(&err, self.device_status(req, expected));
         err
     }
 
@@ -251,7 +322,7 @@ impl TestCtx {
                 expected.0,
             ),
             Err(err) => {
-                assert_fw_rejects(&err, expected);
+                assert_fw_rejects(&err, self.device_status(req, expected));
                 err
             }
         }
@@ -295,13 +366,13 @@ impl TestCtx {
     pub fn session_open_init(
         &self,
         psk_id: u8,
-        session_type: SessionType,
+        suite: SessionSuite,
     ) -> DdiResult<PendingHandshake> {
-        session_open_init_helper(&self.dev, psk_id, session_type)
+        session_open_init_helper(&self.dev, psk_id, suite)
     }
 
     /// Full-control Phase 1 entry point: honours every override in
-    /// `opts` (PSK, ephemeral, suite id).
+    /// `opts` (PSK, suite id).
     pub fn session_open_init_with_options(
         &self,
         opts: SessionOpenInitOptions<'_>,
@@ -310,7 +381,7 @@ impl TestCtx {
     }
 
     /// Run Phase 2 of the TBOR session handshake with the canonical
-    /// confirm MAC. Consumes `pending` so callers cannot reuse stale
+    /// host confirmation. Consumes `pending` so callers cannot reuse stale
     /// state.
     pub fn session_open_finish(&self, pending: PendingHandshake) -> DdiResult<SessionHandshake> {
         session_open_finish_helper(&self.dev, pending)
@@ -334,9 +405,9 @@ impl TestCtx {
     pub(crate) fn open_session_raw(
         &self,
         psk_id: u8,
-        session_type: SessionType,
+        suite: SessionSuite,
     ) -> DdiResult<SessionHandshake> {
-        session_open_helper(&self.dev, psk_id, session_type)
+        session_open_helper(&self.dev, psk_id, suite)
     }
 
     /// Issue `SessionClose(session_id)`. Used by negative-path
@@ -355,46 +426,14 @@ impl TestCtx {
     }
 
     /// Issue `PartInit` on the CO `session` with the canonical
-    /// envelope construction and a fixed default SATA thumbprint (no
-    /// SAPOTA). Returns the decoded [`TborPartInitResp`].
+    /// envelope construction. Returns the decoded [`TborPartInitResp`].
     pub fn part_init(
         &self,
         session: &SessionHandshake,
         mach_seed: &[u8],
         part_policy: &[u8],
-        pota_thumbprint: &[u8],
     ) -> DdiResult<TborPartInitResp> {
-        part_init_helper(
-            &self.dev,
-            session,
-            mach_seed,
-            part_policy,
-            pota_thumbprint,
-            &DEFAULT_SATA_THUMBPRINT,
-            None,
-        )
-    }
-
-    /// Issue `PartInit` with explicit security-domain thumbprint inputs
-    /// (SATA + optional SAPOTA).
-    pub fn part_init_sd(
-        &self,
-        session: &SessionHandshake,
-        mach_seed: &[u8],
-        part_policy: &[u8],
-        pota_thumbprint: &[u8],
-        sata_thumbprint: &[u8],
-        sapota_thumbprint: Option<&[u8]>,
-    ) -> DdiResult<TborPartInitResp> {
-        part_init_helper(
-            &self.dev,
-            session,
-            mach_seed,
-            part_policy,
-            pota_thumbprint,
-            sata_thumbprint,
-            sapota_thumbprint,
-        )
+        part_init_helper(&self.dev, session, mach_seed, part_policy)
     }
 
     /// Issue `PartFinal` re-supplying `part_policy` (must match the one

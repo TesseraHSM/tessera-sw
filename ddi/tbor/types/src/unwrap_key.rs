@@ -143,7 +143,7 @@ pub struct TborUnwrapKeyResp {
     pub key_kind: u8,
 
     /// The recovered key, masked under the scope's masking key.
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// The recovered key's wire public key for RSA / ECC; empty for
@@ -170,7 +170,7 @@ mod tests {
             key_label: b"imported-key".to_vec(),
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&KEY_CLASS_HMAC_SHA256),
             "encoded frame must carry the key-class discriminant",

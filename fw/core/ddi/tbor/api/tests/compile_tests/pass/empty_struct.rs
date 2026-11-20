@@ -16,9 +16,9 @@ pub struct EmptyReq {}
 
 fn main() {
     let mut buf = [0u8; 16];
-    let frame = EmptyReq::encode(&mut buf).expect("encode").finish();
+    let frame = EmptyReq::encode(&mut buf, (1, 1)).expect("encode").finish();
     let bytes = frame.as_bytes();
-    // 8-byte header + 1 TOC entry (4 bytes) = 12 bytes total.
-    assert_eq!(bytes.len(), 12);
+    // 12-byte header + 1 TOC entry (4 bytes) = 16 bytes total.
+    assert_eq!(bytes.len(), 16);
     EmptyReq::decode(brand(bytes)).expect("decode");
 }

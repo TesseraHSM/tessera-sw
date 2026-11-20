@@ -38,12 +38,15 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
@@ -63,6 +66,7 @@ use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::ENVELOPE_AAD_LEN;
 use crate::commands::common::ENVELOPE_HEADER_LEN;
 use crate::commands::common::ENVELOPE_IV_LEN;
@@ -71,6 +75,48 @@ use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
+
+fn rebound_caller_report(role: u8) {
+    use tsra_session_ex_crypto::seal_key_report_auth;
+
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
+    let caller = if role == CO_PSK_ID {
+        co
+    } else {
+        let pending = ctx
+            .session_open_init(role, SessionSuite::EcdhP384)
+            .expect("CU init");
+        ctx.session_open_finish(pending).expect("CU finish")
+    };
+    let new_psk = [0xD5; 32];
+    ctx.psk_change(&caller, &new_psk).expect("rotate caller");
+    let mut request = TborKeyReportReq {
+        session_id: caller.session_id,
+        masked_key,
+        report_data: sample_report_data(),
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope =
+        seal_key_report_auth(&caller.param_key, &request).expect("authenticate report");
+    let response = ctx
+        .tbor(&request)
+        .expect("same-session report after rotation");
+    let decoded = verify_key_report(&ctx, &response.report, &public_key, &request.report_data);
+    assert_eq!(&decoded.app_uuid[..], &new_psk[..16]);
+    ctx.session_close(caller.session_id).expect("close caller");
+}
+
+#[test]
+fn key_report_co_rotation_rebinds_calling_session_and_app_id() {
+    rebound_caller_report(CO_PSK_ID);
+}
+
+#[test]
+fn key_report_cu_rotation_rebinds_calling_session_and_app_id() {
+    rebound_caller_report(CU_PSK_ID);
+}
 
 /// Verifies an imported RSA or RSA-CRT key report against the host public key.
 fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
@@ -102,15 +148,8 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
         .expect("KeyReport accepts imported RSA key");
 
     // Verify the PID signature.
-    let info = ctx.cert_chain_info().expect("GetCertChainInfo");
-    assert!(info.data.num_certs > 0);
-
-    let leaf_resp = ctx
-        .get_certificate(info.data.num_certs - 1)
-        .expect("GetCertificate PID leaf");
-
-    let leaf = X509Certificate::from_der(leaf_resp.data.certificate.as_slice())
-        .expect("parse PID certificate");
+    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("parse PID certificate");
 
     let spki = leaf.get_public_key_der().expect("extract PID public key");
 
@@ -230,15 +269,8 @@ pub(crate) fn verify_key_report(
     use x509::X509CertificateOp;
 
     // 1. PID pubkey from the slot-0 chain leaf.
-    let info = ctx.cert_chain_info().expect("GetCertChainInfo");
-    let n = info.data.num_certs;
-    assert!(
-        n >= 1,
-        "slot-0 cert chain must contain the PID leaf, got {n}"
-    );
-    let leaf_resp = ctx.get_certificate(n - 1).expect("GetCertificate(leaf)");
-    let leaf_bytes = leaf_resp.data.certificate.as_slice();
-    let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509 certificate");
+    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("PID leaf parses as X.509 certificate");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
 
     // 2. COSE_Sign1 signature verify under PID pubkey, then decode the
@@ -255,26 +287,21 @@ pub(crate) fn verify_key_report(
 
     let cose_key = &decoded.public_key[..decoded.public_key_size as usize];
     let expected_curve = match sealing_pub_le.len() {
-        64 => 1,  // P-256
-        96 => 2,  // P-384
-        136 => 3, // P-521
+        64 => 1,        // P-256
+        96 => 2,        // P-384
+        132 | 136 => 3, // P-521
         other => panic!("unexpected public-key length {other}"),
     };
 
     let (x_be, y_be) = cose_key_xy(cose_key, expected_curve);
     // The COSE_Key holds big-endian coordinates; the sealing pubkey is
-    // little-endian `x_le ‖ y_le`, so reverse each COSE_Key coordinate
+    // `x ‖ y` in device byte order, so convert each COSE_Key coordinate
     // and compare against the corresponding wire half.
-    let (coord_len, wire_len) = match sealing_pub_le.len() {
-        64 => (32, 32),
-        96 => (48, 48),
-        136 => (66, 68), // P-521 wire coordinates include two padding bytes.
-        other => panic!("unexpected public-key length {other}"),
-    };
+    let (wire_len, coord_len) = coord_sizes(sealing_pub_le.len());
     assert_eq!(x_be.len(), coord_len, "COSE_Key X coordinate length");
     assert_eq!(y_be.len(), coord_len, "COSE_Key Y coordinate length");
-    let x_le: Vec<u8> = x_be.iter().rev().copied().collect();
-    let y_le: Vec<u8> = y_be.iter().rev().copied().collect();
+    let x_le = dev_rev(&x_be);
+    let y_le = dev_rev(&y_be);
     assert_eq!(
         x_le.as_slice(),
         &sealing_pub_le[..coord_len],
@@ -423,7 +450,7 @@ fn key_report_cu_rejects_before_finalize() {
 
     // Rotate the CU PSK out of the default so the dispatcher's default-PSK
     // gate does not fire first; then reopen a CU session under it.  CU
-    // sessions are pinned to `SessionType::PlainText`.
+    // sessions are pinned to `SessionSuite::EcdhP384`.
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
     let req = TborKeyReportReq {
@@ -439,8 +466,8 @@ fn key_report_cu_rejects_before_finalize() {
 #[test]
 fn key_report_rejected_on_default_psk() {
     for (psk_id, session_type) in [
-        (CO_PSK_ID, SessionType::Authenticated),
-        (CU_PSK_ID, SessionType::PlainText),
+        (CO_PSK_ID, SessionSuite::EcdhP384),
+        (CU_PSK_ID, SessionSuite::EcdhP384),
     ] {
         let ctx = TestCtx::new();
         let session = ctx
@@ -677,15 +704,14 @@ fn key_report_imported_ecc_all_curves() {
         assert_eq!(y_be.len(), key_len);
 
         // Convert host big-endian coordinates to TBOR wire format.
-        // P-521 uses 68-byte wire coordinates with two padding bytes.
-        let wire_len = if key_len == 66 { 68 } else { key_len };
+        let wire_len = wire_coord_len(key_len);
 
         let mut host_pub_key = Vec::with_capacity(2 * wire_len);
 
-        host_pub_key.extend(x_be.iter().rev().copied());
+        host_pub_key.extend(dev_rev(&x_be));
         host_pub_key.resize(wire_len, 0);
 
-        host_pub_key.extend(y_be.iter().rev().copied());
+        host_pub_key.extend(dev_rev(&y_be));
         host_pub_key.resize(2 * wire_len, 0);
 
         // Import the host private key into the firmware.
@@ -795,7 +821,7 @@ fn key_report_cu_authentication_binds_key_data_and_session() {
     let other_ctx = TestCtx::new_with_path(ctx.path());
     let pending = other_ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&ROTATED_CU_PSK),
         )
         .expect("second CU init");
@@ -852,11 +878,11 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
     let old_ctx = TestCtx::new_with_path(ctx.path());
     let old = old_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("default CU session");
     let pending_ctx = TestCtx::new_with_path(ctx.path());
     let pending = pending_ctx
-        .session_open_init(CU_PSK_ID, SessionType::PlainText)
+        .session_open_init(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("pending CU under the old credential");
     let cu_ctx = TestCtx::new_with_path(ctx.path());
     let cu = bootstrap_rotated_cu(&cu_ctx, &ROTATED_CU_PSK);
@@ -864,7 +890,7 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     let err = pending_ctx
         .session_open_finish(pending)
         .expect_err("stale pending handshake must fail");
-    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::DefaultPskChanged);
     let mut request = TborKeyReportReq {
         session_id: old.session_id(),
         masked_key,
@@ -873,7 +899,7 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     };
     request.auth_envelope = seal_key_report_auth(&old.handshake().param_key, &request)
         .expect("authenticate with the old credential's session key");
-    old_ctx.expect_fw_reject(&request, TborStatus::SessionAuthFailure);
+    old_ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
 
     request.session_id = cu.session_id;
     request.auth_envelope =
@@ -899,11 +925,11 @@ fn key_report_concurrent_cu_rotations_have_one_winner() {
     let co = finalized_co_session(&ctx);
     let first_ctx = TestCtx::new_with_path(ctx.path());
     let first = first_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("first default CU");
     let second_ctx = TestCtx::new_with_path(ctx.path());
     let second = second_ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("second default CU");
     let candidates = [[0xB1; 32], [0xB2; 32]];
     let barrier = Barrier::new(2);
@@ -925,13 +951,13 @@ fn key_report_concurrent_cu_rotations_have_one_winner() {
     let winner = results.iter().position(Result::is_ok).expect("one winner");
     assert_fw_rejects(
         results[1 - winner].as_ref().expect_err("stale rotation"),
-        TborStatus::SessionAuthFailure,
+        TborStatus::DefaultPskChanged,
     );
     first.close().expect("close first CU");
     second.close().expect("close second CU");
     let pending = first_ctx
         .session_open_init_with_options(
-            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionSuite::EcdhP384)
                 .with_psk(&candidates[winner]),
         )
         .expect("winning credential init");
@@ -1370,4 +1396,21 @@ fn key_report_imported_rsa_invalid_session_rejected() {
 #[test]
 fn key_report_imported_rsa_crt_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA_CRT);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn key_report_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _pub) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborKeyReportReq {
+            auth_envelope: Vec::new(),
+            session_id: session.session_id,
+            masked_key,
+            report_data: sample_report_data(),
+        },
+    );
 }

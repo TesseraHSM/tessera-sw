@@ -115,6 +115,18 @@ enum tsra_status
      Authentication of a masked key's AES-GCM envelope failed.
      */
     TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED = -78,
+    /*
+     Bootstrap sessions must rotate the public default PSK before use.
+     */
+    TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE = -79,
+    /*
+     The CU default PSK changed; close and reopen with the new credential.
+     */
+    TSRA_STATUS_DEFAULT_PSK_CHANGED = -80,
+    /*
+     This session already committed its one permitted PSK change.
+     */
+    TSRA_STATUS_PSK_CHANGE_ALREADY_USED = -81,
     TSRA_STATUS_PANIC = INT32_MIN,
 };
 #ifndef __cplusplus
@@ -604,30 +616,27 @@ typedef uint32_t tsra_part_prop_id;
 #endif // __cplusplus
 
 /*
- Channel-level integrity profile for a security-domain (TBOR) session,
- selected by the caller when opening a session via `open_session_ex`.
+ Key-establishment suite of a security-domain (TBOR) session, selected
+ by the caller when opening a session via `open_session_ex`.
 
- API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
- separate `#[open_enum]` so the public API surface does not leak the
- DDI-layer wire type.
+ Every such session encrypts its in-session traffic; the suite picks
+ how the session keys are agreed. The suite authenticates the HSM with
+ its partition identity key (ECDSA P-384 over the handshake transcript)
+ and the caller with the role PSK. The discriminant is the wire
+ `suite_id`.
  */
-enum tsra_session_ex_type
+enum tsra_session_suite
 #ifdef __cplusplus
     : uint32_t
 #endif // __cplusplus
 {
     /*
-     Channel transports bodies without per-message MAC.
+     Ephemeral ECDH P-384 key agreement.
      */
-    TSRA_SESSION_EX_TYPE_PLAIN_TEXT = 0,
-    /*
-     Channel transports bodies wrapped in an outer per-message HMAC
-     envelope.
-     */
-    TSRA_SESSION_EX_TYPE_AUTHENTICATED = 1,
+    TSRA_SESSION_SUITE_ECDH_P384 = 1,
 };
 #ifndef __cplusplus
-typedef uint32_t tsra_session_ex_type;
+typedef uint32_t tsra_session_suite;
 #endif // __cplusplus
 
 /*
@@ -872,7 +881,8 @@ struct tsra_darc_tmk_export_params
      */
     const struct tsra_buffer *masked_tmk;
     /*
-     Unified partition-policy image (584 B) whose `DATAPubKey` anchors
+     Partition policy CBOR document (at most 384 B) whose DATA key
+     thumbprint anchors
      `target_cert_chain`.
      */
     const struct tsra_buffer *policy;
@@ -893,7 +903,8 @@ struct tsra_darc_tmk_import_params
      */
     const struct tsra_buffer *masked_kex_key;
     /*
-     Unified partition-policy image (584 B) whose `POTAPubKey` anchors
+     Partition policy CBOR document (at most 384 B) whose POTA key
+     thumbprint anchors
      `remote_cert_chain`.
      */
     const struct tsra_buffer *policy;
@@ -1006,6 +1017,11 @@ struct tsra_darc_key_unwrap_params
  This type is used across the FFI boundary to indicate whether a key is RSA, ECC, AES, etc.
  */
 typedef tsra_key_kind tsra_key_kind;
+
+/*
+ Encoding of a public key passed to the policy builder.
+ */
+typedef uint32_t tsra_policy_key_format;
 
 #if !defined(_WIN32)
 /*
@@ -1503,38 +1519,27 @@ struct tsra_session_psk
     const struct tsra_buffer *psk;
 };
 
-typedef tsra_session_ex_type tsra_session_ex_type;
+typedef tsra_session_suite tsra_session_suite;
 
 /*
  Input buffers for [`tsra_sess_ex_part_init`].
 
  Groups the security-domain provisioning inputs into a single struct so
  the call site does not pass them as separate arguments. Each field
- points to an `tsra_buffer`; `sapota_thumbprint` is optional and may
- be NULL to omit it.
+ points to an `tsra_buffer`.
  */
 struct tsra_sess_ex_part_init_params
 {
     /*
-     Unified partition policy image buffer.
+     Partition policy buffer: a deterministic CBOR document of at most
+     384 bytes that names the POTA, SATA, and optional SAPOTA trust
+     anchors by public-key thumbprint.
      */
     const struct tsra_buffer *part_policy;
     /*
      Machine seed plaintext buffer.
      */
     const struct tsra_buffer *mach_seed;
-    /*
-     POTA public-key thumbprint buffer.
-     */
-    const struct tsra_buffer *pota_thumbprint;
-    /*
-     SATA public-key thumbprint buffer.
-     */
-    const struct tsra_buffer *sata_thumbprint;
-    /*
-     Optional SAPOTA thumbprint buffer; NULL to omit.
-     */
-    const struct tsra_buffer *sapota_thumbprint;
 };
 
 /*
@@ -1549,8 +1554,8 @@ struct tsra_sess_ex_part_init_params
 struct tsra_sess_ex_part_final_params
 {
     /*
-     Unified partition policy image buffer, re-supplied for `POTAPubKey`
-     recovery; must match the policy given to `part_init`.
+     Partition policy buffer, re-supplied for the POTA trust anchor;
+     must match the policy given to `part_init`.
      */
     const struct tsra_buffer *part_policy;
     /*
@@ -1834,6 +1839,22 @@ struct tsra_algo_rsa_pkcs_pss_params
  Native C boolean true value.
  */
 #define TSRA_BOOL_TRUE 1
+
+/*
+ A precomputed 48-byte SPKI thumbprint (SHA-384 of the key's DER
+ SubjectPublicKeyInfo).
+ */
+#define TSRA_POLICY_KEY_FORMAT_THUMBPRINT 0
+
+/*
+ A DER SubjectPublicKeyInfo of any key algorithm, hashed as given.
+ */
+#define TSRA_POLICY_KEY_FORMAT_SPKI_DER 1
+
+/*
+ A raw uncompressed ECC P-384 public key, `X || Y` (96 bytes).
+ */
+#define TSRA_POLICY_KEY_FORMAT_ECC_P384 2
 
 #ifdef __cplusplus
 extern "C"
@@ -2217,9 +2238,10 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
 
  Generates a new DARC key-exchange key (ECC-P384) on the calling
  session's partition and returns the masked private key plus its raw
- P-384 public key (`x ‖ y`, 96 bytes). Run on the target it yields the
- HPKE receiver identity; run on the source it yields the HPKE sender-auth
- identity. The key is not stored on the device.
+ P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
+ the target it yields the HPKE receiver identity; run on the source it
+ yields the HPKE sender-auth identity. The key is not stored on the
+ device.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
@@ -2269,7 +2291,7 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
 /*
  @brief Seal a DARC TMK to an authenticated target
 
- Validates the target certificate chain against the policy `DATAPubKey`,
+ Validates the target certificate chain against the policy DATA key thumbprint,
  then HPKE-Auth seals the TMK to the target's KEX key, returning the
  sealed TMK.
 
@@ -2297,7 +2319,7 @@ tsra_status tsra_darc_tmk_export(
 /*
  @brief Import (open) a sealed DARC TMK on the target
 
- Validates the source certificate chain against the policy `POTAPubKey`,
+ Validates the source certificate chain against the policy POTA key thumbprint,
  HPKE-Auth opens the sealed TMK, and re-masks it under the partition
  SDMK, returning the masked TMK.
 
@@ -2649,21 +2671,14 @@ tsra_status tsra_key_get_prop(tsra_handle key_handle, struct tsra_key_prop *key_
 /*
  @brief Allocate a new partition-policy builder
 
- On success, writes a handle to `*out_builder` whose policy starts from
- a version defaulting to `major = 1, minor = 0` with every other field
- zeroed; set the required POTA and SATA keys and any optional fields
- through the `tsra_part_policy_builder_set_*` functions, then serialize
- it with `tsra_part_policy_build`. Release it with
+ The builder starts empty: no keys, no flags and no optional fields.
+ Set the required POTA and SATA keys and any optional fields through the
+ `tsra_part_policy_builder_set_*` functions, then serialize it with
+ `tsra_part_policy_build`. Release it with
  `tsra_part_policy_builder_free`.
 
- A key / `info` / backing-id that does not satisfy its field's length
- requirement is rejected at `tsra_part_policy_build` time (returning
- `TSRA_STATUS_INVALID_ARGUMENT`) rather than silently truncated or
- padded.
- Missing either POTA or SATA key also causes `tsra_part_policy_build`
- to return `TSRA_STATUS_INVALID_ARGUMENT`.
- Unsupported major versions and reserved flag bits are rejected at
- build time as well.
+ Setters only report NULL/misaligned handles or buffers and unknown key
+ formats; invalid field values are reported by `tsra_part_policy_build`.
 
  @param[out] out_builder Receives the non-NULL builder handle on
              success; left unmodified on failure.
@@ -2694,63 +2709,42 @@ tsra_status tsra_part_policy_builder_new(struct tsra_part_policy_builder **out_b
 void tsra_part_policy_builder_free(struct tsra_part_policy_builder *builder);
 
 /*
- @brief Set the policy version (`major.minor`)
-
- Major version must be 1; any minor version is accepted. An unsupported
- major version is rejected at `tsra_part_policy_build` time.
+ @brief Set the POTA (Partition Owner Trust Anchor) public key (required)
 
  @param[in] builder Builder handle
- @param[in] major Major version number
- @param[in] minor Minor version number
- @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle
-
- # Safety
-
- - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- */
-tsra_status tsra_part_policy_builder_set_version(
-    struct tsra_part_policy_builder *builder,
-    uint8_t major,
-    uint8_t minor
-);
-
-/*
- @brief Set the POTA (Partition Owner Trust Anchor) public key
-
- @param[in] builder Builder handle
- @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
- @param[in] key Raw public-key bytes
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
  @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-         handle / buffer
+         handle / buffer or an unknown `format`
 
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `key` must be NULL or point to a valid `tsra_buffer`.
  */
 tsra_status tsra_part_policy_builder_set_pota_key(
     struct tsra_part_policy_builder *builder,
-    uint16_t kind,
+    tsra_policy_key_format format,
     const struct tsra_buffer *key
 );
 
 /*
- @brief Set the SATA (Sealing Authority Trust Anchor) public key
+ @brief Set the SATA (Sealing Authority Trust Anchor) public key (required)
 
  @param[in] builder Builder handle
- @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
- @param[in] key Raw public-key bytes
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
  @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-         handle / buffer
+         handle / buffer or an unknown `format`
 
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `key` must be NULL or point to a valid `tsra_buffer`.
  */
 tsra_status tsra_part_policy_builder_set_sata_key(
     struct tsra_part_policy_builder *builder,
-    uint16_t kind,
+    tsra_policy_key_format format,
     const struct tsra_buffer *key
 );
 
@@ -2758,24 +2752,27 @@ tsra_status tsra_part_policy_builder_set_sata_key(
  @brief Set the SAPOTA (Sealing Authority's POTA) public key
 
  @param[in] builder Builder handle
- @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
- @param[in] key Raw public-key bytes
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
  @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-         handle / buffer
+         handle / buffer or an unknown `format`
 
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `key` must be NULL or point to a valid `tsra_buffer`.
  */
 tsra_status tsra_part_policy_builder_set_sapota_key(
     struct tsra_part_policy_builder *builder,
-    uint16_t kind,
+    tsra_policy_key_format format,
     const struct tsra_buffer *key
 );
 
 /*
  @brief Set the backing-partition identifier
+
+ Must be exactly 16 bytes and set together with
+ `tsra_part_policy_builder_set_backup_part_key`.
 
  @param[in] builder Builder handle
  @param[in] id Backing-partition identifier bytes
@@ -2785,7 +2782,7 @@ tsra_status tsra_part_policy_builder_set_sapota_key(
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `id` must be NULL or point to a valid `tsra_buffer`.
  */
 tsra_status tsra_part_policy_builder_set_backup_part_id(
     struct tsra_part_policy_builder *builder,
@@ -2793,27 +2790,51 @@ tsra_status tsra_part_policy_builder_set_backup_part_id(
 );
 
 /*
- @brief Set the backing-partition public key
+ @brief Set the backing partition's PID public key
+
+ Must be set together with `tsra_part_policy_builder_set_backup_part_id`.
 
  @param[in] builder Builder handle
- @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
- @param[in] key Raw public-key bytes
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
  @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-         handle / buffer
+         handle / buffer or an unknown `format`
 
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `key` must be NULL or point to a valid `tsra_buffer`.
  */
-tsra_status tsra_part_policy_builder_set_backup_part_pub_key(
+tsra_status tsra_part_policy_builder_set_backup_part_key(
     struct tsra_part_policy_builder *builder,
-    uint16_t kind,
+    tsra_policy_key_format format,
+    const struct tsra_buffer *key
+);
+
+/*
+ @brief Set the DATA (DARC TMK authority) public key
+
+ @param[in] builder Builder handle
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
+ @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
+         handle / buffer or an unknown `format`
+
+ # Safety
+
+ - `builder` must be a live handle from `tsra_part_policy_builder_new`.
+ - `key` must be NULL or point to a valid `tsra_buffer`.
+ */
+tsra_status tsra_part_policy_builder_set_data_key(
+    struct tsra_part_policy_builder *builder,
+    tsra_policy_key_format format,
     const struct tsra_buffer *key
 );
 
 /*
  @brief Set the caller-provided opaque `info` field
+
+ At most 64 bytes; an empty buffer omits the field.
 
  @param[in] builder Builder handle
  @param[in] info Opaque info bytes
@@ -2823,7 +2844,7 @@ tsra_status tsra_part_policy_builder_set_backup_part_pub_key(
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+ - `info` must be NULL or point to a valid `tsra_buffer`.
  */
 tsra_status tsra_part_policy_builder_set_info(
     struct tsra_part_policy_builder *builder,
@@ -2833,11 +2854,12 @@ tsra_status tsra_part_policy_builder_set_info(
 /*
  @brief Set the policy flag bits
 
- Bits 0-2 are supported; reserved bits 3-7 are rejected at
- `tsra_part_policy_build` time.
+ Bit 0 `include_fmc_cdi`, bit 1 `require_trusted_sa_key`, bit 2
+ `allow_peer_cloning`; reserved bits 3-7 are rejected by
+ `tsra_part_policy_build`.
 
  @param[in] builder Builder handle
- @param[in] flags Raw flag bits (see the `PolicyFlags` definition)
+ @param[in] flags Raw flag bits
  @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle
 
  # Safety
@@ -2850,32 +2872,58 @@ tsra_status tsra_part_policy_builder_set_flags(
 );
 
 /*
- @brief Serialize the policy into its canonical wire image
+ @brief Serialize the policy into its CBOR document
 
- Writes exactly `PART_POLICY_LEN` bytes — the image accepted by
- `tsra_sess_ex_part_init` / `tsra_sess_ex_part_final` — into
- `out`. If `out` is too small, sets `out.len` to the required size and
- returns `TSRA_STATUS_BUFFER_TOO_SMALL` without writing. The builder is left
- usable (unchanged) for further serialization.
- Both POTA and SATA keys must be set; otherwise returns
- `TSRA_STATUS_INVALID_ARGUMENT`, even for a size probe.
- Unsupported major versions and reserved flag bits also return
- `TSRA_STATUS_INVALID_ARGUMENT` before writing output.
+ Validates the fields and writes the deterministic CBOR document (at
+ most 384 bytes) accepted by the partition, security-domain and DARC
+ entry points into `out`. If `out` is too small, sets `out.len` to the
+ required size and returns `TSRA_STATUS_BUFFER_TOO_SMALL` without
+ writing. The builder is left unchanged and remains usable.
+
+ Returns `TSRA_STATUS_INVALID_ARGUMENT`, even for a size probe, if a
+ setter received an invalid key, identifier or `info`, the POTA or SATA
+ key is missing, only one of the backing-partition identifier and key
+ is set, or a reserved flag bit is set.
 
  @param[in] builder Builder handle
- @param[out] out Buffer to receive the serialized policy image
- @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT` on a
-         NULL or misaligned handle / buffer, or
+ @param[out] out Buffer to receive the encoded policy
+ @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT`, or
          `TSRA_STATUS_BUFFER_TOO_SMALL` if `out` is too small
 
  # Safety
 
  - `builder` must be a live handle from `tsra_part_policy_builder_new`.
- - `out` must be a valid pointer to an `tsra_buffer` with writable
+ - `out` must be a valid pointer to a `tsra_buffer` with writable
    backing storage of its advertised length.
  */
 tsra_status tsra_part_policy_build(
     struct tsra_part_policy_builder *builder,
+    struct tsra_buffer *out
+);
+
+/*
+ @brief Compute a public key's SPKI thumbprint
+
+ Writes the 48-byte SHA-384 of the key's DER SubjectPublicKeyInfo, the
+ value the policy uses to name the key. If `out` is too small, sets
+ `out.len` to 48 and returns `TSRA_STATUS_BUFFER_TOO_SMALL`.
+
+ @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+ @param[in] key Key bytes in `format`
+ @param[out] out Buffer to receive the thumbprint
+ @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
+         buffer, unknown `format` or malformed `key`, or
+         `TSRA_STATUS_BUFFER_TOO_SMALL` if `out` is too small
+
+ # Safety
+
+ - `key` must be NULL or point to a valid `tsra_buffer`.
+ - `out` must be a valid pointer to a `tsra_buffer` with writable
+   backing storage of its advertised length.
+ */
+tsra_status tsra_policy_key_thumbprint(
+    tsra_policy_key_format format,
+    const struct tsra_buffer *key,
     struct tsra_buffer *out
 );
 
@@ -3315,13 +3363,18 @@ tsra_status tsra_sess_close(tsra_handle handle);
  Opens a security-domain session using the API revision negotiated when
  the partition was opened, and returns a handle to the resulting
  session. `psk` selects the role slot and (optionally) the PSK, and
- `session_type` selects the channel integrity profile pinned for the
- session.
+ `suite` selects the key-establishment suite. Every session encrypts
+ its in-session traffic under keys agreed during the handshake.
 
  @param[in] dev_handle Handle to the HSM partition
+ @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the
+            trusted root certificate's DER SubjectPublicKeyInfo, obtained
+            independently of this connection. The verified PID path must
+            contain a non-PID certificate with DICE TCB Info layer zero and
+            Tessera EKU `1.3.6.1.4.1.311.102.1.50.1`.
  @param[in] psk PSK credential — slot plus optional PSK
             (see `tsra_session_psk`)
- @param[in] session_type Channel integrity profile to pin for the session
+ @param[in] suite Key-establishment suite (`tsra_session_suite`)
  @param[out] sess_handle Pointer to the session handle to be allocated
 
  @return `TsraStatus` indicating the result of the operation
@@ -3329,6 +3382,8 @@ tsra_status tsra_sess_close(tsra_handle handle);
  # Safety
 
  - `dev_handle` must be a valid partition handle.
+ - `root_spki_thumbprint` must point to a valid `tsra_buffer` containing
+   exactly 48 bytes.
  - `psk` must be a valid pointer to an `tsra_session_psk` whose `psk`
    field is NULL or a valid `tsra_buffer` holding exactly `TSRA_PSK_LEN`
    bytes.
@@ -3337,19 +3392,38 @@ tsra_status tsra_sess_close(tsra_handle handle);
  */
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
     const struct tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
+);
+
+/*
+ @brief Recover a migrated security-domain session in place
+
+ Establishes fresh channel keys while restoring the original session
+ masking key. Uses the session's existing role and the current role PSK.
+ Does not replay an interrupted command or reset the PSK-change allowance.
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+ - `psk` must be NULL (default PSK) or identify a valid buffer containing
+   exactly `TSRA_PSK_LEN` bytes.
+ */
+tsra_status tsra_sess_ex_reopen(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
+    const struct tsra_buffer *psk
 );
 
 /*
  @brief Provision a partition's security domain
 
- Initializes the partition from the machine seed and unified partition
- policy, together with the partition-owner (POTA), security-administrator
- (SATA), and optional secondary-owner (SAPOTA) trust-anchor thumbprints,
- returning the partition's certificate-signing request and attestation
- report.
+ Initializes the partition from the machine seed and the partition
+ policy, returning the partition's certificate-signing request and
+ attestation report.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Provisioning input buffers
@@ -3381,9 +3455,7 @@ tsra_status tsra_sess_ex_open(
 
  - `sess_handle` must be a valid security-domain session handle.
  - `params` must be a valid pointer to an `tsra_sess_ex_part_init_params`
-   whose `mach_seed`, `part_policy`, `pota_thumbprint`, and
-   `sata_thumbprint` are valid `tsra_buffer` pointers, and whose
-   `sapota_thumbprint` is NULL or a valid `tsra_buffer` pointer.
+   whose `mach_seed` and `part_policy` are valid `tsra_buffer` pointers.
  - `pta_csr` and `pta_report` must be valid pointers to distinct
    `tsra_buffer` structures with writable backing storage of the
    advertised length.
@@ -3399,7 +3471,7 @@ tsra_status tsra_sess_ex_part_init(
  @brief Finalize a partition's security domain
 
  Completes provisioning started by `tsra_sess_ex_part_init`: re-supplies
- the unified partition policy and the PTA certificate chain (root to leaf),
+ the partition policy and the PTA certificate chain (root to leaf),
  optionally restoring a prior `local_mk` backup, and returns the current
  `local_mk` backup envelope the firmware produced.
 

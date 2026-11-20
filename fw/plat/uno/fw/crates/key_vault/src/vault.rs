@@ -211,6 +211,10 @@ impl<S: TableStorage> KeyVault<S> {
         key_id: HsmKeyId,
     ) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
+        // Key IDs carry an 8-bit slot, but only `ENTRIES_PER_TABLE` exist.
+        if slot >= ENTRIES_PER_TABLE {
+            return Err(HsmError::KeyNotFound);
+        }
         // Delete operates on any *present* key — live or disabled — so the
         // undo-log commit path can zeroize a soft-deleted (disabled) key.
         // Only a genuinely free slot is rejected (matches `delete_by_session`
@@ -263,6 +267,9 @@ impl<S: TableStorage> KeyVault<S> {
     ///   slot (a free slot cannot be enabled).
     pub fn enable(&mut self, key_id: HsmKeyId) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
+        if slot >= ENTRIES_PER_TABLE {
+            return Err(HsmError::KeyNotFound);
+        }
         // Disabled-aware lookup: a disabled entry is hidden from `entry`,
         // so read it raw and reject only a genuinely free slot.
         if self.storage.entry(table, slot)?.is_free() {
@@ -351,6 +358,19 @@ impl<S: TableStorage> KeyVault<S> {
         let (table, slot) = split_key_id(key_id);
         let entry = self.entry(table, slot)?;
         self.blob_of(table, &entry)
+    }
+
+    /// Overwrite a checked range without changing the key's identity.
+    pub fn update(&mut self, key_id: HsmKeyId, offset: usize, bytes: &[u8]) -> HsmResult<()> {
+        let (table, off, len) = self.key_location(key_id)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(HsmError::InvalidArg)?;
+        if end > len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.storage.blob_mut(table)?[off + offset..off + end].copy_from_slice(bytes);
+        Ok(())
     }
 
     /// Disabled-aware variant of [`key`](Self::key), for the teardown walks

@@ -31,7 +31,7 @@
 //!   must attest the same `RcvrPub` recovered from `receiver_cert_chain`.
 //!   When the flag is clear the group is sent empty and ignored.
 //! * `policy` — the unified [`PartPolicy`] describing the security domain
-//!   to create.  Length pinned to [`PART_POLICY_LEN`] (584 B).
+//!   to create.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B).
 //!
 //! Output:
 //!
@@ -53,16 +53,16 @@ use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::evidence::*;
 pub use crate::part_final::LOCAL_MK_BACKUP_LEN;
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 
 /// TBOR opcode for `SdCreateRemoteBackup`.
 pub const TBOR_OP_SD_CREATE_REMOTE_BACKUP: u8 = 0x0A;
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
-// literal on the field, so the length is spelled out as `484` and pinned
+// literal on the field, so the maximum length is spelled out as `384` and pinned
 // against the canonical value here.
-const _: () = assert!(PART_POLICY_LEN == 584);
+const _: () = assert!(PART_POLICY_MAX_LEN == 384);
 
 // `masked_sealing_key` is spelled out as `280` on the field (the derive
 // needs an integer literal) and pinned against the canonical
@@ -121,7 +121,7 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
     /// omitted from the generated `ViewMut` (its accessors remain on the
     /// shared [`decode`](TborSdCreateRemoteBackupReq::decode) view), so the
     /// handler reads evidence via `decode` and unmasks via `decode_mut`.
-    #[tbor(buffer, len = 280, mutable)]
+    #[tbor(align = 4, buffer, len = 280, mutable)]
     pub masked_sealing_key: &'a [u8],
 
     /// Receiver key certificate-chain descriptors (root→leaf), carried
@@ -149,10 +149,10 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
     pub receiver_evidence: Evidence<'a>,
 
     /// Caller-asserted unified [`PartPolicy`] describing the security
-    /// domain to create.  Length pinned to [`PART_POLICY_LEN`] (584 B).
+    /// domain to create.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B).
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 }
 
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn request_round_trips_masked_key_and_policy() {
         let masked = [0u8; MASKED_SEALING_KEY_LEN];
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let cert = CertDescriptor {
             index: 0,
             length: crate::tbor_int::U16::new(8),
@@ -208,7 +208,7 @@ mod tests {
         };
         let chain = [cert];
         let mut buf = [0u8; 1024];
-        let frame = TborSdCreateRemoteBackupReq::encode(&mut buf)
+        let frame = TborSdCreateRemoteBackupReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -227,7 +227,7 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_sealing_key().len(), MASKED_SEALING_KEY_LEN);
-        assert_eq!(frame.policy().len(), PART_POLICY_LEN);
+        assert_eq!(frame.policy().len(), PART_POLICY_MAX_LEN);
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
         let local = [0xCDu8; MASKED_SD_LEN];
         let sd_mk = [0xEFu8; LOCAL_MK_BACKUP_LEN];
         let mut buf = [0u8; 1024];
-        let frame = TborSdCreateRemoteBackupResp::encode(&mut buf, 0, true)
+        let frame = TborSdCreateRemoteBackupResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .pok_remote_backup(&remote)
             .unwrap()

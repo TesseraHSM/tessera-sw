@@ -32,7 +32,7 @@ pub struct TborVerifyKeyReq {
 
     /// The masked-key envelope. Variable length up to
     /// [`VERIFY_KEY_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 5160)]
+    #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 }
 
@@ -55,7 +55,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.windows(4).any(|w| w == [0xCD; 4]),
             "encoded frame must carry the masked key",

@@ -36,12 +36,17 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Duration;
 use embassy_time::Instant;
+use tsra_fw_hsm_pal_traits::HsmApiRevision;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::UnoIo;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
 // Cargo cannot drop a dependency for a feature; the BCP is unused here.
@@ -1223,6 +1228,18 @@ impl HsmCustomDispatch for UnoHsmPal {
     }
 }
 
+/// Uno: API revision 1.x, Uno IO protocol.
+impl HsmPalFeatures for UnoHsmPal {
+    type IoProtocol = UnoIo;
+    const API_REV_MIN: HsmApiRevision = HsmApiRevision::new(1, 0);
+    const API_REV_MAX: HsmApiRevision = HsmApiRevision::new(1, 1);
+}
+
+/// Uno PKA operands are little-endian (word-padded P-521 slots).
+impl HsmCryptoOrder for UnoHsmPal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+}
+
 impl HsmPal for UnoHsmPal {
     /// Initialises the Uno platform (phase 1 only).
     ///
@@ -1323,12 +1340,16 @@ impl HsmPal for UnoHsmPal {
             SocResetType::WarmReset | SocResetType::FwUpdateWarmReset => {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
-                // preserved as-is and only Gate 1 is re-armed.
+                // preserved as-is; only Gate 1 and the session transport
+                // epochs are advanced.
                 info!(
                     "boot",
                     "init: reset=warm/fwupdate -> keep store, rearm gate1"
                 );
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
+                // Surviving sessions keep their keys but their DTCM message
+                // counters restarted: move to a fresh sequence-number epoch.
+                tsra_fw_uno_drivers_part_store::PartStore::bump_transport_epochs();
             }
         }
         boot_status::set(BootStatus::Done);

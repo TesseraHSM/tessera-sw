@@ -35,6 +35,7 @@ pub(crate) fn filler(tag: u8, len: usize) -> Vec<u8> {
 }
 
 /// A reproducible signing-randomness block, sized for the pinning constructor.
+#[cfg(target_os = "linux")]
 pub(crate) fn rnd(tag: u8) -> [u8; MLDSA_RND_LEN] {
     filler(tag, MLDSA_RND_LEN)
         .try_into()

@@ -10,6 +10,8 @@
 use std::path::Path;
 
 use parking_lot::Mutex;
+use tsra_api::HsmApiRev;
+use tsra_api::HsmApiRevRange;
 use tsra_api::HsmCredentials;
 use tsra_api::HsmEccPrivateKey;
 use tsra_api::HsmError;
@@ -49,6 +51,10 @@ const CREDENTIALS_HEX_SIZE: usize = CREDENTIALS_SIZE * 2;
 
 const ENV_CREDENTIALS_ID: &str = "TSRA_CREDENTIALS_ID";
 const ENV_CREDENTIALS_PIN: &str = "TSRA_CREDENTIALS_PIN";
+
+/// HSM API revision the engine opens its partition and session with: the one
+/// it is built and tested against, whatever newer ones the device offers.
+const API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 0 };
 
 /// Per-engine state stored in `ENGINE` ex_data.
 pub struct EngineData {
@@ -381,7 +387,7 @@ impl HsmEngineContext {
         let api_rev_range = info
             .api_rev_range
             .ok_or_else(|| EngineError::Other(format!("partition {} has no API rev", info.path)))?;
-        let api_rev = api_rev_range.max();
+        let api_rev = supported_api_rev(&info.path, api_rev_range)?;
 
         let partition = HsmPartitionManager::open_partition(&info.path, api_rev)
             .map_err(|e| EngineError::wrap(format!("open_partition({})", info.path), e))?;
@@ -445,6 +451,19 @@ impl HsmEngineContext {
 
         Ok(Self { partition, session })
     }
+}
+
+/// [`API_REV`] if the partition at `path` supports it, i.e. it lies within
+/// `range`; an error naming both otherwise.
+fn supported_api_rev(path: &str, range: HsmApiRevRange) -> EngineResult<HsmApiRev> {
+    let (min, max) = (range.min(), range.max());
+    if API_REV < min || API_REV > max {
+        return Err(EngineError::Other(format!(
+            "partition {path} supports API revisions {}.{} to {}.{}, the engine needs {}.{}",
+            min.major, min.minor, max.major, max.minor, API_REV.major, API_REV.minor
+        )));
+    }
+    Ok(API_REV)
 }
 
 /// Warm-device re-init: the plaintext OBK was rejected with

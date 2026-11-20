@@ -48,7 +48,7 @@ pub struct TborDarcTmkGenReq {
 pub struct TborDarcTmkGenResp {
     /// The minted TMK, masked under the partition SDMK (exactly 264 B on
     /// the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub masked_tmk: Vec<u8>,
 }
 
@@ -63,7 +63,7 @@ mod tests {
         let req = TborDarcTmkGenReq { session_id: 9 };
 
         let mut buf = [0u8; 128];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // A session-id-only request still produces a well-formed frame.
         assert!(!frame.is_empty(), "encoded frame must be non-empty");

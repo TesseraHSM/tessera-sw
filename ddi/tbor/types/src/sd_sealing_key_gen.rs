@@ -55,10 +55,11 @@ pub struct TborSdSealingKeyGenResp {
     /// The new sealing key's ECC-P384 private half, masked
     /// (AEAD-GCM-256) under the requested scope's masking key.  Always
     /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B); not stored on-device.
+    #[tbor(align = 4)]
     pub masked_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// little-endian per coordinate) of the new sealing key.  Not a SEC1
+    /// device byte order per coordinate) of the new sealing key.  Not a SEC1
     /// point encoding (no `0x04` prefix).
     pub pub_key: [u8; SD_SEALING_PUB_KEY_LEN],
 }
@@ -78,7 +79,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The 1-byte scope discriminant must appear in the encoded frame.
         assert!(

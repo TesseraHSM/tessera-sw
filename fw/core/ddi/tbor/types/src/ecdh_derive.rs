@@ -17,8 +17,9 @@
 //! * `scope` — the [`KeyScope`] whose masking key wraps the derived secret.
 //! * `masked_key` — the masked local ECC private key (unmasked in place;
 //!   its kind recovers the curve).
-//! * `peer_pub_key` — the peer's wire public key `x ‖ y` (little-endian,
-//!   P-521 padded), exactly the curve's wire public-key length.
+//! * `peer_pub_key` — the peer's wire public key `x ‖ y` (device byte
+//!   order; P-521 word-padded on little-endian devices), exactly the
+//!   curve's wire public-key length.
 //!
 //! Outputs:
 //!
@@ -34,7 +35,7 @@ use crate::key_props::KeyScope;
 /// TBOR opcode for `EcdhDerive`.
 pub const TBOR_OP_ECDH_DERIVE: u8 = 0x19;
 
-/// Maximum peer public-key length (`x ‖ y`, P-521 padded).  Pinned into the
+/// Maximum peer public-key length (`x ‖ y`, P-521 little-endian word-padded).  Pinned into the
 /// `#[tbor(buffer, max_len = 136)]` literal on
 /// [`TborEcdhDeriveReq::peer_pub_key`].
 pub const ECDH_PEER_PUB_MAX_LEN: usize = 136;
@@ -66,11 +67,12 @@ pub struct TborEcdhDeriveReq<'a> {
     /// The masked local ECC private key (from `EccGenerateKey` /
     /// `UnwrapKey`), an AEAD-GCM-256 envelope of 264..=312 B.  Its kind
     /// recovers the curve.
-    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The peer's wire public key `x ‖ y` (little-endian, P-521 padded),
-    /// exactly the curve's wire public-key length (64 / 96 / 136 B).
+    /// The peer's wire public key `x ‖ y` in device byte order, exactly the
+    /// curve's wire public-key length (64 / 96 B; P-521 132 B big-endian or
+    /// 136 B little-endian).
     #[tbor(buffer, max_len = 136)]
     pub peer_pub_key: &'a [u8],
 
@@ -89,7 +91,7 @@ pub struct TborEcdhDeriveReq<'a> {
 pub struct TborEcdhDeriveResp<'a> {
     /// The derived ECDH shared secret, masked (AEAD-GCM-256) under the
     /// scope's masking key.  264 / 280 / 312 B for P-256 / P-384 / P-521.
-    #[tbor(buffer, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, max_len = 312, mutable)]
     pub masked_secret: &'a [u8],
 }
 
@@ -106,7 +108,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0x11u8; MASKED_ECC_KEY_MIN_LEN];
         let peer = [0x22u8; 64];
-        let frame = TborEcdhDeriveReq::encode(&mut buf)
+        let frame = TborEcdhDeriveReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -128,7 +130,7 @@ mod tests {
     fn response_round_trips_masked_secret() {
         let mut buf = [0u8; 512];
         let masked = [0x33u8; MASKED_SECRET_MAX_LEN];
-        let frame = TborEcdhDeriveResp::encode(&mut buf, 0, true)
+        let frame = TborEcdhDeriveResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_secret(&masked)
             .unwrap()

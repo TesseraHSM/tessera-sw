@@ -59,7 +59,7 @@ pub struct TborHmacReq<'a> {
     /// Marked `#[tbor(mutable)]` so the handler can `unmask` it **in place**
     /// in the request buffer (via `decode_mut`) — no scratch copy of the
     /// blob, and the recovered key is used straight from `target_key`.
-    #[tbor(buffer, min_len = 264, max_len = 360, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 360, mutable)]
     pub masked_key: &'a [u8],
 
     /// The message to MAC, up to [`HMAC_MSG_MAX_LEN`] (1024) bytes.
@@ -88,7 +88,7 @@ mod tests {
         let mut buf = [0u8; 1536];
         let masked = [0x11u8; MASKED_HMAC_KEY_MIN_LEN];
         let msg = [0x22u8; 300];
-        let frame = TborHmacReq::encode(&mut buf)
+        let frame = TborHmacReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -106,7 +106,7 @@ mod tests {
     fn response_round_trips_tag() {
         let mut buf = [0u8; 256];
         let tag = [0x33u8; HMAC_TAG_MAX_LEN];
-        let frame = TborHmacResp::encode(&mut buf, 0, true)
+        let frame = TborHmacResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .tag(&tag)
             .unwrap()

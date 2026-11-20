@@ -9,7 +9,6 @@ use anyhow::Context;
 use anyhow::Result;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::IntoBytes;
 
 use crate::hsm::mint_sealing_key;
 use crate::hsm::SealingKey;
@@ -97,7 +96,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         let pok_peer_backup = receiver
             .with_hsm_evidence(|evidence| {
                 session.session.sd_create_peer_backup(
-                    self.env().policy(),
+                    self.env().policy().as_bytes(),
                     &sender.masked,
                     evidence,
                     &state.pok_local_backup,
@@ -143,7 +142,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             .sender_evidence
             .with_hsm_evidence(|evidence| {
                 session.session.sd_restore_peer_backup(
-                    self.env().policy(),
+                    self.env().policy().as_bytes(),
                     &prepared.receiver.masked,
                     evidence,
                     &backup.pok_peer_backup,

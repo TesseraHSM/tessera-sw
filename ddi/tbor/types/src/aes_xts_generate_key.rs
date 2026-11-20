@@ -52,7 +52,7 @@ pub struct TborAesXtsGenerateKeyReq {
 pub struct TborAesXtsGenerateKeyResp {
     /// The freshly generated XTS key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key; 296 B.
-    #[tbor(min_len = 296, max_len = 296)]
+    #[tbor(align = 4, min_len = 296, max_len = 296)]
     pub masked_key: Vec<u8>,
 }
 
@@ -74,7 +74,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame.windows(10).any(|w| w == b"my-xts-key"));
     }
 

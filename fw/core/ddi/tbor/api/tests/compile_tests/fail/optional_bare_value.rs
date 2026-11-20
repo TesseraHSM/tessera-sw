@@ -12,7 +12,7 @@ pub struct OptTypeReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = OptTypeReq::encode(&mut buf).unwrap()
+    let _ = OptTypeReq::encode(&mut buf, (1, 1)).unwrap()
         .required(1).unwrap()
         .opt(42u16).unwrap() // ERROR: expected Option<u16>, got u16
         .finish();

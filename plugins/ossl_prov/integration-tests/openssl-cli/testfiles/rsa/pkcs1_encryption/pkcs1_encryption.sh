@@ -50,13 +50,17 @@ if [[ -f "$encrypted_data" && -s "$encrypted_data" ]]; then
   echo "data encrypted"
 fi
 
-# CHECK: Hello PKCS1
-"$OPENSSL_BIN" pkeyutl \
+# CHECK: PKCS1 decryption rejected
+if "$OPENSSL_BIN" pkeyutl \
     -propquery "$PROPQUERY" \
     -decrypt \
     -inkey "tsra://$maskedkeyfile;type=$keytype" \
     -pkeyopt rsa_padding_mode:pkcs1 \
-    -in "$encrypted_data"
+    -in "$encrypted_data"; then
+    echo "PKCS1 decryption unexpectedly succeeded" >&2
+    exit 1
+fi
+echo "PKCS1 decryption rejected"
 
 if [[ "$cleanup" == "true" ]]; then
   rm -f "$encrypted_data" "$maskedkeyfile" "$keyfile"

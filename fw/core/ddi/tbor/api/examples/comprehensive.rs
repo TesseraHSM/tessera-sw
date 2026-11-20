@@ -108,7 +108,7 @@ fn example_aes_gcm_full() {
     let mut buf = [0u8; 512];
 
     // Encode: typestate builder, each call writes directly to buf.
-    let frame = EncryptReq::encode(&mut buf)
+    let frame = EncryptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .session_id(tsra_fw_ddi_tbor_api::SessionId(7))
         .unwrap()
@@ -156,7 +156,7 @@ fn example_aes_ecb_minimal() {
 
     // Skip iv and aad by jumping directly to plaintext.
     // The typestate encoder auto-fills None for both skipped fields.
-    let frame = EncryptReq::encode(&mut buf)
+    let frame = EncryptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .session_id(tsra_fw_ddi_tbor_api::SessionId(1))
         .unwrap()
@@ -192,7 +192,7 @@ fn example_skip_intermediate() {
     let mut buf = [0u8; 512];
 
     // Set iv, then skip aad by jumping to plaintext.
-    let frame = EncryptReq::encode(&mut buf)
+    let frame = EncryptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .session_id(tsra_fw_ddi_tbor_api::SessionId(3))
         .unwrap()
@@ -223,7 +223,7 @@ fn example_response() {
 
     // GCM response: ciphertext + tag.
     let mut buf = [0u8; 512];
-    let frame = EncryptResp::encode(&mut buf, 0x00000000, true)
+    let frame = EncryptResp::encode(&mut buf, (1, 1), 0x00000000, true)
         .unwrap()
         .ciphertext(b"<ciphertext-bytes>")
         .unwrap()
@@ -243,7 +243,7 @@ fn example_response() {
 
     // ECB response: ciphertext only, skip tag via early finish.
     let mut buf2 = [0u8; 512];
-    let frame2 = EncryptResp::encode(&mut buf2, 0x00000000, false)
+    let frame2 = EncryptResp::encode(&mut buf2, (1, 1), 0x00000000, false)
         .unwrap()
         .ciphertext(b"<ecb-ciphertext>")
         .unwrap()
@@ -260,7 +260,7 @@ fn example_raw_decode() {
 
     // First encode a message to get some wire bytes.
     let mut buf = [0u8; 256];
-    let frame = EncryptReq::encode(&mut buf)
+    let frame = EncryptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .session_id(tsra_fw_ddi_tbor_api::SessionId(99))
         .unwrap()

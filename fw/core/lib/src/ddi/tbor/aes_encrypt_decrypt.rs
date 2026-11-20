@@ -110,7 +110,7 @@ pub(crate) async fn handle<P: HsmPal>(
             || offset(req.msg().as_ptr()) != Some(data_start + iv_len)
             || key_off < region_end
         {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
 
         // In bounds: decode bounded every field within the request, and
@@ -134,7 +134,7 @@ pub(crate) async fn handle<P: HsmPal>(
             .await?;
 
         Ok(
-            TborAesEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?
+            TborAesEncryptDecryptResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
                 .msg_existing(msg_len)?
                 .iv_existing(iv_len)?
                 .finish()

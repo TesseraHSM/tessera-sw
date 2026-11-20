@@ -53,13 +53,15 @@ and the result of the last hardware run.
 ### H-a Firmware, platform and key survival
 
 - Run: generate AES keys, encrypt with CBC, GCM and XTS, `C_Logout`,
-  `C_Login`, encrypt again.
-- Expect: the same ciphertexts after the login. Round trips only, until keys
+  `C_Login`, encrypt again. The same with an EC key pair, signing.
+- Expect: the same ciphertexts after the login, and EC signatures that
+  verify under the public point read before it. Round trips only, until keys
   can be imported for known-answer tests. Firmware older than the key
   generation enablement fails at key generation.
 - Cases: `key_survival.*`, `key_survival_persist.after_finalize_initialize`,
   `logout.public_session_object_survives_logout`,
-  `aes_cbc.logout_tears_down_the_active_operation`.
+  `aes_cbc.logout_tears_down_the_active_operation`, `ec_survival.*`,
+  `ec_survival_persist.*`.
 - Result: not run yet.
 
 ### H-b Provisioning through C_Login on a fresh partition
@@ -90,24 +92,31 @@ and the result of the last hardware run.
 ### H-d Second process on a provisioned partition
 
 - Run: a second process logs in with the same PIN, another PIN and an empty
-  PIN, and uses a token key the first process created.
+  PIN, uses a token key the first process created, and reads a private token
+  object the first process created on the file store.
 - Expect: the same PIN logs in; another PIN fails with `CKR_FUNCTION_FAILED`
   (not `CKR_PIN_INCORRECT` until the SDK names the status); an empty PIN
   fails with `CKR_PIN_LEN_RANGE` unless `TSRA_PKCS11_PIN` sets a default; the
-  token key works in the second process. The simulator cannot show this across a
-  power cycle: it keeps no state over a restart.
+  token key works and the private object reads back in the second process.
+  The simulator cannot show this across a power cycle: it keeps no state over
+  a restart.
 - Cases: `persist.a_second_process_sees_the_token_object` (the object, not
-  the key), `login.*`.
+  the key), `persist.a_second_process_reads_the_private_object`,
+  `persist.a_freshly_provisioned_device_reads_only_its_own_private_objects`
+  (simulator only), `login.*`.
 - Result: not run yet.
 
 ### H-e Power cycle and NSSR
 
-- Run: create token keys, power-cycle the device (and separately reset it
-  with NSSR), log in, use the keys.
-- Expect: fails today, with the keys unusable (-26), until the module
-  replays the backup masking key and the owner backup key at
+- Run: create token keys and private token objects, power-cycle the device
+  (and separately reset it with NSSR), log in, use the keys, read the
+  objects, create a private object.
+- Expect: fails today, with the keys unusable (-26) and the private objects
+  invisible (their keys do not unmask) while new private objects work, until
+  the module replays the backup masking key and the owner backup key at
   re-provisioning. With both replayed and the same endorsement key the keys
-  come back; with a fresh endorsement key they do not.
+  and the private objects come back; with a fresh endorsement key they do
+  not.
 - Result: not run yet.
 
 ### H-f First login wins
@@ -155,6 +164,8 @@ and the result of the last hardware run.
   unwrapped over MBOR, a 16-byte XTS tweak against an 8-byte little-endian
   sector number.
 - Expect: the same results as on the emulator and the host references.
+- Cases: `ec_sign.every_curve_and_hash_signs_what_the_host_verifies` (a
+  64-byte hash on P-256 and P-384 is the over-long digest).
 - Result: not run yet.
 
 ### H-l RSA decryption timing
