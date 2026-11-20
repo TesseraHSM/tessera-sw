@@ -330,6 +330,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 receiver_cert_chain,
@@ -425,6 +426,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_reseal_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 src_evidence,
@@ -459,6 +461,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 sender_cert_chain,
@@ -490,6 +493,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_peer_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 dst_evidence,
@@ -522,6 +526,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_peer_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 src_evidence,
@@ -550,6 +555,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_local_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 pok_local_backup,
                 sd_mk_backup,

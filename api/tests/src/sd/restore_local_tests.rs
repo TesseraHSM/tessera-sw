@@ -25,6 +25,37 @@ use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 
+#[test]
+fn sd_restore_local_backup_uses_negotiated_session_revision() {
+    let _guard = PARTITION_LOCK.lock();
+    let info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("partition");
+    let range = info.api_rev_range.expect("API revision range");
+    if range.min() == range.max() {
+        return;
+    }
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata, &pota, None, None);
+    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
+    let created = evidence
+        .with_create_backup(|rcvr_chain, ev| {
+            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+        })
+        .expect("create remote backup");
+    drop(session);
+
+    let part =
+        HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, range.max());
+    assert_ne!(part.api_rev(), session.api_rev());
+    let result = session.sd_restore_local_backup(&created.pok_local_backup, &created.sd_mk_backup);
+    assert_eq!(result.err(), Some(HsmError::SdAlreadyInitialized));
+}
+
 /// Happy path: create the security domain on one incarnation, then restore
 /// it from its device-local backups on a rebooted (factory-reset, same-seed)
 /// incarnation; the restore returns non-zero refreshed backups of the pinned

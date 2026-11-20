@@ -116,6 +116,10 @@ tsra_status tsra_sess_set_pin(
 
 Retrieve session property
 
+Security-domain backup creation, resealing, and restoration use the session's
+negotiated API revision. It can differ from the revision
+selected when the partition handle was opened.
+
 **Properties**
 
 | Description                               | Type                                     | Define                                      |
