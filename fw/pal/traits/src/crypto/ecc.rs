@@ -20,6 +20,24 @@
 //! [`EccCurve::sig_len`], and [`EccCurve::secret_len`] to determine
 //! the required sizes.
 //!
+//! ## Private-key encoding
+//!
+//! Private keys are opaque, PAL-specific HSM/vault encodings. Their buffer
+//! lengths use [`HsmEccCurve::wire_priv_key_len`], but their byte order and
+//! padding placement are not specified by [`HsmCryptoOrder::BYTE_ORDER`]
+//! or the value-first operand-lane rule:
+//!
+//! - std Uno and std Duo use big-endian scalars with leading zero padding.
+//!   A std Duo P-521 key is `zeros(6) || d_be(66)`, not
+//!   `d_be(66) || zeros(6)`.
+//! - Hardware Uno uses little-endian scalars with trailing zero padding:
+//!   `d_le(66) || zeros(2)` for P-521.
+//!
+//! Pass generated or imported HSM-format keys back to the same PAL unchanged.
+//! Use [`HsmEcc::ecc_priv_to_vault`] and [`HsmEcc::ecc_vault_to_priv`] to
+//! convert between a canonical big-endian scalar and the PAL's private-key
+//! encoding; do not apply generic operand byte-order conversions to keys.
+//!
 //! ## ECDSA operands
 //!
 //! **`ecc_sign` / `ecc_sign_in_place` / `ecc_verify`** take a pre-computed
@@ -129,11 +147,11 @@ impl HsmEccCurve {
 
     /// Return the PAL operand private-key length in bytes for lane
     /// padding `pad` ([`HsmCryptoOrder::ECC_COORD_PAD`]) — the size of an
-    /// HSM-format private scalar buffer.
+    /// HSM-format private scalar buffer. This specifies its length, not
+    /// its PAL-specific byte order or padding placement.
     ///
     /// Alias of [`HsmEccCurve::wire_coord_len`] kept for caller-site
-    /// clarity (private keys are a single padded scalar; this name
-    /// makes intent explicit at allocation sites).
+    /// clarity at private-key allocation sites.
     pub fn wire_priv_key_len(&self, pad: usize) -> usize {
         self.wire_coord_len(pad)
     }
@@ -148,7 +166,8 @@ impl HsmEccCurve {
     /// coordinate or signature component for lane padding `pad`
     /// ([`HsmCryptoOrder::ECC_COORD_PAD`]): the raw length rounded up to a
     /// multiple of `pad`.  The value occupies the start of the lane in
-    /// operand byte order and the rest is zero.
+    /// operand byte order and the rest is zero. Private-key buffers use
+    /// the same length, but their encoding is PAL-specific.
     ///
     /// | Curve  | Raw | pad 4 | pad 8 |
     /// |--------|-----|-------|-------|
@@ -229,10 +248,12 @@ pub enum HsmEcdsaNonce {
 /// signing, verification, and ECDH.  The `async` signatures let
 /// hardware-backed implementations yield while the PKA engine runs.
 ///
-/// Scalars, coordinates, signature components, digests and shared
+/// Nonces, coordinates, signature components, digests and shared
 /// secrets are in the platform's operand order
 /// ([`HsmCryptoOrder::BYTE_ORDER`]), each in a lane of
 /// [`HsmEccCurve::wire_coord_len`] for [`HsmCryptoOrder::ECC_COORD_PAD`].
+/// Private keys instead use the PAL-specific HSM/vault encoding documented
+/// above; preserve that encoding or use the private-key conversion methods.
 pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     /// Generates an ECC key pair on the chosen curve, optionally
     /// writing the keys into caller-provided buffers.
@@ -343,8 +364,9 @@ pub trait HsmEcc: HsmIoTypes + HsmCryptoOrder {
     ///   SHA-384 or SHA-512. It sizes the digest lane, and a digest longer
     ///   than the curve order is truncated to its leftmost bits (FIPS 186-5
     ///   §6.4.1).
-    /// - `priv_key` — signing key in raw HSM-format scalar bytes
-    ///   (`curve.wire_coord_len(Self::ECC_COORD_PAD)`).
+    /// - `priv_key` — signing key in PAL-specific HSM-format scalar bytes
+    ///   (`curve.wire_priv_key_len(Self::ECC_COORD_PAD)`), not a value-first
+    ///   operand lane.
     /// - `nonce` — the source of `k`.
     /// - `input` — exactly
     ///   [`curve.ecdsa_sign_input_len(hash, Self::ECC_COORD_PAD)`](HsmEccCurve::ecdsa_sign_input_len)
