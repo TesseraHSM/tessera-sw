@@ -16,6 +16,7 @@ use tsra_crypto::aead_envelope::{self};
 use tsra_crypto::*;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_codec::Encoder;
 use tsra_ddi_tbor_codec::Header;
 use tsra_ddi_tbor_codec::MAX_DATA_SIZE;
@@ -69,6 +70,61 @@ use tsra_ddi_tbor_types::*;
 pub type DdiTest = TsraDdi;
 
 pub const COORD_LEN: usize = RAW_PUB_LEN / 2;
+
+/// Generate and import a host RSA private key as a caller-held masked key.
+pub fn import_rsa_private_key(
+    ctx: &TestCtx,
+    session_id: u16,
+    modulus_bytes: usize,
+    crt: bool,
+    scope: u8,
+    key_usage: u64,
+    key_label: &[u8],
+) -> Result<(Vec<u8>, RsaPrivateKey), DdiError> {
+    let key = RsaPrivateKey::generate(modulus_bytes).expect("generate host RSA key");
+    let private_der = key.to_vec().expect("export host RSA private key");
+    let unwrapping_key = ctx
+        .tbor(&TborGetUnwrappingKeyReq { session_id })
+        .expect("get built-in unwrapping public key")
+        .pub_key;
+    assert_eq!(unwrapping_key.len(), 260);
+    let mut public_key_be = Vec::with_capacity(unwrapping_key.len());
+    public_key_be.extend(unwrapping_key[..256].iter().rev());
+    public_key_be.extend(unwrapping_key[256..].iter().rev());
+    let public_key =
+        RsaPublicKey::from_hsm_bytes(&public_key_be).expect("parse unwrapping public key");
+
+    let kek = [0xA7u8; 32];
+    let mut encrypted_kek = Encrypter::encrypt_vec(
+        &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
+        &public_key,
+        &kek,
+    )
+    .expect("RSA-OAEP wrap AES key");
+    encrypted_kek.reverse();
+    let kek = AesKey::from_bytes(&kek).expect("construct AES key-encryption key");
+    let encrypted_private_key =
+        Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, &private_der)
+            .expect("AES-KWP wrap RSA private key");
+    let mut wrapped_blob = encrypted_kek;
+    wrapped_blob.extend(encrypted_private_key);
+    let key_class = if crt {
+        KEY_CLASS_RSA_CRT
+    } else {
+        KEY_CLASS_RSA
+    };
+
+    ctx.tbor(&TborUnwrapKeyReq {
+        session_id,
+        scope,
+        key_class,
+        key_usage,
+        oaep_hash_algo: 1,
+        wrapped_blob,
+        key_label: key_label.to_vec(),
+    })
+    .map(|resp| (resp.masked_key, key))
+}
 
 const MACH_SEED_PATTERN_BASE: u8 = 0x40;
 const SATA_THUMBPRINT_PATTERN_BASE: u8 = 0x20;

@@ -3,7 +3,9 @@
 
 #![allow(unsafe_code)]
 
-use core::future::poll_fn;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::Context;
 use core::task::Poll;
 
 use embassy_sync::waitqueue::WakerRegistration;
@@ -226,6 +228,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// `detached` transfer carries the given cookie and completes into
     /// [`take_detached`](Self::take_detached) rather than a waker.
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn submit(
         &self,
         src_addr: GdmaBuf,
@@ -344,23 +347,11 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_len: u32,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
         let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
-        Ok(poll_fn(move |cx| {
-            self.state.with(|s| {
-                let slot = &mut s.tags[tag as usize];
-                if slot.completed {
-                    let status = slot.status;
-                    slot.completed = false;
-                    s.tag_free |= 1u32 << tag;
-                    return Poll::Ready(if status == 0 {
-                        Ok(())
-                    } else {
-                        Err(GdmaError::dma_error(status))
-                    });
-                }
-                slot.waker.register(cx.waker());
-                Poll::Pending
-            })
-        }))
+        Ok(GdmaCopyFuture {
+            driver: self,
+            tag,
+            released: false,
+        })
     }
 
     /// Submit a DMA copy that no task awaits: its completion is collected,
@@ -438,9 +429,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// SingleCell borrow and batching the MMIO head pointer write.
     /// Call from the GDMA_CQ IRQ handler or the main poll loop.
     pub fn wake(&self, irq: u16) {
-        self.state.with(|s| {
-            // Clear NVIC pending bit for this interrupt
+        self.reap();
+        tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+    }
 
+    fn reap(&self) {
+        self.state.with(|s| {
             // SAFETY: The configured CQ shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
 
@@ -469,7 +463,63 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             self.regs.cq[self.channel as usize]
                 .head
                 .write(CQ_CHANNEL_HEAD::HEAD.val(s.cq_head.into()));
-            tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+        });
+    }
+}
+
+struct GdmaCopyFuture<'a, const DEPTH: usize> {
+    driver: &'a GdmaDriver<DEPTH>,
+    tag: u16,
+    released: bool,
+}
+
+impl<const DEPTH: usize> Future for GdmaCopyFuture<'_, DEPTH> {
+    type Output = HsmResult<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.driver.state.with(|s| {
+            let slot = &mut s.tags[this.tag as usize];
+            if slot.completed {
+                let status = slot.status;
+                slot.completed = false;
+                s.tag_free |= 1u32 << this.tag;
+                this.released = true;
+                return Poll::Ready(if status == 0 {
+                    Ok(())
+                } else {
+                    Err(GdmaError::dma_error(status))
+                });
+            }
+            slot.waker.register(cx.waker());
+            Poll::Pending
+        })
+    }
+}
+
+impl<const DEPTH: usize> Drop for GdmaCopyFuture<'_, DEPTH> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+
+        // The DMA engine may still own both buffers. Reap completions until
+        // this transfer is known to be done before returning control to the
+        // caller, which may reclaim its allocation immediately.
+        while !self
+            .driver
+            .state
+            .with(|s| s.tags[self.tag as usize].completed)
+        {
+            self.driver.reap();
+            core::hint::spin_loop();
+        }
+
+        self.driver.state.with(|s| {
+            let slot = &mut s.tags[self.tag as usize];
+            slot.completed = false;
+            slot.detached = false;
+            s.tag_free |= 1u32 << self.tag;
         });
     }
 }
@@ -505,5 +555,85 @@ unsafe fn read_pair(p: *const u32) -> (u32, u32) {
     // SAFETY: per the function contract.
     unsafe {
         (p.read_volatile(), p.add(4).read_volatile())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::boxed::Box;
+
+    use super::*;
+
+    #[test]
+    fn dropping_pending_copy_reaps_completion_before_releasing_tag() {
+        // SAFETY: the register overlay consists of integer MMIO cells; leaked
+        // zeroed storage supplies permanent, aligned fake registers.
+        let regs = Box::leak(Box::new(unsafe {
+            core::mem::MaybeUninit::<GdmaRegs>::zeroed().assume_init()
+        }));
+        // SAFETY: the CQ overlay also contains only integer MMIO cells.
+        let ring = unsafe { core::mem::MaybeUninit::<[GdmaCqEntry; 4]>::zeroed().assume_init() };
+        ring[0].status.write(GDMA_CQ_STATUS::SUCCESS.val(1));
+        let tail = 1u32;
+        let mut driver = GdmaDriver::<4>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        // SAFETY: the fake register storage is leaked and has the overlay's alignment.
+        driver.regs = unsafe { StaticRef::new(regs) };
+        driver.cq_ring = ring.as_ptr();
+        driver.cq_tail_shadow = &tail;
+        driver.state.with(|s| {
+            s.tag_free &= !1;
+            assert!(!s.tags[0].completed);
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 0,
+            released: false,
+        });
+
+        driver.state.with(|s| {
+            assert_eq!(s.cq_head, 1);
+            assert_ne!(s.tag_free & 1, 0);
+            assert!(!s.tags[0].completed);
+        });
+        assert_eq!(driver.regs.cq[0].head.read(CQ_CHANNEL_HEAD::HEAD), 1);
+    }
+
+    #[test]
+    fn dropping_completed_copy_releases_tag_for_reuse() {
+        let driver = GdmaDriver::<4>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        driver.state.with(|s| {
+            s.tag_free &= !1;
+            s.tags[0].completed = true;
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 0,
+            released: false,
+        });
+
+        let reused = driver.state.with(|s| {
+            let tag = s.tag_free.trailing_zeros() as u16;
+            s.tag_free &= !(1u32 << tag);
+            tag
+        });
+        assert_eq!(reused, 0);
     }
 }

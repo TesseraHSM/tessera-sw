@@ -60,7 +60,7 @@ use tsra_crypto::RsaPadPkcs1EncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
-use tsra_crypto::SignOp;
+use tsra_crypto::Signer;
 use tsra_crypto::Verifier;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
@@ -410,42 +410,6 @@ impl StdRsa {
         result
     }
 
-    /// Sign a pre-computed `digest` with PKCS#1 v1.5 padding, or PSS
-    /// padding when `salt_len` is `Some`. Writes the modulus-sized
-    /// signature to `out` in operand order.
-    ///
-    /// # Errors
-    /// - [`HsmError::RsaSignFailed`] — signing failed.
-    pub async fn sign(
-        &self,
-        priv_key: &RsaPrivateKey,
-        hash: HashAlgo,
-        digest: &[u8],
-        salt_len: Option<usize>,
-        out: &mut [u8],
-    ) -> HsmResult<()> {
-        let key = priv_key.clone();
-        let digest = digest.to_vec();
-        let k = out.len();
-        let result = self
-            .pool
-            .submit_with_result(async move {
-                let mut algo = match salt_len {
-                    Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
-                    None => RsaSignAlgo::with_pkcs1_padding(hash),
-                };
-                let mut buf = vec![0u8; k];
-                let len = SignOp::sign(&mut algo, &key, &digest, Some(&mut buf))
-                    .map_err(|_| HsmError::RsaSignFailed)?;
-                if len != k {
-                    return Err(HsmError::RsaSignFailed);
-                }
-                Ok::<_, HsmError>(buf)
-            })
-            .await?;
-        byte_order::int_copy_from_be(self.order, out, &result)
-    }
-
     /// Verify a digest using an operand-order `n || e(4)` key and signature.
     /// The digest is a standard byte string. `salt_len` selects PSS when
     /// present, and PKCS#1 v1.5 otherwise.
@@ -470,6 +434,9 @@ impl StdRsa {
             return Err(HsmError::InvalidArg);
         }
         let public = self.pub_key_be(k, pub_key)?;
+        if salt_len.is_some() && public[0] & 0x80 == 0 {
+            return Err(HsmError::InvalidArg);
+        }
         let mut signature = signature.to_vec();
         byte_order::int_to_be(self.order, &mut signature);
         let digest = digest.to_vec();
@@ -482,9 +449,66 @@ impl StdRsa {
                     None => RsaSignAlgo::with_pkcs1_padding(hash),
                 };
                 Verifier::verify(&mut algorithm, &key, &digest, &signature)
-                    .map_err(|_| HsmError::RsaEncryptFailed)
+                    .map_err(|_| HsmError::InternalError)
             })
             .await
+    }
+
+    /// Sign a standard-order digest and return the signature in device
+    /// operand order. PSS salt generation is delegated to the crypto backend.
+    pub async fn sign(
+        &self,
+        key_size: HsmRsaKey,
+        hash: HashAlgo,
+        priv_key: &RsaPrivateKey,
+        digest: &[u8],
+        salt_len: Option<usize>,
+        output: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        let k = key_size.modulus_len();
+        let max_salt = k
+            .checked_sub(hash.size())
+            .and_then(|len| len.checked_sub(2))
+            .ok_or(HsmError::InvalidArg)?;
+        if digest.len() != hash.size() || salt_len.is_some_and(|len| len > max_salt) {
+            return Err(HsmError::InvalidArg);
+        }
+        if salt_len.is_some() {
+            let mut modulus = vec![0; k];
+            priv_key
+                .n(Some(&mut modulus))
+                .map_err(|_| HsmError::InvalidArg)?;
+            if modulus[0] & 0x80 == 0 {
+                return Err(HsmError::InvalidArg);
+            }
+        }
+        let Some(output) = output else {
+            return Ok(k);
+        };
+        if output.len() < k {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let key = priv_key.clone();
+        let digest = digest.to_vec();
+        let signature = self
+            .pool
+            .submit_with_result(async move {
+                let mut signature = vec![0u8; k];
+                let mut algorithm = match salt_len {
+                    Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
+                    None => RsaSignAlgo::with_pkcs1_padding(hash),
+                };
+                let written = Signer::sign(&mut algorithm, &key, &digest, Some(&mut signature))
+                    .map_err(|_| HsmError::RsaSignFailed)?;
+                if written != k {
+                    return Err(HsmError::InternalError);
+                }
+                Ok::<_, HsmError>(signature)
+            })
+            .await?;
+        byte_order::int_copy_from_be(self.order, &mut output[..k], &signature)?;
+        Ok(k)
     }
 
     /// RSA-OAEP decrypt (EME-OAEP, RFC 8017 §7.1.2).
@@ -609,6 +633,7 @@ fn mod_exp_input_in_range(n: &[u8], m: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
+    use tsra_crypto::ExportableHsmKey;
 
     use super::*;
 
@@ -663,6 +688,55 @@ mod tests {
                     &[0; 300],
                     &[0; 256],
                     Some(0)
+                )
+                .await,
+            Err(HsmError::InvalidArg)
+        );
+    }
+
+    #[tokio::test]
+    async fn pss_rejects_non_full_width_moduli() {
+        let driver = make_driver();
+        let (private, public) = driver.gen_keypair(2048).await.expect("RSA key");
+        const K: usize = 256;
+        let k = K;
+        let mut private_bytes = vec![0; private.hsm_bytes_len()];
+        private
+            .to_hsm_bytes(&mut private_bytes)
+            .expect("serialize RSA key");
+        private_bytes[0] = 0x7f;
+        // CNG rejects this malformed key during import; OpenSSL permits
+        // import, so the driver must reject its narrow modulus before signing.
+        match RsaPrivateKey::from_hsm_bytes(&private_bytes) {
+            Ok(non_full_width) => assert_eq!(
+                driver
+                    .sign(
+                        HsmRsaKey::Rsa2048Priv,
+                        HashAlgo::sha256(),
+                        &non_full_width,
+                        &[0; 32],
+                        Some(32),
+                        None,
+                    )
+                    .await,
+                Err(HsmError::InvalidArg)
+            ),
+            Err(error) => assert_eq!(error, tsra_crypto::CryptoError::RsaKeyImportError),
+        }
+
+        let mut public_wire = vec![0; k + RSA_PUB_EXP_WIRE_LEN];
+        rsa_pub_wire(&public, HsmByteOrder::Le, Some(&mut public_wire))
+            .expect("serialize public key");
+        public_wire[k - 1] = 0x7f;
+        assert_eq!(
+            driver
+                .verify(
+                    HsmRsaKey::Rsa2048Pub,
+                    HashAlgo::sha256(),
+                    &public_wire,
+                    &[0; 32],
+                    &vec![0; k],
+                    Some(32),
                 )
                 .await,
             Err(HsmError::InvalidArg)

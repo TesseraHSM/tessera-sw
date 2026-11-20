@@ -212,6 +212,14 @@ fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<&[u8]>
     Ok(&priv_key[n_off..end])
 }
 
+fn validate_pss_modulus_width(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<()> {
+    let modulus = rsa_modulus_le(key_size, priv_key)?;
+    if modulus.last().is_none_or(|byte| byte & 0x80 == 0) {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(())
+}
+
 /// Byte-wise check that the little-endian value `m` satisfies `1 < m < n - 1`,
 /// where `n` is the equal-length little-endian modulus.
 ///
@@ -802,6 +810,8 @@ impl HsmRsa for UnoHsmPal {
 
     // ── PKCS#1 v1.5 signatures ─────────────────────────────────────
 
+    // Share RSA future construction between MBOR and TBOR callers.
+    #[inline(never)]
     async fn rsa_pkcs1_sign(
         &self,
         io: &UnoHsmIo,
@@ -851,6 +861,7 @@ impl HsmRsa for UnoHsmPal {
         .await
     }
 
+    #[inline(never)]
     async fn rsa_pkcs1_verify(
         &self,
         io: &UnoHsmIo,
@@ -868,6 +879,12 @@ impl HsmRsa for UnoHsmPal {
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() != k {
             return Err(HsmError::InvalidArg);
+        }
+        if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if !mod_exp_input_in_range(&pub_key[..k], signature) {
+            return Ok(false);
         }
 
         self.alloc_scoped_async(io, async |alloc| {
@@ -1077,6 +1094,7 @@ impl HsmRsa for UnoHsmPal {
 
     // ── PSS signatures ─────────────────────────────────────────────
 
+    #[inline(never)]
     async fn rsa_pss_sign(
         &self,
         io: &UnoHsmIo,
@@ -1101,7 +1119,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        rsa_modulus_le(key_size, priv_key)?;
+        validate_pss_modulus_width(key_size, priv_key)?;
         let Some(signature) = out else {
             return Ok(k);
         };
@@ -1155,6 +1173,7 @@ impl HsmRsa for UnoHsmPal {
         .await
     }
 
+    #[inline(never)]
     async fn rsa_pss_verify(
         &self,
         io: &UnoHsmIo,
@@ -1177,6 +1196,15 @@ impl HsmRsa for UnoHsmPal {
         }
         if salt_len > k - h_len - 2 {
             return Err(HsmError::InvalidArg);
+        }
+        if pub_key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        if pub_key[k - 1] & 0x80 == 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        if !mod_exp_input_in_range(&pub_key[..k], signature) {
+            return Ok(false);
         }
 
         self.alloc_scoped_async(io, async |alloc| {

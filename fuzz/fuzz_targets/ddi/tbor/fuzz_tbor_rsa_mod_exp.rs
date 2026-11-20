@@ -10,16 +10,6 @@ use common::KeyScope;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_crypto::AesKey;
-use tsra_crypto::AesKeyWrapPadAlgo;
-use tsra_crypto::Encrypter;
-use tsra_crypto::ExportableKey;
-use tsra_crypto::HashAlgo;
-use tsra_crypto::ImportableKey;
-use tsra_crypto::KeyGenerationOp;
-use tsra_crypto::RsaEncryptAlgo;
-use tsra_crypto::RsaPrivateKey;
-use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -114,9 +104,6 @@ struct FuzzInput {
 
 /// `KeyScope::Session` discriminant — masked keys generated here only need
 /// to outlive the fuzzed `RsaModExp` call.
-/// `HashAlgo::Sha256` discriminant used to OAEP-wrap the KEK in `UnwrapKey`.
-const RSA_OAEP_SHA256: u8 = 1;
-
 /// Deterministic xorshift64* fill used to materialize the fuzzed `y`
 /// operand from `rand_seed`, avoiding a dependency on the `rand` crate.
 fn fill_rand(seed: u64, buf: &mut [u8]) {
@@ -131,75 +118,6 @@ fn fill_rand(seed: u64, buf: &mut [u8]) {
         let bytes = state.to_le_bytes();
         chunk.copy_from_slice(&bytes[..chunk.len()]);
     }
-}
-
-/// Generate a host RSA private key of `modulus_bytes`, import it on-device
-/// via `UnwrapKey` under the given CRT / non-CRT class and usage, and
-/// return the resulting masked key. Mirrors `import_rsa_key` in
-/// `fuzz_tbor_attest_key`, generalized over modulus size, key class, and
-/// key usage.
-fn import_rsa_key(
-    ctx: &TestCtx,
-    session_id: u16,
-    modulus_bytes: usize,
-    crt: bool,
-    scope: u8,
-    key_usage: u64,
-    key_label: &[u8],
-) -> Result<Vec<u8>, DdiError> {
-    let key = RsaPrivateKey::generate(modulus_bytes).expect("generate host RSA key");
-    let private_der = key.to_vec().expect("export host RSA private key");
-    let unwrapping_key = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("get built-in unwrapping public key")
-        .pub_key;
-
-    // Convert HSM little-endian (n_le(256) ‖ e_le(4)) to the crypto crate's
-    // big-endian form; the built-in unwrapping key is a fixed RSA-2048 key
-    // regardless of the modulus size being imported.
-    assert_eq!(
-        unwrapping_key.len(),
-        260,
-        "built-in unwrapping key is a fixed-size RSA-2048 (n_le(256) ‖ e_le(4))",
-    );
-    let mut public_key_be = Vec::with_capacity(unwrapping_key.len());
-    public_key_be.extend(unwrapping_key[..256].iter().rev());
-    public_key_be.extend(unwrapping_key[256..].iter().rev());
-    let public_key =
-        RsaPublicKey::from_hsm_bytes(&public_key_be).expect("parse unwrapping public key");
-
-    let kek = [0xA7u8; 32];
-    let mut encrypted_kek = Encrypter::encrypt_vec(
-        &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
-        &public_key,
-        &kek,
-    )
-    .expect("RSA-OAEP wrap AES key");
-    encrypted_kek.reverse();
-
-    let kek = AesKey::from_bytes(&kek).expect("construct AES key-encryption key");
-    let encrypted_private_key =
-        Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, &private_der)
-            .expect("AES-KWP wrap RSA private key");
-    let mut wrapped_blob = encrypted_kek;
-    wrapped_blob.extend(encrypted_private_key);
-
-    let key_class = if crt {
-        KEY_CLASS_RSA_CRT
-    } else {
-        KEY_CLASS_RSA
-    };
-
-    ctx.tbor(&TborUnwrapKeyReq {
-        session_id,
-        scope,
-        key_class,
-        key_usage,
-        oaep_hash_algo: RSA_OAEP_SHA256,
-        wrapped_blob,
-        key_label: key_label.to_vec(),
-    })
-    .map(|resp| resp.masked_key)
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -218,7 +136,7 @@ fuzz_target!(|input: FuzzInput| {
                 _ => common::finalize_partition(ctx, &session),
             }
             let modulus_len = input.key_size.modulus_bytes();
-            match import_rsa_key(
+            match common::import_rsa_private_key(
                 ctx,
                 session.session_id,
                 modulus_len,
@@ -227,7 +145,7 @@ fuzz_target!(|input: FuzzInput| {
                 input.key_usage,
                 &input.key_label,
             ) {
-                Ok(masked_key) => {
+                Ok((masked_key, _)) => {
                     import_succeeded = true;
                     (masked_key, Some(modulus_len))
                 }
