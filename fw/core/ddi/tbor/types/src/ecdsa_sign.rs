@@ -58,7 +58,7 @@ mod tests {
     fn request_round_trips_required_fields() {
         let mut buf = [0u8; 1024];
         let key = [0x11; MASKED_ECC_KEY_MAX_LEN];
-        let frame = TborEcdsaSignReq::encode(&mut buf)
+        let frame = TborEcdsaSignReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -79,7 +79,7 @@ mod tests {
     fn maximum_signature_fits_exchange_capacity() {
         let mut buf = [0u8; 4096];
         let sig = [0x22; ECDSA_SIGNATURE_MAX_LEN];
-        let frame = TborEcdsaSignResp::encode(&mut buf, 0, true)
+        let frame = TborEcdsaSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&sig)
             .unwrap()

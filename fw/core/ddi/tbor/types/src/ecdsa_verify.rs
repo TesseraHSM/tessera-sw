@@ -57,7 +57,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let key = [0x11; MASKED_ECC_KEY_MAX_LEN];
         let sig = [0x22; ECDSA_SIGNATURE_MAX_LEN];
-        let frame = TborEcdsaVerifyReq::encode(&mut buf)
+        let frame = TborEcdsaVerifyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn response_is_empty() {
         let mut buf = [0u8; 512];
-        let frame = TborEcdsaVerifyResp::encode(&mut buf, 0, true)
+        let frame = TborEcdsaVerifyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .finish();
         assert!(frame.as_bytes().len() <= buf.len());

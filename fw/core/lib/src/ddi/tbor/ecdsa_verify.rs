@@ -9,7 +9,6 @@ use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::TborEcdsaVerifyReq;
 use tsra_fw_ddi_tbor_types::TborEcdsaVerifyResp;
 use tsra_fw_ddi_tbor_types::ECDSA_MESSAGE_MAX_LEN;
-use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -32,16 +31,8 @@ fn hash_algo(algo: HashAlgo) -> HsmResult<HsmHashAlgo> {
     }
 }
 
-fn validate_signature(
-    curve: HsmEccCurve,
-    signature: &[u8],
-    order: tsra_fw_hsm_pal_traits::HsmByteOrder,
-) -> HsmResult<()> {
-    let lane_len = if curve == HsmEccCurve::P521 && order == HsmByteOrder::Be {
-        72
-    } else {
-        curve.wire_coord_len(order)
-    };
+fn validate_signature(curve: HsmEccCurve, signature: &[u8], pad: usize) -> HsmResult<()> {
+    let lane_len = curve.wire_coord_len(pad);
     let raw_len = curve.priv_key_len();
     if signature.len() != lane_len * 2 {
         return Err(HsmError::InvalidArg);
@@ -79,13 +70,13 @@ pub(crate) async fn handle<P: HsmPal>(
         let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
         let view = unmask(pal, io, masking_key, req.masked_key).await?;
         let curve = ecc_private_curve(view.key_kind)?;
-        if view.target_key.len() != curve.wire_priv_key_len(P::BYTE_ORDER) {
+        if view.target_key.len() != curve.wire_priv_key_len(P::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         if !view.key_attrs.sign() && !view.key_attrs.verify() {
             return Err(HsmError::InvalidPermissions);
         }
-        validate_signature(curve, req.signature, P::BYTE_ORDER)?;
+        validate_signature(curve, req.signature, P::ECC_COORD_PAD)?;
 
         let key_at = (view.target_key.as_ptr() as usize)
             .checked_sub(request_base)
@@ -105,14 +96,14 @@ pub(crate) async fn handle<P: HsmPal>(
         )
     };
 
-    let digest = pal.dma_alloc_zeroed(io, algo.digest_len())?;
+    let input = pal.dma_alloc_zeroed(io, curve.ecdsa_verify_input_len(algo, P::ECC_COORD_PAD))?;
     pal.hash_oob(
         io,
         algo,
         message_len,
         message_index,
         HsmDigestForm::Operand,
-        digest,
+        &mut input[signature_len..signature_len + algo.digest_len()],
     )
     .await?;
 
@@ -132,21 +123,10 @@ pub(crate) async fn handle<P: HsmPal>(
     let (_, after_signature_offset) = after_key.split_at(signature_offset);
     let (signature, _) = after_signature_offset.split_at(signature_len);
 
-    let pal_signature_len = curve.wire_sig_len(P::BYTE_ORDER);
-    let pal_signature = pal.dma_alloc_zeroed(io, pal_signature_len)?;
-    let pal_lane_len = curve.wire_coord_len(P::BYTE_ORDER);
-    let signature_lane_len = if curve == HsmEccCurve::P521 && P::BYTE_ORDER == HsmByteOrder::Be {
-        72
-    } else {
-        pal_lane_len
-    };
-    let raw_len = curve.priv_key_len();
-    pal_signature[..raw_len].copy_from_slice(&signature[..raw_len]);
-    pal_signature[pal_lane_len..pal_lane_len + raw_len]
-        .copy_from_slice(&signature[signature_lane_len..signature_lane_len + raw_len]);
+    input[..signature_len].copy_from_slice(signature);
 
     let pub_key_len = pal.ecc_priv_pub_key(io, key, None).await?;
-    if pub_key_len != curve.wire_pub_key_len(P::BYTE_ORDER) {
+    if pub_key_len != curve.wire_pub_key_len(P::ECC_COORD_PAD) {
         return Err(HsmError::InternalError);
     }
     let pub_key_backing_len = pub_key_len.checked_add(7).ok_or(HsmError::InvalidArg)? & !7;
@@ -156,15 +136,12 @@ pub(crate) async fn handle<P: HsmPal>(
     if derived_len != pub_key_len {
         return Err(HsmError::InternalError);
     }
-    if !pal
-        .ecc_verify(io, curve, pub_key, digest, pal_signature)
-        .await?
-    {
+    if !pal.ecc_verify(io, curve, algo, pub_key, input).await? {
         return Err(HsmError::EccVerifyFailed);
     }
 
     cmd_buf.encode_response(|buf| {
-        let frame = TborEcdsaVerifyResp::encode(buf, 0, false)?.finish();
+        let frame = TborEcdsaVerifyResp::encode_for_request(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })
 }
