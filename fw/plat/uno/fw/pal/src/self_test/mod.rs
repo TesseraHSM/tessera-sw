@@ -43,6 +43,8 @@ use embassy_time::Timer;
 use embassy_time::with_timeout;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_sha::ShaError;
 use tsra_fw_uno_drivers_upka::UpkaError;
 
@@ -187,6 +189,17 @@ const PERIODIC_INTERVAL_SECS: u64 = 60;
 /// Delay between attempts to acquire a busy crypto queue.
 const QUEUE_RETRY_INTERVAL_SECS: u64 = 1;
 
+/// Budget for one attempt of a scheduled test.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Budget for one attempt of a bulk (BCP) test: its two engine commands may
+/// each wait for a command ID held by a host bulk IO and then run, up to the
+/// driver's 2 s deadline apiece, while the driver recovers an engine that a
+/// stalled host transfer has stuck. The driver then always resolves the
+/// test's commands before the budget runs out.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl SelfTest {
     /// Returns `(test kind, engine)` for periodic failure attribution.
     fn id(self) -> (u32, u32) {
@@ -205,6 +218,33 @@ impl SelfTest {
             Self::BulkAesGcm => (11, 0),
             #[cfg(not(feature = "bulk_crypto"))]
             Self::BulkAesXts => (12, 0),
+        }
+    }
+
+    /// Budget for one scheduled attempt of this test.
+    fn attempt_timeout(self) -> Duration {
+        match self {
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm | Self::BulkAesXts => BULK_ATTEMPT_TIMEOUT,
+            _ => ATTEMPT_TIMEOUT,
+        }
+    }
+
+    /// Whether `e` means the test's engine could not run it now, rather
+    /// than that the test failed: a full crypto queue, or, for a bulk test,
+    /// a BCP that the driver had to reset (a host bulk IO's transfer stalled
+    /// the engine, failing every command in flight) or could not bring up.
+    /// Such an attempt is retried within the admission window.
+    fn engine_busy(self, e: HsmError) -> bool {
+        if e == ShaError::QUEUE_FULL || e == UpkaError::QUEUE_FULL {
+            return true;
+        }
+        match self {
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm | Self::BulkAesXts => {
+                e == BcpError::TIMEOUT || e == BcpError::RESET_FAILED
+            }
+            _ => false,
         }
     }
 
@@ -293,22 +333,25 @@ pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> 
 
 /// Runs one scheduled non-RNG test on the self-test slot.
 ///
-/// A full crypto queue is retried for at most one interval; a test that does
-/// not finish within one second, or any other failure, stops the HSM.
+/// An engine that cannot run the test now (see [`SelfTest::engine_busy`]) is
+/// retried for at most one interval; a test that does not finish within its
+/// attempt budget, or any other failure, stops the HSM. On a timeout the
+/// test's future is not dropped: the HSM stops with any engine command it
+/// has in flight.
 async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
     let admission_deadline = Instant::now() + Duration::from_secs(PERIODIC_INTERVAL_SECS);
     loop {
         let result = {
             let future = test.run(pal, io);
             let mut future = core::pin::pin!(future);
-            match with_timeout(Duration::from_secs(1), future.as_mut()).await {
+            match with_timeout(test.attempt_timeout(), future.as_mut()).await {
                 Ok(result) => result,
                 Err(_) => notify_self_test_failure(test, HsmError::CryptoTimeout),
             }
         };
         match result {
             Ok(()) => return,
-            Err(e) if e == ShaError::QUEUE_FULL || e == UpkaError::QUEUE_FULL => {
+            Err(e) if test.engine_busy(e) => {
                 let retry_at = (Instant::now() + Duration::from_secs(QUEUE_RETRY_INTERVAL_SECS))
                     .min(admission_deadline);
                 Timer::at(retry_at).await;
