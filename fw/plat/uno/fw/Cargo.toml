@@ -11,6 +11,7 @@ members = [
   "crates/error",
   "crates/fault",
   "crates/key_vault",
+  "crates/mbor_ledger",
   "crates/pct",
   "crates/single_cell",
   "crates/static_init",
@@ -82,6 +83,7 @@ tsra_fw_uno_drivers_vault = { path = "drivers/vault" }
 tsra_fw_uno_error = { path = "crates/error" }
 tsra_fw_uno_fault = { path = "crates/fault" }
 tsra_fw_uno_key_vault = { path = "crates/key_vault" }
+tsra_fw_uno_mbor_ledger = { path = "crates/mbor_ledger" }
 tsra_fw_uno_pac = { path = "drivers/pac" }
 tsra_fw_uno_pal = { path = "pal" }
 tsra_fw_uno_pct = { path = "crates/pct" }
