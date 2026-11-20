@@ -51,6 +51,22 @@ const TEXT_ONLY: &str = "a text-only line: ";
 /// The function that gives the `error_text!` line its value.
 const TEXT_ONLY_VALUE: &str = "text_only_value";
 
+/// The `level-*` features, from the one that prints the fewest calls.
+const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+
+/// Text that the fixture's calls print, each with the lowest level in
+/// `LEVELS` that prints it: an `error!`, a `warn!`, and the dependency's
+/// `info!`. Text output prints `TEXT_ONLY` at every level.
+const PRINTED: &[(&str, &str)] = &[
+    ("  MemManage: IACCVIOL ", "error"),
+    ("queue at 50% of {capacity} ", "warn"),
+    ("from the dependency: ", "info"),
+];
+
+/// The feature that turns on text output for the text builds of the
+/// compile-time checks and of the copy outside `fw/plat/uno/`.
+const TEXT_FEATURE: &str = "tsra_fw_uno_trace/level-info";
+
 const TARGET: &[&str] = &["with debug-log output, a log target must match [a-z0-9_]+"];
 const MESSAGE: &[&str] = &[
     "with debug-log output, a log message can't be empty, end with a space, or hold a double quote, a backslash, or a control character",
@@ -129,8 +145,9 @@ const REPEAT_CASES: &[&str] = &[
 ];
 
 /// The functions that give dropped calls their values in the fixture's
-/// `outside` module, each with whether its call evaluates it: only a call
-/// dropped for a value's or the error code's type does.
+/// `outside` module, each with whether its call evaluates it without text
+/// output: only a call dropped for a value's or the error code's type does.
+/// With text output, each call evaluates its values.
 const DROPPED_VALUES: &[(&str, bool)] = &[
     ("arg_placeholder", false),
     ("arg_named", false),
@@ -259,10 +276,33 @@ fn absolute_paths(path: &Path, from: &Path) -> anyhow::Result<()> {
     fs::write(path, doc.to_string()).with_context(|| format!("can't write {}", path.display()))
 }
 
+/// Copies the log fixture's host crate for code above the PAL
+/// (`xtask/fixtures/log_above_pal`) to the repository's `target/`, outside
+/// `fw/plat/uno/`, where its calls follow the rules for code above the PAL,
+/// and returns the copy's directory.
+pub fn copy_above_pal(ctx: &XtaskCtx) -> anyhow::Result<PathBuf> {
+    let source = FwPaths::new(ctx)?.log_above_pal_dir;
+    let copy = log_map::repo_root(ctx)?
+        .join("target")
+        .join("tsra_log_above_pal");
+    fs::create_dir_all(copy.join("src"))?;
+    for file in ["Cargo.toml", "src/lib.rs"] {
+        fs::copy(source.join(file), copy.join(file))
+            .with_context(|| format!("can't copy {}", source.join(file).display()))?;
+    }
+    absolute_paths(&copy.join("Cargo.toml"), &source)?;
+    Ok(copy)
+}
+
 /// Runs `cargo rustc` with [`NIGHTLY_TOOLCHAIN`] on the fixture's binary in
-/// `dir`, with `rustc_args` for the binary alone, and returns whether it
-/// succeeded, with its standard error.
-fn rustc(dir: &Path, map: &Path, rustc_args: &[&str]) -> anyhow::Result<(bool, String)> {
+/// `dir`, with `cargo_args` for Cargo and `rustc_args` for the binary alone,
+/// and returns whether it succeeded, with its standard error.
+fn rustc(
+    dir: &Path,
+    map: &Path,
+    cargo_args: &[&str],
+    rustc_args: &[&str],
+) -> anyhow::Result<(bool, String)> {
     let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
     let output = Command::new("cargo")
         .args([
@@ -271,8 +311,9 @@ fn rustc(dir: &Path, map: &Path, rustc_args: &[&str]) -> anyhow::Result<(bool, S
             "--release",
             "--bin",
             "tsra_log_fixture",
-            "--",
         ])
+        .args(cargo_args)
+        .arg("--")
         .args(rustc_args)
         .current_dir(dir)
         .env("TSRA_LOG_MAP", map)
@@ -553,15 +594,11 @@ impl Xtask for LogFixture {
             );
         }
 
-        log::info!("--- above the PAL, `error!` passes the error code last too");
-        let source = FwPaths::new(&ctx)?.log_above_pal_dir;
-        let above = fixture.repo.join("target").join("tsra_log_above_pal");
-        fs::create_dir_all(above.join("src"))?;
-        for file in ["Cargo.toml", "src/lib.rs"] {
-            fs::copy(source.join(file), above.join(file))
-                .with_context(|| format!("can't copy {}", source.join(file).display()))?;
-        }
-        absolute_paths(&above.join("Cargo.toml"), &source)?;
+        log::info!(
+            "--- above the PAL, calls record, drop, and print by their rules, and the facade \
+             prints text alone on the host"
+        );
+        let above = copy_above_pal(&ctx)?;
         let output = Command::new("cargo")
             .args([toolchain.as_str(), "test", "--quiet"])
             .current_dir(&above)
@@ -569,8 +606,8 @@ impl Xtask for LogFixture {
             .context("can't run cargo")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         anyhow::ensure!(
-            output.status.success() && stdout.contains("test result: ok. 1 passed"),
-            "the test of error records above the PAL failed in {}:\n{stdout}{}",
+            output.status.success() && stdout.contains("test result: ok. 6 passed"),
+            "the tests above the PAL failed in {}:\n{stdout}{}",
             above.display(),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -615,39 +652,72 @@ impl Xtask for LogFixture {
         }
 
         log::info!(
-            "--- the debug-log feature with a level-* feature prints text, error_text! included, \
-             and makes no records"
+            "--- a level-* feature prints the calls at or above its level, error_text! \
+             included; with the debug-log feature, each call records too"
         );
-        for level in ["error", "warn", "info", "debug", "trace"] {
+        let error_row = golden
+            .rows()
+            .find(|row| row.key.message == "  MemManage: IACCVIOL {:#x}")
+            .context("the fixture map has no row for the IACCVIOL error")?;
+        let loaded = format!(
+            "the text {:?} of token {} is in a loaded section",
+            "  MemManage: IACCVIOL ",
+            error_row.key.symbol()
+        );
+        let hook = format!("the image defines the text hook {TEXT_HOOK}");
+        let rank = |level: &str| LEVELS.iter().position(|l| *l == level);
+        for level in LEVELS {
             let feature = format!("tsra_fw_uno_trace/level-{level}");
-            let image = fixture.build(
-                &format!("level-{level}"),
-                &["--features", feature.as_str()],
-                Mode::Locked,
-            )?;
-            // Every level prints `error!` calls, so this text is in the image.
-            let elf = Elf::read(&fixture.elf())?;
-            let text = in_loaded_section(&elf, "  MemManage: IACCVIOL ")?
-                && in_loaded_section(&elf, TEXT_ONLY)?
-                && has_symbol(&elf, TEXT_ONLY_VALUE);
-            anyhow::ensure!(
-                image.tokens.is_empty() && image.sites.is_empty() && image.drops.is_empty() && text,
-                "the debug-log feature with level-{level} doesn't print text only"
-            );
-            anyhow::ensure!(
-                elf.symbol(TEXT_HOOK).is_some(),
-                "the level-{level} image doesn't define the text hook {TEXT_HOOK}"
-            );
-            // Given the default image's tokens, `loaded_texts`, the search
-            // that reading an image runs, finds this printed text.
-            let texts = log_map::loaded_texts(&elf, default.tokens.keys())?;
-            anyhow::ensure!(
-                texts
-                    .iter()
-                    .any(|(_, found)| found == "  MemManage: IACCVIOL "),
-                "loaded_texts finds {texts:?} in the level-{level} image, but not the text of \
-                 an error! call"
-            );
+            for records in [true, false] {
+                let (label, args) = if records {
+                    (format!("level-{level}"), vec!["--features", &feature])
+                } else {
+                    (
+                        format!("level-{level}-no-debug-log"),
+                        vec!["--no-default-features", "--features", &feature],
+                    )
+                };
+                let image = fixture.build(&label, &args, Mode::Locked)?;
+                let elf = Elf::read(&fixture.elf())?;
+                let recorded = if records {
+                    image.tokens.keys().eq(default.tokens.keys()) && image.sites == default.sites
+                } else {
+                    image.tokens.is_empty() && image.sites.is_empty()
+                };
+                anyhow::ensure!(
+                    recorded && image.drops.is_empty(),
+                    "the {label} image refers to {:#?}, has markers for {:?}, and drops {:?}",
+                    image.tokens.keys(),
+                    image.sites.keys(),
+                    image.drops
+                );
+                for (text, lowest) in PRINTED {
+                    let printed = in_loaded_section(&elf, text)?;
+                    anyhow::ensure!(
+                        printed == (rank(level) >= rank(lowest)),
+                        "the {label} image {} {text:?}",
+                        if printed { "prints" } else { "doesn't print" }
+                    );
+                }
+                anyhow::ensure!(
+                    in_loaded_section(&elf, TEXT_ONLY)?
+                        && has_symbol(&elf, TEXT_ONLY_VALUE)
+                        && elf.symbol(TEXT_HOOK).is_some(),
+                    "the {label} image doesn't print the error_text! line through the text hook"
+                );
+                // Read as an image without text output, it fails on the hook,
+                // and on the text of each call that it records and prints.
+                let error = log_map::read_image(&label, &fixture.elf(), &golden, Output::Records)
+                    .err()
+                    .with_context(|| {
+                        format!("the {label} image passed as one without text output")
+                    })?;
+                let error = format!("{error:#}");
+                anyhow::ensure!(
+                    error.contains(&hook) && error.contains(&loaded) == records,
+                    "the {label} image failed as one without text output with: {error}"
+                );
+            }
         }
 
         log::info!("--- error_text! takes text output from the Uno trace crate's level-* features");
@@ -658,33 +728,24 @@ impl Xtask for LogFixture {
         )?;
         let elf = Elf::read(&fixture.elf())?;
         anyhow::ensure!(
-            image.tokens.is_empty()
-                && image.sites.is_empty()
+            image.tokens.keys().eq(default.tokens.keys())
                 && in_loaded_section(&elf, "  MemManage: IACCVIOL ")?
                 && !in_loaded_section(&elf, TEXT_ONLY)?
                 && !has_symbol(&elf, TEXT_ONLY_VALUE),
-            "the facade's level-warn alone doesn't print error! without error_text!"
+            "the facade's level-warn alone doesn't record each call and print error! without \
+             error_text!"
         );
 
         log::info!("--- reading an image fails when a message's text is in a loaded section");
         let cfg = "fail_case=\"text_loaded\"";
-        let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &["--cfg", cfg])?;
+        let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &[], &["--cfg", cfg])?;
         anyhow::ensure!(ok, "case text_loaded didn't build:\n{stderr}");
-        let kept = "  MemManage: IACCVIOL ";
-        let error_row = golden
-            .rows()
-            .find(|row| row.key.message == "  MemManage: IACCVIOL {:#x}")
-            .context("the fixture map has no row for the IACCVIOL error")?;
-        let expected = format!(
-            "the text {kept:?} of token {} is in a loaded section",
-            error_row.key.symbol()
-        );
         let error = log_map::read_image("text_loaded", &fixture.elf(), &golden, Output::Records)
             .err()
             .context("the image passed with a message's text in a loaded section")?;
         anyhow::ensure!(
-            format!("{error:#}").contains(&expected),
-            "the image failed without {expected:?}: {error:#}"
+            format!("{error:#}").contains(&loaded),
+            "the image failed without {loaded:?}: {error:#}"
         );
         // A build that asks for text may keep it.
         log_map::read_image("text_loaded", &fixture.elf(), &golden, Output::Text)
@@ -695,28 +756,34 @@ impl Xtask for LogFixture {
              no text"
         );
         let cfg = "fail_case=\"text_hook\"";
-        let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &["--cfg", cfg])?;
+        let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &[], &["--cfg", cfg])?;
         anyhow::ensure!(ok, "case text_hook didn't build:\n{stderr}");
-        let expected = format!("the image defines the text hook {TEXT_HOOK}");
         let error = log_map::read_image("text_hook", &fixture.elf(), &golden, Output::Records)
             .err()
             .context("the image passed with the text hook")?;
         anyhow::ensure!(
-            format!("{error:#}").contains(&expected),
-            "the image failed without {expected:?}: {error:#}"
+            format!("{error:#}").contains(&hook),
+            "the image failed without {hook:?}: {error:#}"
         );
         log_map::read_image("text_hook", &fixture.elf(), &golden, Output::Text)
             .context("the image with the text hook failed as a text image")?;
 
-        log::info!("--- each debug-log check rejects its bad call");
+        log::info!("--- each debug-log check rejects its bad call, with and without text output");
         for (case, expected) in FAIL_CASES {
             let cfg = format!("fail_case=\"{case}\"");
-            let (ok, stderr) = rustc(&fixture.dir, &fixture.scratch, &["--cfg", &cfg])?;
-            anyhow::ensure!(!ok, "case {case} built, but a check should reject it");
-            anyhow::ensure!(
-                expected.iter().any(|e| stderr.contains(e)),
-                "case {case} failed without the expected message {expected:?}:\n{stderr}"
-            );
+            for features in [&[][..], &["--features", TEXT_FEATURE][..]] {
+                let (ok, stderr) =
+                    rustc(&fixture.dir, &fixture.scratch, features, &["--cfg", &cfg])?;
+                anyhow::ensure!(
+                    !ok,
+                    "case {case} built with {features:?}, but a check should reject it"
+                );
+                anyhow::ensure!(
+                    expected.iter().any(|e| stderr.contains(e)),
+                    "case {case} failed with {features:?} without the expected message \
+                     {expected:?}:\n{stderr}"
+                );
+            }
             log::info!("case {case}: rejected");
         }
 
@@ -747,7 +814,7 @@ impl Xtask for LogFixture {
 
         log::info!("--- outside fw/plat/uno, a call that doesn't fit drops with a note");
         let copy = fixture.copy_outside()?;
-        let (ok, stderr) = rustc(&copy, &copy.join("log_map"), &["--cfg", "outside"])?;
+        let (ok, stderr) = rustc(&copy, &copy.join("log_map"), &[], &["--cfg", "outside"])?;
         anyhow::ensure!(
             ok && !stderr.contains("warning"),
             "the fixture's copy in {} didn't build cleanly:\n{stderr}",
@@ -808,10 +875,46 @@ impl Xtask for LogFixture {
             elf.symbol("tsra_log_fixture_uncalled").is_none(),
             "the copy keeps the exported function with no caller"
         );
+
+        log::info!(
+            "--- outside fw/plat/uno, with text output, the same calls drop with their notes, \
+             and each call evaluates its values"
+        );
+        let (ok, stderr) = rustc(
+            &copy,
+            &copy.join("log_map"),
+            &["--features", TEXT_FEATURE],
+            &["--cfg", "outside"],
+        )?;
+        anyhow::ensure!(
+            ok && !stderr.contains("warning"),
+            "the fixture's copy in {} didn't build cleanly with {TEXT_FEATURE}:\n{stderr}",
+            copy.display()
+        );
+        let text = log_map::read_image("outside-text", &path, &golden, Output::Text)?;
+        anyhow::ensure!(
+            text.drops == outside.drops
+                && text.tokens.keys().eq(default.tokens.keys())
+                && text.sites.is_empty(),
+            "with {TEXT_FEATURE}, the copy drops {:#?}, refers to {:#?}, and has markers for \
+             {:?}",
+            text.drops,
+            text.tokens.keys(),
+            text.sites.keys()
+        );
+        let elf = Elf::read(&path)?;
+        for (name, _) in DROPPED_VALUES {
+            anyhow::ensure!(
+                has_symbol(&elf, name),
+                "with {TEXT_FEATURE}, the copy doesn't evaluate {name}"
+            );
+        }
+
         let cfg = "fail_case=\"message_nul\"";
         let (ok, stderr) = rustc(
             &copy,
             &copy.join("log_map"),
+            &[],
             &["--cfg", "outside", "--cfg", cfg],
         )?;
         anyhow::ensure!(

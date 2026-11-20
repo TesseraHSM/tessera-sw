@@ -294,7 +294,7 @@ mod outside {
     }
 
     /// Logs a value of a generic type, which always drops.
-    fn generic<T: Copy>(value: T) {
+    fn generic<T: Copy + core::fmt::Display>(value: T) {
         // drop: a value doesn't convert to u32
         info!("fixture", "a generic value {}", value);
     }

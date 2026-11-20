@@ -58,10 +58,17 @@ impl Xtask for Clippy {
             cmd!(sh, "cargo {toolchain} clippy -- -D warnings").run()?;
         }
 
-        // Log fixture's host crate for code above the PAL (nightly, host target).
+        // Log fixture's host crate for code above the PAL (nightly, host
+        // target), where `cargo xtask log-fixture` copies it, outside
+        // `fw/plat/uno/`. In place, it's Uno code, where its calls that drop
+        // fail to compile.
         {
-            let _dir = sh.push_dir(&fw.log_above_pal_dir);
-            log::info!("Running clippy on log fixture's host crate...");
+            let copy = crate::log_fixture::copy_above_pal(&ctx)?;
+            let _dir = sh.push_dir(&copy);
+            log::info!(
+                "Running clippy on log fixture's host crate, copied to {}...",
+                copy.display()
+            );
             cmd!(sh, "cargo {toolchain} clippy --all-targets -- -D warnings").run()?;
         }
 

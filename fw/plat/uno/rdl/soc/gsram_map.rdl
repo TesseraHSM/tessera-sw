@@ -8,6 +8,7 @@
 // vault. DTCM_IO_BUF is NOT here — it lives in dtcm_map.rdl.
 //
 // Region layout:
+//   0x01000            UART lock (4 B, CP0 and CP1)
 //   0x01110 - 0x012FC  BKS table (device-global, 12 × 41-byte entries)
 //   0x012FC - 0x01360  FIPS provisioned keys (SP KDF key + CP mask key + flag)
 //   0x01360 - 0x013C0  HSM seed table (UDS + FMC-CDI, 2 × 48-byte seeds)
@@ -40,9 +41,27 @@
 // layout. Treat each range with no block as reserved: the HSP firmware,
 // CP0, and other bus masters can use it. Before a new use of such a range,
 // get approval from the owners of the HSP firmware. A new use can be a new,
-// moved, or larger block, a linker script, or an address in code. Give
-// every block an explicit offset.
+// moved, or larger block, a linker script, or an address in code. A block
+// that describes data the HSP firmware already defines for the CP cores,
+// with the same offset, size, and purpose, isn't a new use. Give every
+// block an explicit offset.
 
+
+// ══════════════════════════════════════════════════════════════
+// UART Lock (CP0 and CP1)
+// ══════════════════════════════════════════════════════════════
+//
+// The HSP firmware already defines this 4-byte word at offset 0x1000
+// (abs 0x6100_1000) as a lock for the CP cores, and clears it at reset.
+// CP0 and CP1 share one UART, and as in the reference firmware, each core
+// holds this lock while it prints one line. The block keeps the HSP
+// firmware's offset, size, and purpose, so it isn't a new use of GSRAM.
+
+reg uart_lock_t {
+    name = "UART Lock";
+    desc = "0 when free, 1 while CP0 or CP1 holds the lock.";
+    field { sw = rw; hw = rw; } VAL[31:0] = 0x0;
+};
 
 // ══════════════════════════════════════════════════════════════
 // BKS Table (device-global, SP-populated, read-only)
@@ -796,6 +815,9 @@ addrmap io_gsram {
 
     default hw = na;
     default sw = rw;
+
+    // ─── UART lock (CP0 and CP1 each hold it while printing one line) ───
+    uart_lock_t      UART_LOCK          @ 0x01000;
 
     // ─── BKS table (device-global, SP-populated): 12 × 41-byte entries ───
     bks_table_entry_t BKS_TABLE[12]    @ 0x01110 += 0x29;  // 0x1110 - 0x12FC

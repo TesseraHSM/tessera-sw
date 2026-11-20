@@ -11,11 +11,13 @@
 //! count and task ID. The output destination is selected by the
 //! mutually-exclusive `backend-uart` / `backend-semihosting` features;
 //! with neither enabled the emitter compiles to a no-op (output disabled).
+//! With `backend-uart`, each line holds the UART lock that CP1 shares with
+//! CP0.
 //!
 //! `error_text!` takes the same arguments as `error!`. It prints with text
 //! output, which one of this crate's `level-*` features turns on, and
-//! compiles to nothing otherwise, for lines that no debug-log record can
-//! hold.
+//! compiles to nothing otherwise. It never records, so it suits lines that
+//! no debug-log record can hold.
 //!
 //! # Usage
 //!
@@ -33,9 +35,14 @@
 #[allow(unsafe_code)]
 mod emit;
 
+#[cfg(all(feature = "tracing", feature = "backend-uart"))]
+#[allow(unsafe_code)]
+mod lock;
+
 pub extern crate tsra_fw_hsm_core_tracing as tracing;
 
 /// Prints like `error!` with text output, and compiles to nothing otherwise.
+/// It never records.
 #[macro_export]
 #[cfg(any(
     feature = "level-trace",
@@ -45,9 +52,10 @@ pub extern crate tsra_fw_hsm_core_tracing as tracing;
     feature = "level-error"
 ))]
 macro_rules! error_text {
-    ($($t:tt)*) => { $crate::tracing::error!($($t)*) };
+    ($($t:tt)*) => { $crate::tracing::__text!(error, b'E', $($t)*) };
 }
 /// Prints like `error!` with text output, and compiles to nothing otherwise.
+/// It never records.
 #[macro_export]
 #[cfg(not(any(
     feature = "level-trace",
