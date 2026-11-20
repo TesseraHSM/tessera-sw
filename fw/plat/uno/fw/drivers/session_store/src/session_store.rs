@@ -4,7 +4,8 @@
 //! [`SessionStore`]: the session indirection table. Its persistent state
 //! lives in the raw 18-byte `session_table` region of a partition's
 //! persistent store; the volatile Pending and PSK-change bitmasks live in
-//! the adjacent 2-byte `session_meta` region (cleared on reset).
+//! the adjacent 2-byte `session_meta` region (cleared on reset). Both are
+//! read from the partition store's DTCM copy of them, not from GSRAM.
 
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -15,6 +16,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_part_store::Partition;
+use tsra_fw_uno_drivers_part_store::SessionFieldMut;
 
 /// Maximum concurrent sessions per partition (one bit per slot in the
 /// allocation / renegotiation masks).
@@ -67,30 +69,23 @@ impl SessionTable {
     // ── raw field helpers ────────────────────────────────────────────────
 
     #[inline]
-    fn region(&self) -> &[u8; SESSION_STORE_LEN] {
-        self.0.session_table()
-    }
-
-    #[inline]
-    fn region_mut(&mut self) -> &mut [u8; SESSION_STORE_LEN] {
+    fn region_mut(&mut self) -> SessionFieldMut<'_, SESSION_STORE_LEN> {
         self.0.session_table_mut()
     }
 
     #[inline]
     fn alloc_mask(&self) -> u8 {
-        self.region()[ALLOC_MASK]
+        self.0.session_table_byte(ALLOC_MASK)
     }
 
     #[inline]
     fn renego_mask(&self) -> u8 {
-        self.region()[RENEGO_MASK]
+        self.0.session_table_byte(RENEGO_MASK)
     }
 
     #[inline]
     fn phys_id(&self, slot: usize) -> u16 {
-        let off = PHYS_IDS + slot * 2;
-        let r = self.region();
-        u16::from_le_bytes([r[off], r[off + 1]])
+        self.0.session_table_u16(PHYS_IDS + slot * 2)
     }
 
     #[inline]
@@ -103,7 +98,7 @@ impl SessionTable {
 
     #[inline]
     fn pending_mask(&self) -> u8 {
-        self.0.session_meta()[0]
+        self.0.session_pending_mask()
     }
 
     #[inline]

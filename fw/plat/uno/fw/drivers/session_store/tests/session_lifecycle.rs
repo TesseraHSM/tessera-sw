@@ -18,6 +18,7 @@ use part_store::HsmPartId;
 use part_store::PartResetKind;
 pub use part_store::PartStore;
 pub use part_store::Partition;
+pub use part_store::SessionFieldMut;
 use session_store::SessionStore;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -276,4 +277,32 @@ fn clear_all_releases_active_pending_and_renegotiating_slots() {
     }
     assert!(table.occupied_physical_ids().iter().all(Option::is_none));
     assert_eq!(table.create(HsmKeyId::from(4u16)).unwrap(), renegotiating);
+}
+
+#[test]
+fn lookups_follow_writes_to_the_session_regions() {
+    let pid = HsmPartId::from(57u8);
+    let mut part = PartStore::partition(pid).expect("partition");
+    part.reset();
+    let mut table = SessionStore::partition(pid).expect("sessions");
+    let id = table.create(HsmKeyId::from(7u16)).expect("active");
+    assert_eq!(table.physical_id(id).expect("mapped"), HsmKeyId::from(7u16));
+    assert!(matches!(table.state(id), HsmSessionState::Active));
+
+    let slot = u16::from(id) as usize;
+    part.session_table_mut()[2 + 2 * slot..4 + 2 * slot].copy_from_slice(&9u16.to_le_bytes());
+    assert_eq!(table.physical_id(id).expect("mapped"), HsmKeyId::from(9u16));
+    part.session_meta_mut()[0] = 1 << slot;
+    assert!(matches!(table.state(id), HsmSessionState::Pending));
+
+    // A shadow getter while the guard is held reloads the copy before the
+    // write lands; dropping the guard must drop that copy.
+    let other = part;
+    {
+        let mut meta = part.session_meta_mut();
+        other.state().expect("partition state");
+        meta[0] = 0;
+    }
+    other.state().expect("partition state");
+    assert!(matches!(table.state(id), HsmSessionState::Active));
 }

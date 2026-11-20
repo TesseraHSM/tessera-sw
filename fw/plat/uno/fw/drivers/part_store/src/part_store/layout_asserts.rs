@@ -38,5 +38,9 @@ const _: () =
     assert!(core::mem::offset_of!(Storage, res_mask) + RES_MASK_LEN == SHADOW_HEAD + SHADOW_RUN);
 const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) + 2 <= SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) < SHADOW_TAIL + SHADOW_RUN);
+const _: () = assert!(core::mem::offset_of!(Storage, session_meta) + 2 <= SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(SHADOW_HEAD + SHADOW_RUN <= SHADOW_TAIL);
 const _: () = assert!(SHADOW_TAIL + SHADOW_RUN <= STORE_SIZE);
+// The session-table run starts word-aligned, before the other two.
+const _: () = assert!(SHADOW_SESSION.is_multiple_of(4));
+const _: () = assert!(SHADOW_SESSION + 4 * SESSION_WORDS <= SHADOW_HEAD);
