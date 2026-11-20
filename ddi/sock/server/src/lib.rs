@@ -1666,7 +1666,7 @@ mod tests {
     fn encoded_request(request: &impl TborOpReq) -> Request {
         let mut bytes = vec![0; MAX_DMA_BUFFER as usize];
         let payload = request
-            .encode_request(&mut bytes)
+            .encode_request(&mut bytes, (1, 1))
             .expect("test request")
             .to_vec();
         Request {
@@ -1710,7 +1710,6 @@ mod tests {
 
     #[test]
     fn oob_directions_cover_input_only_commands() {
-        use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
         use tsra_ddi_tbor_types::codec::RequestEncoder;
 
         for opcode in [
@@ -1724,7 +1723,7 @@ mod tests {
             TBOR_OP_SD_RESTORE_REMOTE_BACKUP,
         ] {
             let mut bytes = vec![0; MAX_DMA_BUFFER as usize];
-            let payload = RequestEncoder::new(&mut bytes, PROTOCOL_VERSION, opcode)
+            let payload = RequestEncoder::new(&mut bytes, (1, 1), opcode)
                 .session_id(0)
                 .expect("session field")
                 .finish()
