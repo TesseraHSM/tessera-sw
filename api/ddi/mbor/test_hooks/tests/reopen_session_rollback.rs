@@ -10,9 +10,10 @@
 //!    handles with distinct seeds. Retain partition and session recovery blobs.
 //! 2. Simulate migration with NSSR and restore provisioning using the saved
 //!    partition material, keeping both original handles and logical session IDs.
-//! 3. Reopen the control session, arm TriggerIoFailure, and close that session.
-//!    Reopen the target using its original seed and session BMK; expect
-//!    InvalidKeyType after recreation.
+//! 3. Reopen the control session and prepare the target credentials. Arm
+//!    TriggerIoFailure from the control session, then immediately reopen the
+//!    target using its original seed and session BMK; expect InvalidKeyType
+//!    after recreation. Close the control session.
 //! 4. Probe the target with a session-scoped AES request and expect
 //!    SessionNeedsRenegotiation, confirming rollback restored its prior state.
 //!    Verify the nonce changed and replaying the failed reopen returns NonceMismatch.
@@ -144,10 +145,6 @@ fn test_reopen_session_with_rollback_after_migration() {
                 assert_eq!(control.hdr.status, DdiStatus::Success);
                 assert!(!control.data.bmk_session.is_empty());
 
-                rollback::arm_io_failure(dev, first.data.sess_id);
-                helper_close_session(dev, first_id, rev).expect("close control session");
-                first_id = None;
-
                 let (credential, public) = encrypt_userid_pin_for_open_session(
                     &dev2,
                     TEST_CRED_ID,
@@ -155,6 +152,8 @@ fn test_reopen_session_with_rollback_after_migration() {
                     second_seed,
                 );
                 let nonce = credential.nonce;
+                // The armed failure is consumed by the partition's next IO.
+                rollback::arm_io_failure(dev, first.data.sess_id);
                 let failed = helper_reopen_session(
                     &dev2,
                     second.data.sess_id,
@@ -163,6 +162,8 @@ fn test_reopen_session_with_rollback_after_migration() {
                     public.clone(),
                     second.data.bmk_session,
                 );
+                helper_close_session(dev, first_id, rev).expect("close control session");
+                first_id = None;
                 assert!(
                     matches!(failed, Err(DdiError::DdiStatus(DdiStatus::InvalidKeyType))),
                     "expected failure after recreation, got {failed:?}"

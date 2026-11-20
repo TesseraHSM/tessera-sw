@@ -45,10 +45,10 @@ fn test_unmask_with_rollback_after_exhaust_keys() {
                     )
                     .expect("generate masked input key");
                     keys.push(original.data.key_id);
-                    (original.data.key_id, original.data.masked_key)
+                    rollback::assert_aes_key(dev, session_id, original.data.key_id);
+                    original.data.masked_key
                 },
-                |dev, (original, masked)| {
-                    rollback::assert_aes_key(dev, session_id, *original);
+                |dev, masked| {
                     helper_unmask_key(dev, Some(session_id), rev, *masked)
                         .map(|resp| resp.data.key_id)
                 },

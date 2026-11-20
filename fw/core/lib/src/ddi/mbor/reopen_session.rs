@@ -111,7 +111,6 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
         .session_create(io, &api_rev_bytes, mk_session, Some(reopen_id))
         .await?;
     undo.push_session_rollback_reopen(sess_id)?;
-    pal.check_io_failure(io)?;
 
     // The outer IO owner rolls back handler, DMA, and CQE failures using
     // the dedicated inverse; it must not free this existing logical ID.

@@ -114,7 +114,6 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
         .session_create(io, &api_rev_bytes, mk_session, None)
         .await?;
     undo.push_session_destroy(sess_id)?;
-    pal.check_io_failure(io)?;
 
     // ── Step 9: Encode response + envelope MK_SESSION under BK_SESSION
     //

@@ -55,6 +55,5 @@ pub(crate) async fn commit_key<P: HsmPal>(
         (handle, None)
     };
     undo.push_vault_create(result.0)?;
-    pal.check_io_failure(io)?;
     Ok(result)
 }

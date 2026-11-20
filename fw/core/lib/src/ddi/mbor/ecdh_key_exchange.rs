@@ -97,7 +97,6 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
             )
             .await?;
         undo.push_vault_create(key_id)?;
-        pal.check_io_failure(io)?;
         let key_id: u16 = key_id.into();
 
         // Envelope the derived shared secret into the host's re-import blob.

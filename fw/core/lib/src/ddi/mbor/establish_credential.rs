@@ -242,7 +242,6 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     if let Some(uk_id) = unwrapping_key_id {
         crate::part_state::part_set_unwrapping_key_id(pal, io, uk_id)?;
     }
-    pal.check_io_failure(io)?;
 
     Ok(resp)
 }

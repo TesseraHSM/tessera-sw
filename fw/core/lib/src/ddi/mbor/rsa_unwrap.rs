@@ -253,7 +253,6 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
                     )
                     .await?;
                 undo.push_vault_create(key_id)?;
-                pal.check_io_failure(io)?;
 
                 Ok((key_id, vault_kind))
             },

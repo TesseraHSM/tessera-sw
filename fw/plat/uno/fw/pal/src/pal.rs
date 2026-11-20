@@ -575,6 +575,24 @@ fn is_pcie_reset_event(value: u32) -> bool {
 const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
 
 impl UnoHsmPal {
+    /// Consume the partition's one-shot IO failure, if armed.
+    ///
+    /// Checked by the response allocators, so an armed failure surfaces
+    /// from the next IO's response encode, after its mutations are
+    /// recorded in the undo log, and follows normal command rollback.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) fn take_io_failure(&self, io: &UnoHsmIo) -> HsmResult<()> {
+        if self
+            .io_failure
+            .get(usize::from(u8::from(io.pid())))
+            .ok_or(HsmError::InvalidArg)?
+            .replace(false)
+        {
+            return Err(HsmError::InvalidKeyType);
+        }
+        Ok(())
+    }
+
     /// Returns the current boot phase.
     ///
     /// # Parameters
@@ -1214,19 +1232,6 @@ impl UnoHsmPal {
 /// `crate::test_hooks`; without both, and for TBOR in all cases, uno
 /// claims nothing.
 impl HsmCustomDispatch for UnoHsmPal {
-    fn check_io_failure(&self, _io: &UnoHsmIo) -> HsmResult<()> {
-        #[cfg(feature = "tsra_test_hooks")]
-        if self
-            .io_failure
-            .get(usize::from(u8::from(_io.pid())))
-            .ok_or(HsmError::InvalidArg)?
-            .replace(false)
-        {
-            return Err(HsmError::InvalidKeyType);
-        }
-        Ok(())
-    }
-
     #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
     async fn mbor_dispatch(&self, io: &UnoHsmIo, req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         let future = core::pin::pin!(crate::test_hooks::mbor_dispatch(self, io, req));

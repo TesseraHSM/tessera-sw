@@ -175,7 +175,6 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
                         )
                         .await?;
                     undo.push_vault_create(created)?;
-                    pal.check_io_failure(io)?;
                     Ok(created)
                 })
                 .await?;
