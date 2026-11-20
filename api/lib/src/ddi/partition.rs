@@ -783,7 +783,7 @@ pub(super) fn fetch_cert_chain_checked(
 /// [`get_cert_chain_info_mbor`].
 fn get_cert_chain_info(dev: &HsmDev, rev: HsmApiRev, slot_id: u8) -> HsmResult<(u8, Vec<u8>)> {
     if rev_supports_tbor(rev) {
-        get_cert_chain_info_tbor(dev, slot_id)
+        get_cert_chain_info_tbor(dev, rev, slot_id)
     } else {
         get_cert_chain_info_mbor(dev, rev, slot_id)
     }
@@ -821,7 +821,7 @@ fn get_cert_chain_info_mbor(dev: &HsmDev, rev: HsmApiRev, slot_id: u8) -> HsmRes
 /// least [`TBOR_MIN_API_REV`], otherwise to [`get_cert_mbor`].
 fn get_cert(dev: &HsmDev, rev: HsmApiRev, slot_id: u8, cert_id: u8) -> HsmResult<Vec<u8>> {
     if rev_supports_tbor(rev) {
-        get_cert_tbor(dev, slot_id, cert_id)
+        get_cert_tbor(dev, rev, slot_id, cert_id)
     } else {
         get_cert_mbor(dev, rev, slot_id, cert_id)
     }

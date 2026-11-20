@@ -26,7 +26,7 @@
 //!
 //! * `masked_key` — the private key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
-//! * `pub_key` — the wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
+//! * `pub_key` — the wire public key `x ‖ y` (device byte order; P-521 lanes padded to 4 B on little-endian and 8 B on big-endian devices).
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -41,15 +41,15 @@ pub const TBOR_OP_ECC_GENERATE_KEY: u8 = 0x17;
 /// `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)`.
 pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
-/// Maximum masked ECC private-key envelope length (P-521, 68-byte
+/// Maximum masked ECC private-key envelope length (P-521, up to 72-byte
 /// wire scalar).  Pinned into the `#[tbor(buffer, max_len = 312)]` literal
 /// on [`TborEccGenerateKeyResp::masked_key`].
 pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
-/// Maximum wire public-key length (`x ‖ y`, P-521 little-endian word-padded coordinates).
-/// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
+/// Maximum wire public-key length (`x ‖ y`, P-521 8-byte-padded big-endian lanes).
+/// Pinned into the `#[tbor(buffer, max_len = 144)]` literal on
 /// [`TborEccGenerateKeyResp::pub_key`].
-pub const ECC_PUB_KEY_MAX_LEN: usize = 136;
+pub const ECC_PUB_KEY_MAX_LEN: usize = 144;
 
 /// ECC curve selector on the TBOR wire.
 ///
@@ -113,8 +113,8 @@ pub struct TborEccGenerateKeyResp<'a> {
     pub masked_key: &'a [u8],
 
     /// The wire public key `x ‖ y` in device byte order: 64 / 96 B for
-    /// P-256 / P-384; 132 B (big-endian) or 136 B (little-endian) for P-521.
-    #[tbor(buffer, max_len = 136)]
+    /// P-256 / P-384; 144 B (big-endian) or 136 B (little-endian) for P-521.
+    #[tbor(buffer, max_len = 144)]
     pub pub_key: &'a [u8],
 }
 
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn request_round_trips_scope_and_curve() {
         let mut buf = [0u8; 256];
-        let frame = TborEccGenerateKeyReq::encode(&mut buf)
+        let frame = TborEccGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(5))
             .unwrap()
@@ -154,7 +154,7 @@ mod tests {
         let mut buf = [0u8; 512];
         let masked = [0xABu8; MASKED_ECC_KEY_MAX_LEN];
         let pub_key = [0xCDu8; ECC_PUB_KEY_MAX_LEN];
-        let frame = TborEccGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborEccGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn lengths_match_pinned_values() {
         const _: () = assert!(312 == MASKED_ECC_KEY_MAX_LEN);
-        const _: () = assert!(136 == ECC_PUB_KEY_MAX_LEN);
+        const _: () = assert!(144 == ECC_PUB_KEY_MAX_LEN);
         assert_eq!(MASKED_ECC_KEY_MIN_LEN, 264);
         assert_eq!(MASKED_ECC_KEY_MAX_LEN, 312);
     }

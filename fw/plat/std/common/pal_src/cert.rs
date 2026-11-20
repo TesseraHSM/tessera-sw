@@ -8,7 +8,7 @@
 //! | Index | Certificate | Scope |
 //! |-------|-------------|-------|
 //! | 0 | Root CA (self-signed) | Shared |
-//! | 1 | DeviceId CA (Intermediate, path_len=1) | Shared |
+//! | 1 | DeviceId CA (Intermediate, path_len=1, DICE layer 0, Tessera EKU) | Shared |
 //! | 2 | Alias CA (Intermediate, path_len=0) | Shared |
 //! | 3 | Partition Id Leaf | Per-partition (on-demand) |
 //!
@@ -23,6 +23,13 @@
 //! they bypass it entirely. The trait impl ([`HsmCertStore`]) at the
 //! bottom of this file is the only path the core uses.
 
+use der::asn1::AnyRef;
+use der::asn1::ContextSpecific;
+use der::Encode;
+use der::Reader;
+use der::SliceReader;
+use der::Tag;
+use der::TagNumber;
 use tsra_crypto::x509_builder::cert_builder;
 use tsra_crypto::x509_builder::cert_builder::*;
 use tsra_crypto::EccCurve;
@@ -32,6 +39,7 @@ use tsra_crypto::HashAlgo;
 use tsra_crypto::PrivateKey;
 
 use super::*;
+use crate::drivers::ecc::EccForm;
 use crate::part::NUM_PARTITIONS;
 use crate::part::P384_PUB_KEY_LEN;
 use crate::StdHsmPal;
@@ -50,6 +58,14 @@ const LEAF_CN: &str = "TSRA Partition";
 
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
+
+const DEVICEID_EXTENSIONS: &[u8] = &[
+    // tcg-dice-TcbInfo (2.23.133.5.4.1): SEQUENCE { layer [4] IMPLICIT INTEGER 0 }.
+    0x30, 0x0F, 0x06, 0x06, 0x67, 0x81, 0x05, 0x05, 0x04, 0x01, 0x04, 0x05, 0x30, 0x03, 0x84, 0x01,
+    0x00, // ExtendedKeyUsage (2.5.29.37): Tessera device (1.3.6.1.4.1.311.102.1.50.1).
+    0x30, 0x16, 0x06, 0x03, 0x55, 0x1D, 0x25, 0x04, 0x0F, 0x30, 0x0D, 0x06, 0x0B, 0x2B, 0x06, 0x01,
+    0x04, 0x01, 0x82, 0x37, 0x66, 0x01, 0x32, 0x01,
+];
 
 /// Maximum DER-encoded certificate size.
 pub(crate) const MAX_CERT_DER_LEN: usize = 2048;
@@ -130,6 +146,41 @@ fn patch_tbs_intermediate(tbs: &mut [u8], params: &IntermediateCertParams<'_>) {
     tbs[AUTHORITY_KEY_ID_OFFSET..AUTHORITY_KEY_ID_OFFSET + 20]
         .copy_from_slice(params.authority_key_id);
     tbs[PATH_LEN_OFFSET] = params.path_len;
+}
+
+/// Extend the DeviceId TBS before signing, without changing the Alias CA profile.
+fn deviceid_tbs(tbs: &[u8]) -> der::Result<Vec<u8>> {
+    let extensions_tag = Tag::ContextSpecific {
+        constructed: true,
+        number: TagNumber::N3,
+    };
+    let mut reader = SliceReader::new(tbs)?;
+    let body = reader.sequence(|fields| {
+        let mut body = Vec::new();
+        while fields.peek_tag()? != extensions_tag {
+            body.extend_from_slice(fields.tlv_bytes()?);
+        }
+        let extensions = ContextSpecific::<AnyRef<'_>>::decode_explicit(fields, TagNumber::N3)?
+            .ok_or(der::ErrorKind::Value {
+                tag: extensions_tag,
+            })?;
+        let mut values = extensions
+            .value
+            .sequence(|r| Ok(r.read_slice(r.remaining_len())?.to_vec()))?;
+        values.extend_from_slice(DEVICEID_EXTENSIONS);
+        let sequence = encode_der_value(Tag::Sequence, &values)?;
+        body.extend_from_slice(&encode_der_value(extensions_tag, &sequence)?);
+        Ok(body)
+    })?;
+    reader.finish(())?;
+    encode_der_value(Tag::Sequence, &body)
+}
+
+fn encode_der_value(tag: Tag, value: &[u8]) -> der::Result<Vec<u8>> {
+    let value = AnyRef::new(tag, value)?;
+    let mut out = vec![0u8; value.encoded_len()?.try_into()?];
+    value.encode_to_slice(&mut out)?;
+    Ok(out)
 }
 
 fn patch_tbs_leaf(tbs: &mut [u8], params: &LeafCertParams<'_>) {
@@ -262,11 +313,11 @@ impl StdHsmPal {
         };
         let mut tbs = tsra_crypto::x509_builder::intermediate_cert::TBS_TEMPLATE;
         patch_tbs_intermediate(&mut tbs, &deviceid_params);
+        let tbs = deviceid_tbs(&tbs).map_err(|_| HsmError::InternalError)?;
         let (r, s) = self.hash_and_sign(&root_kp.priv_key, &tbs).await?;
         let mut deviceid_cert = [0u8; MAX_CERT_DER_LEN];
-        let deviceid_cert_len =
-            cert_builder::build_intermediate_cert(&deviceid_params, &r, &s, &mut deviceid_cert)
-                .ok_or(HsmError::InternalError)?;
+        let deviceid_cert_len = cert_builder::assemble_cert(&tbs, &r, &s, &mut deviceid_cert)
+            .ok_or(HsmError::InternalError)?;
 
         // --- Alias CA ---
         let alias_serial = make_serial(3);
@@ -326,7 +377,7 @@ impl StdHsmPal {
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
         let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
         self.ecc
-            .pub_coords(&pub_key, HsmByteOrder::Be, &mut pub_raw)
+            .pub_coords(&pub_key, EccForm::BE, &mut pub_raw)
             .await?;
         let priv_len = pk.hsm_bytes_len();
         let mut priv_key = vec![0u8; priv_len];
@@ -402,7 +453,7 @@ impl StdHsmPal {
         };
         let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
         self.ecc
-            .pub_coords(&public_key, HsmByteOrder::Be, &mut pub_raw)
+            .pub_coords(&public_key, EccForm::BE, &mut pub_raw)
             .await?;
         let uncompressed = to_uncompressed(&pub_raw);
 
@@ -574,7 +625,86 @@ impl HsmCertStore for StdHsmPal {
 
 #[cfg(test)]
 mod tests {
+    use der::asn1::ObjectIdentifier;
+    use der::asn1::OctetStringRef;
+    use der::Decode;
+    use der::Tagged;
+
     use super::*;
+
+    fn certificate_extensions(cert: &[u8]) -> der::Result<Vec<(ObjectIdentifier, &[u8])>> {
+        AnyRef::from_der(cert)?.sequence(|certificate| {
+            let values = certificate.sequence(|fields| {
+                for _ in 0..7 {
+                    fields.tlv_bytes()?;
+                }
+                let extensions =
+                    ContextSpecific::<AnyRef<'_>>::decode_explicit(fields, TagNumber::N3)?
+                        .ok_or(der::ErrorKind::Value { tag: Tag::Sequence })?;
+                extensions.value.sequence(|reader| {
+                    let mut values = Vec::new();
+                    while !reader.is_finished() {
+                        values.push(reader.sequence(|ext| {
+                            let oid = ObjectIdentifier::decode(ext)?;
+                            if ext.peek_tag()? == Tag::Boolean {
+                                bool::decode(ext)?;
+                            }
+                            let value = OctetStringRef::decode(ext)?;
+                            Ok((oid, value.as_bytes()))
+                        })?);
+                    }
+                    Ok(values)
+                })
+            })?;
+            certificate.tlv_bytes()?;
+            certificate.tlv_bytes()?;
+            Ok(values)
+        })
+    }
+
+    #[tokio::test]
+    async fn deviceid_certificate_has_layer_zero_and_tessera_eku() -> HsmResult<()> {
+        let (_, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.init_cert_store().await?;
+
+        let tcb_oid = ObjectIdentifier::new_unwrap("2.23.133.5.4.1");
+        let eku_oid = ObjectIdentifier::new_unwrap("2.5.29.37");
+        let tessera_oid = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.311.102.1.50.1");
+        for idx in 0..3 {
+            let cert = pal.cert_store().shared_cert(idx).expect("shared cert");
+            let extensions = certificate_extensions(cert).expect("certificate extensions");
+            let tcb = extensions.iter().find(|(oid, _)| *oid == tcb_oid);
+            let eku = extensions.iter().find(|(oid, _)| *oid == eku_oid);
+            if idx != 1 {
+                assert!(tcb.is_none(), "only DeviceId should assert DICE layer 0");
+                assert!(eku.is_none(), "only DeviceId should have the Tessera EKU");
+                continue;
+            }
+
+            let layer = AnyRef::from_der(tcb.expect("DICE TCB Info").1)
+                .expect("TCB SEQUENCE")
+                .sequence(AnyRef::decode)
+                .expect("DICE layer");
+            assert_eq!(
+                layer.tag(),
+                Tag::ContextSpecific {
+                    constructed: false,
+                    number: TagNumber::N4,
+                }
+            );
+            assert_eq!(layer.value(), &[0]);
+
+            assert_eq!(
+                AnyRef::from_der(eku.expect("EKU").1)
+                    .expect("EKU SEQUENCE")
+                    .sequence(ObjectIdentifier::decode)
+                    .expect("Tessera EKU OID"),
+                tessera_oid
+            );
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn unsupported_slots_and_banks_reject_metadata_queries_and_certificate_reads() {

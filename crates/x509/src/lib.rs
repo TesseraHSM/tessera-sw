@@ -4,6 +4,8 @@
 //! This module implements utilities for parsing and interacting with X509
 //! certificates.
 
+mod extensions;
+
 #[cfg(target_os = "linux")]
 use openssl::pkey::PKey;
 #[cfg(target_os = "linux")]
@@ -32,6 +34,9 @@ pub enum X509CertificateError {
 
     #[error("Failed to parse DER-encoded certificate")]
     DerParseError,
+
+    #[error("Failed to parse certificate extensions")]
+    ExtensionParseError,
 
     #[error("Failed to verify certificate chain")]
     VerifyError,
@@ -64,7 +69,19 @@ pub trait X509CertificateOp {
     fn from_der(der_bytes: &[u8]) -> Result<X509Certificate, X509CertificateError>;
     fn get_public_key_der(&self) -> Result<Vec<u8>, X509CertificateError>;
     fn from_pem_stack(pem_bytes: &[u8]) -> Result<Vec<X509Certificate>, X509CertificateError>;
-    fn validate_chain(&self, chain: &[X509Certificate]) -> Result<bool, X509CertificateError>;
+    fn validate_chain(&self, chain: &[X509Certificate]) -> Result<bool, X509CertificateError> {
+        self.verified_chain(chain).map(|path| path.is_some())
+    }
+
+    /// Validate signatures, validity and CA constraints, returning the actual
+    /// leaf-to-root path selected by the platform, or `None` if invalid.
+    ///
+    /// Supplied certificates are not necessarily on that path. The caller must
+    /// authenticate its root independently; this does not establish root trust.
+    fn verified_chain(
+        &self,
+        chain: &[X509Certificate],
+    ) -> Result<Option<Vec<X509Certificate>>, X509CertificateError>;
 }
 
 /// A struct representing an X509 certificate.
@@ -359,7 +376,10 @@ impl X509CertificateOp for X509Certificate {
 
     /// Validate the chain of certificates from the leaf (self) up to but not
     /// including the root (last certificate in chain slice). This aligns with the openssl implementation.
-    fn validate_chain(&self, chain: &[X509Certificate]) -> Result<bool, X509CertificateError> {
+    fn verified_chain(
+        &self,
+        chain: &[X509Certificate],
+    ) -> Result<Option<Vec<X509Certificate>>, X509CertificateError> {
         // Convert leaf cert to CERT_CONTEXT
         let leaf_context = self.create_cert_context()?;
 
@@ -424,9 +444,43 @@ impl X509CertificateOp for X509Certificate {
             // We allow untrusted roots to align with openssl implementation, and only validate the chain up to the root cert
             // CERT_TRUST_IS_UNTRUSTED_ROOT means the root is not in Windows trust store and is not self signed
             if chain_trust_status == 0 || chain_trust_status == CERT_TRUST_IS_UNTRUSTED_ROOT {
-                return Ok(true);
+                // SAFETY: CertGetCertificateChain owns these arrays and their
+                // certificate contexts until chain_context is dropped. Copy DER
+                // before releasing them; never return borrowed native pointers.
+                let path = unsafe {
+                    let context = &*chain_context.ptr;
+                    if context.cChain != 1 || context.rgpChain.is_null() {
+                        return Err(X509CertificateError::VerifyError);
+                    }
+                    let simple = (*context.rgpChain)
+                        .as_ref()
+                        .ok_or(X509CertificateError::VerifyError)?;
+                    if simple.cElement == 0 || simple.rgpElement.is_null() {
+                        return Err(X509CertificateError::VerifyError);
+                    }
+                    let mut path = Vec::new();
+                    for index in 0..simple.cElement as usize {
+                        let element = (*simple.rgpElement.add(index))
+                            .as_ref()
+                            .ok_or(X509CertificateError::VerifyError)?;
+                        let certificate = element
+                            .pCertContext
+                            .as_ref()
+                            .ok_or(X509CertificateError::VerifyError)?;
+                        if certificate.pbCertEncoded.is_null() || certificate.cbCertEncoded == 0 {
+                            return Err(X509CertificateError::VerifyError);
+                        }
+                        let der = std::slice::from_raw_parts(
+                            certificate.pbCertEncoded,
+                            certificate.cbCertEncoded as usize,
+                        );
+                        path.push(Self::from_der(der)?);
+                    }
+                    path
+                };
+                return Ok(Some(path));
             } else {
-                return Ok(false);
+                return Ok(None);
             }
         }
 
@@ -516,7 +570,10 @@ impl X509CertificateOp for X509Certificate {
 
     /// Validate the chain of certificates from the leaf (self) up to but not
     /// including the root (last certificate in chain slice). This aligns with the windows implementation.
-    fn validate_chain(&self, chain: &[X509Certificate]) -> Result<bool, X509CertificateError> {
+    fn verified_chain(
+        &self,
+        chain: &[X509Certificate],
+    ) -> Result<Option<Vec<X509Certificate>>, X509CertificateError> {
         // Build a Store that holds root CA
         let mut store_builder =
             X509StoreBuilder::new().map_err(|_| X509CertificateError::StoreInitError)?;
@@ -539,10 +596,28 @@ impl X509CertificateOp for X509Certificate {
         let mut store_ctx =
             X509StoreContext::new().map_err(|_| X509CertificateError::StoreInitError)?;
         let result = store_ctx
-            .init(&store, &self.cert, &stack, |ctx| ctx.verify_cert())
+            .init(&store, &self.cert, &stack, |ctx| {
+                if !ctx.verify_cert()? {
+                    return Ok(None);
+                }
+                Ok(ctx
+                    .chain()
+                    .map(|path| path.iter().map(|cert| cert.to_owned()).collect::<Vec<_>>()))
+            })
             .map_err(|_| X509CertificateError::VerifyError)?;
 
-        Ok(result)
+        result
+            .map(|path| {
+                path.into_iter()
+                    .map(|cert| {
+                        let der = cert
+                            .to_der()
+                            .map_err(|_| X509CertificateError::DerParseError)?;
+                        Ok(Self { der, cert })
+                    })
+                    .collect()
+            })
+            .transpose()
     }
 }
 

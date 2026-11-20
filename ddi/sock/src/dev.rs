@@ -443,6 +443,30 @@ enum CloseLeakedSessionOutcome {
 }
 
 impl DdiSockDev {
+    /// Recreate the emulator partition, discarding credentials and session
+    /// reservations. Unlike `erase` (NSSR), this is not live migration.
+    pub fn factory_reset(&self) -> DdiResult<()> {
+        self.reset_partition(RequestFrame::FactoryReset)
+    }
+
+    fn reset_partition(&self, request: RequestFrame) -> DdiResult<()> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let mut stream = self.stream.lock();
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        request.write_to(&mut *stream).map_err(map_proto_err)?;
+        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
+            ResponseFrame::Reset { status: 0 } => Ok(()),
+            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
+            _ => Err(map_proto_err(ProtoError::Malformed(
+                "expected reset response",
+            ))),
+        }
+    }
+
     /// Connect to the server at `path` (a Unix socket path, `tcp://HOST:PORT`,
     /// or `vsock://CID:PORT` endpoint).
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
@@ -717,8 +741,8 @@ impl DdiSockDev {
         status: u32,
         dst_len: usize,
     ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
-        if status != 0 {
-            return Err(DdiError::DdiError(status));
+        if let Some(error) = DdiError::from_tbor_completion_status(status) {
+            return Err(error);
         }
 
         // Each output item must come back exactly once with its requested length.
@@ -870,6 +894,7 @@ impl DdiSockDev {
     /// response. Returns the bytes of each [`OobItem::Out`].
     fn exec_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Vec<OobItem>,
     ) -> DdiResult<(T::OpResp, Vec<Vec<u8>>)> {
@@ -879,7 +904,7 @@ impl DdiSockDev {
 
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
-            let bytes = req.encode_request(buf.as_mut_slice())?;
+            let bytes = req.encode_request(buf.as_mut_slice(), api_rev)?;
             bytes.len()
         };
         buf.truncate(req_len);
@@ -904,7 +929,7 @@ impl DdiSockDev {
         }
 
         // ── 3. Decode the typed response.
-        let resp = <T::OpResp>::decode_response(&resp_buf)?;
+        let resp = <T::OpResp>::decode_response_for_api_rev(&resp_buf, api_rev)?;
         Ok((resp, out_items))
     }
 
@@ -1158,6 +1183,7 @@ impl DdiDev for DdiSockDev {
 
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
@@ -1167,18 +1193,20 @@ impl DdiDev for DdiSockDev {
             .iter()
             .map(|item| OobItem::In(item.to_vec()))
             .collect();
-        self.exec_tbor(req, oob_items).map(|(resp, _)| resp)
+        self.exec_tbor(api_rev, req, oob_items)
+            .map(|(resp, _)| resp)
     }
 
     /// TBOR exec path with device-writable out-of-band items. Output
     /// buffers travel as lengths; the server returns their contents.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        let (resp, out_items) = self.exec_tbor(req, wire_oob_items(oob_items)?)?;
+        let (resp, out_items) = self.exec_tbor(api_rev, req, wire_oob_items(oob_items)?)?;
         copy_oob_outputs(oob_items, out_items);
         Ok(resp)
     }
@@ -1350,26 +1378,7 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        if self.retired.load(Ordering::Acquire) {
-            return Err(self.retired_err());
-        }
-        let mut stream = self.stream.lock();
-        // See `exchange`'s matching recheck: a cleanup on another clone
-        // may have retired the connection after the check above but
-        // before this lock was acquired.
-        if self.retired.load(Ordering::Acquire) {
-            return Err(self.retired_err());
-        }
-        RequestFrame::Reset
-            .write_to(&mut *stream)
-            .map_err(map_proto_err)?;
-        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
-            ResponseFrame::Reset { status: 0 } => Ok(()),
-            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
-            _ => Err(map_proto_err(ProtoError::Malformed(
-                "expected reset response",
-            ))),
-        }
+        self.reset_partition(RequestFrame::Reset)
     }
 
     fn discover(&self) -> DdiResult<DdiDeviceInfo> {

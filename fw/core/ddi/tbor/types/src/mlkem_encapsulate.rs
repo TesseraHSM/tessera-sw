@@ -80,7 +80,7 @@ mod tests {
     fn request_round_trips_fields() {
         let mut buf = [0u8; 4096];
         let pub_key = [0x11u8; MLKEM_PUB_KEY_MAX_LEN];
-        let frame = TborMlKemEncapsulateReq::encode(&mut buf)
+        let frame = TborMlKemEncapsulateReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -98,7 +98,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let ciphertext = [0x22u8; MLKEM_CIPHERTEXT_MAX_LEN];
         let secret = [0x33u8; MASKED_MLKEM_SHARED_SECRET_MAX_LEN];
-        let frame = TborMlKemEncapsulateResp::encode(&mut buf, 0, true)
+        let frame = TborMlKemEncapsulateResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .ciphertext(&ciphertext)
             .unwrap()

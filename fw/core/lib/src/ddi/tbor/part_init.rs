@@ -345,11 +345,7 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     // KeyReport `pk_x`/`pk_y`) expects standard SEC1 big-endian.
     // Convert in place so `pub_sec1` is canonical SEC1
     // (`0x04 || X_be || Y_be`).
-    byte_order::pair_to_be(
-        P::BYTE_ORDER,
-        tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
-        pub_xy,
-    )?;
+    byte_order::pair_to_be::<P>(tsra_fw_hsm_pal_traits::HsmEccCurve::P384, pub_xy)?;
     Ok(PtaKeypair {
         priv_scalar,
         pub_sec1,
@@ -623,7 +619,7 @@ fn encode_response(
     pta_report_bytes: &[u8],
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartInitResp::encode(buf, 0, false)?
+        let frame = TborPartInitResp::encode_for_request(buf, 0, false)?
             .pta_csr(pta_csr_bytes)?
             .pta_report(pta_report_bytes)?
             .finish();
@@ -920,8 +916,8 @@ pub(crate) mod kdf {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let curve = HsmEccCurve::P384;
-        let priv_len = curve.wire_coord_len(P::BYTE_ORDER);
-        let pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+        let priv_len = curve.wire_coord_len(P::ECC_COORD_PAD);
+        let pub_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
 
         if root.len() != PART_ROOT_LEN {
             return Err(HsmError::InvalidArg);

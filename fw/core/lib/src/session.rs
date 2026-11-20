@@ -12,12 +12,15 @@ use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
+use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::APP_ID_LEN;
+use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
 use tsra_fw_hsm_pal_traits::PSK_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 
@@ -88,9 +91,47 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
     )
     .await?;
     if binding[4 + APP_ID_LEN..] != digest[..] {
+        if role == HsmSessionRole::CryptoUser {
+            psk.copy_from_slice(&DEFAULT_PSK_CU);
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                psk,
+                HsmDigestForm::Standard,
+                Some(digest),
+            )
+            .await?;
+            if binding[4 + APP_ID_LEN..] == digest[..] {
+                return Err(HsmError::DefaultPskChanged);
+            }
+        }
         return Err(HsmError::SessionAuthFailure);
     }
     Ok(())
+}
+
+/// Apply CU credential policy to the bulk path, which bypasses TBOR dispatch.
+pub(crate) async fn validate_bulk_session<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    let id = HsmSessId::from(io.sqe().session_id().ok_or(HsmError::SessionNotFound)?);
+    if id.role() != HsmSessionRole::CryptoUser {
+        return Ok(());
+    }
+    match pal.session_auth_binding(io, id) {
+        Ok(_) => {}
+        // Legacy MBOR sessions have no SessionEx binding and retain
+        // their existing bulk authorization and key-binding rules.
+        Err(HsmError::InvalidPermissions) => return Ok(()),
+        Err(err) => return Err(err),
+    }
+    pal.alloc_scoped_async(io, async |alloc| {
+        let binding = copy_auth_binding(pal, io, alloc, id)?;
+        validate_auth_binding(pal, io, alloc, id, binding).await?;
+        if crate::part_state::part_psk_is_default(pal, io, 1)? {
+            return Err(HsmError::DefaultPskMustRotate);
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Returns the public AppId bound to `sess_id`'s partition PSK slot.
@@ -103,11 +144,8 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
 /// itself is public by design (it is surfaced in attestation
 /// reports such as PTAReport).
 ///
-/// Combined with the dispatcher's post-`ChangePsk` "drained
-/// session" gate, the returned value is stable for the lifetime of
-/// the session: once a session has rotated its PSK the only
-/// admissible follow-up is `CloseSession`, so no handler can ever
-/// observe a post-rotation AppId.
+/// Callers must validate the session's authentication binding under the
+/// partition credential lock before using the current credential's AppId.
 ///
 /// # Parameters
 ///

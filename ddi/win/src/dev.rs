@@ -1018,6 +1018,7 @@ impl DdiDev for DdiWinDev {
     /// represented by an NVMe SGL Data Block descriptor.
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         cookie: &mut Option<DdiCookie>,
@@ -1027,7 +1028,7 @@ impl DdiDev for DdiWinDev {
             .iter()
             .map(|item| TborOobItem::In(item))
             .collect();
-        self.exec_op_tbor_oob(req, &mut items, cookie)
+        self.exec_op_tbor_oob(api_rev, req, &mut items, cookie)
     }
 
     /// Execute a TBOR command whose OOB items may be written by the device.
@@ -1037,6 +1038,7 @@ impl DdiDev for DdiWinDev {
     /// item for device writes for [`TborOobItem::Out`] results to land.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
@@ -1064,7 +1066,7 @@ impl DdiDev for DdiWinDev {
 
         // -- 1. Encode the TBOR request --------------------------------
         let mut req_buf = [0u8; REQ_BUF_LEN];
-        let req_bytes = req.encode_request(&mut req_buf)?;
+        let req_bytes = req.encode_request(&mut req_buf, api_rev)?;
         let req_len = req_bytes.len();
 
         // Do not log raw request bytes: TBOR requests can carry
@@ -1208,8 +1210,8 @@ impl DdiDev for DdiWinDev {
             Err(DdiError::WinError(ioctl_out_buffer.ioctl_status))?;
         }
 
-        if ioctl_out_buffer.status != 0 {
-            Err(DdiError::DdiError(ioctl_out_buffer.status))?;
+        if let Some(error) = DdiError::from_tbor_completion_status(ioctl_out_buffer.status) {
+            return Err(error);
         }
 
         // -- 4. Decode the typed TBOR response --------------------
@@ -1225,7 +1227,9 @@ impl DdiDev for DdiWinDev {
         // sensitive data depending on opcode.
         tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
 
-        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+        Ok(<T::OpResp>::decode_response_for_api_rev(
+            resp_bytes, api_rev,
+        )?)
     }
 
     /// Execute AES GCM operation (encryption/decryption) with slice-based buffers

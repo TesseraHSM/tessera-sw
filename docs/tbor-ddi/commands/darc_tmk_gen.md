@@ -43,14 +43,14 @@ rejected with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entry, then the (empty)
+Wire layout: 12-byte header, followed by the TOC entry, then the (empty)
 data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
 
 ### Data section
 
@@ -58,15 +58,15 @@ _Empty — the session id is carried inline within its TOC entry._
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
+Wire layout: 12-byte header, followed by the TOC entry, then the data
 section carrying the masked TMK.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_tmk` | `buffer` (164 B) | The minted TMK, masked (AEAD-GCM-256) under the SDMK: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(32) ‖ tag(16)`. Recorded under the `DarcTmk` key kind. Byte-identical envelope to `DarcTmkImport`'s output. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_tmk` | `buffer` (164 B) | The minted TMK, masked (AEAD-GCM-256) under the SDMK: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(32) ‖ tag(16)`. Recorded under the `DarcTmk` key kind. Byte-identical envelope to `DarcTmkImport`'s output. |
 
 ### Data section
 

@@ -68,7 +68,7 @@ mod tests {
     fn request_encodes_slot_id() {
         let req = TborGetCertChainInfoReq::new(3);
         let mut buf = [0u8; 64];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame.contains(&3u8), "encoded frame must carry the slot id",);
     }
 }

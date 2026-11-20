@@ -58,23 +58,23 @@ pub const TBOR_OP_DARC_KEY_UNWRAP: u8 = 0x22;
 pub const DARC_UNWRAP_WRAPPED_KEY_MAX_LEN: usize = 512;
 
 /// Max masked recovered-key envelope length: an AES-256-GCM `MaskedKey`
-/// envelope around the largest EC vault scalar (P-521, 68 B) —
-/// `header(8) + iv(16) + MaskedKeyMetadata aad(192) + ct(68) + tag(16)`
+/// envelope around the largest EC vault scalar (P-521, up to 72 B) —
+/// `header(8) + iv(16) + MaskedKeyMetadata aad(192) + ct(<= 80) + tag(16)`
 /// = 312 B.  Pinned into the `#[tbor(buffer, max_len = 312)]` literal on
 /// [`TborDarcKeyUnwrapResp::masked_key`].
 pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
-/// Max recovered public-key length (P-521 wire `x ‖ y`, each up to 68 B).
-/// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
+/// Max recovered public-key length (P-521 wire `x ‖ y`, each up to 72 B).
+/// Pinned into the `#[tbor(buffer, max_len = 144)]` literal on
 /// [`TborDarcKeyUnwrapResp::pub_key`].
-pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 2 * 68;
+pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 2 * 72;
 
 // Tripwires: keep the public length constants in lock-step with the
 // `#[tbor(buffer, max_len = ...)]` literals below (the derive requires
 // integer literals, so the two cannot share a symbol).
 const _: () = assert!(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN == 512);
 const _: () = assert!(DARC_UNWRAP_MASKED_KEY_MAX_LEN == 312);
-const _: () = assert!(DARC_UNWRAP_PUB_KEY_MAX_LEN == 136);
+const _: () = assert!(DARC_UNWRAP_PUB_KEY_MAX_LEN == 144);
 const _: () = assert!(MASKED_TMK_LEN == 264);
 
 /// `DarcKeyUnwrap` request schema.
@@ -130,7 +130,7 @@ pub struct TborDarcKeyUnwrapResp<'a> {
     /// `#[tbor(mutable)]` so the handler can reserve the slot and derive
     /// the wire public key straight into it (`decode_mut`) — no scratch
     /// buffer, no copy.
-    #[tbor(buffer, max_len = 136, mutable)]
+    #[tbor(buffer, max_len = 144, mutable)]
     pub pub_key: &'a [u8],
 }
 
@@ -147,7 +147,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked_tmk = [0x5Au8; MASKED_TMK_LEN];
         let wrapped = [0xA5u8; 240];
-        let frame = TborDarcKeyUnwrapReq::encode(&mut buf)
+        let frame = TborDarcKeyUnwrapReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -174,8 +174,8 @@ mod tests {
     fn response_round_trips_fields() {
         let mut buf = [0u8; 1024];
         let masked = [0xABu8; 200];
-        let pub_key = [0xCDu8; 136];
-        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, 0, true)
+        let pub_key = [0xCDu8; 144];
+        let frame = TborDarcKeyUnwrapResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .key_kind(14)
             .unwrap()

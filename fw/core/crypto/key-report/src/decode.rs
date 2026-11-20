@@ -250,8 +250,15 @@ where
     minicbor::encode(&sig_struct_val, crate::codec::as_mut_slice(sig_struct))
         .map_err(|_| HsmError::InternalError)?;
 
-    // SHA-384 in the operand order `ecc_verify` consumes.
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
+    // `ecc_verify` consumes `r ‖ s ‖ digest` in operand order. The COSE
+    // signature stores `r || s` big-endian per half.
+    if view.signature.len() != SIGNATURE_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let input = alloc.dma_alloc(SIGNATURE_LEN + SHA384_LEN)?;
+    let (sig, digest) = input.split_at_mut(SIGNATURE_LEN);
+    sig.copy_from_slice(view.signature);
+    sig_halves_swap(P::BYTE_ORDER, sig)?;
     pal.hash(
         io,
         HsmHashAlgo::Sha384,
@@ -261,20 +268,12 @@ where
     )
     .await?;
 
-    // The COSE signature stores `r || s` big-endian per half; a
-    // big-endian PAL verifies it in place, otherwise convert a copy.
-    if view.signature.len() != SIGNATURE_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let sig: &HsmDmaBuf = if P::BYTE_ORDER.is_be() {
-        view.signature
-    } else {
-        let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
-        sig.copy_from_slice(view.signature);
-        sig_halves_swap(P::BYTE_ORDER, sig)?;
-        sig
-    };
-
-    pal.ecc_verify(io, HsmEccCurve::P384, signer_pub, digest, sig)
-        .await
+    pal.ecc_verify(
+        io,
+        HsmEccCurve::P384,
+        HsmHashAlgo::Sha384,
+        signer_pub,
+        input,
+    )
+    .await
 }

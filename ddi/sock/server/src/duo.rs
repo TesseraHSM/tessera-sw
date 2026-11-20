@@ -66,6 +66,8 @@ pub(super) async fn execute_submission(
     let session_id = sqe.session_id();
     let open_init = RequestView::parse(&submission.payload)
         .is_ok_and(|view| view.opcode() == TBOR_OP_SESSION_OPEN_INIT);
+    let plain_close =
+        RequestView::parse(&submission.payload).is_ok_and(|view| view.opcode() == 0x05);
     match sqe.op() {
         // The session's GCM keys already bind secure traffic to its owner;
         // this just fails foreign IDs early, like Uno.
@@ -93,9 +95,29 @@ pub(super) async fn execute_submission(
             }
             response
         }
+        Ok(DuoOp::Tbor) if plain_close => {
+            let mut sessions = server.sessions.write().await;
+            if !state.owns_session(session_id, &sessions) {
+                return rejected(TRANSPORT_SESSION_NOT_OWNED);
+            }
+            let response = execute_frame(Arc::clone(&server), request).await;
+            if let ResponseFrame::Submit(response) = &response
+                && succeeded(response)
+                && tsra_ddi_tbor_types::codec::ResponseView::parse(&response.payload)
+                    .is_ok_and(|view| view.status() == 0)
+            {
+                sessions.remove(&session_id);
+                state.sessions.retain(|session| session.id != session_id);
+            }
+            response
+        }
         Ok(DuoOp::Tbor) if open_init => {
             // Serialize slot allocation with ownership publication.
             let mut sessions = server.sessions.write().await;
+            let reopen = tbor_reopen_target(&submission.payload);
+            if reopen.is_some_and(|id| !state.owns_session(id, &sessions)) {
+                return rejected(TRANSPORT_SESSION_NOT_OWNED);
+            }
             let response = execute_frame(Arc::clone(&server), request).await;
             if let ResponseFrame::Submit(response) = &response
                 && succeeded(response)
@@ -104,16 +126,22 @@ pub(super) async fn execute_submission(
                 // A reused slot moves to this connection; the previous
                 // owner's lease goes stale.
                 let id = init.session_id;
-                let generation = Arc::new(());
-                sessions.insert(
-                    id,
-                    SessionOwner {
-                        generation: Arc::clone(&generation),
-                        state: SessionState::Active,
-                    },
-                );
-                state.sessions.retain(|session| session.id != id);
-                state.sessions.push(SessionLease { id, generation });
+                if reopen == Some(id) {
+                    if let Some(owner) = sessions.get_mut(&id) {
+                        owner.state = SessionState::Recovering;
+                    }
+                } else {
+                    let generation = Arc::new(());
+                    sessions.insert(
+                        id,
+                        SessionOwner {
+                            generation: Arc::clone(&generation),
+                            state: SessionState::Active,
+                        },
+                    );
+                    state.sessions.retain(|session| session.id != id);
+                    state.sessions.push(SessionLease { id, generation });
+                }
             }
             response
         }
@@ -213,7 +241,8 @@ mod tests {
     use tsra_ddi_tbor_types::TborApiRevResp;
     use tsra_ddi_tbor_types::TborOpReq;
     use tsra_ddi_tbor_types::TborSessionOpenInitReq;
-    use tsra_session_ex_crypto::generate_vm_ephemeral;
+    use tsra_session_ex_crypto::SessionInitiator;
+    use tsra_session_ex_crypto::SessionSuite;
 
     use super::*;
     use crate::test_duo_hsm as duo_hsm;
@@ -240,7 +269,10 @@ mod tests {
 
     fn tbor(op: DuoOp, session_id: u16, request: &impl TborOpReq) -> RequestFrame {
         let mut buf = [0u8; 1024];
-        let payload = request.encode_request(&mut buf).expect("encode").to_vec();
+        let payload = request
+            .encode_request(&mut buf, (2, 0))
+            .expect("encode")
+            .to_vec();
         RequestFrame::Submit(Request {
             sqe: sqe(op, session_id, payload.len()),
             payload,
@@ -268,8 +300,10 @@ mod tests {
     async fn open_init(connection: &Connection) -> u16 {
         let request = TborSessionOpenInitReq {
             psk_id: 0,
-            session_type: 1,
-            pk_init: generate_vm_ephemeral().expect("VM ephemeral").pk_sec1,
+            pk_init: SessionInitiator::generate(SessionSuite::EcdhP384, (2, 0))
+                .expect("ephemeral")
+                .pk_init()
+                .to_vec(),
             ..Default::default()
         };
         let response = submit(connection, tbor(DuoOp::Tbor, 0, &request)).await;

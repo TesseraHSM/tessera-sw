@@ -16,34 +16,38 @@
 //!
 //! * `session_id` — TOC-carried session id; cross-checked by the dispatcher.
 //! * `masked_key` — the masked ECC private key (unmasked in place).
-//! * `digest` — the pre-computed message digest in device byte order.
-//!   Its length must be a supported SHA-2 digest length
-//!   (32 / 48 / 64 B); the hash algorithm is inferred from that length, so
-//!   no separate algorithm selector is carried on the wire.
+//! * `hash_algo` — the [`HashAlgo`] that produced the digest: SHA-256,
+//!   SHA-384 or SHA-512.
+//! * `input` — the packed ECDSA operand `k ‖ digest`, in device byte order:
+//!   a zero `k` lane of the curve's wire coordinate length (the device
+//!   generates `k`), then the digest at the start of a zero-padded lane of
+//!   `max(coordinate length, digest length rounded up to the lane pad)`.
+//!   The device signs straight from it.
 //!
 //! Outputs:
 //!
 //! * `signature` — raw `r ‖ s`, each component in device byte order and
 //!   sized to the curve's wire coordinate length (`r ‖ s` is 64 / 96 B for
-//!   P-256 / P-384; 132 B big-endian or 136 B little-endian for P-521).
+//!   P-256 / P-384; 144 B big-endian or 136 B little-endian for P-521).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
 pub use crate::ecc_generate_key::MASKED_ECC_KEY_MAX_LEN;
 pub use crate::ecc_generate_key::MASKED_ECC_KEY_MIN_LEN;
+use crate::key_props::HashAlgo;
 
 /// TBOR opcode for `EccSign`.
 pub const TBOR_OP_ECC_SIGN: u8 = 0x18;
 
-/// Maximum digest length (bytes) accepted by `EccSign` — the SHA-512
-/// digest.  Pinned into the `#[tbor(buffer, max_len = 64)]` literal on
-/// [`TborEccSignReq::digest`].
-pub const ECC_DIGEST_MAX_LEN: usize = 64;
+/// Maximum packed `k ‖ digest` input length (bytes): P-521 with 8-byte
+/// padded lanes.  Pinned into the `#[tbor(align = 4, buffer, max_len = 144,
+/// mutable)]` literal on [`TborEccSignReq::input`].
+pub const ECC_SIGN_INPUT_MAX_LEN: usize = 144;
 
-/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 little-endian word-padded).  Pinned
-/// into the `#[tbor(buffer, max_len = 136)]` literal on
+/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 8-byte-padded big-endian lanes).  Pinned
+/// into the `#[tbor(buffer, max_len = 144)]` literal on
 /// [`TborEccSignResp::signature`].
-pub const ECC_SIG_MAX_LEN: usize = 136;
+pub const ECC_SIG_MAX_LEN: usize = 144;
 
 /// `EccSign` request schema.
 ///
@@ -56,16 +60,20 @@ pub struct TborEccSignReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
+    /// Digest algorithm, 1-byte [`HashAlgo`].
+    #[tbor(U8)]
+    pub hash_algo: HashAlgo,
+
     /// The masked ECC private key (from `EccGenerateKey` / `UnwrapKey`), an
     /// AEAD-GCM-256 envelope of 264..=312 B.  Its kind recovers the curve.
     #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The pre-computed message digest in device byte order. Its
-    /// length must be a supported SHA-2 digest length (32 / 48 / 64 B); the
-    /// hash algorithm is inferred from that length.
-    #[tbor(buffer, max_len = 64)]
-    pub digest: &'a [u8],
+    /// The packed `k ‖ digest` operand in device byte order (see the module
+    /// docs).  `mutable` and word-aligned so the device signs from it in
+    /// place.
+    #[tbor(align = 4, buffer, max_len = 144, mutable)]
+    pub input: &'a [u8],
 }
 
 /// `EccSign` response schema.
@@ -73,8 +81,8 @@ pub struct TborEccSignReq<'a> {
 pub struct TborEccSignResp<'a> {
     /// Raw ECDSA `r ‖ s`, each component in device byte order and sized to
     /// the curve wire coordinate length: 64 / 96 B for P-256 / P-384;
-    /// 132 B (big-endian) or 136 B (little-endian) for P-521.
-    #[tbor(buffer, max_len = 136, mutable)]
+    /// 144 B (big-endian) or 136 B (little-endian) for P-521.
+    #[tbor(buffer, max_len = 144, mutable)]
     pub signature: &'a [u8],
 }
 
@@ -90,24 +98,27 @@ mod tests {
     fn request_round_trips_fields() {
         let mut buf = [0u8; 512];
         let masked = [0x11u8; MASKED_ECC_KEY_MIN_LEN];
-        let digest = [0x22u8; 32];
-        let frame = TborEccSignReq::encode(&mut buf)
+        let input = [0x22u8; 64];
+        let frame = TborEccSignReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
+            .hash_algo(HashAlgo::Sha256)
+            .unwrap()
             .masked_key(&masked)
             .unwrap()
-            .digest(&digest)
+            .input(&input)
             .unwrap()
             .finish();
-        assert_eq!(frame.digest(), &digest[..]);
+        assert_eq!(frame.hash_algo(), HashAlgo::Sha256);
+        assert_eq!(frame.input(), &input[..]);
     }
 
     #[test]
     fn response_round_trips_signature() {
         let mut buf = [0u8; 256];
         let sig = [0x33u8; ECC_SIG_MAX_LEN];
-        let frame = TborEccSignResp::encode(&mut buf, 0, true)
+        let frame = TborEccSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&sig)
             .unwrap()
@@ -117,9 +128,9 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(64 == ECC_DIGEST_MAX_LEN);
-        const _: () = assert!(136 == ECC_SIG_MAX_LEN);
-        assert_eq!(ECC_DIGEST_MAX_LEN, 64);
-        assert_eq!(ECC_SIG_MAX_LEN, 136);
+        const _: () = assert!(144 == ECC_SIGN_INPUT_MAX_LEN);
+        const _: () = assert!(144 == ECC_SIG_MAX_LEN);
+        assert_eq!(ECC_SIGN_INPUT_MAX_LEN, 144);
+        assert_eq!(ECC_SIG_MAX_LEN, 144);
     }
 }

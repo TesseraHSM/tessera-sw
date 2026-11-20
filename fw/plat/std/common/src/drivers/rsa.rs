@@ -47,6 +47,7 @@
 //! On real Cortex-M7 hardware, these operations would be offloaded
 //! to a PKA (Public Key Accelerator) engine via DMA.
 
+use tsra_crypto::DecodeOp;
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::HashAlgo;
@@ -55,12 +56,15 @@ use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaKeyOp;
+use tsra_crypto::RsaPadPkcs1EncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
+use tsra_crypto::SignOp;
 use tsra_crypto::Verifier;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
+use zeroize::Zeroizing;
 
 use crate::worker::WorkerPool;
 
@@ -248,7 +252,7 @@ impl StdRsa {
         priv_key: &RsaPrivateKey,
         y: &[u8],
         out_len: usize,
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<Zeroizing<Vec<u8>>> {
         // Operands are in PAL order; OpenSSL is big-endian.
         let mut y_be = y.to_vec();
         byte_order::int_to_be(self.order, &mut y_be);
@@ -264,7 +268,7 @@ impl StdRsa {
         self.pool
             .submit_with_result(async move {
                 let mut algo = RsaEncryptAlgo::with_no_padding();
-                let mut buf = vec![0u8; out_len];
+                let mut buf = Zeroizing::new(vec![0u8; out_len]);
                 algo.decrypt(&key, &y_be, Some(&mut buf))
                     .map_err(|_| HsmError::RsaDecryptFailed)?;
                 Ok::<_, HsmError>(buf)
@@ -316,6 +320,132 @@ impl StdRsa {
         byte_order::int_copy_from_be(self.order, y, &result)
     }
 
+    /// Convert an operand-order `n || e(4)` public key to the big-endian
+    /// form [`RsaPublicKey::from_hsm_bytes`] parses.
+    fn pub_key_be(&self, k: usize, pub_key: &[u8]) -> HsmResult<Vec<u8>> {
+        if pub_key.len() != k + RSA_PUB_EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut public = pub_key.to_vec();
+        byte_order::int_to_be(self.order, &mut public[..k]);
+        byte_order::int_to_be(self.order, &mut public[k..]);
+        Ok(public)
+    }
+
+    /// Encrypt `message` under an operand-order `n || e(4)` key with
+    /// PKCS#1 v1.5 padding, or OAEP padding when `oaep` is
+    /// `Some((hash, label))`. Writes the modulus-sized ciphertext to
+    /// `out` in operand order.
+    ///
+    /// # Errors
+    /// - [`HsmError::InvalidArg`] — key length mismatch.
+    /// - [`HsmError::RsaEncryptFailed`] — key parse or encryption failed.
+    pub async fn encrypt(
+        &self,
+        key_size: HsmRsaKey,
+        pub_key: &[u8],
+        message: &[u8],
+        oaep: Option<(HashAlgo, Option<Vec<u8>>)>,
+        out: &mut [u8],
+    ) -> HsmResult<()> {
+        let k = key_size.modulus_len();
+        let public = self.pub_key_be(k, pub_key)?;
+        let message = Zeroizing::new(message.to_vec());
+        let result = self
+            .pool
+            .submit_with_result(async move {
+                let key = <RsaPublicKey as tsra_crypto::ImportableHsmKey>::from_hsm_bytes(&public)
+                    .map_err(|_| HsmError::InvalidArg)?;
+                let mut algo = match &oaep {
+                    Some((hash, label)) => {
+                        RsaEncryptAlgo::with_oaep_padding(hash.clone(), label.as_deref())
+                    }
+                    None => RsaEncryptAlgo::with_pkcs1_padding(),
+                };
+                let mut buf = vec![0u8; k];
+                let len = algo
+                    .encrypt(&key, &message, Some(&mut buf))
+                    .map_err(|_| HsmError::RsaEncryptFailed)?;
+                if len != k {
+                    return Err(HsmError::RsaEncryptFailed);
+                }
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+        byte_order::int_copy_from_be(self.order, out, &result)
+    }
+
+    /// PKCS#1 v1.5 decrypt (EME-PKCS1-v1_5) of an operand-order ciphertext.
+    ///
+    /// Unpads in software after a raw private-key operation rather than
+    /// using OpenSSL's padded decrypt: OpenSSL 3.2+ applies implicit
+    /// rejection and returns a synthetic plaintext for bad padding,
+    /// whereas the PAL contract (and the hardware PAL) report an error.
+    ///
+    /// # Errors
+    /// - [`HsmError::InvalidArg`] — ciphertext out of range, or `output`
+    ///   too small for the recovered message.
+    /// - [`HsmError::RsaDecryptFailed`] — padding check failed.
+    pub async fn pkcs1_decrypt(
+        &self,
+        priv_key: &RsaPrivateKey,
+        ciphertext: &[u8],
+        output: &mut [u8],
+    ) -> HsmResult<usize> {
+        let em = self
+            .mod_exp_priv_result(priv_key, ciphertext, ciphertext.len())
+            .await?;
+        let mut decoded = <RsaPadPkcs1EncryptAlgo as DecodeOp>::from_bytes(&em, ())
+            .map_err(|_| HsmError::RsaDecryptFailed)?;
+        let message = decoded.message_mut();
+        let len = message.len();
+        let result = match output.get_mut(..len) {
+            Some(dst) => {
+                dst.copy_from_slice(message);
+                Ok(len)
+            }
+            None => Err(HsmError::InvalidArg),
+        };
+        zeroize::Zeroize::zeroize(message);
+        result
+    }
+
+    /// Sign a pre-computed `digest` with PKCS#1 v1.5 padding, or PSS
+    /// padding when `salt_len` is `Some`. Writes the modulus-sized
+    /// signature to `out` in operand order.
+    ///
+    /// # Errors
+    /// - [`HsmError::RsaSignFailed`] — signing failed.
+    pub async fn sign(
+        &self,
+        priv_key: &RsaPrivateKey,
+        hash: HashAlgo,
+        digest: &[u8],
+        salt_len: Option<usize>,
+        out: &mut [u8],
+    ) -> HsmResult<()> {
+        let key = priv_key.clone();
+        let digest = digest.to_vec();
+        let k = out.len();
+        let result = self
+            .pool
+            .submit_with_result(async move {
+                let mut algo = match salt_len {
+                    Some(len) => RsaSignAlgo::with_pss_padding(hash, len),
+                    None => RsaSignAlgo::with_pkcs1_padding(hash),
+                };
+                let mut buf = vec![0u8; k];
+                let len = SignOp::sign(&mut algo, &key, &digest, Some(&mut buf))
+                    .map_err(|_| HsmError::RsaSignFailed)?;
+                if len != k {
+                    return Err(HsmError::RsaSignFailed);
+                }
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+        byte_order::int_copy_from_be(self.order, out, &result)
+    }
+
     /// Verify a digest using an operand-order `n || e(4)` key and signature.
     /// The digest is a standard byte string. `salt_len` selects PSS when
     /// present, and PKCS#1 v1.5 otherwise.
@@ -333,16 +463,13 @@ impl StdRsa {
             .checked_sub(hash.size())
             .and_then(|len| len.checked_sub(2))
             .ok_or(HsmError::InvalidArg)?;
-        if pub_key.len() != k + RSA_PUB_EXP_WIRE_LEN
-            || signature.len() != k
+        if signature.len() != k
             || digest.len() != hash.size()
             || salt_len.is_some_and(|len| len > max_salt)
         {
             return Err(HsmError::InvalidArg);
         }
-        let mut public = pub_key.to_vec();
-        byte_order::int_to_be(self.order, &mut public[..k]);
-        byte_order::int_to_be(self.order, &mut public[k..]);
+        let public = self.pub_key_be(k, pub_key)?;
         let mut signature = signature.to_vec();
         byte_order::int_to_be(self.order, &mut signature);
         let digest = digest.to_vec();

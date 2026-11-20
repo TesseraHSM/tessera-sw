@@ -11,7 +11,7 @@ pub struct DupReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = DupReq::encode(&mut buf).unwrap()
+    let _ = DupReq::encode(&mut buf, (1, 1)).unwrap()
         .a(1).unwrap()
         .a(2).unwrap() // ERROR: `a` not available on State1
         .b(3).unwrap()

@@ -39,7 +39,10 @@ use tsra_ddi_tbor_test_harness::pqc::ML_DSA_87;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_1024;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_768;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_types::ecc_sign_hash_algo;
+use tsra_ddi_tbor_types::ecc_sign_input;
 use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
@@ -604,15 +607,26 @@ impl<'e> Worker<'e> {
         let keys = &env.keys.ecc[&curve];
         let (k, m) = self.rotate(keys.len(), self.pools.digests.len());
         let key = &keys[k];
+        let digest = &self.pools.digests[m][..len];
+        let input = match ecc_sign_input(key.pub_le.len() / 2, wire_coord_len(1), digest) {
+            Ok(input) => input,
+            Err(error) => {
+                return (
+                    Duration::ZERO,
+                    Err(format!("invalid ECC signing input: {error}")),
+                )
+            }
+        };
         let req = TborEccSignReq {
             session_id: env.session_id,
+            hash_algo: ecc_sign_hash_algo(len).expect("SHA-2 digest length"),
             masked_key: key.masked.clone(),
-            digest: self.pools.digests[m][..len].to_vec(),
+            input,
         };
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
         let result = resp.and_then(|r| {
             if verify {
-                verify_wire_ecdsa(&key.pub_le, &r.signature, &req.digest)
+                verify_wire_ecdsa(&key.pub_le, &r.signature, digest)
             } else {
                 Ok(())
             }

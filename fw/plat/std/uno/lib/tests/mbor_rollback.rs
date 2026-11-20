@@ -41,6 +41,7 @@ use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -184,10 +185,16 @@ async fn check_cqe_boundary(op: DdiOp, kind: DdiKeyType) {
         DdiOp::EcdhKeyExchange => {
             let curve = HsmEccCurve::P256;
             let private_key = pal
-                .dma_alloc(&control_io, curve.wire_priv_key_len(StdHsmPal::BYTE_ORDER))
+                .dma_alloc(
+                    &control_io,
+                    curve.wire_priv_key_len(StdHsmPal::ECC_COORD_PAD),
+                )
                 .expect("private key");
             let public_key = pal
-                .dma_alloc(&control_io, curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER))
+                .dma_alloc(
+                    &control_io,
+                    curve.wire_pub_key_len(StdHsmPal::ECC_COORD_PAD),
+                )
                 .expect("public key");
             pal.alloc_scoped_async(&control_io, async |_alloc| {
                 pal.ecc_gen_keypair(
@@ -1200,22 +1207,35 @@ async fn encode_establish_request(
         tsra_fw_hsm_core::part_state::part_id_pub_key(pal, io, &mut identity_sec1[1..])
             .await
             .expect("identity public key");
-        let digest = pal.dma_alloc(io, 48).expect("POTA digest");
+        let curve = HsmEccCurve::P384;
+        let pad = StdHsmPal::ECC_COORD_PAD;
+        let sign_input = pal
+            .dma_alloc(io, curve.ecdsa_sign_input_len(HsmHashAlgo::Sha384, pad))
+            .expect("POTA sign input");
+        let coord = curve.wire_coord_len(pad);
         pal.hash(
             io,
             HsmHashAlgo::Sha384,
             identity_sec1,
             HsmDigestForm::Operand,
-            Some(digest),
+            Some(&mut sign_input[coord..]),
         )
         .await
         .expect("hash identity");
         let pota_private = pal.dma_alloc(io, 48).expect("POTA private key");
         pota_private.copy_from_slice(&fixture.pota_private);
         let signature = pal.dma_alloc(io, 96).expect("POTA signature");
-        pal.ecc_sign(io, HsmEccCurve::P384, pota_private, digest, Some(signature))
-            .await
-            .expect("endorse identity");
+        pal.ecc_sign(
+            io,
+            curve,
+            HsmHashAlgo::Sha384,
+            pota_private,
+            HsmEcdsaNonce::Generated,
+            sign_input,
+            Some(signature),
+        )
+        .await
+        .expect("endorse identity");
 
         let public_buf = pal.dma_alloc(io, public.len()).expect("host public key");
         public_buf.copy_from_slice(public);

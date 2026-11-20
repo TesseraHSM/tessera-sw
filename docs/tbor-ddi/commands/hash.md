@@ -37,10 +37,10 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `algo` | `u8` (inline) | Digest algorithm ([`HashAlgo`]): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512, `7` = SHAKE128, `8` = SHAKE256. |
-| 16 | `out_len` | `u16` (inline, optional) | SHAKE output length, 1 to 256 bytes; required for SHAKE, absent (`none`) for the fixed-length digests. |
-| 20 | `msg` | `buffer` (≤ 3072 B) | The message to hash. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `algo` | `u8` (inline) | Digest algorithm ([`HashAlgo`]): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512, `7` = SHAKE128, `8` = SHAKE256. |
+| 20 | `out_len` | `u16` (inline, optional) | SHAKE output length, 1 to 256 bytes; required for SHAKE, absent (`none`) for the fixed-length digests. |
+| 24 | `msg` | `buffer` (≤ 3072 B) | The message to hash. |
 
 ### Data section
 
@@ -48,8 +48,8 @@ Carries the message bytes.
 
 The 3072-byte cap holds an ML-DSA-87 public key (2592 B), so `tr` for an
 external ML-DSA `μ` can be computed here, and keeps the whole request
-within 4 KiB.  Worst-case frame: staged `132 + 3072 = 3204` B and encoded
-`8 + 4*4 + 3072 = 3096` B.
+within 4 KiB. The request is encoded directly with its paired TOC footprint:
+`12 + 4*4 + 3072 = 3100` B.
 
 ## Response
 
@@ -57,7 +57,7 @@ within 4 KiB.  Worst-case frame: staged `132 + 3072 = 3204` B and encoded
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `digest` | `buffer` (≤ 256 B) | The natural (big-endian) digest, exactly the algorithm's length (20 / 32 / 48 / 64 B), or `out_len` bytes of SHAKE output. |
+| 12 | `digest` | `buffer` (≤ 256 B) | The natural (big-endian) digest, exactly the algorithm's length (20 / 32 / 48 / 64 B), or `out_len` bytes of SHAKE output. |
 
 ### Data section
 

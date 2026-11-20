@@ -66,6 +66,12 @@ cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234
 
 Wait for its listening message. In a second terminal, run five iterations:
 
+First set `$env:TSRA_ROOT_SPKI_SHA384` to the 96 hexadecimal digits of the
+independently enrolled root certificate's DER SPKI SHA-384 digest. This is
+required and must not be learned from the untrusted connection. The simulator
+generates a new root on server restart; enroll that new root through a trusted
+test setup before reconnecting.
+
 ```powershell
 .\target\debug\tsra_api_sock_ecc384_loop_cpp.exe tcp://127.0.0.1:1234 5
 ```

@@ -46,26 +46,26 @@ owner chain still fails. The wire layout is unchanged.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | Receiver's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `RcvrPriv`. The same key both opens the source and authenticates the reseal; never a vault handle. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key thumbprint anchors both evidence chains. |
-| 24 | `src_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source **sender** manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
-| 28 | `src_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender owner certificate-chain descriptors. |
-| 32 | `src_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender partition-owner certificate-chain descriptors. |
-| 36 | `src_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Source sender attestation-report (COSE_Sign1) descriptor; its attested key is `SndrPub`. |
-| 40 | `dest_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination **receiver** manufacturer certificate-chain descriptors (from the `dest_evidence` field group). |
-| 44 | `dest_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver owner certificate-chain descriptors. |
-| 48 | `dest_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver partition-owner certificate-chain descriptors. |
-| 52 | `dest_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Destination receiver attestation-report (COSE_Sign1) descriptor; its attested key is `DstRcvrPub`. |
-| 56 | `src_remote_backup` | `buffer` (fixed 161 B) | Source remote backup to reseal: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_sealing_key` | `buffer` (fixed 276 B) | Receiver's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `RcvrPriv`. The same key both opens the source and authenticates the reseal; never a vault handle. `MASKED_SEALING_KEY_LEN` (276 B). |
+| 24 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key thumbprint anchors both evidence chains. |
+| 28 | `src_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source **sender** manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
+| 32 | `src_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender owner certificate-chain descriptors. |
+| 36 | `src_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender partition-owner certificate-chain descriptors. |
+| 40 | `src_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Source sender attestation-report (COSE_Sign1) descriptor; its attested key is `SndrPub`. |
+| 44 | `dest_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination **receiver** manufacturer certificate-chain descriptors (from the `dest_evidence` field group). |
+| 48 | `dest_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver owner certificate-chain descriptors. |
+| 52 | `dest_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver partition-owner certificate-chain descriptors. |
+| 56 | `dest_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Destination receiver attestation-report (COSE_Sign1) descriptor; its attested key is `DstRcvrPub`. |
+| 60 | `src_remote_backup` | `buffer` (fixed 161 B) | Source remote backup to reseal: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
 
 The two four-entry descriptor blocks are spliced in by the shared
 [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs) field group
@@ -85,14 +85,14 @@ two `KeyReport`s and their certificate chains) travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
+Wire layout: 12-byte header, followed by the TOC entry, then the data
 section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `dst_remote_backup` | `buffer` (fixed 161 B) | Resealed remote backup: an HPKE-Auth seal of the same BKS3 to `DstRcvrPub` under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). Each reseal re-randomizes the HPKE ephemeral, so the ciphertext differs from `src_remote_backup` and between calls. |
+| 12 | `dst_remote_backup` | `buffer` (fixed 161 B) | Resealed remote backup: an HPKE-Auth seal of the same BKS3 to `DstRcvrPub` under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). Each reseal re-randomizes the HPKE ephemeral, so the ciphertext differs from `src_remote_backup` and between calls. |
 
 ### Data section
 

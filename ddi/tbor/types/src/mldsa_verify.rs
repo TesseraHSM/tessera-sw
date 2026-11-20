@@ -91,14 +91,14 @@ mod tests {
             signature: alloc::vec![0x33u8; MLDSA_SIGNATURE_MAX_LEN],
         };
         let mut buf = [0u8; 8192];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame
                 .windows(MLDSA_MU_LEN)
                 .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
             "encoded frame must carry mu",
         );
-        // header(8) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
-        assert_eq!(frame.len(), 7307);
+        // header(12) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
+        assert_eq!(frame.len(), 7311);
     }
 }

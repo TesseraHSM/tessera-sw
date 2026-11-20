@@ -1263,6 +1263,7 @@ impl HsmPalFeatures for UnoHsmPal {
 /// Uno PKA operands are little-endian (word-padded P-521 slots).
 impl HsmCryptoOrder for UnoHsmPal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
 }
 
 impl HsmPal for UnoHsmPal {
@@ -1365,12 +1366,16 @@ impl HsmPal for UnoHsmPal {
             SocResetType::WarmReset | SocResetType::FwUpdateWarmReset => {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
-                // preserved as-is and only Gate 1 is re-armed.
+                // preserved as-is; only Gate 1 and the session transport
+                // epochs are advanced.
                 info!(
                     "boot",
                     "init: reset=warm/fwupdate -> keep store, rearm gate1"
                 );
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
+                // Surviving sessions keep their keys but their DTCM message
+                // counters restarted: move to a fresh sequence-number epoch.
+                tsra_fw_uno_drivers_part_store::PartStore::bump_transport_epochs();
             }
         }
         boot_status::set(BootStatus::Done);

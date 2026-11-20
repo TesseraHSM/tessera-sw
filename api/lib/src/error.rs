@@ -112,6 +112,12 @@ pub enum HsmError {
     CryptoCptSwWarn = -77,
     /// Authentication of a masked key's AES-GCM envelope failed.
     MaskedKeyAuthenticationFailed = -78,
+    /// Bootstrap sessions must rotate the public default PSK before use.
+    DefaultPskMustRotate = -79,
+    /// The CU default PSK changed; close and reopen with the new credential.
+    DefaultPskChanged = -80,
+    /// This session already committed its one permitted PSK change.
+    PskChangeAlreadyUsed = -81,
     Panic = i32::MIN,
 }
 

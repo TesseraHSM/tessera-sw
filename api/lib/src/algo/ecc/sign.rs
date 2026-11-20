@@ -42,7 +42,7 @@ impl HsmEccSignAlgo {
         if !session.is_ex() {
             return Err(HsmError::UnsupportedApiRevision);
         }
-        Self::default().hash_algo(data)?;
+        let hash_algo = Self::default().hash_algo(data)?;
         let (_, curve) = Self::masked_key_info(masked_key)?;
         let expected_len = curve.signature_size();
         let Some(signature) = signature else {
@@ -51,7 +51,7 @@ impl HsmEccSignAlgo {
         if signature.len() < expected_len {
             return Err(HsmError::BufferTooSmall);
         }
-        ddi::ecc_sign_masked_tbor(session, masked_key, curve, data, signature)
+        ddi::ecc_sign_masked_tbor(session, masked_key, curve, data, hash_algo, signature)
     }
 
     /// Infers the hash algorithm from hash data length.

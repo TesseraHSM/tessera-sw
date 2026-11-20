@@ -24,12 +24,12 @@ use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
-use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 
+use crate::commands::common::sign_req;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant.
@@ -41,8 +41,8 @@ fn coord_sizes(pub_len: usize) -> (usize, usize) {
     match pub_len {
         64 => (32, 32),
         96 => (48, 48),
-        132 => (66, 66),
         136 => (68, 66),
+        144 => (72, 66),
         other => panic!("unexpected public key length {other}"),
     }
 }
@@ -108,11 +108,12 @@ fn ecc_sign_roundtrip_verifies_on_host() {
                 .collect();
 
             let resp = ctx
-                .tbor(&TborEccSignReq {
-                    session_id: session.session_id,
-                    masked_key: key.masked_key.clone(),
-                    digest: digest.clone(),
-                })
+                .tbor(&sign_req(
+                    session.session_id,
+                    key.masked_key.clone(),
+                    key.pub_key.len() / 2,
+                    &digest,
+                ))
                 .expect("EccSign");
 
             assert!(

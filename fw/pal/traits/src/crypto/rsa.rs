@@ -16,6 +16,15 @@
 //! key material. Each PAL implementation is responsible for parsing
 //! them into whatever internal representation it needs.
 //!
+//! ## Key buffer alignment
+//!
+//! Hardware engines require RSA key material to start
+//! at a **4-byte aligned** address, with **`roundup8(len)`** bytes of
+//! readable memory behind it. Callers must uphold this; implementations
+//! may rely on it. PAL allocations are 4-byte aligned, and keys unmasked
+//! in place from a masked-key blob meet both requirements (see the
+//! masked-key format in `tsra_fw_core_crypto_key_masking`).
+//!
 //! ## Modular exponentiation
 //!
 //! RSA signing and decryption are expressed as private-key modular

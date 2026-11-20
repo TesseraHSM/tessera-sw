@@ -24,7 +24,7 @@ use crate::toc::*;
 #[derive(Debug)]
 pub struct RequestEncoder<'a> {
     buf: &'a mut [u8],
-    version: u8,
+    api_rev: (u16, u16),
     opcode: u8,
     toc_words: [u32; MAX_TOC_ENTRIES],
     toc_count: usize,
@@ -33,10 +33,10 @@ pub struct RequestEncoder<'a> {
 
 impl<'a> RequestEncoder<'a> {
     /// Create a new request encoder writing into `buf`.
-    pub fn new(buf: &'a mut [u8], version: u8, opcode: u8) -> Self {
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), opcode: u8) -> Self {
         Self {
             buf,
-            version,
+            api_rev,
             opcode,
             toc_words: [0u32; MAX_TOC_ENTRIES],
             toc_count: 0,
@@ -176,10 +176,10 @@ impl<'a> RequestEncoder<'a> {
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
         }
 
-        // Write header as a single u32.
-        let hdr = u32::from_le_bytes([self.version, 0x00, (self.toc_count - 1) as u8, self.opcode]);
-        self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
-        self.buf[4..8].fill(0);
+        self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+        self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+        self.buf[4..8].copy_from_slice(&[(self.toc_count - 1) as u8, self.opcode, 0, 0]);
+        self.buf[8..12].fill(0);
 
         // Write TOC entries.
         for i in 0..self.toc_count {
@@ -231,7 +231,7 @@ impl<'a> RequestEncoder<'a> {
 #[derive(Debug)]
 pub struct ResponseEncoder<'a> {
     buf: &'a mut [u8],
-    version: u8,
+    api_rev: (u16, u16),
     flags: u8,
     status: u32,
     toc_words: [u32; MAX_TOC_ENTRIES],
@@ -241,10 +241,10 @@ pub struct ResponseEncoder<'a> {
 
 impl<'a> ResponseEncoder<'a> {
     /// Create a new response encoder.
-    pub fn new(buf: &'a mut [u8], version: u8, status: u32, fips_approved: bool) -> Self {
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), status: u32, fips_approved: bool) -> Self {
         Self {
             buf,
-            version,
+            api_rev,
             flags: if fips_approved { 0x01 } else { 0x00 },
             status,
             toc_words: [0u32; MAX_TOC_ENTRIES],
@@ -382,10 +382,10 @@ impl<'a> ResponseEncoder<'a> {
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
         }
 
-        // Write header as two u32 words.
-        let hdr0 = u32::from_le_bytes([self.version, self.flags, (self.toc_count - 1) as u8, 0x00]);
-        self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
-        self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
+        self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+        self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+        self.buf[4..8].copy_from_slice(&[(self.toc_count - 1) as u8, self.flags, 0, 0]);
+        self.buf[8..12].copy_from_slice(&self.status.to_le_bytes());
 
         // Write TOC entries.
         for i in 0..self.toc_count {

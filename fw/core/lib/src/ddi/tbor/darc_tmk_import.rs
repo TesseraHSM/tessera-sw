@@ -216,7 +216,7 @@ pub(crate) async fn handle<P: HsmPal>(
             pal.ecc_pub_from_priv(io, DARC_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_r[1..])?;
+            byte_order::pair_to_be::<P>(DARC_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = TMK + GCM tag = 48 B); the recovered TMK
@@ -262,7 +262,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcTmkImport` response around the masked TMK.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, masked_tmk: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkImportResp::encode(buf, 0, false)?
+        let frame = TborDarcTmkImportResp::encode_for_request(buf, 0, false)?
             .masked_tmk(masked_tmk)?
             .finish();
         Ok(frame.as_bytes().len())

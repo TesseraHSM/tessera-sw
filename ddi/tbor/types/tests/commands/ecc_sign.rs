@@ -10,11 +10,12 @@
 //! the host with `tsra_crypto` (OpenSSL) against the returned public key
 //! — exercising the full unmask → sign → return path for every curve.
 //!
-//! The device speaks the PKA-native **little-endian** wire format: the
-//! public key is `x_le ‖ y_le` and the signature is `r_le ‖ s_le` (each
-//! component zero-padded to the curve's wire coordinate length; P-521 pads
-//! 66→68). `tsra_crypto` is big-endian native, so the test reverses
-//! each component before verifying. The host verifies the full big-endian
+//! The device speaks its native crypto byte order on the wire: the
+//! public key is `x ‖ y` and the signature is `r ‖ s` (each component at
+//! the head of a zero-padded lane of the curve's wire coordinate length;
+//! P-521 uses 68-byte lanes on little-endian devices and 72-byte lanes on
+//! big-endian ones). `tsra_crypto` is big-endian native, so the test
+//! converts each component before verifying. The host verifies the full big-endian
 //! digest; ECDSA truncation retains its most significant curve-width bits
 //! when the digest is longer than the curve's order.
 
@@ -26,16 +27,21 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::device_is_little_endian;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::ecc_sign_input;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::ECC_SIGN_INPUT_MAX_LEN;
+use tsra_ddi_tbor_types::HASH_ALGO_SHA1;
+use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
 use tsra_ddi_tbor_types::KEY_CLASS_ECC;
 use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
@@ -43,7 +49,9 @@ use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 
 use crate::commands::common::assert_ecc_signs;
 use crate::commands::common::assert_masked_key_layout_rejected;
+use crate::commands::common::curve_coord_len;
 use crate::commands::common::sign;
+use crate::commands::common::sign_req;
 use crate::commands::common::verify_wire_ecdsa;
 use crate::commands::common::with_generated_ecc_key;
 use crate::commands::common::CO;
@@ -102,7 +110,7 @@ fn ecc_sign_all_supported_curve_digest_pairs() {
                 let digest: Vec<u8> = (0..digest_len)
                     .map(|i| (i as u8).wrapping_mul(13).wrapping_add(0x29))
                     .collect();
-                let signature = sign(ctx, session_id, masked_key.clone(), &digest);
+                let signature = sign(ctx, session_id, curve, masked_key.clone(), &digest);
                 assert!(
                     verify_wire_ecdsa(&pub_key, &signature, &digest),
                     "signature must verify for curve {curve} with a {digest_len}-byte digest",
@@ -118,7 +126,7 @@ fn ecc_sign_signature_rejects_different_digest() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, pub_key| {
             let digest = vec![0x31; 32];
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
 
             let different_digest = vec![0x32; 32];
             assert!(verify_wire_ecdsa(&pub_key, &signature, &digest));
@@ -138,9 +146,9 @@ fn ecc_sign_distinct_digests_are_independently_verified() {
             let digest_a = vec![0x11; 32];
             let digest_b = vec![0x22; 32];
 
-            let signature_a = sign(ctx, session_id, masked_key.clone(), &digest_a);
+            let signature_a = sign(ctx, session_id, curve, masked_key.clone(), &digest_a);
 
-            let signature_b = sign(ctx, session_id, masked_key, &digest_b);
+            let signature_b = sign(ctx, session_id, curve, masked_key, &digest_b);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature_a, &digest_a),
                 "first signature must verify against its original digest",
@@ -173,7 +181,7 @@ fn ecc_sign_digest_with_zero_bytes_roundtrip() {
             digest[1] = 0xA5;
             digest[15] = 0x5A;
             digest[30] = 0xC3;
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &digest),
                 "digest containing zero bytes must survive the TBOR request unchanged",
@@ -182,14 +190,13 @@ fn ecc_sign_digest_with_zero_bytes_roundtrip() {
     }
 }
 
-/// Verifies P-521 signatures zero-fill the two wire-padding bytes per
-/// component on a little-endian device (a big-endian one sends them
-/// unpadded).
+/// Verifies P-521 signatures zero-fill the lane padding after each
+/// component (2 bytes on a little-endian device, 6 on a big-endian one).
 #[test]
 fn ecc_sign_p521_signature_padding_is_zero() {
     with_generated_ecc_key(ECC_CURVE_P521, |ctx, session_id, masked_key, pub_key| {
         let digest = vec![0x43; 64];
-        let signature = sign(ctx, session_id, masked_key, &digest);
+        let signature = sign(ctx, session_id, ECC_CURVE_P521, masked_key, &digest);
         let wire = wire_coord_len(66);
         assert_eq!(signature.len(), 2 * wire);
         assert!(
@@ -213,7 +220,7 @@ fn ecc_sign_local_scoped_key() {
         let session = finalized_co_session(&ctx);
         let (masked_key, pub_key) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, curve);
         let digest = vec![0x5A; 32];
-        let signature = sign(&ctx, session.session_id, masked_key, &digest);
+        let signature = sign(&ctx, session.session_id, curve, masked_key, &digest);
         assert!(verify_wire_ecdsa(&pub_key, &signature, &digest));
     }
 }
@@ -227,7 +234,7 @@ fn ecc_sign_allowed_on_crypto_user_session() {
         let (masked_key, pub_key) =
             generate_in_scope(&ctx, session.session_id, SCOPE_SESSION, curve);
         let digest = vec![0x6B; 32];
-        let signature = sign(&ctx, session.session_id, masked_key, &digest);
+        let signature = sign(&ctx, session.session_id, curve, masked_key, &digest);
         assert!(verify_wire_ecdsa(&pub_key, &signature, &digest));
     }
 }
@@ -253,7 +260,13 @@ fn ecc_sign_with_unwrapped_key() {
         let digest: Vec<u8> = (0..32)
             .map(|i| (i as u8).wrapping_mul(5).wrapping_add(3))
             .collect();
-        let signature = sign(&ctx, session.session_id, imported.masked_key, &digest);
+        let signature = sign(
+            &ctx,
+            session.session_id,
+            curve,
+            imported.masked_key,
+            &digest,
+        );
         assert!(
             verify_wire_ecdsa(&imported.pub_key, &signature, &digest),
             "signature from the unwrapped ECC key must verify for curve {curve}",
@@ -261,57 +274,80 @@ fn ecc_sign_with_unwrapped_key() {
     }
 }
 
-/// Rejects an empty digest because it does not identify a supported SHA-2 algorithm.
+/// Rejects hash algorithms other than SHA-256 / SHA-384 / SHA-512.
 #[test]
-fn ecc_sign_empty_digest_rejected() {
+fn ecc_sign_unsupported_hash_algo_rejected() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, _pub_key| {
-            ctx.expect_fw_reject(
-                &TborEccSignReq {
-                    session_id,
-                    masked_key,
-                    digest: Vec::new(),
-                },
-                TborStatus::InvalidArg,
-            );
-        });
-    }
-}
-
-/// Rejects digest lengths that do not identify a supported SHA-2 algorithm.
-#[test]
-fn ecc_sign_non_sha2_digest_lengths_rejected() {
-    for curve in ECC_CURVES {
-        for digest_len in [1usize, 31, 33, 47, 49, 63] {
-            with_generated_ecc_key(curve, |ctx, session_id, masked_key, _pub_key| {
+            let coord = curve_coord_len(curve);
+            for (hash_algo, digest_len) in [
+                (HASH_ALGO_SHA1, 20usize),
+                (HASH_ALGO_SHAKE256, 32),
+                (0xFF, 32),
+            ] {
                 ctx.expect_fw_reject(
                     &TborEccSignReq {
                         session_id,
-                        masked_key,
-                        digest: vec![0xAB; digest_len],
+                        hash_algo,
+                        masked_key: masked_key.clone(),
+                        input: ecc_sign_input(coord, wire_coord_len(1), &vec![0xAB; digest_len])
+                            .expect("valid ECC layout"),
                     },
                     TborStatus::InvalidArg,
                 );
-            });
-        }
+            }
+        });
     }
 }
 
-/// Rejects the unsupported SHA-1 digest length.
+/// Rejects a packed input whose length does not match the curve and hash.
 #[test]
-fn ecc_sign_unsupported_digest_len_rejected() {
+fn ecc_sign_input_length_mismatch_rejected() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, _pub_key| {
-            ctx.expect_fw_reject(
-                &TborEccSignReq {
-                    session_id,
-                    masked_key,
-                    digest: vec![0xAB; 20],
-                },
-                TborStatus::InvalidArg,
-            );
+            let coord = curve_coord_len(curve);
+            let good = sign_req(session_id, masked_key.clone(), coord, &[0xAB; 32]).input;
+            let pad = wire_coord_len(1);
+            let long = [good.as_slice(), &vec![0u8; pad]].concat();
+            let inputs = [
+                Vec::new(),
+                good[..good.len() - pad].to_vec(),
+                long,
+                // A SHA-512 sized input labelled SHA-256.
+                ecc_sign_input(coord, pad, &[0xAB; 64]).expect("valid ECC layout"),
+            ];
+            // Inputs over the field's max_len fail TBOR decode, not the handler.
+            for input in inputs
+                .into_iter()
+                .filter(|input| input.len() <= ECC_SIGN_INPUT_MAX_LEN)
+            {
+                ctx.expect_fw_reject(
+                    &TborEccSignReq {
+                        session_id,
+                        hash_algo: HASH_ALGO_SHA256,
+                        masked_key: masked_key.clone(),
+                        input,
+                    },
+                    TborStatus::InvalidArg,
+                );
+            }
         });
     }
+}
+
+/// Rejects a non-zero byte in the digest lane's padding.
+#[test]
+fn ecc_sign_nonzero_digest_lane_tail_rejected() {
+    with_generated_ecc_key(ECC_CURVE_P521, |ctx, session_id, masked_key, _pub_key| {
+        let mut req = sign_req(
+            session_id,
+            masked_key,
+            curve_coord_len(ECC_CURVE_P521),
+            &[0xAB; 32],
+        );
+        *req.input.last_mut().expect("non-empty input") = 1;
+        ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+    });
 }
 
 /// Verifies long digests retain their most significant curve-width bits.
@@ -326,7 +362,7 @@ fn ecc_sign_long_digests_use_most_significant_curve_bits() {
             let digest: Vec<u8> = (0..digest_len)
                 .map(|index| u8::try_from(index).expect("digest byte offset must fit u8"))
                 .collect();
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &digest),
                 "long digest signature must verify (curve {curve}, digest {digest_len} B)",
@@ -367,11 +403,7 @@ fn ecc_sign_tampered_masked_key_rejected() {
                 .expect("masked ECC key must not be empty");
             masked_key[last] ^= 0x01;
             ctx.expect_fw_reject(
-                &TborEccSignReq {
-                    session_id,
-                    masked_key,
-                    digest: vec![0x7C; 32],
-                },
+                &sign_req(session_id, masked_key, curve_coord_len(curve), &[0x7C; 32]),
                 TborStatus::AesGcmDecryptTagDoesNotMatch,
             );
         });
@@ -387,11 +419,12 @@ fn ecc_sign_wrong_key_class_rejected() {
     let aes = unwrap(&ctx, session.session_id, KEY_CLASS_AES, &[0x54; 32]);
 
     ctx.expect_fw_reject(
-        &TborEccSignReq {
-            session_id: session.session_id,
-            masked_key: aes.masked_key,
-            digest: vec![0x65; 32],
-        },
+        &sign_req(
+            session.session_id,
+            aes.masked_key,
+            curve_coord_len(ECC_CURVE_P256),
+            &[0x65; 32],
+        ),
         TborStatus::InvalidKeyType,
     );
 }
@@ -408,11 +441,12 @@ fn ecc_sign_mismatched_session_id_rejected() {
             );
 
             ctx.expect_session_reject(
-                &TborEccSignReq {
-                    session_id: mismatched_session_id,
+                &sign_req(
+                    mismatched_session_id,
                     masked_key,
-                    digest: vec![0x8D; 32],
-                },
+                    curve_coord_len(curve),
+                    &[0x8D; 32],
+                ),
                 TborStatus::FileHandleSessionIdDoesNotMatch,
             );
         });
@@ -476,7 +510,7 @@ fn ecc_sign_signature_rejects_different_public_key() {
                 })
                 .expect("EccGenerateKey");
             let digest = vec![0x42; 32];
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &digest),
                 "signature must verify against the originating public key",
@@ -499,7 +533,7 @@ fn ecc_sign_session_scoped_key_rejected_in_different_session() {
         ctx.session_close(session_a.session_id)
             .expect("close originating CO session");
         let opts =
-            SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+            SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
         let pending = ctx
             .session_open_init_with_options(opts)
             .expect("open replacement CO session");
@@ -507,11 +541,12 @@ fn ecc_sign_session_scoped_key_rejected_in_different_session() {
             .session_open_finish(pending)
             .expect("finish replacement CO session");
         ctx.expect_fw_reject(
-            &TborEccSignReq {
-                session_id: session_b.session_id,
+            &sign_req(
+                session_b.session_id,
                 masked_key,
-                digest: vec![0x91; 32],
-            },
+                curve_coord_len(curve),
+                &[0x91; 32],
+            ),
             TborStatus::AesGcmDecryptTagDoesNotMatch,
         );
     }
@@ -523,7 +558,7 @@ fn ecc_sign_signature_rejects_single_bit_digest_change() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, pub_key| {
             let digest = vec![0xA5; 32];
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             let mut modified_digest = digest.clone();
             modified_digest[17] ^= 0x01;
             assert!(
@@ -545,7 +580,7 @@ fn ecc_sign_all_zero_digest_roundtrip() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, pub_key| {
             let digest = vec![0u8; 32];
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &digest),
                 "an all-zero 32-byte digest must be signed and verified correctly",
@@ -560,7 +595,7 @@ fn ecc_sign_all_ones_digest_roundtrip() {
     for curve in ECC_CURVES {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, pub_key| {
             let digest = vec![0xFF; 32];
-            let signature = sign(ctx, session_id, masked_key, &digest);
+            let signature = sign(ctx, session_id, curve, masked_key, &digest);
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &digest),
                 "an all-0xFF digest must be signed and verified correctly",
@@ -576,7 +611,7 @@ fn ecc_sign_masked_key_can_be_reused() {
         with_generated_ecc_key(curve, |ctx, session_id, masked_key, pub_key| {
             for value in [0x11u8, 0x22, 0x33] {
                 let digest = vec![value; 32];
-                let signature = sign(ctx, session_id, masked_key.clone(), &digest);
+                let signature = sign(ctx, session_id, curve, masked_key.clone(), &digest);
                 assert!(
                     verify_wire_ecdsa(&pub_key, &signature, &digest),
                     "reused masked key must sign digest value {value:#04x}",
@@ -604,11 +639,12 @@ fn ecc_sign_key_without_sign_usage_rejected() {
             .expect("EccGenerateKey (derive)");
 
         ctx.expect_fw_reject(
-            &TborEccSignReq {
-                session_id: session.session_id,
-                masked_key: key.masked_key,
-                digest: vec![0x42; 32],
-            },
+            &sign_req(
+                session.session_id,
+                key.masked_key,
+                curve_coord_len(curve),
+                &[0x42; 32],
+            ),
             TborStatus::InvalidPermissions,
         );
     }
@@ -620,11 +656,12 @@ fn ecc_sign_rejects_bad_masked_key_layout() {
     with_generated_ecc_key(ECC_CURVE_P256, |ctx, session_id, masked_key, _| {
         assert_masked_key_layout_rejected(
             ctx,
-            &TborEccSignReq {
+            &sign_req(
                 session_id,
                 masked_key,
-                digest: vec![0x42; 32],
-            },
+                curve_coord_len(ECC_CURVE_P256),
+                &[0x42; 32],
+            ),
         );
     });
 }

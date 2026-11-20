@@ -50,19 +50,19 @@ rejected with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the fixed-length buffers and the packed cert-descriptor list.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_kex_key` | `buffer` (180 B) | The receiver's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `RcvrPriv`. Must be a `DarcKex`-kind masked key. |
-| 20 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose POTA key thumbprint anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
-| 24 | `sealed_tmk` | `buffer` (145 B) | The HPKE-Auth seal of the 32-byte TMK: `enc(SEC1 97) ‖ ct(TMK 32 + GCM tag 16)`. |
-| 28 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the POTA-anchored sender certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_kex_key` | `buffer` (180 B) | The receiver's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `RcvrPriv`. Must be a `DarcKex`-kind masked key. |
+| 24 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose POTA key thumbprint anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 28 | `sealed_tmk` | `buffer` (145 B) | The HPKE-Auth seal of the 32-byte TMK: `enc(SEC1 97) ‖ ct(TMK 32 + GCM tag 16)`. |
+| 32 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the POTA-anchored sender certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
 
 ### Data section
 
@@ -72,15 +72,15 @@ bytes referenced by the descriptors travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, the TOC entry, then the data section carrying
+Wire layout: 12-byte header, the TOC entry, then the data section carrying
 the masked TMK.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_tmk` | `buffer` (164 B) | The imported TMK, masked (AEAD-GCM-256) under the SDMK: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(32) ‖ tag(16)`. Recorded under the `DarcTmk` key kind. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_tmk` | `buffer` (164 B) | The imported TMK, masked (AEAD-GCM-256) under the SDMK: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(32) ‖ tag(16)`. Recorded under the `DarcTmk` key kind. |
 
 ### Data section
 
