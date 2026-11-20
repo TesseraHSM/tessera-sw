@@ -71,7 +71,7 @@ operand just to convert it:
 | API revision | Device | Order | P-521 coordinate |
 | --- | --- | --- | --- |
 | 1.x | Uno (and std Uno) | little-endian | 68 B (66 B value + 2 zero pad bytes above it) |
-| 2.0 | Duo (and std Duo) | big-endian | 66 B (exact; `EccVerify` uses a 72 B lane) |
+| 2.0 | Duo (and std Duo) | big-endian | 72 B (66 B value + 6 zero pad bytes after it) |
 
 P-256 / P-384 coordinates are 32 / 48 B in both orders. The host derives
 the order from the selected API revision and converts at the DDI

@@ -66,9 +66,8 @@ integers remain little-endian on all platforms.
 | std Duo | Big-endian | 8 B | 72 B | 144 B | 216 B |
 
 For P-521, the meaningful 66-byte coordinate begins at the start of each lane,
-followed by zero padding, including on Duo. This command's 72-byte Duo lanes
-are specific to `EccVerify`; other existing Duo ECC commands retain their
-documented wire widths.
+followed by zero padding, including on Duo. Duo uses the same 72-byte lanes
+for `EccGenerateKey`, `EccSign`, and `EccVerify`.
 
 ## Response
 

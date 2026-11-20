@@ -3,6 +3,10 @@
 
 //! Integration tests for the TBOR `EccVerify` command.
 
+use tsra_crypto::testvectors::ecc::ECC_P256_TEST_VECTORS;
+use tsra_crypto::testvectors::ecc::ECC_P384_TEST_VECTORS;
+use tsra_crypto::testvectors::ecc::ECC_P521_TEST_VECTORS;
+use tsra_crypto::DerEccSignature;
 use tsra_crypto::EccAlgo;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
@@ -111,6 +115,64 @@ fn sign_digest(
     })
     .expect("EccSign")
     .signature
+}
+
+/// Verify fixed NIST signatures, independently of device signing.
+#[test]
+fn ecc_verify_known_answer_vectors() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (curve, wire_curve, vectors) in [
+        (EccCurve::P256, ECC_CURVE_P256, ECC_P256_TEST_VECTORS),
+        (EccCurve::P384, ECC_CURVE_P384, ECC_P384_TEST_VECTORS),
+        (EccCurve::P521, ECC_CURVE_P521, ECC_P521_TEST_VECTORS),
+    ] {
+        let vector = vectors.first().expect("NIST vector for each curve");
+        let imported = unwrap(
+            &ctx,
+            session.session_id,
+            KEY_CLASS_ECC,
+            vector.private_key_der,
+        );
+        let signature =
+            DerEccSignature::from_der(curve, vector.sig_der).expect("parse NIST signature");
+        let mut signature_wire = Vec::new();
+        for component in [signature.r(), signature.s()] {
+            let mut lane = dev_rev(component);
+            lane.resize(wire_coord_len(component.len()), 0);
+            signature_wire.extend(lane);
+        }
+        let hash_algo = match vector.digest.len() {
+            32 => HASH_ALGO_SHA256,
+            48 => HASH_ALGO_SHA384,
+            64 => HASH_ALGO_SHA512,
+            _ => panic!("selected NIST vector must use SHA-2"),
+        };
+        let mut digest_wire = dev_rev(vector.digest);
+        ctx.tbor(&verify_req(
+            session.session_id,
+            hash_algo,
+            imported.masked_key.clone(),
+            packed_input(wire_curve, &digest_wire, &signature_wire),
+        ))
+        .expect("verify NIST known-answer signature");
+
+        let retained_byte = if device_is_little_endian() {
+            digest_wire.len() - 1
+        } else {
+            0
+        };
+        digest_wire[retained_byte] ^= 1;
+        ctx.expect_fw_reject(
+            &verify_req(
+                session.session_id,
+                hash_algo,
+                imported.masked_key,
+                packed_input(wire_curve, &digest_wire, &signature_wire),
+            ),
+            TborStatus::EccVerifyFailed,
+        );
+    }
 }
 
 /// Exercises all curve and SHA-2 combinations with generated sign-only keys.
