@@ -64,7 +64,7 @@ fuzz_target!(|input: FuzzInput| {
         let message: Vec<u8> = (0..message_len)
             .map(|index| input.message_seed.wrapping_add(index as u8))
             .collect();
-        let padding = if input.padding % 2 == 0 {
+        let padding = if input.padding.is_multiple_of(2) {
             RSA_PADDING_PSS
         } else {
             RSA_PADDING_PKCS1_V15
