@@ -100,16 +100,6 @@ pub(crate) fn ecc_hash_from_selector(algo: HashAlgo) -> Option<HsmHashAlgo> {
     }
 }
 
-pub(crate) fn ecc_hash_from_digest_len(len: usize) -> Option<HsmHashAlgo> {
-    [
-        HsmHashAlgo::Sha256,
-        HsmHashAlgo::Sha384,
-        HsmHashAlgo::Sha512,
-    ]
-    .into_iter()
-    .find(|algo| algo.digest_len() == len)
-}
-
 /// TBOR opcodes recognised by the firmware dispatcher.
 ///
 /// The wire opcode is a single byte. Constants kept here (rather than in

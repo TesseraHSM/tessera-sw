@@ -113,7 +113,13 @@ fuzz_target!(|input: FuzzInput| {
             .tbor(&TborEccSignReq {
                 session_id: session.session_id,
                 masked_key: generated.masked_key.clone(),
-                digest: digest_wire.clone(),
+                hash_algo: input.hash.selector(),
+                input: ecc_sign_input(
+                    input.curve.wire_coord_len(),
+                    if device_is_little_endian() { 4 } else { 8 },
+                    &digest_wire,
+                )
+                .expect("bounded ECC sign input"),
             })
             .expect("seed signature")
             .signature;

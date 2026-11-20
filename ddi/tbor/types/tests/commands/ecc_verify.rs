@@ -14,6 +14,7 @@ use tsra_ddi_tbor_test_harness::device_is_little_endian;
 use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
+use tsra_ddi_tbor_types::ecc_sign_input;
 use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
@@ -51,14 +52,17 @@ fn verify_req(
     }
 }
 
-fn packed_input(curve: u8, digest: &[u8], signature: &[u8]) -> Vec<u8> {
-    let raw_coord_len = match curve {
+fn raw_coord_len(curve: u8) -> usize {
+    match curve {
         ECC_CURVE_P256 => 32,
         ECC_CURVE_P384 => 48,
         ECC_CURVE_P521 => 66,
         _ => unreachable!("test uses supported curves"),
-    };
-    let sign_coord_len = wire_coord_len(raw_coord_len);
+    }
+}
+
+fn packed_input(curve: u8, digest: &[u8], signature: &[u8]) -> Vec<u8> {
+    let sign_coord_len = wire_coord_len(raw_coord_len(curve));
     let verify_coord_len = if curve == ECC_CURVE_P521 && !device_is_little_endian() {
         72
     } else {
@@ -82,11 +86,28 @@ fn packed_input(curve: u8, digest: &[u8], signature: &[u8]) -> Vec<u8> {
     input
 }
 
-fn sign_digest(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>, digest: &[u8]) -> Vec<u8> {
+fn sign_digest(
+    ctx: &TestCtx,
+    session_id: u16,
+    masked_key: Vec<u8>,
+    digest: &[u8],
+    curve: u8,
+) -> Vec<u8> {
     ctx.tbor(&TborEccSignReq {
         session_id,
         masked_key,
-        digest: digest.to_vec(),
+        hash_algo: match digest.len() {
+            32 => HASH_ALGO_SHA256,
+            48 => HASH_ALGO_SHA384,
+            64 => HASH_ALGO_SHA512,
+            _ => unreachable!("test uses SHA-2 digests"),
+        },
+        input: ecc_sign_input(
+            wire_coord_len(raw_coord_len(curve)),
+            if device_is_little_endian() { 4 } else { 8 },
+            digest,
+        )
+        .expect("valid ECC sign input"),
     })
     .expect("EccSign")
     .signature
@@ -121,6 +142,7 @@ fn ecc_verify_all_curve_hash_pairs() {
                 session.session_id,
                 generated.masked_key.clone(),
                 &digest_wire,
+                curve,
             );
             let input = packed_input(curve, &digest_wire, &signature);
 
@@ -136,7 +158,13 @@ fn ecc_verify_all_curve_hash_pairs() {
 
             // The request only unmasks its DMA-backed copy; the caller's
             // original masked envelope remains reusable.
-            sign_digest(&ctx, session.session_id, generated.masked_key, &digest_wire);
+            sign_digest(
+                &ctx,
+                session.session_id,
+                generated.masked_key,
+                &digest_wire,
+                curve,
+            );
         }
     }
 }
@@ -161,6 +189,7 @@ fn ecc_verify_rejects_bad_masked_key_layout() {
         session.session_id,
         generated.masked_key.clone(),
         &digest,
+        ECC_CURVE_P256,
     );
     let req = verify_req(
         session.session_id,
@@ -192,6 +221,7 @@ fn ecc_verify_invalid_signature_then_recovers() {
         session.session_id,
         generated.masked_key.clone(),
         &digest,
+        ECC_CURVE_P256,
     );
     let mut input = packed_input(ECC_CURVE_P256, &digest, &signature);
     input[0] ^= 0x80;
@@ -279,6 +309,7 @@ fn ecc_verify_host_signature_and_p521_padding() {
         session.session_id,
         generated.masked_key.clone(),
         &digest,
+        ECC_CURVE_P521,
     );
     let mut input = packed_input(ECC_CURVE_P521, &digest, &signature);
     input[66] = 1;
@@ -326,6 +357,7 @@ fn ecc_verify_rejects_unsupported_hash_and_input_length() {
         session.session_id,
         generated.masked_key.clone(),
         &digest,
+        ECC_CURVE_P256,
     );
     let mut input = packed_input(ECC_CURVE_P256, &digest, &signature);
 
@@ -423,6 +455,7 @@ fn ecc_verify_crypto_user_session() {
         cu.session_id,
         generated_cu.masked_key.clone(),
         &cu_digest,
+        ECC_CURVE_P256,
     );
     ctx.tbor(&verify_req(
         cu.session_id,

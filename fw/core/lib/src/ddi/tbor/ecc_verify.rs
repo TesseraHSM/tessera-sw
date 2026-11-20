@@ -12,7 +12,6 @@ use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::TborEccVerifyReq;
 use tsra_fw_ddi_tbor_types::TborEccVerifyResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
-use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -23,10 +22,6 @@ use super::ecc_hash_from_selector;
 use super::from_pal::ecc_private_curve;
 use super::resolve_masking_key;
 use super::validate_active_session;
-
-fn coord_len(curve: HsmEccCurve, order: tsra_fw_hsm_pal_traits::HsmByteOrder) -> usize {
-    curve.wire_coord_len(order)
-}
 
 /// Handle a TBOR `EccVerify` request.
 pub(crate) async fn handle<P: HsmPal>(
@@ -48,22 +43,14 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidPermissions);
         }
 
-        if view.target_key.len() != curve.wire_priv_key_len(P::BYTE_ORDER) {
+        if view.target_key.len() != curve.wire_priv_key_len(P::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
 
-        let coord_len = if matches!(curve, HsmEccCurve::P521) && P::BYTE_ORDER.is_be() {
-            72
-        } else {
-            coord_len(curve, P::BYTE_ORDER)
-        };
+        let coord_len = curve.wire_coord_len(P::ECC_COORD_PAD);
         let digest_len = hash.digest_len();
-        let pad = if P::BYTE_ORDER.is_be() { 8 } else { 4 };
-        let digest_lane_len = digest_len.next_multiple_of(pad).max(coord_len);
-        let signature_len = coord_len.checked_mul(2).ok_or(HsmError::InvalidArg)?;
-        let packed_len = signature_len
-            .checked_add(digest_lane_len)
-            .ok_or(HsmError::InvalidArg)?;
+        let signature_len = curve.wire_sig_len(P::ECC_COORD_PAD);
+        let packed_len = curve.ecdsa_verify_input_len(hash, P::ECC_COORD_PAD);
         if req.input.len() != packed_len {
             return Err(HsmError::InvalidArg);
         }
@@ -90,34 +77,17 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidArg);
         }
 
-        let public_len = coord_len.checked_mul(2).ok_or(HsmError::InvalidArg)?;
-        let canonical_public_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+        let public_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
         pal.alloc_scoped_async(io, async |alloc| {
             let public_key = alloc.dma_alloc_zeroed(public_len)?;
             let written = pal
                 .ecc_priv_pub_key(io, view.target_key, Some(public_key))
                 .await?;
-            if written != canonical_public_len {
+            if written != public_len {
                 return Err(HsmError::InternalError);
             }
-            if canonical_public_len < public_len {
-                let raw_coord_len = curve.priv_key_len();
-                public_key.copy_within(raw_coord_len..canonical_public_len, coord_len);
-                public_key[raw_coord_len..coord_len].fill(0);
-                public_key[coord_len + raw_coord_len..public_len].fill(0);
-            }
-
-            let signature = &req.input[..signature_len];
-            let digest_lane = &req.input[signature_len..packed_len];
-            let digest = if P::BYTE_ORDER.is_be() {
-                &digest_lane[..digest_len]
-            } else if digest_len > coord_len {
-                &digest_lane[digest_len - coord_len..digest_len]
-            } else {
-                digest_lane
-            };
             if !pal
-                .ecc_verify(io, curve, public_key, digest, signature)
+                .ecc_verify(io, curve, hash, public_key, req.input)
                 .await?
             {
                 return Err(HsmError::EccVerifyFailed);

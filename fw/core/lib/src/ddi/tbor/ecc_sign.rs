@@ -23,11 +23,11 @@ use tsra_fw_ddi_tbor_types::TborEccSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 
-use super::ecc_hash_from_digest_len;
 use super::from_pal::ecc_private_curve;
 use super::resolve_masking_key;
 use super::validate_active_session;
