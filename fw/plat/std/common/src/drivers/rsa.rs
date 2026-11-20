@@ -730,21 +730,24 @@ mod tests {
             .to_hsm_bytes(&mut private_bytes)
             .expect("serialize RSA key");
         private_bytes[0] = 0x7f;
-        let non_full_width =
-            RsaPrivateKey::from_hsm_bytes(&private_bytes).expect("import narrow modulus");
-        assert_eq!(
-            driver
-                .sign(
-                    HsmRsaKey::Rsa2048Priv,
-                    HashAlgo::sha256(),
-                    &non_full_width,
-                    &[0; 32],
-                    Some(32),
-                    None,
-                )
-                .await,
-            Err(HsmError::InvalidArg)
-        );
+        // CNG rejects this malformed key during import; OpenSSL permits
+        // import, so the driver must reject its narrow modulus before signing.
+        match RsaPrivateKey::from_hsm_bytes(&private_bytes) {
+            Ok(non_full_width) => assert_eq!(
+                driver
+                    .sign(
+                        HsmRsaKey::Rsa2048Priv,
+                        HashAlgo::sha256(),
+                        &non_full_width,
+                        &[0; 32],
+                        Some(32),
+                        None,
+                    )
+                    .await,
+                Err(HsmError::InvalidArg)
+            ),
+            Err(error) => assert_eq!(error, tsra_crypto::CryptoError::RsaKeyImportError),
+        }
 
         let mut public_wire = vec![0; k + RSA_PUB_EXP_WIRE_LEN];
         rsa_pub_wire(&public, HsmByteOrder::Le, Some(&mut public_wire))
