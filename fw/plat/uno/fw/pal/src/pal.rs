@@ -393,6 +393,8 @@ pub struct UnoHsmPal {
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
     pub(crate) unwrap_pct_busy: [Cell<bool>; NUM_PARTITIONS],
+    /// Volatile provisioning PINs: DTCM only, never saved/migrated.
+    pub(crate) bk3_prov_credential: [core::cell::RefCell<[u8; 32]>; NUM_PARTITIONS],
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
@@ -542,6 +544,7 @@ impl Default for UnoHsmPal {
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
+            bk3_prov_credential: [const { core::cell::RefCell::new([0; 32]) }; NUM_PARTITIONS],
         }
     }
 }

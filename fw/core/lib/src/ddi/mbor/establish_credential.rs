@@ -118,11 +118,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // Reset the partition nonce *before* decrypting / committing the
     // credential so the nonce that authenticated this request cannot
     // be replayed if a later step fails partway through.
-    {
-        let nonce = pal.dma_alloc(io, crate::part_state::NONCE_LEN)?;
-        pal.rng_fill_bytes(io, nonce)?;
-        crate::part_state::part_set_nonce(pal, io, nonce)?;
-    }
+    refresh_nonce(pal, io)?;
     decrypt_credential(pal, io, &mut body.encrypted_credential, aes_key).await?;
 
     // Fail-fast on null id or pin before doing the rest of the
@@ -137,7 +133,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
         return Err(HsmError::InvalidAppCredentials);
     }
 
-    // Credential commit (CREDENTIAL prop write / `part_clear_establish_cred_key`)
+    // Credential commit and tunnel-key consumption
     // and BK3 session commit (`part_set_bk3_session`) are intentionally
     // deferred to the final atomic-commit block at the end of this
     // handler.  Deferring lets a failure in steps 8-13 (e.g. tampered
@@ -196,14 +192,14 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // is required even on failure to prevent replay of the original
     // request.
     //
-    // Under the partition lock, every call below is effectively
-    // infallible:
+    // After tunnel-key consumption, the property writes under the
+    // partition lock are effectively infallible:
     // - CREDENTIAL prop write validates length, write-once, and
     //   non-zero id/pin; both halves are pre-checked above so this
     //   cannot fail here.
     // - `part_set_bk3_session` validates length (48 B); `bk3_session`
     //   is allocated with `BK3_LEN = 48`.
-    // - `part_clear_establish_cred_key` and `part_set_mk_key_id` only
+    // - `part_set_mk_key_id` and the remaining property writes only
     //   fail if the partition is disabled, which is prevented by the
     //   partition-enabled check at the start of `handle_io`.
     //
@@ -216,15 +212,29 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     let cred = pal.dma_alloc(io, 2 * CRED_FIELD_LEN)?;
     cred[..CRED_FIELD_LEN].copy_from_slice(id);
     cred[CRED_FIELD_LEN..].copy_from_slice(pin);
+    // Delete before unlinking, and before the infallible property commits.
+    // Merely clearing the handle strands the private key in the vault.
+    consume_tunnel_key(pal, io).await?;
     crate::part_state::part_set_credential(pal, io, cred)?;
     crate::part_state::part_set_bk3_session(pal, io, bk3_session)?;
-    crate::part_state::part_clear_establish_cred_key(pal, io)?;
     crate::part_state::part_set_mk_key_id(pal, io, mk_key_id)?;
     if let Some(uk_id) = unwrapping_key_id {
         crate::part_state::part_set_unwrapping_key_id(pal, io, uk_id)?;
     }
 
     Ok(resp)
+}
+
+pub(super) fn refresh_nonce<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    let nonce = pal.dma_alloc(io, crate::part_state::NONCE_LEN)?;
+    pal.rng_fill_bytes(io, nonce)?;
+    crate::part_state::part_set_nonce(pal, io, nonce)
+}
+
+pub(super) async fn consume_tunnel_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    let key_id = crate::part_state::part_establish_cred_key_id(pal, io)?;
+    pal.vault_key_delete(io, key_id).await?;
+    crate::part_state::part_clear_establish_cred_key(pal, io)
 }
 
 /// Re-import the partition unwrapping key from a host-persisted masked
@@ -421,12 +431,25 @@ async fn verify_pota_signature<P: HsmPal>(
 /// (low half) and a 48-byte HMAC key (high half).
 ///
 /// `okm_out` must be exactly [`BK_LEN`] (80) bytes.
-async fn derive_credential_keys<P: HsmPal>(
+pub(super) async fn derive_credential_keys<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     host_eph_pub_key_raw: &HsmDmaBuf,
     nonce: &HsmDmaBuf,
     okm_out: &mut HsmDmaBuf,
+) -> HsmResult<()> {
+    let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
+    derive_credential_prk(pal, io, host_eph_pub_key_raw, prk).await?;
+    pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)
+        .await
+}
+
+/// Extract the SHA-384 PRK from the host-order P-384 shared secret.
+pub(super) async fn derive_credential_prk<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    host_eph_pub_key_raw: &HsmDmaBuf,
+    prk: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let est_cred_key_id = match crate::part_state::part_establish_cred_key_id(pal, io) {
         Ok(id) => id,
@@ -465,19 +488,16 @@ async fn derive_credential_keys<P: HsmPal>(
     byte_order::int_to_be(P::BYTE_ORDER, &mut secret[..HsmEccCurve::P384.secret_len()]);
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
-    let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
     pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
         .await?;
-
-    pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)
-        .await
+    Ok(())
 }
 
 /// HMAC-SHA-384 verifies the encrypted credential's tag over
 /// `enc_id ‖ enc_pin ‖ iv ‖ nonce`.
 ///
 /// `hmac_key` must be at least 48 bytes (the HMAC-SHA-384 key).
-async fn verify_credential_hmac<P: HsmPal>(
+pub(super) async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &DdiEncryptedEstablishCredential<'_>,
@@ -522,7 +542,7 @@ async fn verify_credential_hmac<P: HsmPal>(
 /// snapshot back as `iv_in` for the second call.  Both 16-byte fields
 /// end up overwritten with their respective plaintexts inside the
 /// request buffer — no scratch buffer for ciphertext is needed.
-async fn decrypt_credential<P: HsmPal>(
+pub(super) async fn decrypt_credential<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &mut DdiEncryptedEstablishCredential<'_>,

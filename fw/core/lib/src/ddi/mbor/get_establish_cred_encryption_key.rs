@@ -26,12 +26,13 @@ pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
 ) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetEstablishCredEncryptionKeyReq = decoder.decode_data()?;
 
-    // Key must exist (not yet consumed by EstablishCredential).
-    match crate::part_state::part_establish_cred_key_id(pal, io) {
-        Ok(_) => {}
-        Err(HsmError::PartPropNotFound) => return Err(HsmError::KeyNotFound),
-        Err(e) => return Err(e),
+    let _lock = pal.partition_lock(io).await?;
+    // BK3 phases may consume/recreate the tunnel key, but a completed
+    // application credential establishment closes this provisioning path.
+    if crate::part_state::part_is_credential_set(pal, io)? {
+        return Err(HsmError::VaultAppLimitReached);
     }
+    pal.part_ensure_establish_cred_key(io).await?;
 
     // Query sizes, then encode header + frame with reserved slots.
     let pub_key_len = crate::part_state::part_establish_cred_pub_key(pal, io)?.len();

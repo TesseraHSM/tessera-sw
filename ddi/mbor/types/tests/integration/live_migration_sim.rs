@@ -282,12 +282,10 @@ fn test_live_migration_sim_basic() {
         },
     );
 }
-// Test: get sealed BK3, simulate live migration, set sealed BK3
+// Test: sealed BK3 survives NSSR and remains write-once.
 #[test]
 fn test_live_migration_sealed_bk3() {
-    // Only this process's auto-started simulator gives a fresh partition after
-    // `erase()`; on hardware, NSSR preserves the sealed BK3, so the re-set
-    // below would fail with `SealedBk3AlreadySet`.
+    // Keep this reset fixture isolated from externally supplied devices.
     if !ddi_sock_server::autostarted() {
         return;
     }
@@ -308,21 +306,13 @@ fn test_live_migration_sealed_bk3() {
             );
             info!("Live migration simulation completed successfully");
 
-            // Migration lands on a fresh partition: the host re-provisions the
-            // sealed BK3 it saved before migrating, exactly once.
-            let set_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
-            assert!(
-                set_result.is_ok(),
-                "Setting sealed BK3 after migration should succeed: {:?}",
-                set_result
-            );
             let reset_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
             assert!(
                 matches!(
                     reset_result,
                     Err(DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet))
                 ),
-                "Second set should fail with SealedBk3AlreadySet: {:?}",
+                "NSSR must retain write-once sealed BK3: {:?}",
                 reset_result
             );
 

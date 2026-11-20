@@ -243,6 +243,11 @@ pub enum HsmError {
     PartitionNotProvisioned = 0x087000D5,
     Bk3AlreadyInitialized = 0x087000D6,
     SealedBk3AlreadySet = 0x087000D7,
+    Bk3PinAlreadySet = 0x087000E8,
+    Bk3PinNotSet = 0x087000E9,
+    Bk3PinTagMismatch = 0x087000EA,
+    Bk3TransportTagMismatch = 0x087000EB,
+    Bk3NotSecurelyProvisioned = 0x087000EC,
     PartitionIdKeyGenerationPctFailed = 0x087000D8,
 
     // ── AES Key Wrap errors ────────────────────────────────────────
@@ -277,10 +282,10 @@ pub enum HsmError {
     UnsupportedSessionSuite = 0x087000E7,
 
     /// An ML-DSA key pair failed its sign/verify PCT.
-    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+    PctValidationMlDsaGenKeyFailed = 0x087000ED,
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
-    PctValidationMlKemGenKeyFailed = 0x087000E9,
+    PctValidationMlKemGenKeyFailed = 0x087000EE,
 
     /// X.509 DER parsing failed (malformed structure, bad tag/length,
     /// or unsupported field encoding).

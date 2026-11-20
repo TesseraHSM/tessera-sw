@@ -12,20 +12,18 @@
 use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
-#[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_ddi_mbor_derive::Ddi;
-#[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
+#[cfg(feature = "fips_validation_hooks")]
+use super::clear_bk3;
 #[cfg(feature = "tsra_test_hooks")]
 use super::clear_user_credentials;
 use super::common::ReqHdr;
-#[cfg(feature = "tsra_test_hooks")]
 use super::common::encode_resp;
-#[cfg(feature = "tsra_test_hooks")]
 use super::common::success_hdr;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_priv_key;
@@ -44,7 +42,6 @@ use crate::pal::UnoHsmPal;
 pub(super) const TEST_ACTION_PAYLOAD_MAX: usize = 3584;
 
 /// The response data shared by `TestAction` variants.
-#[cfg(feature = "tsra_test_hooks")]
 #[derive(Debug, Ddi)]
 #[ddi(map)]
 struct DdiTestActionResp {
@@ -67,6 +64,9 @@ enum SupportedTestAction {
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
+    /// Clear persistent BK3 provisioning state.
+    #[cfg(feature = "fips_validation_hooks")]
+    ClearBk3 = 22,
     /// Read back private key material.
     #[cfg(feature = "fips_validation_hooks")]
     GetPrivKey = 25,
@@ -100,6 +100,10 @@ impl TryFrom<u32> for SupportedTestAction {
             return Ok(Self::ClearUserCredentials);
         }
         #[cfg(feature = "fips_validation_hooks")]
+        if value == Self::ClearBk3 as u32 {
+            return Ok(Self::ClearBk3);
+        }
+        #[cfg(feature = "fips_validation_hooks")]
         if value == Self::GetPrivKey as u32 {
             return Ok(Self::GetPrivKey);
         }
@@ -126,6 +130,18 @@ pub(super) async fn dispatch<'p>(
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
+        #[cfg(feature = "fips_validation_hooks")]
+        SupportedTestAction::ClearBk3 => {
+            clear_bk3::dispatch(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
         #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(
@@ -217,7 +233,6 @@ where
 ///
 /// Parameterless actions contain `{1: action, 2: bytes()}` and must carry an
 /// empty payload with no trailing outer bytes.
-#[cfg(feature = "tsra_test_hooks")]
 pub(super) fn expect_empty_payload(
     decoder: &mut MborDecoder<'_>,
     request_field_count: u8,
@@ -256,7 +271,6 @@ fn decode_payload_bytes<'a>(
 }
 
 /// Encode a successful action response with no action-specific result.
-#[cfg(feature = "tsra_test_hooks")]
 pub(super) fn encode_success<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,

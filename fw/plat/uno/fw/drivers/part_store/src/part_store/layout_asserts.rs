@@ -16,6 +16,8 @@ use super::*;
 // `NUM_PARTITIONS` of these.
 const _: () = assert!(core::mem::size_of::<Storage>() == STORE_SIZE);
 const _: () = assert!(STRIDE == STORE_SIZE);
+// Admin LM save/restore reads and writes this classification byte.
+const _: () = assert!(core::mem::offset_of!(Storage, fips_status) == 2444);
 // The ECC keygen engine writes the public keys directly into these fields
 // via DMA, which requires 4-byte alignment (see `Storage` field ordering).
 const _: () = assert!(core::mem::offset_of!(Storage, ec_pub_key) % 4 == 0);

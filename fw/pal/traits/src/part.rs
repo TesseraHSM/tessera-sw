@@ -227,6 +227,20 @@ impl HsmPartState {
 ///
 /// Partition scoping is implicit via the platform's private IO metadata.
 pub trait HsmPartitionManager: HsmIoTypes {
+    /// Materialize a new P-384 establish-credential key if the previous
+    /// one-shot key was consumed. Caller holds the partition write lock.
+    async fn part_ensure_establish_cred_key(&self, io: &Self::Io) -> HsmResult<()>;
+
+    /// Atomically commit the one-shot BK3 gate, secure/legacy classification,
+    /// and an optional replacement boot key generated after ClearBk3.
+    /// Validate everything before mutation; `None` retains the allocation's key.
+    fn part_commit_bk3(
+        &self,
+        io: &Self::Io,
+        secure: bool,
+        masked_boot: Option<&HsmDmaBuf>,
+    ) -> HsmResult<()>;
+
     /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters
@@ -789,6 +803,10 @@ impl HsmPartPropId {
     /// flag is also reset PAL-internally on partition free / NSSR.
     pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
+    /// Volatile BK3 provisioning ID followed by PIN (16 + 16 bytes).
+    /// Never exported or restored with the persistent partition store.
+    pub const BK3_PROV_CREDENTIAL: HsmPartPropId = HsmPartPropId(0x0024);
+
     // ── Vault references (0x0010..) ───────────────────────────────
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition identity
@@ -960,6 +978,7 @@ impl HsmPartPropId {
             Self::PART_RES_COUNT => HsmPartPropMeta::scalar(U8, Ro, Req, false),
             Self::BK3_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
             Self::SD_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
+            Self::BK3_PROV_CREDENTIAL => HsmPartPropMeta::fixed(32, Rw, Abs, true),
 
             // ── Vault refs (HsmKeyId as u16) ──
             Self::PART_ID_ECC_KEY_ID => VAULT_REF_RO,
