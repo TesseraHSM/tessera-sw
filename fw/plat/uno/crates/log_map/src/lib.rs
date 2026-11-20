@@ -9,12 +9,14 @@
 //! token a number. A record's descriptor is the severity, then the component,
 //! then the number, one byte each from the lowest up, then a zero byte.
 //!
-//! The map is a text file with one row per token: the number, component,
-//! kind, crate, target, and message, separated by tabs. Lines that start with
-//! `#` are comments. Rows are never edited or deleted, so a number keeps its
-//! meaning for every decoder. Within a component, rows that decode the same
-//! way (same target, message, and error-code suffix) share a number, and
-//! every other row takes the next number, from 0 up to 255.
+//! The map is one text file per component, named for the component, such as
+//! `uno.tsv`, all in one directory. A file has one row per token: the number,
+//! component, kind, crate, target, and message, separated by tabs, and each
+//! row names its file's component. Lines that start with `#` are comments.
+//! Rows are never edited or deleted, so a number keeps its meaning for every
+//! decoder. Within a component, rows that decode the same way (same target,
+//! message, and error-code suffix) share a number, and every other row takes
+//! the next number, from 0 up to 255.
 //!
 //! This crate parses and checks the map, adds rows, and writes the linker
 //! script and the decoder header that come from it.
@@ -92,6 +94,11 @@ impl Component {
     /// The component that a map name stands for.
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+
+    /// The name of the component's map file: its name, then `.tsv`.
+    pub fn file_name(self) -> String {
+        format!("{}.tsv", self.name())
     }
 
     /// The component of a crate whose manifest is at `path`, relative to the
@@ -335,42 +342,108 @@ impl Row {
     }
 }
 
-/// A line of the map file.
+/// A line of a map file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Line {
     Comment(String),
     Row(Row),
 }
 
-/// The message map.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Parses `component`'s map file. Line endings may be `\n` or `\r\n`. Errors
+/// name the file as `file`.
+fn parse_file(component: Component, text: &str, file: &str) -> Result<Vec<Line>, Error> {
+    let mut lines = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let parsed = if line.starts_with('#') {
+            Line::Comment(line.to_string())
+        } else {
+            let row = Row::from_line(line)
+                .and_then(|row| {
+                    if row.component == component {
+                        Ok(row)
+                    } else {
+                        Err(Error::new(format!(
+                            "the row's component is {}, but the file holds the {} component's rows",
+                            row.component.name(),
+                            component.name()
+                        )))
+                    }
+                })
+                .map_err(|e| Error::new(format!("{file} line {}: {e}", index + 1)))?;
+            Line::Row(row)
+        };
+        lines.push(parsed);
+    }
+    Ok(lines)
+}
+
+/// The message map: each component's file.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Map {
-    lines: Vec<Line>,
+    /// Each component's lines. Every component in [`Component::ALL`] has an
+    /// entry.
+    files: BTreeMap<Component, Vec<Line>>,
+}
+
+impl Default for Map {
+    fn default() -> Self {
+        Self {
+            files: Component::ALL
+                .into_iter()
+                .map(|component| (component, Vec::new()))
+                .collect(),
+        }
+    }
 }
 
 impl Map {
-    /// Parses a map file. Line endings may be `\n` or `\r\n`.
-    pub fn parse(text: &str) -> Result<Self, Error> {
-        let mut lines = Vec::new();
-        for (index, line) in text.lines().enumerate() {
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            let parsed = if line.starts_with('#') {
-                Line::Comment(line.to_string())
-            } else {
-                Line::Row(
-                    Row::from_line(line)
-                        .map_err(|e| Error::new(format!("map line {}: {e}", index + 1)))?,
-                )
-            };
-            lines.push(parsed);
+    /// Parses the map from its files' texts, each with its component. A
+    /// component that `files` doesn't list has no rows, and a component
+    /// listed twice fails. Line endings may be `\n` or `\r\n`.
+    pub fn parse_files(files: &[(Component, &str)]) -> Result<Self, Error> {
+        let mut map = Self::default();
+        let mut parsed = BTreeSet::new();
+        for &(component, text) in files {
+            if !parsed.insert(component) {
+                return Err(Error::new(format!(
+                    "two texts for the {} component's map file",
+                    component.name()
+                )));
+            }
+            let lines = parse_file(component, text, &component.file_name())?;
+            map.files.insert(component, lines);
         }
-        Ok(Self { lines })
+        Ok(map)
     }
 
-    /// The map file's text, with `\n` line endings.
-    pub fn to_text(&self) -> String {
+    /// Reads and parses the map in the directory `dir`, which must hold
+    /// every component's file.
+    pub fn read_dir(dir: &Path) -> Result<Self, Error> {
+        let mut map = Self::default();
+        for component in Component::ALL {
+            let path = dir.join(component.file_name());
+            let text = fs::read_to_string(&path).map_err(|e| {
+                Error::new(format!(
+                    "can't read the {} component's message-map file {}: {e}",
+                    component.name(),
+                    path.display()
+                ))
+            })?;
+            let lines = parse_file(component, &text, &path.display().to_string())?;
+            map.files.insert(component, lines);
+        }
+        Ok(map)
+    }
+
+    fn lines(&self, component: Component) -> &[Line] {
+        self.files.get(&component).map_or(&[], Vec::as_slice)
+    }
+
+    /// The text of `component`'s map file, with `\n` line endings.
+    pub fn to_text(&self, component: Component) -> String {
         let mut text = String::new();
-        for line in &self.lines {
+        for line in self.lines(component) {
             match line {
                 Line::Comment(comment) => text.push_str(comment),
                 Line::Row(row) => text.push_str(&row.to_line()),
@@ -380,12 +453,16 @@ impl Map {
         text
     }
 
-    /// The rows, in map order.
+    /// The rows: each component's in the order of [`Component::ALL`], and
+    /// each component's in file order.
     pub fn rows(&self) -> impl Iterator<Item = &Row> {
-        self.lines.iter().filter_map(|line| match line {
-            Line::Row(row) => Some(row),
-            Line::Comment(_) => None,
-        })
+        Component::ALL
+            .into_iter()
+            .flat_map(move |component| self.lines(component))
+            .filter_map(|line| match line {
+                Line::Row(row) => Some(row),
+                Line::Comment(_) => None,
+            })
     }
 
     /// The row for a token, if the map has one.
@@ -440,11 +517,11 @@ impl Map {
         }
     }
 
-    /// Adds a row for each token that has none, and returns the added rows.
-    /// Each takes its slot's number, if the component has the slot, or the
-    /// component's next number. Tokens are added in order of component, then
-    /// symbol, so the result doesn't depend on the order of `keys`. On an
-    /// error, the map is unchanged.
+    /// Adds a row for each token that has none, at the end of its component's
+    /// file, and returns the added rows. Each takes its slot's number, if the
+    /// component has the slot, or the component's next number. Tokens are
+    /// added in order of component, then symbol, so the result doesn't
+    /// depend on the order of `keys`. On an error, the map is unchanged.
     pub fn add(&mut self, keys: &[(Key, Component)]) -> Result<Vec<Row>, Error> {
         let mut missing: Vec<(Component, &Key)> = keys
             .iter()
@@ -489,7 +566,12 @@ impl Map {
             };
             added.push(row);
         }
-        self.lines.extend(added.iter().cloned().map(Line::Row));
+        for row in &added {
+            self.files
+                .entry(row.component)
+                .or_default()
+                .push(Line::Row(row.clone()));
+        }
         Ok(added)
     }
 
@@ -523,22 +605,25 @@ impl Map {
 /// The name of the linker script that [`build_script`] writes.
 pub const LINKER_SCRIPT: &str = "tsra_log.x";
 
-/// For a build script: reads and checks the map at `map`, writes
-/// [`LINKER_SCRIPT`] to `out_dir`, and passes it to the linker, which then
-/// reports every missing row. The caller puts `out_dir` on the link search
-/// path.
+/// For a build script: reads and checks the map in the directory `map_dir`,
+/// writes [`LINKER_SCRIPT`] to `out_dir`, and passes it to the linker, which
+/// then reports every missing row. The caller puts `out_dir` on the link
+/// search path.
 ///
 /// # Panics
 ///
 /// Panics, which fails the build, if the map can't be read or breaks a rule.
-pub fn build_script(map: &Path, out_dir: &Path) {
-    println!("cargo:rerun-if-changed={}", map.display());
-    let text = fs::read_to_string(map)
-        .unwrap_or_else(|e| panic!("can't read the message map {}: {e}", map.display()));
-    let parsed = Map::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", map.display()));
+pub fn build_script(map_dir: &Path, out_dir: &Path) {
+    for component in Component::ALL {
+        println!(
+            "cargo:rerun-if-changed={}",
+            map_dir.join(component.file_name()).display()
+        );
+    }
+    let parsed = Map::read_dir(map_dir).unwrap_or_else(|e| panic!("{e}"));
     if let Err(errors) = parsed.check() {
         let list: Vec<String> = errors.iter().map(ToString::to_string).collect();
-        panic!("{}:\n{}", map.display(), list.join("\n"));
+        panic!("{}:\n{}", map_dir.display(), list.join("\n"));
     }
     let script = out_dir.join(LINKER_SCRIPT);
     fs::write(&script, parsed.linker_script())

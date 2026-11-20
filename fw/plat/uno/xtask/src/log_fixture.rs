@@ -22,6 +22,7 @@ use anyhow::Context;
 use clap::Parser;
 use toml_edit::DocumentMut;
 use toml_edit::Item;
+use tsra_log_map::Component;
 use tsra_log_map::Map;
 use walkdir::WalkDir;
 
@@ -347,7 +348,7 @@ impl Fixture {
             mode,
             "cargo xtask log-fixture",
         )?;
-        let map = Map::parse(&fs::read_to_string(&self.scratch)?)?;
+        let map = Map::read_dir(&self.scratch)?;
         log_map::read_image(label, &self.elf(), &map, fixture_output(args))
     }
 
@@ -391,17 +392,24 @@ impl Xtask for LogFixture {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
         let dir = FwPaths::new(&ctx)?.log_fixture_dir;
-        let scratch_dir = dir.join("target").join("log_fixture");
-        fs::create_dir_all(&scratch_dir)?;
+        let scratch = dir.join("target").join("log_fixture").join("log_map");
+        fs::create_dir_all(&scratch)?;
         let fixture = Fixture {
             repo: log_map::repo_root(&ctx)?,
-            scratch: scratch_dir.join("log_map.tsv"),
+            scratch,
             dir,
         };
-        let golden_path = fixture.dir.join("log_map.tsv");
-        let golden_text = fs::read_to_string(&golden_path)
-            .with_context(|| format!("can't read {}", golden_path.display()))?;
-        let golden = Map::parse(&golden_text)?;
+        let golden_dir = fixture.dir.join("log_map");
+        // Each component's golden map file: its component, name, and text.
+        let mut golden_files = Vec::new();
+        for component in Component::ALL {
+            let name = component.file_name();
+            let path = golden_dir.join(&name);
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("can't read {}", path.display()))?;
+            golden_files.push((component, name, text));
+        }
+        let golden = Map::read_dir(&golden_dir)?;
         let expected: BTreeSet<String> = golden
             .rows()
             .filter(|row| row.key.message != VARIANT_MESSAGE)
@@ -409,12 +417,14 @@ impl Xtask for LogFixture {
             .collect();
 
         log::info!("--- locked mode names every message without a row");
-        let comments: String = golden_text
-            .lines()
-            .take_while(|line| line.starts_with('#'))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        fs::write(&fixture.scratch, &comments)?;
+        for (_, name, text) in &golden_files {
+            let comments: String = text
+                .lines()
+                .take_while(|line| line.starts_with('#'))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            fs::write(fixture.scratch.join(name), comments)?;
+        }
         let error = match fixture.build("default", &[], Mode::Locked) {
             Ok(_) => anyhow::bail!("locked mode linked the fixture with no map rows"),
             Err(e) => e,
@@ -428,7 +438,7 @@ impl Xtask for LogFixture {
             "locked mode named {named:#?}, but the fixture logs {expected:#?}"
         );
 
-        log::info!("--- fix mode adds the rows that the map file holds");
+        log::info!("--- fix mode adds the rows that the map's files hold");
         let default = fixture.build("default", &[], Mode::Fix)?;
         let elf = Elf::read(&fixture.elf())?;
         anyhow::ensure!(
@@ -445,21 +455,37 @@ impl Xtask for LogFixture {
         let (_, rest) = line
             .split_once('\t')
             .context("a map row starts with its number")?;
+        let (_, _, row_file) = golden_files
+            .iter()
+            .find(|(component, _, _)| *component == row.component)
+            .context("the row's component has no map file")?;
         for (text, problem) in [
             (
-                golden_text.replace(&line, &format!("9\t{rest}")),
+                row_file.replace(&line, &format!("9\t{rest}")),
                 "has the value",
             ),
-            (golden_text.replace(&format!("{line}\n"), ""), "has no row"),
+            (row_file.replace(&format!("{line}\n"), ""), "has no row"),
         ] {
             anyhow::ensure!(
-                text != golden_text,
+                text != *row_file,
                 "the map edit for {problem:?} changed nothing"
             );
+            // The edited file, with the other components' golden files.
+            let files: Vec<(Component, &str)> = golden_files
+                .iter()
+                .map(|(component, _, golden_text)| {
+                    let file = if *component == row.component {
+                        &text
+                    } else {
+                        golden_text
+                    };
+                    (*component, file.as_str())
+                })
+                .collect();
             let error = log_map::read_image(
                 "default",
                 &fixture.elf(),
-                &Map::parse(&text)?,
+                &Map::parse_files(&files)?,
                 Output::Records,
             )
             .err()
@@ -472,12 +498,15 @@ impl Xtask for LogFixture {
         }
         let variant_a = fixture.build("variant_a", &["--features", "variant_a"], Mode::Fix)?;
         let variant_b = fixture.build("variant_b", &["--features", "variant_b"], Mode::Fix)?;
-        anyhow::ensure!(
-            fs::read_to_string(&fixture.scratch)? == golden_text,
-            "fix mode wrote {}, which differs from {}",
-            fixture.scratch.display(),
-            golden_path.display()
-        );
+        for (_, name, text) in &golden_files {
+            let scratch = fixture.scratch.join(name);
+            anyhow::ensure!(
+                fs::read_to_string(&scratch)? == *text,
+                "fix mode wrote {}, which differs from {}",
+                scratch.display(),
+                golden_dir.join(name).display()
+            );
+        }
         let tokens: BTreeSet<String> = default.tokens.keys().cloned().collect();
         anyhow::ensure!(
             tokens == expected && default.sites.len() == expected.len() && default.drops.is_empty(),
@@ -785,7 +814,7 @@ impl Xtask for LogFixture {
 
         log::info!("--- outside fw/plat/uno, a call that doesn't fit drops with a note");
         let copy = fixture.copy_outside()?;
-        let (ok, stderr) = rustc(&copy, &copy.join("log_map.tsv"), &[], &["--cfg", "outside"])?;
+        let (ok, stderr) = rustc(&copy, &copy.join("log_map"), &[], &["--cfg", "outside"])?;
         anyhow::ensure!(
             ok && !stderr.contains("warning"),
             "the fixture's copy in {} didn't build cleanly:\n{stderr}",
@@ -853,7 +882,7 @@ impl Xtask for LogFixture {
         );
         let (ok, stderr) = rustc(
             &copy,
-            &copy.join("log_map.tsv"),
+            &copy.join("log_map"),
             &["--features", TEXT_FEATURE],
             &["--cfg", "outside"],
         )?;
@@ -884,7 +913,7 @@ impl Xtask for LogFixture {
         let cfg = "fail_case=\"message_nul\"";
         let (ok, stderr) = rustc(
             &copy,
-            &copy.join("log_map.tsv"),
+            &copy.join("log_map"),
             &[],
             &["--cfg", "outside", "--cfg", cfg],
         )?;

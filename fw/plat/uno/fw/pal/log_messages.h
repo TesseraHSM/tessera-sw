@@ -5,8 +5,9 @@
 
 /*
  * The HSP debug-log messages of the tessera-sw CP1 firmware, for the
- * decoder. Generated from the message map, fw/plat/uno/fw/pal/log_map.tsv,
- * by `cargo xtask log-map` in fw/plat/uno. Do not edit.
+ * decoder. Generated from the message map, which has one file per component
+ * in fw/plat/uno/fw/pal/log_map/, by `cargo xtask log-map` in fw/plat/uno.
+ * Do not edit.
  *
  * A record is three little-endian 32-bit words: the descriptor, then two
  * values. The descriptor holds the severity, the component, and the message

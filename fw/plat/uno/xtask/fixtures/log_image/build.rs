@@ -15,10 +15,10 @@ fn main() {
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed={}", memory_x.display());
 
-    // `cargo xtask log-fixture` points TSRA_LOG_MAP at a scratch copy of the map.
+    // `cargo xtask log-fixture` points TSRA_LOG_MAP at a scratch copy of the
+    // map directory.
     println!("cargo:rerun-if-env-changed=TSRA_LOG_MAP");
-    let map =
-        env::var_os("TSRA_LOG_MAP").map_or_else(|| manifest.join("log_map.tsv"), PathBuf::from);
+    let map = env::var_os("TSRA_LOG_MAP").map_or_else(|| manifest.join("log_map"), PathBuf::from);
     tsra_log_map::build_script(&map, &out);
 
     println!("cargo:rustc-check-cfg=cfg(fail_case, values(any()))");

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use super::header;
@@ -17,8 +18,25 @@ fn key(crate_name: &str, kind: Kind, target: &str, message: &str) -> Key {
     }
 }
 
+/// The map whose files hold `rows`, each row in its component's file, after
+/// the comment lines.
 fn map(rows: &str) -> Map {
-    Map::parse(&format!("{HEAD}{rows}")).expect("a valid map")
+    let mut texts: BTreeMap<Component, String> = Component::ALL
+        .into_iter()
+        .map(|component| (component, HEAD.to_string()))
+        .collect();
+    for row in rows.lines() {
+        let name = row.split('\t').nth(1).expect("a component field");
+        let component = Component::from_name(name).expect("a component");
+        let text = texts.get_mut(&component).expect("the component's file");
+        text.push_str(row);
+        text.push('\n');
+    }
+    let files: Vec<(Component, &str)> = texts
+        .iter()
+        .map(|(component, text)| (*component, text.as_str()))
+        .collect();
+    Map::parse_files(&files).expect("a valid map")
 }
 
 fn used(map: &Map) -> BTreeSet<String> {
@@ -138,14 +156,24 @@ fn a_map_round_trips_and_accepts_crlf() {
     let text = format!(
         "{HEAD}# number\tcomponent\tkind\tcrate\ttarget\tmessage\n0\tcore\tI\tc\tcore\ta: {{}} b {{:#x}}\n"
     );
-    let m = Map::parse(&text).expect("a valid map");
-    assert_eq!(m.to_text(), text);
+    let m = Map::parse_files(&[(Component::Core, &text)]).expect("a valid map");
+    assert_eq!(m.to_text(Component::Core), text);
+    assert_eq!(m.to_text(Component::Uno), "");
     let crlf = text.replace('\n', "\r\n");
-    assert_eq!(Map::parse(&crlf).expect("a CRLF map").to_text(), text);
+    let m = Map::parse_files(&[(Component::Core, &crlf)]).expect("a CRLF map");
+    assert_eq!(m.to_text(Component::Core), text);
+    let error = Map::parse_files(&[(Component::Core, &text), (Component::Core, HEAD)])
+        .expect_err("two core texts");
+    assert!(
+        error
+            .to_string()
+            .contains("two texts for the core component's map file"),
+        "{error}"
+    );
 }
 
 #[test]
-fn a_bad_row_fails_with_its_line() {
+fn a_bad_row_fails_with_its_file_and_line() {
     for (rows, needle) in [
         ("0\tcore\tI\tc\tcore\n", "six"),
         ("256\tcore\tI\tc\tcore\tm\n", "0 to 255"),
@@ -157,11 +185,66 @@ fn a_bad_row_fails_with_its_line() {
         ("0\tcore\tD\tc\tcore\tm\n", "kind"),
         ("\n", "six"),
     ] {
-        let error = Map::parse(&format!("{HEAD}{rows}")).expect_err(rows);
+        let text = format!("{HEAD}{rows}");
+        let error = Map::parse_files(&[(Component::Core, &text)]).expect_err(rows);
         let text = error.to_string();
-        assert!(text.contains("map line 3"), "{text}");
+        assert!(text.contains("core.tsv line 3: "), "{text}");
         assert!(text.contains(needle), "{text}");
     }
+}
+
+#[test]
+fn a_row_in_another_components_file_fails() {
+    for (file, row, expected) in [
+        (
+            Component::Core,
+            "0\tuno\tI\tu\tboot\tready\n",
+            "core.tsv line 3: the row's component is uno, but the file holds the core component's rows",
+        ),
+        (
+            Component::Uno,
+            "0\tcore\tI\tc\tcore\tready\n",
+            "uno.tsv line 3: the row's component is core, but the file holds the uno component's rows",
+        ),
+    ] {
+        let text = format!("{HEAD}{row}");
+        let error = Map::parse_files(&[(file, &text)]).expect_err(row);
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[test]
+fn reading_the_map_directory_needs_every_components_file() {
+    let dir = std::env::temp_dir().join(format!("tsra-log-map-dir-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("a directory");
+    let core = format!("{HEAD}0\tcore\tE+\tc\tcore\tfailed\n");
+    fs::write(dir.join("core.tsv"), &core).expect("core.tsv");
+    let uno_path = dir.join("uno.tsv");
+    let missing = Map::read_dir(&dir).expect_err("no uno.tsv").to_string();
+    fs::write(&uno_path, format!("{HEAD}0\tcore\tI\tc\tcore\tready\n")).expect("uno.tsv");
+    let misplaced = Map::read_dir(&dir).expect_err("a core row").to_string();
+    let uno = format!("{HEAD}0\tuno\tI\tu\tboot\tready\n");
+    fs::write(&uno_path, &uno).expect("uno.tsv");
+    let read = Map::read_dir(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        missing.starts_with(&format!(
+            "can't read the uno component's message-map file {}: ",
+            uno_path.display()
+        )),
+        "{missing}"
+    );
+    assert!(
+        misplaced.starts_with(&format!(
+            "{} line 3: the row's component is core",
+            uno_path.display()
+        )),
+        "{misplaced}"
+    );
+    let read = read.expect("both files");
+    assert_eq!(read.to_text(Component::Core), core);
+    assert_eq!(read.to_text(Component::Uno), uno);
 }
 
 #[test]
@@ -234,6 +317,29 @@ fn adding_rows_takes_the_next_numbers_in_a_fixed_order() {
     );
     assert_eq!(forward.check(), Ok(()));
     assert_eq!(forward.add(&new), Ok(Vec::new()));
+}
+
+#[test]
+fn adding_rows_appends_each_to_its_components_file() {
+    let mut m = map("0\tcore\tE+\tcore_a\tcore\tfailed\n0\tuno\tI\tuno_a\tboot\tready\n");
+    let core = m.to_text(Component::Core);
+    let uno = m.to_text(Component::Uno);
+    let added = m
+        .add(&[
+            (key("uno_a", Kind::Warn, "boot", "slow"), Component::Uno),
+            (key("core_a", Kind::Info, "core", "ready"), Component::Core),
+        ])
+        .expect("rows added");
+    assert_eq!(added.len(), 2);
+    assert_eq!(
+        m.to_text(Component::Core),
+        format!("{core}1\tcore\tI\tcore_a\tcore\tready\n")
+    );
+    assert_eq!(
+        m.to_text(Component::Uno),
+        format!("{uno}1\tuno\tW\tuno_a\tboot\tslow\n")
+    );
+    assert_eq!(m.check(), Ok(()));
 }
 
 #[test]
@@ -422,8 +528,17 @@ fn a_record_decodes_like_the_text_output_line() {
     );
 }
 
-/// The firmware's message map.
-const FIRMWARE_MAP: &str = include_str!("../../../fw/pal/log_map.tsv");
+/// The firmware's message map: each component's file.
+const FIRMWARE_MAP: [(Component, &str); Component::ALL.len()] = [
+    (
+        Component::Core,
+        include_str!("../../../fw/pal/log_map/core.tsv"),
+    ),
+    (
+        Component::Uno,
+        include_str!("../../../fw/pal/log_map/uno.tsv"),
+    ),
+];
 
 /// Compiles `header` as strict C99, with warnings as errors, and returns the
 /// compiler's errors. Returns `None` if it compiles, or if there's no `cc`.
@@ -504,7 +619,7 @@ fn the_decoder_header_compiles_as_c() {
 
 #[test]
 fn every_error_format_in_the_firmware_map_ends_with_the_code() {
-    let m = Map::parse(FIRMWARE_MAP).expect("the firmware's map");
+    let m = Map::parse_files(&FIRMWARE_MAP).expect("the firmware's map");
     let header = m.decoder_header(&used(&m)).expect("a header");
     // Each slot's format, by component and number.
     let mut formats = std::collections::BTreeMap::new();
@@ -543,7 +658,7 @@ fn an_unused_message_is_marked_deprecated() {
     // Version 1 logs "booted" and "slow {}"; version 2 deletes "booted" and
     // rewords "slow {}" as "slow: {} ms".
     let mut m = map("0\tcore\tI\tc\tcore\tbooted\n1\tcore\tW\tc\tcore\tslow {}\n");
-    let base = m.to_text();
+    let base = m.to_text(Component::Core);
     m.add(&[(key("c", Kind::Warn, "core", "slow: {} ms"), Component::Core)])
         .expect("a reworded row");
     let used_v2: BTreeSet<String> = [key("c", Kind::Warn, "core", "slow: {} ms").symbol()].into();
@@ -560,12 +675,12 @@ fn an_unused_message_is_marked_deprecated() {
         header.contains("    [2] = \"[core] slow: %u ms\",\n"),
         "{header}"
     );
-    assert_eq!(check_prefix(&base, &m.to_text()), Ok(()));
+    assert_eq!(check_prefix(&base, &m.to_text(Component::Core)), Ok(()));
     assert_eq!(m.check(), Ok(()));
 
     // Version 3 restores "booted", from another crate in the same component:
     // it takes its old number, and the mark goes away.
-    let before = m.to_text();
+    let before = m.to_text(Component::Core);
     let restored = key("d", Kind::Info, "core", "booted");
     let added = m
         .add(&[(restored.clone(), Component::Core)])
@@ -585,7 +700,7 @@ fn an_unused_message_is_marked_deprecated() {
         header.contains("    [1] = \"[core] slow %u\", // Deprecated message\n"),
         "{header}"
     );
-    assert_eq!(check_prefix(&before, &m.to_text()), Ok(()));
+    assert_eq!(check_prefix(&before, &m.to_text(Component::Core)), Ok(()));
     assert_eq!(m.check(), Ok(()));
 }
 

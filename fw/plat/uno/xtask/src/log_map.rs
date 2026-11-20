@@ -11,8 +11,8 @@
 //! Which log calls survive optimization decides which messages need rows,
 //! and which ones the decoder header marks as deprecated. So a compiler
 //! update can fail a locked build or the header check with no source change.
-//! Running `cargo xtask log-map` in fw/plat/uno and committing the map and
-//! the header fixes both.
+//! Running `cargo xtask log-map` in fw/plat/uno and committing the map's
+//! files and the header fixes both.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -46,8 +46,9 @@ use crate::fw_util;
 use crate::Xtask;
 use crate::XtaskCtx;
 
-/// The message map, relative to the platform workspace.
-pub const MAP: &str = "fw/pal/log_map.tsv";
+/// The message map's directory, relative to the platform workspace. It holds
+/// one file per component, named for the component, such as `uno.tsv`.
+pub const MAP_DIR: &str = "fw/pal/log_map";
 
 /// The decoder header, relative to the platform workspace.
 pub const HEADER: &str = "fw/pal/log_messages.h";
@@ -116,10 +117,11 @@ impl fmt::Display for MissingRows {
         write!(
             f,
             "To add their rows, run `{}` in fw/plat/uno, then `cargo xtask log-map` to update \
-             the decoder header, and commit fw/plat/uno/{MAP} and fw/plat/uno/{HEADER} with \
-             the change. A compiler update can cause this with no source change, because it \
-             can change which log calls survive optimization; then `cargo xtask log-map` \
-             alone adds the rows and updates the header, and committing both fixes it.",
+             the decoder header, and commit the map's files in fw/plat/uno/{MAP_DIR} and \
+             fw/plat/uno/{HEADER} with the change. A compiler update can cause this with no \
+             source change, because it can change which log calls survive optimization; then \
+             `cargo xtask log-map` alone adds the rows and updates the header, and committing \
+             them fixes it.",
             self.fix
         )
     }
@@ -142,12 +144,9 @@ pub fn repo_root(ctx: &XtaskCtx) -> anyhow::Result<PathBuf> {
     Ok(repo.to_path_buf())
 }
 
-/// Reads and parses the message map.
+/// Reads and parses the message map's files.
 pub fn read_map(ctx: &XtaskCtx) -> anyhow::Result<Map> {
-    let path = ctx.root.join(MAP);
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
-    Map::parse(&text).with_context(|| format!("can't parse {}", path.display()))
+    Ok(Map::read_dir(&ctx.root.join(MAP_DIR))?)
 }
 
 /// Runs `cargo` with `args` in `dir`, passing its standard error through, and
@@ -258,45 +257,69 @@ fn component_of(
     }
 }
 
-/// Adds rows for `keys` to the map file at `path`, keeping its other bytes,
-/// and returns the added rows.
+/// Adds rows for `keys` to the map in the directory `map_dir`, and returns
+/// the added rows. Each row goes at the end of its component's file, which
+/// keeps its other bytes and its line endings.
 fn add_rows(
-    path: &Path,
+    map_dir: &Path,
     keys: &BTreeSet<Key>,
     repo: &Path,
 ) -> anyhow::Result<Vec<tsra_log_map::Row>> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("can't read {}", path.display()))?;
-    let mut map = Map::parse(&text).with_context(|| format!("can't parse {}", path.display()))?;
+    let mut files = Vec::new();
+    for component in Component::ALL {
+        let path = map_dir.join(component.file_name());
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
+        files.push((component, path, text));
+    }
+    let texts: Vec<(Component, &str)> = files
+        .iter()
+        .map(|(component, _, text)| (*component, text.as_str()))
+        .collect();
+    let mut map = Map::parse_files(&texts)
+        .with_context(|| format!("can't parse the message map in {}", map_dir.display()))?;
     let crates = crate_components(repo)?;
     let keys = keys
         .iter()
         .map(|key| Ok((key.clone(), component_of(&crates, &key.crate_name)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let added = map.add(&keys)?;
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut out = text;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push_str(eol);
+    for (component, path, text) in files {
+        let mut rows = added
+            .iter()
+            .filter(|row| row.component == component)
+            .peekable();
+        if rows.peek().is_none() {
+            continue;
+        }
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut out = text;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(eol);
+        }
+        for row in rows {
+            out.push_str(&row.to_line());
+            out.push_str(eol);
+            log::info!(
+                "added a message-map row to {}: {}",
+                path.display(),
+                row.to_line()
+            );
+        }
+        fs::write(&path, out).with_context(|| format!("can't write {}", path.display()))?;
     }
-    for row in &added {
-        out.push_str(&row.to_line());
-        out.push_str(eol);
-        log::info!("added a message-map row: {}", row.to_line());
-    }
-    fs::write(path, out).with_context(|| format!("can't write {}", path.display()))?;
     Ok(added)
 }
 
 /// Runs `cargo args` in `dir`. When the link reports messages that have no
-/// row, fix mode adds their rows to the map file at `map` and builds again;
-/// locked mode fails with [`MissingRows`], which names `fix` as the command
-/// that adds them.
+/// row, fix mode adds their rows to the map in the directory `map_dir` and
+/// builds again; locked mode fails with [`MissingRows`], which names `fix` as
+/// the command that adds them.
 pub fn build_with_map(
     dir: &Path,
     args: &[&str],
     envs: &[(&str, &OsStr)],
-    map: &Path,
+    map_dir: &Path,
     repo: &Path,
     mode: Mode,
     fix: &str,
@@ -322,7 +345,7 @@ pub fn build_with_map(
                     !added,
                     "the link still reports messages without rows after the map was updated"
                 );
-                add_rows(map, &keys, repo)?;
+                add_rows(map_dir, &keys, repo)?;
                 added = true;
             }
         }
@@ -727,31 +750,117 @@ pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result
     }
 }
 
-/// Paths, relative to the repository root, where earlier revisions kept the
-/// message map. A change that moves or renames the map adds the old path
-/// here, so that [`check_against_base`] still finds the base's map.
-pub const FORMER_MAPS: &[&str] = &[];
+/// Former paths of the map's files, relative to the repository root, each
+/// with its component. A change that moves or renames a component's map
+/// file adds the old path here, so that [`check_against_base`] compares the
+/// file with the base's file at the old path.
+pub const FORMER_MAPS: &[(Component, &str)] = &[];
 
-/// Checks the map on its own and against the map at the git revision `base`:
-/// `base`'s map must be an exact prefix, and each row after it must give its
-/// crate the component of the crate's place in the tree. `base`'s map is the
-/// file at [`MAP`], or else at the first of [`FORMER_MAPS`] that `base` has.
-/// Fails if `base` can't be read, or if `base` has neither file but another
-/// of its files holds one of the map's rows, because then the map moved. If
-/// `base` has no map at all, every row counts as new.
+/// The xtask's fixtures, relative to the repository root. Their `*.tsv`
+/// files are the fixtures' own maps, which the map check skips.
+const FIXTURES: &str = "fw/plat/uno/xtask/fixtures/";
+
+/// `component`'s map file, relative to the repository root.
+fn map_file(component: Component) -> String {
+    format!("fw/plat/uno/{MAP_DIR}/{}", component.file_name())
+}
+
+/// Each map file's path, current or former, relative to the repository
+/// root, with its component. Fails if a path belongs to two components, or
+/// isn't a `*.tsv` file under `fw/plat/uno`, outside [`FIXTURES`], with no
+/// empty, `.`, or `..` part: the check looks for map files only there.
+fn map_paths(former_maps: &[(Component, &str)]) -> anyhow::Result<BTreeMap<String, Component>> {
+    let current = Component::ALL
+        .into_iter()
+        .map(|component| (component, map_file(component)));
+    let former = former_maps
+        .iter()
+        .map(|&(component, path)| (component, path.to_string()));
+    let mut paths = BTreeMap::new();
+    for (component, path) in current.chain(former) {
+        let parts_ok = path.split('/').all(|part| !matches!(part, "" | "." | ".."));
+        anyhow::ensure!(
+            parts_ok
+                && path.starts_with("fw/plat/uno/")
+                && !path.starts_with(FIXTURES)
+                && path.ends_with(".tsv"),
+            "the map file path {path:?} isn't a .tsv file under fw/plat/uno, outside \
+             {FIXTURES}, with no empty, `.`, or `..` part; fix FORMER_MAPS in \
+             fw/plat/uno/xtask/src/log_map.rs"
+        );
+        if let Some(other) = paths.insert(path.clone(), component) {
+            anyhow::ensure!(
+                other == component,
+                "the map file path {path} belongs to two components, {} and {}; fix \
+                 FORMER_MAPS in fw/plat/uno/xtask/src/log_map.rs",
+                other.name(),
+                component.name()
+            );
+        }
+    }
+    Ok(paths)
+}
+
+/// The tracked `*.tsv` files under `fw/plat/uno`, apart from [`FIXTURES`]:
+/// in the index, or with `rev`, in that revision.
+fn tsv_files(sh: &Shell, rev: Option<&str>) -> anyhow::Result<BTreeSet<String>> {
+    let listed = match rev {
+        None => cmd!(sh, "git ls-files -z -- fw/plat/uno").quiet().read()?,
+        Some(rev) => cmd!(sh, "git ls-tree -r -z --name-only {rev} -- fw/plat/uno")
+            .quiet()
+            .read()?,
+    };
+    Ok(listed
+        .split('\0')
+        .filter(|path| path.ends_with(".tsv") && !path.starts_with(FIXTURES))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Checks the map on its own, and each component's file against its file in
+/// the git revision `base`: `base`'s file must be an exact prefix, and each
+/// row after it must give its crate the component of the crate's place in
+/// the tree. A component's file in `base` is at its current path or at a
+/// path that [`FORMER_MAPS`] gives the component; if `base` has neither, the
+/// file counts as empty, so each of its rows is new.
+///
+/// Map files live only under `fw/plat/uno`, where every tracked `*.tsv`
+/// file, apart from [`FIXTURES`], must be one: on the branch, a component's
+/// file at its current path, and in `base`, also a former path. So the check
+/// fails on any other `*.tsv` file there, on a component with two files in
+/// `base`, and on a component without its file on the branch. It also fails
+/// if `base` can't be read.
 pub fn check_against_base(ctx: &XtaskCtx, base: &str) -> anyhow::Result<()> {
     check_against_base_with(ctx, base, FORMER_MAPS)
 }
 
-fn check_against_base_with(ctx: &XtaskCtx, base: &str, former_maps: &[&str]) -> anyhow::Result<()> {
+fn check_against_base_with(
+    ctx: &XtaskCtx,
+    base: &str,
+    former_maps: &[(Component, &str)],
+) -> anyhow::Result<()> {
     let repo = repo_root(ctx)?;
-    let head_text = fs::read_to_string(ctx.root.join(MAP))
-        .with_context(|| format!("can't read fw/plat/uno/{MAP}"))?;
-    let head = Map::parse(&head_text).context("can't parse the message map")?;
-    let mut problems: Vec<String> = match head.check() {
-        Ok(()) => Vec::new(),
-        Err(errors) => errors.iter().map(ToString::to_string).collect(),
-    };
+    let paths = map_paths(former_maps)?;
+    let mut problems = Vec::new();
+    let mut heads = Vec::new();
+    for component in Component::ALL {
+        let path = map_file(component);
+        match fs::read_to_string(repo.join(&path)) {
+            Ok(text) => heads.push((component, path, text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => problems.push(format!(
+                "{path} is missing, but every component needs its map file"
+            )),
+            Err(e) => return Err(e).with_context(|| format!("can't read {path}")),
+        }
+    }
+    let texts: Vec<(Component, &str)> = heads
+        .iter()
+        .map(|(component, _, text)| (*component, text.as_str()))
+        .collect();
+    let head = Map::parse_files(&texts).context("can't parse the message map")?;
+    if let Err(errors) = head.check() {
+        problems.extend(errors.iter().map(ToString::to_string));
+    }
 
     let sh = Shell::new()?;
     sh.change_dir(&repo);
@@ -763,33 +872,77 @@ fn check_against_base_with(ctx: &XtaskCtx, base: &str, former_maps: &[&str]) -> 
         .with_context(|| {
             format!("can't read {base}; fetch it first, for example with `git fetch origin main`")
         })?;
-    let base_text = match base_map(&sh, base, former_maps, &head)? {
-        Some(text) => text,
-        None => {
-            // Printed, not logged, so that the CI log shows it without RUST_LOG.
-            eprintln!("note: {base} has no message map; counting it as empty, so every row is new");
-            String::new()
+    let current: BTreeSet<String> = Component::ALL.into_iter().map(map_file).collect();
+    for path in tsv_files(&sh, None)? {
+        if !current.contains(&path) {
+            problems.push(format!(
+                "{path} isn't a component's map file, but under fw/plat/uno, apart from \
+                 {FIXTURES}, only the map files, fw/plat/uno/{MAP_DIR}/<component>.tsv, may \
+                 be .tsv files"
+            ));
         }
-    };
-    if let Err(e) = tsra_log_map::check_prefix(&base_text, &head_text) {
-        problems.push(e.to_string());
     }
-    let base_rows = Map::parse(&base_text)
-        .with_context(|| format!("can't parse {base}'s message map"))?
-        .rows()
-        .count();
-    let crates = crate_components(&repo)?;
-    for row in head.rows().skip(base_rows) {
-        match component_of(&crates, &row.key.crate_name) {
-            Ok(component) if component == row.component => {}
-            Ok(component) => problems.push(format!(
-                "this row gives {} the component {}, but the crate's place in the tree gives {}: {}",
-                row.key.crate_name,
-                row.component.name(),
-                component.name(),
-                row.to_line()
+    let mut base_files: BTreeMap<Component, Vec<String>> = BTreeMap::new();
+    for path in tsv_files(&sh, Some(base))? {
+        match paths.get(&path) {
+            Some(&component) => base_files.entry(component).or_default().push(path),
+            None => problems.push(format!(
+                "{base} has {path}, which is neither a component's map file nor a former path \
+                 in FORMER_MAPS. If this change moves or renames a map file, add its old path \
+                 to FORMER_MAPS in fw/plat/uno/xtask/src/log_map.rs, so that the check \
+                 compares the file with the one at the old path."
             )),
-            Err(e) => problems.push(format!("{e:#}: {}", row.to_line())),
+        }
+    }
+
+    let crates = crate_components(&repo)?;
+    let mut new_rows = 0;
+    for (component, path, head_text) in &heads {
+        let base_text = match base_map(&sh, base, *component, &base_files) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                // Printed, not logged, so that the CI log shows it without RUST_LOG.
+                eprintln!(
+                    "note: {base} has no map file for the {} component; counting it as empty, \
+                     so each of its rows is new",
+                    component.name()
+                );
+                String::new()
+            }
+            Err(e) => {
+                problems.push(format!("{e:#}"));
+                continue;
+            }
+        };
+        if let Err(e) = tsra_log_map::check_prefix(&base_text, head_text) {
+            problems.push(format!("{path}: {e}"));
+        }
+        let base_rows = Map::parse_files(&[(*component, &base_text)])
+            .with_context(|| {
+                format!(
+                    "can't parse {base}'s map file for the {} component",
+                    component.name()
+                )
+            })?
+            .rows()
+            .count();
+        let new = head
+            .rows()
+            .filter(|row| row.component == *component)
+            .skip(base_rows);
+        for row in new {
+            new_rows += 1;
+            match component_of(&crates, &row.key.crate_name) {
+                Ok(owner) if owner == row.component => {}
+                Ok(owner) => problems.push(format!(
+                    "this row gives {} the component {}, but the crate's place in the tree gives {}: {}",
+                    row.key.crate_name,
+                    row.component.name(),
+                    owner.name(),
+                    row.to_line()
+                )),
+                Err(e) => problems.push(format!("{e:#}: {}", row.to_line())),
+            }
         }
     }
     anyhow::ensure!(
@@ -798,63 +951,31 @@ fn check_against_base_with(ctx: &XtaskCtx, base: &str, former_maps: &[&str]) -> 
         problems.join("\n  ")
     );
     log::info!(
-        "the message map passes its checks against {base}: {} rows, {} of them new",
-        head.rows().count(),
-        head.rows().count() - base_rows
+        "the message map passes its checks against {base}: {} rows, {new_rows} of them new",
+        head.rows().count()
     );
     Ok(())
 }
 
-/// Reads `base`'s message map: the file at [`MAP`], or else at the first of
-/// `former_maps` that `base` has. Returns `None` if `base` has neither, and
-/// fails if another file in `base` holds one of `head`'s rows.
+/// Reads `component`'s map file in `base`, given `files`, the map files that
+/// `base` has, by component. Returns `None` if `base` has none for
+/// `component`, and fails if it has more than one.
 fn base_map(
     sh: &Shell,
     base: &str,
-    former_maps: &[&str],
-    head: &Map,
+    component: Component,
+    files: &BTreeMap<Component, Vec<String>>,
 ) -> anyhow::Result<Option<String>> {
-    let map = format!("fw/plat/uno/{MAP}");
-    for path in std::iter::once(map.as_str()).chain(former_maps.iter().copied()) {
-        let listed = cmd!(sh, "git ls-tree --name-only {base} -- {path}")
-            .quiet()
-            .read()?;
-        if !listed.trim().is_empty() {
+    match files.get(&component).map(Vec::as_slice).unwrap_or_default() {
+        [] => Ok(None),
+        [path] => {
             let spec = format!("{base}:{path}");
-            return Ok(Some(cmd!(sh, "git show {spec}").quiet().read()?));
+            Ok(Some(cmd!(sh, "git show {spec}").quiet().read()?))
         }
-    }
-    let patterns: Vec<String> = head
-        .rows()
-        .flat_map(|row| ["-e".to_string(), row.to_line()])
-        .collect();
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-    // `git grep` exits with 1 when nothing matches.
-    let output = cmd!(sh, "git grep -I -l -F {patterns...} {base} --")
-        .quiet()
-        .ignore_status()
-        .output()?;
-    match output.status.code() {
-        Some(1) => Ok(None),
-        Some(0) => {
-            let prefix = format!("{base}:");
-            let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(|line| line.strip_prefix(&prefix).unwrap_or(line).to_string())
-                .collect();
-            anyhow::bail!(
-                "{base} has no message map at {map}, but {} holds rows of the map. If this \
-                 change moves or renames the map, add the old path to FORMER_MAPS in \
-                 fw/plat/uno/xtask/src/log_map.rs, so that the check compares the map with \
-                 the one at the old path.",
-                files.join(" and ")
-            )
-        }
-        _ => anyhow::bail!(
-            "can't search {base} for a moved message map: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        paths => anyhow::bail!(
+            "{base} has more than one map file for the {} component: {}",
+            component.name(),
+            paths.join(" and ")
         ),
     }
 }
@@ -1053,11 +1174,14 @@ mod tests {
     fn a_message_that_only_a_test_hook_image_logs_is_not_deprecated() {
         // Every image logs "ready"; each test-hook image also logs a message
         // that no other image logs.
-        let map = Map::parse(concat!(
-            "0\tuno\tI\ttsra_fw_uno_pal\tboot\tready\n",
-            "1\tuno\tI\ttsra_fw_uno_pal\ttest\tcrash hook ran\n",
-            "2\tuno\tI\ttsra_fw_uno_pal\ttest\tfips hook ran\n",
-        ))
+        let map = Map::parse_files(&[(
+            Component::Uno,
+            concat!(
+                "0\tuno\tI\ttsra_fw_uno_pal\tboot\tready\n",
+                "1\tuno\tI\ttsra_fw_uno_pal\ttest\tcrash hook ran\n",
+                "2\tuno\tI\ttsra_fw_uno_pal\ttest\tfips hook ran\n",
+            ),
+        )])
         .expect("a map");
         let rows: Vec<_> = map.rows().collect();
         let hook_rows = [
@@ -1110,6 +1234,7 @@ mod tests {
     const MAP_HEAD: &str =
         "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
     const CORE_ROW: &str = "0\tcore\tE+\ttsra_fw_hsm_core\tcore\tfailed\n";
+    const CORE_ROW_1: &str = "1\tcore\tW\ttsra_fw_hsm_core\tcore\tslow\n";
     const UNO_ROW: &str = "0\tuno\tI\ttsra_fw_uno_pal\tboot\tready\n";
     const UNO_ROW_1: &str = "1\tuno\tW\ttsra_fw_uno_pal\tboot\tslow\n";
 
@@ -1154,9 +1279,16 @@ mod tests {
             fs::write(&path, text).expect("a file");
         }
 
-        /// Writes the message map, relative to the platform workspace.
-        fn write_map(&self, text: &str) {
-            self.write(&format!("fw/plat/uno/{MAP}"), text);
+        /// Writes core's and uno's map files.
+        fn write_maps(&self, core: &str, uno: &str) {
+            self.write(&map_file(Component::Core), core);
+            self.write(&map_file(Component::Uno), uno);
+        }
+
+        /// Removes a file, relative to the repository root, from the index
+        /// and the working tree.
+        fn remove(&self, path: &str) {
+            self.git(&["rm", "-q", "--", path]);
         }
 
         fn git(&self, args: &[&str]) -> String {
@@ -1189,8 +1321,8 @@ mod tests {
         }
 
         /// Checks the map in the working tree against `base`, with
-        /// `former_maps` as the map's old paths.
-        fn check_with(&self, base: &str, former_maps: &[&str]) -> Result<(), String> {
+        /// `former_maps` as the map files' old paths.
+        fn check_with(&self, base: &str, former_maps: &[(Component, &str)]) -> Result<(), String> {
             check_against_base_with(&self.ctx(), base, former_maps).map_err(|e| format!("{e:#}"))
         }
     }
@@ -1204,78 +1336,282 @@ mod tests {
     #[test]
     fn the_base_check_fails_closed_without_the_base() {
         let repo = TempRepo::new();
-        repo.write_map(&format!("{MAP_HEAD}{CORE_ROW}"));
+        repo.write_maps(&format!("{MAP_HEAD}{CORE_ROW}"), MAP_HEAD);
         repo.commit();
         let error = repo.check("origin/main").expect_err("no origin/main");
         assert!(error.contains("can't read origin/main"), "{error}");
     }
 
     #[test]
-    fn the_base_map_must_stay_a_prefix() {
+    fn each_base_file_must_stay_a_prefix_of_its_file() {
         let repo = TempRepo::new();
-        let base_text = format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}");
-        repo.write_map(&base_text);
+        let core = format!("{MAP_HEAD}{CORE_ROW}");
+        let uno = format!("{MAP_HEAD}{UNO_ROW}");
+        repo.write_maps(&core, &uno);
         let base = repo.commit();
         assert_eq!(repo.check(&base), Ok(()));
-        repo.write_map(&format!("{base_text}{UNO_ROW_1}"));
+        repo.write_maps(&format!("{core}{CORE_ROW_1}"), &format!("{uno}{UNO_ROW_1}"));
         assert_eq!(repo.check(&base), Ok(()));
-        for (head, expected) in [
+        for (core_now, uno_now, expected) in [
             (
-                base_text.replace("ready", "set"),
-                "differs from the base map",
+                core.replace("failed", "lost"),
+                uno.clone(),
+                "core.tsv: map line 3 differs from the base map",
             ),
-            (format!("{MAP_HEAD}{CORE_ROW}"), "lost base line"),
             (
-                format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW_1}{UNO_ROW}"),
-                "differs from the base map",
+                core.clone(),
+                uno.replace("ready", "set"),
+                "uno.tsv: map line 3 differs from the base map",
+            ),
+            (
+                MAP_HEAD.to_string(),
+                uno.clone(),
+                "core.tsv: the map lost base line 3",
+            ),
+            (
+                core.clone(),
+                format!("{MAP_HEAD}{UNO_ROW_1}{UNO_ROW}"),
+                "uno.tsv: map line 3 differs from the base map",
             ),
         ] {
-            repo.write_map(&head);
-            let error = repo.check(&base).expect_err("a changed base line");
-            assert!(error.contains(expected), "{head:?}: {error}");
+            repo.write_maps(&core_now, &uno_now);
+            let error = repo.check(&base).expect_err(expected);
+            assert!(error.contains(expected), "{error}");
         }
     }
 
     #[test]
-    fn a_base_without_a_map_counts_as_empty() {
+    fn a_missing_base_file_counts_as_empty() {
         let repo = TempRepo::new();
-        // Another map, with none of this map's rows, doesn't count.
+        let neither = repo.commit();
+        let core = format!("{MAP_HEAD}{CORE_ROW}");
+        repo.write(&map_file(Component::Core), &core);
+        let only_core = repo.commit();
+        repo.write(&map_file(Component::Uno), &format!("{MAP_HEAD}{UNO_ROW}"));
+        assert_eq!(repo.check(&neither), Ok(()));
+        assert_eq!(repo.check(&only_core), Ok(()));
+        // Each row of a file that the base lacks is new, so the check looks
+        // up its crate.
         repo.write(
-            "fw/plat/uno/xtask/fixtures/log_image/log_map.tsv",
-            &format!("{MAP_HEAD}0\tuno\tI\ttsra_log_fixture\tfixture\tready\n"),
+            &map_file(Component::Uno),
+            &format!("{MAP_HEAD}0\tuno\tI\ttsra_fw_uno_gone\tboot\told\n"),
         );
-        let base = repo.commit();
-        repo.write_map(&format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}"));
-        assert_eq!(repo.check(&base), Ok(()));
-        // Every row is new, so the numbers must still start from 0.
-        repo.write_map(&format!("{MAP_HEAD}{}", CORE_ROW.replacen('0', "1", 1)));
-        let error = repo.check(&base).expect_err("a row numbered from 1");
+        for base in [&neither, &only_core] {
+            let error = repo.check(base).expect_err("a crate that's gone");
+            assert!(
+                error.contains("there's no package named tsra_fw_uno_gone"),
+                "{error}"
+            );
+        }
+        // A file that the base has must still stay a prefix.
+        repo.write_maps(MAP_HEAD, &format!("{MAP_HEAD}{UNO_ROW}"));
+        assert_eq!(repo.check(&neither), Ok(()));
+        let error = repo.check(&only_core).expect_err("core's row is gone");
         assert!(
-            error.contains("must take the next number in its component, 0"),
+            error.contains("core.tsv: the map lost base line 3"),
             "{error}"
         );
     }
 
     #[test]
-    fn a_moved_map_must_name_its_old_path() {
+    fn a_moved_file_must_name_its_old_path_and_keep_its_rows() {
+        let core = format!("{MAP_HEAD}{CORE_ROW}");
+        let uno = format!("{MAP_HEAD}{UNO_ROW}");
         // Moved to another directory, and renamed.
         for old in [
-            "fw/plat/uno/fw/old/log_map.tsv",
-            "fw/plat/uno/fw/pal/messages.tsv",
+            "fw/plat/uno/fw/old/uno.tsv",
+            "fw/plat/uno/fw/pal/log_map/messages.tsv",
         ] {
             let repo = TempRepo::new();
-            let base_text = format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}");
-            repo.write(old, &base_text);
+            repo.write(&map_file(Component::Core), &core);
+            repo.write(old, &uno);
             let base = repo.commit();
-            fs::remove_file(repo.root.join(old)).expect("the old map");
-            repo.write_map(&format!("{base_text}{UNO_ROW_1}"));
-            let error = repo.check(&base).expect_err("a moved map");
-            assert!(error.contains(&format!("but {old} holds rows")), "{error}");
-            assert_eq!(repo.check_with(&base, &[old]), Ok(()));
-            repo.write_map(&base_text.replace("ready", "set"));
-            let error = repo.check_with(&base, &[old]).expect_err("an edited row");
-            assert!(error.contains("differs from the base map"), "{error}");
+            repo.remove(old);
+            let listed = [(Component::Uno, old)];
+            // What the branch's file keeps, and how the check fails when
+            // FORMER_MAPS lists the old path.
+            for (kept, uno_now, listed_error) in [
+                ("every row", format!("{uno}{UNO_ROW_1}"), None),
+                (
+                    "no row",
+                    MAP_HEAD.to_string(),
+                    Some("uno.tsv: the map lost base line 3"),
+                ),
+                (
+                    "only new rows",
+                    format!("{MAP_HEAD}{}", UNO_ROW.replace("ready", "set")),
+                    Some("uno.tsv: map line 3 differs from the base map"),
+                ),
+            ] {
+                repo.write(&map_file(Component::Uno), &uno_now);
+                let error = repo.check(&base).expect_err(kept);
+                let unlisted = format!(
+                    "{base} has {old}, which is neither a component's map file nor a former path"
+                );
+                assert!(error.contains(&unlisted), "{kept}: {error}");
+                match listed_error {
+                    None => assert_eq!(repo.check_with(&base, &listed), Ok(()), "{kept}"),
+                    Some(expected) => {
+                        let error = repo.check_with(&base, &listed).expect_err(kept);
+                        assert!(error.contains(expected), "{kept}: {error}");
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    fn a_former_path_must_be_a_map_file_path_of_one_component() {
+        let repo = TempRepo::new();
+        repo.write_maps(
+            &format!("{MAP_HEAD}{CORE_ROW}"),
+            &format!("{MAP_HEAD}{UNO_ROW}"),
+        );
+        let base = repo.commit();
+        let old = "fw/plat/uno/fw/old.tsv";
+        assert_eq!(repo.check_with(&base, &[(Component::Uno, old)]), Ok(()));
+        let core = map_file(Component::Core);
+        let place = "isn't a .tsv file under fw/plat/uno, outside";
+        for (former, expected) in [
+            (
+                vec![(Component::Uno, old), (Component::Core, old)],
+                format!("{old} belongs to two components, uno and core"),
+            ),
+            (
+                vec![(Component::Uno, core.as_str())],
+                format!("{core} belongs to two components, core and uno"),
+            ),
+            (vec![(Component::Uno, "fw/plat/old.tsv")], place.to_string()),
+            (
+                vec![(Component::Uno, "fw/plat/uno/xtask/fixtures/old.tsv")],
+                place.to_string(),
+            ),
+            (
+                vec![(Component::Uno, "fw/plat/uno/fw/old.txt")],
+                place.to_string(),
+            ),
+            (
+                vec![(Component::Uno, "fw/plat/uno/../uno/fw/old.tsv")],
+                place.to_string(),
+            ),
+            (
+                vec![(Component::Uno, "fw/plat/uno/./fw/old.tsv")],
+                place.to_string(),
+            ),
+            (
+                vec![(Component::Uno, "fw/plat/uno//fw/old.tsv")],
+                place.to_string(),
+            ),
+        ] {
+            let error = repo.check_with(&base, &former).expect_err(&expected);
+            assert!(error.contains(&expected), "{former:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_base_with_two_files_for_one_component_fails() {
+        let repo = TempRepo::new();
+        let old = "fw/plat/uno/fw/old/uno.tsv";
+        let uno = format!("{MAP_HEAD}{UNO_ROW}");
+        repo.write_maps(&format!("{MAP_HEAD}{CORE_ROW}"), &uno);
+        repo.write(old, &uno);
+        let base = repo.commit();
+        repo.remove(old);
+        let error = repo
+            .check_with(&base, &[(Component::Uno, old)])
+            .expect_err("two files");
+        let expected = format!(
+            "{base} has more than one map file for the uno component: {old} and {}",
+            map_file(Component::Uno)
+        );
+        assert!(error.contains(&expected), "{error}");
+    }
+
+    #[test]
+    fn a_base_file_of_a_removed_component_fails() {
+        let repo = TempRepo::new();
+        repo.write_maps(
+            &format!("{MAP_HEAD}{CORE_ROW}"),
+            &format!("{MAP_HEAD}{UNO_ROW}"),
+        );
+        let gone = "fw/plat/uno/fw/pal/log_map/cpu.tsv";
+        repo.write(gone, &format!("{MAP_HEAD}0\tcpu\tI\tc\tboot\tready\n"));
+        let base = repo.commit();
+        repo.remove(gone);
+        let error = repo.check(&base).expect_err("a removed component");
+        assert!(
+            error.contains(&format!("{base} has {gone}, which is neither")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn only_the_map_files_are_tsv_files_under_fw_plat_uno() {
+        let repo = TempRepo::new();
+        repo.write_maps(
+            &format!("{MAP_HEAD}{CORE_ROW}"),
+            &format!("{MAP_HEAD}{UNO_ROW}"),
+        );
+        // The fixtures' maps and .tsv files outside fw/plat/uno don't count,
+        // in the base or on the branch.
+        let fixture = "fw/plat/uno/xtask/fixtures/log_image/log_map";
+        repo.write(
+            &format!("{fixture}/uno.tsv"),
+            &format!("{MAP_HEAD}0\tuno\tI\ttsra_log_fixture\tfixture\tready\n"),
+        );
+        repo.write("plugins/tools/signatures.tsv", "a\tb\n");
+        let base = repo.commit();
+        repo.write(&format!("{fixture}/core.tsv"), MAP_HEAD);
+        repo.write("plugins/tools/more.tsv", "c\td\n");
+        repo.git(&["add", "-A"]);
+        assert_eq!(repo.check(&base), Ok(()));
+        // Another .tsv file under fw/plat/uno fails once it's tracked.
+        let notes = "fw/plat/uno/fw/pal/notes.tsv";
+        repo.write(notes, "a\tb\n");
+        assert_eq!(repo.check(&base), Ok(()));
+        repo.git(&["add", "--", notes]);
+        let error = repo.check(&base).expect_err("an unrelated .tsv file");
+        assert!(
+            error.contains(&format!("{notes} isn't a component's map file")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_branch_without_a_components_file_fails() {
+        let repo = TempRepo::new();
+        repo.write_maps(
+            &format!("{MAP_HEAD}{CORE_ROW}"),
+            &format!("{MAP_HEAD}{UNO_ROW}"),
+        );
+        let base = repo.commit();
+        let core = map_file(Component::Core);
+        repo.remove(&core);
+        let error = repo.check(&base).expect_err("no core.tsv");
+        assert!(
+            error.contains(&format!(
+                "{core} is missing, but every component needs its map file"
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_row_moved_to_the_other_file_fails() {
+        let repo = TempRepo::new();
+        let core = format!("{MAP_HEAD}{CORE_ROW}");
+        repo.write_maps(&core, &format!("{MAP_HEAD}{UNO_ROW}{UNO_ROW_1}"));
+        let base = repo.commit();
+        // uno's row 1 moves to core's file, as core's next row.
+        repo.write_maps(
+            &format!("{core}1\tcore\tW\ttsra_fw_uno_pal\tboot\tslow\n"),
+            &format!("{MAP_HEAD}{UNO_ROW}"),
+        );
+        let error = repo.check(&base).expect_err("a moved row");
+        assert!(
+            error.contains("uno.tsv: the map lost base line 4"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1283,21 +1619,24 @@ mod tests {
         let repo = TempRepo::new();
         // The base row's crate is gone from the tree; base rows aren't
         // checked again.
-        let base_text = format!("{MAP_HEAD}0\tuno\tI\ttsra_fw_uno_gone\tboot\told\n");
-        repo.write_map(&base_text);
+        let uno = format!("{MAP_HEAD}0\tuno\tI\ttsra_fw_uno_gone\tboot\told\n");
+        repo.write_maps(MAP_HEAD, &uno);
         let base = repo.commit();
-        let check = |rows: &str| {
-            repo.write_map(&format!("{base_text}{rows}"));
+        let check = |core_rows: &str, uno_rows: &str| {
+            repo.write_maps(
+                &format!("{MAP_HEAD}{core_rows}"),
+                &format!("{uno}{uno_rows}"),
+            );
             repo.check(&base)
         };
-        assert_eq!(check(&UNO_ROW.replacen('0', "1", 1)), Ok(()));
-        assert_eq!(check(CORE_ROW), Ok(()));
-        let error = check("0\tcore\tI\ttsra_fw_uno_pal\tboot\tready\n").expect_err("core");
+        assert_eq!(check("", &UNO_ROW.replacen('0', "1", 1)), Ok(()));
+        assert_eq!(check(CORE_ROW, ""), Ok(()));
+        let error = check("0\tcore\tI\ttsra_fw_uno_pal\tboot\tready\n", "").expect_err("core");
         assert!(
             error.contains("the crate's place in the tree gives uno"),
             "{error}"
         );
-        let error = check("1\tuno\tI\ttsra_fw_uno_none\tboot\tready\n").expect_err("no crate");
+        let error = check("", "1\tuno\tI\ttsra_fw_uno_none\tboot\tready\n").expect_err("no crate");
         assert!(
             error.contains("there's no package named tsra_fw_uno_none"),
             "{error}"
@@ -1305,30 +1644,39 @@ mod tests {
     }
 
     #[test]
-    fn adding_rows_keeps_crlf_line_endings() {
+    fn adding_rows_appends_each_to_its_components_file_with_its_line_endings() {
         let repo = TempRepo::new();
-        let path = repo.root.join("map.tsv");
-        let text = format!("# map\r\n{}", UNO_ROW.trim_end());
-        fs::write(&path, &text).expect("a map");
-        let key = Key {
-            crate_name: "tsra_fw_uno_pal".to_string(),
+        // core's file is CRLF, without a final line ending; uno's is LF.
+        let core = format!("# map\r\n{}", CORE_ROW.trim_end());
+        let uno = format!("# map\n{UNO_ROW}");
+        repo.write("map/core.tsv", &core);
+        repo.write("map/uno.tsv", &uno);
+        let key = |crate_name: &str, target: &str| Key {
+            crate_name: crate_name.to_string(),
             kind: tsra_log_map::Kind::Warn,
-            target: "boot".to_string(),
+            target: target.to_string(),
             message: "slow".to_string(),
         };
-        let added = add_rows(&path, &BTreeSet::from([key]), &repo.root).expect("a row");
-        assert_eq!(added.len(), 1);
+        let keys = BTreeSet::from([
+            key("tsra_fw_hsm_core", "core"),
+            key("tsra_fw_uno_pal", "boot"),
+        ]);
+        let dir = repo.root.join("map");
+        let added = add_rows(&dir, &keys, &repo.root).expect("two rows");
+        assert_eq!(added.len(), 2);
+        let read = |file: &str| fs::read_to_string(dir.join(file)).expect("a map file");
         assert_eq!(
-            fs::read_to_string(&path).expect("the map"),
-            format!("{text}\r\n{}\r\n", UNO_ROW_1.trim_end())
+            read("core.tsv"),
+            format!("{core}\r\n{}\r\n", CORE_ROW_1.trim_end())
         );
+        assert_eq!(read("uno.tsv"), format!("{uno}{UNO_ROW_1}"));
     }
 
     #[test]
     fn finish_writes_the_header_in_fix_mode_and_checks_it_in_locked_mode() {
         let repo = TempRepo::new();
         let ctx = repo.ctx();
-        repo.write_map(&format!("{MAP_HEAD}{UNO_ROW}"));
+        repo.write_maps(MAP_HEAD, &format!("{MAP_HEAD}{UNO_ROW}"));
         let map = read_map(&ctx).expect("a map");
         let row = map.rows().next().expect("a row");
         let images = [ImageLog {
@@ -1359,7 +1707,7 @@ mod tests {
     fn finish_fails_when_it_cant_read_the_header() {
         let repo = TempRepo::new();
         let ctx = repo.ctx();
-        repo.write_map(&format!("{MAP_HEAD}{UNO_ROW}"));
+        repo.write_maps(MAP_HEAD, &format!("{MAP_HEAD}{UNO_ROW}"));
         // A directory where the header goes can't be read as a file.
         fs::create_dir_all(ctx.root.join(HEADER)).expect("a directory");
         for mode in [Mode::Fix, Mode::Locked] {

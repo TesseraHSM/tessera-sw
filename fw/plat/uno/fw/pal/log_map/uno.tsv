@@ -1,16 +1,16 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# The message map for debug-log output: one row per message, which gives the
-# message its number in its component. Rows are append-only. Never edit,
-# delete, or reorder one, so that each number keeps its meaning for every
-# decoder. `cargo xtask build` in fw/plat/uno appends the rows for new
-# messages, and `cargo xtask log-map` also updates log_messages.h. Commit both
-# with the code that adds the messages.
+# The message map's rows for the uno component, for debug-log output: one
+# row per message, which gives the message its number in the component.
+# Each component has its own file in this directory, and each row names its
+# file's component. Rows are append-only. Never edit, delete, or reorder
+# one, so that each number keeps its meaning for every decoder. `cargo
+# xtask build` in fw/plat/uno appends the rows for new messages to their
+# component's file, and `cargo xtask log-map` also updates
+# ../log_messages.h. Commit both with the code that adds the messages.
 #
 # number	component	kind	crate	target	message
-0	core	E+	tsra_fw_hsm_core	core	failed to fault the IO's poisoned partition
-1	core	E+	tsra_fw_hsm_core	core	undo walk poisoned the IO's partition
 0	uno	I	tsra_fw_uno_app	app	Tessera Integrated HSM firmware starting up...
 1	uno	I	tsra_fw_uno_app	app	boot complete, spawning poll_io
 2	uno	E+	tsra_fw_uno_fault	fips	#### FIPS error state ####
@@ -50,7 +50,6 @@
 36	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair bad seed_len={}
 37	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair short buffers sk_len={}
 38	uno	W	tsra_fw_uno_pal	gdma	SRAM scrub for slot {} fell back to CPU (GDMA wipe failed)
-2	core	E+	tsra_fw_hsm_core	core	handle_op failed
 39	uno	W	tsra_fw_uno_drivers_iic	iic	ALREADY ENABLED before full init: ch={}
 40	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: addr={:#x} axi_id={}
 41	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: ch={} slot={}

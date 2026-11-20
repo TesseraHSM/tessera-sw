@@ -97,7 +97,7 @@ impl Build {
             &fw.fw_dir,
             &args,
             &[],
-            &ctx.root.join(log_map::MAP),
+            &ctx.root.join(log_map::MAP_DIR),
             &log_map::repo_root(ctx)?,
             mode,
             fix.trim_end(),
