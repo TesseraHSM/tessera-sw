@@ -12,9 +12,9 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_codec::EncodeError;
 use tsra_ddi_tbor_codec::RequestEncoder;
 use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborEccVerifyReq;
 use tsra_ddi_tbor_types::TborHashReq;
 use tsra_ddi_tbor_types::TborOpReq;
@@ -207,7 +207,7 @@ fn malformed_requests_for_every_command_are_rejected_and_session_survives() {
 fn malformed_ecc_verify_is_rejected_by_default_psk_gate() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(crate::commands::common::CO, SessionType::Authenticated)
+        .open_session(crate::commands::common::CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
     let result = ctx.tbor(&TborEccVerifyReq {
         session_id: session.session_id(),

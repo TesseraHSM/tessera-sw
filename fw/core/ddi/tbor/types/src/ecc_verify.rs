@@ -55,7 +55,7 @@ mod tests {
         let mut buf = [0u8; 640];
         let masked_key = [0x11u8; MASKED_ECC_KEY_MAX_LEN];
         let input = [0x22u8; ECC_VERIFY_INPUT_MAX_LEN];
-        let frame = TborEccVerifyReq::encode(&mut buf)
+        let frame = TborEccVerifyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -70,13 +70,13 @@ mod tests {
         assert_eq!(frame.input(), &input[..]);
         assert_eq!(frame.masked_key().as_ptr() as usize % 4, 0);
         assert_eq!(frame.input().as_ptr() as usize % 4, 0);
-        assert_eq!(frame.len(), 560);
+        assert_eq!(frame.len(), 564);
     }
 
     #[test]
     fn ecc_verify_empty_response_is_typed() {
-        let mut buf = [0u8; 32];
-        let _ = TborEccVerifyResp::encode(&mut buf, 0, true)
+        let mut buf = [0u8; 64];
+        let _ = TborEccVerifyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .finish();
     }

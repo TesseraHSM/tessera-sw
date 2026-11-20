@@ -58,8 +58,8 @@ mod tests {
             input: alloc::vec![0x22; ECC_VERIFY_INPUT_MAX_LEN],
         };
         let mut buf = [0u8; 640];
-        let frame = req.encode_request(&mut buf).expect("encode");
-        assert_eq!(frame.len(), 560);
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
+        assert_eq!(frame.len(), 564);
         assert_eq!(
             frame
                 .windows(ECC_VERIFY_INPUT_MAX_LEN)
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn ecc_verify_empty_response_decodes() {
         let mut buf = [0u8; 32];
-        let frame = ResponseEncoder::new(&mut buf, 1, 0, false)
+        let frame = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
             .none()
             .expect("none")
             .finish()
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn ecc_verify_failed_status_survives_response_decoding() {
         let mut buf = [0u8; 32];
-        let frame = ResponseEncoder::new(&mut buf, 1, 0x0870_0024, false)
+        let frame = ResponseEncoder::new(&mut buf, (1, 1), 0x0870_0024, false)
             .none()
             .expect("none")
             .finish()
