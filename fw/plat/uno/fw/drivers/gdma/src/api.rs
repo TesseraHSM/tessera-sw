@@ -6,6 +6,7 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
@@ -32,6 +33,10 @@ use crate::GdmaBuf;
 use crate::GdmaError;
 use crate::MemInterface;
 
+/// Tasks that can wait for a free tag or SQ entry before the oldest
+/// waiters are woken early to make room (they then register again).
+const ADMIT_WAITERS: usize = 32;
+
 struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
@@ -51,6 +56,10 @@ struct GdmaState<const DEPTH: usize> {
     tag_free: u32,
     /// Completed detached transfers, one bit per tag.
     detached_done: u32,
+    /// Tasks waiting for a free tag or SQ entry: woken when a tag is
+    /// released or completions are reaped (the engine has then consumed
+    /// SQ entries).
+    admit_waiters: MultiWakerRegistration<ADMIT_WAITERS>,
     tags: [TagSlot; DEPTH],
 }
 
@@ -181,6 +190,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 sq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
+                admit_waiters: MultiWakerRegistration::new(),
                 tags,
             }),
         }
@@ -363,7 +373,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                             tag
                         }
                         Err(e) if e == GdmaError::NO_FREE_TAGS || e == GdmaError::SQ_FULL => {
-                            cx.waker().wake_by_ref();
+                            self.state.with(|s| s.admit_waiters.register(cx.waker()));
                             return Poll::Pending;
                         }
                         Err(e) => return Poll::Ready(Err(e)),
@@ -376,6 +386,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                     let status = slot.status;
                     slot.completed = false;
                     s.tag_free |= 1u32 << tag;
+                    s.admit_waiters.wake();
                     return Poll::Ready(if status == 0 {
                         Ok(())
                     } else {
@@ -433,6 +444,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             slot.detached = false;
             let done = (slot.cookie, slot.status == 0);
             s.tag_free |= 1u32 << tag;
+            s.admit_waiters.wake();
             Some(done)
         })
     }
@@ -470,6 +482,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
 
             // SAFETY: The configured CQ shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
+            if s.cq_head != tail {
+                s.admit_waiters.wake();
+            }
 
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
