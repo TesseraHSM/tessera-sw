@@ -722,9 +722,6 @@ mod tests {
     /// P-384 `PartRoot` size — the only curve the PTA derivation uses.
     const ROOT_LEN: usize = 48;
 
-    /// Builds a PAL plus an admin IO context for a single derivation.
-    const GENERATED: HsmEcdsaNonce = HsmEcdsaNonce::Generated;
-
     fn standard_hash(curve: HsmEccCurve) -> HsmHashAlgo {
         match curve {
             HsmEccCurve::P256 => HsmHashAlgo::Sha256,
@@ -847,8 +844,16 @@ mod tests {
                     let _remaining = reserve.dma_alloc(buf_pool::DMA_BUF_SIZE - mark)?;
                     let full_marks = allocation_marks(&pal, &io);
                     assert_eq!(
-                        pal.ecc_sign(&io, curve, hash, private, GENERATED, input, None)
-                            .await?,
+                        pal.ecc_sign(
+                            &io,
+                            curve,
+                            hash,
+                            private,
+                            HsmEcdsaNonce::Generated,
+                            input,
+                            None,
+                        )
+                        .await?,
                         signature_len
                     );
                     assert_eq!(
@@ -873,7 +878,7 @@ mod tests {
                             curve,
                             hash,
                             private,
-                            GENERATED,
+                            HsmEcdsaNonce::Generated,
                             input,
                             Some(&mut signature[..signature_len - 1]),
                         )
@@ -907,8 +912,16 @@ mod tests {
 
                 for _ in 0..2 {
                     assert_eq!(
-                        pal.ecc_sign(&io, curve, hash, private, GENERATED, input, Some(signature))
-                            .await?,
+                        pal.ecc_sign(
+                            &io,
+                            curve,
+                            hash,
+                            private,
+                            HsmEcdsaNonce::Generated,
+                            input,
+                            Some(signature),
+                        )
+                        .await?,
                         signature_len
                     );
                     assert_eq!(
@@ -965,7 +978,7 @@ mod tests {
                             curve,
                             hash,
                             private,
-                            GENERATED,
+                            HsmEcdsaNonce::Generated,
                             &mut input[..sign_len],
                         )
                         .await?;

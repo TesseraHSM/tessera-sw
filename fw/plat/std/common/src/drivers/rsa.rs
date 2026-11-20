@@ -252,7 +252,7 @@ impl StdRsa {
         priv_key: &RsaPrivateKey,
         y: &[u8],
         out_len: usize,
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<Zeroizing<Vec<u8>>> {
         // Operands are in PAL order; OpenSSL is big-endian.
         let mut y_be = y.to_vec();
         byte_order::int_to_be(self.order, &mut y_be);
@@ -268,7 +268,7 @@ impl StdRsa {
         self.pool
             .submit_with_result(async move {
                 let mut algo = RsaEncryptAlgo::with_no_padding();
-                let mut buf = vec![0u8; out_len];
+                let mut buf = Zeroizing::new(vec![0u8; out_len]);
                 algo.decrypt(&key, &y_be, Some(&mut buf))
                     .map_err(|_| HsmError::RsaDecryptFailed)?;
                 Ok::<_, HsmError>(buf)
@@ -392,10 +392,9 @@ impl StdRsa {
         ciphertext: &[u8],
         output: &mut [u8],
     ) -> HsmResult<usize> {
-        let em = zeroize::Zeroizing::new(
-            self.mod_exp_priv_result(priv_key, ciphertext, ciphertext.len())
-                .await?,
-        );
+        let em = self
+            .mod_exp_priv_result(priv_key, ciphertext, ciphertext.len())
+            .await?;
         let mut decoded = <RsaPadPkcs1EncryptAlgo as DecodeOp>::from_bytes(&em, ())
             .map_err(|_| HsmError::RsaDecryptFailed)?;
         let message = decoded.message_mut();

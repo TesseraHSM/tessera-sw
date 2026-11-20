@@ -232,7 +232,7 @@ impl StdKdf {
         if mask.is_empty() {
             return Ok(());
         }
-        let seed_owned = seed.to_vec();
+        let seed_owned = zeroize::Zeroizing::new(seed.to_vec());
         let len = mask.len();
 
         let result = self
