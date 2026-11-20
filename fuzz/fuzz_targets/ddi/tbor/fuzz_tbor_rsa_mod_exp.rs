@@ -528,6 +528,8 @@ fuzz_target!(|input: FuzzInput| {
             }
             (Ok(_), false) => panic!("invalid RsaModExp request unexpectedly succeeded"),
             (Err(err), true) => panic!("valid RsaModExp request failed: {err}"),
+            // Host encoding failures never reach the device's session policy.
+            (Err(DdiError::TborEncodeError), false) => {}
             (Err(err), false) if input.invalid_session => {
                 ctx.assert_unknown_session_rejects(err, TborStatus::SessionNotFound);
             }
