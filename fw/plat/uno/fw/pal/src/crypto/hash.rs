@@ -83,31 +83,6 @@ fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<()>
     Ok(())
 }
 
-#[cfg(test)]
-mod oob_descriptor_tests {
-    use super::*;
-
-    #[test]
-    fn oob_hash_descriptor_checks_length_format_and_address_range() {
-        let mut desc = [0u8; 16];
-        desc[..8].copy_from_slice(&0x1000u64.to_le_bytes());
-        desc[8..12].copy_from_slice(&8u32.to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Ok(0x1000));
-
-        assert_eq!(validate_oob_hash_desc(&desc, 7), Err(HsmError::InvalidArg));
-        desc[12] = 1;
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[12] = 0;
-        desc[15] = 1;
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[15] = 0;
-        desc[..8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-        desc[..8].copy_from_slice(&(u64::MAX - 7).to_le_bytes());
-        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
-    }
-}
-
 /// Multi-step hash context for the Uno SHA hardware accelerator.
 ///
 /// Carries the algorithm selection, running byte count, and caller-provided

@@ -91,10 +91,11 @@ fn ecdsa_sign_rejects_oversized_message_before_oob_read() {
 }
 
 #[test]
-fn ecdsa_sign_streams_message_boundaries() {
-    with_generated_ecc_key(ECC_CURVES[0], |ctx, session_id, masked_key, _| {
+fn ecdsa_sign_hashes_message_boundaries() {
+    with_generated_ecc_key(ECC_CURVES[0], |ctx, session_id, masked_key, pub_key| {
         for len in [
-            0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 1023, 1024, 1025, 8191, 8192,
+            0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 1023, 1024, 1025, 4095, 4096, 4097,
+            8191, 8192,
         ] {
             let message: Vec<u8> = (0..len)
                 .map(|index| (index as u8).wrapping_mul(37).wrapping_add(0x5B))
@@ -118,7 +119,11 @@ fn ecdsa_sign_streams_message_boundaries() {
                 .unwrap_or_else(|error| {
                     panic!("EcdsaSign failed at message length {len}: {error}")
                 });
-            assert_eq!(response.signature.len(), 64);
+            let digest = Hasher::hash_vec(&mut HashAlgo::sha256(), &message).expect("host hash");
+            assert!(
+                verify_wire_ecdsa(&pub_key, &response.signature, &dev_rev(&digest)),
+                "signature must verify over the original {len}-byte message"
+            );
         }
     });
 }

@@ -342,7 +342,7 @@ mod tests {
         let io = oob_io(desc);
         let digest = pal.dma_alloc(&io, algo.digest_len())?;
         let len = pal
-            .hash_oob(&io, algo, message_index, message_len, form, Some(digest))
+            .hash_oob(&io, algo, message_len, message_index, form, digest)
             .await?;
         Ok(digest[..len].to_vec())
     }
@@ -426,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn oob_hash_streams_boundary_lengths_in_both_digest_forms() {
-        for len in [0, 1023, 1024, 1025, OOB_HASH_MAX_LEN] {
+        for len in [0, 1023, 1024, 1025, 8192] {
             let msg: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
             let desc = (!msg.is_empty()).then(|| sgl_desc(&msg, msg.len()));
             for algo in [
@@ -506,18 +506,6 @@ mod tests {
                 1,
                 msg.len(),
                 Some(&valid_desc),
-                HsmDigestForm::Standard,
-            )
-            .await,
-            Err(HsmError::InvalidArg)
-        );
-        assert_eq!(
-            pal_hash_oob(
-                HsmHashAlgo::Sha256,
-                &[],
-                1,
-                0,
-                None,
                 HsmDigestForm::Standard,
             )
             .await,

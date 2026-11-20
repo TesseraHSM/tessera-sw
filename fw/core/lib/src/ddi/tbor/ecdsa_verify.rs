@@ -109,10 +109,10 @@ pub(crate) async fn handle<P: HsmPal>(
     pal.hash_oob(
         io,
         algo,
-        message_index,
         message_len,
+        message_index,
         HsmDigestForm::Operand,
-        Some(digest),
+        digest,
     )
     .await?;
 
