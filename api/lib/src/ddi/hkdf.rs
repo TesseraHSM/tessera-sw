@@ -140,8 +140,8 @@ fn hkdf_derive_tbor(
         key_label: key_label.to_vec(),
     };
     let mut cookie = None;
+    let rev = shared_secret.api_rev();
     let resp = shared_secret.with_dev(|dev| {
-        let rev = shared_secret.api_rev();
         dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;

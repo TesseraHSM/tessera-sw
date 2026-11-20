@@ -36,8 +36,8 @@ pub(crate) fn darc_tmk_gen(session: &HsmSession) -> HsmResult<Vec<u8>> {
     };
 
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        let rev = session.api_rev();
         dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;

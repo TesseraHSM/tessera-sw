@@ -897,3 +897,94 @@ impl HsmSessionInner {
         self.last_restore_epoch
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    use super::*;
+
+    #[test]
+    fn tbor_sealing_key_rejection_completes_with_queued_session_writer() {
+        let info = HsmPartitionManager::partition_info_list()
+            .into_iter()
+            .next()
+            .expect("partition");
+        let rev = info.api_rev_range.expect("API revision range").max();
+        let part = HsmPartitionManager::open_partition(&info.path, rev).expect("open partition");
+        let pem = part.cert_chain(0).expect("test chain");
+        let certificates =
+            X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
+        let spki = certificates
+            .last()
+            .expect("test root")
+            .subject_public_key_info_der()
+            .expect("test root SPKI");
+        let root_pin: [u8; 48] = Hasher::hash_vec(&mut HashAlgo::sha384(), spki)
+            .expect("test root hash")
+            .try_into()
+            .expect("SHA-384 length");
+        let session = part
+            .open_session_ex(
+                rev,
+                &root_pin,
+                HsmSessionPsk::new(HsmPskId::CO),
+                HsmSessionSuite::EcdhP384,
+            )
+            .expect("open EX session");
+        let psk = rand::random::<[u8; PSK_LEN]>();
+        session.change_psk(&psk).expect("rotate CO PSK");
+        // Pause with_dev after it holds the session read lock but before its callback.
+        let partition_guard = part.inner().write();
+        let command_session = session.clone();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let command = thread::spawn(move || {
+            let result = ddi::sd_sealing_key_gen(&command_session, u8::MAX);
+            completed_tx.send(result).expect("report command result");
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session
+            .inner
+            .try_write_for(Duration::from_millis(50))
+            .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "command must acquire session lock"
+            );
+            thread::yield_now();
+        }
+        let writer_session = session.clone();
+        let writer = thread::spawn(move || {
+            // A timeout releases the queued writer even if the old code deadlocks.
+            writer_session
+                .inner
+                .try_write_for(Duration::from_secs(5))
+                .is_some()
+        });
+        while session.inner.try_read().is_some() {
+            assert!(Instant::now() < deadline, "session writer must be queued");
+            thread::yield_now();
+        }
+        drop(partition_guard);
+        let result = completed_rx.recv_timeout(Duration::from_secs(2));
+        let writer_acquired = writer.join().expect("session writer");
+        command.join().expect("key generation thread");
+        assert_eq!(
+            result.expect("command must finish without waiting for the queued writer to time out"),
+            Err(HsmError::InvalidArgument)
+        );
+        assert!(
+            writer_acquired,
+            "writer must acquire the lock after the command"
+        );
+    }
+}
