@@ -161,7 +161,9 @@ fn rsa_sign_hash_chunk_and_padding_boundaries() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, _, public_key) = import_rsa(&ctx, session.session_id, 256, false);
-    for len in [55, 56, 63, 64, 65, 1023, 1024, 1025, 8191, 8192] {
+    for len in [
+        55, 56, 63, 64, 65, 1023, 1024, 1025, 4095, 4096, 4097, 8191, 8192,
+    ] {
         let message: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
         let req = TborRsaSignReq {
             session_id: session.session_id,
@@ -187,6 +189,18 @@ fn rsa_sign_hash_chunk_and_padding_boundaries() {
                 .expect("reference boundary verify"),
             "device hashed exactly {len} bytes",
         );
+        let verify = tsra_ddi_tbor_types::TborRsaVerifyReq {
+            session_id: session.session_id,
+            masked_key: masked_key.clone(),
+            padding: RSA_PADDING_PSS,
+            hash_algo: RSA_HASH_SHA256,
+            salt_len: Some(32),
+            message_index: 0,
+            message_len: len as u16,
+            signature,
+        };
+        ctx.tbor_oob(&verify, &oob)
+            .expect("boundary RsaVerify hashes the same raw OOB bytes");
     }
 }
 
@@ -194,7 +208,7 @@ fn rsa_sign_hash_chunk_and_padding_boundaries() {
 fn rsa_sign_supports_all_key_sizes_forms_hashes_and_paddings() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    let message = b"RSA signature matrix\0message";
+    let message = &[0xA7u8; RSA_SIGN_MESSAGE_MAX_LEN][..];
     let hashes = [
         (RSA_HASH_SHA256, HashAlgo::sha256(), 32usize),
         (
@@ -239,6 +253,18 @@ fn rsa_sign_supports_all_key_sizes_forms_hashes_and_paddings() {
                             .expect("reference matrix verify"),
                         "signature verifies for {modulus_len}-byte key, CRT={crt}, hash={hash_selector}, padding={padding}",
                     );
+                    let verify = tsra_ddi_tbor_types::TborRsaVerifyReq {
+                        session_id: session.session_id,
+                        masked_key: masked_key.clone(),
+                        padding,
+                        hash_algo: *hash_selector,
+                        salt_len,
+                        message_index: 0,
+                        message_len: message.len() as u16,
+                        signature,
+                    };
+                    ctx.tbor_oob(&verify, &[message])
+                        .expect("maximum-message RsaVerify fits the existing IO heap");
                 }
             }
         }

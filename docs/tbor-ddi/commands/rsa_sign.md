@@ -36,8 +36,10 @@ is a recommended choice, not a restriction. PKCS#1 v1.5 constructs the
 selected hash's DigestInfo; it does not accept a raw DigestInfo or salt.
 
 For an empty message, `message_index` must be zero and no OOB descriptor is
-read. Nonempty messages require a valid input descriptor whose declared
-length exactly matches `message_len`.
+read. Nonempty messages require a valid input descriptor. A direct Data Block
+descriptor's length must equal `message_len`. On Uno, a Segment/Last Segment
+descriptor is passed unchanged to GDMA, which walks the host SGL and gathers
+`message_len` bytes; firmware does not walk SGLs or PRPs.
 
 ## Response
 
@@ -50,7 +52,9 @@ The host must keep the referenced buffer unchanged and accessible until
 command completion. Descriptor capture is not an atomic snapshot of all
 message bytes; the digest covers the byte stream actually read once. Session
 sealing does not add OOB content guarantees beyond those of the transport.
-No full message copy is made in firmware.
+Uno allocates only `message_len` bytes of scoped DMA scratch, up to 8192 bytes,
+without increasing the per-IO heap. It hashes the gathered bytes after DMA
+completes and releases the scratch before RSA execution.
 
 Malformed fields, invalid key/scope/permission, and OOB errors return their
 specific TBOR status. RNG, hashing, DMA, and RSA execution failures remain

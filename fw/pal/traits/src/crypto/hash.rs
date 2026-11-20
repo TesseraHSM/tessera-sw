@@ -209,9 +209,10 @@ pub trait HsmHash: HsmIoTypes + HsmCryptoOrder {
     /// written. The method validates algorithm and output capacity before
     /// reading message data.
     ///
-    /// The platform validates the OOB SGL descriptor and its complete address
-    /// range, then reads successive chunks without materializing the full
-    /// message in firmware memory.
+    /// The platform validates the root descriptor and its address range.
+    /// Uno submits it unchanged to GDMA, which traverses any SGL segments,
+    /// gathering exactly `expected_len` bytes into a scoped DMA allocation
+    /// of that size. Other platforms may stream the message in smaller chunks.
     async fn hash_oob(
         &self,
         io: &Self::Io,
