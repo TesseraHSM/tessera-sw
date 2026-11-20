@@ -22,6 +22,7 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
@@ -1265,6 +1266,23 @@ fn rsa_mod_exp_invalid_session_rejected() {
         })
         .is_err(),
         "invalid session id must be rejected"
+    );
+}
+
+#[test]
+fn rsa_mod_exp_unknown_session_oversized_key_fails_host_encoding() {
+    let ctx = TestCtx::new();
+    let error = ctx
+        .tbor(&TborRsaModExpReq {
+            session_id: u16::MAX,
+            masked_key: vec![0x42; 8192],
+            op_type: RSA_OP_SIGN,
+            y: vec![1; 512],
+        })
+        .expect_err("oversized key must fail before device submission");
+    assert!(
+        matches!(error, DdiError::TborEncodeError),
+        "expected host encoding failure, got {error:?}",
     );
 }
 
