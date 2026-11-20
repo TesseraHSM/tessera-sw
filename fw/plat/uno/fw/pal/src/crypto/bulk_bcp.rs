@@ -82,8 +82,9 @@ const DST_SGL_DW: usize = 12;
 /// `[0 | J₀ | ctr_tail]`, its output `[H | E(J₀) | E(ctr_tail)]`, and the
 /// IO's key. The ECB step spends its input, so the tail, as read from the
 /// host and as written back (each zero-padded to a block), then takes the
-/// input's first two blocks. An XTS keeps its two keys in blocks [`KEY`]
-/// and 0.
+/// input's first two blocks, and once the tail is encrypted, the output's
+/// last block holds the host SGL descriptors that a host write fetches.
+/// An XTS keeps its two keys in blocks [`KEY`] and 0.
 const ECB_IN: usize = 0;
 const ECB_OUT: usize = 3;
 const KEY: usize = 6;
@@ -93,6 +94,10 @@ const SCRATCH_BLOCKS: usize = 8;
 /// the host, and as written back.
 const TAIL_IN: usize = 0;
 const TAIL_OUT: usize = 1;
+
+/// Within the ECB output, once the tail has been encrypted with its
+/// keystream: the host SGL descriptors a host write fetches.
+const DESC: usize = 2;
 
 /// Disjoint views of `io`'s scratch, one per `(first block, blocks)` span.
 ///
@@ -164,6 +169,11 @@ impl Scratch<'_> {
     /// run.
     fn tail(&self, i: usize) -> &Block {
         block(&self.ecb_in[i * AES_BLOCK_SIZE..])
+    }
+
+    /// Scratch for the host SGL descriptors of a host write ([`DESC`]).
+    fn desc(&mut self) -> &mut HsmDmaBuf {
+        &mut self.ecb_out[DESC * AES_BLOCK_SIZE..(DESC + 1) * AES_BLOCK_SIZE]
     }
 
     /// The zero-padded tail ciphertext.
@@ -351,7 +361,7 @@ impl UnoHsmPal {
             .await?;
         if host.len == 0 {
             let tag = s.gmac(&g.f)?;
-            return self.bulk_finish(io, &host, &g, tag, &s, &mut cqe).await;
+            return self.bulk_finish(io, &host, &g, tag, &mut s, &mut cqe).await;
         }
         let engine_tag = if g.f.encrypt || g.f.tail_len != 0 {
             [0; AES_BLOCK_SIZE]
@@ -379,9 +389,9 @@ impl UnoHsmPal {
             }
         });
         match tag {
-            Ok(tag) => self.bulk_finish(io, &host, &g, tag, &s, &mut cqe).await,
+            Ok(tag) => self.bulk_finish(io, &host, &g, tag, &mut s, &mut cqe).await,
             Err(e) => {
-                self.wipe_failed_decrypt(io, &host, &g).await;
+                self.wipe_failed_decrypt(io, &host, &g, s.desc()).await;
                 Err(e)
             }
         }
@@ -484,17 +494,18 @@ impl UnoHsmPal {
         host: &HostIo,
         g: &GcmIo<'_>,
         tag: Block,
-        s: &Scratch<'_>,
+        s: &mut Scratch<'_>,
         cqe: &mut BulkCqe,
     ) -> HsmResult<()> {
         if !g.f.encrypt && !constant_time_eq(&tag, &g.gcm.tag) {
-            self.wipe_failed_decrypt(io, host, g).await;
+            self.wipe_failed_decrypt(io, host, g, s.desc()).await;
             return Err(HsmError::AesGcmDecryptTagDoesNotMatch);
         }
         if let Some(t) = &g.gcm.tail {
             let buf =
                 &s.ecb_in[TAIL_OUT * AES_BLOCK_SIZE..TAIL_OUT * AES_BLOCK_SIZE + g.f.tail_len];
-            self.copy_to_host_sgl(io, buf, &tail_desc(t.dst, g.f.tail_len))
+            let desc = &mut s.ecb_out[DESC * AES_BLOCK_SIZE..(DESC + 1) * AES_BLOCK_SIZE];
+            self.copy_to_host_sgl(io, desc, buf, &tail_desc(t.dst, g.f.tail_len))
                 .await?;
         }
         if g.f.encrypt {
@@ -507,9 +518,15 @@ impl UnoHsmPal {
 
     /// Best effort: wipes the plaintext the engine may have written for a
     /// GCM decrypt that then failed, whether on the tag or on an error.
-    async fn wipe_failed_decrypt(&self, io: &UnoHsmIo, host: &HostIo, g: &GcmIo<'_>) {
+    async fn wipe_failed_decrypt(
+        &self,
+        io: &UnoHsmIo,
+        host: &HostIo,
+        g: &GcmIo<'_>,
+        desc: &mut HsmDmaBuf,
+    ) {
         if !g.f.encrypt && g.f.text != 0 {
-            let _ = self.zero_host_sgl(io, &host.dst, host.len).await;
+            let _ = self.zero_host_sgl(io, desc, &host.dst, host.len).await;
         }
     }
 }

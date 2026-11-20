@@ -26,6 +26,7 @@
 //! | `copy_mem_from_host_raw` | Host (raw SGL desc) | Device                |
 //! | `copy_mem_to_host`       | Device              | Host                  |
 //! | `HostSgl::write_from`    | Device              | Host (raw SGL, cursor)|
+//! | `HostSgl::write_zeros`   | Zero window         | Host (raw SGL, cursor)|
 
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -430,7 +431,44 @@ impl HostSgl {
         scratch: &mut HsmDmaBuf,
         src: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        let n = src.len();
+        self.write_ptr(pal, io, scratch, src.as_ptr(), src.len())
+            .await
+    }
+
+    /// Zeroes the next `n` payload bytes of the host buffer from the
+    /// [`ZERO_BASE`] window. `scratch` (≥ 16 bytes) holds fetched
+    /// descriptors.
+    ///
+    /// # Errors
+    /// Same as [`HostSgl::read_into`].
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) async fn write_zeros(
+        &mut self,
+        pal: &UnoHsmPal,
+        io: &crate::UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
+        n: usize,
+    ) -> HsmResult<()> {
+        let mut left = n;
+        while left != 0 {
+            let chunk = core::cmp::min(left, ZERO_SIZE as usize);
+            self.write_ptr(pal, io, scratch, ZERO_BASE as *const u8, chunk)
+                .await?;
+            left -= chunk;
+        }
+        Ok(())
+    }
+
+    /// Scatters the `n` device bytes at `src` into the next `n` payload
+    /// bytes of the host buffer.
+    async fn write_ptr(
+        &mut self,
+        pal: &UnoHsmPal,
+        io: &crate::UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
+        src: *const u8,
+        n: usize,
+    ) -> HsmResult<()> {
         if n > self.remaining {
             return Err(HsmError::InvalidArg);
         }
@@ -447,8 +485,9 @@ impl HostSgl {
             let page_rem = HOST_PAGE_SIZE - (self.blk_addr & (HOST_PAGE_SIZE - 1));
             let piece = core::cmp::min(n - off, self.blk_rem as usize);
             let piece = core::cmp::min(piece as u64, page_rem) as usize;
-            let part = &src[off..off + piece];
-            let src_addr = device_dma_buf(part.as_ptr(), piece as u32);
+            // `off + piece <= n`, so this stays within the caller's `n`
+            // bytes at `src`.
+            let src_addr = device_dma_buf(src.wrapping_add(off), piece as u32);
             let dst = host_prp_page(self.blk_addr);
             pal.gdma
                 .copy_mem(
@@ -601,56 +640,37 @@ impl HsmGdmaController for UnoHsmPal {
 }
 
 impl UnoHsmPal {
-    /// Copy `len` bytes of device memory at `src` to the host buffer named
-    /// by the raw SGL descriptor `desc`, which must describe exactly `len`
-    /// bytes.
-    #[cfg(not(feature = "bulk_crypto"))]
-    async fn copy_to_host_sgl_raw(
-        &self,
-        io: &UnoHsmIo,
-        src: *const u8,
-        len: usize,
-        desc: &[u8; 16],
-    ) -> HsmResult<()> {
-        let len = raw_sgl_len(desc, len)?;
-        self.gdma
-            .copy_mem(
-                device_dma_buf(src, len),
-                MemInterface::Device,
-                len,
-                sgl_desc_buf(desc),
-                host_interface(io.pid())?,
-                len,
-            )?
-            .await
-    }
-
-    /// Copy `src` to the host buffer named by the raw SGL descriptor `desc`,
-    /// which must describe exactly `src.len()` bytes.
+    /// Copy `src` to the start of the host buffer named by the raw SGL
+    /// descriptor `desc`, which must describe at least `src.len()` bytes.
+    /// The GDMA does not honor an SGL as a host destination, so this walks
+    /// the list with [`HostSgl`] and writes page-bounded PRPs. `scratch`
+    /// (≥ 16 bytes of GDMA-reachable memory) holds fetched descriptors.
     #[cfg(not(feature = "bulk_crypto"))]
     pub(crate) async fn copy_to_host_sgl(
         &self,
         io: &UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
         src: &HsmDmaBuf,
         desc: &[u8; 16],
     ) -> HsmResult<()> {
-        self.copy_to_host_sgl_raw(io, src.as_ptr(), src.len(), desc)
+        HostSgl::new(desc, src.len())?
+            .write_from(self, io, scratch, src)
             .await
     }
 
-    /// Zero the first `len` (at most [`ZERO_SIZE`]) bytes of the host
-    /// buffer named by the raw SGL descriptor `desc`.
+    /// Zero the first `len` bytes of the host buffer named by the raw SGL
+    /// descriptor `desc`, as [`copy_to_host_sgl`](Self::copy_to_host_sgl)
+    /// writes.
     #[cfg(not(feature = "bulk_crypto"))]
     pub(crate) async fn zero_host_sgl(
         &self,
         io: &UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
         desc: &[u8; 16],
         len: usize,
     ) -> HsmResult<()> {
-        if len > ZERO_SIZE as usize {
-            return Err(HsmError::InvalidArg);
-        }
-        self.copy_to_host_sgl_raw(io, ZERO_BASE as *const u8, len, desc)
+        HostSgl::new(desc, len)?
+            .write_zeros(self, io, scratch, len)
             .await
     }
 
