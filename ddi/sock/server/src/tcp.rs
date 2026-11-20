@@ -511,6 +511,32 @@ mod tests {
     }
 
     #[test]
+    fn uno_routes_sealed_open_init_lookalike_to_session_authentication() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            device.erase().expect("initial reset");
+            let pending = open_init(&device, 0);
+            let lookalike = TborSessionOpenInitReq {
+                reopen_id: pending.session_id ^ 1,
+                ..Default::default()
+            };
+            let frame = encode(&lookalike, (1, 1));
+            assert_eq!(crate::tbor_reopen_target(&frame), Some(lookalike.reopen_id));
+            let sealed = SealedFrameReq {
+                session_ctrl: tsra_ddi_tbor_types::SessionControlKind::InSession,
+                session_id: pending.session_id,
+                frame,
+            };
+            assert!(matches!(
+                device.exec_op_tbor_oob((1, 1), &sealed, &mut [], &mut None),
+                Err(DdiError::DdiError(0xCC))
+            ));
+            pending.finish(&device);
+            pending.close(&device);
+        });
+    }
+
+    #[test]
     fn uno_rejects_tampered_session_control_before_dispatch() {
         with_session_clients(|endpoint, _| {
             let device = DdiSock::default().open_dev(&endpoint).expect("socket");

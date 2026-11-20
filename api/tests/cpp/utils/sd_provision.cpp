@@ -8,6 +8,8 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -995,6 +997,47 @@ tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
     }
     return sess;
 }
+
+tsra_handle open_rotated_co_session(tsra_handle part_handle)
+{
+    static std::mutex mutex;
+    static std::set<Bytes> rotated_partitions;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    tsra_part_prop prop{ TSRA_PART_PROP_ID_PATH, nullptr, 0 };
+    if (tsra_part_get_prop(part_handle, &prop) != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        ADD_FAILURE() << "test partition path size query failed";
+        return 0;
+    }
+    Bytes path(prop.len);
+    prop.val = path.data();
+    if (tsra_part_get_prop(part_handle, &prop) != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "test partition path retrieval failed";
+        return 0;
+    }
+    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
+                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
+    // NSSR preserves credentials, so only the first provisioning rotates them.
+    if (!rotated_partitions.contains(path))
+    {
+        tsra_handle bootstrap = open_co_session(part_handle, nullptr);
+        if (bootstrap == 0)
+        {
+            return 0;
+        }
+        auto err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
+        tsra_sess_close(bootstrap);
+        if (err != TSRA_STATUS_SUCCESS)
+        {
+            ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << err;
+            return 0;
+        }
+        rotated_partitions.insert(std::move(path));
+    }
+    return open_co_session(part_handle, &psk_buf);
+}
 } // namespace
 
 TestRootPin::TestRootPin(tsra_handle partition)
@@ -1110,24 +1153,7 @@ TestRootPin::TestRootPin(tsra_handle partition)
 
 tsra_handle provision_sd_co_session(tsra_handle part_handle)
 {
-    // 1. Bootstrap a CO session under the default PSK and rotate it.
-    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
-    if (bootstrap == 0)
-    {
-        return 0;
-    }
-    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
-                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
-    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
-    tsra_sess_close(bootstrap);
-    if (rotate_err != TSRA_STATUS_SUCCESS)
-    {
-        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
-        return 0;
-    }
-
-    // 2. Reopen the CO session under the rotated PSK for provisioning.
-    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    tsra_handle session = open_rotated_co_session(part_handle);
     if (session == 0)
     {
         return 0;
@@ -1231,24 +1257,7 @@ static SdBackingContext provision_backing_impl(
     bool allow_peer_cloning = true
 )
 {
-    // 1. Bootstrap a CO session under the default PSK and rotate it.
-    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
-    if (bootstrap == 0)
-    {
-        return {};
-    }
-    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
-                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
-    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
-    tsra_sess_close(bootstrap);
-    if (rotate_err != TSRA_STATUS_SUCCESS)
-    {
-        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
-        return {};
-    }
-
-    // 2. Reopen the CO session under the rotated PSK for provisioning.
-    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    tsra_handle session = open_rotated_co_session(part_handle);
     if (session == 0)
     {
         return {};
@@ -1622,25 +1631,7 @@ std::vector<uint8_t> build_darc_part_policy(
 
 DarcReadyContext provision_darc_session(tsra_handle part_handle)
 {
-    // 1. Bootstrap a CO session under the default PSK and rotate it off the
-    // default so the DARC commands clear the default-PSK gate.
-    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
-    if (bootstrap == 0)
-    {
-        return {};
-    }
-    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
-                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
-    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
-    tsra_sess_close(bootstrap);
-    if (rotate_err != TSRA_STATUS_SUCCESS)
-    {
-        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
-        return {};
-    }
-
-    // 2. Reopen the CO session under the rotated PSK for provisioning.
-    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    tsra_handle session = open_rotated_co_session(part_handle);
     if (session == 0)
     {
         return {};

@@ -330,7 +330,7 @@ impl Connection {
             let session_flags = SessionFlags::from(submission.sqe[11]);
             let session_id = submission.sqe[12] as u16;
             let session_ctrl = session_flags.ctrl();
-            let tbor_reopen = (op == OP_TBOR)
+            let tbor_reopen = (op == OP_TBOR && session_ctrl == u8::from(SessionControlKind::Open))
                 .then(|| tbor_reopen_target(&submission.payload))
                 .flatten();
             let plain_close = op == OP_TBOR
