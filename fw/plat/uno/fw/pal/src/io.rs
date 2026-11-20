@@ -597,6 +597,8 @@ impl UnoHsmPal {
         let index = rx.index;
         self.io_in_flight_inc();
         reset_io_alloc(self, index);
+        // The slot's MBOR undo records belong to its previous IO.
+        crate::mbor_ledger::clear_slot(index);
         if (index as u32) < IO_SQ_COUNT {
             copy_sqe(index as usize);
             // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.

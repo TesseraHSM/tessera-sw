@@ -292,6 +292,7 @@ impl UnoHsmPal {
         if let Ok(mut sessions) = SessionStore::partition(pid) {
             sessions.clear_all();
         }
+        crate::mbor_ledger::invalidate_pid(pid);
         // The masked boot key persists across enable/disable; it is wiped
         // only here, on free.
         part.clear_masked_bk_boot();
@@ -512,6 +513,8 @@ impl UnoHsmPal {
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
+        #[cfg(feature = "tsra_test_hooks")]
+        self.io_failure[usize::from(u8::from(pid))].set(false);
         // Delete every enable-time and provisioning vault key before the
         // backing handles are zeroized below.
         for key_id in [
@@ -544,6 +547,7 @@ impl UnoHsmPal {
             // afterwards, for the deallocation case.
             sessions.mark_all_needs_renego();
         }
+        crate::mbor_ledger::invalidate_pid(pid);
         part.clear_state(PartResetKind::Disable);
     }
 
@@ -698,6 +702,7 @@ impl UnoHsmPal {
             if let Ok(mut sessions) = SessionStore::partition(pid) {
                 sessions.clear_all();
             }
+            crate::mbor_ledger::invalidate_pid(pid);
             part.clear_identity();
             return Ok(());
         }
@@ -716,6 +721,7 @@ impl UnoHsmPal {
         // established session IDs for reopen/close. Must run before
         // clear_state, which erases the Pending mask used to drop handshakes.
         SessionStore::partition(pid)?.mark_all_needs_renego();
+        crate::mbor_ledger::invalidate_pid(pid);
         part.clear_state(PartResetKind::Migrate);
         // The `vault.clear()` above also deleted the identity private key.
         // Zero the identity fields (id, `id_key_id`)
@@ -1037,6 +1043,7 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
             HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
             HsmPartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
+            HsmPartPropId::RSA_UNWRAPPING_KEY_ID => p.set_unwrapping_key_id(None),
             HsmPartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
             HsmPartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
             HsmPartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),

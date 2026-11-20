@@ -7,7 +7,8 @@
 //! opt in via `partition_lock` — the ones that need an atomic
 //! check → `.await` → commit on partition state. Handlers that do not opt in
 //! (for example `close_session` and key-generating handlers) remain
-//! concurrent. Bulk-key registration with the fast-path engine is serialized
+//! concurrent. Bulk-key registration with the fast-path engine and
+//! session-scoped key creation are serialized against session teardown
 //! separately, inside the vault and session PAL methods, by
 //! `UnoHsmPal::fp_bulk_lock`.
 

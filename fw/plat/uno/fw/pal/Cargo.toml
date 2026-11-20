@@ -48,6 +48,7 @@ tsra_fw_uno_drivers_vault = { workspace = true }
 tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_fault = { workspace = true }
 tsra_fw_uno_key_vault = { workspace = true }
+tsra_fw_uno_mbor_ledger = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_pct = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
