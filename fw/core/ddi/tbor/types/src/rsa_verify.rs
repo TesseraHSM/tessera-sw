@@ -66,7 +66,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let key = [0x11u8; RSA_MASKED_KEY_MAX_LEN];
         let signature = [0x33u8; RSA_SIGNATURE_MAX_LEN];
-        let frame = TborRsaVerifyReq::encode(&mut buf)
+        let frame = TborRsaVerifyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -87,7 +87,7 @@ mod tests {
             .finish();
         assert!(frame.len() <= buf.len());
 
-        let frame = TborRsaVerifyResp::encode(&mut buf, 0, true)
+        let frame = TborRsaVerifyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .finish();
         assert!(frame.len() <= buf.len());

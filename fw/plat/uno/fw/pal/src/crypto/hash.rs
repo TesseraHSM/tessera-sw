@@ -281,6 +281,7 @@ impl HsmHash for UnoHsmPal {
         Ok(digest_len)
     }
 
+    #[inline(never)]
     async fn hash_oob(
         &self,
         io: &UnoHsmIo,

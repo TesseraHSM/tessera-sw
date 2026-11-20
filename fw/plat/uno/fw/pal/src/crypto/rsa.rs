@@ -810,6 +810,8 @@ impl HsmRsa for UnoHsmPal {
 
     // ── PKCS#1 v1.5 signatures ─────────────────────────────────────
 
+    // Share RSA future construction between MBOR and TBOR callers.
+    #[inline(never)]
     async fn rsa_pkcs1_sign(
         &self,
         io: &UnoHsmIo,
@@ -859,6 +861,7 @@ impl HsmRsa for UnoHsmPal {
         .await
     }
 
+    #[inline(never)]
     async fn rsa_pkcs1_verify(
         &self,
         io: &UnoHsmIo,
@@ -1091,6 +1094,7 @@ impl HsmRsa for UnoHsmPal {
 
     // ── PSS signatures ─────────────────────────────────────────────
 
+    #[inline(never)]
     async fn rsa_pss_sign(
         &self,
         io: &UnoHsmIo,
@@ -1169,6 +1173,7 @@ impl HsmRsa for UnoHsmPal {
         .await
     }
 
+    #[inline(never)]
     async fn rsa_pss_verify(
         &self,
         io: &UnoHsmIo,

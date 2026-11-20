@@ -56,8 +56,7 @@ pub mod policy;
 pub(crate) mod psk_change;
 pub(crate) mod pta;
 pub(crate) mod rsa_mod_exp;
-pub(crate) mod rsa_sign;
-pub(crate) mod rsa_verify;
+pub(crate) mod rsa_sign_verify;
 pub(crate) mod sd_backup;
 pub(crate) mod sd_create_peer_backup;
 pub(crate) mod sd_create_remote_backup;
@@ -790,8 +789,9 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
         opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
-        opcode::RSA_SIGN => rsa_sign::handle(pal, io, cmd_buf).await,
-        opcode::RSA_VERIFY => rsa_verify::handle(pal, io, cmd_buf).await,
+        opcode::RSA_SIGN | opcode::RSA_VERIFY => {
+            rsa_sign_verify::handle(pal, io, cmd_buf, opcode == opcode::RSA_VERIFY).await
+        }
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
         opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,

@@ -75,7 +75,7 @@ mod tests {
     fn maximum_request_and_response_fit_exchange_frame() {
         let mut buf = [0u8; 4096];
         let key = [0x11u8; RSA_MASKED_KEY_MAX_LEN];
-        let frame = TborRsaSignReq::encode(&mut buf)
+        let frame = TborRsaSignReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -95,7 +95,7 @@ mod tests {
         assert!(frame.len() <= buf.len());
 
         let signature = [0x33u8; RSA_SIGNATURE_MAX_LEN];
-        let frame = TborRsaSignResp::encode(&mut buf, 0, true)
+        let frame = TborRsaSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&signature)
             .unwrap()

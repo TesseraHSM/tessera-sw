@@ -610,6 +610,7 @@ impl<const DEPTH: usize> Drop for ShaDigestFuture<'_, DEPTH> {
     }
 }
 
+#[inline(never)]
 fn advance_active<const DEPTH: usize>(s: &mut ShaState<DEPTH>) {
     s.active = s.active.wrapping_add(1);
     while s.active != s.tail {
@@ -699,6 +700,7 @@ impl<const DEPTH: usize> ShaExclusive<'_, DEPTH> {
     }
 }
 
+#[inline(never)]
 fn submit_cmd(slot: usize) {
     let desc_addr = IO_GSRAM_BASE + SHA_CMD_OFFSET + (slot as u32) * SHA_CMD_STRIDE;
     // Ensure the descriptor stores to GSRAM are globally visible before the
@@ -714,6 +716,7 @@ fn submit_cmd(slot: usize) {
 /// The caller must have validated the request and obtained the `mode` byte
 /// via [`mode_field`] before calling this function. The actual hardware
 /// submission happens separately via [`submit_cmd`].
+#[inline(never)]
 fn write_cmd(idx: usize, req: &ShaRequest<'_>, mode: u8) {
     let cmd = ShaCmdCode::new()
         .with_tag(0x3)
@@ -790,6 +793,7 @@ fn output_size(req: &ShaRequest<'_>) -> usize {
     }
 }
 
+#[inline(never)]
 fn validate(req: &ShaRequest<'_>) -> HsmResult<()> {
     let _ = mode_field(req.mode)?;
 

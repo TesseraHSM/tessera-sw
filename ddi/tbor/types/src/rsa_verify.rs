@@ -70,7 +70,9 @@ mod tests {
             signature: alloc::vec![0x33; 512],
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode request");
+        let frame = req
+            .encode_request(&mut buf, (1, 1))
+            .expect("encode request");
         assert!(frame.len() <= buf.len());
     }
 }

@@ -228,6 +228,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// `detached` transfer carries the given cookie and completes into
     /// [`take_detached`](Self::take_detached) rather than a waker.
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn submit(
         &self,
         src_addr: GdmaBuf,

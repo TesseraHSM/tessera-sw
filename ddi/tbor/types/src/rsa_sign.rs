@@ -74,7 +74,6 @@ mod tests {
 
     use super::*;
     use crate::codec::ResponseEncoder;
-    use crate::codec::PROTOCOL_VERSION;
 
     #[test]
     fn maximum_request_and_response_fit_exchange_frame() {
@@ -88,11 +87,13 @@ mod tests {
             message_len: RSA_SIGN_MESSAGE_MAX_LEN as u16,
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode request");
+        let frame = req
+            .encode_request(&mut buf, (1, 1))
+            .expect("encode request");
         assert!(frame.len() <= buf.len());
 
         let signature = alloc::vec![0x33; RSA_SIGNATURE_MAX_LEN];
-        let frame = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        let frame = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
             .buffer(&signature)
             .expect("encode response signature")
             .finish()
