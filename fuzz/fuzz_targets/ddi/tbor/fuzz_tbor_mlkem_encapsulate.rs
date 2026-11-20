@@ -380,7 +380,7 @@ fn expected_rejection(
         return Some(TborStatus::InvalidArg);
     }
     if request.gap != 0 {
-        return Some(TborStatus::InvalidArg);
+        return Some(TborStatus::TborNonCanonicalLayout);
     }
     let canonical = canonical_public_key(&req.pub_key);
     assert_eq!(
