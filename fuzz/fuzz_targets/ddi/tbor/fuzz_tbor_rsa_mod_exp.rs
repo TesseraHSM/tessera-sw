@@ -62,6 +62,7 @@ impl TborOpReq for RawRsaModExpReq {
     fn encode_request<'b>(
         &self,
         buf: &'b mut [u8],
+        _api_rev: (u16, u16),
     ) -> Result<&'b [u8], tsra_ddi_tbor_types::codec::EncodeError> {
         let out = buf
             .get_mut(..self.frame.len())
@@ -297,10 +298,10 @@ fn add_one(value: &mut [u8]) {
     }
 }
 
-fn shift_y_past_canonical_data(req: &TborRsaModExpReq) -> Vec<u8> {
+fn shift_y_past_canonical_data(req: &TborRsaModExpReq, api_rev: (u16, u16)) -> Vec<u8> {
     let mut storage = [0u8; 4096];
     let mut frame = req
-        .encode_request(&mut storage)
+        .encode_request(&mut storage, api_rev)
         .expect("valid RSA request must encode")
         .to_vec();
     let data_start = RequestView::parse(&frame)
@@ -527,6 +528,9 @@ fuzz_target!(|input: FuzzInput| {
             }
             (Ok(_), false) => panic!("invalid RsaModExp request unexpectedly succeeded"),
             (Err(err), true) => panic!("valid RsaModExp request failed: {err}"),
+            (Err(err @ DdiError::TborStatus(_)), false) if input.invalid_session => {
+                ctx.assert_unknown_session_rejects(err, TborStatus::SessionNotFound);
+            }
             (Err(err), false) if is_expected_validation_error(err) => {}
             (Err(err), false) => panic!("unexpected RsaModExp failure: {err:?}"),
         }
@@ -540,7 +544,10 @@ fuzz_target!(|input: FuzzInput| {
         {
             let raw = RawRsaModExpReq {
                 session_id: request_session_id,
-                frame: shift_y_past_canonical_data(&req),
+                frame: shift_y_past_canonical_data(
+                    &req,
+                    if ctx.is_duo() { (2, 0) } else { (1, 1) },
+                ),
             };
             match ctx.tbor(&raw) {
                 Err(DdiError::TborStatus(TborStatus::TborNonCanonicalLayout)) => {}
