@@ -55,8 +55,7 @@ and the result of the last hardware run.
 - Run: generate AES keys, encrypt with CBC, GCM and XTS, `C_Logout`,
   `C_Login`, encrypt again. The same with an EC key pair, signing.
 - Expect: the same ciphertexts after the login, and EC signatures that
-  verify under the public point read before it. Round trips only, until keys
-  can be imported for known-answer tests. Firmware older than the key
+  verify under the public point read before it. Firmware older than the key
   generation enablement fails at key generation.
 - Cases: `key_survival.*`, `key_survival_persist.after_finalize_initialize`,
   `logout.public_session_object_survives_logout`,
@@ -162,16 +161,21 @@ and the result of the last hardware run.
 
 - Run: an over-long ECDSA digest on the PKA, the XTS key container, GCM keys
   unwrapped over MBOR, a 16-byte XTS tweak against an 8-byte little-endian
-  sector number.
-- Expect: the same results as on the emulator and the host references.
+  sector number, an XTS key with equal halves.
+- Expect: the same results as on the emulator and the host references: the
+  known-answer cases give the published answers, every invalid Wycheproof
+  vector is refused, and the XTS key with equal halves unwraps but does not
+  encrypt.
 - Cases: `ec_sign.every_curve_and_hash_signs_what_the_host_verifies` (a
-  64-byte hash on P-256 and P-384 is the over-long digest).
+  64-byte hash on P-256 and P-384 is the over-long digest), `unwrap_kat.*`,
+  `unwrap.*`.
 - Result: not run yet.
 
 ### H-l RSA decryption timing
 
 - Run: time RSA decryption of valid and invalid PKCS#1 v1.5 and OAEP
-  ciphertexts (Bleichenbacher, Manger). Optional before general availability.
+  ciphertexts (Bleichenbacher, Manger), and `C_UnwrapKey` with blobs that fail
+  in the OAEP block and in the key wrap. Optional before general availability.
 - Expect: no timing difference an attacker can use.
 - Result: not run yet.
 
@@ -180,4 +184,20 @@ and the result of the last hardware run.
 - Run: pkcs11-check against an externally provisioned token; pkcs11-provider
   TLS with a token EC key; `p11perftest -n`.
 - Expect: the same verdicts as on the emulator.
+- Result: not run yet.
+
+### H-n The partition's unwrapping key
+
+- Run: `C_GenerateKeyPair` for the unwrapping key right after power-on, after
+  a partition reset, in two processes, and after a power cycle; unwrap with a
+  token pair created before each event.
+- Expect: the same modulus every time and in every process: the HSP keeps the
+  key and re-imports it after a partition erase. While it is still staging
+  the key the device answers "pending key generation"; the SDK retries with a
+  backoff of about 12 s in all, then the call fails with
+  `CKR_FUNCTION_FAILED`. Record how long the first call takes. A token pair
+  from before the event still unwraps.
+- Cases: `unwrapping_pair.*`, `unwrapping_pair_persist.token_pair_survives_finalize_initialize`;
+  `unwrapping_pair_persist.another_partitions_private_key_stays_hidden` is
+  simulator-only (it starts a second simulator, with a partition of its own).
 - Result: not run yet.
