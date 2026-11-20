@@ -45,7 +45,6 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 #[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_drivers_bcp::BcpError;
-use tsra_fw_uno_drivers_sha::ShaError;
 use tsra_fw_uno_drivers_upka::UpkaError;
 
 use crate::IpcChannel;
@@ -231,12 +230,12 @@ impl SelfTest {
     }
 
     /// Whether `e` means the test's engine could not run it now, rather
-    /// than that the test failed: a full crypto queue, or, for a bulk test,
+    /// than that the test failed: a full UPKA queue, or, for a bulk test,
     /// a BCP that the driver had to reset (a host bulk IO's transfer stalled
     /// the engine, failing every command in flight) or could not bring up.
     /// Such an attempt is retried within the admission window.
     fn engine_busy(self, e: HsmError) -> bool {
-        if e == ShaError::QUEUE_FULL || e == UpkaError::QUEUE_FULL {
+        if e == UpkaError::QUEUE_FULL {
             return true;
         }
         match self {

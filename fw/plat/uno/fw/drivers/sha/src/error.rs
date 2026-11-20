@@ -20,9 +20,6 @@ impl ShaError {
     /// Invalid message length or byte-count configuration.
     pub const INVALID_MSG_LEN: HsmError = make_component_error(ComponentId::SHA, 2);
 
-    /// All waiter queue slots are occupied.
-    pub const QUEUE_FULL: HsmError = make_component_error(ComponentId::SHA, 3);
-
     /// SHA engine reported a command error.
     pub const CMD_ERROR: HsmError = make_component_error(ComponentId::SHA, 4);
 
