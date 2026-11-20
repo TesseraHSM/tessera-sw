@@ -94,6 +94,7 @@ const BK3_KEY_ATTRIBUTES: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 ///
 /// All partition mutations happen at the end so any earlier failure
 /// leaves partition state untouched and the host can retry.
+#[inline(never)]
 pub(crate) async fn init_bk3<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,

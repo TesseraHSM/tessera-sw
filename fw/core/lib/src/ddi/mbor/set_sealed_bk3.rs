@@ -31,6 +31,7 @@ use super::*;
 ///
 /// 5. **Response** — Encodes `DdiSetSealedBk3Resp` (empty) into a
 ///    heap-allocated response buffer.
+#[inline(never)]
 pub(crate) async fn set_sealed_bk3<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,

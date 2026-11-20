@@ -22,6 +22,7 @@ use super::*;
 /// 2. **Presence check** — `sealed_bk3 len == 0` → `SealedBk3NotPresent`.
 ///
 /// 3. **Response** — Encodes header + frame, fills blob in-place.
+#[inline(never)]
 pub(crate) fn get_sealed_bk3<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,

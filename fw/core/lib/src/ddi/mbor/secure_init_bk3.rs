@@ -26,6 +26,7 @@ fn validate_public_key(key: &DdiPublicKey<'_>) -> HsmResult<()> {
     Ok(())
 }
 
+#[inline(never)]
 pub(crate) async fn set_init_bk3_pin<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
@@ -71,6 +72,7 @@ pub(crate) async fn set_init_bk3_pin<'p, P: HsmPal>(
     Ok(resp)
 }
 
+#[inline(never)]
 pub(crate) async fn secure_init_bk3<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
