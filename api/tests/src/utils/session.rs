@@ -14,7 +14,6 @@ use tsra_api_tests_macro::*;
 use crate::utils::partition::*;
 
 const SESSION_EX_MIN_TEST_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
-const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 
 /// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
 /// least `major.minor`. An unset `api_rev` selects revision 1.1.
@@ -163,24 +162,7 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
         .expect("Failed to open the partition for an open_session_ex test");
 
     part.reset().expect("Partition reset failed");
-    let session = part
-        .open_session_ex(
-            rev,
-            HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
-        )
-        .expect("Failed to call open_session_ex for a test");
-    session
-        .change_psk(&ROTATED_CO_PSK)
-        .expect("Failed to rotate the default CO PSK");
-    drop(session);
-    let session = part
-        .open_session_ex(
-            rev,
-            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
-        )
-        .expect("Failed to reopen the test session with the rotated CO PSK");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, rev);
     crate::utils::sd_provision::provision_partition(&session);
     session
 }

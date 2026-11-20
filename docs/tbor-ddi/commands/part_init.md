@@ -66,7 +66,7 @@ usual way: the caller's CO PSK must already have been rotated by
 
 ## Request
 
-Wire layout: 8-byte header, three TOC entries, then the variable-length
+Wire layout: 12-byte header, three TOC entries, then the variable-length
 data section.
 
 ### TOC entries
@@ -76,9 +76,9 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
-| 12 | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
-| 16 | `part_policy` | `buffer` (max 384 B) | Partition policy CBOR document bound into the partition's attested state (see [Partition Policy](../part_policy.md)). Longer than `PART_POLICY_MAX_LEN` (384 B) is rejected at decode. |
+| 12 | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
+| 16 | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
+| 20 | `part_policy` | `buffer` (max 384 B) | Partition policy CBOR document bound into the partition's attested state (see [Partition Policy](../part_policy.md)). Longer than `PART_POLICY_MAX_LEN` (384 B) is rejected at decode. |
 
 ### `mach_seed_envelope` contents
 
@@ -115,15 +115,15 @@ Built by the host with [`aead_envelope::seal`](
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pta_csr` | `varlen` (≤ 512 B) | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
-| 12 | `pta_report` | `varlen` (≤ 1024 B) | COSE_Sign1 PTA key-attestation report signed by the partition identity key (PID). |
+| 12 | `pta_csr` | `varlen` (≤ 512 B) | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
+| 16 | `pta_report` | `varlen` (≤ 1024 B) | COSE_Sign1 PTA key-attestation report signed by the partition identity key (PID). |
 
 ### Data section
 
 | Offset | Field | Description |
 |---|---|---|
-| 32 | `pta_csr` bytes | DER PKCS#10; length stored in the TOC entry above. |
-| 32 + `len(pta_csr)` | `pta_report` bytes | COSE_Sign1; length stored in the TOC entry above. |
+| 36 | `pta_csr` bytes | DER PKCS#10; length stored in the TOC entry above. |
+| 36 + `len(pta_csr)` | `pta_report` bytes | COSE_Sign1; length stored in the TOC entry above. |
 
 The host is expected to forward both blobs to the partition owner
 for POTA validation; the resulting PTA certificate is then handed

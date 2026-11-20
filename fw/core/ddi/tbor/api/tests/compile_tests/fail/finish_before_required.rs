@@ -12,6 +12,6 @@ pub struct EarlyFinish {
 fn main() {
     let mut buf = [0u8; 64];
     // ERROR: finish() is not available on State0 because `required` is not optional.
-    let _ = EarlyFinish::encode(&mut buf).unwrap()
+    let _ = EarlyFinish::encode(&mut buf, (1, 1)).unwrap()
         .finish();
 }

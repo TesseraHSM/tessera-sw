@@ -11,7 +11,6 @@
 //! the SD anchors and that they are bound into the derived PTA key
 //! (the partition root is derived over the full policy bytes).
 
-use tsra_ddi_tbor_test_harness::assertions;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -90,8 +89,5 @@ fn part_init_with_stale_session_after_erase_is_rejected() {
         .part_init(&session, &mach_seed(), &known_good_part_policy())
         .expect_err("PartInit with a session created before erase must be rejected");
 
-    assertions::assert_fw_rejects(
-        &err,
-        ctx.unknown_session_status(TborStatus::DefaultPskMustRotate),
-    );
+    ctx.assert_unknown_session_rejects(&err, TborStatus::DefaultPskMustRotate);
 }

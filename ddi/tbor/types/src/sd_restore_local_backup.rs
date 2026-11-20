@@ -77,7 +77,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The two backup blobs must be carried in the data section.
         assert!(

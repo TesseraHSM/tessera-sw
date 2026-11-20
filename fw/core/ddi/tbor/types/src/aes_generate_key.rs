@@ -133,7 +133,7 @@ mod tests {
     fn request_round_trips_scope_and_size() {
         let mut buf = [0u8; 256];
         let label = b"my-aes-key";
-        let frame = TborAesGenerateKeyReq::encode(&mut buf)
+        let frame = TborAesGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(5))
             .unwrap()
@@ -160,7 +160,7 @@ mod tests {
     fn response_round_trips_masked_key() {
         let mut buf = [0u8; 512];
         let masked = [0xABu8; MASKED_AES_KEY_MAX_LEN];
-        let frame = TborAesGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborAesGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

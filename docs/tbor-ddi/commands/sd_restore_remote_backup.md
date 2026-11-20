@@ -87,24 +87,24 @@ against the requested SD policy.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **receiver's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover the receiver's private HPKE key (`RcvrPriv`). Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
-| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being restored. Its SHA-384 digest must equal the destination partition's bound `policy_hash`, not the sealing authority's report hash. |
-| 24 | `sender_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender key certificate-chain descriptors (spec `SndrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `SndrPub`. |
-| 28 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender manufacturer certificate-chain descriptors (from the `sender_evidence` field group). Optional (see below). |
-| 32 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender owner certificate-chain descriptors. Optional. |
-| 36 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender partition-owner certificate-chain descriptors. Optional. |
-| 40 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Sender attestation-report (COSE_Sign1) descriptor. Optional. |
-| 44 | `src_remote_backup` | `buffer` (fixed 161 B) | Remote backup to restore: an HPKE-Auth seal of BKS3 = `POK_REMOTE_BACKUP_LEN` (161 B). |
-| 48 | `prev_sd_mk_backup` | `buffer` (fixed 260 B) | Previous security-domain masking-key backup (SDMK masked under the derived SDBMK) = `SD_MK_BACKUP_LEN` (260 B); `SDMK` is recovered from it. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_sealing_key` | `buffer` (fixed 276 B) | The **receiver's** masked SD-sealing key (from [`SdSealingKeyGen`](sd_sealing_key_gen.md)); unmasked on-device to recover the receiver's private HPKE key (`RcvrPriv`). Length pinned to `MASKED_SEALING_KEY_LEN` (276 B). Never a vault handle. |
+| 24 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document describing the security domain being restored. Its SHA-384 digest must equal the destination partition's bound `policy_hash`, not the sealing authority's report hash. |
+| 28 | `sender_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender key certificate-chain descriptors (spec `SndrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `SndrPub`. |
+| 32 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender manufacturer certificate-chain descriptors (from the `sender_evidence` field group). Optional (see below). |
+| 36 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender owner certificate-chain descriptors. Optional. |
+| 40 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Sender partition-owner certificate-chain descriptors. Optional. |
+| 44 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Sender attestation-report (COSE_Sign1) descriptor. Optional. |
+| 48 | `src_remote_backup` | `buffer` (fixed 161 B) | Remote backup to restore: an HPKE-Auth seal of BKS3 = `POK_REMOTE_BACKUP_LEN` (161 B). |
+| 52 | `prev_sd_mk_backup` | `buffer` (fixed 260 B) | Previous security-domain masking-key backup (SDMK masked under the derived SDBMK) = `SD_MK_BACKUP_LEN` (260 B); `SDMK` is recovered from it. |
 
 The four `mfgr_cert_chain` … `evidence` entries are spliced in by the
 shared [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs)
@@ -124,15 +124,15 @@ the packed sender cert-chain and report descriptors (the always-present
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the data
+Wire layout: 12-byte header, followed by the TOC entries, then the data
 section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup (BKS3 re-masked under `PartLocalMK`), sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
-| 12 | `sd_mk_backup` | `buffer` (fixed 260 B) | Refreshed security-domain masking-key backup envelope (SDMK re-masked under SDBMK) = `SD_MK_BACKUP_LEN` (260 B). |
+| 12 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup (BKS3 re-masked under `PartLocalMK`), sized as a masked BKS3 = `MASKED_SD_LEN` (276 B). |
+| 16 | `sd_mk_backup` | `buffer` (fixed 260 B) | Refreshed security-domain masking-key backup envelope (SDMK re-masked under SDBMK) = `SD_MK_BACKUP_LEN` (260 B). |
 
 ### Data section
 

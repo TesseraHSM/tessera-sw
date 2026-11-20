@@ -62,10 +62,16 @@ class tsra_sealing_keygen : public ::testing::Test
     // the returned handle must be closed by the caller.
     static tsra_handle open_sd_session(tsra_handle part_handle)
     {
+        TestRootPin root(part_handle);
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(
+            part_handle,
+            &root.buffer,
+            &psk,
+            TSRA_SESSION_SUITE_ECDH_P384,
+            &sess_handle
+        );
         if (err != TSRA_STATUS_SUCCESS || sess_handle == 0)
         {
             ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;

@@ -74,10 +74,10 @@ fn seal_mobk_envelope(param_key: &AesKey, session_id: u16, mobk: &[u8]) -> HsmRe
 /// SHA-384 of `0x04 ‖ x ‖ y` for the partition identity key — the digest the
 /// POTA endorses. The key is read over TBOR `PartInfo`, which reports it as
 /// raw big-endian `x ‖ y`.
-fn pid_pub_key_digest(dev: &HsmDev) -> HsmResult<Vec<u8>> {
+fn pid_pub_key_digest(dev: &HsmDev, rev: HsmApiRev) -> HsmResult<Vec<u8>> {
     let mut cookie = None;
     let info = dev
-        .exec_op_tbor(&TborPartInfoReq::new(), None, &mut cookie)
+        .exec_op_tbor(rev, &TborPartInfoReq::new(), None, &mut cookie)
         .map_err(HsmError::from)?;
 
     let mut uncompressed = vec![0x04u8];
@@ -99,6 +99,7 @@ fn pid_pub_key_digest(dev: &HsmDev) -> HsmResult<Vec<u8>> {
 /// match its source (missing for `Caller`, present for `Tpm`).
 fn resolve_pota_endorsement(
     dev: &HsmDev,
+    rev: HsmApiRev,
     pota_endorsement: &HsmPotaEndorsement,
 ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
     match pota_endorsement.source() {
@@ -113,7 +114,7 @@ fn resolve_pota_endorsement(
             if pota_endorsement.endorsement().is_some() {
                 return Err(HsmError::InvalidArgument);
             }
-            tpm_ecc_sign_digest(&pid_pub_key_digest(dev)?)
+            tpm_ecc_sign_digest(&pid_pub_key_digest(dev, rev)?)
         }
         _ => Err(HsmError::InvalidArgument),
     }
@@ -221,7 +222,7 @@ pub(crate) fn part_init_with_obk(
         let inner = partition.inner().read();
         let dev = inner.dev();
 
-        let (pota_sig, pota_pub_key_der) = resolve_pota_endorsement(dev, pota_endorsement)?;
+        let (pota_sig, pota_pub_key_der) = resolve_pota_endorsement(dev, rev, pota_endorsement)?;
         let (pota_pub_key, pota_sig) =
             pota_wire(WireOrder::for_rev(rev), &pota_pub_key_der, &pota_sig)?;
         (
@@ -252,7 +253,7 @@ pub(crate) fn part_init_with_obk(
     let result = {
         let inner = partition.inner().read();
         with_explicit_cookie(ddi_cookie, |cookie| {
-            inner.dev().exec_op_tbor(&req, None, cookie)
+            inner.dev().exec_op_tbor(rev, &req, None, cookie)
         })
     };
     let resp = result.map_err(map_obk_error)?;

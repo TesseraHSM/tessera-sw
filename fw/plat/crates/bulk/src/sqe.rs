@@ -438,7 +438,7 @@ impl HsmSqe for BulkSqeEntry {
 
     #[inline]
     fn session_id(&self) -> Option<u16> {
-        None
+        Some(rd_u16(&self.0, OFF_SESSION_ID))
     }
 
     #[inline]

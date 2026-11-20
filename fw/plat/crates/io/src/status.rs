@@ -54,6 +54,8 @@ impl HostStatus {
     /// Secure-channel transport failure: the request failed GCM
     /// authentication, or the session has no transport keys.
     pub const SESSION_TRANSPORT_ERR: u16 = 0x0CC;
+    /// Allocated session lost its channel keys and requires a fresh handshake.
+    pub const SESSION_NEEDS_RENEGOTIATION: u16 = 0x0CD;
 }
 
 /// Maps `err` to its host-visible CQE status.
@@ -74,6 +76,7 @@ pub const fn host_status(err: HsmError) -> u16 {
         HsmError::DdiDecodeFailed => HostStatus::REQ_HDR_DECODE_ERR,
         HsmError::InvalidArg => HostStatus::INVALID_FIELD_IN_COMMAND,
         HsmError::SessionTransportError => HostStatus::SESSION_TRANSPORT_ERR,
+        HsmError::SessionNeedsRenegotiation => HostStatus::SESSION_NEEDS_RENEGOTIATION,
         _ => HostStatus::INTERNAL_ERROR,
     }
 }

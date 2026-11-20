@@ -23,9 +23,10 @@
 //!   provisioning mints a different one; a restore is bound to the POTA and
 //!   rejects a malformed or tampered backup.
 //! * Rejects — bad POTA signature, tampered / foreign-bound / unmaskable
-//!   MOBK envelope, Crypto-User session, default PSK, a session opened before
-//!   the PSK rotation, and the wrong lifecycle state.  A reject leaves the
-//!   partition `Enabled`.
+//!   MOBK envelope, Crypto-User session, default PSK, and the wrong lifecycle
+//!   state.  A reject leaves the partition `Enabled`.
+//! * Rotation — the session that rotated the CO PSK is rebound to it and
+//!   provisions without being reopened.
 
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
@@ -37,12 +38,12 @@ use tsra_ddi_tbor_test_harness::seal_mobk_envelope;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::PotaEndorsement;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::build_part_init_with_obk_aad;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborHmacGenerateKeyReq;
 use tsra_ddi_tbor_types::TborHmacReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
@@ -363,7 +364,7 @@ fn part_init_with_obk_rejects_a_crypto_user_session() {
 fn part_init_with_obk_requires_a_rotated_psk() {
     let Some(ctx) = uno_ctx() else { return };
     let session = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
+        .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("default CO session");
     let endorsement = PotaEndorsement {
         pub_key: vec![0; 96],
@@ -376,25 +377,24 @@ fn part_init_with_obk_requires_a_rotated_psk() {
     assert_fw_rejects(&err, TborStatus::DefaultPskMustRotate);
 }
 
-/// A session opened under the PSK that has since been rotated is rejected,
-/// so a bootstrap session cannot provision once it has rotated its own PSK.
+/// `PskChange` rebinds the session that performs it to the new credential,
+/// so the bootstrap session can provision without being reopened.  (The CO
+/// role has a single session slot, so no other CO session can be left
+/// holding the old credential.)
 #[test]
-fn part_init_with_obk_rejects_a_session_opened_before_psk_rotation() {
+fn part_init_with_obk_accepts_the_session_that_rotated_the_psk() {
     let Some(ctx) = uno_ctx() else { return };
     let pota = CaKey::generate();
-    let stale = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
+    let bootstrap = ctx
+        .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
         .expect("default CO session");
-    ctx.psk_change(stale.handshake(), &ROTATED_CO_PSK)
+    ctx.psk_change(bootstrap.handshake(), &ROTATED_CO_PSK)
         .expect("rotate the CO PSK");
     let (mobk, endorsement) = obk_inputs(&ctx, &pota);
 
-    let err = ctx
-        .part_init_with_obk(stale.handshake(), &mobk, &endorsement, &[])
-        .expect_err("a session opened before the rotation must be rejected");
-    assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    provision(&ctx, bootstrap.handshake(), &mobk, &endorsement, &[]);
 
-    assert_part_state(&ctx, PART_STATE_ENABLED, false);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 }
 
 /// The command is one-shot, and exclusive with the `PartInit` flow in both

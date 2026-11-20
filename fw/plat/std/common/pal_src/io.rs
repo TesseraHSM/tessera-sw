@@ -8,6 +8,8 @@
 //! to [`StdIic`](crate::drivers::iic::StdIic) for receiving and
 //! [`StdOic`](crate::drivers::oic::StdOic) for completing IOs.
 
+use core::cell::Cell;
+
 use tokio::sync::oneshot::Sender as ReplySender;
 use tsra_fw_hsm_bulk::BulkCqe;
 use tsra_fw_hsm_bulk::BulkCqeEntry;
@@ -127,6 +129,8 @@ pub struct StdHsmIo {
 
     /// Completion entry.
     pub(crate) cqe: StdCqe,
+
+    pub(crate) transport_binding: Cell<Option<tsra_fw_hsm_io::sealed::SessionTransportBinding>>,
 }
 
 // SAFETY: StdHsmIo is only used on the single-threaded Embassy executor.
@@ -163,6 +167,7 @@ impl StdHsmIo {
             kind: req.kind,
             sqe,
             cqe,
+            transport_binding: Cell::new(None),
         }
     }
 

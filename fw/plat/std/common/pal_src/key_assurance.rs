@@ -36,6 +36,7 @@ use tsra_crypto::RsaPrivateKey;
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::drivers::ecc::EccForm;
 
 /// rsaEncryption (1.2.840.113549.1.1.1).
 const RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
@@ -198,9 +199,9 @@ impl StdHsmPal {
         let pub_key = pk
             .public_key()
             .map_err(|_| HsmError::EccGetCoordinatesError)?;
-        let mut derived = vec![0u8; curve.wire_pub_key_len(HsmByteOrder::Be)];
+        let mut derived = vec![0u8; curve.pub_key_len()];
         self.ecc
-            .pub_coords(&pub_key, HsmByteOrder::Be, &mut derived)
+            .pub_coords(&pub_key, EccForm::BE, &mut derived)
             .await?;
         let same = embedded == derived.as_slice();
         if !same {

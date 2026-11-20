@@ -8,7 +8,7 @@ use tsra_ddi_tbor_codec::ResponseView;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(view) = ResponseView::parse(data) {
-        let _ = view.version();
+        let _ = view.api_rev();
         let _ = view.status();
         let _ = view.flags();
         let _ = view.fips_approved();

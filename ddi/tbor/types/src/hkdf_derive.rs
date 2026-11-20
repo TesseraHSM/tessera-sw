@@ -121,7 +121,7 @@ mod tests {
             key_label: alloc::vec![0x44u8; 8],
         };
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&KDF_KEY_TYPE_AES256),
             "encoded frame must carry the key-type discriminant",

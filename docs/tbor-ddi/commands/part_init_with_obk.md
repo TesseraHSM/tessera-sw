@@ -41,8 +41,9 @@ The command is **Uno only** in practice: the MOBK is minted by the MBOR
    neither the v1 credential nor `MK` set (`PartitionAlreadyProvisioned`
    otherwise).  The dispatcher additionally requires the CO PSK to have been
    rotated, and the handler requires the session to authenticate with the
-   **current** CO PSK (`SessionAuthFailure` for a session opened before the
-   rotation).  The partition credential lock is held for the whole command.
+   **current** CO PSK (`SessionAuthFailure` otherwise; `PskChange` rebinds the
+   session that rotated the PSK, so it keeps authenticating).  The partition
+   credential lock is held for the whole command.
 2. **Open the MOBK:** AEAD-open `mobk_envelope` in place under the session
    `param_key`; its 32-byte AAD must equal
    `"part-init-obk-v1" ‖ session_id (2 B LE) ‖ 14 × 0x00`
@@ -113,7 +114,7 @@ Carries the 264-byte `local_mk_backup` envelope.
 | `DefaultPskMustRotate` | The CO PSK is still the public default (dispatcher gate) |
 | `InvalidPermissions` | The session is not a Crypto Officer session |
 | `SessionNotFound` | The session is not `Active` |
-| `SessionAuthFailure` | The session was opened under a PSK that has since been rotated |
+| `SessionAuthFailure` | The session no longer authenticates with the current CO PSK (it was opened under a PSK that has since been rotated) |
 | `PartitionAlreadyProvisioned` | The partition is not `Enabled`, or was already provisioned (v1 or v2), or a racing provisioning won the commit |
 | `AeadEnvelopeAuthFailed` | `mobk_envelope` failed its AEAD tag, or its AAD does not bind this command and session |
 | `InvalidArg` | The `mobk_envelope` AAD or plaintext has the wrong shape, or a present `prev_local_mk_backup` is not exactly 264 B |

@@ -55,8 +55,12 @@ impl TborOpReq for MalformedRequest {
     type OpResp = TborGetCertChainInfoResp;
 
     /// Encode a valid envelope whose body violates one firmware schema rule.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let encoder = RequestEncoder::new(buf, PROTOCOL_VERSION, Self::OPCODE);
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let encoder = RequestEncoder::new(buf, api_rev, Self::OPCODE);
         match self {
             Self::MissingSlot => encoder.none()?.none()?.finish(),
             Self::WrongType(slot_id) => encoder.uint16(u16::from(*slot_id))?.none()?.finish(),

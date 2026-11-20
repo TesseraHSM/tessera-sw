@@ -196,7 +196,7 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput, lifecycle: Lifecycle) -
     };
     if lifecycle == Lifecycle::DefaultPsk {
         return ctx
-            .open_session(role.psk_id(), role.session_type())
+            .open_session(role.psk_id(), role.suite())
             .expect("open default-PSK session");
     }
 
@@ -292,8 +292,10 @@ fn check_signing_key(
     let signature = ctx
         .tbor(&TborEccSignReq {
             session_id: req.session_id,
+            hash_algo: HASH_ALGO_SHA256,
             masked_key: resp.masked_key.clone(),
-            digest: digest.clone(),
+            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &digest)
+                .expect("bounded ECC signing layout"),
         })
         .expect("generated signing key must be usable")
         .signature;
@@ -330,8 +332,10 @@ fn check_derivation_key(
     ctx.expect_fw_reject(
         &TborEccSignReq {
             session_id: req.session_id,
+            hash_algo: HASH_ALGO_SHA256,
             masked_key: resp.masked_key.clone(),
-            digest: vec![0; 32],
+            input: ecc_sign_input(curve.wire_sig_len() / 2, 4, &[0; 32])
+                .expect("bounded ECC signing layout"),
         },
         TborStatus::InvalidPermissions,
     );

@@ -56,21 +56,28 @@ pub fn dev_rev_in_place(bytes: &mut [u8]) {
     }
 }
 
-/// On-wire length of a curve coordinate of `raw_len` bytes. A
-/// little-endian device pads P-521's 66-byte coordinates to 68 (4-byte
-/// aligned); a big-endian one sends them unpadded.
+/// On-wire lane length of a curve coordinate of `raw_len` bytes: padded
+/// to 4 bytes on a little-endian device and 8 bytes on a big-endian one
+/// (P-521: 66 → 68 or 72). The value sits at the head of the lane, followed
+/// by zero bytes.
 pub fn wire_coord_len(raw_len: usize) -> usize {
-    if raw_len == 66 && device_is_little_endian() {
-        68
-    } else {
-        raw_len
+    let pad = if device_is_little_endian() { 4 } else { 8 };
+    raw_len.next_multiple_of(pad)
+}
+
+/// Raw coordinate length carried by a wire lane of `lane_len` bytes
+/// (P-521: 68 or 72 → 66).
+pub fn raw_coord_len(lane_len: usize) -> usize {
+    match lane_len {
+        68 | 72 => 66,
+        n => n,
     }
 }
 
-/// Converts one device-order ECC coordinate to the big-endian, 4-byte
+/// Converts one device-order ECC coordinate lane to the big-endian, 4-byte
 /// aligned form `EccPublicKey::from_hsm_bytes` expects (P-521: 68 bytes).
-pub fn dev_coord_to_host_be(coord: &[u8]) -> Vec<u8> {
-    let be = dev_rev(coord);
+pub fn dev_coord_to_host_be(lane: &[u8]) -> Vec<u8> {
+    let be = dev_rev(&lane[..raw_coord_len(lane.len())]);
     let aligned = be.len().next_multiple_of(4);
     let mut out = vec![0u8; aligned - be.len()];
     out.extend(be);

@@ -74,7 +74,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame.windows(10).any(|w| w == b"my-xts-key"));
     }
 

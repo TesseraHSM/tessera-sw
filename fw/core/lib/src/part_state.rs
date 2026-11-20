@@ -1097,7 +1097,7 @@ pub(crate) async fn key_id_pub_key<P: HsmPal>(
     if len != out.len() {
         return Err(HsmError::InternalError);
     }
-    tsra_fw_hsm_byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, out)?;
+    tsra_fw_hsm_byte_order::pair_to_be::<P>(HsmEccCurve::P384, out)?;
     Ok(())
 }
 

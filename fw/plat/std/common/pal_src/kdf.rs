@@ -9,8 +9,8 @@
 //!
 //! HKDF extract/expand and SP 800-108 counter-mode KDF are backed by
 //! OpenSSL. The X9.63 and SP 800-56A single-step concatenation KDFs are
-//! backed by the platform-agnostic `tsra_crypto` implementation. MGF1
-//! remains a `todo!()` stub.
+//! backed by the platform-agnostic `tsra_crypto` implementation. MGF1 is
+//! computed with `tsra_crypto` hashing (SHA-1/SHA-2 only, like Uno).
 
 use core::ops::Deref;
 
@@ -92,21 +92,21 @@ impl HsmKdf for StdHsmPal {
     async fn mgf1(
         &self,
         _io: &StdHsmIo,
-        _algo: HsmHashAlgo,
-        _seed: &HsmDmaBuf,
-        _mask: &mut HsmDmaBuf,
+        algo: HsmHashAlgo,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        todo!()
+        self.kdf.mgf1(to_hash_algo(algo)?, seed, mask, false).await
     }
 
     async fn mgf1_xor(
         &self,
         _io: &StdHsmIo,
-        _algo: HsmHashAlgo,
-        _seed: &HsmDmaBuf,
-        _mask: &mut HsmDmaBuf,
+        algo: HsmHashAlgo,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        todo!()
+        self.kdf.mgf1(to_hash_algo(algo)?, seed, mask, true).await
     }
 
     async fn x963_kdf(
@@ -300,5 +300,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn mgf1_matches_reference_and_xors_in_place() {
+        let (pal, io) = test_pal();
+        let seed = pal.dma_alloc(&io, 17).expect("seed");
+        seed.copy_from_slice(b"tessera mgf1 seed");
+        let mask = pal.dma_alloc(&io, 70).expect("mask");
+        // Reference values computed independently with Python hashlib.
+        for (algo, expected) in [
+            (
+                HsmHashAlgo::Sha1,
+                "a71975d88ef55f1567e41445a0c0c087f92baf41b119b28be2571e32ea217f4bb531b79de9e117767cff31822e2c9bb96be13499296e804ce0d7b1080dcdb76a2613144b8cc8",
+            ),
+            (
+                HsmHashAlgo::Sha256,
+                "8d9bbfada9162baaa562273e8d670809d9d3084fb04d66325e7643f566ce2f6a15d60d2e2020fb7d8377227a8441fe09d4e11cb462562184bf72402baed52932b04b161374d0",
+            ),
+            (
+                HsmHashAlgo::Sha384,
+                "6f57f936a1a09feec1adc11b51cb55934f7ea74d38594aed14b3c67645b14b36dcb6aeeaaa99e1afb17fdea99fcba402741ef51fe3879d948490ea48875caf9758bb784f352f",
+            ),
+            (
+                HsmHashAlgo::Sha512,
+                "f883188dc6181236bf14cb3aa650f41b6f4f91162c0fd70f5e6b0a0ca82da4697f80e81373582cbccaa3e79f81f34ce6bbad7da86cdf427cef0405cd7e156890414163ebaac7",
+            ),
+        ] {
+            let expected = hex::decode(expected).expect("reference mask");
+            mask.fill(0xA5);
+            pal.mgf1(&io, algo, seed, mask).await.expect("mgf1");
+            assert_eq!(&mask[..], expected.as_slice());
+            mask.fill(0xA5);
+            pal.mgf1_xor(&io, algo, seed, mask).await.expect("mgf1_xor");
+            assert!(mask.iter().zip(&expected).all(|(&m, &e)| m == e ^ 0xA5));
+            for len in [1, algo.digest_len()] {
+                pal.mgf1(&io, algo, seed, &mut mask[..len]).await.expect("prefix");
+                assert_eq!(&mask[..len], &expected[..len]);
+            }
+            pal.mgf1(&io, algo, seed, &mut mask[..0]).await.expect("empty mask");
+        }
+        mask.fill(0xA5);
+        for algo in [HsmHashAlgo::Sha3_256, HsmHashAlgo::Sha3_512] {
+            for len in [0, mask.len()] {
+                assert_eq!(
+                    pal.mgf1(&io, algo, seed, &mut mask[..len]).await,
+                    Err(HsmError::UnsupportedDigestHashAlgorithm)
+                );
+                assert_eq!(
+                    pal.mgf1_xor(&io, algo, seed, &mut mask[..len]).await,
+                    Err(HsmError::UnsupportedDigestHashAlgorithm)
+                );
+            }
+        }
+        assert!(mask.iter().all(|&b| b == 0xA5));
     }
 }

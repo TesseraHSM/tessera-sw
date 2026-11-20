@@ -246,7 +246,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
+            byte_order::pair_to_be::<P>(SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3
@@ -304,7 +304,7 @@ fn encode_response(
     sd_mk: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdRestorePeerBackupResp::encode(buf, 0, false)?
+        let frame = TborSdRestorePeerBackupResp::encode_for_request(buf, 0, false)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk)?
             .finish();

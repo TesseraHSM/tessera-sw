@@ -22,23 +22,27 @@ The range is a per-platform constant supplied by the firmware PAL
 | Uno | 1.0 | 1.1 |
 | Duo | 2.0 | 2.0 |
 
+Uno's 1.0 support is MBOR-only: its TBOR header must select 1.1. Duo's
+TBOR header selects 2.0. Discovery reports capabilities rather than
+negotiating an authenticated version choice.
+
 ## Request
 
 (empty body)
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 (empty) data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `min_major` | `uint16` (inline) | Major number of the lowest supported API revision. |
-| 12 | `min_minor` | `uint16` (inline) | Minor number of the lowest supported API revision. |
-| 16 | `max_major` | `uint16` (inline) | Major number of the highest supported API revision. |
-| 20 | `max_minor` | `uint16` (inline) | Minor number of the highest supported API revision. |
+| 12 | `min_major` | `uint16` (inline) | Major number of the lowest supported API revision. |
+| 16 | `min_minor` | `uint16` (inline) | Minor number of the lowest supported API revision. |
+| 20 | `max_major` | `uint16` (inline) | Major number of the highest supported API revision. |
+| 24 | `max_minor` | `uint16` (inline) | Minor number of the highest supported API revision. |
 
 ### Data section
 

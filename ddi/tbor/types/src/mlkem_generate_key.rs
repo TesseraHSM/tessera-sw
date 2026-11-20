@@ -106,7 +106,7 @@ mod tests {
             key_kind: MLKEM_KEY_KIND_768_SEED,
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&MLKEM_KEY_KIND_768_SEED),
             "encoded frame must carry the key-kind discriminant",
@@ -126,7 +126,7 @@ mod tests {
                 key_kind: kind,
             };
             let mut buf = [0u8; 256];
-            let frame = req.encode_request(&mut buf).expect("encode");
+            let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
             assert!(
                 frame.contains(&kind),
                 "encoded frame must carry the key-kind discriminant",

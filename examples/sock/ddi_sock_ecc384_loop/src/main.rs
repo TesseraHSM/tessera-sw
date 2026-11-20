@@ -8,6 +8,8 @@
 //! is `vsock://4:1234`. Unix socket paths are also supported.
 //! Use only a disposable test partition: this tool rotates the default CO PSK
 //! to a fixed, publicly known test value and reuses that value on later runs.
+//! Set `TSRA_ROOT_SPKI_SHA384` to the independently enrolled root's 96-digit
+//! DER SPKI SHA-384 hex hash; it is never discovered from this connection.
 
 #[cfg(unix)]
 mod unix {
@@ -37,6 +39,7 @@ mod unix {
     }
 
     fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>> {
+        let root_pin = trusted_root_pin()?;
         std::env::set_var("TSRA_DDI_ARGS", format!("transport=sock;sock={}", endpoint));
 
         let info = HsmPartitionManager::partition_info_list()
@@ -52,8 +55,9 @@ mod unix {
 
         let default_session = partition.open_session_ex(
             rev,
+            &root_pin,
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         );
 
         match default_session {
@@ -66,8 +70,9 @@ mod unix {
             Err(default_error) => partition
                 .open_session_ex(
                     rev,
+                    &root_pin,
                     HsmSessionPsk::with_psk(HsmPskId::CO, &TOOL_CO_PSK),
-                    HsmSessionExType::Authenticated,
+                    HsmSessionSuite::EcdhP384,
                 )
                 .map_err(|rotated_error| {
                     format!(
@@ -77,6 +82,20 @@ mod unix {
                     .into()
                 }),
         }
+    }
+
+    fn trusted_root_pin() -> Result<[u8; 48], Box<dyn std::error::Error>> {
+        let encoded = std::env::var("TSRA_ROOT_SPKI_SHA384").map_err(|error| {
+            format!("configure the trusted root SPKI SHA-384 hex hash: {error}")
+        })?;
+        if encoded.len() != 96 || !encoded.is_ascii() {
+            return Err("TSRA_ROOT_SPKI_SHA384 must be 96 hex digits".into());
+        }
+        let mut pin = [0; 48];
+        for (byte, pair) in pin.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+        }
+        Ok(pin)
     }
 
     fn generate_key_pair(

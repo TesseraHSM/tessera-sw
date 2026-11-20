@@ -73,50 +73,29 @@ pub enum HsmSessionState {
 /// `OpenSessionInit` (`psk_id = 0` → CO, `psk_id = 1` → CU) and pinned
 /// for the session lifetime.  The role determines which logical slot
 /// range the session occupies and which TBOR commands the session may
-/// invoke.
+/// invoke.  Both roles get the same encrypted channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmSessionRole {
     /// Crypto Officer — administrative role.  Sessions land in
-    /// slot 0.  CO sessions are pinned to
-    /// [`HsmSessionType::Authenticated`] (request rejected otherwise).
+    /// slot 0.
     CryptoOfficer,
 
     /// Crypto User — regular role.  Sessions land in slots 1..=7.
-    /// CU sessions are pinned to
-    /// [`HsmSessionType::PlainText`] (request rejected otherwise).
     CryptoUser,
 }
 
-/// Channel-level integrity profile asserted by the session-establishment
-/// handshake.
+/// Channel profile asserted by the session-establishment handshake.
 ///
-/// Selected by the `session_type` field of `OpenSessionInit` and
-/// pinned for the session lifetime.  The session type determines
-/// which derived keys are produced and stored, and whether subsequent
-/// command/response bodies carry an outer per-message HMAC envelope.
-///
-/// Role pairing is enforced at handshake time:
-///
-/// | Role | Allowed `HsmSessionType` |
-/// |---|---|
-/// | [`HsmSessionRole::CryptoOfficer`] | [`Authenticated`](Self::Authenticated) |
-/// | [`HsmSessionRole::CryptoUser`]    | [`PlainText`](Self::PlainText) |
-///
-/// Any other combination is rejected with
-/// [`HsmError::InvalidSessionType`].
+/// Selected by the `session_type` field of `OpenSessionInit`, bound into
+/// the handshake transcript and pinned for the session lifetime.  Every
+/// session, CO and CU alike, is [`Encrypted`](Self::Encrypted); the byte
+/// stays on the wire so future profiles need no format break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HsmSessionType {
-    /// Channel transports MBOR bodies without per-message MAC.
-    /// `param_key` is still derived so callers can opt-in to encrypt
-    /// individual sensitive parameters via the `aead_envelope` envelope.
-    PlainText = 0,
-
-    /// Channel transports MBOR bodies wrapped in an outer
-    /// per-message HMAC envelope.  Two directional MAC keys
-    /// (`mac_tx_key` for VM→HSM, `mac_rx_key` for HSM→VM) are
-    /// derived in addition to `param_key`.
-    Authenticated = 1,
+    /// Every in-session request and response is AES-256-GCM protected
+    /// under the per-direction session transport keys.
+    Encrypted = 0,
 }
 
 impl HsmSessionType {
@@ -129,65 +108,44 @@ impl HsmSessionType {
     /// Parse a wire `u8` into a `HsmSessionType`.
     ///
     /// Returns [`HsmError::InvalidSessionType`] for any value other
-    /// than `0` (PlainText) or `1` (Authenticated).
+    /// than `0` (Encrypted).
     #[inline]
     pub const fn from_u8(v: u8) -> HsmResult<Self> {
         match v {
-            0 => Ok(Self::PlainText),
-            1 => Ok(Self::Authenticated),
+            0 => Ok(Self::Encrypted),
             _ => Err(HsmError::InvalidSessionType),
         }
-    }
-
-    /// Validate that this `HsmSessionType` is the only one allowed for
-    /// the given [`HsmSessionRole`].  Returns
-    /// [`HsmError::InvalidSessionType`] for any disallowed pairing.
-    #[inline]
-    pub const fn validate_for_role(self, role: HsmSessionRole) -> HsmResult<()> {
-        match (role, self) {
-            (HsmSessionRole::CryptoOfficer, Self::Authenticated)
-            | (HsmSessionRole::CryptoUser, Self::PlainText) => Ok(()),
-            _ => Err(HsmError::InvalidSessionType),
-        }
-    }
-
-    /// `true` for [`Authenticated`](Self::Authenticated).
-    #[inline]
-    pub const fn is_authenticated(self) -> bool {
-        matches!(self, Self::Authenticated)
     }
 }
 
 /// Cryptographic suite negotiated by the session-establishment
 /// handshake.
 ///
+/// A suite pairs a key-encapsulation mechanism with the signature the
+/// HSM uses to authenticate the handshake transcript.  The key
+/// schedule (HKDF-SHA-384), the transport AEAD (AES-256-GCM) and the
+/// confirmation MAC (HMAC-SHA-384) are common to every suite.
+///
 /// The suite identifier is carried as a single byte in the
-/// `OpenSessionInit` request, mixed into the HPKE `info` for
-/// transcript binding, and persisted in the Pending blob so
-/// [`open_session_finish`] can recover it without trusting any
-/// client-side state.
+/// `OpenSessionInit` request, bound into the signed transcript, and
+/// persisted in the Pending blob so `OpenSessionFinish` can recover it
+/// without trusting any client-side state.
 ///
 /// # Wire registry
 ///
-/// | `suite_id` | Variant | Algorithms |
-/// |---|---|---|
-/// | `0x01` | [`P384HkdfSha384AesGcm256`](Self::P384HkdfSha384AesGcm256) | HPKE DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM |
+/// | `suite_id` | Variant | KEM | Signature |
+/// |---|---|---|---|
+/// | `0x01` | [`EcdhP384EcdsaP384`](Self::EcdhP384EcdsaP384) | ephemeral ECDH P-384 | ECDSA P-384 (partition identity) |
 ///
-/// `0x01` is the only currently registered suite.  Any other value
-/// is rejected by `OpenSessionInit` with
-/// [`HsmError::UnsupportedSessionSuite`]; the `suite_id` byte exists
-/// so future suites can be added without a wire-format break.
-///
-/// [`open_session_finish`]: crate::open_session_finish
+/// Any other value is rejected by `OpenSessionInit` with
+/// [`HsmError::UnsupportedSessionSuite`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HsmSessionSuite {
-    /// HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
-    ///
-    /// Authenticated PSK mode bound to the partition identity key.
-    /// All session-establishment messages and the seed/`bmk_session`
-    /// AEAD envelopes use AES-256-GCM (32 B keys, 12 B IVs, 16 B tags).
-    P384HkdfSha384AesGcm256 = 0x01,
+    /// Ephemeral-ephemeral ECDH on P-384.  `pk_init` and `enc` are SEC1
+    /// uncompressed points (97 B); the shared secret is the 48 B
+    /// big-endian x-coordinate.
+    EcdhP384EcdsaP384 = 0x01,
 }
 
 impl HsmSessionSuite {
@@ -200,14 +158,76 @@ impl HsmSessionSuite {
     /// Parse a wire `u8` into a `HsmSessionSuite`.
     ///
     /// Returns [`HsmError::UnsupportedSessionSuite`] for any value
-    /// that this firmware build does not implement (including `0x00`
-    /// and any reserved-but-not-yet-supported variant).
+    /// that this firmware build does not implement (including `0x00`).
     #[inline]
     pub const fn from_u8(v: u8) -> HsmResult<Self> {
         match v {
-            0x01 => Ok(Self::P384HkdfSha384AesGcm256),
+            0x01 => Ok(Self::EcdhP384EcdsaP384),
             _ => Err(HsmError::UnsupportedSessionSuite),
         }
+    }
+
+    /// Length of the initiator's KEM public key (`pk_init`).
+    #[inline]
+    pub const fn pk_init_len(self) -> usize {
+        match self {
+            Self::EcdhP384EcdsaP384 => SESSION_P384_SEC1_LEN,
+        }
+    }
+}
+
+/// Direction of a session transport key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmSessionTransportDir {
+    /// VM→HSM (requests).
+    H2m,
+    /// HSM→VM (responses).
+    M2h,
+}
+
+/// One direction's session transport key and nonce salt.
+///
+/// Every AES-GCM nonce in a direction is `salt ‖ be64(seq)`, where `seq`
+/// is the sender's per-direction message counter, so no per-message
+/// randomness is needed and a nonce never repeats under a key as long as
+/// the sender never reuses a `seq`.
+#[derive(Clone, Copy)]
+pub struct HsmSessionTransportKey<'a> {
+    key: &'a HsmDmaBuf,
+    salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+}
+
+impl<'a> HsmSessionTransportKey<'a> {
+    /// Splits a [`SESSION_TRANSPORT_SECRET_LEN`]-byte `key ‖ salt` secret.
+    ///
+    /// # Errors
+    ///
+    /// [`HsmError::InvalidArg`] if `secret` has the wrong length.
+    #[inline]
+    pub fn new(secret: &'a HsmDmaBuf) -> HsmResult<Self> {
+        if secret.len() != SESSION_TRANSPORT_SECRET_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let (key, salt) = secret.split_at(SESSION_TRANSPORT_KEY_LEN);
+        let mut out = [0u8; SESSION_TRANSPORT_SALT_LEN];
+        out.copy_from_slice(salt);
+        Ok(Self { key, salt: out })
+    }
+
+    /// The [`SESSION_TRANSPORT_KEY_LEN`]-byte AES-256-GCM key.
+    #[inline]
+    pub fn key(&self) -> &'a HsmDmaBuf {
+        self.key
+    }
+
+    /// The AES-GCM nonce of message `seq`: `salt ‖ be64(seq)`.
+    #[inline]
+    pub fn nonce(&self, seq: u64) -> [u8; SESSION_TRANSPORT_IV_LEN] {
+        let mut iv = [0u8; SESSION_TRANSPORT_IV_LEN];
+        let (salt, ctr) = iv.split_at_mut(SESSION_TRANSPORT_SALT_LEN);
+        salt.copy_from_slice(&self.salt);
+        ctr.copy_from_slice(&seq.to_be_bytes());
+        iv
     }
 }
 
@@ -220,6 +240,36 @@ impl HsmSessionSuite {
 /// session table (the firmware is single-core, cooperatively
 /// scheduled, so a plain `Cell`/`RefCell` suffices).
 pub trait HsmSessionManager: HsmIoTypes {
+    /// Reserve a migrated slot for a fresh recovery handshake.
+    async fn session_reopen_pending(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        state: &HsmDmaBuf,
+    ) -> HsmResult<()>;
+
+    /// Stable, non-secret fingerprint of the original session masking key.
+    fn session_recovery_binding(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&[u8]>;
+
+    /// Install the fingerprint when establishing a fresh session.
+    fn session_set_recovery_binding(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        binding: &[u8],
+    ) -> HsmResult<()>;
+
+    /// Whether this logical session has already changed its role PSK.
+    fn session_psk_changed(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<bool>;
+
+    /// Replace the Active session's auth binding and rotation flag without re-keying.
+    fn session_set_auth_binding(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        binding: &HsmDmaBuf,
+        psk_changed: bool,
+    ) -> HsmResult<()>;
     /// Returns `true` if the calling partition has no free session
     /// slots.
     ///
@@ -366,10 +416,10 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// Reserves a session slot in the [`Pending`](HsmSessionState::Pending)
     /// state for an in-flight session-establishment handshake.
     ///
-    /// Phase 1 of the session protocol: the slot holds the HPKE-derived
-    /// `exported` secret and bound public keys so that
-    /// [`session_promote`](Self::session_promote) can verify the
-    /// `OpenSessionFinish` MAC and derive the final session keys.
+    /// Phase 1 of the session protocol: the slot holds the handshake
+    /// secret and transcript hash so that the `OpenSessionFinish`
+    /// handler can verify the host's confirmation and derive the final
+    /// session keys.
     ///
     /// The chosen slot is constrained by `role`:
     ///
@@ -382,7 +432,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// 2. Otherwise the oldest `Pending` slot in the range is destroyed
     ///    (via [`session_destroy`](Self::session_destroy)) and
     ///    re-allocated.  An evicted handshake's late `OpenSessionFinish`
-    ///    fails MAC verification because the slot's `exported` is
+    ///    fails to authenticate because the slot's transport keys are
     ///    different.
     /// 3. Otherwise (all eligible slots `Active` or
     ///    `NeedsRenegotiation`) returns
@@ -394,19 +444,20 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX)
     /// bytes.
     ///
-    /// On [`HsmIoProtocol::Duo`](crate::HsmIoProtocol::Duo) the blob's trailing
-    /// `2 × SESSION_TRANSPORT_KEY_LEN` bytes are the transport keys
-    /// `h2m ‖ m2h`; the PAL serves
-    /// [`recv_request`](crate::HsmIoController::recv_request) /
-    /// [`send_response`](crate::HsmIoController::send_response) for the
-    /// Pending slot from them.
+    /// The blob starts with the selected API revision as
+    /// `LE16(major) || LE16(minor)`. Its trailing
+    /// `2 × SESSION_TRANSPORT_SECRET_LEN` bytes are the
+    /// transport secrets `h2m ‖ m2h` (each `key ‖ salt`);
+    /// [`session_transport_key`](Self::session_transport_key) serves the
+    /// Pending slot from them, so `OpenSessionFinish` already travels on
+    /// the encrypted channel.
     ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (partition scope).
     /// - `role` — role the handshake is claiming.
-    /// - `handshake_state` — opaque handshake material (`exported`
-    ///   plus bound public keys); retrieved verbatim by
+    /// - `handshake_state` — opaque handshake material ending with the
+    ///   transport secrets; retrieved verbatim by
     ///   [`session_pending_state`](Self::session_pending_state).
     ///
     /// # Returns
@@ -426,9 +477,9 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// Borrows the opaque handshake state of a
     /// [`Pending`](HsmSessionState::Pending) slot.
     ///
-    /// Used by the `OpenSessionFinish` handler to recover the HPKE
-    /// `exported` secret and bound public keys from the Pending slot
-    /// before verifying the client's confirmation MAC.
+    /// Used by the `OpenSessionFinish` handler to recover the handshake
+    /// secret and transcript hash from the Pending slot before verifying
+    /// the client's confirmation MAC.
     ///
     /// # Parameters
     ///
@@ -450,6 +501,9 @@ pub trait HsmSessionManager: HsmIoTypes {
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// API revision authenticated during this Pending or Active session's Init.
+    fn session_api_revision(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<HsmApiRevision>;
+
     /// Promotes a [`Pending`](HsmSessionState::Pending) slot to
     /// [`Active`](HsmSessionState::Active), committing the derived
     /// session keys to the vault.
@@ -459,16 +513,14 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// verifies.  The Pending handshake state is zeroized and replaced
     /// by the session-key vault blob:
     ///
-    /// Length-discriminated by session type:
-    /// * **PlainText (CU):** 72 B blob =
-    ///   `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)]`.
-    ///   `mac_tx_key` and `mac_rx_key` MUST both be `None`.
-    /// * **Authenticated (CO):** 168 B blob = the above ‖
-    ///   `mac_tx(48) ‖ mac_rx(48)`.  Both `mac_tx_key` and
-    ///   `mac_rx_key` MUST be `Some` (and 48 B each).
+    /// 216 B blob = `[internal_format_tag(8) ‖ selected_api_rev(4) ‖
+    /// param_key(32) ‖ masking_key(32) ‖ auth_binding(68) ‖ h2m(36) ‖
+    /// m2h(36)]`, identical for CO and CU.
     ///
-    /// Mixed presence (one MAC key supplied, the other not) is
-    /// rejected with [`HsmError::InvalidArg`].
+    /// The transport secrets are the same ones the Pending slot served,
+    /// so the HSM→VM sequence counter (see
+    /// [`session_transport_next_seq`](Self::session_transport_next_seq))
+    /// carries over from Pending to Active rather than restarting.
     ///
     /// On error the slot is left untouched; callers may either retry
     /// `session_promote` with corrected arguments or
@@ -478,8 +530,10 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// - `io` — caller's I/O context (partition scope).
     /// - `id` — Pending session slot to promote.
-    /// - `api_rev` — 8-byte API revision tag (same convention as
+    /// - `api_rev` — opaque 8-byte internal session-format tag (same convention as
     ///   [`session_create`](Self::session_create)).
+    /// - `selected_api_rev` — externally selected API revision authenticated
+    ///   during Init, distinct from the internal format tag.
     /// - `param_key` — 32-byte AES-256 key used by
     ///   [`tsra_fw_core_crypto_aead_envelope`] for per-parameter
     ///   authenticated encryption (and to unseal the `seed_envelope`
@@ -489,17 +543,16 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   separately from the per-parameter `param_key`.
     /// - `auth_binding` — [`SESSION_AUTH_BINDING_LEN`] bytes captured from
     ///   the authenticated handshake: role, AppId and PSK digest.
-    /// - `mac_tx_key` — `Some(48 B)` for Authenticated sessions
-    ///   (VM→HSM message-MAC key); `None` for PlainText.
-    /// - `mac_rx_key` — `Some(48 B)` for Authenticated sessions
-    ///   (HSM→VM message-MAC key); `None` for PlainText.
+    /// - `h2m_secret` — [`SESSION_TRANSPORT_SECRET_LEN`] VM→HSM transport
+    ///   `key ‖ salt`.
+    /// - `m2h_secret` — [`SESSION_TRANSPORT_SECRET_LEN`] HSM→VM transport
+    ///   `key ‖ salt`.
     ///
     /// # Returns
     ///
     /// - `Ok(())` on success; slot transitions Pending → Active.
     /// - `Err(HsmError::InvalidArg)` — bad arguments (wrong key
-    ///   lengths, `api_rev` wrong length, `id` out of range, mixed
-    ///   `mac_*_key` presence).
+    ///   lengths, `api_rev` wrong length, `id` out of range).
     /// - `Err(HsmError::SessionNotPending)` — slot exists but is not
     ///   in [`Pending`](HsmSessionState::Pending) state.
     #[allow(clippy::too_many_arguments)]
@@ -508,12 +561,53 @@ pub trait HsmSessionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmSessId,
         api_rev: &[u8],
+        selected_api_rev: HsmApiRevision,
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
         auth_binding: &HsmDmaBuf,
-        mac_tx_key: Option<&HsmDmaBuf>,
-        mac_rx_key: Option<&HsmDmaBuf>,
+        h2m_secret: &HsmDmaBuf,
+        m2h_secret: &HsmDmaBuf,
     ) -> HsmResult<()>;
+
+    /// Borrows a session's directional AES-256-GCM transport key and
+    /// nonce salt.
+    ///
+    /// Served from a [`Pending`](HsmSessionState::Pending) slot's
+    /// handshake blob tail, or from an [`Active`](HsmSessionState::Active)
+    /// session's schedule blob.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(key)` — the direction's key and salt.
+    /// - `Err(HsmError::SessionNotFound)` — `id` is neither Pending nor
+    ///   Active in the caller's partition.
+    /// - `Err(HsmError::InvalidPermissions)` — the session carries no
+    ///   transport keys (a legacy MBOR session).
+    fn session_transport_key(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        dir: HsmSessionTransportDir,
+    ) -> HsmResult<HsmSessionTransportKey<'_>>;
+
+    /// Reserves the next HSM→VM sequence number of session `id`, for the
+    /// nonce of one sealed response.
+    ///
+    /// Each call returns a value never returned before under the
+    /// session's current transport keys — including across warm resets
+    /// that preserve the session — so a reserved number must be used for
+    /// at most one message. The counter restarts only when new transport
+    /// keys are installed by
+    /// [`session_create_pending`](Self::session_create_pending).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(seq)` — the reserved sequence number.
+    /// - `Err(HsmError::SessionNotFound)` — `id` is neither Pending nor
+    ///   Active in the caller's partition.
+    /// - `Err(HsmError::SessionTransportError)` — the counter is
+    ///   exhausted; the session must be re-established.
+    fn session_transport_next_seq(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<u64>;
 
     /// Returns a borrowed view of the active session's `param_key`
     /// (a 32-byte AES-256 key used by
@@ -588,33 +682,4 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
     fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
-
-    /// Atomically reserves the session's one-shot "PSK change"
-    /// budget.  Each session may successfully consume this budget at
-    /// most once.
-    ///
-    /// The budget is bound to one logical session for the slot's
-    /// lifetime and reset whenever the slot is re-allocated
-    /// (`session_destroy`, `session_create`, `session_create_pending`
-    /// reuse) or rebound to new key material via re-keying
-    /// (`session_recreate`, `session_promote`).
-    ///
-    /// Used by the TBOR `ChangePsk` handler to bound intra-session
-    /// rotation replay.
-    ///
-    /// # Parameters
-    ///
-    /// - `io` — caller's I/O context (partition scope).
-    /// - `id` — Active session slot.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` — budget consumed; the call site may proceed.  No
-    ///   second `Ok(())` will be returned for this session.
-    /// - `Err(HsmError::InvalidPermissions)` — budget already
-    ///   consumed by a prior successful call.
-    /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
-    ///   live Active session in the caller's partition (slot free,
-    ///   destroyed, or still Pending).
-    fn session_try_consume_psk_change(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }

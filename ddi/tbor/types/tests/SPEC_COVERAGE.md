@@ -54,7 +54,7 @@ All test names below are relative to the
 | Role gate: CU + Authenticated → `InvalidSessionType` | ✅ | `open_session::open_session_cu_authenticated_rejected_emu` |  |
 | `psk_id` not in `{0, 1}` → `InvalidPskId` | ✅ 🔁 | `open_session::open_session_invalid_psk_id_emu` | Loop over `[2, 0x7F, 0xFF]` |
 | `session_type` byte not in `{0, 1}` → `InvalidSessionType` | ✅ | `open_session::open_session_invalid_session_type_byte_emu` | Bypasses typed enum; ships raw byte `42` |
-| `suite_id` not in `{0x01}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id_emu` | Loop over `[0x00, 0x02, 0xff]` |
+| `suite_id` not in `{0x01}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id` | Loop over `[0x00, 0x02, 0x03, 0xff]`; includes removed suite `0x02` |
 | Default-PSK gate bypass (E3, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_open_init_bypass_emu` |  |
 | Multiple concurrent sessions return distinct session ids | ✅ | `open_session::open_session_multiple_concurrent_emu` |  |
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |
@@ -99,7 +99,11 @@ All test names below are relative to the
 | Happy path (CU); rotation took effect (reopen under rotated bytes succeeds) | ✅ | `psk_change::psk_change_happy_cu_emu` | Shared body via `run_psk_change_happy` |
 | Happy path (CO); rotation took effect | ✅ | `psk_change::psk_change_happy_co_emu` |  |
 | Reopen with old default PSK fails after rotation | ✅ | `psk_change::psk_change_reopen_with_old_psk_fails_emu` | Either host- or FW-side rejection accepted |
-| One-shot per session: second `PskChange` on same session → `InvalidPermissions` | ✅ | `psk_change::psk_change_second_attempt_same_session_fails_emu` |  |
+| Default-authenticated CU remains bootstrap-only after rotation → `DefaultPskChanged` | ✅ | `psk_change::psk_change_second_attempt_same_session_fails` | Includes the winning session |
+| Failed envelope permits a valid rotation retry on the same session | ✅ | `psk_change::psk_change_failed_envelope_then_valid_rotation` | No per-session attempt budget |
+| Every ordinary CU session command is blocked before and after bootstrap rotation | ✅ | `default_psk_gate::cu_bootstrap_blocks_*` | Separate test per opcode; `DefaultPskMustRotate` before rotation, `DefaultPskChanged` after |
+| Seven concurrent CU bootstrap sessions produce one committed rotation | ✅ | `psk_change::psk_change_seven_cu_bootstrap_sessions_have_one_winner` | All old bootstrap sessions, including the winner, remain blocked |
+| Failed completion restores the old CU PSK and permits same-session retry | ✅ (std Uno) | `key_report_credentials::psk_change_failed_completion_restores_default_and_allows_same_session_retry` | Exercises IO undo, not just envelope rejection |
 | Envelope ciphertext bit-flip → `AeadEnvelopeAuthFailed` | ✅ 🔁 | `psk_change::psk_change_envelope_tampered_emu` | Loop over `[ct_flip, aad_flip]` |
 | Envelope AAD bit-flip → `AeadEnvelopeAuthFailed` | ✅ 🔁 | `psk_change::psk_change_envelope_tampered_emu` | Same test, second sub-case |
 | Empty `psk_envelope` → `InvalidArg` | ✅ | `psk_change::psk_change_empty_envelope_emu` |  |
@@ -194,7 +198,7 @@ fresh POTA endorsement minted for each incarnation.
 | MOBK that `BK_BOOT` did not mask → `MaskedKeyDecodeFailed`, partition unchanged | ✅ | `part_init_with_obk::part_init_with_obk_rejects_an_unmaskable_mobk` |  |
 | CU session → `InvalidPermissions` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_crypto_user_session` |  |
 | Default CO PSK → `DefaultPskMustRotate` | ✅ | `part_init_with_obk::part_init_with_obk_requires_a_rotated_psk` |  |
-| Session opened before the PSK rotation → `SessionAuthFailure` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_session_opened_before_psk_rotation` | Rotates inside the bootstrap session, then reuses it |
+| The session that rotated the CO PSK is rebound and provisions without reopening | ✅ | `part_init_with_obk::part_init_with_obk_accepts_the_session_that_rotated_the_psk` | Rotates inside the bootstrap session, then provisions on it. A CO session left on the old PSK cannot be built (one CO slot; `PskChange` rebinds the rotating session), so the handler's `SessionAuthFailure` arm is the shared `validate_auth_binding` check covered by the `PskChange` / `KeyReport` credential tests |
 | Second call → `PartitionAlreadyProvisioned`; `PartInit` after it → `PartitionAlreadyProvisioned`, state stays `Initialized` | ✅ | `part_init_with_obk::part_init_with_obk_is_exclusive_with_the_other_provisioning_flows` | The `PartInit` guard sits after its PTA-key guard, so its existing statuses are unchanged |
 | After `PartInit` → `PartitionAlreadyProvisioned` | ✅ | `part_init_with_obk::part_init_with_obk_rejects_a_partition_already_in_part_init` |  |
 
@@ -203,13 +207,16 @@ fresh POTA endorsement minted for each incarnation.
 The gate (see `fw/core/lib/src/ddi/tbor/mod.rs::dispatch`) rejects
 in-session commands not on the bootstrap allow-list when the calling
 role's partition PSK still matches the compiled-in default.
+CU sessions also retain their authenticated credential: after bootstrap
+rotation, every protected command except close returns `DefaultPskChanged`,
+including another `PskChange`.
 
 | Spec arm | Status | Test | Notes |
 |---|---|---|---|
 | E1: `PskChange` is allow-listed (CO) | ✅ | `default_psk_gate::default_psk_gate_psk_change_bypass_emu` | CU implicitly via `psk_change_happy_cu_emu` |
 | E2: `SessionClose` is allow-listed (both roles) | ✅ | `default_psk_gate::default_psk_gate_session_close_bypass_emu` |  |
 | E3: `SessionOpenInit` is out-of-session (both roles) | ✅ | `default_psk_gate::default_psk_gate_session_open_init_bypass_emu` |  |
-| E4: A non-allow-listed in-session command under default PSK is rejected with `DefaultPskMustRotate` | ✅ | `part_init::fw_rejects::part_init_reject_default_psk_co` | `PartInit` is currently the only such opcode; this row collapses what `default_psk_gate.rs` calls E4 |
+| E4: Every ordinary CU opcode is rejected before and after bootstrap rotation | ✅ | `default_psk_gate::cu_bootstrap_blocks_*` | 40 independently named tests; `DefaultPskMustRotate` before rotation, `DefaultPskChanged` after |
 | E5: `ApiRev` is out-of-session | ✅ | `default_psk_gate::default_psk_gate_api_rev_bypass_emu` |  |
 
 ## Host-side TBOR codec (no FW round-trip required)

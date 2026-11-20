@@ -126,7 +126,9 @@ const RESERVED3_LEN: usize = 626
     - CREDENTIAL_LEN
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
-    - 2; // session_meta (pending_mask + psk_change_mask)
+    - 2  // session_meta (pending_mask + reserved)
+    - 2  // transport_epoch
+    - 129; // session recovery fingerprints and rotation-consumed mask
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -422,10 +424,17 @@ struct Storage {
     // the DMA-target public keys above stay 4-aligned.
     valid_flags: u8,
     // Volatile TBOR session slot metadata: byte 0 = pending_mask
-    // (bit N set while slot N's handshake is in flight), byte 1 =
-    // psk_change_mask (bit N set once slot N has consumed its one
-    // allowed PSK change). Owned by the session_store driver.
+    // (bit N set while slot N's handshake is in flight), byte 1 is
+    // reserved. Owned by the session_store driver.
     session_meta: [u8; 2],
+    // Little-endian TBOR session transport epoch: the top 16 bits of every
+    // HSM→VM sequence number. Bumped on every warm / fw-update boot, which
+    // preserves sessions but restarts the DTCM message counters, so a
+    // sequence number (and thus an AES-GCM nonce) is never reused under a
+    // surviving session's keys. Zeroed only by `reset` (power-on), which
+    // also drops every session.
+    transport_epoch: [u8; 2],
+    session_recovery: [u8; 129],
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -506,6 +515,23 @@ impl PartStore {
             if part.res_mask() != 0 {
                 part.set_unwrapping_key_required(true);
             }
+        }
+    }
+
+    /// Advances every partition's session transport epoch after a warm /
+    /// fw-update reboot, which keeps sessions but restarts their volatile
+    /// message counters. Saturates at `u16::MAX`, after which
+    /// [`Partition::transport_epoch`] reports exhaustion.
+    pub fn bump_transport_epochs() {
+        for idx in 0..NUM_PARTITIONS {
+            let slot = Partition(idx).slot_ptr();
+            // SAFETY: the index is in range, keeping the slot within the
+            // partition-store GSRAM region; boot runs before any task, so
+            // nothing else accesses the slot. `transport_epoch` is not
+            // shadowed, so the shadow caches need no invalidation.
+            let epoch = unsafe { &mut (*slot).transport_epoch };
+            let next = u16::from_le_bytes(*epoch).saturating_add(1);
+            *epoch = next.to_le_bytes();
         }
     }
 }
@@ -722,18 +748,8 @@ impl Partition {
         // ── Write-once provisioning material ──
         // Preserved by `Migrate` (NSSR keeps provisioning); wiped by `Disable`
         // (partition disable or deallocation).
-        // An NSSR (`Migrate`) returns the partition to its just-allocated
-        // state as far as the session PSKs are concerned: `part_psk` is
-        // `RequiredPresent` and default-baked at allocation, so the slots
-        // must read back as the defaults rather than keeping a rotated
-        // value. Re-uses [`bake_default_psks`] so allocation and NSSR can
-        // never drift apart. Mirrors the std PAL, whose migrated entry
-        // resets `psk_co`/`psk_cu` to `None` and therefore reads back as
-        // `DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`. `Disable` instead zeroes
-        // them below; the PAL restores defaults on a subsequent enable.
-        if matches!(kind, PartResetKind::Migrate) {
-            self.bake_default_psks();
-        }
+        // Migration retains role credentials so stale TBOR sessions can
+        // reauthenticate with the current PSK rather than a public default.
 
         if matches!(kind, PartResetKind::Disable) {
             self.slot_mut().reserved_pta_pub_key.fill(0);
@@ -1645,8 +1661,8 @@ impl Partition {
         &mut self.slot_mut().session_table
     }
 
-    /// Borrows the 2-byte volatile session metadata (`pending_mask`,
-    /// `psk_change_mask`) for the TBOR session slots.
+    /// Borrows the volatile Pending mask and one reserved byte for the
+    /// TBOR session slots.
     #[inline(never)]
     pub fn session_meta(self) -> &'static [u8; 2] {
         &self.slot().session_meta
@@ -1656,6 +1672,25 @@ impl Partition {
     #[inline(never)]
     pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
         &mut self.slot_mut().session_meta
+    }
+
+    /// Session masking-key fingerprints and rotation flags retained across LM.
+    pub fn session_recovery(self) -> &'static [u8; 129] {
+        &self.slot().session_recovery
+    }
+
+    /// Mutable session recovery metadata, owned by the session-store driver.
+    pub fn session_recovery_mut(&mut self) -> &mut [u8; 129] {
+        &mut self.slot_mut().session_recovery
+    }
+
+    /// The session transport epoch (see
+    /// [`PartStore::bump_transport_epochs`]), or `None` once it has
+    /// saturated and no fresh sequence numbers remain.
+    #[inline(never)]
+    pub fn transport_epoch(self) -> Option<u16> {
+        let epoch = u16::from_le_bytes(self.slot().transport_epoch);
+        (epoch != u16::MAX).then_some(epoch)
     }
 }
 

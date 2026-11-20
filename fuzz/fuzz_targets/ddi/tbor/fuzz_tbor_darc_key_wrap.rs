@@ -504,8 +504,10 @@ fn assert_success(
         let signature = ctx
             .tbor(&TborEccSignReq {
                 session_id: req.session_id,
+                hash_algo: ecc_sign_hash_algo(digest.len()).expect("SHA-2 digest length"),
                 masked_key: recovered.masked_key,
-                digest: digest.clone(),
+                input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest)
+                    .expect("bounded ECC signing layout"),
             })
             .expect("sign with round-tripped key")
             .signature;
@@ -544,7 +546,7 @@ fn assert_rejection(ctx: &TestCtx, req: &TborDarcKeyWrapReq, status: TborStatus)
 fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
     let session = match input.scenario {
         Scenario::DefaultPsk => ctx
-            .open_session(CO_PSK_ID, SessionType::Authenticated)
+            .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
             .expect("default-PSK session"),
         Scenario::CryptoUser => SessionGuard::new(ctx, bootstrap_rotated_cu(ctx, &ROTATED_CU_PSK)),
         _ => SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK)),

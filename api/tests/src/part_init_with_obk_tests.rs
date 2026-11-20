@@ -28,31 +28,6 @@ fn obk_supported() -> bool {
     crate::utils::session::api_rev_at_least(1, 1) && !crate::utils::session::api_rev_at_least(2, 0)
 }
 
-/// Open a CO session under a rotated PSK on `part` — the default-PSK gate
-/// rejects provisioning commands otherwise, and the device rejects a session
-/// opened before the rotation.
-fn rotated_co_session(part: &HsmPartition, rev: HsmApiRev) -> HsmSession {
-    {
-        let bootstrap = part
-            .open_session_ex(
-                rev,
-                HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
-            )
-            .expect("open bootstrap CO session");
-        bootstrap
-            .change_psk(&ROTATED_CO_PSK)
-            .expect("rotate CO PSK");
-    }
-
-    part.open_session_ex(
-        rev,
-        HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-        HsmSessionExType::Authenticated,
-    )
-    .expect("open rotated CO session")
-}
-
 /// The raw-OBK configuration and a caller-supplied POTA endorsement of
 /// `part`'s current identity.
 fn caller_inputs(part: &HsmPartition) -> (HsmOwnerBackupKeyConfig, HsmPotaEndorsement) {
@@ -79,7 +54,7 @@ fn part_init_with_obk_provisions_the_partition() {
     }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
-    let session = rotated_co_session(&part, rev);
+    let session = open_rotated_co_session(&part, rev);
     let (obk_config, pota) = caller_inputs(&part);
 
     let result = session
@@ -106,7 +81,7 @@ fn part_init_with_obk_restores_from_the_previous_backup() {
     }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
-    let session = rotated_co_session(&part, rev);
+    let session = open_rotated_co_session(&part, rev);
     let (obk_config, pota) = caller_inputs(&part);
     let first = session
         .part_init_with_obk(&obk_config, &pota, None)
@@ -116,7 +91,7 @@ fn part_init_with_obk_restores_from_the_previous_backup() {
     // A reset stands in for NSSR: the identity is regenerated, so the new
     // incarnation re-endorses it and masks the same OBK again.
     part.reset().expect("reset the partition");
-    let session = rotated_co_session(&part, rev);
+    let session = open_rotated_co_session(&part, rev);
     let (obk_config, pota) = caller_inputs(&part);
 
     let restored = session
@@ -134,7 +109,7 @@ fn part_init_with_obk_rejects_malformed_inputs_without_consuming_the_obk() {
     }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
-    let session = rotated_co_session(&part, rev);
+    let session = open_rotated_co_session(&part, rev);
     let (obk_config, pota) = caller_inputs(&part);
     let (sig, pub_key_der) = generate_pota_endorsement(&part);
 
@@ -184,11 +159,13 @@ fn part_init_with_obk_keeps_the_mobk_after_a_device_rejection() {
 
     // The device gates provisioning under the unrotated default PSK, which it
     // only reports after the raw OBK was masked.
+    let root = test_root_spki_sha384(&part);
     let bootstrap = part
         .open_session_ex(
             rev,
+            &root,
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open bootstrap CO session");
     bootstrap
@@ -204,8 +181,9 @@ fn part_init_with_obk_keeps_the_mobk_after_a_device_rejection() {
     let session = part
         .open_session_ex(
             rev,
+            &root,
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
 

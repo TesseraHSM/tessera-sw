@@ -12,6 +12,7 @@ use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
@@ -148,8 +149,7 @@ fn get_public_key_session_scoped_key_rejected_in_different_session() {
     let (masked_key, _) = generate_ecc(&ctx, session_a.session_id, ECC_CURVE_P256);
     ctx.session_close(session_a.session_id)
         .expect("close originating CO session");
-    let opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_CO_PSK);
+    let opts = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
     let pending = ctx
         .session_open_init_with_options(opts)
         .expect("open replacement CO session");
@@ -170,7 +170,7 @@ fn get_public_key_session_scoped_key_rejected_in_different_session() {
 fn get_public_key_rejects_default_co_psk() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO session under default PSK");
     ctx.expect_fw_reject(
         &TborGetPublicKeyReq {

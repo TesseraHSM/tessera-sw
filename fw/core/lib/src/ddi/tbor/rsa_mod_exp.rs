@@ -78,7 +78,7 @@ pub(crate) async fn handle<P: HsmPal>(
     };
 
     cmd_buf.encode_response(|buf| {
-        let frame = TborRsaModExpResp::encode(buf, 0, false)?
+        let frame = TborRsaModExpResp::encode_for_request(buf, 0, false)?
             .x_existing(output_len)?
             .finish();
         Ok(frame.as_bytes().len())
