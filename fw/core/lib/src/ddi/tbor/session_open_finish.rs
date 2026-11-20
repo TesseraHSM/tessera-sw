@@ -142,8 +142,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             io,
             HsmHashAlgo::Sha384,
             masking_key,
-            fingerprint,
             HsmDigestForm::Standard,
+            Some(fingerprint),
         )
         .await?;
 
@@ -254,8 +254,8 @@ async fn recover_masking_key<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         view.target_key,
-        fingerprint,
         HsmDigestForm::Standard,
+        Some(fingerprint),
     )
     .await?;
     if &fingerprint[..16] != pal.session_recovery_binding(io, id)? {

@@ -286,21 +286,20 @@ async fn ecdh_encapsulate<'a, P: HsmPal>(
     // The ephemeral key is used for ECDH, so its generation runs a
     // key-agreement PCT.
     let (priv_len, pub_len) = pal
-        .ecc_gen_keypair(io, alloc, CURVE, None, HsmEccPct::KeyAgreement)
+        .ecc_gen_keypair(io, CURVE, HsmEccPct::KeyAgreement, None)
         .await?;
     let sk = alloc.dma_alloc(priv_len)?;
     let pk = alloc.dma_alloc(pub_len)?;
     pal.ecc_gen_keypair(
         io,
-        alloc,
         CURVE,
-        Some((&mut *sk, &mut *pk)),
         HsmEccPct::KeyAgreement,
+        Some((&mut *sk, &mut *pk)),
     )
     .await?;
 
     let z = alloc.dma_alloc(coord)?;
-    pal.ecdh_derive(io, CURVE, sk, peer, z).await?;
+    pal.ecdh_derive(io, CURVE, sk, peer, Some(z)).await?;
     let z_len = byte_order::coord_to_be(order, CURVE, z)?.len();
 
     let enc = alloc.dma_alloc(SESSION_P384_SEC1_LEN)?;
@@ -377,7 +376,7 @@ async fn sign_transcript<'a, P: HsmPal>(
     let sig = alloc.dma_alloc(CURVE.wire_sig_len(order))?;
     let key_id = crate::part_state::part_id_key_id(pal, io)?;
     let sk_hsm = pal.vault_key(io, key_id)?;
-    pal.ecc_sign(io, CURVE, sk_hsm, digest, sig).await?;
+    pal.ecc_sign(io, CURVE, sk_hsm, digest, Some(sig)).await?;
     let sig = byte_order::pair_to_be(order, CURVE, sig)?;
     if sig.len() != SIG_LEN {
         return Err(HsmError::InvalidArg);
@@ -401,7 +400,7 @@ async fn handshake_secret<'a, P: HsmPal>(
     let salt = alloc.dma_alloc(SESSION_TRANSCRIPT_LABEL.len())?;
     salt.copy_from_slice(SESSION_TRANSCRIPT_LABEL);
     let prk = alloc.dma_alloc(SESSION_HS_LEN)?;
-    pal.hkdf_extract(io, HsmHashAlgo::Sha384, Some(salt), ikm, prk)
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, Some(salt), ikm, Some(prk))
         .await?;
 
     let info = alloc.dma_alloc(SESSION_HS_LABEL.len() + t1.len())?;
