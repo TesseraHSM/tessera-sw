@@ -139,17 +139,16 @@ pub enum HsmPartState {
     Enabled = 2,
 
     /// The partition was previously [`Enabled`](Self::Enabled) and has
-    /// been disabled by the host.  Internal crypto material, vault
-    /// keys, and sessions are cleared, but the resource allocation
-    /// and identity key pair are retained so the partition can be
-    /// re-enabled without a full re-provision.
+    /// been disabled by the host.  The identity, internal crypto material,
+    /// vault keys, and sessions are cleared, but the resource allocation is
+    /// retained so the partition can be re-enabled without a full
+    /// re-provision; re-enabling regenerates the identity key pair.
     Disabled = 3,
-
     /// The TBOR `PartInit` handler has bound the Partition Trust
     /// Anchor (PTA) key and the partition policy hash to this
     /// incarnation, but partition finalization
     /// has not yet run.  No further `PartInit` is permitted until
-    /// the next alloc/free cycle (one-shot enforcement).
+    /// the next alloc/free or disable/enable cycle (one-shot enforcement).
     Initializing = 4,
 
     /// The TBOR `PartFinal` handler has finalized the partition:
