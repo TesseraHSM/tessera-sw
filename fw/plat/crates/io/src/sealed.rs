@@ -227,6 +227,15 @@ where
     Ok(&frame[TRANSPORT_AAD_LEN..])
 }
 
+/// Length of the message in `pt`, an opened frame's padded plaintext.
+///
+/// # Errors
+///
+/// [`HsmError::SessionTransportError`] if the padding is invalid.
+pub fn sealed_msg_len(pt: &HsmDmaBuf) -> HsmResult<usize> {
+    unpad(pt).ok_or(HsmError::SessionTransportError)
+}
+
 /// Message length of the padded plaintext `pt`, whole blocks, or `None` if
 /// its padding is invalid.
 ///
