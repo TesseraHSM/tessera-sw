@@ -378,6 +378,34 @@ fn max_toc_entries() {
 // ── Error cases ────────────────────────────────────────────────────────
 
 #[test]
+fn from_head_reuses_a_parse_only_for_its_storage() {
+    let mut buf = [0u8; 256];
+    let msg = RequestEncoder::new(&mut buf, (1, 1), 0x0A)
+        .session_id(43)
+        .unwrap()
+        .buffer(b"Hello")
+        .unwrap()
+        .finish()
+        .unwrap();
+    let head = RequestView::parse(brand(msg)).unwrap().head();
+
+    let view = RequestView::from_head(brand(msg), &head).unwrap();
+    assert_eq!(view.opcode(), 0x0A);
+    match view.toc_entry(1) {
+        TocEntry::Buffer(data) => assert_eq!(data, b"Hello"),
+        other => panic!("expected Buffer, got {:?}", other),
+    }
+
+    // Any other storage is parsed in full: a copy elsewhere, or a prefix.
+    let mut copy = msg.to_vec();
+    copy[4] |= 0x1F;
+    let err = RequestView::from_head(brand(&copy), &head).unwrap_err();
+    assert_eq!(err, HsmError::TborMessageTruncated);
+    let err = RequestView::from_head(brand(&msg[..2]), &head).unwrap_err();
+    assert_eq!(err, HsmError::TborBufferTooShort);
+}
+
+#[test]
 fn decode_buffer_too_short() {
     let wire = [0x01, 0x00];
     let err = RequestView::parse(brand(&wire)).unwrap_err();

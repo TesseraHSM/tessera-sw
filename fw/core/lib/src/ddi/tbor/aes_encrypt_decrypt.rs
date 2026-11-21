@@ -30,7 +30,6 @@ use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
 use tsra_fw_ddi_tbor_types::AES_MSG_MAX_LEN;
 use tsra_fw_hsm_pal_traits::HsmAesMode;
 use tsra_fw_hsm_pal_traits::HsmAesOp;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -39,6 +38,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
+use super::TborExchange;
 
 /// Map the wire [`AesOp`] onto the PAL [`HsmAesOp`].  An unrecognized
 /// discriminant is rejected with [`HsmError::InvalidArg`].
@@ -80,10 +80,11 @@ fn assert_aes_kind(kind: HsmVaultKeyKind) -> HsmResult<()> {
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd_buf: &mut TborExchange<'_>,
 ) -> HsmResult<usize> {
     async {
-        let req = TborAesEncryptDecryptReq::decode(cmd_buf.request())?;
+        let (req, head) = cmd_buf.request_and_head();
+        let req = TborAesEncryptDecryptReq::decode_from(req, head)?;
         let base = cmd_buf.request().as_ptr() as usize;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_active_session(pal, io, sess_id)?;

@@ -17,9 +17,10 @@
 use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::TborApiRevReq;
 use tsra_fw_ddi_tbor_types::TborApiRevResp;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
+
+use super::TborExchange;
 
 /// Handle a TBOR `ApiRev` request.
 ///
@@ -27,8 +28,9 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// buffer via `RequestView::parse` and confirmed the opcode is
 /// `API_REV`. This handler validates the typed request and encodes the
 /// platform's API revision range.
-pub(crate) fn handle<P: HsmPalFeatures>(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
-    TborApiRevReq::decode(cmd_buf.request())?;
+pub(crate) fn handle<P: HsmPalFeatures>(cmd_buf: &mut TborExchange<'_>) -> HsmResult<usize> {
+    let (req, head) = cmd_buf.request_and_head();
+    TborApiRevReq::decode_from(req, head)?;
     let frame = TborApiRevResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
         .min_major(U16::new(P::API_REV_MIN.major))?
         .min_minor(U16::new(P::API_REV_MIN.minor))?
