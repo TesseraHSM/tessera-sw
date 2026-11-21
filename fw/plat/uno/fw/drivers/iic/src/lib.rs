@@ -26,14 +26,18 @@
 //! use tsra_fw_uno_drivers_iic::*;
 //!
 //! let iic = IicDriver::<32>::new(ChannelConfig {
+//!     controller: 0,
 //!     channel: 0,
 //!     isq_base: 0x6109_0000,
 //!     io_pool_base: 0x6108_0000,
 //!     io_size: 64,
+//!     io_first: 0,
+//!     io_count: 32,
 //!     icq_base: 0x6109_0100,
 //!     icq_tail_shadow: 0x6109_0300,
 //!     io_meta_base: 0x6109_0C00,
 //!     interrupt: true,
+//!     grant_credit: true,
 //! });
 //! iic.init(); // attach on fw-update, full program otherwise (reads reset reason)
 //! iic.enable();
