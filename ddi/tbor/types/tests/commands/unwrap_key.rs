@@ -150,6 +150,50 @@ fn unwrap_key_aes() {
     assert!(resp.pub_key.is_empty(), "a symmetric key has no public key");
 }
 
+/// Expanded ML-KEM private keys are not supported by UnwrapKey. Sweep the
+/// class byte so a newly added ML-KEM class cannot silently bypass this
+/// regression; enabling import requires revisiting this expectation.
+#[test]
+fn unwrap_key_mlkem_rejected() {
+    for variant in [
+        MlKemVariant::MlKem512,
+        MlKemVariant::MlKem768,
+        MlKemVariant::MlKem1024,
+    ] {
+        let ctx = TestCtx::new();
+        let session = finalized_co_session(&ctx);
+        let ecc = EccPrivateKey::from_curve(EccCurve::P256).expect("generate ECC control");
+        let ecc_der = ecc.to_vec().expect("export ECC control");
+        let control = unwrap_with_usage(
+            &ctx,
+            session.session_id,
+            KEY_CLASS_ECC,
+            KEY_USAGE_DERIVE,
+            &ecc_der,
+        );
+        assert_eq!(control.key_kind, KEY_KIND_ECC256_PRIVATE);
+
+        let key = MlKemPrivateKey::from_seed(variant, &[0xA5; MLKEM_SEED_LEN])
+            .expect("generate ML-KEM private key");
+        let expanded = key.to_vec().expect("export expanded ML-KEM private key");
+        let mut req = unwrap_req(
+            &ctx,
+            session.session_id,
+            KEY_CLASS_ECC,
+            KEY_USAGE_DERIVE,
+            &expanded,
+        );
+        for key_class in u8::MIN..=u8::MAX {
+            req.key_class = key_class;
+            let result = ctx.tbor(&req);
+            assert!(
+                matches!(result, Err(DdiError::TborStatus(_))),
+                "expanded {variant:?} unwrap must be rejected (class {key_class}); got {result:?}",
+            );
+        }
+    }
+}
+
 /// Retrieves the unwrapping public key, retrying while generation is pending.
 pub(crate) fn get_unwrapping_key(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
     let timeout = Duration::from_secs(30);
