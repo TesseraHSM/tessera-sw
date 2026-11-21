@@ -19,10 +19,13 @@ mod build;
 mod clean;
 mod clippy;
 mod copyright;
+mod elf;
 mod filt;
 mod fmt;
 mod fw_util;
 mod install;
+mod log_fixture;
+mod log_map;
 mod nm;
 mod objdump;
 mod precheck;
@@ -72,6 +75,8 @@ enum Commands {
     Setup(setup::Setup),
     RustupComponentAdd(rustup_component_add::RustupComponentAdd),
     Test(test::Test),
+    LogMap(log_map::LogMap),
+    LogFixture(log_fixture::LogFixture),
 }
 
 fn main() {
@@ -112,5 +117,7 @@ fn try_main() -> anyhow::Result<()> {
         Commands::Setup(task) => task.run(ctx),
         Commands::RustupComponentAdd(task) => task.run(ctx),
         Commands::Test(task) => task.run(ctx),
+        Commands::LogMap(task) => task.run(ctx),
+        Commands::LogFixture(task) => task.run(ctx),
     }
 }

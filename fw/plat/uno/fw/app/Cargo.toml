@@ -35,9 +35,13 @@ tsra_fw_uno_trace = { workspace = true }
 
 [build-dependencies]
 tsra_fw_uno_reg_soc = { workspace = true }
+tsra_log_map = { workspace = true }
 
 [features]
-#default = ["trace-uart"]
+# Build a trace flavor with, for example,
+# `cargo xtask build --features tsra_fw_uno_app/trace-uart`. Don't turn one
+# on here: the build's image check expects text output only when
+# `--features` names a trace flavor.
 default = []
 
 # Enable ARM semihosting integration for the emulator:
@@ -58,16 +62,18 @@ fault-stackdump = ["tsra_fw_uno_fault/fault-stackdump"]
 
 # Trace output backend (mutually exclusive). Selecting one compiles the
 # trace emitter at INFO level and routes output to that backend. With
-# neither enabled, trace output is disabled.
+# neither enabled, trace output is disabled. With or without one, the PAL
+# records `error!`, `warn!`, and `info!` calls in its debug-log ring.
 #
 # CODE SIZE: enabling a trace backend pulls in formatting code at every
 # `info!`/`error!`/`debug!` call site plus the `Debug` impls they format.
-# On the Uno firmware this costs ~43 KB of `.text` (~22% of the image).
-# Production / size-constrained builds should build WITHOUT any trace
-# backend (e.g. `--no-default-features --features semihosting` for the
-# emulator, or `--no-default-features` for silicon); the emulator only
-# needs `semihosting` (SYS_READY / SYS_EXIT) — trace is verbose output
-# only and all tests pass without it.
+# A Uno image with a trace backend doesn't fit the 512 KiB ITCM, mainly
+# because the panic handler then prints the whole `PanicInfo`, which keeps
+# every panic site's location. Production / size-constrained builds should
+# build WITHOUT any trace backend (e.g. `--no-default-features --features
+# semihosting` for the emulator, or `--no-default-features` for silicon);
+# the emulator only needs `semihosting` (SYS_READY / SYS_EXIT) — trace is
+# verbose output only and all tests pass without it.
 trace-semihosting = [
   "tsra_fw_uno_trace/backend-semihosting",
   "tsra_fw_uno_trace/level-info",

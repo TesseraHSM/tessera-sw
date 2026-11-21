@@ -38,7 +38,21 @@ impl Xtask for Fmt {
             cmd!(sh, "cargo {toolchain} fmt -- {fmt_check...}").run()?;
         }
 
-        // Top platform workspace (xtask + reggen + systemrdl).
+        // Log fixture workspace (nightly).
+        {
+            let _dir = sh.push_dir(&fw.log_fixture_dir);
+            log::info!("Running fmt on log fixture workspace...");
+            cmd!(sh, "cargo {toolchain} fmt -- {fmt_check...}").run()?;
+        }
+
+        // Log fixture's host crate for code above the PAL (nightly).
+        {
+            let _dir = sh.push_dir(&fw.log_above_pal_dir);
+            log::info!("Running fmt on log fixture's host crate...");
+            cmd!(sh, "cargo {toolchain} fmt -- {fmt_check...}").run()?;
+        }
+
+        // Top platform workspace (xtask + log_map + reggen + systemrdl).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running fmt on platform workspace...");

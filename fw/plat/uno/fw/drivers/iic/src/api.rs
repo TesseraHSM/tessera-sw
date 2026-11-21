@@ -290,10 +290,14 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         if icq_ctrl & 0x1 != 0 || isq_ctrl & 0x1 != 0 {
             warn!(
                 "iic",
-                "ch={} ALREADY ENABLED before full init! icq_ctrl={:#x} isq_ctrl={:#x}",
-                config.channel,
+                "ALREADY ENABLED before full init: icq_ctrl={:#x} isq_ctrl={:#x}",
                 icq_ctrl,
                 isq_ctrl
+            );
+            // A record holds two values, so the channel follows in its own.
+            warn!(
+                "iic",
+                "ALREADY ENABLED before full init: ch={}", config.channel
             );
         }
 
@@ -469,13 +473,15 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             let queue_id = entry.info.queue_id() as u16;
             warn!(
                 "iic",
-                "recv FAILED ch={} slot={} addr={:#x} axi_id={} qid={} cause={:#010x}",
-                self.channel,
-                index,
+                "recv FAILED: qid={} cause={:#010x}", queue_id, _cause
+            );
+            // A record holds two values, so the rest follow in two more.
+            warn!("iic", "recv FAILED: ch={} slot={}", self.channel, index);
+            warn!(
+                "iic",
+                "recv FAILED: addr={:#x} axi_id={}",
                 entry.buffer_addr(),
-                entry.info.axi_id(),
-                queue_id,
-                _cause
+                entry.info.axi_id()
             );
             self.free_io_in(s, index, queue_id);
             return IcqPop::Recycled;

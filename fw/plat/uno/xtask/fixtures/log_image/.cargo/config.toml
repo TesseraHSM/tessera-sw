@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# The firmware's target, linker script, inline threshold, and core library
+# build (fw/plat/uno/fw/.cargo/config.toml).
+
+[build]
+target = "thumbv7em-none-eabi"
+
+[target.thumbv7em-none-eabi]
+rustflags = [
+  "-C",
+  "link-arg=-Tlink.x",
+  "-C",
+  "target-cpu=cortex-m7",
+  "-C",
+  "llvm-args=-inline-threshold=50",
+]
+
+[unstable]
+build-std = ["compiler_builtins", "core"]

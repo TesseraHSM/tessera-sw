@@ -7,7 +7,12 @@
 //! 'Unified GSRAM address map (2 MiB at 0x6100_0000).'
 
 pub const IO_GSRAM_BASE: u32 = 0x61000000;
+pub const UART_LOCK_OFFSET: u32 = 0x1000;
 pub const FIPS_PROVISIONED_KEYS_FLAG_OFFSET: u32 = 0x135C;
+pub const HSM_LOG_BUFFER_SIZE_OFFSET: u32 = 0x27F8;
+pub const HSM_LOG_HEAD_OFFSET: u32 = 0x27FC;
+pub const HSM_LOG_TAIL_OFFSET: u32 = 0x2800;
+pub const HSM_LOG_OVERFLOWS_OFFSET: u32 = 0x2804;
 pub const BOOT_STATUS_OFFSET: u32 = 0x7000;
 pub const IPC_ADMIN_HSM_RX_PI_OFFSET: u32 = 0x7004;
 pub const IPC_ADMIN_HSM_RX_CI_OFFSET: u32 = 0x7008;
@@ -22,6 +27,9 @@ pub const OCQ_TAIL_SHADOW_OFFSET: u32 = 0x11E40;
 pub const GDMA_CQ_TAIL_SHADOW_OFFSET: u32 = 0x13240;
 pub const BCP_SQ_CI_SHADOW_OFFSET: u32 = 0x16180;
 pub const BCP_CQ_PI_SHADOW_OFFSET: u32 = 0x16184;
+pub const HSM_LOG_RECORDS_OFFSET: u32 = 0x2808;
+pub const HSM_LOG_RECORDS_COUNT: u32 = 170;
+pub const HSM_LOG_RECORDS_STRIDE: u32 = 0x0C;
 pub const IPC_ADMIN_HSM_RX_RING_OFFSET: u32 = 0x7014;
 pub const IPC_ADMIN_HSM_RX_RING_COUNT: u32 = 2;
 pub const IPC_ADMIN_HSM_RX_RING_STRIDE: u32 = 0x40;
@@ -113,10 +121,30 @@ pub const FP_DSA_CACHE_STRIDE: u32 = 0x30000;
 pub const FP_DSA_CACHE_SIZE: u32 = 0x30000;
 
 tock_registers::register_bitfields! [u32,
+    /// '0 when free, 1 while CP0 or CP1 holds the lock.'
+    pub UART_LOCK [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
     /// 'FIPS provisioned-keys flag (byte 0) plus 3 reserved bytes.'
     pub FIPS_PROVISIONED_KEYS_FLAG [
         FLAG OFFSET(0) NUMBITS(8) [],
         RSVD OFFSET(8) NUMBITS(24) [],
+    ],
+    /// 'One 32-bit word of the HSM debug-log ring.'
+    pub HSM_LOG_BUFFER_SIZE [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'One 32-bit word of the HSM debug-log ring.'
+    pub HSM_LOG_HEAD [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'One 32-bit word of the HSM debug-log ring.'
+    pub HSM_LOG_TAIL [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'One 32-bit word of the HSM debug-log ring.'
+    pub HSM_LOG_OVERFLOWS [
+        VAL OFFSET(0) NUMBITS(32) [],
     ],
     /// 'HSM boot phase indicator. Written by HSM firmware, polled by Admin. Values: 0=NotStarted, 1=Done, 2=Run.'
     pub BOOT_STATUS [
@@ -226,6 +254,14 @@ tock_registers::register_bitfields! [u32,
         QUEUE_INDEX OFFSET(16) NUMBITS(16) [],
     ]
 ];
+
+/// Regfile entry struct for `hsm_log_record`.
+#[repr(C)]
+pub struct HsmLogRecord {
+    pub desc: crate::RW<u32>,
+    pub value1: crate::RW<u32>,
+    pub value2: crate::RW<u32>,
+}
 
 /// Regfile entry struct for `ipc_message`.
 #[repr(C)]
@@ -441,12 +477,20 @@ pub mod regs {
     tock_registers::register_structs! {
         pub IoGsramRegs {
             (0x0 => _reserved0),
+            (0x1000 => pub uart_lock: crate::RW<u32, super::UART_LOCK::Register>),
+            (0x1004 => _reserved1),
             (0x1110 => pub bks_table: [u8; 492]),
             (0x12fc => pub sp_fips_provisioned_keys: [u8; 48]),
             (0x132c => pub cp_fips_provisioned_keys: [u8; 48]),
             (0x135c => pub fips_provisioned_keys_flag: crate::RW<u32, super::FIPS_PROVISIONED_KEYS_FLAG::Register>),
             (0x1360 => pub hsm_seed_table: [u8; 96]),
-            (0x13c0 => _reserved1),
+            (0x13c0 => _reserved2),
+            (0x27f8 => pub hsm_log_buffer_size: crate::RW<u32, super::HSM_LOG_BUFFER_SIZE::Register>),
+            (0x27fc => pub hsm_log_head: crate::RW<u32, super::HSM_LOG_HEAD::Register>),
+            (0x2800 => pub hsm_log_tail: crate::RW<u32, super::HSM_LOG_TAIL::Register>),
+            (0x2804 => pub hsm_log_overflows: crate::RW<u32, super::HSM_LOG_OVERFLOWS::Register>),
+            (0x2808 => pub hsm_log_records: [super::HsmLogRecord; 170]),
+            (0x3000 => _reserved3),
             (0x7000 => pub boot_status: crate::RW<u32, super::BOOT_STATUS::Register>),
             (0x7004 => pub ipc_admin_hsm_rx_pi: crate::RW<u32, super::IPC_ADMIN_HSM_RX_PI::Register>),
             (0x7008 => pub ipc_admin_hsm_rx_ci: crate::RW<u32, super::IPC_ADMIN_HSM_RX_CI::Register>),
@@ -454,46 +498,46 @@ pub mod regs {
             (0x7010 => pub ipc_admin_hsm_tx_ci: crate::RW<u32, super::IPC_ADMIN_HSM_TX_CI::Register>),
             (0x7014 => pub ipc_admin_hsm_rx_ring: [super::IpcMessage; 2]),
             (0x7094 => pub ipc_admin_hsm_tx_ring: [super::IpcMessage; 2]),
-            (0x7114 => _reserved2),
+            (0x7114 => _reserved4),
             (0x7ea4 => pub ipc_hsm_admin_tx_ci: crate::RW<u32, super::IPC_HSM_ADMIN_TX_CI::Register>),
             (0x7ea8 => pub ipc_hsm_admin_tx_pi: crate::RW<u32, super::IPC_HSM_ADMIN_TX_PI::Register>),
             (0x7eac => pub ipc_hsm_admin_tx_ring: [super::IpcMessage; 2]),
             (0x7f2c => pub ipc_hsm_admin_rx_ci: crate::RW<u32, super::IPC_HSM_ADMIN_RX_CI::Register>),
             (0x7f30 => pub ipc_hsm_admin_rx_pi: crate::RW<u32, super::IPC_HSM_ADMIN_RX_PI::Register>),
             (0x7f34 => pub ipc_hsm_admin_rx_ring: [super::IpcMessage; 2]),
-            (0x7fb4 => _reserved3),
+            (0x7fb4 => _reserved5),
             (0xe440 => pub isq: [super::IsqEntry; 32]),
             (0xe540 => pub icq: [super::IcqEntry; 32]),
             (0xe740 => pub io_sq: [super::IoSqEntry; 32]),
             (0xef40 => pub icq_tail_shadow: crate::RW<u32, super::ICQ_TAIL_SHADOW::Register>),
-            (0xef44 => _reserved4),
+            (0xef44 => _reserved6),
             (0x11840 => pub osq: [super::OsqEntry; 32]),
             (0x11a40 => pub ocq: [super::OcqEntry; 32]),
             (0x11c40 => pub io_cq: [super::IoCqEntry; 32]),
             (0x11e40 => pub ocq_tail_shadow: crate::RW<u32, super::OCQ_TAIL_SHADOW::Register>),
-            (0x11e44 => _reserved5),
+            (0x11e44 => _reserved7),
             (0x12840 => pub gdma_sq: [super::GdmaSqEntry; 32]),
             (0x13040 => pub gdma_cq: [super::GdmaCqEntry; 32]),
             (0x13240 => pub gdma_cq_tail_shadow: crate::RW<u32, super::GDMA_CQ_TAIL_SHADOW::Register>),
-            (0x13244 => _reserved6),
+            (0x13244 => _reserved8),
             (0x15064 => pub aes_cmd: [super::AesCmdEntry; 32]),
             (0x15364 => pub upka_engine_cmd: [super::UpkaCmdEntry; 16]),
             (0x154a4 => pub sha_cmd: [super::ShaCmdEntry; 32]),
-            (0x158a4 => _reserved7),
+            (0x158a4 => _reserved9),
             (0x16000 => pub bcp_sq: [super::BcpSqe; 8]),
-            (0x16080 => _reserved8),
+            (0x16080 => _reserved10),
             (0x16100 => pub bcp_cq: [super::BcpCqe; 8]),
-            (0x16140 => _reserved9),
+            (0x16140 => _reserved11),
             (0x16180 => pub bcp_sq_ci_shadow: crate::RW<u32, super::BCP_SQ_CI_SHADOW::Register>),
             (0x16184 => pub bcp_cq_pi_shadow: crate::RW<u32, super::BCP_CQ_PI_SHADOW::Register>),
-            (0x16188 => _reserved10),
+            (0x16188 => _reserved12),
             (0x16200 => pub bcp_dfl: [super::BcpDflEntry; 8]),
-            (0x16600 => _reserved11),
+            (0x16600 => _reserved13),
             (0x20c58 => pub io_meta: [super::IoMetaEntry; 33]),
             (0x20d60 => pub sram_io_buf: [u8; 557056]),
-            (0xa8d60 => _reserved12),
+            (0xa8d60 => _reserved14),
             (0xb8000 => pub fp_slot_map: [u8; 65]),
-            (0xb8041 => _reserved13),
+            (0xb8041 => _reserved15),
             (0x16e000 => pub hsm_code: [u8; 401408]),
             (0x1d0000 => pub fp_dsa_cache: [u8; 196608]),
             (0x200000 => @END),

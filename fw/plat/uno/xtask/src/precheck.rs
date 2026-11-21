@@ -35,12 +35,17 @@ struct Stage {
     /// Run cargo audit (firmware).
     #[clap(long)]
     audit: bool,
-    /// Run release build (firmware).
+    /// Run release builds (the five message-map firmware images, locked to
+    /// the map, and the fastpath PQC image), check the decoder header, and
+    /// run the log fixture.
     #[clap(long)]
     build: bool,
-    /// Run unit tests (firmware, host target).
+    /// Run unit tests (firmware and platform workspace, host target).
     #[clap(long)]
     test: bool,
+    /// Check the debug-log message map against the base branch's map.
+    #[clap(long)]
+    log_map: bool,
 }
 
 impl Stage {
@@ -53,6 +58,7 @@ impl Stage {
             || self.audit
             || self.build
             || self.test
+            || self.log_map
     }
 
     fn all() -> Self {
@@ -65,6 +71,7 @@ impl Stage {
             audit: true,
             build: true,
             test: true,
+            log_map: true,
         }
     }
 }
@@ -72,7 +79,7 @@ impl Stage {
 /// Run pre-commit checks across the uno firmware workspace.
 #[derive(Parser)]
 #[clap(
-    about = "Run all pre-commit checks (setup, fmt, clippy, test, copyright, audit, build, reggen)"
+    about = "Run all pre-commit checks (setup, fmt, clippy, test, copyright, audit, log map, build, reggen)"
 )]
 pub struct Precheck {
     #[clap(flatten)]
@@ -80,6 +87,9 @@ pub struct Precheck {
     /// Skip `cargo audit` (useful offline).
     #[clap(long)]
     skip_audit: bool,
+    /// The git revision whose message map `--log-map` checks against.
+    #[clap(long, default_value = "origin/main")]
+    log_map_base: String,
 }
 
 impl Xtask for Precheck {
@@ -157,7 +167,7 @@ impl Xtask for Precheck {
         }
 
         if stage.test {
-            log::info!("=== test (firmware, host) ===");
+            log::info!("=== test (firmware and platform workspace, host) ===");
             if let Err(e) = (crate::test::Test {}).run(ctx.clone()) {
                 errors.push(("test", e));
             }
@@ -177,27 +187,49 @@ impl Xtask for Precheck {
             }
         }
 
+        if stage.log_map {
+            log::info!("=== message map against {} ===", self.log_map_base);
+            if let Err(e) = crate::log_map::check_against_base(&ctx, &self.log_map_base) {
+                errors.push(("log map", e));
+            }
+        }
+
         if stage.build {
-            // The bulk-crypto fastpath flavor first, so the default flavor is what
-            // remains in `target/` afterwards.
-            log::info!("=== build (firmware, bulk_crypto) ===");
-            if let Err(e) = (crate::build::Build {
-                features: Some(crate::fw_util::BULK_CRYPTO_FEATURE.to_string()),
-                no_default_features: false,
-            })
-            .run(ctx.clone())
-            {
-                errors.push(("build (bulk_crypto)", e));
+            // Every image that `cargo xtask log-map` reads, the test-hook
+            // images included, so the decoder header check sees the same
+            // messages. The default image builds last, so it is what remains
+            // in `target/` afterwards. Each build is locked: a debug-log
+            // message without a map row fails it.
+            let mut images = Vec::new();
+            for (label, features) in crate::log_map::MAP_IMAGES {
+                log::info!("=== build (firmware, {label}) ===");
+                let build = crate::build::Build {
+                    features: features.map(str::to_string),
+                    no_default_features: false,
+                    locked: true,
+                };
+                match build.build_firmware(&ctx, label) {
+                    Ok(image) => images.push(image),
+                    Err(e) => errors.push(("build", e.context(format!("the {label} image")))),
+                }
             }
 
-            log::info!("=== build (firmware) ===");
-            if let Err(e) = (crate::build::Build {
-                features: None,
-                no_default_features: false,
-            })
-            .run(ctx.clone())
-            {
-                errors.push(("build", e));
+            log::info!("=== build (fastpath PQC firmware) ===");
+            if let Err(e) = crate::build::build_fastpath_pqc(&ctx) {
+                errors.push(("build (fastpath PQC)", e));
+            }
+
+            if images.len() == crate::log_map::MAP_IMAGES.len() {
+                log::info!("=== message sources and decoder header ===");
+                if let Err(e) = crate::log_map::finish(&ctx, &images, crate::log_map::Mode::Locked)
+                {
+                    errors.push(("decoder header", e));
+                }
+            }
+
+            log::info!("=== log fixture ===");
+            if let Err(e) = (crate::log_fixture::LogFixture {}).run(ctx.clone()) {
+                errors.push(("log fixture", e));
             }
         }
 

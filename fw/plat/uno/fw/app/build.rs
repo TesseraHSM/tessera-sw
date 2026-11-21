@@ -34,6 +34,10 @@ fn main() {
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed={}", memory_x.display());
 
+    // The message map, one file per component, gives each debug-log message
+    // its number.
+    tsra_log_map::build_script(&manifest.join("../pal/log_map"), &out);
+
     let gsram_x = manifest.join("../gsram.x");
     fs::copy(&gsram_x, out.join("gsram.x")).expect("copy gsram.x to OUT_DIR");
     println!("cargo:rerun-if-changed={}", gsram_x.display());

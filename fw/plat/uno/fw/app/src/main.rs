@@ -59,6 +59,7 @@ use tsra_fw_uno_pac as _;
 use tsra_fw_uno_pal::BootPhase;
 use tsra_fw_uno_pal::UnoHsmIo;
 use tsra_fw_uno_pal::UnoHsmPal;
+use tsra_fw_uno_pal::UnoLog;
 
 // Placeholder so the linker emits a non-empty `.data` section.
 //
@@ -246,6 +247,8 @@ async fn poll_ipc(spawner: Spawner) -> ! {
 /// - Spawns IPC loop task and enters main NVIC polling loop.
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // Reset the debug-log ring before the first log.
+    UnoLog::boot_reset();
     info!("app", "Tessera Integrated HSM firmware starting up...");
     let _ = HSM.init(Hsm::new(UnoHsmPal::default()));
     let hsm = HSM.get().await;

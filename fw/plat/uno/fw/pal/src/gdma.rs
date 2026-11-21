@@ -674,10 +674,10 @@ impl UnoHsmPal {
         } else if dma_len != 0 && self.gdma_zero_region(dma_ptr, dma_len).await.is_err() {
             // Surface the fallback: a persistent GDMA fault would otherwise
             // silently degrade every wipe into a CPU loop with no signal.
-            // Logged via the trace facade (as the iic/oic drivers do for
-            // unexpected conditions); compiled out when no trace backend is
-            // selected. Correctness is unaffected — the CPU wipe below still
-            // fully scrubs the buffer.
+            // `warn!` records it in the debug log, once for each IO whose
+            // wipe falls back, as the iic/oic drivers do for unexpected
+            // conditions. Correctness is unaffected — the CPU wipe below
+            // still fully scrubs the buffer.
             warn!(
                 "gdma",
                 "SRAM scrub for slot {} fell back to CPU (GDMA wipe failed)", io_index

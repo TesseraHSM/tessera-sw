@@ -9,9 +9,9 @@
 //! registers (`BFAR`/`MMFAR`) are reported by the caller when the matching
 //! `*VALID` bit is set.
 //!
-//! Output goes through the tracing facade (`error!`), so it shares the
-//! firmware's logging backend and compiles out with the rest of tracing in
-//! trace-disabled builds.
+//! Output goes through the tracing facade (`error!`). Text output prints
+//! each line, and debug-log output records it as an error record. With
+//! logging off, the calls compile to nothing.
 
 use tock_registers::interfaces::Readable;
 use tsra_fw_hsm_core_tracing::error;
@@ -24,8 +24,8 @@ use tsra_fw_uno_reg_cortex_m::scb::CFSR;
 /// Covers the MemManage (`MMFSR`), BusFault (`BFSR`) and UsageFault
 /// (`UFSR`) sub-registers. Only set bits are printed; a clean register
 /// produces no output.
-// `err` is consumed only by `error!`, which compiles out without a trace
-// level (production); allow keeps that build warning-free.
+// `err` is unused when logging is off, as in a build of this crate alone;
+// allow keeps that build warning-free.
 #[allow(unused_variables)]
 pub fn report_cfsr(scb: &ScbRegs, err: HsmError) {
     // MemManage faults (MMFSR, CFSR[7:0]).

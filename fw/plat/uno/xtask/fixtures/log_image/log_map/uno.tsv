@@ -1,0 +1,15 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# The fixture image's message map. `cargo xtask log-fixture` starts from these
+# comment lines alone, and checks that fix mode adds exactly these rows.
+#
+# number	component	kind	crate	target	message
+0	uno	E+	tsra_log_fixture	fixture	  MemManage: IACCVIOL {:#x}
+1	uno	E+	tsra_log_fixture	fixture	failed
+2	uno	I	tsra_log_fixture	fixture	depth={} flag={}
+3	uno	I	tsra_log_fixture	fixture	started
+4	uno	W	tsra_log_fixture	fixture	slot {:x} at {:#010x}
+5	uno	W	tsra_log_fixture	fixture_io	queue at 50% of {{capacity}} {:08x}
+6	uno	I	tsra_log_fixture_dep	fixture	from the dependency: {:#x}
+7	uno	I	tsra_log_fixture	fixture	only in one variant: {}

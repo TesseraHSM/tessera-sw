@@ -92,5 +92,11 @@ jobs:
     - name: Run audit
       run: cargo xtask precheck --audit
 
+    - name: Fetch main for the message map check
+      run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+    - name: Run message map check
+      run: cargo xtask precheck --log-map
+
     - name: Run build
       run: cargo xtask precheck --build

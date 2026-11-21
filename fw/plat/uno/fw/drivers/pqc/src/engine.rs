@@ -9,6 +9,7 @@ use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_uno_trace::error_text;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::api::PqcDriver;
@@ -816,34 +817,81 @@ impl PqcEngine<'_> {
         error!(
             "pqc",
             PqcError::FP_NOT_READY,
-            "engine {} (FP{}) did not answer seq={} within the deadline",
-            self.id.raw(),
-            self.id.core(),
+            "engine did not answer: engine={}",
+            self.id.raw()
+        );
+        // An error record holds one value next to its code, so the rest
+        // follow in error records of their own.
+        error!(
+            "pqc",
+            PqcError::FP_NOT_READY,
+            "engine did not answer: FP{}",
+            self.id.core()
+        );
+        error!(
+            "pqc",
+            PqcError::FP_NOT_READY,
+            "engine did not answer: seq={}",
             seq
         );
         // A core that faulted or panicked leaves a record on its way down.
         // Without this the timeout above is all anyone ever sees, and a
         // stack overflow is indistinguishable from a core that is merely
         // busy.
-        // Bound with a leading underscore because the only reader is the
-        // `error!` below, which compiles to nothing unless a trace backend
-        // is enabled; without this the fields look unused in default builds.
-        if let Some(_c) = mailbox::crash_record(self.id) {
+        if let Some(c) = mailbox::crash_record(self.id) {
+            error!("pqc", PqcError::FP_NOT_READY, "FP crash: kind={}", c.kind);
             error!(
                 "pqc",
                 PqcError::FP_NOT_READY,
-                "FP{} crashed: kind={} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
-                self.id.core(),
-                _c.kind,
-                _c.pc,
-                _c.lr,
-                _c.sp,
-                _c.cfsr,
-                _c.hfsr,
-                _c.mmfar,
-                _c.bfar,
-                _c.stack_free as i32
+                "FP crash: FP{}",
+                self.id.core()
             );
+            error!("pqc", PqcError::FP_NOT_READY, "FP crash: pc={:#010x}", c.pc);
+            // The LR can hold a data word instead of a return address, so it
+            // prints only as text.
+            error_text!("pqc", PqcError::FP_NOT_READY, "FP crash: lr={:#010x}", c.lr);
+            error!("pqc", PqcError::FP_NOT_READY, "FP crash: sp={:#010x}", c.sp);
+            error!(
+                "pqc",
+                PqcError::FP_NOT_READY,
+                "FP crash: cfsr={:#010x}",
+                c.cfsr
+            );
+            error!(
+                "pqc",
+                PqcError::FP_NOT_READY,
+                "FP crash: hfsr={:#010x}",
+                c.hfsr
+            );
+            error!(
+                "pqc",
+                PqcError::FP_NOT_READY,
+                "FP crash: mmfar={:#010x}",
+                c.mmfar
+            );
+            error!(
+                "pqc",
+                PqcError::FP_NOT_READY,
+                "FP crash: bfar={:#010x}",
+                c.bfar
+            );
+            // `stack_free` wraps on a stack overflow, and a record's values
+            // print unsigned, so an overflow gets its own message.
+            if (c.stack_free as i32) < 0 {
+                error!(
+                    "pqc",
+                    PqcError::FP_NOT_READY,
+                    "FP crash: stack overflowed by {} B",
+                    (c.stack_free as i32).unsigned_abs()
+                );
+            } else {
+                error!(
+                    "pqc",
+                    PqcError::FP_NOT_READY,
+                    "FP crash: stack_free={}",
+                    c.stack_free
+                );
+            }
         }
         Err(PqcError::FP_NOT_READY)
     }

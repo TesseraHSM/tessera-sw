@@ -570,9 +570,18 @@ impl UnoHsmPal {
                 self.post_detached(index);
             }
         }
-        while let Some((index, _)) = self.oic.take_detached() {
+        while let Some((index, ok)) = self.oic.take_detached() {
             // As `drop_io`: wipe the slot's scratch before the slot can be
-            // reused. A failed post is dropped like a failed `complete_io`.
+            // reused. A failed post is logged and dropped, like a failed
+            // `complete_io`.
+            if !ok {
+                error!(
+                    "io",
+                    HsmError::CompleteIoFailure,
+                    "detached CQE post failed for slot {}",
+                    index
+                );
+            }
             self.scrub_io_slot_cpu(index);
             self.iic
                 .free_io(index, self.detached[index as usize].get().queue_id);

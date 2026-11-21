@@ -1,0 +1,13 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_log_map"
+version = "0.1.0"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

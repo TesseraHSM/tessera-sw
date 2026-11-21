@@ -26,11 +26,17 @@ backend-semihosting = [
   "tsra_fw_uno_drivers_profile/trace",
 ]
 backend-uart = [
+  "dep:cortex-m",
   "dep:tsra_fw_uno_drivers_uart",
+  "dep:tsra_fw_uno_reg_soc",
   "tsra_fw_uno_drivers_profile/backend-uart",
 ]
-# Log-level threshold pass-throughs to the tracing facade. Enable exactly
-# one; without any, only `error!` is compiled in.
+# Output pass-throughs to the tracing facade. `debug-log` makes `error!`,
+# `warn!`, and `info!` go to the Uno log crate on the bare-metal target,
+# whatever the `level-*` features. A `level-*` feature also prints text at
+# or above its level, and turns on `error_text!`; enable at most one. With
+# neither, every macro compiles to nothing.
+debug-log = ["tsra_fw_hsm_core_tracing/debug-log"]
 level-debug = ["tsra_fw_hsm_core_tracing/level-debug"]
 level-error = ["tsra_fw_hsm_core_tracing/level-error"]
 level-info = ["tsra_fw_hsm_core_tracing/level-info"]
@@ -38,11 +44,13 @@ level-trace = ["tsra_fw_hsm_core_tracing/level-trace"]
 level-warn = ["tsra_fw_hsm_core_tracing/level-warn"]
 
 [dependencies]
+cortex-m = { optional = true, workspace = true }
 embassy-time = { optional = true, workspace = true }
 tsra_fw_hsm_core_tracing.workspace = true
 tsra_fw_uno_drivers_profile = { optional = true, workspace = true }
 tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
 tsra_fw_uno_drivers_uart = { optional = true, workspace = true }
+tsra_fw_uno_reg_soc = { optional = true, workspace = true }
 
 [lints]
 workspace = true

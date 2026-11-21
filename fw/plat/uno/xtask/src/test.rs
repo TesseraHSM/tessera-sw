@@ -4,7 +4,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-//! Firmware host unit-test command.
+//! Host unit-test command for the firmware crates and the platform workspace.
 
 use clap::Parser;
 use xshell::cmd;
@@ -26,11 +26,13 @@ const HOST_TESTED: &[&str] = &[
     "tsra_fw_uno_drivers_iic",
     "tsra_fw_uno_drivers_oic",
     "tsra_fw_uno_drivers_session_store",
+    "tsra_fw_uno_debug_log",
+    "tsra_fw_uno_log_ring",
     "tsra_fw_uno_pct",
 ];
 
 #[derive(Parser)]
-#[clap(about = "Run firmware unit tests on the host")]
+#[clap(about = "Run firmware and platform workspace unit tests on the host")]
 pub struct Test {}
 
 impl Xtask for Test {
@@ -43,6 +45,13 @@ impl Xtask for Test {
         for krate in HOST_TESTED {
             log::info!("Running {krate} unit tests on {host}...");
             cmd!(sh, "cargo nextest run -p {krate} --target {host}").run()?;
+        }
+
+        // Top platform workspace (xtask + log_map + reggen + systemrdl, host target).
+        {
+            let _dir = sh.push_dir(&ctx.root);
+            log::info!("Running platform workspace unit tests...");
+            cmd!(sh, "cargo nextest run --workspace").run()?;
         }
         Ok(())
     }

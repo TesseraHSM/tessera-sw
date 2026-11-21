@@ -20,6 +20,23 @@ use crate::XtaskCtx;
 /// `package/feature` form because the firmware workspace is virtual.
 pub const BULK_CRYPTO_FEATURE: &str = "tsra_fw_uno_app/bulk_crypto";
 
+/// Feature that builds the firmware for the emulator: the PAL signals
+/// `SYS_READY` and the fault handlers call `SYS_EXIT` through ARM
+/// semihosting (`tsra_fw_uno_pal/semihosting`, `tsra_fw_uno_fault/semihosting`).
+pub const EMULATOR_FEATURE: &str = "tsra_fw_uno_app/semihosting";
+
+/// Feature that compiles the trace emitter at INFO level with the UART
+/// backend (`tsra_fw_uno_trace/backend-uart`).
+pub const TRACE_UART_FEATURE: &str = "tsra_fw_uno_app/trace-uart";
+
+/// Feature that compiles the PAL's test-only DDI commands, `TriggerCrash`
+/// among them. Never in a production build.
+pub const TEST_HOOKS_FEATURE: &str = "tsra_fw_uno_pal/tsra_test_hooks";
+
+/// Feature that compiles the PAL's test-only DDI commands for FIPS
+/// validation. Never in a production build.
+pub const FIPS_VALIDATION_HOOKS_FEATURE: &str = "tsra_fw_uno_pal/fips_validation_hooks";
+
 /// Resolved firmware workspace paths.
 #[derive(Debug)]
 pub struct FwPaths {
@@ -28,6 +45,12 @@ pub struct FwPaths {
 
     /// Fastpath PQC firmware workspace directory.
     pub pqc_dir: PathBuf,
+
+    /// Log fixture workspace directory (`cargo xtask log-fixture`).
+    pub log_fixture_dir: PathBuf,
+
+    /// Host crate that `cargo xtask log-fixture` tests outside `fw/plat/uno/`.
+    pub log_above_pal_dir: PathBuf,
 
     /// Default release ELF path for the firmware app binary.
     pub elf: PathBuf,
@@ -65,9 +88,12 @@ impl FwPaths {
             .join("release")
             .join(bin_name);
 
+        let fixtures = ctx.root.join("xtask").join("fixtures");
         Ok(Self {
             fw_dir,
             pqc_dir,
+            log_fixture_dir: fixtures.join("log_image"),
+            log_above_pal_dir: fixtures.join("log_above_pal"),
             elf,
         })
     }
