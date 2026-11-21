@@ -1502,6 +1502,37 @@ fn decode_mut_with_uint32_uint64_siblings() {
     assert_eq!(&**view.payload, b"hello-payload");
 }
 
+#[test]
+fn decode_from_a_parse_keeps_the_schema_checks() {
+    let mut buf = [0u8; 256];
+    let frame_len = MixedMutableReq::encode(&mut buf, (1, 1))
+        .unwrap()
+        .epoch(7)
+        .unwrap()
+        .serial(9)
+        .unwrap()
+        .payload(b"hi")
+        .unwrap()
+        .finish()
+        .len();
+    let head = tsra_fw_ddi_tbor::RequestView::parse(brand(&buf[..frame_len]))
+        .unwrap()
+        .head();
+
+    let view = MixedMutableReq::decode_from(brand(&buf[..frame_len]), &head).unwrap();
+    assert_eq!(view.epoch(), 7);
+    // The parse spares only the frame's checks, not the schema's.
+    let err = PairedReq::decode_from(brand(&buf[..frame_len]), &head).unwrap_err();
+    assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborOpcodeMismatch);
+
+    // SAFETY: test-only re-branding of a stack-allocated wire buffer
+    // that outlives `wire_mut` and is not aliased for the borrow.
+    let wire_mut: &mut HsmDmaBuf = unsafe { HsmDmaBuf::from_raw_mut(&mut buf[..frame_len]) };
+    let view = MixedMutableReq::decode_mut_from(wire_mut, &head).unwrap();
+    assert_eq!(view.serial, 9);
+    assert_eq!(&**view.payload, b"hi");
+}
+
 // ── Field group with typed-slice + buffer fields (include) ────────────
 
 #[derive(

@@ -70,6 +70,7 @@ pub(crate) mod session_open_init;
 pub(crate) mod unwrap_key;
 pub(crate) mod verify_key;
 
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
@@ -511,6 +512,45 @@ fn resolve_masking_key<'p, P: HsmPal>(
     }
 }
 
+/// A TBOR request's exchange buffer, with the head of the core's parse of
+/// the request: handlers decode the request from that head rather than
+/// read and validate its frame again. Everything else goes through the
+/// [`HsmCmdBuf`] it derefs to.
+pub(crate) struct TborExchange<'a> {
+    buf: HsmCmdBuf<'a>,
+    head: RequestHead,
+}
+
+impl<'a> TborExchange<'a> {
+    pub(crate) fn new(buf: HsmCmdBuf<'a>, head: RequestHead) -> Self {
+        Self { buf, head }
+    }
+
+    /// The request, and the head to decode it from.
+    pub(crate) fn request_and_head(&self) -> (&HsmDmaBuf, &RequestHead) {
+        (self.buf.request(), &self.head)
+    }
+
+    /// The request for writing, and the head to decode it from.
+    pub(crate) fn request_mut_and_head(&mut self) -> (&mut HsmDmaBuf, &RequestHead) {
+        (self.buf.request_mut(), &self.head)
+    }
+}
+
+impl<'a> core::ops::Deref for TborExchange<'a> {
+    type Target = HsmCmdBuf<'a>;
+
+    fn deref(&self) -> &HsmCmdBuf<'a> {
+        &self.buf
+    }
+}
+
+impl core::ops::DerefMut for TborExchange<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buf
+    }
+}
+
 /// Dispatch a parsed TBOR request to its handler.
 ///
 /// All handlers return a response length in the exchange. On failure (unknown
@@ -643,7 +683,7 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
 pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd_buf: &mut TborExchange<'_>,
     opcode: u8,
     sqe_session_id: u16,
     body_sess_id: Option<HsmSessId>,
@@ -1129,6 +1169,8 @@ mod tests {
             .finish()
             .len();
         let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), len, 32).unwrap();
+        let head = RequestView::parse(cmd_buf.request()).unwrap().head();
+        let mut cmd_buf = TborExchange::new(cmd_buf, head);
         let len = api_rev::handle::<UnoRevs>(&mut cmd_buf).unwrap();
         let bytes = cmd_buf.response(len).unwrap();
         assert_eq!(bytes.as_ptr(), address);

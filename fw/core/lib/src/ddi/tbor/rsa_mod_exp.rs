@@ -22,7 +22,6 @@ use tsra_fw_core_crypto_key_masking::aead::unmask_framed;
 use tsra_fw_ddi_tbor_types::RsaOp;
 use tsra_fw_ddi_tbor_types::TborRsaModExpReq;
 use tsra_fw_ddi_tbor_types::TborRsaModExpResp;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -31,6 +30,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use super::from_pal::rsa_key;
 use super::resolve_masking_key;
 use super::validate_active_session;
+use super::TborExchange;
 
 /// Handle a TBOR `RsaModExp` request.
 ///
@@ -40,11 +40,12 @@ use super::validate_active_session;
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd_buf: &mut TborExchange<'_>,
 ) -> HsmResult<usize> {
     let base = cmd_buf.request().as_ptr() as usize;
     let output_len = {
-        let req = TborRsaModExpReq::decode_mut(cmd_buf.request_mut())?;
+        let (req, head) = cmd_buf.request_mut_and_head();
+        let req = TborRsaModExpReq::decode_mut_from(req, head)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
         let require_sign = match RsaOp(req.op_type) {

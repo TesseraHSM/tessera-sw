@@ -193,7 +193,7 @@ impl<P: HsmPal> Hsm<P> {
         } = self.pal().recv_request(io).await?;
         let sqe_session_id = io.sqe().session_id().unwrap_or(0);
 
-        let (opcode, body_sess_id) = {
+        let (opcode, body_sess_id, req_head) = {
             let req_view = TborRequestView::parse(&allocation.buffer_mut()[..src_len])
                 .log_as("core", HsmError::DdiDecodeFailed)?;
             let op = req_view.opcode();
@@ -202,7 +202,7 @@ impl<P: HsmPal> Hsm<P> {
             } else {
                 None
             };
-            (op, sid)
+            (op, sid, req_view.head())
         };
         let policy = duo_channel_policy(
             channel,
@@ -245,8 +245,11 @@ impl<P: HsmPal> Hsm<P> {
                     .log_as("core", HsmError::NotEnoughSpace)?,
             )
         });
-        let mut exchange = HsmCmdBuf::new(allocation.buffer_mut(), src_len, dst_len)
-            .log_as("core", HsmError::InternalError)?;
+        let mut exchange = ddi::tbor::TborExchange::new(
+            HsmCmdBuf::new(allocation.buffer_mut(), src_len, dst_len)
+                .log_as("core", HsmError::InternalError)?,
+            req_head,
+        );
         let dispatch_result = match policy {
             Ok(()) => {
                 ddi::tbor::dispatch(

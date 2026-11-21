@@ -20,7 +20,6 @@ use tsra_fw_core_crypto_key_masking::aead::unmask_framed;
 use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::TborEccSignReq;
 use tsra_fw_ddi_tbor_types::TborEccSignResp;
-use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -31,6 +30,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use super::from_pal::ecc_private_curve;
 use super::resolve_masking_key;
 use super::validate_active_session;
+use super::TborExchange;
 
 /// Map the wire [`HashAlgo`] onto the firmware hash algorithm: ECDSA over
 /// SHA-256, SHA-384 or SHA-512.
@@ -51,12 +51,13 @@ fn ecdsa_hsm_hash(algo: HashAlgo) -> HsmResult<HsmHashAlgo> {
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    cmd_buf: &mut HsmCmdBuf<'_>,
+    cmd_buf: &mut TborExchange<'_>,
 ) -> HsmResult<usize> {
     async {
         let base = cmd_buf.request().as_ptr() as usize;
         let (curve, hash, key_at, key_len, input_at, input_len) = {
-            let req = TborEccSignReq::decode_mut(cmd_buf.request_mut())?;
+            let (req, head) = cmd_buf.request_mut_and_head();
+            let req = TborEccSignReq::decode_mut_from(req, head)?;
             let sess_id = HsmSessId::from(u16::from(req.session_id));
             validate_active_session(pal, io, sess_id)?;
             let hash = ecdsa_hsm_hash(HashAlgo(req.hash_algo))?;

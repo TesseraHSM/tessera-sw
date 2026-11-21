@@ -374,8 +374,9 @@ impl<P: HsmPal> Hsm<P> {
         let sqe_ctrl = io.sqe().session_ctrl();
         let sqe_session_id = io.sqe().session_id();
 
-        // Parse once before growing or reborrowing the request storage.
-        let (opcode, body_sess_id) = {
+        // Parse once before growing or reborrowing the request storage; the
+        // exchange carries this parse's head for handlers to decode from.
+        let (opcode, body_sess_id, req_head) = {
             let req_view = TborRequestView::parse(&allocation.buffer_mut()[..src_len])
                 .log_as("core", HsmError::DdiDecodeFailed)?;
             let op = req_view.opcode();
@@ -384,7 +385,7 @@ impl<P: HsmPal> Hsm<P> {
             } else {
                 None
             };
-            (op, sid)
+            (op, sid, req_view.head())
         };
 
         if credential_guard.is_none()
@@ -423,8 +424,11 @@ impl<P: HsmPal> Hsm<P> {
                     .log_as("core", HsmError::NotEnoughSpace)?,
             )
         });
-        let mut exchange = HsmCmdBuf::new(allocation.buffer_mut(), src_len, dst_len)
-            .log_as("core", HsmError::InternalError)?;
+        let mut exchange = ddi::tbor::TborExchange::new(
+            HsmCmdBuf::new(allocation.buffer_mut(), src_len, dst_len)
+                .log_as("core", HsmError::InternalError)?,
+            req_head,
+        );
         let session_ctrl = sess_ctrl_from_tbor_opcode(opcode);
         let dispatch_result =
             if Self::validate_tbor_session_flags(session_ctrl, sqe_ctrl, sqe_session_id).is_err() {
