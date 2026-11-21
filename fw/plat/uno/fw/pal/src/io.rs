@@ -186,9 +186,9 @@ fn publish_cqe(index: u16) {
 /// the partition and queue it needs from there once, when it is created,
 /// since IO GSRAM is read uncached and both are wanted many times per IO.
 ///
-/// Word-aligned: an IO moves by value from the run loop to its task and on
-/// through the core, and a word-aligned move is a few word copies rather
-/// than a `memcpy` call.
+/// Word-aligned and small: an IO moves by value from the run loop to its
+/// task and on through the core, so per-IO state that moving would copy
+/// lives in the PAL, by slot (see [`UnoHsmPal::bindings`]).
 #[derive(Debug)]
 #[repr(align(4))]
 pub struct UnoHsmIo {
@@ -201,7 +201,6 @@ pub struct UnoHsmIo {
     pid: HsmPartId,
     /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
     queue_id: u16,
-    transport_binding: Cell<Option<sealed::SessionTransportBinding>>,
 }
 
 /// How the run loop brought an IO's request in ahead of the IO's task (see
@@ -237,7 +236,6 @@ impl UnoHsmIo {
                 index,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
-                transport_binding: Cell::new(None),
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
@@ -262,7 +260,6 @@ impl UnoHsmIo {
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
             queue_id,
-            transport_binding: Cell::new(None),
         }
     }
 
@@ -434,7 +431,7 @@ impl HsmIoController for UnoHsmPal {
             &mut buf.buffer_mut()[..headroom + len],
         )
         .await?;
-        io.transport_binding.set(Some(binding));
+        self.set_binding(io, Some(binding));
         let buf = buf.skip_prefix(headroom)?;
         Ok(HsmRequest {
             buf,
@@ -448,9 +445,10 @@ impl HsmIoController for UnoHsmPal {
     async fn send_response(&self, io: &mut UnoHsmIo, resp: &HsmDmaBuf) -> HsmResult<()> {
         let resp = match sealed::sealed_session(io.sqe())? {
             Some(id) => {
-                let binding = io
-                    .transport_binding
-                    .take()
+                let binding = self
+                    .bindings
+                    .get(usize::from(io.index))
+                    .and_then(Cell::take)
                     .ok_or(HsmError::SessionTransportError)?;
                 let frame = sealed::sealed_seal(self, io, id, binding, resp).await?;
                 let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
@@ -768,9 +766,10 @@ impl UnoHsmPal {
         use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
 
         let index = io.index;
-        let (Ok(Some(id)), Some(binding)) =
-            (sealed::sealed_session(io.sqe()), io.transport_binding.get())
-        else {
+        let (Ok(Some(id)), Some(binding)) = (
+            sealed::sealed_session(io.sqe()),
+            self.bindings.get(usize::from(index)).and_then(Cell::get),
+        ) else {
             return None;
         };
         let sqe = io.sqe().view();
@@ -887,6 +886,15 @@ impl UnoHsmPal {
         }
     }
 
+    /// Keeps the transport binding of `io`'s sealed request for the seal of
+    /// its reply (see [`UnoHsmPal::bindings`]).
+    #[inline]
+    fn set_binding(&self, io: &UnoHsmIo, binding: Option<sealed::SessionTransportBinding>) {
+        if let Some(cell) = self.bindings.get(usize::from(io.index)) {
+            cell.set(binding);
+        }
+    }
+
     /// How the run loop brought `io`'s request in ahead of the IO's task, if
     /// it did. Leaves the slot idle: while a task holds the slot's IO, the
     /// slot is idle or [`Stage::Received`].
@@ -951,9 +959,11 @@ impl UnoHsmPal {
         self.io_in_flight_inc();
         reset_io_alloc(self, index);
         if (index as u32) < IO_SQ_COUNT {
-            // A request brought in for the slot's last IO, which ended
-            // without taking it, is not this IO's.
+            // Nothing the slot's last IO left is this IO's: a request
+            // brought in that it ended without taking, or its request's
+            // transport binding.
             self.stages[index as usize].set(Stage::Idle);
+            self.bindings[index as usize].set(None);
             copy_sqe(index as usize);
             // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.
             let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] };

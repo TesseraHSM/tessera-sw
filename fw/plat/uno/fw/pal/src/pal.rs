@@ -399,6 +399,12 @@ pub struct UnoHsmPal {
     /// its IO.
     pub(crate) stages: [Cell<crate::io::Stage>; IO_SQ_COUNT as usize],
 
+    /// Per host IO slot: the transport binding of its IO's sealed request,
+    /// kept until the IO's reply is sealed. Here rather than in the IO, so
+    /// an IO stays small to move.
+    pub(crate) bindings:
+        [Cell<Option<tsra_fw_hsm_io::sealed::SessionTransportBinding>>; IO_SQ_COUNT as usize],
+
     /// Host IO slots whose next detached step (a reply copy or completion
     /// post) found its engine full: retried every run-loop pass.
     pub(crate) detached_retry: Cell<u32>,
@@ -564,6 +570,7 @@ impl Default for UnoHsmPal {
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
             stages: [const { Cell::new(crate::io::Stage::Idle) }; IO_SQ_COUNT as usize],
+            bindings: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
             detached_retry: Cell::new(0),
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
