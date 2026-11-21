@@ -172,6 +172,9 @@ pub enum IpcMessageOpCode {
 
     /// Trigger a crash on a remote core (test hook).
     TriggerCrash = 0x47,
+    /// Request for an Admin/FP negative self-test.
+    #[cfg(feature = "tsra_test_hooks")]
+    NegativeSelfTest = 0x48,
 
     /// HSM asks Admin to quiesce for the RNG self-test. Admin replies once
     /// quiesced (`Success`) or declines (`Deferred`).
@@ -197,6 +200,8 @@ impl TryFrom<u8> for IpcMessageOpCode {
             0x09 => Self::FpErrLog,
             0x42 => Self::Shutdown,
             0x47 => Self::TriggerCrash,
+            #[cfg(feature = "tsra_test_hooks")]
+            0x48 => Self::NegativeSelfTest,
             0x4C => Self::RngSelfTestPrepare,
             0x4D => Self::RngSelfTestDone,
             0x7F => Self::SetResource,
@@ -1104,6 +1109,59 @@ pub fn response_status(
         return Err(IpcMessageErr::InvalidInputMessageForDecode.into());
     }
     Ok(IpcMessageStatusCode::from(header.status()))
+}
+
+/// Encode an Admin/FP negative self-test request.
+#[cfg(feature = "tsra_test_hooks")]
+pub fn encode_negative_self_test(test_id: u32) -> [u32; IPC_MESSAGE_LENGTH] {
+    let mut out = [0u32; IPC_MESSAGE_LENGTH];
+    out[0] = IpcMessageHeader::new()
+        .with_msg_op(IpcMessageOpCode::NegativeSelfTest as u32)
+        .with_length(4)
+        .into();
+    out[1] = test_id;
+    out
+}
+
+/// Validate Admin's echoed four-byte response before accepting the request.
+#[cfg(feature = "tsra_test_hooks")]
+pub fn negative_self_test_response_status(
+    resp: &[u32; IPC_MESSAGE_LENGTH],
+    test_id: u32,
+) -> IpcResult<u32> {
+    let header = IpcMessageHeader::from(resp[0]);
+    if !header.response()
+        || header.msg_op() != IpcMessageOpCode::NegativeSelfTest as u32
+        || header.tag() != 0
+        || header.length() != 4
+        || resp[1] != test_id
+    {
+        return Err(IpcMessageErr::InvalidInputMessageForDecode.into());
+    }
+    Ok(header.status())
+}
+
+#[cfg(all(test, feature = "tsra_test_hooks"))]
+mod negative_response_tests {
+    use super::*;
+
+    #[test]
+    fn response_must_echo_opcode_length_tag_and_id() {
+        let mut resp = encode_negative_self_test(6);
+        resp[0] = IpcMessageHeader::from(resp[0])
+            .with_response(true)
+            .with_status(IpcMessageStatusCode::Success as u32)
+            .into();
+        assert_eq!(negative_self_test_response_status(&resp, 6), Ok(0));
+        assert!(negative_self_test_response_status(&resp, 7).is_err());
+        resp[0] = IpcMessageHeader::from(resp[0]).with_tag(1).into();
+        assert!(negative_self_test_response_status(&resp, 6).is_err());
+        resp[0] = IpcMessageHeader::from(resp[0])
+            .with_tag(0)
+            .with_length(0)
+            .into();
+        assert!(negative_self_test_response_status(&resp, 6).is_err());
+    }
 }
 
 #[cfg(test)]
