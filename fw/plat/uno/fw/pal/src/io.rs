@@ -185,7 +185,12 @@ fn publish_cqe(index: u16) {
 /// `IO_META[index]`, written by the IIC driver at recv time; the IO reads
 /// the partition and queue it needs from there once, when it is created,
 /// since IO GSRAM is read uncached and both are wanted many times per IO.
+///
+/// Word-aligned: an IO moves by value from the run loop to its task and on
+/// through the core, and a word-aligned move is a few word copies rather
+/// than a `memcpy` call.
 #[derive(Debug)]
+#[repr(align(4))]
 pub struct UnoHsmIo {
     /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
     /// admin slot (`ADMIN_IO_INDEX`, the last of `IO_SLOTS`) is used only
