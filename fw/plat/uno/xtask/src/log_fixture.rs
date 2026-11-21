@@ -9,8 +9,9 @@
 //! the firmware does: locked and fix modes, the generated linker script, the
 //! checks on each image, the cross-image source check, the decoder header's
 //! deprecation marks, the order of the values in an `error!` record, text
-//! output and `error_text!`, the Uno log crate's compile-time checks, the
-//! drops outside `fw/plat/uno/`, and the build matrix.
+//! output with `error_text!` and `warn_text!`, the Uno log crate's
+//! compile-time checks, the drops outside `fw/plat/uno/`, and the build
+//! matrix.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -51,12 +52,20 @@ const TEXT_ONLY: &str = "a text-only line: ";
 /// The function that gives the `error_text!` line its value.
 const TEXT_ONLY_VALUE: &str = "text_only_value";
 
+/// Text of the fixture's `warn_text!` line, which only text output prints,
+/// and only when its level prints warnings.
+const WARN_TEXT: &str = "a text-only warning: ";
+
+/// The function that gives the `warn_text!` line its value.
+const WARN_TEXT_VALUE: &str = "warn_text_value";
+
 /// The `level-*` features, from the one that prints the fewest calls.
 const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
 /// Text that the fixture's calls print, each with the lowest level in
 /// `LEVELS` that prints it: an `error!`, a `warn!`, and the dependency's
-/// `info!`. Text output prints `TEXT_ONLY` at every level.
+/// `info!`. Text output prints `TEXT_ONLY` at every level, and `WARN_TEXT` at
+/// every level but `error`.
 const PRINTED: &[(&str, &str)] = &[
     ("  MemManage: IACCVIOL ", "error"),
     ("queue at 50% of {capacity} ", "warn"),
@@ -442,8 +451,11 @@ impl Xtask for LogFixture {
         let default = fixture.build("default", &[], Mode::Fix)?;
         let elf = Elf::read(&fixture.elf())?;
         anyhow::ensure!(
-            !in_loaded_section(&elf, TEXT_ONLY)? && !has_symbol(&elf, TEXT_ONLY_VALUE),
-            "the image with debug-log output keeps the error_text! line or evaluates its value"
+            !in_loaded_section(&elf, TEXT_ONLY)?
+                && !has_symbol(&elf, TEXT_ONLY_VALUE)
+                && !in_loaded_section(&elf, WARN_TEXT)?
+                && !has_symbol(&elf, WARN_TEXT_VALUE),
+            "the image with debug-log output keeps a text-only line or evaluates its value"
         );
 
         log::info!("--- reading an image fails when a token's row has another number or is gone");
@@ -652,8 +664,8 @@ impl Xtask for LogFixture {
         }
 
         log::info!(
-            "--- a level-* feature prints the calls at or above its level, error_text! \
-             included; with the debug-log feature, each call records too"
+            "--- a level-* feature prints the calls at or above its level, error_text! and \
+             warn_text! included; with the debug-log feature, each call records too"
         );
         let error_row = golden
             .rows()
@@ -705,6 +717,17 @@ impl Xtask for LogFixture {
                         && elf.symbol(TEXT_HOOK).is_some(),
                     "the {label} image doesn't print the error_text! line through the text hook"
                 );
+                let warns = rank(level) >= rank("warn");
+                anyhow::ensure!(
+                    in_loaded_section(&elf, WARN_TEXT)? == warns
+                        && has_symbol(&elf, WARN_TEXT_VALUE) == warns,
+                    "the {label} image {} the warn_text! line",
+                    if warns {
+                        "doesn't print"
+                    } else {
+                        "prints or evaluates"
+                    }
+                );
                 // Read as an image without text output, it fails on the hook,
                 // and on the text of each call that it records and prints.
                 let error = log_map::read_image(&label, &fixture.elf(), &golden, Output::Records)
@@ -720,7 +743,10 @@ impl Xtask for LogFixture {
             }
         }
 
-        log::info!("--- error_text! takes text output from the Uno trace crate's level-* features");
+        log::info!(
+            "--- error_text! and warn_text! take text output from the Uno trace crate's level-* \
+             features"
+        );
         let image = fixture.build(
             "facade-level-warn",
             &["--features", "tsra_fw_hsm_core_tracing/level-warn"],
@@ -731,9 +757,11 @@ impl Xtask for LogFixture {
             image.tokens.keys().eq(default.tokens.keys())
                 && in_loaded_section(&elf, "  MemManage: IACCVIOL ")?
                 && !in_loaded_section(&elf, TEXT_ONLY)?
-                && !has_symbol(&elf, TEXT_ONLY_VALUE),
+                && !has_symbol(&elf, TEXT_ONLY_VALUE)
+                && !in_loaded_section(&elf, WARN_TEXT)?
+                && !has_symbol(&elf, WARN_TEXT_VALUE),
             "the facade's level-warn alone doesn't record each call and print error! without \
-             error_text!"
+             error_text! and warn_text!"
         );
 
         log::info!("--- reading an image fails when a message's text is in a loaded section");

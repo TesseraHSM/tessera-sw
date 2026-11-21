@@ -953,8 +953,8 @@ impl UnoHsmPal {
     /// # Parameters
     /// - `self`: PAL instance used to send the ACK response.
     /// - `buf`: Inbound IPC payload buffer, expected to contain a state-change message.
-    /// - `expected`: Required [`IoProcessorState`] for this boot phase.
-    /// - `phase_name`: Human-readable phase label for trace diagnostics.
+    /// - `expected`: Required [`IoProcessorState`] for this boot phase; the
+    ///   diagnostics name the phase by this state's value.
     ///
     /// # Returns
     /// - `true` if `buf` decoded as a state-change and matched `expected`.
@@ -962,21 +962,20 @@ impl UnoHsmPal {
     ///
     /// # Side Effects
     /// Sends an ACK reply on [`IpcChannel::Message`] only on success.
-    fn try_ack_state_change(
-        &self,
-        buf: &mut [u32; 16],
-        expected: IoProcessorState,
-        phase_name: &'static str,
-    ) -> bool {
-        let _ = phase_name;
-
+    fn try_ack_state_change(&self, buf: &mut [u32; 16], expected: IoProcessorState) -> bool {
         let Some(state) = decode_state_change(buf) else {
-            warn!("boot", "non-StateChange msg during {}", phase_name);
+            warn!(
+                "boot",
+                "non-StateChange msg while waiting for state {}", expected.0
+            );
             return false;
         };
 
         if state != expected {
-            warn!("boot", "unexpected state during {}", phase_name);
+            warn!(
+                "boot",
+                "unexpected state {} while waiting for state {}", state.0, expected.0
+            );
             return false;
         }
 
@@ -1150,14 +1149,14 @@ impl UnoHsmPal {
     async fn handle_ipc_message(&self, channel: IpcChannel, buf: &mut [u32; 16]) {
         match self.boot_phase.get() {
             BootPhase::WaitNormalBoot => {
-                if !self.try_ack_state_change(buf, IoProcessorState::NormalBoot, "WaitNormalBoot") {
+                if !self.try_ack_state_change(buf, IoProcessorState::NormalBoot) {
                     return;
                 }
                 self.boot_phase.set(BootPhase::WaitStart);
                 info!("boot", "ACK'd NormalBoot, phase -> WaitStart");
             }
             BootPhase::WaitStart => {
-                if !self.try_ack_state_change(buf, IoProcessorState::Start, "WaitStart") {
+                if !self.try_ack_state_change(buf, IoProcessorState::Start) {
                     return;
                 }
                 // Pre-operational self-test gate (FIPS): the in-scope algorithm

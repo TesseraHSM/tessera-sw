@@ -11,3 +11,6 @@
 # ../log_messages.h. Commit both with the code that adds the messages.
 #
 # number	component	kind	crate	target	message
+0	core	E+	tsra_fw_hsm_core	core	failed to fault the IO's poisoned partition
+1	core	E+	tsra_fw_hsm_core	core	undo walk poisoned the IO's partition
+2	core	E+	tsra_fw_hsm_core	core	handle_op failed

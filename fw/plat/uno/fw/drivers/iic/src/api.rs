@@ -18,6 +18,7 @@ use tsra_fw_uno_reg_soc::iic::regs::IicRegs;
 use tsra_fw_uno_reg_soc::iic::IIC_BASE;
 use tsra_fw_uno_reg_soc::iic::*;
 use tsra_fw_uno_trace::tracing::*;
+use tsra_fw_uno_trace::warn_text;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
@@ -295,12 +296,11 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // e.g. a bulk_crypto image's FP DTCM rings after an IDFU to this
         // image, so disable it before reprogramming; Step 5 re-enables it.
         if icq_ctrl & 0x1 != 0 || isq_ctrl & 0x1 != 0 {
+            // A record holds two values, so the channel has its own line.
+            warn!("iic", "ch={} enabled before full init", config.channel);
             warn!(
                 "iic",
-                "ch={} enabled before full init, disabling: icq_ctrl={:#x} isq_ctrl={:#x}",
-                config.channel,
-                icq_ctrl,
-                isq_ctrl
+                "Disabling: icq_ctrl={:#x} isq_ctrl={:#x}", icq_ctrl, isq_ctrl
             );
             isq.ctrl.modify(ISQ_CHANNEL_CTRL::EN::CLEAR);
             icq.ctrl.modify(ICQ_CHANNEL_CTRL::EN::CLEAR);
@@ -504,13 +504,16 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             let queue_id = entry.info.queue_id() as u16;
             warn!(
                 "iic",
-                "recv FAILED ch={} slot={} addr={:#x} axi_id={} qid={} cause={:#010x}",
-                self.channel,
+                "recv FAILED: ch={} cause={:#010x}", self.channel, _cause
+            );
+            // A record holds two values, so the rest print only as text.
+            warn_text!(
+                "iic",
+                "recv FAILED: qid={} slot={} addr={:#x} axi_id={}",
+                queue_id,
                 index,
                 entry.buffer_addr(),
-                entry.info.axi_id(),
-                queue_id,
-                _cause
+                entry.info.axi_id()
             );
             self.free_io_in(s, index, queue_id);
             return IcqPop::Recycled;

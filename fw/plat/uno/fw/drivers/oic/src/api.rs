@@ -251,12 +251,11 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         // e.g. a bulk_crypto image's FP DTCM rings after an IDFU to this
         // image, so disable it before reprogramming; Step 4 re-enables it.
         if ocq_ctrl & 0x1 != 0 || osq_ctrl & 0x1 != 0 {
+            // A record holds two values, so the channel has its own line.
+            warn!("oic", "ch={} enabled before full init", config.channel);
             warn!(
                 "oic",
-                "ch={} enabled before full init, disabling: ocq_ctrl={:#x} osq_ctrl={:#x}",
-                config.channel,
-                ocq_ctrl,
-                osq_ctrl
+                "Disabling: ocq_ctrl={:#x} osq_ctrl={:#x}", ocq_ctrl, osq_ctrl
             );
             osq.ctrl.modify(OSQ_CHANNEL_CTRL::EN::CLEAR);
             ocq.ctrl.modify(OCQ_CHANNEL_CTRL::EN::CLEAR);

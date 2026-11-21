@@ -9,6 +9,7 @@ use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_uno_trace::error_text;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::api::PqcDriver;
@@ -816,8 +817,15 @@ impl PqcEngine<'_> {
         error!(
             "pqc",
             PqcError::FP_NOT_READY,
-            "engine {} (FP{}) did not answer seq={} within the deadline",
-            self.id.raw(),
+            "engine did not answer: engine={}",
+            self.id.raw()
+        );
+        // An error record holds one value next to its code, so the rest
+        // print only as text.
+        error_text!(
+            "pqc",
+            PqcError::FP_NOT_READY,
+            "engine did not answer: FP{} seq={}",
             self.id.core(),
             seq
         );
@@ -825,16 +833,18 @@ impl PqcEngine<'_> {
         // Without this the timeout above is all anyone ever sees, and a
         // stack overflow is indistinguishable from a core that is merely
         // busy.
-        // Bound with a leading underscore because the only reader is the
-        // `error!` below, which compiles to nothing unless a trace backend
-        // is enabled; without this the fields look unused in default builds.
         if let Some(_c) = mailbox::crash_record(self.id) {
-            error!(
+            error!("pqc", PqcError::FP_NOT_READY, "FP crash: kind={}", _c.kind);
+            // The rest of the report prints only as text. The LR can hold a
+            // data word, so it never reaches a record. `stack_free` prints
+            // signed: after a stack overflow, it's the overflow's size,
+            // negated.
+            error_text!(
                 "pqc",
                 PqcError::FP_NOT_READY,
-                "FP{} crashed: kind={} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
+                "FP crash: FP{} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} \
+                 hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
                 self.id.core(),
-                _c.kind,
                 _c.pc,
                 _c.lr,
                 _c.sp,

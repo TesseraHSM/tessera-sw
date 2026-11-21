@@ -11,3 +11,57 @@
 # ../log_messages.h. Commit both with the code that adds the messages.
 #
 # number	component	kind	crate	target	message
+0	uno	I	tsra_fw_uno_app	app	Tessera Integrated HSM firmware starting up...
+1	uno	I	tsra_fw_uno_app	app	boot complete, spawning poll_io
+2	uno	E+	tsra_fw_uno_fault	fips	#### FIPS error state ####
+3	uno	E+	tsra_fw_uno_fault	fips	crypto command timed out
+4	uno	E+	tsra_fw_uno_fault	selftest	periodic self-test {} failed
+5	uno	E+	tsra_fw_uno_pal	idfu	malformed shutdown request
+6	uno	E+	tsra_fw_uno_pal	idfu	shutdown requested with PKA cleanup pending; failing closed
+7	uno	E+	tsra_fw_uno_pal	idfu	shutdown requested with {} IO in flight; failing closed
+8	uno	E+	tsra_fw_uno_pal	io	detached CQE post failed for slot {}
+9	uno	E+	tsra_fw_uno_pal	selftest	AES-CBC decrypt KAT mismatch
+10	uno	E+	tsra_fw_uno_pal	selftest	AES-CBC encrypt KAT mismatch
+11	uno	E+	tsra_fw_uno_pal	selftest	AES-ECB decrypt KAT mismatch
+12	uno	E+	tsra_fw_uno_pal	selftest	AES-KWP unwrap KAT mismatch
+13	uno	E+	tsra_fw_uno_pal	selftest	ECDH P-384 KAT mismatch on engine
+14	uno	E+	tsra_fw_uno_pal	selftest	ECDSA P-384 sign KAT mismatch on engine
+15	uno	E+	tsra_fw_uno_pal	selftest	HKDF KAT mismatch
+16	uno	E+	tsra_fw_uno_pal	selftest	KBKDF KAT mismatch
+17	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K CRT mod-exp KAT mismatch on engine
+18	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP KEK mismatch on engine
+19	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP lHash mismatch on engine
+20	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP leading byte nonzero on engine
+21	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP separator invalid on engine
+22	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K mod-exp KAT mismatch on engine
+23	uno	E+	tsra_fw_uno_pal	selftest	pre-operational self-test FAILED
+24	uno	I	tsra_fw_uno_pal	boot	ACK'd NormalBoot, phase -> WaitStart
+25	uno	I	tsra_fw_uno_pal	boot	init: boot_status=Done published
+26	uno	I	tsra_fw_uno_pal	boot	init: reset=POR -> partition store init_default
+27	uno	I	tsra_fw_uno_pal	boot	init: reset=warm/fwupdate -> keep store, rearm gate1
+28	uno	I	tsra_fw_uno_pal	boot	phase -> Running, status=Run
+29	uno	I	tsra_fw_uno_pal	selftest	pre-operational self-test PASSED
+30	uno	W	tsra_fw_uno_pal	boot	non-StateChange msg while waiting for state {}
+31	uno	W	tsra_fw_uno_pal	boot	unexpected state {} while waiting for state {}
+32	uno	W	tsra_fw_uno_pal	pcie	ignoring unexpected admin event {:#x}
+33	uno	W	tsra_fw_uno_pal	pcie	reset event {}: {} partition(s) failed to free and were faulted
+34	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair bad seed_len={}
+35	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair bad seed_len={}
+36	uno	W	tsra_fw_uno_pal	gdma	SRAM scrub for slot {} fell back to CPU (GDMA wipe failed)
+37	uno	E+	tsra_fw_uno_fault	fault	#### Unexpected exception {} ####
+38	uno	E+	tsra_fw_uno_pal	pcie	reset event: partition {} free failed; faulted
+39	uno	I	tsra_fw_uno_pal	pcie	reset event {}: all partitions reset
+40	uno	W	tsra_fw_uno_drivers_iic	iic	Disabling: icq_ctrl={:#x} isq_ctrl={:#x}
+41	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: ch={} cause={:#010x}
+42	uno	W	tsra_fw_uno_drivers_oic	oic	Disabling: ocq_ctrl={:#x} osq_ctrl={:#x}
+43	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: kind={}
+44	uno	E+	tsra_fw_uno_drivers_pqc	pqc	engine did not answer: engine={}
+45	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair buffer too short
+46	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair buffer too short
+47	uno	W	tsra_fw_uno_drivers_iic	iic	ch={} enabled before full init
+48	uno	W	tsra_fw_uno_drivers_oic	oic	ch={} enabled before full init
+49	uno	E+	tsra_fw_uno_pal	pcie	reset: failed to recycle IO received during reset
+50	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-GCM decrypt KAT mismatch
+51	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-GCM encrypt KAT mismatch
+52	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-XTS decrypt KAT mismatch
+53	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-XTS encrypt KAT mismatch

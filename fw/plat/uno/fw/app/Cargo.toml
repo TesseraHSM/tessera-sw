@@ -62,7 +62,8 @@ fault-stackdump = ["tsra_fw_uno_fault/fault-stackdump"]
 
 # Trace output backend (mutually exclusive). Selecting one compiles the
 # trace emitter at INFO level and routes output to that backend. With
-# neither enabled, trace output is disabled.
+# neither enabled, trace output is disabled. With or without one, the PAL
+# records `error!`, `warn!`, and `info!` calls in its debug-log ring.
 #
 # CODE SIZE: enabling a trace backend pulls in formatting code at every
 # `info!`/`error!`/`debug!` call site plus the `Debug` impls they format.

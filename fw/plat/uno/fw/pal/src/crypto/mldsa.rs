@@ -49,6 +49,7 @@ use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
 use tsra_fw_uno_drivers_pqc::mldsa_check_msg;
 use tsra_fw_uno_pct::mldsa_pct;
 use tsra_fw_uno_pct::mlkem_pct;
+use tsra_fw_uno_trace::error_text;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmIo;
@@ -117,8 +118,15 @@ impl HsmMlDsa for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_keypair bad seed_len={} (want {})",
-                    seed.len(),
+                    "pal: mldsa_gen_keypair bad seed_len={}",
+                    seed.len()
+                );
+                // An error record holds one value next to its code, so the
+                // expected length prints only as text.
+                error_text!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mldsa_gen_keypair bad seed_len (want {})",
                     MLDSA_SEED_LEN
                 );
                 return Err(HsmError::InvalidArg);
@@ -132,7 +140,12 @@ impl HsmMlDsa for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    "pal: mldsa_gen_keypair buffer too short"
+                );
+                error_text!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mldsa_gen_keypair buffer too short: sk_len={} (want {}) pk_len={} (want {})",
                     sk.len(),
                     sk_len,
                     pk.len(),
@@ -352,8 +365,13 @@ impl HsmMlKem for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mlkem_gen_keypair bad seed_len={} (want {})",
-                    seed.len(),
+                    "pal: mlkem_gen_keypair bad seed_len={}",
+                    seed.len()
+                );
+                error_text!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mlkem_gen_keypair bad seed_len (want {})",
                     MLKEM_SEED_LEN
                 );
                 return Err(HsmError::InvalidArg);
@@ -365,7 +383,12 @@ impl HsmMlKem for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mlkem_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    "pal: mlkem_gen_keypair buffer too short"
+                );
+                error_text!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mlkem_gen_keypair buffer too short: sk_len={} (want {}) pk_len={} (want {})",
                     sk.len(),
                     sk_len,
                     pk.len(),

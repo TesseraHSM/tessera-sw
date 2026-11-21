@@ -15,20 +15,36 @@
 //!
 //! # Output via the tracing facade
 //!
-//! Diagnostics are emitted through `tsra_fw_hsm_core_tracing` (`error!`),
-//! the same facade the rest of the firmware uses, rather than a bespoke
-//! sink. This keeps faults on one logging path: they share the backend
-//! and formatting with every other trace.
-//! As with all tracing, the messages are present only when a trace level is
-//! enabled in the final image (e.g. the `trace-uart` bring-up build); a
-//! trace-disabled production build emits nothing here.
+//! Diagnostics are emitted through `tsra_fw_hsm_core_tracing`, the same
+//! facade the rest of the firmware uses, rather than a bespoke sink. This
+//! keeps faults on one logging path: they share the backend and formatting
+//! with every other trace.
+//!
+//! The FIPS error-state paths and the unexpected-exception handler log with
+//! `error!`, so a build with debug-log output records them. The panic,
+//! HardFault, and explicit-crash handlers print text only (`error_text!`) and
+//! write no record: the crash dump that each saves keeps the failure code,
+//! the registers it captures, and `CFSR`, `MMFAR`, and `BFAR`. Their other
+//! lines, such as `HFSR` and the decoded fault bits, show only in text
+//! output.
+//!
+//! The panic, HardFault, and explicit-crash handlers print after they save
+//! the crash dump. With UART output, a line waits for the UART lock, a GSRAM
+//! word that a stopped core can hold forever, and a HardFault can be an
+//! escalated bus error in GSRAM; printing last keeps the dump safe. The FIPS
+//! error-state paths log first, and then run `dmb`, before they save a crash
+//! dump, notify the peer core, or set Mailbox0's error bit: those writes lead
+//! the SP to drain the ring, so the record's `tail` write must come first.
+//! For the same reason, the panic, HardFault, and explicit-crash handlers run
+//! `dmb` before they notify the peer core, so a record written before the
+//! crash, such as the pre-operational self-test's, comes first.
 //!
 //! Each handler logs at error level with an exception-specific `HsmError`
 //! code — [`HsmError::Panic`], [`HsmError::HardFault`],
 //! [`HsmError::UnexpectedException`], or [`HsmError::ExplicitCrash`] — so
-//! fault output is greppable by code
-//! and exception type. The `trace-uart` / `trace-semihosting` features select
-//! `level-info`, which compiles `error!` in.
+//! fault output is greppable by code and exception type. The `trace-uart` /
+//! `trace-semihosting` features select `level-info`, which compiles `error!`
+//! and `error_text!` in.
 //!
 //! # FIPS error state
 //!
@@ -95,6 +111,7 @@ use tsra_fw_uno_reg_soc::sys_mbx::regs::SysMbxRegs;
 use tsra_fw_uno_reg_soc::sys_mbx::S2H_MBX_INSTS;
 #[cfg(not(feature = "semihosting"))]
 use tsra_fw_uno_reg_soc::sys_mbx::SYS_MBX_BASE;
+use tsra_fw_uno_trace::error_text;
 
 /// Mailbox0, which the SP watches for this core's error interrupt.
 #[cfg(not(feature = "semihosting"))]
@@ -130,10 +147,17 @@ fn halt() -> ! {
     }
 }
 
-/// Records the failed periodic self-test, notifies the peer, and enters the
-/// FIPS error state. The dump tail preserves the test and engine identifiers.
+/// Logs the failed periodic self-test, saves a crash dump, notifies the peer,
+/// and enters the FIPS error state. The log carries the test and the error;
+/// the dump tail preserves the test and engine identifiers.
 pub fn enter_self_test_error_state(test: u32, engine: u32, reason: HsmError) -> ! {
     Nvic::disable(Interrupt::TCON_WAKEUP1);
+    // Log before the peer notification and the error bit, which lead the SP
+    // to drain the ring and reset the device.
+    error!("selftest", reason, "periodic self-test {} failed", test);
+    // Order the record's `tail` write before the writes below, which lead
+    // the SP to drain the ring.
+    cortex_m::asm::dmb();
     crashdump_save_fmt(
         &capture_register_context(),
         FailureCode::ExplicitFailure,
@@ -143,19 +167,26 @@ pub fn enter_self_test_error_state(test: u32, engine: u32, reason: HsmError) -> 
         ),
     );
     Tcon::fire_wakeup_timer1();
-    enter_error_state(reason)
+    fips_halt()
 }
 
 /// Reports a crypto or IO timeout without releasing any active DMA buffers.
+/// The log carries the error; the dump tail carries `detail`.
 pub fn enter_crypto_timeout_error_state(detail: &'static str) -> ! {
     Nvic::disable(Interrupt::TCON_WAKEUP1);
+    // Log before the peer notification and the error bit, which lead the SP
+    // to drain the ring and reset the device.
+    error!("fips", HsmError::CryptoTimeout, "crypto command timed out");
+    // Order the record's `tail` write before the writes below, which lead
+    // the SP to drain the ring.
+    cortex_m::asm::dmb();
     crashdump_save(
         &capture_register_context(),
         FailureCode::ExplicitFailure,
         Some(detail),
     );
     Tcon::fire_wakeup_timer1();
-    enter_error_state(HsmError::CryptoTimeout)
+    fips_halt()
 }
 
 /// Capture the calling core's `sp` and `pc` for a crash dump.
@@ -206,12 +237,9 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
     // already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
 
-    error!(
-        "explicit_crash",
-        HsmError::ExplicitCrash,
-        "#### EXPLICIT CRASH ####"
-    );
-
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     // Notify the peer core of the crash.
     Tcon::fire_wakeup_timer1();
 
@@ -221,27 +249,46 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
         additional_info,
     );
 
+    // Print only after the dump is saved: see the module docs.
+    error_text!(
+        "explicit_crash",
+        HsmError::ExplicitCrash,
+        "#### EXPLICIT CRASH ####"
+    );
+
     halt();
 }
 
 /// Enters the FIPS error state. Never returns.
 ///
 /// Called when a key pair that the module generated, or the partition's
-/// unwrapping key, fails its pairwise consistency test (PCT). Sets `ERR_BIT`
-/// in Mailbox0's `S2H_MBX_INSTS` register, then halts. The SP turns that
-/// interrupt into its own FIPS error state, which stops SP output, saves
-/// crash dumps, and resets the device. Emulator builds (`semihosting`) skip
-/// the mailbox write and exit through semihosting instead.
+/// unwrapping key, fails its pairwise consistency test (PCT). Logs, runs
+/// `dmb`, then sets `ERR_BIT` in Mailbox0's `S2H_MBX_INSTS` register, then
+/// halts. The SP turns that interrupt into its own FIPS error state, which
+/// stops SP output, saves crash dumps, and resets the device. Emulator
+/// builds (`semihosting`) skip the mailbox write and exit through
+/// semihosting instead.
 ///
-/// `reason` names the check that failed; only trace builds report it.
+/// `reason` names the check that failed; the log carries it as the error
+/// code.
 //
-// `reason` is consumed only by `error!`, which compiles out when no trace
-// level is enabled (production builds); allow keeps that build warning-free.
+// `reason` is unused when logging is off, as in a build of this crate alone;
+// allow keeps that build warning-free.
 #[allow(unused_variables)]
 #[cold]
 #[inline(never)]
 pub fn enter_error_state(reason: HsmError) -> ! {
     error!("fips", reason, "#### FIPS error state ####");
+    // Order the record's `tail` write before `ERR_BIT`, which leads the SP
+    // to drain the ring.
+    cortex_m::asm::dmb();
+    fips_halt()
+}
+
+/// Sets `ERR_BIT` in Mailbox0's `S2H_MBX_INSTS` register, then halts: the
+/// last step of each path into the FIPS error state, after it logs. Emulator
+/// builds (`semihosting`) skip the mailbox write.
+fn fips_halt() -> ! {
     #[cfg(not(feature = "semihosting"))]
     SYS_MBX.s2h_mbx_insts.modify(S2H_MBX_INSTS::ERR_BIT::SET);
     halt();
@@ -249,9 +296,9 @@ pub fn enter_error_state(reason: HsmError) -> ! {
 
 /// Firmware panic handler.
 ///
-/// Reports the panic through the tracing facade, notifies the peer core of
-/// the crash over TCON wakeup1, and captures a persistent crash dump before
-/// halting.
+/// Notifies the peer core of the crash over TCON wakeup1, captures a
+/// persistent crash dump, and then reports the panic through the tracing
+/// facade before halting.
 ///
 /// # Why the dump carries real registers, not the panic site
 ///
@@ -269,15 +316,15 @@ pub fn enter_error_state(reason: HsmError) -> ! {
 /// [`FailureCode::Panic`], but it does not locate the panic *site*: `pc`
 /// points into this handler, which the panic site reaches three frames down
 /// through `core::panicking::panic_fmt`. On a `trace-uart` bring-up build
-/// the `error!` below still prints the full panic message and source
+/// the `error_text!` below still prints the full panic message and source
 /// location.
 ///
 /// TODO: recover the panic site by unwinding the `r7` frame-pointer chain,
 /// and/or capture it from `PanicInfo` once the ITCM budget allows — most
 /// likely by relocating `.rodata` to GSRAM rather than by trimming code.
 #[panic_handler]
-// `info` is consumed only by `error!`, which compiles out when no trace level
-// is enabled (production). It is deliberately not read otherwise; see above.
+// `info` is consumed only by `error_text!`, which compiles out unless a trace
+// level is enabled. It is deliberately not read otherwise; see above.
 #[allow(unused_variables)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     // Disable our own wakeup1 receiver before firing it at the peer core, so
@@ -285,13 +332,17 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     // already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
 
-    error!("panic", HsmError::Panic, "#### PANIC ####");
-    error!("panic", HsmError::Panic, "{}", info);
-
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     // Notify the peer core of the crash.
     Tcon::fire_wakeup_timer1();
 
     crashdump_save(&capture_register_context(), FailureCode::Panic, None);
+
+    // Print only after the dump is saved: see the module docs.
+    error_text!("panic", HsmError::Panic, "#### PANIC ####");
+    error_text!("panic", HsmError::Panic, "{}", info);
 
     halt();
 }
@@ -304,9 +355,9 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// overflow (`HFSR.FORCED` + `CFSR.MSTKERR`/`STKERR`) is reported specially
 /// because exception stacking failed and the frame is unreliable.
 ///
-/// After reporting, it notifies the peer core over TCON wakeup1 and captures
-/// a persistent crash dump (mirroring the reference handler) before
-/// halting.
+/// After it notifies the peer core over TCON wakeup1 and captures a
+/// persistent crash dump (mirroring the reference handler), it reports the
+/// fault and halts.
 ///
 /// # Safety
 ///
@@ -315,8 +366,9 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// directly; it reads fixed architectural SCB registers and the
 /// hardware-supplied exception frame, then halts.
 //
-// Some register values below are used only by tracing; allow keeps
-// trace-disabled builds warning-free. Persistent crash capture remains active.
+// Some register values below are used only by text output, so they're unused
+// without it; allow keeps that build warning-free. Persistent crash capture
+// remains active.
 #[allow(unused_variables)]
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
@@ -333,68 +385,11 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     let mstkerr = scb.cfsr.is_set(CFSR::MSTKERR);
     let stkerr = scb.cfsr.is_set(CFSR::STKERR);
 
-    error!("fault", HsmError::HardFault, "#### HardFault ####");
-
-    if forced && (mstkerr || stkerr) {
-        // Exception-entry stacking failed and escalated to HardFault: the
-        // CPU could not push {R0-R3,R12,LR,PC,xPSR}, so `ef` is garbage. The
-        // faulting PC/LR are unrecoverable on ARMv7-M; only MSP locates
-        // where the stack was when it overran its guard region.
-        error!(
-            "fault",
-            HsmError::HardFault,
-            "cause: stack overflow (exception frame unreliable)"
-        );
-        error!(
-            "fault",
-            HsmError::HardFault,
-            "MSP={:#010x} CFSR={:#010x} HFSR={:#010x}",
-            msp,
-            cfsr,
-            hfsr
-        );
-    } else {
-        decode::report_cfsr(scb, HsmError::HardFault);
-
-        if scb.cfsr.is_set(CFSR::BFARVALID) {
-            error!(
-                "fault",
-                HsmError::HardFault,
-                "BFAR={:#010x}  (faulting bus address)",
-                scb.bfar.get()
-            );
-        }
-        if scb.cfsr.is_set(CFSR::MMARVALID) {
-            error!(
-                "fault",
-                HsmError::HardFault,
-                "MMFAR={:#010x} (faulting memory address)",
-                scb.mmfar.get()
-            );
-        }
-
-        error!(
-            "fault",
-            HsmError::HardFault,
-            "CFSR={:#010x} HFSR={:#010x} MSP={:#010x}",
-            cfsr,
-            hfsr,
-            msp
-        );
-        error!("fault", HsmError::HardFault, "frame: {:#?}", ef);
-
-        #[cfg(feature = "fault-stackdump")]
-        // SAFETY: The development-only dump intentionally probes the faulting stack before halting.
-        unsafe {
-            stack_dump(msp);
-        }
-    }
-
     // ---- Crash capture + cross-core notify -------------------------------
     // Mirrors the reference `exception_handlers::HardFault`.
     // Classification uses the reference's FORCED+MSTKERR predicate so the
     // shared SP parser records the same `failure_code`; note the diagnostic
-    // logging above intentionally treats the broader FORCED+(MSTKERR|STKERR)
+    // logging below intentionally treats the broader FORCED+(MSTKERR|STKERR)
     // as an unreliable-frame overflow for operator visibility.
     let failure_code = if forced && mstkerr {
         FailureCode::MemoryFault
@@ -405,6 +400,9 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     // Disable our own wakeup1 receiver before firing it at the peer core, so
     // the notification cannot recurse back into this already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     Tcon::fire_wakeup_timer1();
 
     let context = if forced && (mstkerr || stkerr) {
@@ -424,6 +422,65 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
         ctx
     };
     crashdump_save(&context, failure_code, None);
+
+    // Print only after the dump is saved: see the module docs.
+    error_text!("fault", HsmError::HardFault, "#### HardFault ####");
+
+    if forced && (mstkerr || stkerr) {
+        // Exception-entry stacking failed and escalated to HardFault: the
+        // CPU could not push {R0-R3,R12,LR,PC,xPSR}, so `ef` is garbage. The
+        // faulting PC/LR are unrecoverable on ARMv7-M; only MSP locates
+        // where the stack was when it overran its guard region.
+        error_text!(
+            "fault",
+            HsmError::HardFault,
+            "cause: stack overflow (exception frame unreliable)"
+        );
+        error_text!(
+            "fault",
+            HsmError::HardFault,
+            "MSP={:#010x} CFSR={:#010x} HFSR={:#010x}",
+            msp,
+            cfsr,
+            hfsr
+        );
+    } else {
+        decode::report_cfsr(scb, HsmError::HardFault);
+
+        if scb.cfsr.is_set(CFSR::BFARVALID) {
+            error_text!(
+                "fault",
+                HsmError::HardFault,
+                "BFAR={:#010x}  (faulting bus address)",
+                scb.bfar.get()
+            );
+        }
+        if scb.cfsr.is_set(CFSR::MMARVALID) {
+            error_text!(
+                "fault",
+                HsmError::HardFault,
+                "MMFAR={:#010x} (faulting memory address)",
+                scb.mmfar.get()
+            );
+        }
+
+        error_text!(
+            "fault",
+            HsmError::HardFault,
+            "CFSR={:#010x} HFSR={:#010x} MSP={:#010x}",
+            cfsr,
+            hfsr,
+            msp
+        );
+        // The crash dump, saved above, keeps the PC and LR.
+        error_text!("fault", HsmError::HardFault, "frame: {:#?}", ef);
+
+        #[cfg(feature = "fault-stackdump")]
+        // SAFETY: The development-only dump intentionally probes the faulting stack before halting.
+        unsafe {
+            stack_dump(msp);
+        }
+    }
 
     halt();
 }
@@ -506,16 +563,18 @@ extern "C" fn collect_crash_dump_tcon_irq(ef: &ExceptionFrame) -> ! {
 /// hardware exception mechanism for an otherwise-unhandled exception/IRQ
 /// and must never be called directly.
 //
-// `irqn` is consumed only by `error!`, which compiles out when no trace level
-// is enabled (production builds); allow keeps that build warning-free.
+// `irqn` is unused when logging is off, as in a build of this crate alone;
+// allow keeps that build warning-free.
 #[allow(unused_variables)]
 #[exception]
 unsafe fn DefaultHandler(irqn: i16) -> ! {
+    // A record can't hold an `i16`, so log the exception number, which is
+    // `irqn + 16` and never negative.
     error!(
         "fault",
         HsmError::UnexpectedException,
-        "#### Unexpected exception/IRQ: {} ####",
-        irqn
+        "#### Unexpected exception {} ####",
+        (i32::from(irqn) + 16) as u32
     );
     halt();
 }
@@ -531,8 +590,8 @@ unsafe fn DefaultHandler(irqn: i16) -> ! {
 /// Performs volatile reads of arbitrary stack addresses; the range may run
 /// past valid RAM. Intended for debug builds on hardware only.
 //
-// Reads are consumed only by `error!`, which compiles out when no trace level
-// is enabled; allow keeps a `fault-stackdump`-without-trace build clean.
+// Reads are consumed only by `error_text!`, which compiles out unless a trace
+// level is enabled; allow keeps a `fault-stackdump`-without-trace build clean.
 #[cfg(feature = "fault-stackdump")]
 #[allow(unused_variables)]
 unsafe fn stack_dump(sp: u32) {
@@ -541,7 +600,7 @@ unsafe fn stack_dump(sp: u32) {
     // corrupted or misaligned at the fault, so align the base down first to
     // avoid undefined behaviour while keeping the dump word-oriented.
     let base = sp & !0b11;
-    error!("fault", HsmError::HardFault, "stack dump @ {:#010x}:", base);
+    error_text!("fault", HsmError::HardFault, "stack dump @ {:#010x}:", base);
     for row in 0..ROWS {
         let addr = base.wrapping_add(row * 16);
         let p = addr as *const u32;
@@ -554,7 +613,7 @@ unsafe fn stack_dump(sp: u32) {
                 core::ptr::read_volatile(p.add(3)),
             )
         };
-        error!(
+        error_text!(
             "fault",
             HsmError::HardFault,
             "  {:#010x}: {:08x} {:08x} {:08x} {:08x}",
