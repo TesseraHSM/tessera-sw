@@ -289,14 +289,30 @@ pub enum GcmData<'a> {
     },
     /// Transform in place.
     InPlace(&'a mut HsmDmaBuf),
+    /// Transform in place a region held by address alone (see
+    /// [`GcmData::in_place_raw`]).
+    InPlaceRaw(*mut u8, usize),
 }
 
 impl GcmData<'_> {
+    /// Transform `len` bytes at `addr` in place, for a caller that owns the
+    /// region but may not take a `&mut` to it, such as a reply sealed where
+    /// a shared reference to it is still live.
+    ///
+    /// # Safety
+    ///
+    /// `addr..addr + len` is PAL DMA heap memory that nothing reads or writes
+    /// from when the command is submitted until it completes.
+    pub unsafe fn in_place_raw(addr: *mut u8, len: usize) -> Self {
+        Self::InPlaceRaw(addr, len)
+    }
+
     /// Source address and length.
     fn src(&self) -> (u32, usize) {
         match self {
             Self::Copy { src, .. } => (src.as_ptr() as u32, src.len()),
             Self::InPlace(buf) => (buf.as_ptr() as u32, buf.len()),
+            Self::InPlaceRaw(addr, len) => (*addr as u32, *len),
         }
     }
 
@@ -305,6 +321,7 @@ impl GcmData<'_> {
         match self {
             Self::Copy { dst, .. } => (dst.as_ptr() as u32, dst.len()),
             Self::InPlace(buf) => (buf.as_ptr() as u32, buf.len()),
+            Self::InPlaceRaw(addr, len) => (*addr as u32, *len),
         }
     }
 }
