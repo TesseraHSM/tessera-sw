@@ -51,6 +51,7 @@ use tsra_fw_hsm_bulk::RawBulkCqe;
 use tsra_fw_hsm_bulk::RawBulkSqe;
 use tsra_fw_hsm_io::CqeEntry;
 use tsra_fw_hsm_io::OOB_ENTRY_LEN;
+use tsra_fw_hsm_io::OP_TBOR;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SqeEntry;
@@ -70,6 +71,7 @@ use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmRequest;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
@@ -228,6 +230,15 @@ pub struct UnoHsmIo {
     /// Source queue, from its routing (see [`Self::queue_id`]).
     queue_id: u16,
     transport_binding: Cell<Option<sealed::SessionTransportBinding>>,
+}
+
+/// How the run loop brought an IO's request in ahead of the IO's task (see
+/// [`Stage::Received`]).
+pub(crate) enum RequestIn {
+    /// Copied into the exchange buffer.
+    Copied,
+    /// The copy failed.
+    Failed,
 }
 
 /// Takes a command IO the run loop received (see
@@ -504,34 +515,30 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
-        let sealed_id = sealed::sealed_session(io.cmd_sqe())?;
+        let plan = RequestPlan::of(io)?;
         let control = io.cmd_sqe().session_ctrl();
-        let sqe = io.cmd_sqe().view();
-        if sqe.cmd().psdt() != 0 {
-            return Err(HsmError::SqeInvalidPsdt);
-        }
-        validate_io_fields(
-            sqe.src_len(),
-            sqe.dst_len(),
-            sqe.src_prp1(),
-            sqe.dst_prp1(),
-            sqe.oob_len(),
-            sqe.oob_prp(),
-        )?;
-        let len = sqe.src_len() as usize;
-        let headroom = sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN);
-        let mut buf = self.dma_alloc_exchange(io, headroom + len.next_multiple_of(4))?;
-        self.copy_mem_from_host(
-            io,
-            sqe.src_prp1(),
-            sqe.src_prp2(),
-            &mut buf.buffer_mut()[headroom..headroom + len],
-            true,
-        )
-        .await
-        .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
-        let resp_capacity = sqe.dst_len() as usize;
-        let Some(id) = sealed_id else {
+        let (len, headroom) = (plan.len, plan.headroom);
+        let mut buf = match self.take_request_in(io) {
+            None => {
+                let mut buf = self.dma_alloc_exchange(io, plan.exchange_len())?;
+                self.copy_mem_from_host(
+                    io,
+                    plan.src.0,
+                    plan.src.1,
+                    &mut buf.buffer_mut()[headroom..headroom + len],
+                    true,
+                )
+                .await
+                .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+                buf
+            }
+            Some(RequestIn::Copied) => {
+                crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?
+            }
+            Some(RequestIn::Failed) => return Err(HsmError::FailedToStartDmaTransaction),
+        };
+        let resp_capacity = plan.resp_capacity;
+        let Some(id) = plan.sealed_id else {
             return Ok(HsmRequest {
                 buf,
                 len,
@@ -669,7 +676,7 @@ impl HsmIoController for UnoHsmPal {
         {
             return Err(io);
         }
-        self.detached[index as usize].set(DetachedIo {
+        self.stages[index as usize].set(Stage::Reply {
             queue_id: io.queue_id(),
         });
         Ok(())
@@ -714,15 +721,70 @@ impl HsmIoController for UnoHsmPal {
     }
 }
 
-/// What finishing a detached host IO still needs (see
-/// [`HsmIoController::finish_io`]).
-#[derive(Clone, Copy)]
-pub(crate) struct DetachedIo {
-    queue_id: u16,
+/// Where a host IO slot is in the work the run loop does for it: each
+/// detached step's completion takes the slot to its next stage (see
+/// [`UnoHsmPal::finish_detached`]).
+#[derive(Default)]
+pub(crate) enum Stage {
+    /// Nothing: the slot is free, or its IO is with its task.
+    #[default]
+    Idle,
+    /// Copying the request in (see [`UnoHsmPal::start_request`]); the IO
+    /// waits here for it.
+    Request(UnoHsmIo),
+    /// The IO is with its task, its request brought in as given, for
+    /// [`recv_request`](HsmIoController::recv_request) to take.
+    Received(RequestIn),
+    /// Copying the reply out (see [`HsmIoController::finish_io`]), then
+    /// posting the completion to queue `queue_id`.
+    Reply { queue_id: u16 },
+    /// Posting the completion to queue `queue_id`.
+    Post { queue_id: u16 },
 }
 
-impl DetachedIo {
-    pub(crate) const NONE: Self = Self { queue_id: 0 };
+/// Where an IO's request is and what receiving it takes, from the IO's
+/// SQE, checked as receiving it requires.
+struct RequestPlan {
+    /// The session of a sealed request.
+    sealed_id: Option<HsmSessId>,
+    /// The request's length.
+    len: usize,
+    /// Room a sealed request leaves in front of it for its AAD.
+    headroom: usize,
+    /// The request's host buffer (PRP 1 and 2).
+    src: (HsmDmaAddr, HsmDmaAddr),
+    /// The host's response buffer length.
+    resp_capacity: usize,
+}
+
+impl RequestPlan {
+    fn of(io: &UnoHsmIo) -> HsmResult<Self> {
+        let sealed_id = sealed::sealed_session(io.cmd_sqe())?;
+        let sqe = io.cmd_sqe().view();
+        if sqe.cmd().psdt() != 0 {
+            return Err(HsmError::SqeInvalidPsdt);
+        }
+        validate_io_fields(
+            sqe.src_len(),
+            sqe.dst_len(),
+            sqe.src_prp1(),
+            sqe.dst_prp1(),
+            sqe.oob_len(),
+            sqe.oob_prp(),
+        )?;
+        Ok(Self {
+            sealed_id,
+            len: sqe.src_len() as usize,
+            headroom: sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN),
+            src: (sqe.src_prp1(), sqe.src_prp2()),
+            resp_capacity: sqe.dst_len() as usize,
+        })
+    }
+
+    /// Length of the exchange buffer the request is received into.
+    fn exchange_len(&self) -> usize {
+        self.headroom + self.len.next_multiple_of(4)
+    }
 }
 
 /// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it: its DTCM copy
@@ -808,20 +870,35 @@ impl UnoHsmPal {
 }
 
 impl UnoHsmPal {
-    /// Advances detached IOs (see [`HsmIoController::finish_io`]): posts the
-    /// completion of each finished reply copy (marked failed first if the
-    /// copy failed), retries posts the OIC had no room for, and scrubs and
-    /// frees the slot of each posted completion. Called on every run-loop
-    /// pass.
+    /// Advances the host IO slots the run loop works on (see [`Stage`]):
+    /// hands on each IO whose request copy is done, posts the completion of
+    /// each finished reply copy (marked failed first if the copy failed),
+    /// retries posts the OIC had no room for, and scrubs and frees the slot
+    /// of each posted completion. Called on every run-loop pass.
     pub(crate) fn finish_detached(&self) {
         while let Some((index, ok)) = self.gdma.take_detached() {
-            let d = self.detached[index as usize].get();
-            let cqe = slot_cqe(index);
-            if !ok {
-                cqe.set_err(HsmError::FailedToStartDmaTransaction);
+            match self.stages[index as usize].take() {
+                Stage::Request(io) => {
+                    self.stages[index as usize].set(Stage::Received(if ok {
+                        RequestIn::Copied
+                    } else {
+                        RequestIn::Failed
+                    }));
+                    // Set before the first copy, and never cleared.
+                    if let Some(dispatch) = self.io_dispatch.get() {
+                        dispatch(io);
+                    }
+                }
+                Stage::Reply { queue_id } => {
+                    let cqe = slot_cqe(index);
+                    if !ok {
+                        cqe.set_err(HsmError::FailedToStartDmaTransaction);
+                    }
+                    cqe.view().set_sq_id(queue_id);
+                    self.post_detached(index, queue_id);
+                }
+                stage => self.stages[index as usize].set(stage),
             }
-            cqe.view().set_sq_id(d.queue_id);
-            self.post_detached(index);
         }
         let mut pending = self.detached_post_pending.get();
         if pending != 0 {
@@ -829,7 +906,9 @@ impl UnoHsmPal {
             while pending != 0 {
                 let index = pending.trailing_zeros() as u16;
                 pending &= !(1 << index);
-                self.post_detached(index);
+                if let Stage::Post { queue_id } = self.stages[index as usize].take() {
+                    self.post_detached(index, queue_id);
+                }
             }
         }
         while let Some((index, _)) = self.oic.take_detached() {
@@ -837,22 +916,78 @@ impl UnoHsmPal {
             // reused. A failed post is dropped like a failed `complete_io`.
             // The post granted the IO's queue credit back (see
             // `OicDriver::send_detached`), so only the buffer returns here.
+            self.stages[index as usize].set(Stage::Idle);
             self.scrub_io_slot_cpu(index);
             self.iic.release_io(index);
             self.io_in_flight_dec(HsmIoKind::Cmd);
         }
     }
 
-    /// Posts slot `index`'s completion, or leaves it for the next pass if
-    /// the OIC has no room.
+    /// Posts slot `index`'s completion to queue `queue_id`, or leaves it
+    /// for the next pass if the OIC has no room.
     #[inline]
-    fn post_detached(&self, index: u16) {
-        let queue_id = self.detached[index as usize].get().queue_id as u8;
+    fn post_detached(&self, index: u16, queue_id: u16) {
+        self.stages[index as usize].set(Stage::Post { queue_id });
         publish_cqe(index);
-        if self.oic.send_detached(index, queue_id).is_err() {
+        if self.oic.send_detached(index, queue_id as u8).is_err() {
             self.detached_post_pending
                 .set(self.detached_post_pending.get() | 1 << index);
         }
+    }
+
+    /// How the run loop brought `io`'s request in ahead of the IO's task, if
+    /// it did. Leaves the slot idle: while a task holds the slot's IO, the
+    /// slot is idle or [`Stage::Received`].
+    #[inline]
+    fn take_request_in(&self, io: &UnoHsmIo) -> Option<RequestIn> {
+        match self.stages.get(usize::from(io.index))?.take() {
+            Stage::Received(request_in) => Some(request_in),
+            _ => None,
+        }
+    }
+
+    /// Starts copying a TBOR IO's request in from the host as the run loop
+    /// receives the IO, into the exchange buffer
+    /// [`recv_request`](HsmIoController::recv_request) would copy it into,
+    /// and parks the IO until the copy lands (see
+    /// [`finish_detached`](Self::finish_detached)): the IO's task then wakes
+    /// once, to its request. Returns the IO, to hand on now, if the copy
+    /// does not start; `recv_request` then copies the request, or fails as
+    /// it would have.
+    fn start_request(&self, io: UnoHsmIo) -> Option<UnoHsmIo> {
+        let index = io.index;
+        if index as u32 >= IO_SQ_COUNT || io.cmd_sqe().opcode() != OP_TBOR {
+            return Some(io);
+        }
+        let Ok(plan) = RequestPlan::of(&io) else {
+            return Some(io);
+        };
+        let Ok(ifc) = crate::gdma::host_interface(io.pid()) else {
+            return Some(io);
+        };
+        let Ok(mut buf) = self.dma_alloc_exchange(&io, plan.exchange_len()) else {
+            return Some(io);
+        };
+        let len = plan.len as u32;
+        let dst = buf.buffer_mut()[plan.headroom..].as_mut_ptr();
+        if self
+            .gdma
+            .copy_mem_detached(
+                crate::gdma::host_dma_buf(plan.src.0, plan.src.1, true),
+                ifc,
+                len,
+                crate::gdma::device_dma_buf(dst, len),
+                MemInterface::Device,
+                len,
+                index,
+            )
+            .is_err()
+        {
+            reset_io_alloc(self, index);
+            return Some(io);
+        }
+        self.stages[index as usize].set(Stage::Request(io));
+        None
     }
 
     /// Turns slot `rx.index` received from the `kind` IIC driver into an IO:
@@ -867,6 +1002,9 @@ impl UnoHsmPal {
             HsmIoKind::Cmd => {
                 reset_io_alloc(self, index);
                 if (index as u32) < IO_SQ_COUNT {
+                    // A request brought in for the slot's last IO, which ended
+                    // without taking it, is not this IO's.
+                    self.stages[index as usize].set(Stage::Idle);
                     copy_sqe(index as usize);
                     // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.
                     let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] };
@@ -907,7 +1045,9 @@ impl UnoHsmPal {
             Some(dispatch) if !self.io_paused() => {
                 tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
                 while let Some(rx) = self.iic.try_recv() {
-                    dispatch(self.accept_io(rx, HsmIoKind::Cmd));
+                    if let Some(io) = self.start_request(self.accept_io(rx, HsmIoKind::Cmd)) {
+                        dispatch(io);
+                    }
                 }
             }
             _ => self.iic.wake(irq),

@@ -526,8 +526,9 @@ pub struct UnoHsmPal {
     /// The bulk IOs among [`io_in_flight`](Self::io_in_flight).
     bulk_io_in_flight: Cell<u32>,
 
-    /// Per host IO slot: what finishing a detached IO still needs.
-    pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
+    /// Per host IO slot: what the run loop does for it while no task holds
+    /// its IO.
+    pub(crate) stages: [Cell<crate::io::Stage>; IO_SQ_COUNT as usize],
 
     /// Host IO slots whose detached completion post found the OIC full.
     pub(crate) detached_post_pending: Cell<u32>,
@@ -780,7 +781,7 @@ impl Default for UnoHsmPal {
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
             bulk_io_in_flight: Cell::new(0),
-            detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
+            stages: [const { Cell::new(crate::io::Stage::Idle) }; IO_SQ_COUNT as usize],
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
