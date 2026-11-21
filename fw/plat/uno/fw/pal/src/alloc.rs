@@ -216,6 +216,13 @@ fn heap_base_cap(io_index: u16, heap: usize) -> (*mut u8, usize) {
     }
 }
 
+/// Base of IO slot `index`'s DMA heap, where its exchange buffer starts.
+#[cfg(not(feature = "bulk_crypto"))]
+#[inline(always)]
+pub(crate) fn dma_heap_base(index: u16) -> *mut u8 {
+    heap_base_cap(index, DMA).0
+}
+
 /// Per-IO SRAM (DMA heap) region that may hold IO data, as
 /// `(base_ptr, dirty_len)`.
 ///

@@ -538,7 +538,7 @@ impl UnoHsmPal {
         key: &[u8],
         iv: &[u8; GCM_IV_LEN],
         tag: Option<&Block>,
-        data: &mut HsmDmaBuf,
+        data: BcpData<'_>,
         cookie: u16,
     ) -> HsmResult<()> {
         self.bcp.gcm_detached(
@@ -553,7 +553,7 @@ impl UnoHsmPal {
                 aad_len: GCM_AAD_PAD,
                 unpadded_aad_len: GCM_AAD_PAD,
                 tag: tag.unwrap_or(&[0; AES_BLOCK_SIZE]),
-                data: BcpData::InPlace(data),
+                data,
             },
             cookie,
         )

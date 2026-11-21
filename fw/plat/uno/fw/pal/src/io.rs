@@ -76,6 +76,8 @@ use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 #[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_drivers_bcp::GcmCompletion;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::BcpData;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
@@ -1059,7 +1061,7 @@ impl UnoHsmPal {
         };
         data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(false));
         if self
-            .gcm_start_detached(key.key(), &iv, Some(&tag), data, io.index)
+            .gcm_start_detached(key.key(), &iv, Some(&tag), BcpData::InPlace(data), io.index)
             .is_err()
         {
             return Some(io);
@@ -1142,33 +1144,60 @@ impl UnoHsmPal {
         if index as u32 >= IO_SQ_COUNT || len > dst_len {
             return None;
         }
-        let frame = self.dma_alloc(io, sealed::TRANSPORT_AAD_LEN + len).ok()?;
+        const AAD: usize = sealed::TRANSPORT_AAD_LEN;
+        let pt_len = len - sealed::SEALED_TRAILER_LEN;
+        // The response sits where its request was opened, after the
+        // request's AAD room. A frame no longer than the request's fits
+        // there: seal it in place rather than copy the response out of DMA
+        // memory into a frame of its own.
+        let exchange = crate::alloc::dma_heap_base(index);
+        let frame = if core::ptr::eq(resp.as_ptr(), exchange.wrapping_add(AAD))
+            && len <= sqe.src_len() as usize
+        {
+            exchange
+        } else {
+            let frame = self.dma_alloc(io, AAD + len).ok()?;
+            resp.copy_to_slice(&mut frame[AAD..AAD + resp.len()]);
+            frame.as_mut_ptr()
+        };
         if crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX {
             return None;
         }
         let key = self
             .session_transport_key(io, id, HsmSessionTransportDir::M2h)
             .ok()?;
-        let pt_len = len - sealed::SEALED_TRAILER_LEN;
-        let (data, trailer) = frame.split_at_mut(sealed::TRANSPORT_AAD_LEN + pt_len);
-        data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(true));
-        let pt = &mut data[sealed::TRANSPORT_AAD_LEN..];
-        resp.copy_to_slice(&mut pt[..resp.len()]);
-        pt[resp.len()..pt_len - 1].fill(0);
-        pt[pt_len - 1] = (pt_len - 1 - resp.len()) as u8;
+        let pad = pt_len - resp.len();
+        // SAFETY: `frame..frame + AAD + len` lies in the slot's DMA heap,
+        // which the slot owns; the AAD room before the response and the
+        // padding after it, written here, are outside `resp`.
+        unsafe {
+            frame.copy_from_nonoverlapping(binding.aad(true).as_ptr(), AAD);
+            let tail = frame.add(AAD + resp.len());
+            tail.write_bytes(0, pad - 1);
+            tail.add(pad - 1).write((pad - 1) as u8);
+        }
         // A drawn sequence number is spent: draw it only once the BCP has
         // room for the seal.
-        if !self.bcp.can_start(data.len()) {
+        if !self.bcp.can_start(AAD + pt_len) {
             return None;
         }
         let seq = self.session_transport_next_seq(io, id).ok()?;
         let iv = key.nonce(seq);
-        trailer[..SESSION_TRANSPORT_IV_LEN].copy_from_slice(&iv);
+        // SAFETY: as above; the IV starts the trailer, after the padding.
+        unsafe {
+            frame
+                .add(AAD + pt_len)
+                .copy_from_nonoverlapping(iv.as_ptr(), SESSION_TRANSPORT_IV_LEN);
+        }
+        // SAFETY: the slot owns the frame, and once the IO is detached
+        // nothing else reads or writes it until the run loop takes the
+        // seal's completion.
+        let data = unsafe { BcpData::in_place_raw(frame, AAD + pt_len) };
         self.gcm_start_detached(key.key(), &iv, None, data, index)
             .ok()?;
         Some(SealedReply {
             queue_id: io.queue_id(),
-            frame: frame[sealed::TRANSPORT_AAD_LEN..].as_mut_ptr(),
+            frame: frame.wrapping_add(AAD),
             len: len as u32,
             dst,
             ifc,
