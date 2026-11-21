@@ -71,6 +71,7 @@ set(SOURCE
     algo/aes/keygen_tests.cpp
     algo/aes/ofb_enc_dec_tests.cpp
     algo/ecc/ecc_static_der.cpp
+    algo/ecc/derive_tests.cpp
     algo/ecc/keygen_tests.cpp
     algo/ecc/unwrap_tests.cpp
     algo/ecc/unwrap_property_tests.cpp
