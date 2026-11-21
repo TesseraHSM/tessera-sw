@@ -47,7 +47,7 @@ use super::*;
 /// with both absent is rejected by the device.
 #[resiliency_key_op(key = "shared_secret")]
 pub(crate) fn kbkdf_derive(
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     hash_algo: HsmHashAlgo,
     label: Option<&[u8]>,
     context: Option<&[u8]>,
@@ -62,7 +62,7 @@ pub(crate) fn kbkdf_derive(
 
 /// Executes KBKDF using a legacy resident shared-secret key.
 fn kbkdf_derive_mbor(
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     hash_algo: HsmHashAlgo,
     label: Option<&[u8]>,
     context: Option<&[u8]>,
@@ -110,7 +110,7 @@ fn kbkdf_derive_mbor(
 
 /// Placeholder for KBKDF, which has no command in the current TBOR types.
 fn kbkdf_derive_tbor(
-    _shared_secret: &HsmGenericSecretKey,
+    _shared_secret: &HsmSharedSecretKey,
     _hash_algo: HsmHashAlgo,
     _label: Option<&[u8]>,
     _context: Option<&[u8]>,

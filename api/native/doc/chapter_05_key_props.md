@@ -36,26 +36,26 @@ Key class defines the classification of the key.  Possible classes are:
 Defines the type of the key. Possible key types are:
 
 - RSA
-- EC
+- RSA-CRT
+- ECC
 - AES
 - AES-XTS
 - AES-GCM
-- Generic
-- HMAC-SHA1
+- Shared Secret
 - HMAC-SHA256
 - HMAC-SHA384
 - HMAC-SHA512
-- Masking
+- Sealing
 
 |             |                                                              |
 | ----------- | ------------------------------------------------------------ |
-| Define      | TSRA_KEY_PROP_ID_TYPE                                        |
-| Type        | [tsra_key_type](#tsra_key_type)                              |
-| Values      | [TSRA_KEY_TYPE_XXX](#tsra_key_type_xxx)                      |
+| Define      | TSRA_KEY_PROP_ID_KIND                                        |
+| Type        | [tsra_key_kind](#tsra_key_kind)                              |
+| Values      | [TSRA_KEY_KIND_XXX](#tsra_key_kind_xxx)                      |
 | Default     | Set by caller during key creation                     &nbsp; |
 | Applicable  | All Keys                                                     |
 | Specifiable | Yes                                                          |
-| PKCS#11     | CKA_TYPE                                                     |
+| PKCS#11     | CKA_KEY_TYPE                                                 |
 
 
 ## Bit Length

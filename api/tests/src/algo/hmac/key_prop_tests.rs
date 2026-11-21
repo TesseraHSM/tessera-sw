@@ -9,7 +9,7 @@ use super::*;
 // ================================
 
 /// Derive a base ECDH shared secret to be used as HKDF input.
-fn derive_base_secret_for_hkdf(session: &HsmSession, curve: HsmEccCurve) -> HsmGenericSecretKey {
+fn derive_base_secret_for_hkdf(session: &HsmSession, curve: HsmEccCurve) -> HsmSharedSecretKey {
     let (shared_secret_a, _shared_secret_b) = derive_ecdh_shared_secrets(session, curve);
     shared_secret_a
 }
@@ -17,7 +17,7 @@ fn derive_base_secret_for_hkdf(session: &HsmSession, curve: HsmEccCurve) -> HsmG
 /// Derive an HMAC key using HKDF with the given properties.
 fn derive_hmac_key_with_props(
     session: &HsmSession,
-    base_secret: &HsmGenericSecretKey,
+    base_secret: &HsmSharedSecretKey,
     hkdf_hash: HsmHashAlgo,
     props: HsmKeyProps,
 ) -> Result<HsmHmacKey, HsmError> {

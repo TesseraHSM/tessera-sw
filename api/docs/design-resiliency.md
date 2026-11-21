@@ -280,7 +280,7 @@ Keys are restored by unmasking their cached masked key material:
 | AES-XTS         | `aes_xts_unmask_key_raw_no_res` | Two handles (key pair blob) |
 | AES-GCM         | `unmask_key_raw_no_res`       | Single handle            |
 | HMAC            | `unmask_key_raw_no_res`       | Single handle            |
-| Generic Secret  | `unmask_key_raw_no_res`       | Single handle            |
+| Shared Secret   | `unmask_key_raw_no_res`       | Single handle            |
 
 ## Epoch Mechanism
 

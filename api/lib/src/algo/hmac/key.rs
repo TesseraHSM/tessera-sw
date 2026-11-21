@@ -92,16 +92,16 @@ impl HsmSigningKey for HsmHmacKey {}
 // `HsmHmacKey` can be used to verify HMAC tags by recomputing and comparing.
 impl HsmVerificationKey for HsmHmacKey {}
 
-/// Converts a generic secret-key handle into a typed HMAC key wrapper.
+/// Converts a shared secret-key handle into a typed HMAC key wrapper.
 ///
 /// This conversion does not copy or expose key material. It simply re-wraps the
 /// existing shared key state (handle + properties) after validating that the
 /// underlying key is a secret HMAC key of a supported digest size.
-impl TryFrom<HsmGenericSecretKey> for HsmHmacKey {
+impl TryFrom<HsmSharedSecretKey> for HsmHmacKey {
     type Error = HsmError;
 
-    fn try_from(key: HsmGenericSecretKey) -> Result<Self, Self::Error> {
-        // Validate that the generic secret key is suitable for HMAC operations.
+    fn try_from(key: HsmSharedSecretKey) -> Result<Self, Self::Error> {
+        // Validate that the shared secret key is suitable for HMAC operations.
         HsmHmacKey::validate_props(&key.props())?;
 
         // Re-wrap the existing inner key state so typed wrappers share the same
