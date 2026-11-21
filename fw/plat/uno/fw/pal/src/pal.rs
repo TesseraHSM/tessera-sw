@@ -29,6 +29,8 @@
 //! without a copy.
 
 use core::cell::Cell;
+use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::Ordering;
 
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
@@ -171,36 +173,16 @@ pub enum IpcChannel {
 
 type WakeFn = fn(&UnoHsmPal, u16);
 
-/// Wake the PKA driver engine that owns the given IRQ.
-///
-/// PKA IRQs are laid out as two contiguous ranges of 16: done IRQs
-/// `UPKA_0_DONE..=UPKA_15_DONE` (32..=47) and error IRQs
-/// `UPKA_0_ERROR..=UPKA_15_ERROR` (0..=15). Either edge maps to the
-/// same engine index `irq & 0x0F`.
-///
-/// # Parameters
-/// - `pal`: Shared PAL instance that owns the PKA driver.
-/// - `irq`: Raw NVIC IRQ number in the PKA done/error ranges.
-///
-/// # Returns
-/// Returns `()`.
-///
-/// # Side Effects
-/// Wakes exactly one PKA engine by deriving its index from the low
-/// nibble of `irq`.
-fn wake_pka(pal: &UnoHsmPal, irq: u16) {
-    pal.pka.wake_engine((irq & 0x0F) as u8);
-}
-
-/// First PKA done and error IRQs. Each block of sixteen sits inside one
-/// pending register, at the engine's index (see [`wake_pka`]).
-const PKA_DONE_IRQ: usize = Interrupt::UPKA_0_DONE as usize;
-const PKA_ERROR_IRQ: usize = Interrupt::UPKA_0_ERROR as usize;
+/// First PKA done and error IRQs. Each block of sixteen starts on a
+/// multiple of sixteen, so an IRQ's low four bits are its engine's index
+/// (see [`UPKA_IRQ`]).
+const PKA_DONE_IRQ: u16 = Interrupt::UPKA_0_DONE as u16;
+const PKA_ERROR_IRQ: u16 = Interrupt::UPKA_0_ERROR as u16;
 const _: () = assert!(
-    PKA_DONE_IRQ % 32 + 16 <= 32
-        && PKA_ERROR_IRQ % 32 + 16 <= 32
-        && Interrupt::UPKA_15_DONE as usize == PKA_DONE_IRQ + 15
-        && Interrupt::UPKA_15_ERROR as usize == PKA_ERROR_IRQ + 15
+    PKA_DONE_IRQ.is_multiple_of(16)
+        && PKA_ERROR_IRQ.is_multiple_of(16)
+        && Interrupt::UPKA_15_DONE as u16 == PKA_DONE_IRQ + 15
+        && Interrupt::UPKA_15_ERROR as u16 == PKA_ERROR_IRQ + 15
 );
 
 /// Runs `fut`, polling it from the GSRAM code region (see `gsram.x`): for
@@ -220,13 +202,35 @@ fn poll_cold_once<F: core::future::Future>(
     fut.poll(cx)
 }
 
+/// The PKA driver, for [`UPKA_IRQ`]: set by `init` before it enables the
+/// engines' interrupts.
+static PKA_IRQ_DRIVER: AtomicPtr<Upka> = AtomicPtr::new(core::ptr::null_mut());
+
+/// The PKA engines' done and error interrupt handler (the vector table
+/// routes all thirty-two here). It hands a finished engine its wipe, or its
+/// next queued command, at once: polled, an engine sat idle until the run
+/// loop next scanned the NVIC, twice per command.
+#[unsafe(no_mangle)]
+extern "C" fn UPKA_IRQ() {
+    let ipsr: u32;
+    // SAFETY: reads the active exception number; touches no memory.
+    unsafe {
+        core::arch::asm!("mrs {}, IPSR", out(reg) ipsr, options(nomem, nostack, preserves_flags));
+    }
+    // SAFETY: null, or the `'static` driver the PAL owns (see `init`).
+    if let Some(pka) = unsafe { PKA_IRQ_DRIVER.load(Ordering::Relaxed).as_ref() } {
+        // The exception number is the IRQ's plus sixteen.
+        pka.wake_engine((ipsr.wrapping_sub(16) & 0x0F) as u8);
+    }
+}
+
 /// `(IRQ number, wake function)` pairs registered for NVIC dispatch.
 ///
 /// Adding a new peripheral interrupt requires one entry here. The
 /// [`ISPR_MASKS`] and [`WAKE_TABLE`] are derived automatically. Each
 /// wake function receives the IRQ number so a single handler can
-/// distinguish between multiple IRQs routed to the same driver — used
-/// by [`wake_pka`] to derive the engine index from the IRQ.
+/// distinguish between multiple IRQs routed to the same driver. The PKA
+/// engines' IRQs are not here: their handler, [`UPKA_IRQ`], serves them.
 const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     // Per-peripheral wakers. Most peripherals register a single IRQ, but
     // AES and SHA each route two vectors (Done and Error) to the same
@@ -240,40 +244,6 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     (Interrupt::SHA_ERROR as u16, |pal, _| pal.sha.wake()),
     (Interrupt::GDMA_CQ as u16, |pal, irq| pal.gdma.wake(irq)),
     (Interrupt::INTC_IPC as u16, |pal, irq| pal.ipc.wake(irq)),
-    // PKA done IRQs (32..=47) — `wake_pka` derives the engine index.
-    (Interrupt::UPKA_0_DONE as u16, wake_pka),
-    (Interrupt::UPKA_1_DONE as u16, wake_pka),
-    (Interrupt::UPKA_2_DONE as u16, wake_pka),
-    (Interrupt::UPKA_3_DONE as u16, wake_pka),
-    (Interrupt::UPKA_4_DONE as u16, wake_pka),
-    (Interrupt::UPKA_5_DONE as u16, wake_pka),
-    (Interrupt::UPKA_6_DONE as u16, wake_pka),
-    (Interrupt::UPKA_7_DONE as u16, wake_pka),
-    (Interrupt::UPKA_8_DONE as u16, wake_pka),
-    (Interrupt::UPKA_9_DONE as u16, wake_pka),
-    (Interrupt::UPKA_10_DONE as u16, wake_pka),
-    (Interrupt::UPKA_11_DONE as u16, wake_pka),
-    (Interrupt::UPKA_12_DONE as u16, wake_pka),
-    (Interrupt::UPKA_13_DONE as u16, wake_pka),
-    (Interrupt::UPKA_14_DONE as u16, wake_pka),
-    (Interrupt::UPKA_15_DONE as u16, wake_pka),
-    // PKA error IRQs (0..=15) — same routing as the done IRQs.
-    (Interrupt::UPKA_0_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_1_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_2_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_3_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_4_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_5_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_6_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_7_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_8_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_9_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_10_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_11_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_12_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_13_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_14_ERROR as u16, wake_pka),
-    (Interrupt::UPKA_15_ERROR as u16, wake_pka),
 ];
 
 /// Highest IRQ number in WAKE_ENTRIES — computed at compile time.
@@ -424,10 +394,11 @@ pub struct UnoHsmPal {
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
-// executor on a single-core Cortex-M7 with no preemptive ISRs.  The
-// interior-mutable fields (e.g. Cell<BootPhase>) are never accessed from
-// interrupt context, so concurrent access is impossible despite the
-// asserted Sync.
+// executor on a single-core Cortex-M7.  The interior-mutable fields (e.g.
+// Cell<BootPhase>) are never accessed from interrupt context (the PKA
+// engines' handler reaches only the PKA driver, whose state masks
+// interrupts), so concurrent access is impossible despite the asserted
+// Sync.
 unsafe impl Sync for UnoHsmPal {}
 
 impl Default for UnoHsmPal {
@@ -797,44 +768,12 @@ impl UnoHsmPal {
         info!("boot", "phase -> Running, status=Run");
     }
 
-    /// Handle every PKA engine that has finished a command or a wipe, as
-    /// [`poll_once`](Self::poll_once) does for their IRQs.
-    ///
-    /// Called also where a request awaits the BCP or the PKA -- steps of
-    /// keyed requests only, so that requests that never use them pay
-    /// nothing -- since the run loop's next pass waits behind every task
-    /// ready ahead of it, and an engine whose command has finished sits
-    /// idle until it comes: twice per command, once for the command and
-    /// once for the wipe that follows. Under a stream of ECDSA P-256
-    /// signatures, which keeps all sixteen engines busy, that wait was
-    /// about a fortieth of each engine's time. With no engine in use this
-    /// is a load and a compare, inlined; the rest is out of line, to keep
-    /// the request path's code as it was.
-    #[inline(always)]
-    pub fn service_pka(&self) {
-        if self.pka.any_engine_busy() {
-            self.service_busy_pka();
-        }
-    }
-
-    #[inline(never)]
-    fn service_busy_pka(&self) {
-        let mut done = ((Nvic::pending_bits(PKA_DONE_IRQ / 32) >> (PKA_DONE_IRQ % 32))
-            | (Nvic::pending_bits(PKA_ERROR_IRQ / 32) >> (PKA_ERROR_IRQ % 32)))
-            & 0xFFFF;
-        while done != 0 {
-            let id = done.trailing_zeros() as u8;
-            done &= done - 1;
-            self.pka.wake_engine(id);
-        }
-    }
-
     /// Poll the NVIC once and wake any PAL driver with a pending IRQ.
     ///
     /// NVIC pending bits are **not** cleared here. For level-triggered
     /// peripherals (IIC, OIC, GDMA, IPC) the source de-asserts after the
     /// driver reads the hardware status. For edge-triggered peripherals
-    /// (AES, SHA, PKA) the pending bit remains until the next
+    /// (AES, SHA) the pending bit remains until the next
     /// `poll_once` call — the driver's `wake()` reads and clears the
     /// hardware status register, so the subsequent call finds nothing
     /// to do and returns early.
@@ -1160,13 +1099,13 @@ impl UnoHsmPal {
     }
 
     /// Wait up to [`SHUTDOWN_PKA_DRAIN_MS`] for every PKA engine to return to
-    /// the pool, handling finished commands and wipes as it goes.
+    /// the pool, as the engines' interrupt handler finishes their commands
+    /// and wipes.
     ///
     /// Returns whether the PKA is idle.
     async fn drain_pka(&self) -> bool {
         let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_PKA_DRAIN_MS);
         loop {
-            self.service_pka();
             if !self.pka.any_engine_busy() {
                 return true;
             }
@@ -1344,6 +1283,13 @@ impl HsmPal for UnoHsmPal {
     #[unsafe(link_section = ".gsram_text.boot")]
     fn init(&self) {
         systick_driver::init();
+        // Let the PKA engines' interrupt handler see to their completions.
+        // No engine has been used yet.
+        PKA_IRQ_DRIVER.store(core::ptr::from_ref(self.pka).cast_mut(), Ordering::Relaxed);
+        for engine in 0..16 {
+            Nvic::enable_raw(PKA_DONE_IRQ + engine);
+            Nvic::enable_raw(PKA_ERROR_IRQ + engine);
+        }
         // The PQC operand slots are read back with an engine reserved, so how
         // fast CP1 can read them is throughput. The default memory map makes
         // that window Device, which serialises reads; remap it Normal. The

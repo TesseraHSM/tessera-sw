@@ -864,8 +864,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// - `Ok(())`: Wipe completed successfully.
     /// - `Err(HsmError)`: Wipe command failed.
     pub async fn memory_wipe(&mut self) -> HsmResult<()> {
-        self.prepare_for_command();
-        EngineExecutor::submit_wipe(self.id);
+        let id = self.id;
+        self.start(|| EngineExecutor::submit_wipe(id));
         poll_fn(|cx| self.poll_completion(cx)).await
     }
 
@@ -889,7 +889,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// completes, without waiting for it.
     ///
     /// The engine stays out of the pool until the wipe has finished: the
-    /// wipe's completion, handled when the engine's interrupt is serviced,
+    /// wipe's completion, handled by the engine's interrupt handler,
     /// releases it, and a failed wipe is issued again rather than releasing
     /// an engine that may still hold key material. Callers that must know
     /// the wipe has finished use [`release`](Self::release).
@@ -898,8 +898,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
             let slot = &mut s.engine_slots[self.id as usize];
             slot.arm_completion_wait();
             slot.wiping = true;
+            EngineExecutor::submit_wipe(self.id);
         });
-        EngineExecutor::submit_wipe(self.id);
         self.released = true;
     }
 
@@ -923,20 +923,20 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         arg2: u32,
         arg3: u32,
     ) -> HsmResult<()> {
-        self.prepare_for_command();
-        self.issue_command(opcode, result, arg1, arg2, arg3);
+        let id = self.id;
+        self.start(|| {
+            EngineExecutor::submit_engine_command(id, opcode, result, arg1, arg2, arg3);
+        });
         poll_fn(|cx| self.poll_completion(cx)).await
     }
 
-    fn prepare_for_command(&self) {
+    /// Arms the engine's completion and `submit`s a command to it at once,
+    /// so that its interrupt handler never finds it armed before it starts.
+    fn start(&self, submit: impl FnOnce()) {
         self.driver.state.with(|s| {
-            let slot = &mut s.engine_slots[self.id as usize];
-            slot.arm_completion_wait();
+            s.engine_slots[self.id as usize].arm_completion_wait();
+            submit();
         });
-    }
-
-    fn issue_command(&self, opcode: u32, result: u32, arg1: u32, arg2: u32, arg3: u32) {
-        EngineExecutor::submit_engine_command(self.id, opcode, result, arg1, arg2, arg3);
     }
 
     fn poll_completion(&self, cx: &mut Context<'_>) -> Poll<HsmResult<()>> {

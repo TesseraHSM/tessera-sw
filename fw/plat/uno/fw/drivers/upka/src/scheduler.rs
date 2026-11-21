@@ -4,9 +4,7 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
-use tsra_fw_uno_drivers_nvic::Nvic;
 use tsra_fw_uno_error::HsmResult;
-use tsra_fw_uno_pac::Interrupt;
 
 use crate::api::UpkaDriver;
 use crate::engine::UpkaEngine;
@@ -26,11 +24,14 @@ struct TicketGuard<'a, const DEPTH: usize, const ENGINES: usize> {
 impl<const DEPTH: usize, const ENGINES: usize> Drop for TicketGuard<'_, DEPTH, ENGINES> {
     fn drop(&mut self) {
         if let Some(t) = self.ticket {
-            let running = self.driver.state.with(|s| s.abandon_staged(t));
-            if let Some(id) = running {
-                // The command still uses the caller's buffers: wait for the
-                // engine to finish with them, as dropping a held engine does.
-                EngineExecutor::wait_until_idle(id);
+            if self.driver.state.with(|s| s.abandon_staged(t)) {
+                // The command still uses the caller's buffers: wait for its
+                // completion, which the engine's interrupt handler sees to,
+                // freeing the ticket. (The engine may go straight on to other
+                // commands, so its going idle is no sign.)
+                while self.driver.state.with(|s| s.is_abandoned(t)) {
+                    core::hint::spin_loop();
+                }
             }
         }
     }
@@ -162,10 +163,10 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         if !slot.is_in_use() || !slot.is_completion_armed() || slot.has_completion_status() {
             return;
         }
+        // Writing a command clears the status, so a busy engine reads 0 here,
+        // whatever interrupt brought us.
         let flags = EngineExecutor::completion_flags(id as u8);
         if flags != 0 {
-            Nvic::unpend_raw(Interrupt::UPKA_0_DONE as u16 + id as u16);
-            Nvic::unpend_raw(Interrupt::UPKA_0_ERROR as u16 + id as u16);
             if slot.wiping {
                 Self::finish_wipe(s, id, flags as u8);
             } else if let Some(t) = slot.ticket {

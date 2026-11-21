@@ -485,30 +485,33 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
     }
 
     /// Give up ticket `t`, whose caller has gone. A queued command is
-    /// dropped; a running one is left to finish (it is freed then), and the
-    /// engine running it is returned so the caller can wait for the engine
-    /// to stop using its buffers.
-    pub(crate) fn abandon_staged(&mut self, t: u8) -> Option<u8> {
+    /// dropped; a running one is left to finish (it is freed then), and
+    /// whether one is running is returned, so that the caller can wait for
+    /// it to stop using its buffers (see [`is_abandoned`](Self::is_abandoned)).
+    pub(crate) fn abandon_staged(&mut self, t: u8) -> bool {
         match self.tickets[t as usize].state {
             TicketState::Queued(q) => {
                 self.clear_queue_entry(q);
                 self.tickets[t as usize].state = TicketState::Free;
                 self.ticket_free |= 1u64 << t;
-                None
+                false
             }
             TicketState::Running => {
                 self.tickets[t as usize].state = TicketState::Abandoned;
-                self.engine_slots
-                    .iter()
-                    .position(|e| e.ticket == Some(t))
-                    .map(|id| id as u8)
+                true
             }
             TicketState::Done(_) => {
                 self.tickets[t as usize].state = TicketState::Free;
                 self.ticket_free |= 1u64 << t;
-                None
+                false
             }
-            TicketState::Free | TicketState::Abandoned => None,
+            TicketState::Free | TicketState::Abandoned => false,
         }
+    }
+
+    /// Whether ticket `t` was given up while its command ran, and the
+    /// command has not finished yet.
+    pub(crate) fn is_abandoned(&self, t: u8) -> bool {
+        self.tickets[t as usize].state == TicketState::Abandoned
     }
 }

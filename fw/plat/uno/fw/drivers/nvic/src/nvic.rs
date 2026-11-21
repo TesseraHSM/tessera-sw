@@ -27,6 +27,12 @@ impl Nvic {
 
     /// Disable an interrupt in the NVIC.
     #[inline(always)]
+    pub fn enable_raw(irq: u16) {
+        let n = irq as u32;
+        NVIC.iser[(n / 32) as usize].set(1 << (n % 32));
+    }
+
+    #[inline(always)]
     pub fn disable(irq: Interrupt) {
         let n = irq as u32;
         NVIC.icer[(n / 32) as usize].set(1 << (n % 32));

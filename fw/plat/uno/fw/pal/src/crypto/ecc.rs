@@ -756,15 +756,9 @@ impl HsmEcc for UnoHsmPal {
         if signature.len() < wire_len {
             return Err(HsmError::InvalidArg);
         }
-        self.service_pka();
-        let signed = self
-            .pka
+        self.pka
             .ecc_sign(pka_curve, hash, priv_key, input, &mut signature[..wire_len])
-            .await;
-        // Other engines may have finished while this one signed; see to
-        // them before the reply goes out.
-        self.service_pka();
-        signed?;
+            .await?;
         Ok(wire_len)
     }
 
@@ -787,13 +781,9 @@ impl HsmEcc for UnoHsmPal {
         if priv_key.len() != hsm_point_size(pka_curve) {
             return Err(HsmError::InvalidArg);
         }
-        self.service_pka();
-        let signed = self
-            .pka
+        self.pka
             .ecc_sign_in_place(pka_curve, hash, priv_key, k_sig)
-            .await;
-        self.service_pka();
-        signed?;
+            .await?;
         Ok(curve.wire_sig_len(Self::ECC_COORD_PAD))
     }
 

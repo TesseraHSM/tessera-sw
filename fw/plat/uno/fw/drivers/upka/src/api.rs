@@ -1,12 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
+use core::cell::UnsafeCell;
 use core::ops::AsyncFnOnce;
 
 use embassy_sync::waitqueue::WakerRegistration;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
 
@@ -39,7 +41,31 @@ use crate::UpkaRsaKeyType;
 ///   at most 128.
 /// - `ENGINES`: Number of hardware PKA engines. Must be 1–16.
 pub struct UpkaDriver<const DEPTH: usize, const ENGINES: usize> {
-    pub(crate) state: SingleCell<UpkaState<DEPTH, ENGINES>>,
+    pub(crate) state: Masked<UpkaState<DEPTH, ENGINES>>,
+}
+
+/// The driver state, which the engines' interrupt handler updates (through
+/// [`UpkaDriver::wake_engine`]) as well as thread code: every access masks
+/// interrupts.
+pub(crate) struct Masked<T>(UnsafeCell<T>);
+
+// SAFETY: the HSM has one core, and every access to the state runs with
+// interrupts masked (see `with`), so no two of them overlap.
+unsafe impl<T> Sync for Masked<T> {}
+
+impl<T> Masked<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    /// Runs `f` on the state with interrupts masked. `f` must not reach the
+    /// state again.
+    #[inline(always)]
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: with interrupts masked nothing else runs until `f`
+        // returns, and `f` does not re-enter.
+        cortex_m::interrupt::free(|_| f(unsafe { &mut *self.0.get() }))
+    }
 }
 
 impl<const DEPTH: usize, const ENGINES: usize> core::fmt::Debug for UpkaDriver<DEPTH, ENGINES> {
@@ -95,7 +121,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         EngineExecutor::init_wipe_descriptor();
 
         Self {
-            state: SingleCell::new(UpkaState {
+            state: Masked::new(UpkaState {
                 free_mask: ((1u32 << ENGINES) - 1) as u16,
                 engine_slots: core::array::from_fn(|_| EngineSlot {
                     waker: WakerRegistration::new(),
@@ -134,10 +160,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         Scheduler::new(self)
     }
 
-    /// Wake a specific engine by ID.
+    /// Handle engine `id`'s completion, if it has one: wake the command's
+    /// waiter, start the wipe that follows it, or return the wiped engine to
+    /// the pool, starting the next queued command on it.
     ///
-    /// Called from the per-engine Done/Error IRQ handler via the PAL
-    /// WAKE_ENTRIES dispatch.
+    /// Called from the engines' done and error interrupt handler, as soon as
+    /// an engine finishes.
     ///
     /// # Parameters
     ///
