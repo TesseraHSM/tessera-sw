@@ -172,6 +172,7 @@ extern "C" {
     fn AES_DONE();
     fn SHA_DONE();
     fn TCON_WAKEUP1();
+    fn UPKA_IRQ();
 }
 
 /// Interrupt vector table — indexed by IRQ number.
@@ -191,6 +192,14 @@ pub static __INTERRUPTS: [Option<unsafe extern "C" fn()>; 224] = {
     // 89 = TCON_WAKEUP1 — cross-core crash-notify receiver (asm trampoline in
     // `tsra_fw_uno_fault`); NVIC-vectored so it preempts a spinning/halted core.
     table[89] = Some(TCON_WAKEUP1);
+    // 0..=15 = UPKA_n_ERROR, 32..=47 = UPKA_n_DONE — one handler for every
+    // PKA engine, which takes the engine from the active vector.
+    let mut engine = 0;
+    while engine < 16 {
+        table[engine] = Some(UPKA_IRQ);
+        table[32 + engine] = Some(UPKA_IRQ);
+        engine += 1;
+    }
     // 129 = INTC_IPC — polled, no ISR
     // 100/101 = IIC_ICQ_FP1/FP2, 107/108 = OIC_OCQ_FP1/FP2 — polled, no ISR
     table

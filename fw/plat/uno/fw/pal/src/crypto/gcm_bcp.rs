@@ -288,7 +288,6 @@ impl UnoHsmPal {
                 Dir::Decrypt(t) => read_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
             });
-            self.service_pka();
             let done = self
                 .bcp
                 .gcm(GcmRequest {

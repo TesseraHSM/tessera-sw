@@ -37,5 +37,6 @@ PROVIDE(UPKA_13_ERROR = DefaultHandler);
 PROVIDE(UPKA_14_ERROR = DefaultHandler);
 PROVIDE(UPKA_15_ERROR = DefaultHandler);
 PROVIDE(INTC_IPC = DefaultHandler);
+PROVIDE(UPKA_IRQ = DefaultHandler);
 
 
