@@ -215,7 +215,12 @@ fn publish_cqe(index: u16) {
 /// at recv time; the IO keeps the partition and queue it needs from the
 /// routing the driver returned, since IO GSRAM is read uncached and both
 /// are wanted many times per IO.
+///
+/// Word-aligned: an IO moves by value from the run loop to its task and on
+/// through the core, and a word-aligned move is a few word copies rather
+/// than a `memcpy` call.
 #[derive(Debug)]
+#[repr(align(4))]
 pub struct UnoHsmIo {
     /// Slot index. For a command IO this indexes `IO_SQ`: host IO uses
     /// `0..ADMIN_IO_INDEX`; the reserved admin slot (`ADMIN_IO_INDEX`, the
