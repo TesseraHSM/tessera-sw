@@ -74,6 +74,8 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::GcmCompletion;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
@@ -243,6 +245,13 @@ pub(crate) enum RequestIn {
     Copied,
     /// The copy failed.
     Failed,
+    /// Copied and, sealed, opened in place (see [`UnoHsmPal::start_open`]):
+    /// authenticated and decrypted, a message of this length.
+    #[cfg(not(feature = "bulk_crypto"))]
+    Opened(u16),
+    /// Copied but, sealed, failed to open; its text is wiped.
+    #[cfg(not(feature = "bulk_crypto"))]
+    OpenFailed,
 }
 
 /// Takes a command IO the run loop received (see
@@ -538,6 +547,17 @@ impl HsmIoController for UnoHsmPal {
                 crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?
             }
             Some(RequestIn::Failed) => return Err(HsmError::FailedToStartDmaTransaction),
+            #[cfg(not(feature = "bulk_crypto"))]
+            Some(RequestIn::Opened(len)) => {
+                let buf = crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?;
+                return Ok(HsmRequest {
+                    buf: buf.skip_prefix(headroom)?,
+                    len: usize::from(len),
+                    resp_capacity: sealed::sealed_msg_capacity(plan.resp_capacity),
+                });
+            }
+            #[cfg(not(feature = "bulk_crypto"))]
+            Some(RequestIn::OpenFailed) => return Err(HsmError::SessionTransportError),
         };
         let resp_capacity = plan.resp_capacity;
         let Some(id) = plan.sealed_id else {
@@ -737,6 +757,10 @@ pub(crate) enum Stage {
     /// Copying the request in (see [`UnoHsmPal::start_request`]); the IO
     /// waits here for it.
     Request(UnoHsmIo),
+    /// Opening the sealed request copied in (see
+    /// [`UnoHsmPal::start_open`]); the IO waits here for it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    Open(UnoHsmIo),
     /// The IO is with its task, its request brought in as given, for
     /// [`recv_request`](HsmIoController::recv_request) to take.
     Received(RequestIn),
@@ -749,6 +773,22 @@ pub(crate) enum Stage {
     Reply { queue_id: u16 },
     /// Posting the completion to queue `queue_id`.
     Post { queue_id: u16 },
+}
+
+/// A sealed frame's trailer, `iv ‖ tag`, read with one burst out of DMA
+/// memory.
+#[cfg(not(feature = "bulk_crypto"))]
+fn trailer_words(trailer: &HsmDmaBuf) -> Option<([u8; 12], [u8; 16])> {
+    let words = trailer.read_words::<7>()?;
+    let mut iv = [0u8; 12];
+    let mut tag = [0u8; 16];
+    for (bytes, word) in iv.as_chunks_mut::<4>().0.iter_mut().zip(&words[..3]) {
+        *bytes = word.to_ne_bytes();
+    }
+    for (bytes, word) in tag.as_chunks_mut::<4>().0.iter_mut().zip(&words[3..]) {
+        *bytes = word.to_ne_bytes();
+    }
+    Some((iv, tag))
 }
 
 /// A reply the run loop seals (see [`UnoHsmPal::start_seal`]): its frame and
@@ -903,15 +943,18 @@ impl UnoHsmPal {
         while let Some((index, ok)) = self.gdma.take_detached() {
             match self.stages[index as usize].take() {
                 Stage::Request(io) => {
-                    self.stages[index as usize].set(Stage::Received(if ok {
-                        RequestIn::Copied
-                    } else {
-                        RequestIn::Failed
-                    }));
-                    // Set before the first copy, and never cleared.
-                    if let Some(dispatch) = self.io_dispatch.get() {
-                        dispatch(io);
-                    }
+                    #[cfg(not(feature = "bulk_crypto"))]
+                    let Some(io) = (if ok { self.start_open(io) } else { Some(io) }) else {
+                        continue;
+                    };
+                    self.hand_on(
+                        io,
+                        if ok {
+                            RequestIn::Copied
+                        } else {
+                            RequestIn::Failed
+                        },
+                    );
                 }
                 Stage::Reply { queue_id } => {
                     let cqe = slot_cqe(index);
@@ -950,6 +993,112 @@ impl UnoHsmPal {
             self.iic.release_io(index);
             self.io_in_flight_dec(HsmIoKind::Cmd);
         }
+    }
+
+    /// Hands an IO the run loop parked on to its task, its request brought
+    /// in as `request_in` says.
+    #[inline]
+    fn hand_on(&self, io: UnoHsmIo, request_in: RequestIn) {
+        self.stages[io.index as usize].set(Stage::Received(request_in));
+        // Set before the first request copy, and never cleared.
+        if let Some(dispatch) = self.io_dispatch.get() {
+            dispatch(io);
+        }
+    }
+
+    /// Opens the sealed request just copied in for `io` in place, as
+    /// [`sealed_open`](sealed::sealed_open) would, but with a detached BCP
+    /// command, whose completion the run loop judges (see
+    /// [`finish_bcp_detached`](Self::finish_bcp_detached)): the IO's task
+    /// then wakes to the opened request. Opens only requests of an Active
+    /// session (a Pending one's are opened under the partition lock, by the
+    /// task). Returns the IO, to hand on now, if the open does not start.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn start_open(&self, io: UnoHsmIo) -> Option<UnoHsmIo> {
+        use tsra_fw_hsm_pal_traits::HsmSessionManager;
+        use tsra_fw_hsm_pal_traits::HsmSessionState;
+        use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
+        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
+
+        if !sealed::sqe_is_sealed(io.cmd_sqe()) {
+            return Some(io);
+        }
+        let Ok(plan) = RequestPlan::of(&io) else {
+            return Some(io);
+        };
+        let Some(id) = plan.sealed_id else {
+            return Some(io);
+        };
+        let Some(ct_len) = plan
+            .len
+            .checked_sub(sealed::SEALED_TRAILER_LEN)
+            .filter(|&n| n != 0 && n % sealed::SEALED_BLOCK_LEN == 0)
+        else {
+            return Some(io);
+        };
+        if !matches!(self.session_state(&io, id), HsmSessionState::Active) {
+            return Some(io);
+        }
+        let Ok(key) = self.session_transport_key(&io, id, HsmSessionTransportDir::H2m) else {
+            return Some(io);
+        };
+        let Ok(mut buf) = crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())
+        else {
+            return Some(io);
+        };
+        let (data, trailer) =
+            buf.buffer_mut()[..plan.headroom + plan.len].split_at_mut(plan.headroom + ct_len);
+        // The trailer, `iv ‖ tag`, in one burst out of DMA memory.
+        let Some((iv, tag)) = trailer_words(trailer) else {
+            return Some(io);
+        };
+        let Ok(binding) =
+            sealed::SessionTransportBinding::uno(u16::from(id), io.cmd_sqe().session_ctrl(), iv)
+        else {
+            return Some(io);
+        };
+        data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(false));
+        if self
+            .gcm_start_detached(key.key(), &iv, Some(&tag), data, io.index)
+            .is_err()
+        {
+            return Some(io);
+        }
+        debug_assert_eq!(iv.len(), SESSION_TRANSPORT_IV_LEN);
+        self.set_binding(&io, Some(binding));
+        self.stages[io.index as usize].set(Stage::Open(io));
+        None
+    }
+
+    /// Takes on IO `io`, whose sealed request [`start_open`](Self::start_open)
+    /// opened, with the open's completion `done`: hands the IO on, marked with
+    /// whether its request authenticated; one that did not has its text
+    /// wiped and its binding dropped, as a failed `sealed_open` leaves it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn finish_open(&self, io: UnoHsmIo, done: HsmResult<GcmCompletion>) {
+        let opened = RequestPlan::of(&io).ok().and_then(|plan| {
+            let mut buf =
+                crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len()).ok()?;
+            let ct_len = plan.len.checked_sub(sealed::SEALED_TRAILER_LEN)?;
+            let (data, trailer) =
+                buf.buffer_mut()[..plan.headroom + plan.len].split_at_mut(plan.headroom + ct_len);
+            let opened = trailer_words(trailer).and_then(|(_, tag)| {
+                crate::crypto::detached_gcm_verdict(Some(&tag), done).ok()?;
+                sealed::sealed_msg_len(&data[sealed::TRANSPORT_AAD_LEN..]).ok()
+            });
+            if opened.is_none() {
+                data[sealed::TRANSPORT_AAD_LEN..].fill(0);
+            }
+            opened.and_then(|len| u16::try_from(len).ok())
+        });
+        let request_in = match opened {
+            Some(len) => RequestIn::Opened(len),
+            None => {
+                self.set_binding(&io, None);
+                RequestIn::OpenFailed
+            }
+        };
+        self.hand_on(io, request_in);
     }
 
     /// Seals a sealed IO's reply `resp` as
@@ -1031,13 +1180,15 @@ impl UnoHsmPal {
         Err(io)
     }
 
-    /// Takes each finished detached BCP command's slot on: writes a sealed
-    /// reply's tag and starts its copy out, or fails its IO if the seal
-    /// failed.
+    /// Takes each finished detached BCP command's slot on: hands on the IO
+    /// of an opened request (see [`finish_open`](Self::finish_open)), or
+    /// writes a sealed reply's tag and starts its copy out, failing its IO if
+    /// the seal failed.
     #[cfg(not(feature = "bulk_crypto"))]
     fn finish_bcp_detached(&self) {
         while let Some((index, done)) = self.bcp.take_detached() {
             match self.stages[index as usize].take() {
+                Stage::Open(io) => self.finish_open(io, done),
                 Stage::Seal(reply) => match crate::crypto::detached_gcm_verdict(None, done) {
                     Ok(tag) => {
                         // SAFETY: the frame's last tag bytes lie in the slot's
