@@ -113,6 +113,24 @@ pub(crate) fn reset_io_alloc(pal: &UnoHsmPal, index: u16) {
     }
 }
 
+/// The exchange buffer the run loop allocated for slot `index` to copy a
+/// request into ahead of its task: the first `size` bytes of the slot's DMA
+/// heap, which nothing has been allocated after.
+pub(crate) fn prefetched_exchange(
+    pal: &UnoHsmPal,
+    index: u16,
+    size: usize,
+) -> HsmResult<HsmDmaAllocation<'_>> {
+    if wm(pal, index, DMA).with(|v| *v) != size {
+        return Err(HsmError::InternalError);
+    }
+    let (base, _) = heap_base_cap(index, DMA);
+    // SAFETY: `dma_alloc_exchange` reserved exactly this range for the
+    // slot's IO, the slot's first allocation since its reset, and handed
+    // out no view of it that is still live.
+    Ok(unsafe { HsmDmaAllocation::from_raw_parts(base, size) })
+}
+
 // ── Public test/utility hooks ─────────────────────────────────────
 
 impl UnoHsmPal {
