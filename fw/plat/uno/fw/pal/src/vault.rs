@@ -84,13 +84,24 @@ fn vault_for_key(io: &UnoHsmIo, key_id: HsmKeyId) -> KeyVault<VaultStorage> {
 }
 
 /// Where a lookup found a key's blob, with the vault generation it was
-/// found at and the session the key is bound to, if any.
+/// found at and the session the key is bound to, if any. An entry with no
+/// `blob` is empty; [`EMPTY`](Self::EMPTY) is all zeros, so the cache
+/// needs no `.data` initial values (see `memory.x`).
 #[derive(Clone, Copy)]
 struct KeyLocation {
-    key_id: HsmKeyId,
-    generation: u32,
+    key_id: u16,
     session: Option<u16>,
-    blob: &'static HsmDmaBuf,
+    generation: u32,
+    blob: Option<&'static HsmDmaBuf>,
+}
+
+impl KeyLocation {
+    const EMPTY: Self = Self {
+        key_id: 0,
+        session: None,
+        generation: 0,
+        blob: None,
+    };
 }
 
 /// Entries of [`KEY_LOCATIONS`].
@@ -100,14 +111,15 @@ const KEY_LOCATION_COUNT: usize = 16;
 /// [`vault_key_static`](UnoHsmPal::vault_key_static)). A static rather than
 /// a field of the PAL, so the compiler sees that a lookup writes nothing
 /// else.
-struct KeyLocations([Cell<Option<KeyLocation>>; KEY_LOCATION_COUNT]);
+struct KeyLocations([Cell<KeyLocation>; KEY_LOCATION_COUNT]);
 
 // SAFETY: single-core firmware with cooperative scheduling; only the
 // executor's tasks use the cache (no interrupt handler does), and no
 // reference into it outlives a lookup.
 unsafe impl Sync for KeyLocations {}
 
-static KEY_LOCATIONS: KeyLocations = KeyLocations([const { Cell::new(None) }; KEY_LOCATION_COUNT]);
+static KEY_LOCATIONS: KeyLocations =
+    KeyLocations([const { Cell::new(KeyLocation::EMPTY) }; KEY_LOCATION_COUNT]);
 
 /// Whether the IO's partition owns the table of key `key_id`, as
 /// [`vault_for_key`] would find it.
@@ -155,15 +167,17 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         key_id: HsmKeyId,
     ) -> HsmResult<&'static HsmDmaBuf> {
-        let id = usize::from(u16::from(key_id));
+        let raw_id = u16::from(key_id);
+        let id = usize::from(raw_id);
         let cell = &KEY_LOCATIONS.0[(id ^ id >> 4) % KEY_LOCATION_COUNT];
-        if let Some(found) = cell.get()
-            && found.key_id == key_id
+        let found = cell.get();
+        if let Some(blob) = found.blob
+            && found.key_id == raw_id
             && found.generation == VaultStorage::generation()
             && owns_key_table(io, key_id)
         {
             Self::check_key_session(io, found.session)?;
-            return Ok(found.blob);
+            return Ok(blob);
         }
         Self::locate_key(io, key_id, cell)
     }
@@ -174,7 +188,7 @@ impl UnoHsmPal {
     fn locate_key(
         io: &UnoHsmIo,
         key_id: HsmKeyId,
-        cell: &Cell<Option<KeyLocation>>,
+        cell: &Cell<KeyLocation>,
     ) -> HsmResult<&'static HsmDmaBuf> {
         let generation = VaultStorage::generation();
         // One vault view and one entry read serve both the isolation check
@@ -183,12 +197,12 @@ impl UnoHsmPal {
             vault_for_key(io, key_id).key_location_and_session(key_id)?;
         Self::check_key_session(io, session)?;
         let blob = blob_ref(table, off, len);
-        cell.set(Some(KeyLocation {
-            key_id,
-            generation,
+        cell.set(KeyLocation {
+            key_id: u16::from(key_id),
             session,
-            blob,
-        }));
+            generation,
+            blob: Some(blob),
+        });
         Ok(blob)
     }
 

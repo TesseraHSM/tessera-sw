@@ -19,3 +19,10 @@ MEMORY
 /* Include before link.x consumes the .text/.rodata self-test inputs. */
 INCLUDE gsram.x
 ASSERT(__gsram_rodata_end <= ORIGIN(GSRAM_CODE) + LENGTH(GSRAM_CODE), "Self-tests exceed GSRAM_CODE");
+
+/* The bootloader stages .data at its DTCM address, but the reset handler
+   then copies .data from its load address after .rodata, which the image
+   leaves unloaded: statics in .data start out as whatever ITCM holds there.
+   Keep .data to the 16-byte placeholder; other statics must be all zeros
+   (.bss). */
+ASSERT(__edata - __sdata == 16, "Only the placeholder may be in .data: make the static zero-initialized");

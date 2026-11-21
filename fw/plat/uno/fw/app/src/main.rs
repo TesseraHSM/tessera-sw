@@ -70,12 +70,10 @@ use tsra_fw_uno_pal::UnoHsmPal;
 //
 // The 1SP bootloader that loads this image requires every loadable
 // section to be at least 16 bytes long and a multiple of 16 bytes
-// (it copies sections in 16-byte units during image staging). Until
-// the firmware accumulates real mutable static state in `.data`,
-// the section would otherwise be 0 bytes and the bootloader would
-// reject the image. Once any genuine `.data` content lands and the
-// section is naturally >= 16 bytes (and a multiple of 16 bytes in
-// size), this dummy can be removed.
+// (it copies sections in 16-byte units during image staging). No
+// other static may need `.data`, as its initial values are not loaded
+// (see `memory.x`), so the section would otherwise be 0 bytes and the
+// bootloader would reject the image.
 #[used]
 #[allow(unsafe_code)]
 #[unsafe(link_section = ".data")]
