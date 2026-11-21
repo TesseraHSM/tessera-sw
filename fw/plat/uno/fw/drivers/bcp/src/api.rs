@@ -370,6 +370,9 @@ struct Slot {
     deadline: Instant,
     /// SQEs reserved against [`SQE_BUDGET`] until the command completes.
     chunks: u8,
+    /// The cookie of a command no task awaits, whose completion goes to
+    /// [`BcpDriver::take_detached`] rather than to a waker.
+    detached: Option<u16>,
 }
 
 struct BcpState {
@@ -398,6 +401,8 @@ struct BcpState {
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; IDS],
+    /// Detached commands done, by ID, for [`BcpDriver::take_detached`].
+    detached_done: u64,
     /// The DFL element [`write_dfl`] builds before writing it out: words it
     /// does not set stay zero, so a command need not clear it first.
     dfl: [u32; DFL_DWORDS],
@@ -443,7 +448,9 @@ impl BcpDriver {
                     err: [0; 2],
                     deadline: Instant::from_ticks(0),
                     chunks: 0,
+                    detached: None,
                 }),
+                detached_done: 0,
                 dfl: [0; DFL_DWORDS],
             }),
         }
@@ -473,6 +480,58 @@ impl BcpDriver {
             req,
             id: None,
         }
+    }
+
+    /// Submit an AES-256-GCM command no task awaits: [`take_detached`]
+    /// collects its completion, with `cookie`. The engine reads `src` and
+    /// writes `dst` until then, so the caller keeps them until it has.
+    ///
+    /// # Errors
+    ///
+    /// As [`gcm`](Self::gcm) fails before submitting, and with
+    /// [`BcpError::BUSY`], having started nothing, if no command ID or SQE
+    /// room is free now.
+    ///
+    /// [`take_detached`]: Self::take_detached
+    pub fn gcm_detached(&self, req: GcmRequest<'_>, cookie: u16) -> HsmResult<()> {
+        self.state.with(|s| match start(s, &req, Some(cookie))? {
+            Some(_) => Ok(()),
+            None => Err(BcpError::BUSY),
+        })
+    }
+
+    /// Whether a valid command over `len` bytes would start now: the engine
+    /// is up and not stalled, and a command ID and SQE room are free. For a
+    /// caller that commits to something before it starts the command.
+    pub fn can_start(&self, len: usize) -> bool {
+        self.state.with(|s| {
+            s.up && !s.stalled
+                && s.free != 0
+                && s.reserved + len.div_ceil(BCP_CHUNK_LEN) <= SQE_BUDGET
+        })
+    }
+
+    /// Takes one completed detached command, releasing it: its cookie and
+    /// its completion, which fails as [`gcm`](Self::gcm)'s does if the
+    /// engine had to be reset.
+    pub fn take_detached(&self) -> Option<(u16, HsmResult<GcmCompletion>)> {
+        self.state.with(|s| {
+            if s.detached_done == 0 {
+                return None;
+            }
+            let id = s.detached_done.trailing_zeros() as usize;
+            s.detached_done &= !(1 << id);
+            let cookie = s.slots[id].detached.take().unwrap_or(0);
+            let done = release(s, id);
+            Some((
+                cookie,
+                if done.status == STATUS_STALLED {
+                    Err(BcpError::TIMEOUT)
+                } else {
+                    Ok(done)
+                },
+            ))
+        })
     }
 
     /// Ring the doorbell for the commands submitted since the last call,
@@ -544,42 +603,17 @@ impl Future for GcmFuture<'_> {
         bcp.state.with(|s| {
             let id = match this.id {
                 Some(id) => id,
-                None => {
-                    let req = &this.req;
-                    if let Err(e) = validate(req) {
-                        return Poll::Ready(Err(e));
-                    }
-                    if s.stalled {
-                        return Poll::Ready(Err(BcpError::TIMEOUT));
-                    }
-                    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
-                    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
+                None => match start(s, &this.req, None) {
+                    Err(e) => return Poll::Ready(Err(e)),
+                    Ok(None) => {
                         s.id_waiters.register(cx.waker());
                         return Poll::Pending;
                     }
-                    if !s.up {
-                        if !bring_up() {
-                            return Poll::Ready(Err(BcpError::RESET_FAILED));
-                        }
-                        s.up = true;
-                        s.sq_pi = 0;
-                        s.cq_ci = 0;
+                    Ok(Some(id)) => {
+                        this.id = Some(id);
+                        id
                     }
-
-                    let id = s.free.trailing_zeros() as usize;
-                    s.free &= !(1 << id);
-                    s.slots[id].done = false;
-                    s.slots[id].aborting = false;
-                    s.slots[id].deadline = Instant::MAX;
-                    s.slots[id].chunks = chunks as u8;
-                    s.reserved += chunks;
-                    this.id = Some(id);
-
-                    load_key(id, req.key);
-                    write_dfl(&mut s.dfl, id, req);
-                    submit(s, id, req.op, req.data.src().1);
-                    id
-                }
+                },
             };
 
             if !s.slots[id].done {
@@ -612,6 +646,62 @@ impl Drop for GcmFuture<'_> {
         self.bcp.state.with(|s| {
             release(s, id);
         });
+    }
+}
+
+/// Take a command ID for `req` and submit it, if an ID is free and the
+/// command's chunks fit the SQE budget; `Ok(None)` if not, for the caller
+/// to wait or give up. A `detached` command's completion goes to
+/// [`BcpDriver::take_detached`], with that cookie, rather than to a waker.
+#[inline(always)]
+fn start(
+    s: &mut BcpState,
+    req: &GcmRequest<'_>,
+    detached: Option<u16>,
+) -> HsmResult<Option<usize>> {
+    validate(req)?;
+    if s.stalled {
+        return Err(BcpError::TIMEOUT);
+    }
+    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
+    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
+        return Ok(None);
+    }
+    if !s.up {
+        if !bring_up() {
+            return Err(BcpError::RESET_FAILED);
+        }
+        s.up = true;
+        s.sq_pi = 0;
+        s.cq_ci = 0;
+    }
+
+    let id = s.free.trailing_zeros() as usize;
+    s.free &= !(1 << id);
+    let slot = &mut s.slots[id];
+    slot.done = false;
+    slot.aborting = false;
+    slot.deadline = Instant::MAX;
+    slot.chunks = chunks as u8;
+    slot.detached = detached;
+    s.reserved += chunks;
+
+    load_key(id, req.key);
+    write_dfl(&mut s.dfl, id, req);
+    submit(s, id, req.op, req.data.src().1);
+    Ok(Some(id))
+}
+
+/// Command `id` is done: wake its awaiter, or leave it for
+/// [`BcpDriver::take_detached`] if it is detached.
+#[inline(always)]
+fn complete(s: &mut BcpState, id: usize) {
+    let slot = &mut s.slots[id];
+    slot.done = true;
+    if slot.detached.is_some() {
+        s.detached_done |= 1 << id;
+    } else {
+        slot.waker.wake();
     }
 }
 
@@ -674,10 +764,8 @@ fn reap(s: &mut BcpState, pi: u16, shadow: u32) {
         if s.slots[id].aborting {
             // The abort freeing a failed command's engine slot is done; the
             // command completes with its original status.
-            let slot = &mut s.slots[id];
-            slot.aborting = false;
-            slot.done = true;
-            slot.waker.wake();
+            s.slots[id].aborting = false;
+            complete(s, id);
             continue;
         }
 
@@ -704,8 +792,7 @@ fn reap(s: &mut BcpState, pi: u16, shadow: u32) {
         if status & BCP_STATUS_ERROR != 0 {
             slot.aborting = true;
         } else {
-            slot.done = true;
-            slot.waker.wake();
+            complete(s, id);
         }
     }
 
@@ -733,12 +820,11 @@ fn recover(s: &mut BcpState) {
     s.up = false;
 
     let free = s.free;
-    for (i, slot) in s.slots.iter_mut().enumerate() {
-        if free & (1 << i) == 0 && !slot.done {
-            slot.status = STATUS_STALLED;
-            slot.aborting = false;
-            slot.done = true;
-            slot.waker.wake();
+    for i in 0..IDS {
+        if free & (1 << i) == 0 && !s.slots[i].done {
+            s.slots[i].status = STATUS_STALLED;
+            s.slots[i].aborting = false;
+            complete(s, i);
         }
     }
 }

@@ -399,8 +399,9 @@ pub struct UnoHsmPal {
     /// its IO.
     pub(crate) stages: [Cell<crate::io::Stage>; IO_SQ_COUNT as usize],
 
-    /// Host IO slots whose detached completion post found the OIC full.
-    pub(crate) detached_post_pending: Cell<u32>,
+    /// Host IO slots whose next detached step (a reply copy or completion
+    /// post) found its engine full: retried every run-loop pass.
+    pub(crate) detached_retry: Cell<u32>,
 
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
@@ -563,7 +564,7 @@ impl Default for UnoHsmPal {
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
             stages: [const { Cell::new(crate::io::Stage::Idle) }; IO_SQ_COUNT as usize],
-            detached_post_pending: Cell::new(0),
+            detached_retry: Cell::new(0),
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
