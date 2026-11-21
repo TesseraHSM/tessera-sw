@@ -744,7 +744,7 @@ impl UnoHsmPal {
     pub(crate) async fn scrub_io_slot(&self, io_index: u16) {
         let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, io_index);
         // The admin and self-test slots always wipe with the CPU, so only the
-        // host IO slots take GDMA tags (see `GDMA_QUEUE_DEPTH`).
+        // host IO slots take GDMA tags (see `GDMA_TAGS`).
         let cpu = dma_len <= CPU_SCRUB_MAX || io_index >= crate::alloc::ADMIN_IO_INDEX;
         if dma_len != 0 && cpu {
             // SAFETY: `(dma_ptr, dma_len)` is a prefix of the slot's SRAM

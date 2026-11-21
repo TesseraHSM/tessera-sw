@@ -169,7 +169,7 @@ type Oic = OicDriver<IO_QUEUE_DEPTH>;
 pub(crate) type BulkIic = IicDriver<BULK_QUEUE_DEPTH>;
 #[cfg(not(feature = "bulk_crypto"))]
 pub(crate) type BulkOic = OicDriver<BULK_QUEUE_DEPTH>;
-type Gdma = GdmaDriver<GDMA_QUEUE_DEPTH>;
+type Gdma = GdmaDriver<GDMA_RING_DEPTH, GDMA_TAGS>;
 type Ipc = IpcDriver<IPC_PAIRS>;
 type Aes = AesDriver<CRYPTO_QUEUE_DEPTH>;
 type Sha = ShaDriver<CRYPTO_QUEUE_DEPTH>;
@@ -189,16 +189,20 @@ pub enum BootPhase {
 /// Queue depth for the command IO queues (ISQ, ICQ, OSQ, OCQ).
 const IO_QUEUE_DEPTH: usize = 32;
 
-/// GDMA queue depth and tag count. A transfer that finds every tag taken
-/// fails rather than waits, so there is a tag for every IO slot that can
-/// hold a transfer: the host command slots (each copies one transfer at a
-/// time; a detached reply copy holds its slot's tag until the slot frees)
-/// and the bulk slots. The admin and self-test slots scrub with the CPU
-/// (`scrub_io_slot`) and take none.
-const GDMA_QUEUE_DEPTH: usize = 64;
-const _: () = assert!(
-    GDMA_QUEUE_DEPTH >= crate::alloc::ADMIN_IO_INDEX as usize + crate::alloc::BULK_ALLOC_SLOTS
-);
+/// GDMA tag count. A transfer that finds every tag taken fails rather than
+/// waits, so there is a tag for every IO slot that can hold a transfer: the
+/// host command slots (each copies one transfer at a time; a detached reply
+/// copy holds its slot's tag until the slot frees) and the bulk slots. The
+/// admin and self-test slots scrub with the CPU (`scrub_io_slot`) and take
+/// none.
+const GDMA_TAGS: usize = 64;
+const _: () =
+    assert!(GDMA_TAGS >= crate::alloc::ADMIN_IO_INDEX as usize + crate::alloc::BULK_ALLOC_SLOTS);
+
+/// GDMA SQ/CQ ring depth. A ring holds one entry fewer than its depth, so
+/// it is deeper than [`GDMA_TAGS`]: with every tag in flight and none
+/// fetched by the engine, the SQ still has room.
+const GDMA_RING_DEPTH: usize = 128;
 
 /// AES and SHA queue depth. Each queue is a software FIFO (the engine runs
 /// one command at a time), and a request that finds it full fails rather

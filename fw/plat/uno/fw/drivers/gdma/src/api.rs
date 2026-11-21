@@ -43,7 +43,7 @@ struct TagSlot {
     cookie: u16,
 }
 
-struct GdmaState<const DEPTH: usize> {
+struct GdmaState<const TAGS: usize> {
     cq_head: u16,
     sq_tail: u16,
     /// Cached SQ head index. Updated lazily when the queue looks full.
@@ -51,7 +51,7 @@ struct GdmaState<const DEPTH: usize> {
     tag_free: u64,
     /// Completed detached transfers, one bit per tag.
     detached_done: u64,
-    tags: [TagSlot; DEPTH],
+    tags: [TagSlot; TAGS],
 }
 
 /// Async GDMA (General DMA Controller) driver.
@@ -62,11 +62,13 @@ struct GdmaState<const DEPTH: usize> {
 ///
 /// # Type Parameters
 ///
-/// - `DEPTH`: Queue depth and max concurrent tags. Must be a power of 2, at
-///   most 64. A transfer that finds every tag taken fails with
-///   [`GdmaError::NO_FREE_TAGS`] rather than waiting, so size `DEPTH` to the
-///   number of transfers that can be in flight at once.
-pub struct GdmaDriver<const DEPTH: usize> {
+/// - `DEPTH`: SQ and CQ ring depth. Must be a power of 2. A ring holds
+///   `DEPTH - 1` entries (`PI == CI` means empty).
+/// - `TAGS`: Maximum concurrent transfers, at most 64 and less than `DEPTH`,
+///   so the SQ cannot fill while a tag is free. A transfer that finds every
+///   tag taken fails with [`GdmaError::NO_FREE_TAGS`] rather than waiting,
+///   so size `TAGS` to the number of transfers that can be in flight at once.
+pub struct GdmaDriver<const DEPTH: usize, const TAGS: usize> {
     /// Physical channel index.
     channel: u8,
 
@@ -89,30 +91,35 @@ pub struct GdmaDriver<const DEPTH: usize> {
     sq_head_shadow: *const u32,
 
     /// Mutable state protected by single-threaded access.
-    state: SingleCell<GdmaState<DEPTH>>,
+    state: SingleCell<GdmaState<TAGS>>,
 }
 
 // SAFETY: GdmaDriver is only used on single-core Cortex-M firmware with
 // cooperative scheduling. The raw pointers reference MMIO or DTCM memory with
 // a single owner in practice; Send/Sync are needed for Embassy's static tasks.
-unsafe impl<const DEPTH: usize> Send for GdmaDriver<DEPTH> {}
+unsafe impl<const DEPTH: usize, const TAGS: usize> Send for GdmaDriver<DEPTH, TAGS> {}
 // SAFETY: Single-core cooperative scheduling serializes access to the owned queues and state.
-unsafe impl<const DEPTH: usize> Sync for GdmaDriver<DEPTH> {}
+unsafe impl<const DEPTH: usize, const TAGS: usize> Sync for GdmaDriver<DEPTH, TAGS> {}
 
-impl<const DEPTH: usize> core::fmt::Debug for GdmaDriver<DEPTH> {
+impl<const DEPTH: usize, const TAGS: usize> core::fmt::Debug for GdmaDriver<DEPTH, TAGS> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GdmaDriver")
             .field("DEPTH", &DEPTH)
+            .field("TAGS", &TAGS)
             .field("channel", &self.channel)
             .finish()
     }
 }
 
-impl<const DEPTH: usize> GdmaDriver<DEPTH> {
+impl<const DEPTH: usize, const TAGS: usize> GdmaDriver<DEPTH, TAGS> {
     const MASK: u16 = (DEPTH - 1) as u16;
 
     const _ASSERT_DEPTH_POW2: () = assert!(DEPTH.is_power_of_two(), "DEPTH must be power of 2");
-    const _ASSERT_DEPTH_MAX: () = assert!(DEPTH <= 64, "DEPTH must be <= 64 (u64 tag bitmap)");
+    const _ASSERT_TAGS_MAX: () = assert!(TAGS <= 64, "TAGS must be <= 64 (u64 tag bitmap)");
+    const _ASSERT_TAGS_FIT: () = assert!(
+        TAGS > 0 && TAGS < DEPTH,
+        "TAGS must be nonzero and below DEPTH, so the SQ cannot fill"
+    );
     const _ASSERT_SQ_FIT: () =
         assert!(DEPTH <= GDMA_SQ_COUNT as usize, "DEPTH exceeds SQ capacity");
     const _ASSERT_CQ_FIT: () =
@@ -139,13 +146,14 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// # Panics
     ///
-    /// Compile-time panic if `DEPTH` is not a power of 2, exceeds 64, or is
-    /// larger than the GDMA queue storage allocated in DTCM.
+    /// Compile-time panic if `DEPTH` is not a power of 2 or exceeds the GDMA
+    /// queue storage, or if `TAGS` exceeds 64 or is not below `DEPTH`.
     pub fn new(config: ChannelConfig) -> Self {
         #[allow(clippy::let_unit_value)]
         {
             let _ = Self::_ASSERT_DEPTH_POW2;
-            let _ = Self::_ASSERT_DEPTH_MAX;
+            let _ = Self::_ASSERT_TAGS_MAX;
+            let _ = Self::_ASSERT_TAGS_FIT;
             let _ = Self::_ASSERT_SQ_FIT;
             let _ = Self::_ASSERT_CQ_FIT;
             let _ = Self::_ASSERT_SQ_ENTRY_SIZE;
@@ -163,10 +171,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             cookie: 0,
         });
 
-        let tag_free = if DEPTH >= 64 {
+        let tag_free = if TAGS >= 64 {
             u64::MAX
         } else {
-            (1u64 << DEPTH) - 1
+            (1u64 << TAGS) - 1
         };
 
         Self {
@@ -436,10 +444,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// Record the completion whose CQ status word is `st` for its tag, and
     /// wake its awaiter (or mark a detached copy done).
     #[inline(always)]
-    fn complete(s: &mut GdmaState<DEPTH>, st: u32) {
+    fn complete(s: &mut GdmaState<TAGS>, st: u32) {
         let st = tock_registers::LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(st);
         let tag = st.read(GDMA_CQ_STATUS::TAG) as usize;
-        if tag < DEPTH {
+        if tag < TAGS {
             let slot = &mut s.tags[tag];
             slot.status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
                 0
