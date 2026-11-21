@@ -83,14 +83,31 @@ fn vault_for_key(io: &UnoHsmIo, key_id: HsmKeyId) -> KeyVault<VaultStorage> {
     KeyVault::new(VaultStorage::with_mask_word(word, bits))
 }
 
-/// A session key's blob as a sealed IO found it, with the vault generation
-/// it was found at.
+/// Where a lookup found a key's blob, with the vault generation it was
+/// found at and the session the key is bound to, if any.
 #[derive(Clone, Copy)]
-pub(crate) struct SessionKeyBlob {
+struct KeyLocation {
     key_id: HsmKeyId,
     generation: u32,
+    session: Option<u16>,
     blob: &'static HsmDmaBuf,
 }
+
+/// Entries of [`KEY_LOCATIONS`].
+const KEY_LOCATION_COUNT: usize = 16;
+
+/// Where vault lookups found keys, by key ID (see
+/// [`vault_key_static`](UnoHsmPal::vault_key_static)). A static rather than
+/// a field of the PAL, so the compiler sees that a lookup writes nothing
+/// else.
+struct KeyLocations([Cell<Option<KeyLocation>>; KEY_LOCATION_COUNT]);
+
+// SAFETY: single-core firmware with cooperative scheduling; only the
+// executor's tasks use the cache (no interrupt handler does), and no
+// reference into it outlives a lookup.
+unsafe impl Sync for KeyLocations {}
+
+static KEY_LOCATIONS: KeyLocations = KeyLocations([const { Cell::new(None) }; KEY_LOCATION_COUNT]);
 
 /// Whether the IO's partition owns the table of key `key_id`, as
 /// [`vault_for_key`] would find it.
@@ -126,42 +143,42 @@ impl UnoHsmPal {
     /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
     /// on a key's already-read session binding.
     /// [`vault_key`](HsmVault::vault_key), as a `'static` view.
-    fn vault_key_static(io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&'static HsmDmaBuf> {
-        // One vault view and one entry read serve both the isolation check
-        // and the location: the vault sits in GSRAM, read uncached.
-        let ((table, off, len), session) =
-            vault_for_key(io, key_id).key_location_and_session(key_id)?;
-        Self::check_key_session(io, session)?;
-        Ok(blob_ref(table, off, len))
-    }
-
-    /// [`vault_key`](HsmVault::vault_key) for the session key that a sealed
-    /// IO's request is opened with and its response sealed with: the second
-    /// lookup takes the first's blob instead of reading the key's entry out
-    /// of GSRAM again, unless the vault has been written since or the
-    /// partition no longer owns the key's table.
-    pub(crate) fn session_key_blob(
-        &self,
+    ///
+    /// The key's entry sits in GSRAM, read uncached, and a sealed IO looks
+    /// up its session's key three times (to open its request, unmask its
+    /// key, and seal its response), as does every IO of the session after
+    /// it. So where a lookup found a key is kept in [`KEY_LOCATIONS`], and
+    /// a later lookup of the key takes it from there while the vault is
+    /// unwritten since, checking again that the IO's partition owns the
+    /// key's table and may use a key bound to a session, as reading the
+    /// entry would.
+    pub(crate) fn vault_key_static(
         io: &UnoHsmIo,
         key_id: HsmKeyId,
     ) -> HsmResult<&'static HsmDmaBuf> {
         let generation = VaultStorage::generation();
-        let cell = self.io_session_key.get(usize::from(io.index()));
-        if let Some(found) = cell.and_then(Cell::get)
+        let id = usize::from(u16::from(key_id));
+        let cell = &KEY_LOCATIONS.0[(id ^ id >> 4) % KEY_LOCATION_COUNT];
+        if let Some(found) = cell.get()
             && found.key_id == key_id
             && found.generation == generation
             && owns_key_table(io, key_id)
         {
+            Self::check_key_session(io, found.session)?;
             return Ok(found.blob);
         }
-        let blob = Self::vault_key_static(io, key_id)?;
-        if let Some(cell) = cell {
-            cell.set(Some(SessionKeyBlob {
-                key_id,
-                generation,
-                blob,
-            }));
-        }
+        // One vault view and one entry read serve both the isolation check
+        // and the location.
+        let ((table, off, len), session) =
+            vault_for_key(io, key_id).key_location_and_session(key_id)?;
+        Self::check_key_session(io, session)?;
+        let blob = blob_ref(table, off, len);
+        cell.set(Some(KeyLocation {
+            key_id,
+            generation,
+            session,
+            blob,
+        }));
         Ok(blob)
     }
 
