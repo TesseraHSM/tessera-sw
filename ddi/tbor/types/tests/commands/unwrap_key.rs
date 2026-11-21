@@ -10,7 +10,10 @@
 //! key), unwrap it on-device, and check the result.
 //!
 //! Coverage:
-//! * AES key — the masked blob is non-zero and there is no public key.
+//! * AES keys of every size and supported scope preserve exact imported attributes
+//!   and labels, including boundary lengths and arbitrary bytes.
+//! * AES rejects missing, forbidden, mixed, and unknown usages, unsupported scopes,
+//!   and oversized labels, with valid unwrap controls.
 //! * AES-XTS key — a 64-byte `K1 ‖ K2` imports as `AesXts512`; wrong
 //!   lengths, equal halves, and non-cipher usage are rejected.
 //! * HMAC key — the recovered key's kind is `VarLenHmacSha256` and it
@@ -32,9 +35,14 @@ use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
 
+use crate::commands::aes_generate_key::assert_aes_key_attrs;
+use crate::commands::aes_generate_key::key_len_for_size;
 use crate::commands::common::import_ok;
 use crate::commands::common::rsa_aes_wrap;
+use crate::commands::common::SCOPE_EPHEMERAL;
 use crate::commands::common::SCOPE_LOCAL;
+use crate::commands::common::SCOPE_SECURITY_DOMAIN;
+use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `HsmVaultKeyKind::VarLenHmacSha256` discriminant.
@@ -137,17 +145,40 @@ fn unwrap_key_rsa_4k_crt() {
 
 #[test]
 fn unwrap_key_aes() {
-    let ctx = TestCtx::new();
-    let session = finalized_co_session(&ctx);
+    for (key_size, key_kind, masked_len) in [
+        (AES_KEY_SIZE_128, KEY_KIND_AES128, MASKED_AES_KEY_MIN_LEN),
+        (AES_KEY_SIZE_192, KEY_KIND_AES192, MASKED_AES_KEY_MAX_LEN),
+        (AES_KEY_SIZE_256, KEY_KIND_AES256, MASKED_AES_KEY_MAX_LEN),
+    ] {
+        for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+            for label in [
+                Vec::new(),
+                vec![b'L'],
+                vec![b'L'; TBOR_KEY_LABEL_MAX_LEN - 1],
+                vec![b'L'; TBOR_KEY_LABEL_MAX_LEN],
+                vec![0x00, 0x80, 0xff, b'A', 0x00],
+            ] {
+                let ctx = TestCtx::new();
+                let session = finalized_co_session(&ctx);
+                let key = vec![0x42; key_len_for_size(key_size)];
+                let mut req = unwrap_req(
+                    &ctx,
+                    session.session_id,
+                    KEY_CLASS_AES,
+                    KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+                    &key,
+                );
+                req.scope = scope;
+                req.key_label = label;
+                let resp = ctx.tbor(&req).expect("valid AES unwrap attributes");
 
-    let aes_key = [0x42u8; 32];
-    let resp = unwrap(&ctx, session.session_id, KEY_CLASS_AES, &aes_key);
-
-    assert!(
-        resp.masked_key.iter().any(|&b| b != 0),
-        "masked AES key must not be all-zero",
-    );
-    assert!(resp.pub_key.is_empty(), "a symmetric key has no public key");
+                assert_eq!(resp.key_kind, key_kind);
+                assert_eq!(resp.masked_key.len(), masked_len);
+                assert!(resp.pub_key.is_empty(), "a symmetric key has no public key");
+                assert_aes_key_attrs(&resp.masked_key, scope, key_kind, &req.key_label, false);
+            }
+        }
+    }
 }
 
 /// Retrieves the unwrapping public key, retrying while generation is pending.
@@ -312,6 +343,122 @@ fn unwrap_key_rejects_invalid_usage_for_class() {
         key_label: Vec::new(),
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+}
+
+/// Unknown usage bits must be rejected even when ENCRYPT+DECRYPT is otherwise valid.
+/// Each size, scope, and reserved-bit case uses a fresh fixture and a successful control.
+#[test]
+fn unwrap_key_aes_rejects_unknown_usage() {
+    for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+        for unknown_bit in [1u64 << 7, 1u64 << 63] {
+            for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+                let ctx = TestCtx::new();
+                let session = finalized_co_session(&ctx);
+                let key = vec![0x42; key_len_for_size(key_size)];
+                let mut req = unwrap_req(
+                    &ctx,
+                    session.session_id,
+                    KEY_CLASS_AES,
+                    KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+                    &key,
+                );
+                req.scope = scope;
+                ctx.tbor(&req).expect("valid AES unwrap usage must succeed");
+
+                req.key_usage |= unknown_bit;
+                ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+            }
+        }
+    }
+}
+
+/// All recognized AES usages other than exactly ENCRYPT+DECRYPT are rejected.
+#[test]
+fn unwrap_key_aes_rejects_invalid_usage() {
+    let valid_usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
+    for usage in [
+        0,
+        KEY_USAGE_ENCRYPT,
+        KEY_USAGE_DECRYPT,
+        KEY_USAGE_SIGN,
+        KEY_USAGE_VERIFY,
+        KEY_USAGE_DERIVE,
+        KEY_USAGE_WRAP,
+        KEY_USAGE_UNWRAP,
+        valid_usage | KEY_USAGE_SIGN,
+        valid_usage | KEY_USAGE_VERIFY,
+        valid_usage | KEY_USAGE_DERIVE,
+        valid_usage | KEY_USAGE_WRAP,
+        valid_usage | KEY_USAGE_UNWRAP,
+        valid_usage | KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        valid_usage | KEY_USAGE_WRAP | KEY_USAGE_UNWRAP,
+        u64::MAX,
+    ] {
+        for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+            for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+                let ctx = TestCtx::new();
+                let session = finalized_co_session(&ctx);
+                let key = vec![0x42; key_len_for_size(key_size)];
+                let mut req =
+                    unwrap_req(&ctx, session.session_id, KEY_CLASS_AES, valid_usage, &key);
+                req.scope = scope;
+                ctx.tbor(&req).expect("valid AES unwrap usage must succeed");
+
+                req.key_usage = usage;
+                ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+            }
+        }
+    }
+}
+
+/// Invalid and unprovisioned scopes reject a valid wrapped AES key.
+#[test]
+fn unwrap_key_aes_rejects_unsupported_scope() {
+    for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+        for scope in [0, SCOPE_SECURITY_DOMAIN, SCOPE_SECURITY_DOMAIN + 1, u8::MAX] {
+            let ctx = TestCtx::new();
+            let session = finalized_co_session(&ctx);
+            let key = vec![0x42; key_len_for_size(key_size)];
+            let mut req = unwrap_req(
+                &ctx,
+                session.session_id,
+                KEY_CLASS_AES,
+                KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+                &key,
+            );
+            ctx.tbor(&req)
+                .expect("Local AES unwrap control must succeed");
+
+            req.scope = scope;
+            ctx.expect_fw_reject(&req, TborStatus::UnsupportedKeyScope);
+        }
+    }
+}
+
+/// A 128-byte label succeeds before the corresponding 129-byte label is rejected.
+#[test]
+fn unwrap_key_aes_rejects_oversized_label() {
+    for key_size in [AES_KEY_SIZE_128, AES_KEY_SIZE_192, AES_KEY_SIZE_256] {
+        for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
+            let ctx = TestCtx::new();
+            let session = finalized_co_session(&ctx);
+            let key = vec![0x42; key_len_for_size(key_size)];
+            let mut req = unwrap_req(
+                &ctx,
+                session.session_id,
+                KEY_CLASS_AES,
+                KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+                &key,
+            );
+            req.scope = scope;
+            req.key_label = vec![b'L'; TBOR_KEY_LABEL_MAX_LEN];
+            ctx.tbor(&req)
+                .expect("maximum-length AES unwrap label must succeed");
+
+            req.key_label.push(b'L');
+            ctx.expect_fw_reject(&req, TborStatus::TborInvalidFixedLength);
+        }
+    }
 }
 
 /// A 64-byte `K1 ‖ K2` imports as a single `AesXts512` key with no public

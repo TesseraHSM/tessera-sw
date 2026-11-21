@@ -2,8 +2,11 @@
 // Licensed under the MIT License.
 
 use tsra_crypto::Rng;
+use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
 use super::*;
+
+const AES_VALID_KEY_SIZES_IN_BITS: [u32; 3] = [128, 192, 256];
 
 // ================================
 // Helpers
@@ -39,6 +42,7 @@ fn verify_generated_aes_key_properties(key: &HsmAesKey, bits: u32, is_session: b
     assert_eq!(key.class(), HsmKeyClass::Secret, "Key class mismatch");
     assert_eq!(key.kind(), HsmKeyKind::Aes, "Key kind mismatch");
     assert_eq!(key.bits(), bits, "Key bits mismatch");
+    assert_eq!(key.ecc_curve(), None, "AES key must not have an ECC curve");
     assert!(key.is_local(), "Session key should be local");
     assert_eq!(key.is_session(), is_session, "Session flag mismatch");
     assert!(key.is_sensitive(), "Secret key should be sensitive");
@@ -47,6 +51,7 @@ fn verify_generated_aes_key_properties(key: &HsmAesKey, bits: u32, is_session: b
     assert!(key.can_decrypt(), "Key should support decryption");
     assert!(!key.can_sign(), "Key should not support signing");
     assert!(!key.can_verify(), "Key should not support verification");
+    assert!(!key.can_wrap(), "Key should not support wrapping");
     assert!(!key.can_unwrap(), "Key should not support unwrapping");
     assert!(!key.can_derive(), "Key should not support derivation");
 }
@@ -55,6 +60,7 @@ fn verify_unwrapped_aes_key_properties(key: &HsmAesKey, bits: u32, is_session: b
     assert_eq!(key.class(), HsmKeyClass::Secret, "Key class mismatch");
     assert_eq!(key.kind(), HsmKeyKind::Aes, "Key kind mismatch");
     assert_eq!(key.bits(), bits, "Key bits mismatch");
+    assert_eq!(key.ecc_curve(), None, "AES key must not have an ECC curve");
     assert!(!key.is_local(), "Unwrapped key should not be local");
     assert_eq!(key.is_session(), is_session, "Session flag mismatch");
     assert!(key.is_sensitive(), "Secret key should be sensitive");
@@ -63,6 +69,7 @@ fn verify_unwrapped_aes_key_properties(key: &HsmAesKey, bits: u32, is_session: b
     assert!(key.can_decrypt(), "Key should support decryption");
     assert!(!key.can_sign(), "Key should not support signing");
     assert!(!key.can_verify(), "Key should not support verification");
+    assert!(!key.can_wrap(), "Key should not support wrapping");
     assert!(!key.can_unwrap(), "Key should not support unwrapping");
     assert!(!key.can_derive(), "Key should not support derivation");
 }
@@ -178,36 +185,38 @@ fn test_session_aes_key_generation_common(session: &HsmSession, bits: u32) {
     HsmKeyManager::delete_key(key).expect("Failed to delete AES key");
 }
 
-fn test_aes_key_unwrap_common(session: &HsmSession, bits: u32, is_session: bool) {
+fn unwrap_aes_key_with_props(
+    session: &HsmSession,
+    key_props: HsmKeyProps,
+) -> Result<HsmAesKey, HsmError> {
     let (unwrapping_priv_key, unwrapping_pub_key) = get_rsa_unwrapping_key_pair(session);
 
-    let key_bytes = (bits / 8) as usize;
+    let key_bytes = (key_props.bits() / u8::BITS) as usize;
     let mut wrap_algo = HsmRsaAesWrapAlgo::new(HsmHashAlgo::Sha256, key_bytes);
     let aes_key_data = vec![0u8; key_bytes];
     let wrapped_key = HsmEncrypter::encrypt_vec(&mut wrap_algo, &unwrapping_pub_key, &aes_key_data)
         .expect("Failed to wrap AES Key");
 
-    let mut builder = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Secret)
-        .key_kind(HsmKeyKind::Aes)
-        .bits(bits)
-        .can_encrypt(true)
-        .can_decrypt(true);
-
-    if is_session {
-        builder = builder.is_session(true);
-    }
-
-    let key_props = builder.build().expect("Failed to build key props");
-
     let mut unwrap_algo = HsmAesKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256);
-    let aes_key = HsmKeyManager::unwrap_key(
+    HsmKeyManager::unwrap_key(
         &mut unwrap_algo,
         &unwrapping_priv_key,
         &wrapped_key,
         key_props,
     )
-    .expect("Failed to unwrap AES Key");
+}
+
+fn test_aes_key_unwrap_common(session: &HsmSession, bits: u32, is_session: bool) {
+    let key_props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(bits)
+        .is_session(is_session)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .build()
+        .expect("Failed to build key props");
+    let aes_key = unwrap_aes_key_with_props(session, key_props).expect("Failed to unwrap AES Key");
 
     verify_unwrapped_aes_key_properties(&aes_key, bits, is_session);
     HsmKeyManager::delete_key(aes_key).expect("Failed to delete unwrapped AES key");
@@ -287,6 +296,7 @@ fn test_token_aes_key_generation(session: HsmSession) {
     assert_eq!(key.class(), HsmKeyClass::Secret, "Key class mismatch");
     assert_eq!(key.kind(), HsmKeyKind::Aes, "Key kind mismatch");
     assert_eq!(key.bits(), 256, "Key bits mismatch");
+    assert_eq!(key.ecc_curve(), None, "AES key must not have an ECC curve");
     assert!(key.is_local(), "Token key should be local");
     assert!(!key.is_session(), "Token key should not be a session key");
     assert!(key.is_sensitive(), "Secret key should be sensitive");
@@ -295,6 +305,7 @@ fn test_token_aes_key_generation(session: HsmSession) {
     assert!(key.can_decrypt(), "Key should support decryption");
     assert!(!key.can_sign(), "Key should not support signing");
     assert!(!key.can_verify(), "Key should not support verification");
+    assert!(!key.can_wrap(), "Key should not support wrapping");
     assert!(!key.can_unwrap(), "Key should not support unwrapping");
     assert!(!key.can_derive(), "Key should not support derivation");
 
@@ -336,6 +347,111 @@ fn test_aes_192_key_unwrap(session: HsmSession) {
 #[session_test]
 fn test_aes_256_key_unwrap(session: HsmSession) {
     test_aes_key_unwrap_common(&session, 256, true);
+}
+
+/// Every AES size preserves label bytes and imported attributes for both key lifetimes.
+#[session_test]
+fn test_aes_unwrap_labels_preserved(session: HsmSession) {
+    for label in [
+        Vec::new(),
+        vec![b'L'],
+        vec![b'L'; TBOR_KEY_LABEL_MAX_LEN - 1],
+        vec![b'L'; TBOR_KEY_LABEL_MAX_LEN],
+        vec![0x00, 0x80, 0xff, b'A', 0x00],
+    ] {
+        for bits in AES_VALID_KEY_SIZES_IN_BITS {
+            for is_session in [false, true] {
+                let props = HsmKeyPropsBuilder::default()
+                    .class(HsmKeyClass::Secret)
+                    .key_kind(HsmKeyKind::Aes)
+                    .bits(bits)
+                    .is_session(is_session)
+                    .can_encrypt(true)
+                    .can_decrypt(true)
+                    .label(&label)
+                    .build()
+                    .expect("Failed to build labeled AES unwrap props");
+                let key = unwrap_aes_key_with_props(&session, props)
+                    .expect("Valid AES unwrap label must be preserved");
+
+                verify_unwrapped_aes_key_properties(&key, bits, is_session);
+                assert_eq!(key.label(), label.as_slice());
+                HsmKeyManager::delete_key(key).expect("Failed to delete labeled unwrapped key");
+            }
+        }
+    }
+}
+
+/// The maximum label succeeds before an oversized label is rejected for each size and lifetime.
+#[session_test]
+fn test_aes_unwrap_label_too_long_fails(session: HsmSession) {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        HsmError::InvalidKeyProps
+    } else {
+        HsmError::InternalError
+    };
+
+    for bits in AES_VALID_KEY_SIZES_IN_BITS {
+        for is_session in [false, true] {
+            for label_len in [TBOR_KEY_LABEL_MAX_LEN, TBOR_KEY_LABEL_MAX_LEN + 1] {
+                let label = vec![b'L'; label_len];
+                let props = HsmKeyPropsBuilder::default()
+                    .class(HsmKeyClass::Secret)
+                    .key_kind(HsmKeyKind::Aes)
+                    .bits(bits)
+                    .is_session(is_session)
+                    .can_encrypt(true)
+                    .can_decrypt(true)
+                    .label(&label)
+                    .build()
+                    .expect("Failed to build AES unwrap label props");
+                let result = unwrap_aes_key_with_props(&session, props);
+
+                if label_len == TBOR_KEY_LABEL_MAX_LEN {
+                    let key = result.expect("Maximum-length AES unwrap label must succeed");
+                    verify_unwrapped_aes_key_properties(&key, bits, is_session);
+                    assert_eq!(key.label(), label.as_slice());
+                    HsmKeyManager::delete_key(key).expect("Failed to delete unwrap control key");
+                } else {
+                    assert_eq!(result.err(), Some(expected_error));
+                }
+            }
+        }
+    }
+}
+
+/// Explicit TBOR scopes override either session-flag value; MBOR rejects explicit scopes.
+#[session_test]
+fn test_aes_unwrap_explicit_scope(session: HsmSession) {
+    for bits in AES_VALID_KEY_SIZES_IN_BITS {
+        for scope in [
+            HsmKeyScope::Session,
+            HsmKeyScope::Ephemeral,
+            HsmKeyScope::Local,
+        ] {
+            for is_session in [false, true] {
+                let props = HsmKeyPropsBuilder::default()
+                    .class(HsmKeyClass::Secret)
+                    .key_kind(HsmKeyKind::Aes)
+                    .bits(bits)
+                    .is_session(is_session)
+                    .scope(scope)
+                    .can_encrypt(true)
+                    .can_decrypt(true)
+                    .build()
+                    .expect("Failed to build scoped AES unwrap props");
+                let result = unwrap_aes_key_with_props(&session, props);
+
+                if crate::utils::session::api_rev_at_least(1, 1) {
+                    let key = result.expect("Supported AES unwrap scope must be honored");
+                    verify_unwrapped_aes_key_properties(&key, bits, scope == HsmKeyScope::Session);
+                    HsmKeyManager::delete_key(key).expect("Failed to delete scoped unwrapped key");
+                } else {
+                    assert_eq!(result.err(), Some(HsmError::UnsupportedApiRevision));
+                }
+            }
+        }
+    }
 }
 
 /// Test AES key unmasking for key sizes of 128

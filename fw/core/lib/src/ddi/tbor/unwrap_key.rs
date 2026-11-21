@@ -90,13 +90,26 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
 /// - ECC → `sign`+`verify` or `derive`;
 /// - HMAC → `sign`+`verify`.
 ///
-/// Any invalid pairing, multi-usage request, or usage not permitted for
-/// the class is rejected with [`HsmError::InvalidPermissions`].
+/// Unknown usage bits, invalid pairings, multi-usage requests, and usages not
+/// permitted for the class are rejected with [`HsmError::InvalidPermissions`].
 fn attrs_for_class(
     class: KeyClass,
     scope: HsmKeyScope,
     usage: KeyUsage,
 ) -> HsmResult<HsmVaultKeyAttrs> {
+    if usage.bits()
+        & !(KeyUsage::ENCRYPT
+            | KeyUsage::DECRYPT
+            | KeyUsage::SIGN
+            | KeyUsage::VERIFY
+            | KeyUsage::DERIVE
+            | KeyUsage::WRAP
+            | KeyUsage::UNWRAP)
+        != 0
+    {
+        return Err(HsmError::InvalidPermissions);
+    }
+
     // Paired usages must be requested together.
     if usage.sign() != usage.verify() || usage.encrypt() != usage.decrypt() {
         return Err(HsmError::InvalidPermissions);

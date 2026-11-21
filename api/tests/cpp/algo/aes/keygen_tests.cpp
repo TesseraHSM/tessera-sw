@@ -14,6 +14,7 @@
 #include "helpers.hpp"
 #include "utils/aes_keygen.hpp"
 #include "utils/auto_key.hpp"
+#include "utils/key_props.hpp"
 #include "utils/rsa_keygen.hpp"
 #include "utils/utils.hpp"
 
@@ -30,6 +31,60 @@ class tsra_aes_keygen : public ::testing::Test
 {
   protected:
     PartitionListHandle part_list_ = PartitionListHandle{};
+
+    static constexpr uint32_t kMaxKeyLabelLen = 128;
+
+    static tsra_status generate_labeled_aes_key(
+        tsra_handle session,
+        uint32_t bits,
+        bool is_session,
+        const std::vector<uint8_t> &label,
+        tsra_handle *key
+    )
+    {
+        key_props fields{};
+        fields.key_class = TSRA_KEY_CLASS_SECRET;
+        fields.key_kind = TSRA_KEY_KIND_AES;
+        fields.key_size_bits = bits;
+        fields.session_key = is_session;
+        fields.encrypt = true;
+        fields.decrypt = true;
+
+        std::vector<tsra_key_prop> props;
+        build_key_prop_list(fields, props);
+        uint8_t empty_label{};
+        props.push_back({ .id = TSRA_KEY_PROP_ID_LABEL,
+                          .val = label.empty() ? &empty_label : const_cast<uint8_t *>(label.data()),
+                          .len = static_cast<uint32_t>(label.size()) });
+        tsra_key_prop_list prop_list{ .props = props.data(),
+                                      .count = static_cast<uint32_t>(props.size()) };
+        tsra_algo algo{};
+        algo.id = TSRA_ALGO_ID_AES_KEY_GEN;
+        return tsra_key_gen(session, &algo, &prop_list, key);
+    }
+
+    static tsra_status unwrap_labeled_aes_key(
+        tsra_handle unwrapping_key,
+        tsra_buffer &wrapped_key,
+        key_props &fields,
+        const std::vector<uint8_t> &label,
+        tsra_handle *key
+    )
+    {
+        std::vector<tsra_key_prop> props;
+        build_key_prop_list(fields, props);
+        uint8_t empty_label{};
+        props.push_back({ .id = TSRA_KEY_PROP_ID_LABEL,
+                          .val = label.empty() ? &empty_label : const_cast<uint8_t *>(label.data()),
+                          .len = static_cast<uint32_t>(label.size()) });
+        tsra_key_prop_list prop_list{ .props = props.data(),
+                                      .count = static_cast<uint32_t>(props.size()) };
+        auto oaep_params = build_oaep_sha256_params();
+        auto unwrap_params =
+            build_rsa_aes_key_unwrap_params(oaep_params, fields.key_kind, fields.key_size_bits);
+        auto algo = build_rsa_aes_key_unwrap_algo(unwrap_params);
+        return tsra_key_unwrap(&algo, unwrapping_key, &wrapped_key, &prop_list, key);
+    }
 
     // Helper function to compare AES XTS key properties
     static void compare_aes_xts_key_properties(
@@ -123,6 +178,249 @@ TEST_F(tsra_aes_keygen, session_aes_256_key_generation)
             256
         );
     });
+}
+
+/// Labels preserve exact bytes for every AES size and both Session/App lifetimes.
+TEST_F(tsra_aes_keygen, aes_key_gen_label_roundtrip)
+{
+    const std::vector<std::vector<uint8_t>> labels = {
+        {},
+        { 'L' },
+        std::vector<uint8_t>(kMaxKeyLabelLen - 1, 'L'),
+        std::vector<uint8_t>(kMaxKeyLabelLen, 'L'),
+        { 0x00, 0x80, 0xff, 'A', 0x00 }
+    };
+
+    for (const auto &label : labels)
+    {
+        for (uint32_t bits : { 128u, 192u, 256u })
+        {
+            for (bool is_session : { false, true })
+            {
+                SCOPED_TRACE(
+                    ::testing::Message()
+                    << "bits=" << bits << " session=" << is_session << " label_len=" << label.size()
+                );
+                part_list_.for_each_session([&](tsra_handle session) {
+                    auto_key key;
+                    ASSERT_EQ(
+                        generate_labeled_aes_key(session, bits, is_session, label, key.get_ptr()),
+                        TSRA_STATUS_SUCCESS
+                    );
+                    ASSERT_NE(key.get(), 0u);
+                    verify_generated_aes_key_properties(
+                        key.get(),
+                        TSRA_KEY_KIND_AES,
+                        bits,
+                        is_session,
+                        true
+                    );
+
+                    std::array<uint8_t, kMaxKeyLabelLen> actual_label{};
+                    tsra_key_prop prop{ .id = TSRA_KEY_PROP_ID_LABEL,
+                                        .val = actual_label.data(),
+                                        .len = static_cast<uint32_t>(actual_label.size()) };
+                    ASSERT_EQ(tsra_key_get_prop(key.get(), &prop), TSRA_STATUS_SUCCESS);
+                    ASSERT_EQ(prop.len, label.size());
+                    ASSERT_LE(prop.len, actual_label.size());
+                    EXPECT_EQ(
+                        std::vector<uint8_t>(actual_label.begin(), actual_label.begin() + prop.len),
+                        label
+                    );
+                });
+            }
+        }
+    }
+}
+
+/// The maximum label succeeds before the one-byte-over-limit request is rejected.
+TEST_F(tsra_aes_keygen, aes_key_gen_label_too_long_fails)
+{
+    const std::vector<uint8_t> max_label(kMaxKeyLabelLen, 'L');
+    const std::vector<uint8_t> oversized_label(kMaxKeyLabelLen + 1, 'L');
+    const auto expected_error =
+        api_rev_at_least(1, 1) ? TSRA_STATUS_INVALID_KEY_PROPS : TSRA_STATUS_INTERNAL_ERROR;
+
+    for (uint32_t bits : { 128u, 192u, 256u })
+    {
+        for (bool is_session : { false, true })
+        {
+            SCOPED_TRACE(::testing::Message() << "bits=" << bits << " session=" << is_session);
+            part_list_.for_each_session([&](tsra_handle session) {
+                auto_key control_key;
+                ASSERT_EQ(
+                    generate_labeled_aes_key(
+                        session,
+                        bits,
+                        is_session,
+                        max_label,
+                        control_key.get_ptr()
+                    ),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_NE(control_key.get(), 0u);
+
+                auto_key key;
+                ASSERT_EQ(
+                    generate_labeled_aes_key(
+                        session,
+                        bits,
+                        is_session,
+                        oversized_label,
+                        key.get_ptr()
+                    ),
+                    expected_error
+                );
+                ASSERT_EQ(key.get(), 0u);
+            });
+        }
+    }
+}
+
+/// Labels and imported attributes round-trip for every AES size and Session/App lifetime.
+TEST_F(tsra_aes_keygen, aes_key_unwrap_label_roundtrip)
+{
+    const std::vector<std::vector<uint8_t>> labels = {
+        {},
+        { 'L' },
+        std::vector<uint8_t>(kMaxKeyLabelLen - 1, 'L'),
+        std::vector<uint8_t>(kMaxKeyLabelLen, 'L'),
+        { 0x00, 0x80, 0xff, 'A', 0x00 }
+    };
+
+    for (const auto &label : labels)
+    {
+        for (uint32_t bits : { 128u, 192u, 256u })
+        {
+            for (bool is_session : { false, true })
+            {
+                SCOPED_TRACE(
+                    ::testing::Message()
+                    << "bits=" << bits << " session=" << is_session << " label_len=" << label.size()
+                );
+                part_list_.for_each_session([&](tsra_handle session) {
+                    auto_key priv_key;
+                    auto_key pub_key;
+                    ASSERT_EQ(
+                        generate_rsa_unwrapping_keypair(
+                            session,
+                            priv_key.get_ptr(),
+                            pub_key.get_ptr()
+                        ),
+                        TSRA_STATUS_SUCCESS
+                    );
+                    auto oaep_params = build_oaep_sha256_params();
+                    const std::vector<uint8_t> material(bits / 8, 0x42);
+                    auto wrapped = wrap_local_aes_key(pub_key.get(), material, bits, oaep_params);
+                    ASSERT_FALSE(wrapped.empty());
+                    tsra_buffer wrapped_buf{ wrapped.data(),
+                                             static_cast<uint32_t>(wrapped.size()) };
+
+                    key_props fields{};
+                    fields.key_class = TSRA_KEY_CLASS_SECRET;
+                    fields.key_kind = TSRA_KEY_KIND_AES;
+                    fields.key_size_bits = bits;
+                    fields.session_key = is_session;
+                    fields.encrypt = true;
+                    fields.decrypt = true;
+                    auto_key key;
+                    ASSERT_EQ(
+                        unwrap_labeled_aes_key(
+                            priv_key.get(),
+                            wrapped_buf,
+                            fields,
+                            label,
+                            key.get_ptr()
+                        ),
+                        TSRA_STATUS_SUCCESS
+                    );
+                    ASSERT_NE(key.get(), 0u);
+                    verify_generated_aes_key_properties(
+                        key.get(),
+                        TSRA_KEY_KIND_AES,
+                        bits,
+                        is_session,
+                        false
+                    );
+
+                    std::array<uint8_t, kMaxKeyLabelLen> actual_label{};
+                    tsra_key_prop prop{ .id = TSRA_KEY_PROP_ID_LABEL,
+                                        .val = actual_label.data(),
+                                        .len = static_cast<uint32_t>(actual_label.size()) };
+                    ASSERT_EQ(tsra_key_get_prop(key.get(), &prop), TSRA_STATUS_SUCCESS);
+                    ASSERT_EQ(prop.len, label.size());
+                    ASSERT_LE(prop.len, actual_label.size());
+                    EXPECT_EQ(
+                        std::vector<uint8_t>(actual_label.begin(), actual_label.begin() + prop.len),
+                        label
+                    );
+                });
+            }
+        }
+    }
+}
+
+/// A valid maximum-length label controls the oversized-label rejection for each lifetime.
+TEST_F(tsra_aes_keygen, aes_key_unwrap_label_too_long_fails)
+{
+    const std::vector<uint8_t> max_label(kMaxKeyLabelLen, 'L');
+    const std::vector<uint8_t> oversized_label(kMaxKeyLabelLen + 1, 'L');
+    const auto expected_error =
+        api_rev_at_least(1, 1) ? TSRA_STATUS_INVALID_KEY_PROPS : TSRA_STATUS_INTERNAL_ERROR;
+
+    for (uint32_t bits : { 128u, 192u, 256u })
+    {
+        for (bool is_session : { false, true })
+        {
+            SCOPED_TRACE(::testing::Message() << "bits=" << bits << " session=" << is_session);
+            part_list_.for_each_session([&](tsra_handle session) {
+                auto_key priv_key;
+                auto_key pub_key;
+                ASSERT_EQ(
+                    generate_rsa_unwrapping_keypair(session, priv_key.get_ptr(), pub_key.get_ptr()),
+                    TSRA_STATUS_SUCCESS
+                );
+                auto oaep_params = build_oaep_sha256_params();
+                const std::vector<uint8_t> material(bits / 8, 0x42);
+                auto wrapped = wrap_local_aes_key(pub_key.get(), material, bits, oaep_params);
+                ASSERT_FALSE(wrapped.empty());
+                tsra_buffer wrapped_buf{ wrapped.data(), static_cast<uint32_t>(wrapped.size()) };
+
+                key_props fields{};
+                fields.key_class = TSRA_KEY_CLASS_SECRET;
+                fields.key_kind = TSRA_KEY_KIND_AES;
+                fields.key_size_bits = bits;
+                fields.session_key = is_session;
+                fields.encrypt = true;
+                fields.decrypt = true;
+                auto_key control_key;
+                ASSERT_EQ(
+                    unwrap_labeled_aes_key(
+                        priv_key.get(),
+                        wrapped_buf,
+                        fields,
+                        max_label,
+                        control_key.get_ptr()
+                    ),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_NE(control_key.get(), 0u);
+
+                auto_key key;
+                ASSERT_EQ(
+                    unwrap_labeled_aes_key(
+                        priv_key.get(),
+                        wrapped_buf,
+                        fields,
+                        oversized_label,
+                        key.get_ptr()
+                    ),
+                    expected_error
+                );
+                ASSERT_EQ(key.get(), 0u);
+            });
+        }
+    }
 }
 
 /// Test AES key unwrapping for key sizes of 128
