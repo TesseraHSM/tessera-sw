@@ -6,7 +6,6 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
-use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
@@ -33,10 +32,6 @@ use crate::GdmaBuf;
 use crate::GdmaError;
 use crate::MemInterface;
 
-/// Tasks that can wait for a free tag or SQ entry before the oldest
-/// waiters are woken early to make room (they then register again).
-const ADMIT_WAITERS: usize = 32;
-
 struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
@@ -53,13 +48,9 @@ struct GdmaState<const DEPTH: usize> {
     sq_tail: u16,
     /// Cached SQ head index. Updated lazily when the queue looks full.
     sq_head_cached: u16,
-    tag_free: u32,
+    tag_free: u64,
     /// Completed detached transfers, one bit per tag.
-    detached_done: u32,
-    /// Tasks waiting for a free tag or SQ entry: woken when a tag is
-    /// released or completions are reaped (the engine has then consumed
-    /// SQ entries).
-    admit_waiters: MultiWakerRegistration<ADMIT_WAITERS>,
+    detached_done: u64,
     tags: [TagSlot; DEPTH],
 }
 
@@ -72,7 +63,9 @@ struct GdmaState<const DEPTH: usize> {
 /// # Type Parameters
 ///
 /// - `DEPTH`: Queue depth and max concurrent tags. Must be a power of 2, at
-///   most 32.
+///   most 64. A transfer that finds every tag taken fails with
+///   [`GdmaError::NO_FREE_TAGS`] rather than waiting, so size `DEPTH` to the
+///   number of transfers that can be in flight at once.
 pub struct GdmaDriver<const DEPTH: usize> {
     /// Physical channel index.
     channel: u8,
@@ -119,7 +112,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     const MASK: u16 = (DEPTH - 1) as u16;
 
     const _ASSERT_DEPTH_POW2: () = assert!(DEPTH.is_power_of_two(), "DEPTH must be power of 2");
-    const _ASSERT_DEPTH_MAX: () = assert!(DEPTH <= 32, "DEPTH must be <= 32 (u32 tag bitmap)");
+    const _ASSERT_DEPTH_MAX: () = assert!(DEPTH <= 64, "DEPTH must be <= 64 (u64 tag bitmap)");
     const _ASSERT_SQ_FIT: () =
         assert!(DEPTH <= GDMA_SQ_COUNT as usize, "DEPTH exceeds SQ capacity");
     const _ASSERT_CQ_FIT: () =
@@ -146,7 +139,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// # Panics
     ///
-    /// Compile-time panic if `DEPTH` is not a power of 2, exceeds 32, or is
+    /// Compile-time panic if `DEPTH` is not a power of 2, exceeds 64, or is
     /// larger than the GDMA queue storage allocated in DTCM.
     pub fn new(config: ChannelConfig) -> Self {
         #[allow(clippy::let_unit_value)]
@@ -170,10 +163,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             cookie: 0,
         });
 
-        let tag_free = if DEPTH >= 32 {
-            u32::MAX
+        let tag_free = if DEPTH >= 64 {
+            u64::MAX
         } else {
-            (1u32 << DEPTH) - 1
+            (1u64 << DEPTH) - 1
         };
 
         Self {
@@ -190,7 +183,6 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 sq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
-                admit_waiters: MultiWakerRegistration::new(),
                 tags,
             }),
         }
@@ -258,7 +250,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 return Err(GdmaError::NO_FREE_TAGS);
             }
             let tag = s.tag_free.trailing_zeros() as u16;
-            s.tag_free &= !(1u32 << tag);
+            s.tag_free &= !(1u64 << tag);
             let slot = &mut s.tags[tag as usize];
             slot.detached = detached.is_some();
             slot.cookie = detached.unwrap_or(0);
@@ -272,7 +264,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                         .head
                         .read(SQ_CHANNEL_HEAD::HEAD) as u16;
                     if next_tail == s.sq_head_cached {
-                        s.tag_free |= 1u32 << tag;
+                        s.tag_free |= 1u64 << tag;
                         return Err(GdmaError::SQ_FULL);
                     }
                 }
@@ -333,10 +325,6 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// Submits on the first poll, then checks for completion on subsequent
     /// polls. This avoids constructing a separate submit + wait future.
-    /// While every tag or SQ entry is taken the future waits for one to free
-    /// rather than failing: the command and bulk IO tasks together can
-    /// outnumber the slots, and a full queue is transient. Nothing is
-    /// claimed before submission, so that wait is cancel-safe.
     ///
     /// # Errors
     ///
@@ -345,6 +333,8 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// - [`GdmaError::INVALID_HOST_IFC`] — `Host { ctrl_id: 0 }` used.
     ///
     /// Returns on await:
+    /// - [`GdmaError::NO_FREE_TAGS`] or [`GdmaError::SQ_FULL`] — every tag
+    ///   or SQ entry is taken.
     /// - [`GdmaError::dma_error`] — hardware reported an error.
     pub fn copy_mem(
         &self,
@@ -372,10 +362,6 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                             submitted = Some(tag);
                             tag
                         }
-                        Err(e) if e == GdmaError::NO_FREE_TAGS || e == GdmaError::SQ_FULL => {
-                            self.state.with(|s| s.admit_waiters.register(cx.waker()));
-                            return Poll::Pending;
-                        }
                         Err(e) => return Poll::Ready(Err(e)),
                     }
                 }
@@ -385,8 +371,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 if slot.completed {
                     let status = slot.status;
                     slot.completed = false;
-                    s.tag_free |= 1u32 << tag;
-                    s.admit_waiters.wake();
+                    s.tag_free |= 1u64 << tag;
                     return Poll::Ready(if status == 0 {
                         Ok(())
                     } else {
@@ -438,13 +423,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 return None;
             }
             let tag = s.detached_done.trailing_zeros();
-            s.detached_done &= !(1u32 << tag);
+            s.detached_done &= !(1u64 << tag);
             let slot = &mut s.tags[tag as usize];
             slot.completed = false;
             slot.detached = false;
             let done = (slot.cookie, slot.status == 0);
-            s.tag_free |= 1u32 << tag;
-            s.admit_waiters.wake();
+            s.tag_free |= 1u64 << tag;
             Some(done)
         })
     }
@@ -464,7 +448,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             };
             slot.completed = true;
             if slot.detached {
-                s.detached_done |= 1u32 << tag;
+                s.detached_done |= 1u64 << tag;
             } else {
                 slot.waker.wake();
             }
@@ -482,9 +466,6 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
 
             // SAFETY: The configured CQ shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
-            if s.cq_head != tail {
-                s.admit_waiters.wake();
-            }
 
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;

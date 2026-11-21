@@ -169,10 +169,10 @@ type Oic = OicDriver<IO_QUEUE_DEPTH>;
 pub(crate) type BulkIic = IicDriver<BULK_QUEUE_DEPTH>;
 #[cfg(not(feature = "bulk_crypto"))]
 pub(crate) type BulkOic = OicDriver<BULK_QUEUE_DEPTH>;
-type Gdma = GdmaDriver<IO_QUEUE_DEPTH>;
+type Gdma = GdmaDriver<GDMA_QUEUE_DEPTH>;
 type Ipc = IpcDriver<IPC_PAIRS>;
-type Aes = AesDriver<IO_QUEUE_DEPTH>;
-type Sha = ShaDriver<IO_QUEUE_DEPTH>;
+type Aes = AesDriver<CRYPTO_QUEUE_DEPTH>;
+type Sha = ShaDriver<CRYPTO_QUEUE_DEPTH>;
 type Upka = UpkaDriver<IO_QUEUE_DEPTH, 16>;
 
 /// Boot handshake phase — tracks PAL lifecycle state.
@@ -186,8 +186,27 @@ pub enum BootPhase {
     Running,
 }
 
-/// Queue depth for all IO queues (ISQ, ICQ, OSQ, OCQ, GDMA SQ/CQ).
+/// Queue depth for the command IO queues (ISQ, ICQ, OSQ, OCQ).
 const IO_QUEUE_DEPTH: usize = 32;
+
+/// GDMA queue depth and tag count. A transfer that finds every tag taken
+/// fails rather than waits, so there is a tag for every IO slot that can
+/// hold a transfer: the host command slots (each copies one transfer at a
+/// time; a detached reply copy holds its slot's tag until the slot frees)
+/// and the bulk slots. The admin and self-test slots scrub with the CPU
+/// (`scrub_io_slot`) and take none.
+const GDMA_QUEUE_DEPTH: usize = 64;
+const _: () = assert!(
+    GDMA_QUEUE_DEPTH >= crate::alloc::ADMIN_IO_INDEX as usize + crate::alloc::BULK_ALLOC_SLOTS
+);
+
+/// AES and SHA queue depth. Each queue is a software FIFO (the engine runs
+/// one command at a time), and a request that finds it full fails rather
+/// than waits, so it holds one request for every IO slot, each served by one
+/// task at a time: host command, admin, self-test and bulk.
+const CRYPTO_QUEUE_DEPTH: usize = 128;
+const _: () =
+    assert!(CRYPTO_QUEUE_DEPTH >= crate::alloc::IO_SLOTS + crate::alloc::BULK_ALLOC_SLOTS);
 
 /// Queue depth for the bulk (fast-path) IIC/OIC queues.
 #[cfg(not(feature = "bulk_crypto"))]

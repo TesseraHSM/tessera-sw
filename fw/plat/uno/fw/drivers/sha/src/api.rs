@@ -8,7 +8,6 @@ use core::ops::AsyncFnOnce;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
-use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::with_timeout;
 use embassy_time::Duration;
@@ -261,10 +260,6 @@ struct WaiterSlot {
     exclusive_in_flight: bool,
 }
 
-/// Tasks that can wait for a free slot before the oldest waiters are woken
-/// early to make room (they then register again).
-const SLOT_WAITERS: usize = 32;
-
 struct ShaState<const DEPTH: usize> {
     /// Per-slot waiter state (waker, status, exclusive flag).
     slots: [WaiterSlot; DEPTH],
@@ -277,9 +272,6 @@ struct ShaState<const DEPTH: usize> {
 
     /// Index of the next slot to allocate.
     tail: u8,
-
-    /// Tasks waiting for a free slot; woken when `head` advances.
-    slot_waiters: MultiWakerRegistration<SLOT_WAITERS>,
 }
 
 /// Async SHA driver.
@@ -290,7 +282,9 @@ struct ShaState<const DEPTH: usize> {
 /// # Type Parameters
 ///
 /// - `DEPTH`: Maximum number of concurrent waiters. Must be a power of 2,
-///   at most 128.
+///   at most 128. A caller that finds every slot taken fails with
+///   [`ShaError::QUEUE_FULL`] rather than waiting, so size `DEPTH` to the
+///   number of tasks that can use the engine at once.
 pub struct ShaDriver<const DEPTH: usize> {
     state: SingleCell<ShaState<DEPTH>>,
 }
@@ -340,7 +334,6 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                 head: 0,
                 active: 0,
                 tail: 0,
-                slot_waiters: MultiWakerRegistration::new(),
             }),
         }
     }
@@ -348,8 +341,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
     /// Submit a SHA digest request and await completion.
     ///
     /// Concurrent callers are queued (up to `DEPTH`) and served in FIFO order.
-    /// While all slots are occupied the caller waits for one to free rather
-    /// than failing.
+    /// Returns [`ShaError::QUEUE_FULL`] if all slots are occupied.
     pub async fn digest<'a>(&'a self, req: ShaRequest<'a>) -> HsmResult<()> {
         let status = self.digest_status(req).await?;
         map_status(status)
@@ -384,7 +376,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                         return Poll::Ready(Err(ShaError::INVALID_MODE));
                     };
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return wait_for_slot(&mut s.slot_waiters, cx);
+                        return Poll::Ready(Err(ShaError::QUEUE_FULL));
                     }
 
                     let idx = (s.tail & Self::MASK) as usize;
@@ -512,7 +504,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
             self.state.with(|s| {
                 if slot_idx.is_none() {
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return wait_for_slot(&mut s.slot_waiters, cx);
+                        return Poll::Ready(Err(ShaError::QUEUE_FULL));
                     }
                     let idx = (s.tail & Self::MASK) as usize;
                     s.slots[idx].exclusive = true;
@@ -634,30 +626,10 @@ impl<const DEPTH: usize> ShaExclusive<'_, DEPTH> {
     }
 }
 
-/// Admission when every slot is occupied: wait until [`advance_head`] frees
-/// one.
-///
-/// The command and bulk IO tasks together can outnumber the slots, and a
-/// full queue is transient (each slot frees when its command completes), so
-/// waiting rather than failing keeps a valid request from failing on load
-/// alone. Nothing is claimed before admission, so the wait is cancel-safe.
-fn wait_for_slot<T>(
-    waiters: &mut MultiWakerRegistration<SLOT_WAITERS>,
-    cx: &mut core::task::Context<'_>,
-) -> Poll<T> {
-    waiters.register(cx.waker());
-    Poll::Pending
-}
-
-/// Advance `head` past consecutive consumed slots, waking the tasks waiting
-/// for a slot if any was freed.
+/// Advance `head` past consecutive consumed slots.
 fn advance_head<const DEPTH: usize>(s: &mut ShaState<DEPTH>) {
-    let head = s.head;
     while s.head != s.active && s.slots[(s.head as usize) & (DEPTH - 1)].status == 0 {
         s.head = s.head.wrapping_add(1);
-    }
-    if s.head != head {
-        s.slot_waiters.wake();
     }
 }
 

@@ -17,8 +17,8 @@
 //   0x0E440 - 0x0EF44  IIC queues (ISQ, ICQ, IO_SQ, ICQ tail shadow)
 //   0x0F000 - 0x11824  Reserved: Admin (CP0) GDMA rings — do not place HSM data here
 //   0x11840 - 0x11E44  OIC queues (OSQ, OCQ, IO_CQ, OCQ tail shadow)
-//   0x12840 - 0x15064  GDMA queues
-//   0x15064 - 0x158A4  Crypto command buffers (AES, UPKA, SHA)
+//   0x12840 - 0x13C48  GDMA queues (64 entries)
+//   0x13C60 - 0x159A0  Crypto command buffers (AES, UPKA, SHA)
 //   0x16000 - 0x17400  BCP (CDMA) rings
 //   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
 //   0x19460 - 0x1A460  Bulk crypto per-IO scratch
@@ -812,15 +812,16 @@ addrmap io_gsram {
     io_cq_entry_t    IO_CQ[32]          @ 0x11C40 += 0x10;
     queue_shadow_t   OCQ_TAIL_SHADOW    @ 0x11E40;
 
-    // ─── GDMA — 0x20-aligned ───
-    gdma_sq_entry_t  GDMA_SQ[32]        @ 0x12840 += 0x40;
-    gdma_cq_entry_t  GDMA_CQ[32]        @ 0x13040 += 0x10;
-    queue_shadow_t   GDMA_CQ_TAIL_SHADOW @ 0x13240;
+    // ─── GDMA — 0x20-aligned. The SQ head shadow is the word after the CQ
+    // tail shadow. ───
+    gdma_sq_entry_t  GDMA_SQ[64]        @ 0x12840 += 0x40;
+    gdma_cq_entry_t  GDMA_CQ[64]        @ 0x13840 += 0x10;
+    queue_shadow_t   GDMA_CQ_TAIL_SHADOW @ 0x13C40;
 
     // ─── Crypto ───
-    aes_cmd_entry_t  AES_CMD[32]         @ 0x15064 += 0x18;
-    upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0x15364 += 0x14;
-    sha_cmd_entry_t  SHA_CMD[32]         @ 0x154A4 += 0x20;
+    aes_cmd_entry_t  AES_CMD[128]        @ 0x13C60 += 0x18;
+    upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0x14860 += 0x14;
+    sha_cmd_entry_t  SHA_CMD[128]        @ 0x149A0 += 0x20;
 
     // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
     // may master (0x0F000 - 0xB8000) ───
