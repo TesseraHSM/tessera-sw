@@ -34,4 +34,8 @@ impl BcpError {
 
     /// The engine could not be brought up: a soft reset did not complete.
     pub const RESET_FAILED: HsmError = make_component_error(ComponentId::BCP, 6);
+
+    /// No command ID or SQE room is free now, for a detached command, which
+    /// cannot wait for one.
+    pub const BUSY: HsmError = make_component_error(ComponentId::BCP, 7);
 }

@@ -57,6 +57,8 @@ mod gcm;
 mod gcm_bcp;
 #[cfg(not(feature = "bulk_crypto"))]
 use gcm_bcp as gcm;
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) use gcm_bcp::detached_gcm_verdict;
 mod gcm_sgl;
 use tsra_fw_uno_aes_sgl::ghash;
 #[allow(unsafe_code)]

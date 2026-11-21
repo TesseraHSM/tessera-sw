@@ -644,15 +644,17 @@ impl HsmIoController for UnoHsmPal {
     /// Starts the reply copy as a detached GDMA transfer, whose completion
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
-    /// [`drop_io`](HsmIoController::drop_io). Declines bulk, admin and
-    /// self-test IOs, sealed IOs (whose reply [`send_response`] must seal),
-    /// and IOs whose dirty SRAM is too large to scrub with the CPU.
-    ///
-    /// [`send_response`]: HsmIoController::send_response
+    /// [`drop_io`](HsmIoController::drop_io); a sealed IO's reply is sealed
+    /// first, also detached (see [`start_seal`](UnoHsmPal::start_seal)).
+    /// Declines bulk, admin and self-test IOs, and IOs whose dirty SRAM is
+    /// too large to scrub with the CPU.
     fn finish_io(&self, io: Self::Io, resp: &HsmDmaBuf) -> Result<(), Self::Io> {
         let index = io.index;
-        if io.kind != HsmIoKind::Cmd || sealed::sqe_is_sealed(io.cmd_sqe()) {
+        if io.kind != HsmIoKind::Cmd {
             return Err(io);
+        }
+        if sealed::sqe_is_sealed(io.cmd_sqe()) {
+            return self.start_seal(io, resp);
         }
         let sqe = io.cmd_sqe().view();
         let (dst, dst2) = (sqe.dst_prp1(), sqe.dst_prp2());
@@ -740,11 +742,29 @@ pub(crate) enum Stage {
     /// The IO is with its task, its request brought in as given, for
     /// [`recv_request`](HsmIoController::recv_request) to take.
     Received(RequestIn),
+    /// Sealing the reply (see [`UnoHsmPal::start_seal`]), then copying it
+    /// out; if the copy cannot start, it is retried.
+    #[cfg(not(feature = "bulk_crypto"))]
+    Seal(SealedReply),
     /// Copying the reply out (see [`HsmIoController::finish_io`]), then
     /// posting the completion to queue `queue_id`.
     Reply { queue_id: u16 },
     /// Posting the completion to queue `queue_id`.
     Post { queue_id: u16 },
+}
+
+/// A reply the run loop seals (see [`UnoHsmPal::start_seal`]): its frame and
+/// where the frame goes.
+#[cfg(not(feature = "bulk_crypto"))]
+#[derive(Clone, Copy)]
+pub(crate) struct SealedReply {
+    queue_id: u16,
+    /// The frame, `ct ‖ iv ‖ tag`, in the slot's DMA heap.
+    frame: *mut u8,
+    len: u32,
+    /// The host's response buffer.
+    dst: (HsmDmaAddr, HsmDmaAddr),
+    ifc: MemInterface,
 }
 
 /// Where an IO's request is and what receiving it takes, from the IO's
@@ -876,10 +896,11 @@ impl UnoHsmPal {
 
 impl UnoHsmPal {
     /// Advances the host IO slots the run loop works on (see [`Stage`]):
-    /// hands on each IO whose request copy is done, posts the completion of
-    /// each finished reply copy (marked failed first if the copy failed),
-    /// retries posts the OIC had no room for, and scrubs and frees the slot
-    /// of each posted completion. Called on every run-loop pass.
+    /// hands on each IO whose request copy is done, copies out each sealed
+    /// reply, posts the completion of each finished reply copy (marked
+    /// failed first if the copy failed), retries the copies and posts whose
+    /// engine had no room, and scrubs and frees the slot of each posted
+    /// completion. Called on every run-loop pass.
     pub(crate) fn finish_detached(&self) {
         while let Some((index, ok)) = self.gdma.take_detached() {
             match self.stages[index as usize].take() {
@@ -905,14 +926,19 @@ impl UnoHsmPal {
                 stage => self.stages[index as usize].set(stage),
             }
         }
-        let mut pending = self.detached_post_pending.get();
-        if pending != 0 {
-            self.detached_post_pending.set(0);
-            while pending != 0 {
-                let index = pending.trailing_zeros() as u16;
-                pending &= !(1 << index);
-                if let Stage::Post { queue_id } = self.stages[index as usize].take() {
-                    self.post_detached(index, queue_id);
+        #[cfg(not(feature = "bulk_crypto"))]
+        self.finish_bcp_detached();
+        let mut retry = self.detached_retry.get();
+        if retry != 0 {
+            self.detached_retry.set(0);
+            while retry != 0 {
+                let index = retry.trailing_zeros() as u16;
+                retry &= !(1 << index);
+                match self.stages[index as usize].take() {
+                    Stage::Post { queue_id } => self.post_detached(index, queue_id),
+                    #[cfg(not(feature = "bulk_crypto"))]
+                    Stage::Seal(reply) => self.start_reply_copy(index, reply),
+                    stage => self.stages[index as usize].set(stage),
                 }
             }
         }
@@ -928,6 +954,142 @@ impl UnoHsmPal {
         }
     }
 
+    /// Seals a sealed IO's reply `resp` as
+    /// [`send_response`](HsmIoController::send_response) would, but with a
+    /// detached BCP command, whose completion the run loop takes on to the
+    /// reply copy (see [`finish_bcp_detached`](Self::finish_bcp_detached)).
+    /// Returns the IO, for its task to send the reply, if the seal does not
+    /// start; its frame is then given back, for the task's seal to take.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn start_seal(&self, io: UnoHsmIo, resp: &HsmDmaBuf) -> Result<(), UnoHsmIo> {
+        let mark = self.dma_mark(io.index);
+        let Some(reply) = self.seal_detached(&io, resp) else {
+            self.dma_restore(io.index, mark);
+            return Err(io);
+        };
+        slot_cqe(io.index).view().set_dst_len(reply.len as u16);
+        self.stages[io.index as usize].set(Stage::Seal(reply));
+        Ok(())
+    }
+
+    /// Starts the detached seal of [`start_seal`](Self::start_seal), or
+    /// returns `None` if it cannot start, having drawn no sequence number
+    /// unless the BCP turned down a command it had room for.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn seal_detached(&self, io: &UnoHsmIo, resp: &HsmDmaBuf) -> Option<SealedReply> {
+        use tsra_fw_hsm_pal_traits::HsmSessionManager;
+        use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
+        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
+
+        let index = io.index;
+        let (Ok(Some(id)), Some(binding)) = (
+            sealed::sealed_session(io.cmd_sqe()),
+            io.transport_binding.get(),
+        ) else {
+            return None;
+        };
+        let sqe = io.cmd_sqe().view();
+        let (dst, dst_len) = ((sqe.dst_prp1(), sqe.dst_prp2()), sqe.dst_len() as usize);
+        let len = sealed::sealed_frame_len(resp.len());
+        let ifc = crate::gdma::host_interface(io.pid()).ok()?;
+        if index as u32 >= IO_SQ_COUNT || len > dst_len {
+            return None;
+        }
+        let frame = self.dma_alloc(io, sealed::TRANSPORT_AAD_LEN + len).ok()?;
+        if crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX {
+            return None;
+        }
+        let key = self
+            .session_transport_key(io, id, HsmSessionTransportDir::M2h)
+            .ok()?;
+        let pt_len = len - sealed::SEALED_TRAILER_LEN;
+        let (data, trailer) = frame.split_at_mut(sealed::TRANSPORT_AAD_LEN + pt_len);
+        data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(true));
+        let pt = &mut data[sealed::TRANSPORT_AAD_LEN..];
+        resp.copy_to_slice(&mut pt[..resp.len()]);
+        pt[resp.len()..pt_len - 1].fill(0);
+        pt[pt_len - 1] = (pt_len - 1 - resp.len()) as u8;
+        // A drawn sequence number is spent: draw it only once the BCP has
+        // room for the seal.
+        if !self.bcp.can_start(data.len()) {
+            return None;
+        }
+        let seq = self.session_transport_next_seq(io, id).ok()?;
+        let iv = key.nonce(seq);
+        trailer[..SESSION_TRANSPORT_IV_LEN].copy_from_slice(&iv);
+        self.gcm_start_detached(key.key(), &iv, None, data, index)
+            .ok()?;
+        Some(SealedReply {
+            queue_id: io.queue_id(),
+            frame: frame[sealed::TRANSPORT_AAD_LEN..].as_mut_ptr(),
+            len: len as u32,
+            dst,
+            ifc,
+        })
+    }
+
+    #[cfg(feature = "bulk_crypto")]
+    fn start_seal(&self, io: UnoHsmIo, _resp: &HsmDmaBuf) -> Result<(), UnoHsmIo> {
+        Err(io)
+    }
+
+    /// Takes each finished detached BCP command's slot on: writes a sealed
+    /// reply's tag and starts its copy out, or fails its IO if the seal
+    /// failed.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn finish_bcp_detached(&self) {
+        while let Some((index, done)) = self.bcp.take_detached() {
+            match self.stages[index as usize].take() {
+                Stage::Seal(reply) => match crate::crypto::detached_gcm_verdict(None, done) {
+                    Ok(tag) => {
+                        // SAFETY: the frame's last tag bytes lie in the slot's
+                        // DMA heap, which the slot owns until it is freed, and
+                        // the engine is done with the frame.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                tag.as_ptr(),
+                                reply.frame.add(reply.len as usize - tag.len()),
+                                tag.len(),
+                            );
+                        }
+                        self.start_reply_copy(index, reply);
+                    }
+                    Err(_) => {
+                        let cqe = slot_cqe(index);
+                        cqe.set_err(HsmError::SessionTransportError);
+                        cqe.view().set_sq_id(reply.queue_id);
+                        self.post_detached(index, reply.queue_id);
+                    }
+                },
+                stage => self.stages[index as usize].set(stage),
+            }
+        }
+    }
+
+    /// Starts copying sealed reply `reply` of slot `index` out, or leaves it
+    /// for the next pass if the GDMA has no room.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn start_reply_copy(&self, index: u16, reply: SealedReply) {
+        let started = self.gdma.copy_mem_detached(
+            crate::gdma::device_dma_buf(reply.frame, reply.len),
+            MemInterface::Device,
+            reply.len,
+            crate::gdma::host_dma_buf(reply.dst.0, reply.dst.1, true),
+            reply.ifc,
+            reply.len,
+            index,
+        );
+        if started.is_ok() {
+            self.stages[index as usize].set(Stage::Reply {
+                queue_id: reply.queue_id,
+            });
+        } else {
+            self.stages[index as usize].set(Stage::Seal(reply));
+            self.detached_retry
+                .set(self.detached_retry.get() | 1 << index);
+        }
+    }
+
     /// Posts slot `index`'s completion to queue `queue_id`, or leaves it
     /// for the next pass if the OIC has no room.
     #[inline]
@@ -935,8 +1097,8 @@ impl UnoHsmPal {
         self.stages[index as usize].set(Stage::Post { queue_id });
         publish_cqe(index);
         if self.oic.send_detached(index, queue_id as u8).is_err() {
-            self.detached_post_pending
-                .set(self.detached_post_pending.get() | 1 << index);
+            self.detached_retry
+                .set(self.detached_retry.get() | 1 << index);
         }
     }
 

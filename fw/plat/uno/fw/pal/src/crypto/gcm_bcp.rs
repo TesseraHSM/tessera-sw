@@ -528,6 +528,54 @@ impl UnoHsmPal {
     }
 }
 
+impl UnoHsmPal {
+    /// Starts AES-256-GCM over `data`, `[AAD(32) | text]` with whole blocks
+    /// of text, in place, as a detached BCP command: an encrypt, or with
+    /// `tag` a decrypt to check against it. The run loop collects its
+    /// completion with `cookie`, for [`detached_gcm_verdict`] to judge; until
+    /// then the engine reads and writes `data`.
+    pub(crate) fn gcm_start_detached(
+        &self,
+        key: &[u8],
+        iv: &[u8; GCM_IV_LEN],
+        tag: Option<&Block>,
+        data: &mut HsmDmaBuf,
+        cookie: u16,
+    ) -> HsmResult<()> {
+        self.bcp.gcm_detached(
+            GcmRequest {
+                op: if tag.is_some() {
+                    GcmOp::Decrypt
+                } else {
+                    GcmOp::Encrypt
+                },
+                key,
+                iv,
+                aad_len: GCM_AAD_PAD,
+                unpadded_aad_len: GCM_AAD_PAD,
+                tag: tag.unwrap_or(&[0; AES_BLOCK_SIZE]),
+                data: BcpData::InPlace(data),
+            },
+            cookie,
+        )
+    }
+}
+
+/// The verdict on the completion of a command
+/// [`UnoHsmPal::gcm_start_detached`] started: the tag of an encrypt, or, for
+/// a decrypt of a message whose tag is `tag`, that tag if the message
+/// authenticated.
+pub(crate) fn detached_gcm_verdict(
+    tag: Option<&Block>,
+    done: HsmResult<GcmCompletion>,
+) -> HsmResult<Block> {
+    let dir = match tag {
+        Some(tag) => Dir::Decrypt(tag),
+        None => Dir::Encrypt,
+    };
+    verdict(dir, tag.unwrap_or(&[0; AES_BLOCK_SIZE]), done).map(|t| t.0)
+}
+
 /// Interpret an engine completion: the engine's tag for an encrypt, or the
 /// verdict on a decrypt.
 #[inline]
