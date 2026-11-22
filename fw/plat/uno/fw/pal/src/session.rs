@@ -20,6 +20,8 @@
 //! the read-only probes (`session_pending_state`, `session_param_key`)
 //! are synchronous.
 
+use core::cell::Cell;
+
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -38,12 +40,15 @@ use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_drivers_part_store::NUM_PARTITIONS;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_session_store::MAX_SESSIONS;
 use tsra_fw_uno_drivers_session_store::SessionStore;
+use tsra_fw_uno_drivers_vault::VaultStorage;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
@@ -92,7 +97,92 @@ fn m2h_count(pid: u8, id: HsmSessId) -> HsmResult<&'static SingleCell<u64>> {
         .ok_or(HsmError::SessionNotFound)
 }
 
+/// What an Active session's `SessionEx` blob holds that is not secret: its
+/// selected API revision, and its HSM→VM nonce salt, which heads the IV of
+/// every sealed reply. Read out of the blob at `blob` while the vault was at
+/// `generation`, so they hold while the blob is there at that generation
+/// (see [`VaultStorage::generation`]).
+#[derive(Clone, Copy)]
+struct SessionPublic {
+    blob: usize,
+    generation: u32,
+    api_rev: [u8; 4],
+    m2h_salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+}
+
+impl SessionPublic {
+    /// Matches no blob; all zeros, so needs no `.data` (see `memory.x`).
+    const EMPTY: Self = Self {
+        blob: 0,
+        generation: 0,
+        api_rev: [0; 4],
+        m2h_salt: [0; SESSION_TRANSPORT_SALT_LEN],
+    };
+
+    /// Reads them out of `SessionEx` blob `blob`, at the vault's
+    /// `generation`.
+    #[cold]
+    #[inline(never)]
+    fn read(blob: &HsmDmaBuf, generation: u32) -> Self {
+        const SALT_OFF: usize =
+            SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN + SESSION_TRANSPORT_KEY_LEN;
+        let mut out = Self {
+            blob: blob.as_ptr() as usize,
+            generation,
+            ..Self::EMPTY
+        };
+        out.api_rev
+            .copy_from_slice(&blob[SESSION_API_REV_SIZE..SESSION_EX_PARAM_OFF]);
+        out.m2h_salt
+            .copy_from_slice(&blob[SALT_OFF..SALT_OFF + SESSION_TRANSPORT_SALT_LEN]);
+        out
+    }
+}
+
+/// Per session slot, the [`SessionPublic`] last read for it, so in-session
+/// requests need not read them out of DMA memory each time. Shared by the
+/// partitions: only the same blob hits.
+struct SessionPublics([Cell<SessionPublic>; MAX_SESSIONS]);
+
+// SAFETY: single-core firmware with cooperative scheduling; only the
+// executor's tasks use it (no interrupt handler does), and no reference
+// into it outlives a lookup.
+#[allow(unsafe_code)]
+unsafe impl Sync for SessionPublics {}
+
+static SESSION_PUBLICS: SessionPublics =
+    SessionPublics([const { Cell::new(SessionPublic::EMPTY) }; MAX_SESSIONS]);
+
+/// The [`SessionPublic`] of Active session `id`, whose `SessionEx` blob a
+/// fresh lookup found at `blob`: kept from an earlier read of that blob at
+/// the vault's current generation, else read now.
+fn session_public(id: HsmSessId, blob: &HsmDmaBuf) -> SessionPublic {
+    let generation = VaultStorage::generation();
+    let Some(cell) = SESSION_PUBLICS.0.get(usize::from(u16::from(id))) else {
+        return SessionPublic::read(blob, generation);
+    };
+    let kept = cell.get();
+    if kept.blob == blob.as_ptr() as usize && kept.generation == generation {
+        return kept;
+    }
+    let read = SessionPublic::read(blob, generation);
+    cell.set(read);
+    read
+}
+
 impl UnoHsmPal {
+    /// Session `id`'s `SessionEx` blob, located afresh, if the session is
+    /// Active.
+    #[cfg(not(feature = "bulk_crypto"))]
+    fn active_session_blob(io: &UnoHsmIo, id: HsmSessId) -> Option<&'static HsmDmaBuf> {
+        let table = SessionStore::partition(io.pid()).ok()?;
+        if !matches!(table.state(id), HsmSessionState::Active) {
+            return None;
+        }
+        let blob = Self::vault_key_static(io, table.physical_id(id).ok()?).ok()?;
+        (blob.len() == SESSION_EX_BLOB_SIZE).then_some(blob)
+    }
+
     /// Active session `id`'s direction-`dir` transport `key ‖ salt`, where
     /// [`session_transport_key`](HsmSessionManager::session_transport_key)
     /// finds it, borrowed in place; `None` if the session is not Active.
@@ -104,19 +194,35 @@ impl UnoHsmPal {
         id: HsmSessId,
         dir: HsmSessionTransportDir,
     ) -> Option<&'static HsmDmaBuf> {
-        let table = SessionStore::partition(io.pid()).ok()?;
-        if !matches!(table.state(id), HsmSessionState::Active) {
-            return None;
-        }
-        let blob = Self::vault_key_static(io, table.physical_id(id).ok()?).ok()?;
-        if blob.len() != SESSION_EX_BLOB_SIZE {
-            return None;
-        }
+        let blob = Self::active_session_blob(io, id)?;
         let off = match dir {
             HsmSessionTransportDir::H2m => SESSION_EX_KEYS_OFF,
             HsmSessionTransportDir::M2h => SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN,
         };
         Some(&blob[off..off + SESSION_TRANSPORT_SECRET_LEN])
+    }
+
+    /// Session `id`'s HSM→VM transport key and nonce salt, as
+    /// [`session_transport_key`](HsmSessionManager::session_transport_key)
+    /// gives them; an Active session's salt from [`SESSION_PUBLICS`].
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) fn reply_key(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+    ) -> Option<(&HsmDmaBuf, [u8; SESSION_TRANSPORT_SALT_LEN])> {
+        if let Some(blob) = Self::active_session_blob(io, id) {
+            const KEY_OFF: usize = SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN;
+            let key = &blob[KEY_OFF..KEY_OFF + SESSION_TRANSPORT_KEY_LEN];
+            return Some((key, session_public(id, blob).m2h_salt));
+        }
+        let key = self
+            .session_transport_key(io, id, HsmSessionTransportDir::M2h)
+            .ok()?;
+        // The nonce of message 0 is the salt and then zeros.
+        let mut salt = [0; SESSION_TRANSPORT_SALT_LEN];
+        salt.copy_from_slice(&key.nonce(0)[..SESSION_TRANSPORT_SALT_LEN]);
+        Some((key.key(), salt))
     }
 }
 
@@ -437,16 +543,19 @@ impl HsmSessionManager for UnoHsmPal {
     fn session_api_revision(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<HsmApiRevision> {
         let table = SessionStore::partition(io.pid())?;
         let revision = match table.state(id) {
-            HsmSessionState::Pending => self
-                .vault_key(io, table.pending_phys(id)?)?
-                .get(..4)
-                .ok_or(HsmError::InvalidArg)?,
+            HsmSessionState::Pending => {
+                let head = self
+                    .vault_key(io, table.pending_phys(id)?)?
+                    .get(..4)
+                    .ok_or(HsmError::InvalidArg)?;
+                [head[0], head[1], head[2], head[3]]
+            }
             HsmSessionState::Active => {
-                let blob = self.vault_key(io, table.physical_id(id)?)?;
+                let blob = Self::vault_key_static(io, table.physical_id(id)?)?;
                 if blob.len() != SESSION_EX_BLOB_SIZE {
                     return Err(HsmError::InvalidPermissions);
                 }
-                &blob[SESSION_API_REV_SIZE..SESSION_EX_PARAM_OFF]
+                session_public(id, blob).api_rev
             }
             _ => return Err(HsmError::SessionNotFound),
         };
