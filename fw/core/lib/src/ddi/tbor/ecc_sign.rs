@@ -88,6 +88,9 @@ pub(crate) async fn handle<P: HsmPal>(
             .ok_or(HsmError::InvalidArg)?;
         let sig_len = curve.wire_sig_len(P::ECC_COORD_PAD);
         let len = tsra_fw_ddi_tbor::RESP_HEADER_LEN + TborEccSignResp::TOC_COUNT * 4 + sig_len;
+        // The request's revision, echoed as `encode_for_request` would, but
+        // from its parse rather than out of DMA memory.
+        let api_rev = cmd_buf.request_and_head().1.api_rev();
         // Authenticated envelope metadata is dead; the private key and the
         // input remain live beyond it. Check disjointness before encoding.
         let buffer = cmd_buf.buffer_mut();
@@ -97,15 +100,19 @@ pub(crate) async fn handle<P: HsmPal>(
         let (response, rest) = buffer[..input_end].split_at_mut(key_at);
         let (key, input) = rest.split_at_mut(input_at - key_at);
         let response = &mut response[..len];
-        TborEccSignResp::encode_for_request(response, 0, false)?
-            .signature_reserve(sig_len)?
+        TborEccSignResp::encode(response, api_rev, 0, false)?
+            .signature_existing(sig_len)?
             .finish();
 
         // `response` is exactly header, TOC and the one reserved field, so the
         // signature slot is its tail; taking it there spares re-decoding the
         // frame just encoded from DMA memory. The PAL checks the input's
-        // shape against `curve` and `hash`.
+        // shape against `curve` and `hash`. It writes every byte of unpadded
+        // `r ‖ s` lanes, so only padded ones need zeroing first.
         let signature = &mut response[len - sig_len..];
+        if sig_len != 2 * curve.priv_key_len() {
+            signature.fill(0);
+        }
         pal.ecc_sign(
             io,
             curve,

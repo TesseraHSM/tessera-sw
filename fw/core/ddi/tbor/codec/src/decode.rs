@@ -37,6 +37,17 @@ pub struct RequestHead {
     len: usize,
 }
 
+impl RequestHead {
+    /// The message's API major and minor revision, as
+    /// [`RequestView::api_rev`] reads it: for a reply encoded over the
+    /// request, without reading its header out of DMA memory again.
+    #[inline]
+    pub fn api_rev(&self) -> (u16, u16) {
+        let [a, b, c, d] = self.head[0].to_ne_bytes();
+        (u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]))
+    }
+}
+
 /// Words of a request's start a [`RequestView`] keeps.
 const HEAD_WORDS: usize = 8;
 
