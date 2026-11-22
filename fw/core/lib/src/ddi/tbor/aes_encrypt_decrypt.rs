@@ -134,8 +134,11 @@ pub(crate) async fn handle<P: HsmPal>(
         pal.aes_enc_dec_in_place(io, op, mode, view.target_key, data)
             .await?;
 
+        // The request's revision, echoed as `encode_for_request` would, but
+        // from its parse rather than out of DMA memory.
+        let api_rev = cmd_buf.request_and_head().1.api_rev();
         Ok(
-            TborAesEncryptDecryptResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
+            TborAesEncryptDecryptResp::encode(cmd_buf.buffer_mut(), api_rev, 0, false)?
                 .msg_existing(msg_len)?
                 .iv_existing(iv_len)?
                 .finish()

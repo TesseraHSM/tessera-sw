@@ -733,7 +733,8 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     body_sess_id: Option<HsmSessId>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<DispatchResult> {
-    let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(cmd_buf.request())?;
+    // From the request's parse, rather than out of DMA memory again.
+    let api_rev = cmd_buf.request_and_head().1.api_rev();
     validate_api_rev::<P>(api_rev)?;
 
     // Reject unknown opcodes with the canonical error *before*

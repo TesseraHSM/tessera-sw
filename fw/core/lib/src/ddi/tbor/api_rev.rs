@@ -31,7 +31,10 @@ use super::TborExchange;
 pub(crate) fn handle<P: HsmPalFeatures>(cmd_buf: &mut TborExchange<'_>) -> HsmResult<usize> {
     let (req, head) = cmd_buf.request_and_head();
     TborApiRevReq::decode_from(req, head)?;
-    let frame = TborApiRevResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
+    // The request's revision, echoed as `encode_for_request` would, but
+    // from its parse rather than out of DMA memory.
+    let api_rev = head.api_rev();
+    let frame = TborApiRevResp::encode(cmd_buf.buffer_mut(), api_rev, 0, false)?
         .min_major(U16::new(P::API_REV_MIN.major))?
         .min_minor(U16::new(P::API_REV_MIN.minor))?
         .max_major(U16::new(P::API_REV_MAX.major))?
