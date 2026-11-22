@@ -1018,10 +1018,9 @@ impl UnoHsmPal {
     /// task). Returns the IO, to hand on now, if the open does not start.
     #[cfg(not(feature = "bulk_crypto"))]
     fn start_open(&self, io: UnoHsmIo) -> Option<UnoHsmIo> {
-        use tsra_fw_hsm_pal_traits::HsmSessionManager;
-        use tsra_fw_hsm_pal_traits::HsmSessionState;
         use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
         use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
+        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN;
 
         if !sealed::sqe_is_sealed(io.cmd_sqe()) {
             return Some(io);
@@ -1039,12 +1038,12 @@ impl UnoHsmPal {
         else {
             return Some(io);
         };
-        if !matches!(self.session_state(&io, id), HsmSessionState::Active) {
-            return Some(io);
-        }
-        let Ok(key) = self.session_transport_key(&io, id, HsmSessionTransportDir::H2m) else {
+        // The frame carries the IV: only the key is needed, not the salt.
+        let Some(secret) = Self::active_transport_secret(&io, id, HsmSessionTransportDir::H2m)
+        else {
             return Some(io);
         };
+        let key = &secret[..SESSION_TRANSPORT_KEY_LEN];
         let Ok(mut buf) = crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())
         else {
             return Some(io);
@@ -1062,7 +1061,7 @@ impl UnoHsmPal {
         };
         data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(false));
         if self
-            .gcm_start_detached(key.key(), &iv, Some(&tag), BcpData::InPlace(data), io.index)
+            .gcm_start_detached(key, &iv, Some(&tag), BcpData::InPlace(data), io.index)
             .is_err()
         {
             return Some(io);

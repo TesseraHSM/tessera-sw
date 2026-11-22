@@ -92,6 +92,34 @@ fn m2h_count(pid: u8, id: HsmSessId) -> HsmResult<&'static SingleCell<u64>> {
         .ok_or(HsmError::SessionNotFound)
 }
 
+impl UnoHsmPal {
+    /// Active session `id`'s direction-`dir` transport `key ‖ salt`, where
+    /// [`session_transport_key`](HsmSessionManager::session_transport_key)
+    /// finds it, borrowed in place; `None` if the session is not Active.
+    /// Nothing is read out of it, so a caller that needs only the key (an
+    /// open, whose IV the frame carries) reads no salt out of DMA memory.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) fn active_transport_secret(
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        dir: HsmSessionTransportDir,
+    ) -> Option<&'static HsmDmaBuf> {
+        let table = SessionStore::partition(io.pid()).ok()?;
+        if !matches!(table.state(id), HsmSessionState::Active) {
+            return None;
+        }
+        let blob = Self::vault_key_static(io, table.physical_id(id).ok()?).ok()?;
+        if blob.len() != SESSION_EX_BLOB_SIZE {
+            return None;
+        }
+        let off = match dir {
+            HsmSessionTransportDir::H2m => SESSION_EX_KEYS_OFF,
+            HsmSessionTransportDir::M2h => SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN,
+        };
+        Some(&blob[off..off + SESSION_TRANSPORT_SECRET_LEN])
+    }
+}
+
 impl HsmSessionManager for UnoHsmPal {
     async fn session_reopen_pending(
         &self,
