@@ -528,11 +528,10 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn recv_request(&self, io: &UnoHsmIo) -> HsmResult<HsmRequest<'_>> {
-        let plan = RequestPlan::of(io)?;
-        let control = io.cmd_sqe().session_ctrl();
-        let (len, headroom) = (plan.len, plan.headroom);
-        let mut buf = match self.take_request_in(io) {
+        let (plan, mut buf) = match self.take_request_in(io) {
             None => {
+                let plan = RequestPlan::of(io)?;
+                let (len, headroom) = (plan.len, plan.headroom);
                 let mut buf = self.dma_alloc_exchange(io, plan.exchange_len())?;
                 self.copy_mem_from_host(
                     io,
@@ -543,25 +542,35 @@ impl HsmIoController for UnoHsmPal {
                 )
                 .await
                 .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
-                buf
+                (plan, buf)
             }
+            // The run loop checked the plan of a request it brought in as
+            // the request's copy started (see `start_request`).
             Some(RequestIn::Copied) => {
-                crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?
+                let plan = RequestPlan::read(io)?;
+                let buf = crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?;
+                (plan, buf)
             }
             Some(RequestIn::Failed) => return Err(HsmError::FailedToStartDmaTransaction),
             #[cfg(not(feature = "bulk_crypto"))]
             Some(RequestIn::Opened(len)) => {
-                let buf = crate::alloc::prefetched_exchange(self, io.index, plan.exchange_len())?;
+                // Sealed, so opened after the room for its AAD.
+                let sqe = io.cmd_sqe().view();
+                let buf = crate::alloc::prefetched_exchange(
+                    self,
+                    io.index,
+                    open_exchange_len(sqe.src_len() as usize),
+                )?;
                 return Ok(HsmRequest {
-                    buf: buf.skip_prefix(headroom)?,
+                    buf: buf.skip_prefix(sealed::TRANSPORT_AAD_LEN)?,
                     len: usize::from(len),
-                    resp_capacity: sealed::sealed_msg_capacity(plan.resp_capacity),
+                    resp_capacity: sealed::sealed_msg_capacity(sqe.dst_len() as usize),
                 });
             }
             #[cfg(not(feature = "bulk_crypto"))]
             Some(RequestIn::OpenFailed) => return Err(HsmError::SessionTransportError),
         };
-        let resp_capacity = plan.resp_capacity;
+        let (len, headroom, resp_capacity) = (plan.len, plan.headroom, plan.resp_capacity);
         let Some(id) = plan.sealed_id else {
             return Ok(HsmRequest {
                 buf,
@@ -573,7 +582,7 @@ impl HsmIoController for UnoHsmPal {
             self,
             io,
             id,
-            control,
+            io.cmd_sqe().session_ctrl(),
             &mut buf.buffer_mut()[..headroom + len],
         )
         .await?;
@@ -850,7 +859,7 @@ struct RequestPlan {
 
 impl RequestPlan {
     fn of(io: &UnoHsmIo) -> HsmResult<Self> {
-        let sealed_id = sealed::sealed_session(io.cmd_sqe())?;
+        let plan = Self::read(io)?;
         let sqe = io.cmd_sqe().view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -863,6 +872,16 @@ impl RequestPlan {
             sqe.oob_len(),
             sqe.oob_prp(),
         )?;
+        Ok(plan)
+    }
+
+    /// The plan of `io`'s request, unchecked: for a request
+    /// [`of`](Self::of) planned before, as the IO's SQE copy, which plans
+    /// read, is not written again while the IO lives.
+    #[inline]
+    fn read(io: &UnoHsmIo) -> HsmResult<Self> {
+        let sealed_id = sealed::sealed_session(io.cmd_sqe())?;
+        let sqe = io.cmd_sqe().view();
         Ok(Self {
             sealed_id,
             len: sqe.src_len() as usize,
