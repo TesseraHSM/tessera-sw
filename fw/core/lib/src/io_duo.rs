@@ -239,11 +239,7 @@ impl<P: HsmPal> Hsm<P> {
         let undo = undo.insert(if policy.is_ok() && ddi::tbor::records_undo(opcode) {
             self.duo_bind_undo(io)?
         } else {
-            UndoLog::new(
-                self.pal()
-                    .dma_alloc(io, 0)
-                    .log_as("core", HsmError::NotEnoughSpace)?,
-            )
+            UndoLog::new(HsmDmaBuf::empty_mut())
         });
         let mut exchange = ddi::tbor::TborExchange::new(
             HsmCmdBuf::new(allocation.buffer_mut(), src_len, dst_len)
