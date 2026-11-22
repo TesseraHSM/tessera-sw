@@ -73,7 +73,6 @@ pub(crate) mod verify_key;
 use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
-use tsra_fw_ddi_tbor::TocEntry;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -1094,13 +1093,18 @@ pub(crate) fn peek_session_id(view: &RequestView<'_>) -> Option<HsmSessId> {
 }
 
 fn extract_session_id(view: &RequestView<'_>) -> HsmResult<HsmSessId> {
+    use tsra_fw_ddi_tbor::toc::raw_toc_entry_type;
+    use tsra_fw_ddi_tbor::toc::raw_toc_inline_u16;
+
+    // The entries' types are all it needs: no other entry is decoded.
     let mut found: Option<u16> = None;
-    for entry in view.toc_iter() {
-        if let TocEntry::SessionId(id) = entry {
+    for i in 0..view.toc_count() {
+        let word = view.toc_word(i);
+        if raw_toc_entry_type(word) == tsra_fw_ddi_tbor::TocType::SessionId as u8 {
             if found.is_some() {
                 return Err(HsmError::DdiDecodeFailed);
             }
-            found = Some(id);
+            found = Some(raw_toc_inline_u16(word));
         }
     }
     found.map(HsmSessId::from).ok_or(HsmError::DdiDecodeFailed)
@@ -1180,6 +1184,24 @@ mod tests {
              minor: tsra_fw_ddi_tbor_types::tbor_int::U16| (major.get(), minor.get());
         assert_eq!(rev(response.min_major(), response.min_minor()), (1, 0));
         assert_eq!(rev(response.max_major(), response.max_minor()), (1, 1));
+    }
+
+    #[test]
+    fn body_session_id_needs_exactly_one_entry() {
+        let session_id = |ids: &[u16]| {
+            let mut storage = [0; 64];
+            let mut enc = tsra_fw_ddi_tbor::RequestEncoder::new(&mut storage, (1, 1), 0x18)
+                .uint8(5)
+                .unwrap();
+            for &id in ids {
+                enc = enc.session_id(id).unwrap().uint8(6).unwrap();
+            }
+            let len = enc.finish().unwrap().len();
+            extract_session_id(&RequestView::parse(dma(&mut storage[..len])).unwrap())
+        };
+        assert_eq!(session_id(&[7]), Ok(HsmSessId::from(7)));
+        assert_eq!(session_id(&[]), Err(HsmError::DdiDecodeFailed));
+        assert_eq!(session_id(&[7, 7]), Err(HsmError::DdiDecodeFailed));
     }
 
     #[test]
