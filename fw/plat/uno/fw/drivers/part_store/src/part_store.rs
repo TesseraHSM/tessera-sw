@@ -1235,10 +1235,12 @@ impl Partition {
 
     /// Reads the partition lifecycle [`HsmPartState`].
     ///
+    /// Inline: a byte of the shadow, read for every host IO's admission.
+    ///
     /// # Errors
     ///
     /// - [`HsmError::InvalidArg`] — the stored byte is not a known state.
-    #[inline(never)]
+    #[inline]
     pub fn state(self) -> HsmResult<HsmPartState> {
         HsmPartState::from_u8(self.shadow_byte(offset_of!(Storage, state)))
             .ok_or(HsmError::InvalidArg)
@@ -1452,12 +1454,20 @@ impl Partition {
     /// non-zero value as occupied, so the HSM can advance the slot to
     /// `PctPassed` without the SP noticing. A slot once read as passed is
     /// remembered as such until the HSM next writes it (see
-    /// [`Shadow::unwrap_passed`]).
-    #[inline(never)]
+    /// [`Shadow::unwrap_passed`]): that check, made for every host IO, is
+    /// inline.
+    #[inline]
     pub fn unwrapping_key_slot(self) -> Option<UnwrappingKeySlot> {
         if SHADOWS[self.0].unwrap_passed.load(Relaxed) {
             return Some(UnwrappingKeySlot::PctPassed);
         }
+        self.read_unwrapping_key_slot()
+    }
+
+    /// [`unwrapping_key_slot`](Self::unwrapping_key_slot) read out of the
+    /// slot in GSRAM.
+    #[inline(never)]
+    fn read_unwrapping_key_slot(self) -> Option<UnwrappingKeySlot> {
         // Volatile read: the SP writes this mailbox byte from another processor,
         // so a cached/hoisted load could miss the publish.
         // SAFETY: valid, aligned, readable byte in this partition's GSRAM slot.
