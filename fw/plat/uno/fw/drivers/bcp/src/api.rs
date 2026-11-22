@@ -670,6 +670,10 @@ impl Drop for GcmFuture<'_> {
 /// command's chunks fit the SQE budget; `Ok(None)` if not, for the caller
 /// to wait or give up. A `detached` command's completion goes to
 /// [`BcpDriver::take_detached`], with that cookie, rather than to a waker.
+///
+/// Inlined, with its steps, into its two callers: out of line, each step
+/// costs a call and reloads the request from memory, three times per
+/// sealed request.
 #[inline(always)]
 fn start(
     s: &mut BcpState,
@@ -866,6 +870,7 @@ fn reset() -> bool {
 }
 
 /// Check a request.
+#[inline(always)]
 fn validate(req: &GcmRequest<'_>) -> HsmResult<()> {
     if req.key.len() != BCP_KEY_LEN {
         return Err(BcpError::INVALID_KEY_LEN);
@@ -961,6 +966,7 @@ fn bring_up() -> bool {
 /// memory, which the CPU reads uncached, where a burst of eight words costs
 /// about as much as a single byte load. The vault registers take one
 /// single-beat store each; they do not accept a burst.
+#[inline(always)]
 fn load_key(id: usize, key: &[u8]) {
     const _: () = assert!(KEY_WORDS == 8);
     let (words, _) = key.as_chunks::<4>();
@@ -1113,6 +1119,7 @@ fn put_unaligned(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
 ///
 /// The destination is as long as the source: the engine writes the padded
 /// AAD through ahead of the text, as the host fast path expected.
+#[inline(always)]
 fn write_dfl(dw: &mut [u32; DFL_DWORDS], id: usize, req: &GcmRequest<'_>) {
     let (src, src_len) = req.data.src();
     let (dst, _) = req.data.dst();
@@ -1242,6 +1249,7 @@ fn write_sqe(idx: usize, dw: [u32; 4]) {
 /// `len`-byte source, the first NEW and the last LAST, as the FP firmware
 /// chunked host commands. Later chunks carry only their byte count; the
 /// engine keeps the rest from the first.
+#[inline(always)]
 fn submit(s: &mut BcpState, id: usize, op: GcmOp, len: usize) {
     let process_type = match op {
         GcmOp::Encrypt => PROCESS_GCM_ENCRYPT,
