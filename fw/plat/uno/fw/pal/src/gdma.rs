@@ -711,9 +711,8 @@ pub(crate) const CPU_SCRUB_MAX: usize = 4096;
 ///
 /// Zeroes the widest naturally-aligned element the region supports: an
 /// 8-byte-aligned `u64` (QWORD) body, framed by a byte-wise head/tail for
-/// any unaligned edges. `[u64]::zeroize()` lowers to 64-bit volatile stores
-/// (a single `STRD`/64-bit AXI transfer on Cortex-M7), so it issues half as
-/// many stores as a 32-bit wipe and a quarter of a byte-wise one.
+/// any unaligned edges. The body goes out 32 bytes per store-multiple, one
+/// bus burst each, and its last 0–3 QWORDs through `zeroize`.
 ///
 /// The **head** is normally empty: callers pass a per-IO region base, and
 /// both regions are 8-byte aligned (`DTCM_IO_BUF` 0x600, `SRAM_IO_BUF`
@@ -743,9 +742,40 @@ unsafe fn cpu_zeroize(ptr: *mut u8, len: usize) {
         // SAFETY: `ptr + head` is 8-byte aligned by construction and
         // `body_len` is a `u64` multiple within the region, so the cast and
         // slice are valid for writes.
-        let body_ptr = unsafe { ptr.add(head) } as *mut u64;
-        // SAFETY: body_ptr is aligned and body_len bytes remain within the exclusive region.
-        let body = unsafe { core::slice::from_raw_parts_mut(body_ptr, body_len / 8) };
+        let mut body_ptr = unsafe { ptr.add(head) } as *mut u64;
+        let mut body_words = body_len / 8;
+        // Whole 32-byte runs go out a store-multiple of eight zeroed
+        // registers at a time: uncached SRAM takes it as one burst, where
+        // it takes single stores one bus transaction each.
+        #[cfg(target_arch = "arm")]
+        if body_words >= 4 {
+            let runs = body_words / 4;
+            // SAFETY: `runs * 32` bytes from the aligned `body_ptr` lie in
+            // the region; the asm writes nothing else.
+            unsafe {
+                core::arch::asm!(
+                    "2:",
+                    "stm {p}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                    "subs {n}, {n}, #1",
+                    "bne 2b",
+                    p = inout(reg) body_ptr,
+                    n = inout(reg) runs => _,
+                    in("r2") 0u32,
+                    in("r3") 0u32,
+                    in("r4") 0u32,
+                    in("r5") 0u32,
+                    in("r8") 0u32,
+                    in("r9") 0u32,
+                    in("r10") 0u32,
+                    in("r11") 0u32,
+                    options(nostack),
+                );
+            }
+            body_words %= 4;
+        }
+        // SAFETY: `body_ptr` is aligned and `body_words` QWORDs of the body
+        // remain within the exclusive region.
+        let body = unsafe { core::slice::from_raw_parts_mut(body_ptr, body_words) };
         body.zeroize();
     }
     // Byte-wise tail (sub-`u64` remainder). Unlike the head this is
