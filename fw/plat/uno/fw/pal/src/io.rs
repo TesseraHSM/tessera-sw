@@ -824,7 +824,11 @@ impl UnoHsmPal {
                 }
                 #[cfg(not(feature = "bulk_crypto"))]
                 Stage::Sealed(io, plan) => {
-                    let Some(io) = (if ok { self.start_open(io, plan) } else { Some(io) }) else {
+                    let Some(io) = (if ok {
+                        self.start_open(io, plan)
+                    } else {
+                        Some(io)
+                    }) else {
                         continue;
                     };
                     self.hand_on(
@@ -907,8 +911,7 @@ impl UnoHsmPal {
             return Some(io);
         };
         // The frame carries the IV: only the key is needed, not the salt.
-        let Some(secret) =
-            Self::active_transport_secret(&io, plan.id, HsmSessionTransportDir::H2m)
+        let Some(secret) = Self::active_transport_secret(&io, plan.id, HsmSessionTransportDir::H2m)
         else {
             return Some(io);
         };
@@ -947,13 +950,7 @@ impl UnoHsmPal {
     /// whether its request authenticated; one that did not has its text
     /// wiped and its binding dropped, as a failed `sealed_open` leaves it.
     #[cfg(not(feature = "bulk_crypto"))]
-    fn finish_open(
-        &self,
-        io: UnoHsmIo,
-        tag: &[u8; 16],
-        len: u16,
-        done: HsmResult<GcmCompletion>,
-    ) {
+    fn finish_open(&self, io: UnoHsmIo, tag: &[u8; 16], len: u16, done: HsmResult<GcmCompletion>) {
         let len = usize::from(len);
         let opened = (|| {
             let mut buf =
@@ -1068,7 +1065,8 @@ impl UnoHsmPal {
         // nothing else reads or writes it until the run loop takes the
         // seal's completion.
         let data = unsafe { GcmData::in_place_raw(frame, AAD + pt_len) };
-        self.gcm_start_detached(reply.key, &iv, None, data, index).ok()?;
+        self.gcm_start_detached(reply.key, &iv, None, data, index)
+            .ok()?;
         Some(SealedReply {
             queue_id: io.queue_id(),
             frame: frame.wrapping_add(AAD),

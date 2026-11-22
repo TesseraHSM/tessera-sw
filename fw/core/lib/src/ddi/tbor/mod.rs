@@ -1173,7 +1173,7 @@ mod tests {
             .unwrap()
             .finish()
             .len();
-        let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), len, 32).unwrap();
+        let cmd_buf = HsmCmdBuf::new(dma(&mut storage), len, 32).unwrap();
         let head = RequestView::parse(cmd_buf.request()).unwrap().head();
         let mut cmd_buf = TborExchange::new(cmd_buf, head);
         let len = api_rev::handle::<UnoRevs>(&mut cmd_buf).unwrap();
