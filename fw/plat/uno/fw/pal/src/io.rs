@@ -858,6 +858,9 @@ struct RequestPlan {
 }
 
 impl RequestPlan {
+    /// Inlined: out of line, the plan goes back to its caller through
+    /// memory, for every IO the run loop takes in.
+    #[inline(always)]
     fn of(io: &UnoHsmIo) -> HsmResult<Self> {
         let plan = Self::read(io)?;
         let sqe = io.cmd_sqe().view();
@@ -1335,6 +1338,7 @@ impl UnoHsmPal {
     /// Starts copying sealed reply `reply` of slot `index` out, or leaves it
     /// for the next pass if the GDMA has no room.
     #[cfg(not(feature = "bulk_crypto"))]
+    #[inline(always)]
     fn start_reply_copy(&self, index: u16, reply: SealedReply) {
         let started = self.gdma.copy_mem_detached(
             crate::gdma::device_dma_buf(reply.frame, reply.len),
