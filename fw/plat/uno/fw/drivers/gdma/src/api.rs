@@ -241,6 +241,29 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_len: u32,
         detached: Option<u16>,
     ) -> HsmResult<u16> {
+        self.submit_inline(
+            src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, detached,
+        )
+    }
+
+    /// [`submit`](Self::submit), inlined into
+    /// [`copy_mem_detached`](Self::copy_mem_detached), with which the run
+    /// loop starts the copy of every host IO's request and reply. The state
+    /// is borrowed only to take a tag and an SQ entry, which keeps that
+    /// borrow small enough to inline too; the entry is written after it,
+    /// which nothing can observe before the next [`ring`](Self::ring).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_inline(
+        &self,
+        src_addr: GdmaBuf,
+        src_ifc: MemInterface,
+        src_len: u32,
+        dst_addr: GdmaBuf,
+        dst_ifc: MemInterface,
+        dst_len: u32,
+        detached: Option<u16>,
+    ) -> HsmResult<u16> {
         if src_len == 0 || dst_len == 0 {
             return Err(GdmaError::ZERO_LENGTH);
         }
@@ -248,75 +271,90 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             return Err(GdmaError::INVALID_HOST_IFC);
         }
 
-        self.state.with(|s| {
-            if s.tag_free == 0 {
-                return Err(GdmaError::NO_FREE_TAGS);
-            }
-            let tag = s.tag_free.trailing_zeros() as u16;
-            s.tag_free &= !(1u32 << tag);
-            let slot = &mut s.tags[tag as usize];
-            slot.detached = detached.is_some();
-            slot.cookie = detached.unwrap_or(0);
+        let (tag, slot) = self.state.with(|s| self.take_entry(s, detached))?;
 
-            let next_tail = (s.sq_tail + 1) & Self::MASK;
-            if next_tail == s.sq_head_cached {
-                // SAFETY: The configured SQ shadow word remains aligned and mapped for the driver.
-                s.sq_head_cached = unsafe { self.sq_head_shadow.read_volatile() } as u16;
-                if next_tail == s.sq_head_cached {
-                    s.sq_head_cached = self.regs.sq[self.channel as usize]
-                        .head
-                        .read(SQ_CHANNEL_HEAD::HEAD) as u16;
-                    if next_tail == s.sq_head_cached {
-                        s.tag_free |= 1u32 << tag;
-                        return Err(GdmaError::SQ_FULL);
-                    }
-                }
-            }
+        // SAFETY: The masked producer index selects an unused entry in the configured SQ ring.
+        let sq = unsafe { &mut *self.sq_ring.add(slot) };
 
-            let slot = (s.sq_tail & Self::MASK) as usize;
-            // SAFETY: The masked producer index selects an unused entry in the configured SQ ring.
-            let sq = unsafe { &mut *self.sq_ring.add(slot) };
+        // Build the 16-DW SQ entry locally, then bulk-copy to MMIO.
+        // This replaces ~24 individual STR instructions with 4 STM
+        // (LDM from stack + STM to MMIO).
+        let (src_fst_lo, src_fst_hi, src_snd_lo, src_snd_hi) = src_addr.to_dwords();
+        let (dst_fst_lo, dst_fst_hi, dst_snd_lo, dst_snd_hi) = dst_addr.to_dwords();
 
-            // Build the 16-DW SQ entry locally, then bulk-copy to MMIO.
-            // This replaces ~24 individual STR instructions with 4 STM
-            // (LDM from stack + STM to MMIO).
-            let (src_fst_lo, src_fst_hi, src_snd_lo, src_snd_hi) = src_addr.to_dwords();
-            let (dst_fst_lo, dst_fst_hi, dst_snd_lo, dst_snd_hi) = dst_addr.to_dwords();
+        let ctrl = (tag as u32) << 16 | (src_addr.fmt_bit() << 11) | (dst_addr.fmt_bit() << 12);
+        let src_ifc_val = src_ifc.ifc_slct() as u32;
+        let dst_ifc_val = dst_ifc.ifc_slct() as u32;
+        let ifc = src_ifc_val | (dst_ifc_val << 8) | (src_ifc_val << 16) | (dst_ifc_val << 24);
 
-            let ctrl = (tag as u32) << 16 | (src_addr.fmt_bit() << 11) | (dst_addr.fmt_bit() << 12);
-            let src_ifc_val = src_ifc.ifc_slct() as u32;
-            let dst_ifc_val = dst_ifc.ifc_slct() as u32;
-            let ifc = src_ifc_val | (dst_ifc_val << 8) | (src_ifc_val << 16) | (dst_ifc_val << 24);
+        let entry: [u32; 16] = [
+            ctrl,       // DW0: ctrl
+            ifc,        // DW1: ifc
+            0,          // DW2: rsvd
+            0,          // DW3: rsvd
+            src_len,    // DW4: src_len
+            dst_len,    // DW5: dst_len
+            0,          // DW6: rsvd
+            0,          // DW7: rsvd
+            src_fst_lo, // DW8
+            src_fst_hi, // DW9
+            src_snd_lo, // DW10
+            src_snd_hi, // DW11
+            dst_fst_lo, // DW12
+            dst_fst_hi, // DW13
+            dst_snd_lo, // DW14
+            dst_snd_hi, // DW15
+        ];
 
-            let entry: [u32; 16] = [
-                ctrl,       // DW0: ctrl
-                ifc,        // DW1: ifc
-                0,          // DW2: rsvd
-                0,          // DW3: rsvd
-                src_len,    // DW4: src_len
-                dst_len,    // DW5: dst_len
-                0,          // DW6: rsvd
-                0,          // DW7: rsvd
-                src_fst_lo, // DW8
-                src_fst_hi, // DW9
-                src_snd_lo, // DW10
-                src_snd_hi, // DW11
-                dst_fst_lo, // DW12
-                dst_fst_hi, // DW13
-                dst_snd_lo, // DW14
-                dst_snd_hi, // DW15
-            ];
+        let sq_ptr = sq as *mut GdmaSqEntry as *mut u32;
+        // SAFETY: The asserted SQ layout is sixteen aligned u32 words exclusively borrowed here.
+        let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
+        tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
 
-            let sq_ptr = sq as *mut GdmaSqEntry as *mut u32;
-            // SAFETY: The asserted SQ layout is sixteen aligned u32 words exclusively borrowed here.
-            let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
-            tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
+        Ok(tag)
+    }
 
-            s.sq_tail = next_tail;
-            s.bell = true;
+    /// Takes a free tag, for a `detached` transfer with that cookie, and
+    /// the next SQ entry, which the next [`ring`](Self::ring) hands to the
+    /// engine: its tag and the entry's ring index.
+    #[inline(always)]
+    fn take_entry(
+        &self,
+        s: &mut GdmaState<DEPTH>,
+        detached: Option<u16>,
+    ) -> HsmResult<(u16, usize)> {
+        if s.tag_free == 0 {
+            return Err(GdmaError::NO_FREE_TAGS);
+        }
+        let tag = s.tag_free.trailing_zeros() as u16;
+        let next_tail = (s.sq_tail + 1) & Self::MASK;
+        if next_tail == s.sq_head_cached && !self.sq_has_room(s, next_tail) {
+            return Err(GdmaError::SQ_FULL);
+        }
+        s.tag_free &= !(1u32 << tag);
+        let slot = &mut s.tags[tag as usize];
+        slot.detached = detached.is_some();
+        slot.cookie = detached.unwrap_or(0);
+        let entry = (s.sq_tail & Self::MASK) as usize;
+        s.sq_tail = next_tail;
+        s.bell = true;
+        Ok((tag, entry))
+    }
 
-            Ok(tag)
-        })
+    /// Whether the SQ, which looked full, has room for an entry at
+    /// `next_tail` after all: re-reads the engine's consumer index, from its
+    /// shadow and then from the register.
+    #[cold]
+    #[inline(never)]
+    fn sq_has_room(&self, s: &mut GdmaState<DEPTH>, next_tail: u16) -> bool {
+        // SAFETY: The configured SQ shadow word remains aligned and mapped for the driver.
+        s.sq_head_cached = unsafe { self.sq_head_shadow.read_volatile() } as u16;
+        if next_tail == s.sq_head_cached {
+            s.sq_head_cached = self.regs.sq[self.channel as usize]
+                .head
+                .read(SQ_CHANNEL_HEAD::HEAD) as u16;
+        }
+        next_tail != s.sq_head_cached
     }
 
     /// Ring the doorbell for the SQ entries written since the last call,
@@ -389,6 +427,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// As [`copy_mem`](Self::copy_mem) fails immediately.
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     pub fn copy_mem_detached(
         &self,
         src_addr: GdmaBuf,
@@ -399,7 +438,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_len: u32,
         cookie: u16,
     ) -> HsmResult<()> {
-        self.submit(
+        self.submit_inline(
             src_addr,
             src_ifc,
             src_len,
