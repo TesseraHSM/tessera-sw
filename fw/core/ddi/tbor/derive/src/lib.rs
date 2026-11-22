@@ -74,11 +74,17 @@ fn on_struct(
 
     let validation = codegen_view::gen_validation_standalone(&schema);
     let is_request = matches!(schema.kind, schema::MessageKind::Request { .. });
+    // A request view keeps the validation's parse (see `codegen_view`).
+    let validated = if is_request {
+        quote! { raw }
+    } else {
+        quote! { buf }
+    };
 
     let decode_fn = quote! {
         pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
             #validation
-            Ok(#view_name::from_validated(buf))
+            Ok(#view_name::from_validated(#validated))
         }
     };
 
@@ -90,7 +96,7 @@ fn on_struct(
         quote! {
             pub fn decode_from<'b>(buf: &'b tsra_fw_hsm_pal_traits::HsmDmaBuf, head: &tsra_fw_ddi_tbor::RequestHead) -> Result<#view_name<'b>, tsra_fw_hsm_pal_traits::HsmError> {
                 #validation
-                Ok(#view_name::from_validated(buf))
+                Ok(#view_name::from_validated(raw))
             }
         }
     } else {
