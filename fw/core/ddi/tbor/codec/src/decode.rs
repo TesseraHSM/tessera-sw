@@ -23,7 +23,8 @@ pub struct RequestView<'a> {
     /// The message's first words, read with one burst by
     /// [`parse()`](Self::parse): the header, then as many of the TOC
     /// entries as fit ([`TOC_CACHED`]), so validating and decoding the
-    /// message reads them from here rather than from DMA memory.
+    /// message reads them from here rather than from DMA memory; and, for a
+    /// TOC that reaches it, the entry after those (see [`NEXT_TOC_WORD`]).
     head: [u32; HEAD_WORDS],
 }
 
@@ -55,6 +56,13 @@ const HEAD_WORDS: usize = 8;
 /// has no more.
 const TOC_CACHED: usize = HEAD_WORDS - REQ_HEADER_LEN / 4;
 
+/// The head word that keeps TOC entry [`TOC_CACHED`], the first past the
+/// head, for a TOC that reaches it (a masked-key request's two padded
+/// buffers take its TOC to six entries): the header's third word, which no
+/// accessor reads. A parse reads the entry once, so validating and decoding
+/// the message do not each read it out of DMA memory.
+const NEXT_TOC_WORD: usize = 2;
+
 impl<'a> RequestView<'a> {
     /// Parse and structurally validate a request message.
     ///
@@ -72,13 +80,18 @@ impl<'a> RequestView<'a> {
         }
 
         let (head, _) = buf.read_head_words();
-        let view = Self { buf, head };
+        let mut view = Self { buf, head };
         // The words read cover every TOC entry up to `TOC_CACHED` that
         // passes this check.
         let toc_count = view.toc_count();
         let min_len = REQ_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
+        }
+        if toc_count > TOC_CACHED {
+            // As `read_head_words` would have loaded it.
+            view.head[NEXT_TOC_WORD] =
+                u32::from_ne_bytes(read_toc_word(buf, REQ_HEADER_LEN, TOC_CACHED).to_be_bytes());
         }
 
         let data_size = buf.len() - view.data_start();
@@ -147,10 +160,12 @@ impl<'a> RequestView<'a> {
     /// [`parse()`](Self::parse) read when it is among them.
     #[inline]
     pub fn toc_word(&self, index: usize) -> u32 {
-        match self.head.get(REQ_HEADER_LEN / 4 + index) {
-            Some(word) if index < TOC_CACHED => u32::from_be_bytes(word.to_ne_bytes()),
-            _ => read_toc_word(self.buf, REQ_HEADER_LEN, index),
-        }
+        let at = match index {
+            i if i < TOC_CACHED => REQ_HEADER_LEN / 4 + i,
+            TOC_CACHED => NEXT_TOC_WORD,
+            _ => return read_toc_word(self.buf, REQ_HEADER_LEN, index),
+        };
+        u32::from_be_bytes(self.head[at].to_ne_bytes())
     }
 
     /// Byte offset where the variable-length data section starts.

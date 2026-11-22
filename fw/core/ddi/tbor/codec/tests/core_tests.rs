@@ -406,6 +406,26 @@ fn from_head_reuses_a_parse_only_for_its_storage() {
 }
 
 #[test]
+fn from_head_keeps_the_toc_entry_past_the_head() {
+    let mut buf = [0u8; 256];
+    let mut enc = RequestEncoder::new(&mut buf, (1, 1), 0x0A);
+    for i in 0..7u8 {
+        enc = enc.uint8(i).unwrap();
+    }
+    let msg = enc.finish().unwrap();
+    let head = RequestView::parse(brand(msg)).unwrap().head();
+
+    let view = RequestView::from_head(brand(msg), &head).unwrap();
+    assert_eq!(view.api_rev(), (1, 1));
+    for i in 0..7 {
+        match view.toc_entry(i) {
+            TocEntry::Uint8(v) => assert_eq!(v, i as u8),
+            other => panic!("expected Uint8, got {:?}", other),
+        }
+    }
+}
+
+#[test]
 fn decode_buffer_too_short() {
     let wire = [0x01, 0x00];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
