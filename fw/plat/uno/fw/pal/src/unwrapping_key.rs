@@ -118,16 +118,19 @@ impl UnoHsmPal {
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
+        // The slot first: once its key has passed, the partition's shadow
+        // answers for it, so almost every IO returns here without reading
+        // the partition's state.
+        if part.unwrapping_key_slot() != Some(UnwrappingKeySlot::PendingPct)
+            || part.unwrapping_key_id().is_some()
+        {
+            return;
+        }
         // The same admission rule that the core applies to host traffic.
         if !matches!(
             part.state(),
             Ok(HsmPartState::Enabled | HsmPartState::Initializing | HsmPartState::Initialized)
         ) {
-            return;
-        }
-        if part.unwrapping_key_slot() != Some(UnwrappingKeySlot::PendingPct)
-            || part.unwrapping_key_id().is_some()
-        {
             return;
         }
         let Some(_reservation) = PctReservation::acquire(self, pid) else {
