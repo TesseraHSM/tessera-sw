@@ -612,8 +612,10 @@ impl Partition {
     }
 
     /// Word `i` of this slot's [`Shadow`], loading the shadow first if
-    /// need be.
-    #[inline]
+    /// need be. Inlined everywhere: in-session lookups read through it
+    /// several times per request, and out of line its call costs more than
+    /// its two loads.
+    #[inline(always)]
     fn shadow(self, i: usize) -> u32 {
         let shadow = &SHADOWS[self.0];
         if !shadow.valid.load(Relaxed) {
