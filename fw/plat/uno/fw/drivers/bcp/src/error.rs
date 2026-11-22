@@ -34,4 +34,7 @@ impl BcpError {
 
     /// The engine could not be brought up: a soft reset did not complete.
     pub const RESET_FAILED: HsmError = make_component_error(ComponentId::BCP, 6);
+
+    /// The driver already tracks as many commands as it can.
+    pub const QUEUE_FULL: HsmError = make_component_error(ComponentId::BCP, 7);
 }

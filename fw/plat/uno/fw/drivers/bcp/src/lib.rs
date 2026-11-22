@@ -15,7 +15,8 @@
 //! The driver programs one 32-entry submission/completion queue pair and
 //! DFL list 0 in GSRAM, and submits AES-256 commands of up to four 4 KiB
 //! chunks, up to 31 at a time while their chunks fit the ring; further
-//! callers wait. Each in-flight command owns the two key-vault slots (data
+//! commands queue in the driver and start, in order, as completions free
+//! room. Each in-flight command owns the two key-vault slots (data
 //! key, XTS tweak key) and the DFL entry matching its command ID.
 //!
 //! The engine has no interrupt routed to the HSM, so completions are

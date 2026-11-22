@@ -4,12 +4,12 @@
 #![allow(unsafe_code)]
 
 use core::future::Future;
+use core::marker::PhantomPinned;
 use core::pin::Pin;
 use core::task::Context;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
-use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::Duration;
 use embassy_time::Instant;
@@ -77,10 +77,12 @@ const SQE_BUDGET: usize = DEPTH - 1;
 /// command has at most one CQE not yet reaped.
 const IDS: usize = SQE_BUDGET;
 
-/// Tasks that can wait for a command ID before the oldest waiters are
-/// woken early to make room (they then register again): every task that
-/// can run a command, so a busy engine does not churn the waiters.
-const ID_WAITERS: usize = 32;
+/// Commands the driver tracks at once, queued or in flight. A caller holds
+/// its ticket from submission until it takes the result, so this covers
+/// every task that can run a command at once (one per IO slot: command,
+/// admin, self-test and bulk) with room to spare, and
+/// [`BcpError::QUEUE_FULL`] is only a backstop.
+const TICKETS: usize = 128;
 
 /// `free` bitmap with every command ID free.
 const ALL_FREE: u32 = ((1u64 << IDS) - 1) as u32;
@@ -93,10 +95,8 @@ const CMD_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Bound on the wait for a soft reset to complete and the engine to stop.
 const RESET_SPIN: u32 = 100_000;
 
-/// Driver-internal status for a command abandoned by a reset.
-const STATUS_STALLED: u8 = 0xFF;
-
 const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 32);
+const _: () = assert!(TICKETS.is_power_of_two() && TICKETS <= 128);
 const _: () = assert!(BCP_CQ_COUNT as usize == DEPTH && BCP_DFL_COUNT as usize == DEPTH);
 
 /// AES-256 key length; the engine has no other key size.
@@ -431,27 +431,58 @@ impl GcmCompletion {
     }
 }
 
+/// A command ID in use.
 struct Slot {
-    waker: WakerRegistration,
-    done: bool,
+    /// Ticket of the command.
+    ticket: u8,
     /// Failed; waiting for the completion of the abort that frees its
     /// engine slot.
     aborting: bool,
-    status: u8,
-    tag: [u8; BCP_TAG_LEN],
-    err: [u32; 2],
     deadline: Instant,
     /// SQEs reserved against [`SQE_BUDGET`] until the command completes.
     chunks: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TicketState {
+    Free,
+    /// Waiting in the driver's queue for a command ID and SQE budget.
+    Queued,
+    /// Dropped by its caller while queued; freed when the queue reaches it.
+    Cancelled,
+    /// On the engine.
+    Running,
+    /// Finished; its caller has yet to take the result.
+    Done,
+}
+
+/// A command from submission until its caller takes the result.
+struct Ticket {
+    waker: WakerRegistration,
+    state: TicketState,
+    /// The command while [`TicketState::Queued`]. It lives in its caller's
+    /// [`CmdFuture`], which does not move (it is `!Unpin`) and cancels the
+    /// ticket before it is dropped.
+    cmd: *const Cmd<'static>,
+    /// The completion, or why the command failed.
+    result: HsmResult<GcmCompletion>,
+}
+
+/// [`Ticket::result`] of a ticket without one.
+const NO_RESULT: HsmResult<GcmCompletion> = Ok(GcmCompletion {
+    status: 0,
+    tag: [0; BCP_TAG_LEN],
+    err: [0; 2],
+});
+
 struct BcpState {
     /// Engine and rings configured.
     up: bool,
     /// The reset of a stuck engine is not confirmed yet: the commands in
-    /// flight stay in flight, and new commands fail. Cleared once the
-    /// reset is confirmed, or once the engine has reported every command
-    /// in flight; either way the next command brings the engine up afresh.
+    /// flight stay in flight, and new and queued commands fail. Cleared
+    /// once the reset is confirmed, or once the engine has reported every
+    /// command in flight; either way the next command brings the engine up
+    /// afresh.
     stalled: bool,
     /// Next submission ring index.
     sq_pi: u16,
@@ -461,18 +492,24 @@ struct BcpState {
     free: u32,
     /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
     reserved: usize,
-    /// Tasks waiting for a free command ID.
-    id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; IDS],
+    tickets: [Ticket; TICKETS],
+    /// Free tickets (bit N = ticket N free).
+    ticket_free: u128,
+    /// Queued tickets, oldest at `queue_head`.
+    queue: [u8; TICKETS],
+    queue_head: u8,
+    queue_tail: u8,
 }
 
 /// Async BCP driver.
 ///
 /// Up to `IDS` commands may be outstanding while their chunks fit
-/// [`SQE_BUDGET`], and further callers
-/// wait for a command ID; each command owns the key-vault slot and DFL
-/// element numbered by its ID.
+/// [`SQE_BUDGET`]; each owns the key-vault slots and DFL element numbered
+/// by its ID. Further commands queue in the driver, in order, and the
+/// completions that free IDs and SQEs start them (see
+/// [`wake`](Self::wake)), so a caller is woken once, with its result.
 pub struct BcpDriver {
     state: SingleCell<BcpState>,
 }
@@ -495,36 +532,42 @@ impl BcpDriver {
                 cq_ci: 0,
                 free: ALL_FREE,
                 reserved: 0,
-                id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
-                    waker: WakerRegistration::new(),
-                    done: false,
+                    ticket: 0,
                     aborting: false,
-                    status: 0,
-                    tag: [0; BCP_TAG_LEN],
-                    err: [0; 2],
                     deadline: Instant::from_ticks(0),
                     chunks: 0,
                 }),
+                tickets: core::array::from_fn(|_| Ticket {
+                    waker: WakerRegistration::new(),
+                    state: TicketState::Free,
+                    cmd: core::ptr::null(),
+                    result: NO_RESULT,
+                }),
+                ticket_free: u128::MAX >> (128 - TICKETS),
+                queue: [0; TICKETS],
+                queue_head: 0,
+                queue_tail: 0,
             }),
         }
     }
 
     /// Submit an AES-256-GCM command and await its completion.
     ///
-    /// Waits for a command ID when all are in use. Returns the raw
-    /// completion; the caller decides what the status means. Fails with
-    /// [`BcpError::TIMEOUT`] if the engine had to be reset (or a reset is
-    /// still pending), or [`BcpError::RESET_FAILED`] if it could not be
-    /// brought up.
+    /// Queues in the driver while every command ID or the SQE budget is in
+    /// use. Returns the raw completion; the caller decides what the status
+    /// means. Fails with [`BcpError::TIMEOUT`] if the engine had to be reset
+    /// (or a reset is still pending), [`BcpError::RESET_FAILED`] if it could
+    /// not be brought up, or [`BcpError::QUEUE_FULL`] if the driver already
+    /// tracks [`TICKETS`] commands.
     ///
     /// # Cancellation safety
     ///
-    /// Once submitted, the engine reads `src` and writes `dst` until the
-    /// command completes. Dropping the future before then blocks until the
-    /// engine is done with them, or has been reset past the command's
-    /// deadline, and then releases the command, so the buffers are never
-    /// freed while the engine may still use them.
+    /// Dropping the future while the command is queued cancels it. Once
+    /// started, the engine reads `src` and writes `dst` until the command
+    /// completes; dropping the future before then blocks until the engine is
+    /// done with them, or has been reset past the command's deadline, so the
+    /// buffers are never freed while the engine may still use them.
     pub fn gcm<'a>(
         &'a self,
         req: GcmRequest<'a>,
@@ -532,7 +575,8 @@ impl BcpDriver {
         CmdFuture {
             bcp: self,
             cmd: Cmd::local(req),
-            id: None,
+            ticket: None,
+            _pin: PhantomPinned,
         }
     }
 
@@ -546,7 +590,8 @@ impl BcpDriver {
         CmdFuture {
             bcp: self,
             cmd: Cmd::local_xts(req),
-            id: None,
+            ticket: None,
+            _pin: PhantomPinned,
         }
     }
 
@@ -560,12 +605,13 @@ impl BcpDriver {
         CmdFuture {
             bcp: self,
             cmd: Cmd::host(req),
-            id: None,
+            ticket: None,
+            _pin: PhantomPinned,
         }
     }
 
-    /// Reap completions and wake their awaiters; reset the engine if a
-    /// command is past its deadline.
+    /// Reap completions, wake their awaiters and start the queued commands
+    /// that now fit; reset the engine if a command is past its deadline.
     ///
     /// The engine raises no HSM interrupt, so the PAL calls this from its
     /// poll loop. With no command in flight it touches no register: the
@@ -588,7 +634,7 @@ impl BcpDriver {
                 .slots
                 .iter()
                 .enumerate()
-                .any(|(i, slot)| s.free & (1 << i) == 0 && !slot.done && now > slot.deadline);
+                .any(|(i, slot)| s.free & (1 << i) == 0 && now > slot.deadline);
             if late {
                 recover(s);
             }
@@ -758,112 +804,191 @@ fn data_block(addr: u32, len: usize) -> [u8; 16] {
 }
 
 /// The future [`BcpDriver::gcm`], [`BcpDriver::xts`] and [`BcpDriver::host`]
-/// return. It owns its command from submission until the completion is
-/// consumed, so that dropping it mid-flight can wait for the engine before
-/// the buffers go.
+/// return. It holds its command's ticket from submission until it takes the
+/// result, so that dropping it can cancel a queued command or wait for the
+/// engine before the buffers go.
 struct CmdFuture<'a> {
     bcp: &'a BcpDriver,
     /// The command, or why it is invalid.
     cmd: HsmResult<Cmd<'a>>,
-    /// Command ID while submitted and not yet consumed.
-    id: Option<usize>,
+    /// Ticket while submitted and the result not yet taken.
+    ticket: Option<u8>,
+    /// A queued command is read in place, through [`Ticket::cmd`].
+    _pin: PhantomPinned,
 }
 
 impl Future for CmdFuture<'_> {
     type Output = HsmResult<GcmCompletion>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let bcp = this.bcp;
-        bcp.state.with(|s| {
-            let id = match this.id {
-                Some(id) => id,
+        // SAFETY: nothing is moved out of the future, which stays in place
+        // while its command is queued.
+        let this = unsafe { self.get_unchecked_mut() };
+        let cmd = match &this.cmd {
+            Ok(cmd) => cmd,
+            Err(e) => return Poll::Ready(Err(*e)),
+        };
+        this.bcp.state.with(|s| {
+            let t = match this.ticket {
+                Some(t) => t,
                 None => {
-                    let cmd = match &this.cmd {
-                        Ok(cmd) => cmd,
-                        Err(e) => return Poll::Ready(Err(*e)),
-                    };
                     if s.stalled {
                         return Poll::Ready(Err(BcpError::TIMEOUT));
                     }
-                    let chunks = cmd.len.div_ceil(BCP_CHUNK_LEN);
-                    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
-                        s.id_waiters.register(cx.waker());
-                        return Poll::Pending;
+                    if s.ticket_free == 0 {
+                        return Poll::Ready(Err(BcpError::QUEUE_FULL));
                     }
-                    if !s.up {
-                        if !bring_up() {
-                            return Poll::Ready(Err(BcpError::RESET_FAILED));
-                        }
-                        s.up = true;
-                        s.sq_pi = 0;
-                        s.cq_ci = 0;
+                    let t = s.ticket_free.trailing_zeros() as u8;
+                    s.ticket_free &= !(1 << t);
+                    this.ticket = Some(t);
+                    // Commands queued ahead start first.
+                    dispatch(s);
+                    if s.queue_head == s.queue_tail && fits(s, cmd) {
+                        start(s, t, cmd);
+                    } else {
+                        let ticket = &mut s.tickets[t as usize];
+                        ticket.cmd = (cmd as *const Cmd<'_>).cast();
+                        ticket.state = TicketState::Queued;
+                        s.queue[s.queue_tail as usize % TICKETS] = t;
+                        s.queue_tail = s.queue_tail.wrapping_add(1);
                     }
-
-                    let id = s.free.trailing_zeros() as usize;
-                    s.free &= !(1 << id);
-                    s.slots[id].done = false;
-                    s.slots[id].aborting = false;
-                    s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
-                    s.slots[id].chunks = chunks as u8;
-                    s.reserved += chunks;
-                    this.id = Some(id);
-
-                    load_key(key_slot(id, 0), cmd.key1);
-                    if let Some(key2) = cmd.key2 {
-                        load_key(key_slot(id, 1), key2);
-                    }
-                    write_dfl(id, cmd);
-                    submit(s, id, cmd);
-                    id
+                    t
                 }
             };
-
-            if !s.slots[id].done {
-                s.slots[id].waker.register(cx.waker());
+            let ticket = &mut s.tickets[t as usize];
+            if ticket.state != TicketState::Done {
+                ticket.waker.register(cx.waker());
                 return Poll::Pending;
             }
-            this.id = None;
-            let done = release(s, id);
-            if done.status == STATUS_STALLED {
-                return Poll::Ready(Err(BcpError::TIMEOUT));
-            }
-            Poll::Ready(Ok(done))
+            this.ticket = None;
+            Poll::Ready(take(s, t))
         })
     }
 }
 
 impl Drop for CmdFuture<'_> {
-    /// Dropped with its command in flight, and the caller is about to free
-    /// the command's buffers: wait for the engine to finish with them (or
-    /// to be reset past the command's deadline), then release the command.
-    /// While a reset cannot be confirmed this waits on, since returning
-    /// would hand the caller buffers the engine may still use.
+    /// Dropped with its command queued: cancel the command. Dropped with its
+    /// command on the engine, and the caller is about to free the command's
+    /// buffers: wait for the engine to finish with them (or to be reset past
+    /// the command's deadline). While a reset cannot be confirmed this waits
+    /// on, since returning would hand the caller buffers the engine may still
+    /// use.
     fn drop(&mut self) {
-        let Some(id) = self.id.take() else {
+        let Some(t) = self.ticket.take() else {
             return;
         };
-        while !self.bcp.state.with(|s| s.slots[id].done) {
+        loop {
+            let running = self.bcp.state.with(|s| match s.tickets[t as usize].state {
+                TicketState::Running => true,
+                TicketState::Queued => {
+                    s.tickets[t as usize].state = TicketState::Cancelled;
+                    dispatch(s);
+                    false
+                }
+                _ => {
+                    let _ = take(s, t);
+                    false
+                }
+            });
+            if !running {
+                return;
+            }
             self.bcp.wake();
         }
-        self.bcp.state.with(|s| {
-            release(s, id);
-        });
     }
 }
 
-/// Release the completed command `id`: free its ID and SQE reservation,
-/// wipe its key, and return its completion.
-fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
-    let slot = &mut s.slots[id];
-    slot.done = false;
-    let done = GcmCompletion {
-        status: slot.status,
-        tag: slot.tag,
-        err: slot.err,
+/// Whether `cmd` can start now: a command ID is free, and its chunks fit
+/// the SQE budget.
+fn fits(s: &BcpState, cmd: &Cmd<'_>) -> bool {
+    s.free != 0 && s.reserved + cmd.len.div_ceil(BCP_CHUNK_LEN) <= SQE_BUDGET
+}
+
+/// Start ticket `t`'s command `cmd`, which [`fits`]: bring the engine up if
+/// it is down, then take a command ID, load the keys and DFL element and
+/// queue the SQEs. If the engine cannot be brought up, the command finishes
+/// with the error.
+fn start(s: &mut BcpState, t: u8, cmd: &Cmd<'_>) {
+    if !s.up {
+        if !bring_up() {
+            finish(s, t, Err(BcpError::RESET_FAILED));
+            return;
+        }
+        s.up = true;
+        s.sq_pi = 0;
+        s.cq_ci = 0;
+    }
+
+    let chunks = cmd.len.div_ceil(BCP_CHUNK_LEN);
+    let id = s.free.trailing_zeros() as usize;
+    s.free &= !(1 << id);
+    s.slots[id] = Slot {
+        ticket: t,
+        aborting: false,
+        deadline: Instant::now() + CMD_TIMEOUT,
+        chunks: chunks as u8,
     };
-    slot.tag = [0; BCP_TAG_LEN];
-    s.reserved -= usize::from(slot.chunks);
+    s.reserved += chunks;
+    s.tickets[t as usize].state = TicketState::Running;
+
+    load_key(key_slot(id, 0), cmd.key1);
+    if let Some(key2) = cmd.key2 {
+        load_key(key_slot(id, 1), key2);
+    }
+    write_dfl(id, cmd);
+    submit(s, id, cmd);
+}
+
+/// Start the queued commands, in order, while the oldest fits, and free the
+/// cancelled ones. While a reset is pending the queued commands fail.
+fn dispatch(s: &mut BcpState) {
+    while s.queue_head != s.queue_tail {
+        let t = s.queue[s.queue_head as usize % TICKETS];
+        let ticket = &s.tickets[t as usize];
+        if ticket.state == TicketState::Cancelled {
+            s.queue_head = s.queue_head.wrapping_add(1);
+            let _ = take(s, t);
+            continue;
+        }
+        if s.stalled {
+            s.queue_head = s.queue_head.wrapping_add(1);
+            finish(s, t, Err(BcpError::TIMEOUT));
+            continue;
+        }
+        // SAFETY: a queued command lives in its caller's `CmdFuture`, which
+        // does not move and cancels the ticket before it is dropped.
+        let cmd = unsafe { &*ticket.cmd };
+        if !fits(s, cmd) {
+            break;
+        }
+        s.queue_head = s.queue_head.wrapping_add(1);
+        start(s, t, cmd);
+    }
+}
+
+/// Finish ticket `t` with `result` and wake its caller.
+fn finish(s: &mut BcpState, t: u8, result: HsmResult<GcmCompletion>) {
+    let ticket = &mut s.tickets[t as usize];
+    ticket.result = result;
+    ticket.state = TicketState::Done;
+    ticket.waker.wake();
+}
+
+/// Take ticket `t`'s result and free the ticket.
+fn take(s: &mut BcpState, t: u8) -> HsmResult<GcmCompletion> {
+    let ticket = &mut s.tickets[t as usize];
+    let result = ticket.result;
+    ticket.result = NO_RESULT;
+    ticket.state = TicketState::Free;
+    ticket.cmd = core::ptr::null();
+    s.ticket_free |= 1 << t;
+    result
+}
+
+/// Free command ID `id`, whose command is done with the engine: its SQE
+/// reservation, its key slots and the ID.
+fn free_id(s: &mut BcpState, id: usize) {
+    s.reserved -= usize::from(s.slots[id].chunks);
     clear_key(id);
     s.free |= 1 << id;
     if s.stalled && s.free == ALL_FREE {
@@ -873,8 +998,6 @@ fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
         s.stalled = false;
         s.up = false;
     }
-    s.id_waiters.wake();
-    done
 }
 
 /// Advance the submission ring past the SQE just written at `sq_pi` and
@@ -901,13 +1024,13 @@ fn reap(s: &mut BcpState, pi: u16) {
             continue;
         }
 
+        let t = s.slots[id].ticket;
         if s.slots[id].aborting {
             // The abort freeing a failed command's engine slot is done; the
-            // command completes with its original status.
-            let slot = &mut s.slots[id];
-            slot.aborting = false;
-            slot.done = true;
-            slot.waker.wake();
+            // command completes with the status of its own CQE.
+            free_id(s, id);
+            let result = s.tickets[t as usize].result;
+            finish(s, t, result);
             continue;
         }
 
@@ -927,19 +1050,22 @@ fn reap(s: &mut BcpState, pi: u16) {
             ring(s);
         }
 
-        let slot = &mut s.slots[id];
-        slot.status = status;
-        slot.err = err;
-        slot.tag = read_tag(id);
+        let done = GcmCompletion {
+            status,
+            tag: read_tag(id),
+            err,
+        };
         if status & BCP_STATUS_ERROR != 0 {
-            slot.aborting = true;
+            s.slots[id].aborting = true;
+            s.tickets[t as usize].result = Ok(done);
         } else {
-            slot.done = true;
-            slot.waker.wake();
+            free_id(s, id);
+            finish(s, t, Ok(done));
         }
     }
 
     BCP.cq_ci.write(CQ_CI::INDEX.val(s.cq_ci.into()));
+    dispatch(s);
 }
 
 /// Reset a stuck engine and fail every command in flight. The commands
@@ -951,23 +1077,23 @@ fn recover(s: &mut BcpState) {
     if !reset() {
         if !s.stalled {
             s.stalled = true;
-            // Commands waiting for an ID fail instead.
-            s.id_waiters.wake();
+            // The queued commands fail instead.
+            dispatch(s);
         }
         return;
     }
     s.stalled = false;
     s.up = false;
 
-    let free = s.free;
-    for (i, slot) in s.slots.iter_mut().enumerate() {
-        if free & (1 << i) == 0 && !slot.done {
-            slot.status = STATUS_STALLED;
-            slot.aborting = false;
-            slot.done = true;
-            slot.waker.wake();
+    for id in 0..IDS {
+        if s.free & (1 << id) == 0 {
+            let t = s.slots[id].ticket;
+            free_id(s, id);
+            finish(s, t, Err(BcpError::TIMEOUT));
         }
     }
+    // The first queued command brings the engine up again.
+    dispatch(s);
 }
 
 /// Soft-reset the engine and confirm that it has stopped: the reset bit
