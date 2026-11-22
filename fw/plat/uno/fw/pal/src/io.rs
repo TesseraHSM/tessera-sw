@@ -75,9 +75,9 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 #[cfg(not(feature = "bulk_crypto"))]
-use tsra_fw_uno_drivers_bcp::GcmCompletion;
-#[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_drivers_bcp::BcpData;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::GcmCompletion;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
@@ -1038,7 +1038,11 @@ impl UnoHsmPal {
                 }
                 #[cfg(not(feature = "bulk_crypto"))]
                 Stage::Sealed(io, plan) => {
-                    let Some(io) = (if ok { self.start_open(io, plan) } else { Some(io) }) else {
+                    let Some(io) = (if ok {
+                        self.start_open(io, plan)
+                    } else {
+                        Some(io)
+                    }) else {
                         continue;
                     };
                     self.hand_on(
@@ -1121,8 +1125,7 @@ impl UnoHsmPal {
             return Some(io);
         };
         // The frame carries the IV: only the key is needed, not the salt.
-        let Some(secret) =
-            Self::active_transport_secret(&io, plan.id, HsmSessionTransportDir::H2m)
+        let Some(secret) = Self::active_transport_secret(&io, plan.id, HsmSessionTransportDir::H2m)
         else {
             return Some(io);
         };
@@ -1137,9 +1140,11 @@ impl UnoHsmPal {
         let Some((iv, tag)) = trailer_words(trailer) else {
             return Some(io);
         };
-        let Ok(binding) =
-            sealed::SessionTransportBinding::uno(u16::from(plan.id), io.cmd_sqe().session_ctrl(), iv)
-        else {
+        let Ok(binding) = sealed::SessionTransportBinding::uno(
+            u16::from(plan.id),
+            io.cmd_sqe().session_ctrl(),
+            iv,
+        ) else {
             return Some(io);
         };
         data[..sealed::TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(false));
@@ -1161,13 +1166,7 @@ impl UnoHsmPal {
     /// whether its request authenticated; one that did not has its text
     /// wiped and its binding dropped, as a failed `sealed_open` leaves it.
     #[cfg(not(feature = "bulk_crypto"))]
-    fn finish_open(
-        &self,
-        io: UnoHsmIo,
-        tag: &[u8; 16],
-        len: u16,
-        done: HsmResult<GcmCompletion>,
-    ) {
+    fn finish_open(&self, io: UnoHsmIo, tag: &[u8; 16], len: u16, done: HsmResult<GcmCompletion>) {
         let len = usize::from(len);
         let opened = (|| {
             let mut buf =
@@ -1282,7 +1281,8 @@ impl UnoHsmPal {
         // nothing else reads or writes it until the run loop takes the
         // seal's completion.
         let data = unsafe { BcpData::in_place_raw(frame, AAD + pt_len) };
-        self.gcm_start_detached(reply.key, &iv, None, data, index).ok()?;
+        self.gcm_start_detached(reply.key, &iv, None, data, index)
+            .ok()?;
         Some(SealedReply {
             queue_id: io.queue_id(),
             frame: frame.wrapping_add(AAD),
