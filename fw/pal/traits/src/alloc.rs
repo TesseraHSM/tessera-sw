@@ -213,6 +213,14 @@ impl HsmDmaBuf {
         unsafe { &mut *(buf as *mut [u8] as *mut HsmDmaBuf) }
     }
 
+    /// An empty buffer over no storage, for a holder that never touches its
+    /// bytes (an empty undo log's): no allocation.
+    #[inline(always)]
+    pub fn empty_mut<'a>() -> &'a mut Self {
+        // SAFETY: An empty slice has no bytes for a DMA engine to address.
+        unsafe { Self::from_raw_mut(&mut []) }
+    }
+
     /// Splits this `HsmDmaBuf` into two `HsmDmaBuf` views at `mid`.
     ///
     /// Both halves remain DMA-accessible because they are
