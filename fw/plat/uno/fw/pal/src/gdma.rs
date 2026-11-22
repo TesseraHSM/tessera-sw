@@ -705,14 +705,14 @@ impl UnoHsmPal {
 pub(crate) const CPU_SCRUB_MAX: usize = 4096;
 
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
-/// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA
-/// cannot reach), small SRAM scrubs, and as the GDMA-failure fallback for
-/// SRAM.
+/// elide. Used for the M7 TCM (which GDMA cannot reach), small SRAM scrubs,
+/// and as the GDMA-failure fallback for SRAM.
 ///
 /// Zeroes the widest naturally-aligned element the region supports: an
-/// 8-byte-aligned `u64` (QWORD) body, framed by a byte-wise head/tail for
-/// any unaligned edges. The body goes out 32 bytes per store-multiple, one
-/// bus burst each, and its last 0–3 QWORDs through `zeroize`.
+/// 8-byte-aligned `u64` (QWORD) body, framed by a head/tail for any
+/// unaligned edges. The body goes out 32 bytes per store-multiple, one bus
+/// burst each, and its last 0–3 QWORDs and the tail as a few single stores
+/// rather than through a fill routine, whose call costs more than they do.
 ///
 /// The **head** is normally empty: callers pass a per-IO region base, and
 /// both regions are 8-byte aligned (`DTCM_IO_BUF` 0x600, `SRAM_IO_BUF`
@@ -721,8 +721,9 @@ pub(crate) const CPU_SCRUB_MAX: usize = 4096;
 /// value's `align_of`, so a watermark that is not a multiple of 8 is the
 /// normal case and the tail path runs routinely.
 ///
-/// `zeroize` emits the volatile writes plus a compiler+atomic fence, so
-/// the wipe cannot be elided.
+/// Every store is volatile (the store-multiples are inline assembly; the
+/// head goes through the vetted [`zeroize`] crate), and a compiler fence
+/// follows them, as `zeroize` does, so the wipe cannot be elided.
 ///
 /// # Safety
 ///
@@ -773,16 +774,47 @@ unsafe fn cpu_zeroize(ptr: *mut u8, len: usize) {
             }
             body_words %= 4;
         }
+        // The body's last QWORDs: at most three after the store-multiples.
         // SAFETY: `body_ptr` is aligned and `body_words` QWORDs of the body
         // remain within the exclusive region.
-        let body = unsafe { core::slice::from_raw_parts_mut(body_ptr, body_words) };
-        body.zeroize();
+        #[cfg(target_arch = "arm")]
+        unsafe {
+            if body_words & 2 != 0 {
+                body_ptr.write_volatile(0);
+                body_ptr.add(1).write_volatile(0);
+                body_ptr = body_ptr.add(2);
+            }
+            if body_words & 1 != 0 {
+                body_ptr.write_volatile(0);
+            }
+        }
+        #[cfg(not(target_arch = "arm"))]
+        for i in 0..body_words {
+            // SAFETY: as above.
+            unsafe { body_ptr.add(i).write_volatile(0) };
+        }
     }
-    // Byte-wise tail (sub-`u64` remainder). Unlike the head this is
-    // common: `len` is the dirty high-water mark, not the region size.
+    // Tail (sub-`u64` remainder). Unlike the head this is common: `len` is
+    // the dirty high-water mark, not the region size. It starts 8-byte
+    // aligned (the head and body end on a QWORD boundary whenever any
+    // tail remains), so a word, a halfword and a byte cover it aligned.
     let tail_off = head + body_len;
-    if tail_off < len {
-        // SAFETY: `tail_off < len`, so `ptr + tail_off` is within the region.
-        unsafe { core::slice::from_raw_parts_mut(ptr.add(tail_off), len - tail_off) }.zeroize();
+    let tail = len - tail_off;
+    // SAFETY: the `tail` (< 8) bytes from `ptr + tail_off` are within the
+    // region, and each store below is naturally aligned within them.
+    unsafe {
+        let mut p = ptr.add(tail_off);
+        if tail & 4 != 0 {
+            p.cast::<u32>().write_volatile(0);
+            p = p.add(4);
+        }
+        if tail & 2 != 0 {
+            p.cast::<u16>().write_volatile(0);
+            p = p.add(2);
+        }
+        if tail & 1 != 0 {
+            p.write_volatile(0);
+        }
     }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
