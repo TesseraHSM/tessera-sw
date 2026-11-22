@@ -853,6 +853,43 @@ impl RequestPlan {
     }
 }
 
+/// Writes a sealed frame's padding over `frame[start..end]`: zeros, then
+/// their count in its last byte. `end` ends a 16-byte block of the padded
+/// text, so is word-aligned: whole words go out as single stores. Volatile,
+/// so the few stores are not turned into a call.
+///
+/// # Safety
+///
+/// `frame` must be word-aligned and `frame[start..end]` valid for writes,
+/// with `1 <= end - start <= 16`.
+#[cfg(not(feature = "bulk_crypto"))]
+unsafe fn write_padding(frame: *mut u8, start: usize, end: usize) {
+    let count = (end - start - 1) as u8;
+    let words_from = start.next_multiple_of(4);
+    // SAFETY: every store is within `frame[start..end]`, and the word
+    // stores at word-aligned offsets of the word-aligned `frame`.
+    unsafe {
+        if words_from + 4 > end {
+            // All in the last word, beside text: bytes.
+            for at in start..end - 1 {
+                frame.add(at).write_volatile(0);
+            }
+            frame.add(end - 1).write_volatile(count);
+            return;
+        }
+        for at in start..words_from {
+            frame.add(at).write_volatile(0);
+        }
+        let last = frame.add(end - 4).cast::<u32>();
+        let mut word = frame.add(words_from).cast::<u32>();
+        while word < last {
+            word.write_volatile(0);
+            word = word.add(1);
+        }
+        last.write_volatile(u32::from(count) << 24);
+    }
+}
+
 /// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it: its DTCM copy
 /// (see [`CqeCopies`]), which goes out to `IO_CQ[index]` when the
 /// completion is posted.
@@ -1163,15 +1200,15 @@ impl UnoHsmPal {
             return None;
         }
         let (key, salt) = self.reply_key(io, id)?;
-        let pad = pt_len - resp.len();
         // SAFETY: `frame..frame + AAD + len` lies in the slot's DMA heap,
-        // which the slot owns; the AAD room before the response and the
-        // padding after it, written here, are outside `resp`.
+        // which the slot owns, and is word-aligned, as DMA allocations are;
+        // the AAD room before the response and the padding after it, written
+        // here, are outside `resp`. Word stores: the CPU writes the frame
+        // uncached, a bus write each.
         unsafe {
-            frame.copy_from_nonoverlapping(binding.aad(true).as_ptr(), AAD);
-            let tail = frame.add(AAD + resp.len());
-            tail.write_bytes(0, pad - 1);
-            tail.add(pad - 1).write((pad - 1) as u8);
+            let aad: [u32; AAD / 4] = core::mem::transmute(binding.aad(true));
+            frame.cast::<[u32; AAD / 4]>().write(aad);
+            write_padding(frame, AAD + resp.len(), AAD + pt_len);
         }
         // A drawn sequence number is spent: draw it only once the BCP has
         // room for the seal.
