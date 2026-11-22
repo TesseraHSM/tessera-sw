@@ -912,8 +912,8 @@ impl UnoHsmPal {
     #[cfg(not(feature = "bulk_crypto"))]
     fn seal_detached(&self, io: &UnoHsmIo, resp: &HsmDmaBuf) -> Option<SealedReply> {
         use tsra_fw_hsm_pal_traits::HsmSessionManager;
-        use tsra_fw_hsm_pal_traits::HsmSessionTransportDir;
         use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
+        use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN;
 
         let index = io.index;
         let (Ok(Some(id)), Some(binding)) = (
@@ -948,9 +948,7 @@ impl UnoHsmPal {
         if crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX {
             return None;
         }
-        let key = self
-            .session_transport_key(io, id, HsmSessionTransportDir::M2h)
-            .ok()?;
+        let (key, salt) = self.reply_key(io, id)?;
         let pad = pt_len - resp.len();
         // SAFETY: `frame..frame + AAD + len` lies in the slot's DMA heap,
         // which the slot owns; the AAD room before the response and the
@@ -967,7 +965,10 @@ impl UnoHsmPal {
             return None;
         }
         let seq = self.session_transport_next_seq(io, id).ok()?;
-        let iv = key.nonce(seq);
+        // `salt ‖ be64(seq)`, as `HsmSessionTransportKey::nonce` makes it.
+        let mut iv = [0; SESSION_TRANSPORT_IV_LEN];
+        iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&salt);
+        iv[SESSION_TRANSPORT_SALT_LEN..].copy_from_slice(&seq.to_be_bytes());
         // SAFETY: as above; the IV starts the trailer, after the padding.
         unsafe {
             frame
@@ -978,8 +979,7 @@ impl UnoHsmPal {
         // nothing else reads or writes it until the run loop takes the
         // seal's completion.
         let data = unsafe { GcmData::in_place_raw(frame, AAD + pt_len) };
-        self.gcm_start_detached(key.key(), &iv, None, data, index)
-            .ok()?;
+        self.gcm_start_detached(key, &iv, None, data, index).ok()?;
         Some(SealedReply {
             queue_id: io.queue_id(),
             frame: frame.wrapping_add(AAD),
