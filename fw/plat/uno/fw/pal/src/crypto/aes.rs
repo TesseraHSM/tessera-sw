@@ -113,6 +113,23 @@ fn block_at(buf: &[u8], offset: usize) -> [u8; AES_BLOCK_SIZE] {
     block
 }
 
+/// [`block_at`] out of DMA memory: one burst load when the block is
+/// word-aligned, as DMA memory may be uncached and every single load there
+/// costs the interconnect's full latency (see [`HsmDmaBuf::read_words`]).
+/// Kept out of line: a call costs far less than the loads it saves.
+#[inline(never)]
+fn dma_block_at(buf: &HsmDmaBuf, offset: usize) -> [u8; AES_BLOCK_SIZE] {
+    let src = &buf[offset..offset + AES_BLOCK_SIZE];
+    let Some(words) = src.read_words::<4>() else {
+        return block_at(src, 0);
+    };
+    let mut block = [0u8; AES_BLOCK_SIZE];
+    for (bytes, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *bytes = word.to_ne_bytes();
+    }
+    block
+}
+
 /// XORs two AES blocks.
 #[inline]
 fn xor_block(mut a: [u8; AES_BLOCK_SIZE], b: [u8; AES_BLOCK_SIZE]) -> [u8; AES_BLOCK_SIZE] {
@@ -302,11 +319,19 @@ impl UnoHsmPal {
         };
         let main = data_len - tail;
 
-        let mut iv_in = [0u8; AES_BLOCK_SIZE];
-        iv_in[..iv_len].copy_from_slice(&src[..iv_len]);
-        let last_full_in = match full {
-            0 => iv_in,
-            _ => block_at(src, iv_len + full - AES_BLOCK_SIZE),
+        // `iv_len` is 0 (ECB) or a whole block.
+        let iv_in = match iv_len {
+            0 => [0u8; AES_BLOCK_SIZE],
+            _ => dma_block_at(src, 0),
+        };
+        // The last whole input block, read only where the chaining value or
+        // the IV out uses it: CBC and CFB decrypt, and OFB.
+        let last_full_in = match (mode, op) {
+            _ if full == 0 => iv_in,
+            (HsmAesMode::Cbc | HsmAesMode::Cfb, HsmAesOp::Decrypt) | (HsmAesMode::Ofb, _) => {
+                dma_block_at(src, iv_len + full - AES_BLOCK_SIZE)
+            }
+            _ => [0u8; AES_BLOCK_SIZE],
         };
 
         self.alloc_scoped_async(io, async |scope| {
@@ -350,16 +375,16 @@ impl UnoHsmPal {
                 (HsmAesMode::Ctr, _) => u128::from_be_bytes(iv_in)
                     .wrapping_add((full / AES_BLOCK_SIZE) as u128)
                     .to_be_bytes(),
-                (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(dst, full - AES_BLOCK_SIZE),
+                (HsmAesMode::Cfb, HsmAesOp::Encrypt) => dma_block_at(dst, full - AES_BLOCK_SIZE),
                 (HsmAesMode::Ofb, _) => {
-                    xor_block(block_at(dst, full - AES_BLOCK_SIZE), last_full_in)
+                    xor_block(dma_block_at(dst, full - AES_BLOCK_SIZE), last_full_in)
                 }
                 _ => last_full_in,
             };
 
             let mut tail_keystream = None;
             if let Some(block) = tail_block {
-                let padded_in = block_at(block, 0);
+                let padded_in = dma_block_at(block, 0);
                 let iv = iv.take().ok_or(HsmError::InvalidArg)?;
                 iv.copy_from_slice(&chain);
                 self.aes
@@ -376,13 +401,15 @@ impl UnoHsmPal {
                 dst[main..data_len].copy_from_slice(&block[..tail]);
                 // Zero padding makes the padded output block the raw
                 // keystream XOR the padded input block.
-                tail_keystream = Some(xor_block(block_at(block, 0), padded_in));
+                tail_keystream = Some(xor_block(dma_block_at(block, 0), padded_in));
             }
 
             let iv_out = match (mode, op) {
                 (HsmAesMode::Ecb, _) => [0u8; AES_BLOCK_SIZE],
                 _ if data_len == 0 => iv_in,
-                (HsmAesMode::Cbc, HsmAesOp::Encrypt) => block_at(dst, data_len - AES_BLOCK_SIZE),
+                (HsmAesMode::Cbc, HsmAesOp::Encrypt) => {
+                    dma_block_at(dst, data_len - AES_BLOCK_SIZE)
+                }
                 (HsmAesMode::Cbc, HsmAesOp::Decrypt) => last_full_in,
                 (HsmAesMode::Cfb, _) => chain,
                 (HsmAesMode::Ofb, _) => tail_keystream.unwrap_or(chain),
@@ -393,7 +420,9 @@ impl UnoHsmPal {
                         .to_be_bytes()
                 }
             };
-            dst[data_len..].copy_from_slice(&iv_out[..iv_len]);
+            if iv_len != 0 {
+                dst[data_len..data_len + AES_BLOCK_SIZE].copy_from_slice(&iv_out);
+            }
             Ok::<(), HsmError>(())
         })
         .await
