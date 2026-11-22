@@ -26,6 +26,7 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
@@ -101,13 +102,16 @@ fn m2h_count(pid: u8, id: HsmSessId) -> HsmResult<&'static SingleCell<u64>> {
 /// selected API revision, and its HSM→VM nonce salt, which heads the IV of
 /// every sealed reply. Read out of the blob at `blob` while the vault was at
 /// `generation`, so they hold while the blob is there at that generation
-/// (see [`VaultStorage::generation`]).
+/// (see [`VaultStorage::generation`]). With them, the transport epoch of the
+/// session's partition, read then too: it changes only on a boot, which
+/// clears these.
 #[derive(Clone, Copy)]
 struct SessionPublic {
     blob: usize,
     generation: u32,
     api_rev: [u8; 4],
     m2h_salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+    epoch: Option<u16>,
 }
 
 impl SessionPublic {
@@ -117,13 +121,14 @@ impl SessionPublic {
         generation: 0,
         api_rev: [0; 4],
         m2h_salt: [0; SESSION_TRANSPORT_SALT_LEN],
+        epoch: None,
     };
 
     /// Reads them out of `SessionEx` blob `blob`, at the vault's
-    /// `generation`.
+    /// `generation`, and partition `pid`'s transport epoch.
     #[cold]
     #[inline(never)]
-    fn read(blob: &HsmDmaBuf, generation: u32) -> Self {
+    fn read(blob: &HsmDmaBuf, generation: u32, pid: HsmPartId) -> Self {
         const SALT_OFF: usize =
             SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN + SESSION_TRANSPORT_KEY_LEN;
         let mut out = Self {
@@ -135,6 +140,9 @@ impl SessionPublic {
             .copy_from_slice(&blob[SESSION_API_REV_SIZE..SESSION_EX_PARAM_OFF]);
         out.m2h_salt
             .copy_from_slice(&blob[SALT_OFF..SALT_OFF + SESSION_TRANSPORT_SALT_LEN]);
+        out.epoch = PartStore::partition(pid)
+            .ok()
+            .and_then(|p| p.transport_epoch());
         out
     }
 }
@@ -156,18 +164,56 @@ static SESSION_PUBLICS: SessionPublics =
 /// The [`SessionPublic`] of Active session `id`, whose `SessionEx` blob a
 /// fresh lookup found at `blob`: kept from an earlier read of that blob at
 /// the vault's current generation, else read now.
-fn session_public(id: HsmSessId, blob: &HsmDmaBuf) -> SessionPublic {
+fn session_public(io: &UnoHsmIo, id: HsmSessId, blob: &HsmDmaBuf) -> SessionPublic {
     let generation = VaultStorage::generation();
     let Some(cell) = SESSION_PUBLICS.0.get(usize::from(u16::from(id))) else {
-        return SessionPublic::read(blob, generation);
+        return SessionPublic::read(blob, generation, io.pid());
     };
     let kept = cell.get();
     if kept.blob == blob.as_ptr() as usize && kept.generation == generation {
         return kept;
     }
-    let read = SessionPublic::read(blob, generation);
+    let read = SessionPublic::read(blob, generation, io.pid());
     cell.set(read);
     read
+}
+
+/// Draws session `id`'s next HSM→VM sequence number in partition `pid`,
+/// whose transport epoch is `epoch`: `epoch(16) ‖ count(48)`, failing
+/// rather than wrapping.
+fn draw_seq(pid: u8, id: HsmSessId, epoch: Option<u16>) -> HsmResult<u64> {
+    let epoch = epoch.ok_or(HsmError::SessionTransportError)?;
+    let count = m2h_count(pid, id)?.with(|c| {
+        let count = *c;
+        if count >> M2H_COUNT_BITS != 0 {
+            return Err(HsmError::SessionTransportError);
+        }
+        *c = count + 1;
+        Ok(count)
+    })?;
+    Ok(u64::from(epoch) << M2H_COUNT_BITS | count)
+}
+
+/// Session `id`'s HSM→VM transport key and nonce salt, as
+/// [`session_transport_key`](HsmSessionManager::session_transport_key)
+/// gives them, for [`UnoHsmPal::reply_seq`] to seal a reply under.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) struct ReplyKey<'a> {
+    pub(crate) key: &'a HsmDmaBuf,
+    pub(crate) salt: [u8; SESSION_TRANSPORT_SALT_LEN],
+    /// Where the reply's sequence number takes its transport epoch from.
+    epoch: ReplyEpoch,
+}
+
+/// Where [`UnoHsmPal::reply_seq`] takes a reply's transport epoch from.
+#[cfg(not(feature = "bulk_crypto"))]
+#[derive(Clone, Copy)]
+enum ReplyEpoch {
+    /// An Active session's partition's epoch, kept in [`SESSION_PUBLICS`]
+    /// (`None` once exhausted).
+    Kept(Option<u16>),
+    /// Any other session's, read as the sequence number is drawn.
+    Read,
 }
 
 impl UnoHsmPal {
@@ -202,19 +248,18 @@ impl UnoHsmPal {
         Some(&blob[off..off + SESSION_TRANSPORT_SECRET_LEN])
     }
 
-    /// Session `id`'s HSM→VM transport key and nonce salt, as
-    /// [`session_transport_key`](HsmSessionManager::session_transport_key)
-    /// gives them; an Active session's salt from [`SESSION_PUBLICS`].
+    /// Session `id`'s [`ReplyKey`]; an Active session's salt and epoch from
+    /// [`SESSION_PUBLICS`].
     #[cfg(not(feature = "bulk_crypto"))]
-    pub(crate) fn reply_key(
-        &self,
-        io: &UnoHsmIo,
-        id: HsmSessId,
-    ) -> Option<(&HsmDmaBuf, [u8; SESSION_TRANSPORT_SALT_LEN])> {
+    pub(crate) fn reply_key(&self, io: &UnoHsmIo, id: HsmSessId) -> Option<ReplyKey<'_>> {
         if let Some(blob) = Self::active_session_blob(io, id) {
             const KEY_OFF: usize = SESSION_EX_KEYS_OFF + SESSION_TRANSPORT_SECRET_LEN;
-            let key = &blob[KEY_OFF..KEY_OFF + SESSION_TRANSPORT_KEY_LEN];
-            return Some((key, session_public(id, blob).m2h_salt));
+            let public = session_public(io, id, blob);
+            return Some(ReplyKey {
+                key: &blob[KEY_OFF..KEY_OFF + SESSION_TRANSPORT_KEY_LEN],
+                salt: public.m2h_salt,
+                epoch: ReplyEpoch::Kept(public.epoch),
+            });
         }
         let key = self
             .session_transport_key(io, id, HsmSessionTransportDir::M2h)
@@ -222,7 +267,29 @@ impl UnoHsmPal {
         // The nonce of message 0 is the salt and then zeros.
         let mut salt = [0; SESSION_TRANSPORT_SALT_LEN];
         salt.copy_from_slice(&key.nonce(0)[..SESSION_TRANSPORT_SALT_LEN]);
-        Some((key.key(), salt))
+        Some(ReplyKey {
+            key: key.key(),
+            salt,
+            epoch: ReplyEpoch::Read,
+        })
+    }
+
+    /// Draws the sequence number to seal session `id`'s reply under with
+    /// `reply`, as
+    /// [`session_transport_next_seq`](HsmSessionManager::session_transport_next_seq)
+    /// would; for an Active session, with the epoch `reply` brought, the
+    /// session found Active as it was looked up.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) fn reply_seq(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        reply: &ReplyKey<'_>,
+    ) -> HsmResult<u64> {
+        match reply.epoch {
+            ReplyEpoch::Kept(epoch) => draw_seq(u8::from(io.pid()), id, epoch),
+            ReplyEpoch::Read => self.session_transport_next_seq(io, id),
+        }
     }
 }
 
@@ -555,7 +622,7 @@ impl HsmSessionManager for UnoHsmPal {
                 if blob.len() != SESSION_EX_BLOB_SIZE {
                     return Err(HsmError::InvalidPermissions);
                 }
-                session_public(id, blob).api_rev
+                session_public(io, id, blob).api_rev
             }
             _ => return Err(HsmError::SessionNotFound),
         };
@@ -736,17 +803,10 @@ impl HsmSessionManager for UnoHsmPal {
         ) {
             return Err(HsmError::SessionNotFound);
         }
-        let epoch = PartStore::partition(io.pid())?
-            .transport_epoch()
-            .ok_or(HsmError::SessionTransportError)?;
-        let count = m2h_count(u8::from(io.pid()), id)?.with(|c| {
-            let count = *c;
-            if count >> M2H_COUNT_BITS != 0 {
-                return Err(HsmError::SessionTransportError);
-            }
-            *c = count + 1;
-            Ok(count)
-        })?;
-        Ok(u64::from(epoch) << M2H_COUNT_BITS | count)
+        draw_seq(
+            u8::from(io.pid()),
+            id,
+            PartStore::partition(io.pid())?.transport_epoch(),
+        )
     }
 }

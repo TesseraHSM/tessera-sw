@@ -1196,7 +1196,6 @@ impl UnoHsmPal {
     /// unless the BCP turned down a command it had room for.
     #[cfg(not(feature = "bulk_crypto"))]
     fn seal_detached(&self, io: &UnoHsmIo, resp: &HsmDmaBuf) -> Option<SealedReply> {
-        use tsra_fw_hsm_pal_traits::HsmSessionManager;
         use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN;
         use tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN;
 
@@ -1233,7 +1232,7 @@ impl UnoHsmPal {
         if crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX {
             return None;
         }
-        let (key, salt) = self.reply_key(io, id)?;
+        let reply = self.reply_key(io, id)?;
         // SAFETY: `frame..frame + AAD + len` lies in the slot's DMA heap,
         // which the slot owns, and is word-aligned, as DMA allocations are;
         // the AAD room before the response and the padding after it, written
@@ -1249,10 +1248,10 @@ impl UnoHsmPal {
         if !self.bcp.can_start(AAD + pt_len) {
             return None;
         }
-        let seq = self.session_transport_next_seq(io, id).ok()?;
+        let seq = self.reply_seq(io, id, &reply).ok()?;
         // `salt ‖ be64(seq)`, as `HsmSessionTransportKey::nonce` makes it.
         let mut iv = [0; SESSION_TRANSPORT_IV_LEN];
-        iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&salt);
+        iv[..SESSION_TRANSPORT_SALT_LEN].copy_from_slice(&reply.salt);
         iv[SESSION_TRANSPORT_SALT_LEN..].copy_from_slice(&seq.to_be_bytes());
         // SAFETY: as above; the IV starts the trailer, after the padding.
         unsafe {
@@ -1264,7 +1263,7 @@ impl UnoHsmPal {
         // nothing else reads or writes it until the run loop takes the
         // seal's completion.
         let data = unsafe { BcpData::in_place_raw(frame, AAD + pt_len) };
-        self.gcm_start_detached(key, &iv, None, data, index).ok()?;
+        self.gcm_start_detached(reply.key, &iv, None, data, index).ok()?;
         Some(SealedReply {
             queue_id: io.queue_id(),
             frame: frame.wrapping_add(AAD),
