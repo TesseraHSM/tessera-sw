@@ -35,11 +35,11 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
             quote! {
                 #[inline]
                 pub fn #name(&self) -> #group_view<'a> {
-                    #group_view::__new(self.buf, #header_len, #toc_idx)
+                    #group_view::__new(self.__buf(), #header_len, #toc_idx)
                 }
             }
         } else {
-            gen_accessor(field, toc_idx, &header_len, schema.needs_data_start)
+            gen_accessor(field, toc_idx, &header_len, name, schema.needs_data_start)
         }
     });
 
@@ -65,6 +65,40 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
     // Lifetime parameter — always 'a since the view borrows the buffer.
     let view_lifetime = quote! { <'a> };
 
+    // A request view keeps its decode's parse, whose header and leading TOC
+    // words the accessors read rather than DMA memory, which may be
+    // uncached; a response view reads the buffer.
+    let (view_fields, from_validated, buf, api_rev, toc_word) = if is_response {
+        (
+            quote! { buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf, },
+            quote! {
+                fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Self {
+                    Self { buf }
+                }
+            },
+            quote! { self.buf },
+            quote! {
+                (
+                    u16::from_le_bytes([self.buf[0], self.buf[1]]),
+                    u16::from_le_bytes([self.buf[2], self.buf[3]]),
+                )
+            },
+            quote! { tsra_fw_ddi_tbor::toc::read_toc_word(self.buf, #header_len, index) },
+        )
+    } else {
+        (
+            quote! { raw: tsra_fw_ddi_tbor::RequestView<'a>, },
+            quote! {
+                fn from_validated(raw: tsra_fw_ddi_tbor::RequestView<'a>) -> Self {
+                    Self { raw }
+                }
+            },
+            quote! { self.raw.as_bytes() },
+            quote! { self.raw.api_rev() },
+            quote! { self.raw.toc_word(index) },
+        )
+    };
+
     // Display impl.
     let display_impl = gen_display(schema, &view_name);
 
@@ -74,35 +108,43 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
         #[doc = concat!("[`", stringify!(#name), "::decode()`].")]
         #[derive(Debug)]
         #vis struct #view_name #view_lifetime {
-            buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf,
+            #view_fields
         }
 
         impl<'a> #view_name<'a> {
             /// API revision carried in the message header.
             pub fn api_rev(&self) -> (u16, u16) {
-                (
-                    u16::from_le_bytes([self.buf[0], self.buf[1]]),
-                    u16::from_le_bytes([self.buf[2], self.buf[3]]),
-                )
+                #api_rev
             }
 
             /// Construct from a validated buffer. Not public — use
             #[doc = concat!("[`", stringify!(#name), "::decode()`] instead.")]
-            fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Self {
-                Self { buf }
+            #from_validated
+
+            /// The message bytes.
+            #[inline(always)]
+            fn __buf(&self) -> &'a tsra_fw_hsm_pal_traits::HsmDmaBuf {
+                #buf
+            }
+
+            /// The raw TOC word at `index`.
+            #[allow(dead_code)]
+            #[inline(always)]
+            fn __toc_word(&self, index: usize) -> u32 {
+                #toc_word
             }
 
             /// Total message length.
             #[inline]
-            pub fn len(&self) -> usize { self.buf.len() }
+            pub fn len(&self) -> usize { self.__buf().len() }
 
             /// Returns `true` if the message is empty.
             #[inline]
-            pub fn is_empty(&self) -> bool { self.buf.is_empty() }
+            pub fn is_empty(&self) -> bool { self.__buf().is_empty() }
 
             /// The raw message bytes.
             #[inline]
-            pub fn as_bytes(&self) -> &'a tsra_fw_hsm_pal_traits::HsmDmaBuf { self.buf }
+            pub fn as_bytes(&self) -> &'a tsra_fw_hsm_pal_traits::HsmDmaBuf { self.__buf() }
 
             #response_accessors
 
@@ -118,33 +160,35 @@ fn gen_accessor(
     field: &SchemaField,
     toc_index: TokenStream,
     header_len: &TokenStream,
+    schema_name: &syn::Ident,
     needs_data_start: bool,
 ) -> TokenStream {
     let name = &field.name;
+    let word = quote! { self.__toc_word(#toc_index) };
 
     let body = match field.wire_type {
         WireType::Uint8 => quote! {
-            tsra_fw_ddi_tbor::toc::read_toc_inline_u8(self.buf, #header_len, #toc_index)
+            tsra_fw_ddi_tbor::toc::raw_toc_inline_u8(#word)
         },
         WireType::Uint16 => quote! {
-            tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index)
+            tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(#word)
         },
         WireType::SessionId => quote! {
-            tsra_fw_ddi_tbor_api::SessionId(tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index))
+            tsra_fw_ddi_tbor_api::SessionId(tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(#word))
         },
         WireType::KeyId => quote! {
-            tsra_fw_ddi_tbor_api::KeyId(tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index))
+            tsra_fw_ddi_tbor_api::KeyId(tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(#word))
         },
         WireType::Uint32 => {
-            let ds = data_start_expr(header_len, needs_data_start);
-            quote! { tsra_fw_ddi_tbor::toc::read_toc_uint32(self.buf, #header_len, #toc_index, #ds) }
+            let ds = data_start_expr(header_len, schema_name, needs_data_start);
+            quote! { tsra_fw_ddi_tbor::toc::toc_word_uint32(self.__buf(), #word, #ds) }
         }
         WireType::Uint64 => {
-            let ds = data_start_expr(header_len, needs_data_start);
-            quote! { tsra_fw_ddi_tbor::toc::read_toc_uint64(self.buf, #header_len, #toc_index, #ds) }
+            let ds = data_start_expr(header_len, schema_name, needs_data_start);
+            quote! { tsra_fw_ddi_tbor::toc::toc_word_uint64(self.__buf(), #word, #ds) }
         }
         WireType::Buffer | WireType::SealedKey => {
-            let ds = data_start_expr(header_len, needs_data_start);
+            let ds = data_start_expr(header_len, schema_name, needs_data_start);
             if let Some(elem) = &field.elem_type {
                 // Typed-slice buffer: zero-copy cast the raw bytes to
                 // `&[T]`.  Length is validated to be a multiple of
@@ -153,7 +197,7 @@ fn gen_accessor(
                 quote! {
                     {
                         let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
-                            tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, #header_len, #toc_index, #ds);
+                            tsra_fw_ddi_tbor::toc::toc_word_buffer(self.__buf(), #word, #ds);
                         <[#elem] as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]).unwrap_or(&[])
                     }
                 }
@@ -164,7 +208,7 @@ fn gen_accessor(
                 quote! {
                     {
                         let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
-                            tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, #header_len, #toc_index, #ds);
+                            tsra_fw_ddi_tbor::toc::toc_word_buffer(self.__buf(), #word, #ds);
                         match <#ty as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]) {
                             ::core::result::Result::Ok(__r) => __r,
                             ::core::result::Result::Err(_) => {
@@ -176,7 +220,7 @@ fn gen_accessor(
                     }
                 }
             } else {
-                quote! { tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, #header_len, #toc_index, #ds) }
+                quote! { tsra_fw_ddi_tbor::toc::toc_word_buffer(self.__buf(), #word, #ds) }
             }
         }
     };
@@ -221,9 +265,7 @@ fn gen_accessor(
         quote! {
             #[inline]
             pub fn #name(&self) -> Option<#ret_type> {
-                if tsra_fw_ddi_tbor::toc::raw_toc_entry_type(
-                    tsra_fw_ddi_tbor::toc::read_toc_word(self.buf, #header_len, #toc_index)
-                ) == #none_type_id {
+                if tsra_fw_ddi_tbor::toc::raw_toc_entry_type(#word) == #none_type_id {
                     None
                 } else {
                     Some(#body)
@@ -241,13 +283,15 @@ fn gen_accessor(
 }
 
 /// Compute the `data_start` expression used by data-section accessors.
-fn data_start_expr(header_len: &TokenStream, _needs_data_start: bool) -> TokenStream {
-    quote! {
-        {
-            let toc_count = (self.buf[4] & 0x1F) as usize + 1;
-            #header_len + toc_count * 4
-        }
-    }
+///
+/// A constant: decoding checked the message's TOC count against the
+/// schema's, so the header is not read again for it.
+fn data_start_expr(
+    header_len: &TokenStream,
+    schema_name: &syn::Ident,
+    _needs_data_start: bool,
+) -> TokenStream {
+    quote! { #header_len + #schema_name::TOC_COUNT * 4 }
 }
 
 /// Generate validation code as a standalone block (used by `lib.rs` for
