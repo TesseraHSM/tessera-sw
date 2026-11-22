@@ -1411,7 +1411,7 @@ impl UnoHsmPal {
         let Ok(ifc) = crate::gdma::host_interface(io.pid()) else {
             return Some(io);
         };
-        let Ok(mut buf) = self.dma_alloc_exchange(&io, plan.exchange_len()) else {
+        let Ok(mut buf) = crate::alloc::fresh_exchange(self, index, plan.exchange_len()) else {
             return Some(io);
         };
         let len = plan.len as u32;

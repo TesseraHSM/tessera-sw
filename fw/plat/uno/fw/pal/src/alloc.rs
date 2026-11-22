@@ -144,6 +144,32 @@ pub(crate) fn prefetched_exchange(
     Ok(unsafe { HsmDmaAllocation::from_raw_parts(base, size) })
 }
 
+/// The exchange buffer for a request the run loop copies in as it takes
+/// the IO, as [`dma_alloc_exchange`](HsmAlloc::dma_alloc_exchange) would
+/// allocate it: the slot's DMA heap was just reset, so the buffer starts at
+/// its base, and is taken without an out-of-line [`bump`]. A heap in use
+/// after all is allocated from as `dma_alloc_exchange` would.
+#[inline(always)]
+pub(crate) fn fresh_exchange(
+    pal: &UnoHsmPal,
+    index: u16,
+    size: usize,
+) -> HsmResult<HsmDmaAllocation<'_>> {
+    let (base, cap) = heap_base_cap(index, DMA);
+    let w = wm(pal, index, DMA);
+    let start = if w.with(|v| *v) == 0 && size <= cap {
+        w.with(|v| *v = size);
+        pk(pal, index, DMA).with(|v| *v = (*v).max(size));
+        0
+    } else {
+        bump(pal, index, DMA, size, 4)?.0
+    };
+    // SAFETY: the range was reserved above for the slot's IO, exclusively;
+    // the heap's raw pointer keeps its provenance, as in
+    // `dma_alloc_exchange`.
+    Ok(unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) })
+}
+
 // ── Public test/utility hooks ─────────────────────────────────────
 
 impl UnoHsmPal {
