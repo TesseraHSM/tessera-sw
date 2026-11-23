@@ -292,7 +292,12 @@ struct TborSecureCmd {
     transport: TborTransport,
 }
 
-ioctl_readwrite!(tsra_tbor_secure_ioctl, b'B', 0x08, TborSecureCmd);
+ioctl_readwrite!(
+    tsra_ctrl_path_encrypt_decrypt_ioctl,
+    b'B',
+    0x08,
+    TborSecureCmd
+);
 
 #[cfg(test)]
 #[path = "secure_tests.rs"]
@@ -925,7 +930,7 @@ impl DdiNixDev {
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
         self.exec_secure_ioctl_with(op, session_id, payload, seal, |cmd| {
             // SAFETY: cmd and its buffers remain valid until the synchronous IOCTL completes.
-            unsafe { tsra_tbor_secure_ioctl(self.file.read().as_raw_fd(), cmd) }
+            unsafe { tsra_ctrl_path_encrypt_decrypt_ioctl(self.file.read().as_raw_fd(), cmd) }
         })
     }
 
