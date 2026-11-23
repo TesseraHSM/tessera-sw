@@ -588,6 +588,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dropping_unpolled_copy_does_not_submit_or_reserve_tag() {
+        let driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        let buffer = GdmaBuf::Prp {
+            prp0: crate::GdmaAddr::from_u32(0x1000),
+            prp1: crate::GdmaAddr::ZERO,
+        };
+        let future = driver
+            .copy_mem(
+                buffer,
+                MemInterface::Device,
+                4,
+                buffer,
+                MemInterface::Device,
+                4,
+            )
+            .expect("valid copy arguments");
+        drop(future);
+        driver.state.with(|s| {
+            assert_eq!(s.sq_tail, 0);
+            assert_eq!(s.tag_free, 0b111);
+        });
+    }
+
+    #[test]
     fn dropping_pending_copy_reaps_completion_before_releasing_tag() {
         // SAFETY: the register overlay consists of integer MMIO cells; leaked
         // zeroed storage supplies permanent, aligned fake registers.
@@ -631,7 +662,7 @@ mod tests {
 
     #[test]
     fn dropping_completed_copy_releases_tag_for_reuse() {
-        let driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+        let driver = GdmaDriver::<64, 48>::new(ChannelConfig {
             channel: 0,
             sq_base: 0,
             cq_base: 0,
@@ -640,21 +671,19 @@ mod tests {
             interrupt: false,
         });
         driver.state.with(|s| {
-            s.tag_free &= !1;
-            s.tags[0].completed = true;
+            s.tag_free &= !(1u64 << 40);
+            s.tags[40].completed = true;
         });
 
         drop(GdmaCopyFuture {
             driver: &driver,
-            tag: 0,
+            tag: 40,
             released: false,
         });
 
-        let reused = driver.state.with(|s| {
-            let tag = s.tag_free.trailing_zeros() as u16;
-            s.tag_free &= !(1u64 << tag);
-            tag
+        driver.state.with(|s| {
+            assert_ne!(s.tag_free & (1u64 << 40), 0);
+            assert!(!s.tags[40].completed);
         });
-        assert_eq!(reused, 0);
     }
 }
