@@ -144,23 +144,23 @@ struct FuzzInput {
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    /// Decode scalar selectors followed by a bounded, possibly empty payload.
+    /// Default missing controls to a valid signing case, including empty inputs.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
-            scenario: Scenario::from_byte(u.arbitrary()?),
-            role: if u.arbitrary::<u8>()? & 1 == 0 {
+            scenario: Scenario::from_byte(u.arbitrary().unwrap_or_default()),
+            role: if u.arbitrary::<u8>().unwrap_or_default() & 1 == 0 {
                 common::FuzzRole::Co
             } else {
                 common::FuzzRole::Cu
             },
-            params: u.arbitrary()?,
-            hedge: u.arbitrary()?,
-            session_id: u.arbitrary()?,
-            length: u.arbitrary()?,
-            offset: u.arbitrary()?,
-            mask: u.arbitrary()?,
-            switches: u.arbitrary()?,
-            fill: u.arbitrary()?,
+            params: u.arbitrary().unwrap_or_default(),
+            hedge: u.arbitrary().unwrap_or_default(),
+            session_id: u.arbitrary().unwrap_or_default(),
+            length: u.arbitrary().unwrap_or_default(),
+            offset: u.arbitrary().unwrap_or_default(),
+            mask: u.arbitrary().unwrap_or_default(),
+            switches: u.arbitrary().unwrap_or_default(),
+            fill: u.arbitrary().unwrap_or_default(),
             bytes: u
                 .bytes(u.len().min(MASKED_MLDSA_KEY_MAX_LEN + EXTRA_BYTES))?
                 .to_vec(),
@@ -170,7 +170,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     /// Account for wire controls rather than an in-memory vector allocation.
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
         (
-            CONTROL_LEN,
+            0,
             Some(CONTROL_LEN + MASKED_MLDSA_KEY_MAX_LEN + EXTRA_BYTES),
         )
     }
@@ -517,11 +517,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     );
     let result = ctx.tbor(&request);
     match predicted {
-        Expected::Success => {
-            let resp = result
-                .unwrap_or_else(|err| panic!("valid ML-DSA scenario {scenario:?} failed: {err}"));
-            check_success(ctx, input, p, &key.pub_key, &req, &resp);
-        }
+        Expected::Success => match result {
+            Ok(resp) => check_success(ctx, input, p, &key.pub_key, &req, &resp),
+            // Deterministic signing is optional; Windows CNG rejects it.
+            Err(DdiError::TborStatus(TborStatus::UnsupportedCmd))
+                if req.hedge == MLDSA_HEDGE_DETERMINISTIC => {}
+            Err(err) => panic!("valid ML-DSA scenario {scenario:?} failed: {err}"),
+        },
         Expected::Reject(status) => {
             let err = result.expect_err("invalid ML-DSA sign unexpectedly succeeded");
             if !active || req.session_id != sid {

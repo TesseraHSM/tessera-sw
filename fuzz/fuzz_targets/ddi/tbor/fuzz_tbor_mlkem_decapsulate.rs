@@ -36,6 +36,8 @@ const NONCE_END: usize = aead_envelope::HEADER_LEN + GCM_IV_LEN;
 /// End of the 16-byte stored IV, including its ignored suffix.
 const IV_END: usize = aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len();
 const PATTERN_LEN: usize = 16;
+/// Scalar controls, pattern, and two payload length prefixes.
+const CONTROL_LEN: usize = 32;
 const PARAMETER_SET_COUNT: usize = 3;
 const PARAMS: [&MlKemParams; PARAMETER_SET_COUNT] = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024];
 const OVERSIZE_LENGTH_CHOICES: usize = 2;
@@ -167,7 +169,7 @@ impl<'a> Arbitrary<'a> for Scenario {
 }
 
 /// Scalar controls precede bounded vectors so small corpus entries reach crypto.
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     scenario: Scenario,
     parameter_set: u8,
@@ -183,20 +185,47 @@ struct FuzzInput {
     raw_ciphertext: BoundedBytes<{ MLKEM_CIPHERTEXT_MAX_LEN + 1 }>,
 }
 
+impl<'a> Arbitrary<'a> for FuzzInput {
+    /// Default missing controls to a round trip, including empty inputs.
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            scenario: Scenario::arbitrary(u).unwrap_or(Scenario::RoundTrip),
+            parameter_set: u.arbitrary().unwrap_or_default(),
+            role: u.arbitrary().unwrap_or_default(),
+            session_id: u.arbitrary().unwrap_or_default(),
+            scope: u.arbitrary().unwrap_or_default(),
+            length: u.arbitrary().unwrap_or_default(),
+            offset: u.arbitrary().unwrap_or_default(),
+            mask: u.arbitrary().unwrap_or_default(),
+            switches: u.arbitrary().unwrap_or_default(),
+            pattern: u.arbitrary().unwrap_or_default(),
+            raw_key: BoundedBytes::arbitrary(u)?,
+            raw_ciphertext: BoundedBytes::arbitrary(u)?,
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (
+            0,
+            Some(CONTROL_LEN + (MASKED_MLKEM_KEY_MAX_LEN + 1) + (MLKEM_CIPHERTEXT_MAX_LEN + 1)),
+        )
+    }
+}
+
 /// Bounded bytes whose size hint describes their wire prefix, not a `Vec`.
 #[derive(Debug)]
 struct BoundedBytes<const MAX: usize>(Vec<u8>);
 
 impl<'a, const MAX: usize> Arbitrary<'a> for BoundedBytes<MAX> {
-    /// Consume only bytes available after a bounded two-byte length prefix.
+    /// Default missing length prefixes to zero and consume only available bytes.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let len = (usize::from(u16::arbitrary(u)?) % (MAX + 1)).min(u.len());
+        let len = (usize::from(u16::arbitrary(u).unwrap_or_default()) % (MAX + 1)).min(u.len());
         Ok(Self(u.bytes(len)?.to_vec()))
     }
 
     /// Keep the minimum input size independent of the maximum payload size.
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
-        (size_of::<u16>(), Some(size_of::<u16>() + MAX))
+        (0, Some(size_of::<u16>() + MAX))
     }
 }
 
