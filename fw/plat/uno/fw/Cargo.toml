@@ -102,7 +102,7 @@ tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"
 cortex-m = { features = ["inline-asm"], version = "0.7.7" }
-cortex-m-rt = "0.7.5"
+cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
 der = { default-features = false, features = [
   "derive",

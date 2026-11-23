@@ -138,7 +138,7 @@ pub(crate) async fn handle<P: HsmPal>(
     }
 
     Ok(
-        TborAesGcmEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?
+        TborAesGcmEncryptDecryptResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
             .iv_existing(GCM_IV_LEN)?
             .tag_existing(GCM_TAG_LEN)?
             .finish()

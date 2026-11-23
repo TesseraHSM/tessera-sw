@@ -133,20 +133,9 @@ fn preserves_provisioning_and_clears_tenant_state() {
 
     let p = Partition(pid);
 
-    // Session PSKs are reset to the well-known defaults, not preserved:
-    // an NSSR returns the partition to its just-allocated state as far as
-    // the PSKs are concerned, so the rotated values seeded above must not
-    // survive.
-    assert_eq!(
-        &p.psk_co()[..],
-        &DEFAULT_PSK_CO[..],
-        "psk_co must be re-baked to the default on migrate"
-    );
-    assert_eq!(
-        &p.psk_cu()[..],
-        &DEFAULT_PSK_CU[..],
-        "psk_cu must be re-baked to the default on migrate"
-    );
+    // Recovery must authenticate the current role PSKs, not public defaults.
+    assert_eq!(&p.psk_co()[..], &psk_co[..], "psk_co must survive migrate");
+    assert_eq!(&p.psk_cu()[..], &psk_cu[..], "psk_cu must survive migrate");
 
     // Provisioning preserved.
     assert_eq!(
@@ -314,6 +303,29 @@ fn rearm_sets_gate1_only_for_resourced_partitions() {
 
     assert!(resourced.unwrapping_key_required());
     assert!(!empty.unwrapping_key_required());
+}
+
+/// Warm boots advance the transport epoch, which survives everything but
+/// a power-on `reset`, and report exhaustion once it saturates.
+#[test]
+fn transport_epoch_bumps_and_saturates() {
+    let mut p = Partition(60);
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), Some(1));
+    p.clear_state(PartResetKind::Disable);
+    assert_eq!(p.transport_epoch(), Some(1));
+
+    p.slot_mut().transport_epoch = (u16::MAX - 1).to_le_bytes();
+    assert_eq!(p.transport_epoch(), Some(u16::MAX - 1));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
 }
 
 /// The unwrapping-key slot's validity byte decodes to its three states, and

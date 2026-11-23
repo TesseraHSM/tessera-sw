@@ -46,20 +46,20 @@ with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the fixed-length buffers and the packed cert-descriptor list.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sender_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_sender_key` | `buffer` (180 B) | The source's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `SndrPriv`. Must be a `DarcKex`-kind masked key. |
-| 20 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 24 | `masked_tmk` | `buffer` (164 B) | The locally-masked TMK envelope (from `DarcTmkGen`/`DarcTmkImport`); unmasked on-device to the 32-byte TMK. Must be a `DarcTmk`-kind masked key. |
-| 28 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose DATA key thumbprint anchors `target_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
-| 32 | `target_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the DATA-anchored target certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sender_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_sender_key` | `buffer` (180 B) | The source's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `SndrPriv`. Must be a `DarcKex`-kind masked key. |
+| 24 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 28 | `masked_tmk` | `buffer` (164 B) | The locally-masked TMK envelope (from `DarcTmkGen`/`DarcTmkImport`); unmasked on-device to the 32-byte TMK. Must be a `DarcTmk`-kind masked key. |
+| 32 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose DATA key thumbprint anchors `target_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 36 | `target_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the DATA-anchored target certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
 
 ### Data section
 
@@ -69,14 +69,14 @@ referenced by the descriptors travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, the TOC entry, then the data section carrying
+Wire layout: 12-byte header, the TOC entry, then the data section carrying
 the sealed TMK.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `sealed_tmk` | `buffer` (145 B) | The HPKE-Auth seal of the 32-byte TMK: `enc(SEC1 97) ‖ ct(TMK 32 + GCM tag 16)`. Byte-for-byte what `DarcTmkImport` consumes. |
+| 12 | `sealed_tmk` | `buffer` (145 B) | The HPKE-Auth seal of the 32-byte TMK: `enc(SEC1 97) ‖ ct(TMK 32 + GCM tag 16)`. Byte-for-byte what `DarcTmkImport` consumes. |
 
 ### Data section
 

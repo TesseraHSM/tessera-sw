@@ -31,16 +31,15 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
 use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKeyUnwrapReq;
 use tsra_ddi_tbor_types::TborDarcKeyWrapReq;
 use tsra_ddi_tbor_types::TborDarcTmkGenReq;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
-use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
@@ -52,6 +51,7 @@ use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
+use crate::commands::common::sign_req;
 use crate::commands::darc_tmk_export::build_valid_export;
 use crate::commands::darc_tmk_export::gen_masked_tmk;
 use crate::commands::darc_tmk_export::mint_kex;
@@ -71,8 +71,8 @@ fn coord_sizes(pub_len: usize) -> (usize, usize) {
     match pub_len {
         64 => (32, 32),
         96 => (48, 48),
-        132 => (66, 66),
         136 => (68, 66),
+        144 => (72, 66),
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }
@@ -115,7 +115,7 @@ fn digest_len_for(pub_len: usize) -> usize {
     match pub_len {
         64 => 32,
         96 => 48,
-        132 | 136 => 64,
+        136 | 144 => 64,
         _ => panic!("unexpected public-key length {pub_len}"),
     }
 }
@@ -171,11 +171,12 @@ fn assert_wrap_unwrap_sign(
     // the original public key.
     let dgst = digest(digest_len_for(pub_ec.len()));
     let sign = ctx
-        .tbor(&TborEccSignReq {
+        .tbor(&sign_req(
             session_id,
-            masked_key: unwrapped.masked_key,
-            digest: dgst.clone(),
-        })
+            unwrapped.masked_key,
+            pub_ec.len() / 2,
+            &dgst,
+        ))
         .expect("EccSign with the unwrapped key");
     assert!(
         verify_wire_ecdsa(pub_ec, &sign.signature, &dgst),
@@ -312,11 +313,12 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
     let dgst = digest(32);
     let sign = ready
         .ctx
-        .tbor(&TborEccSignReq {
-            session_id: sid,
-            masked_key: unwrapped.masked_key,
-            digest: dgst.clone(),
-        })
+        .tbor(&sign_req(
+            sid,
+            unwrapped.masked_key,
+            ec.pub_key.len() / 2,
+            &dgst,
+        ))
         .expect("EccSign");
     assert!(
         verify_wire_ecdsa(&ec.pub_key, &sign.signature, &dgst),
@@ -425,7 +427,7 @@ fn darc_key_wrap_rejected_on_default_psk() {
     // default-PSK gate before the handler runs.
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();

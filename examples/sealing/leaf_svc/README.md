@@ -65,6 +65,14 @@ cargo run -p ddi_sock_server -- tcp://127.0.0.1:1235
 Wait for each server's listening message. The same SDK build uses
 `TSRA_DDI_ARGS` to select the connection at runtime. Start the root:
 
+In each application terminal, first set `TSRA_ROOT_SPKI_SHA384` to the
+corresponding device's independently enrolled root SPKI SHA-384 digest (96 hex
+digits; `export TSRA_ROOT_SPKI_SHA384=...` on Linux or
+`$env:TSRA_ROOT_SPKI_SHA384 = "..."` in PowerShell). The root and leaf servers
+have different roots. The thumbprint is mandatory for creation, recovery and fresh
+sessions, and must not be learned from the connection being authenticated.
+Restarting a simulator generates a new root requiring trusted re-enrollment.
+
 ```sh
 TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" \
 cargo run -p tsra_sealing_root_svc -- \

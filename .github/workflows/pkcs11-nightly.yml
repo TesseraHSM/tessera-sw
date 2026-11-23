@@ -4,7 +4,9 @@
 # PKCS#11 module nightly checks: the slower and broader runs that do not fit
 # the per-PR budget of pkcs11.yml. GitHub runs a schedule only from the default
 # branch, so the schedule starts once the module is on main; until then the
-# workflow runs on manual dispatch. Build output goes to $RUNNER_TEMP.
+# workflow runs on manual dispatch. Build output goes to $RUNNER_TEMP. The checks
+# run in one job per Ubuntu release, 24.04 and 26.04, with the same steps on
+# both; only the pkcs11-provider run needs a container of its own.
 name: pkcs11-nightly
 
 on:
@@ -12,67 +14,37 @@ on:
     - cron: '0 3 * * *'  # Daily at 3 AM UTC
   workflow_dispatch:
 
-env:
-  CACHE_KEY_ID: dd2c2bcffcf0cd62b538fdeaa31c7b89c4d42815
-
 jobs:
-  # The GoogleTest suite on both object stores against a module built with
-  # AddressSanitizer and UndefinedBehaviorSanitizer (pkcs11.yml runs ASan only,
-  # on the memory store).
-  functional-asan-ubsan:
-    runs-on: ubuntu-26.04
+  # The external tools and the sanitizer suite on one runner per release. Each
+  # check is its own step that runs even after an earlier one failed, so a red
+  # one does not hide the others.
+  build-and-test:
+    strategy:
+      fail-fast: false # a failure on one release must not cancel the other
+      matrix:
+        os: [ ubuntu-24.04, ubuntu-26.04 ]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ./.github/actions/ubuntu-setup
-
-      - name: Install CMake and OpenSSL headers
-        run: sudo apt-get install -y cmake libssl-dev
-
-      - name: Build PKCS#11 module for hardware and the simulator, with ASan and UBSan
-        env:
-          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
-          LDFLAGS: -fsanitize=address,undefined
+      # Only what this workflow uses: the shared ubuntu-setup action installs the
+      # repo's cargo tools on a cache miss, none of which run here.
+      - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
-          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libbsd-dev libssl-dev opensc
 
-      # The module reaches the simulator over the DDI socket transport; it never
-      # links one. One server serves every following step: the script sets
-      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
-      - name: Start the simulator (ddi_sock_server)
-        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
-
-      - name: Build the functional tests with ASan and UBSan
+      # The module's CMake build generates tsra.h with cbindgen. Without one on
+      # PATH, Corrosion compiles the newest release into every build tree, so
+      # install the version xtask pins, once.
+      - name: Install the pinned cbindgen
         run: |
           set -euo pipefail
-          flags="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
-          cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
-            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
-
-      - name: Functional tests, memory object store
-        run: |
-          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
-
-      - name: Functional tests, file object store (TSRA_PKCS11_PERSIST=1)
-        if: ${{ !cancelled() }}
-        run: |
-          TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$RUNNER_TEMP/pkcs11-store" \
-            ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
-
-  # The external tools on one emulator build; each check is its own step so a red
-  # one does not hide the others.
-  conformance:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/ubuntu-setup
-
-      - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
-        run: sudo apt-get install -y cmake libssl-dev opensc
+          ver="$(sed -n 's/^const CARGO_CBINDGEN_VERSION: &str = "\([0-9.]*\)";$/\1/p' \
+            xtask/src/setup.rs)"
+          test -n "$ver"
+          cargo install --locked "cbindgen@$ver"
+          cbindgen --version
 
       - name: Build PKCS#11 module for hardware and the simulator
         run: |
@@ -80,8 +52,8 @@ jobs:
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never
-      # links one. One server serves every following step: the script sets
-      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      # links one. One server serves the steps up to the sanitizer suite: the
+      # script sets TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
       - name: Start the simulator (ddi_sock_server)
         run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
@@ -110,6 +82,48 @@ jobs:
         if: ${{ !cancelled() }}
         run: plugins/tsra_pkcs11/tests/nightly/pkcs11_tool.sh import "$TSRA_PKCS11_MODULE"
 
+      # The GoogleTest suite on both object stores against a module built with
+      # AddressSanitizer and UndefinedBehaviorSanitizer (pkcs11.yml runs ASan
+      # only, on the memory store), in a target directory of its own. A fresh
+      # simulator, from the server binary the first start built, serves it; the
+      # module path written here holds for the steps after it.
+      - name: Build PKCS#11 module for hardware and the simulator, with ASan and UBSan
+        id: san-module
+        if: ${{ !cancelled() }}
+        env:
+          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target-san" -p tsra_pkcs11
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target-san/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      - name: Start a fresh simulator for the sanitizer suite
+        id: san-server
+        if: ${{ !cancelled() && steps.san-module.outcome == 'success' }}
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
+
+      - name: Build the functional tests with ASan and UBSan
+        id: san-tests
+        if: ${{ !cancelled() && steps.san-server.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          flags="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
+            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
+
+      - name: Functional tests, memory object store
+        if: ${{ !cancelled() && steps.san-tests.outcome == 'success' }}
+        run: |
+          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+
+      - name: Functional tests, file object store (TSRA_PKCS11_PERSIST=1)
+        if: ${{ !cancelled() && steps.san-tests.outcome == 'success' }}
+        run: |
+          TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$RUNNER_TEMP/pkcs11-store" \
+            ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+
   # OpenSSL 3.5 with the distribution's pkcs11-provider in front of the module,
   # on the Ubuntu 26.04 image of the provider matrix.
   pkcs11-provider:
@@ -136,6 +150,18 @@ jobs:
           curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The module's CMake build generates tsra.h with cbindgen. Without one on
+      # PATH, Corrosion compiles the newest release into every build tree, so
+      # install the version xtask pins, once.
+      - name: Install the pinned cbindgen
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^const CARGO_CBINDGEN_VERSION: &str = "\([0-9.]*\)";$/\1/p' \
+            xtask/src/setup.rs)"
+          test -n "$ver"
+          cargo install --locked "cbindgen@$ver"
+          cbindgen --version
 
       - name: Build PKCS#11 module for hardware and the simulator
         run: |

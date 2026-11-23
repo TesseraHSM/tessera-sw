@@ -333,8 +333,9 @@ fn aes_generate_key_tbor(
         key_label: key_label.to_vec(),
     };
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -388,8 +389,9 @@ fn aes_encrypt_decrypt_tbor(
         msg: input.to_vec(),
     };
     let mut cookie = None;
+    let rev = key.api_rev();
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -688,8 +690,9 @@ fn aes_xts_encrypt_decrypt_tbor(
         masked_key: masked.to_vec(),
     };
     let mut items = [TborOobItem::In(input), TborOobItem::Out(&mut output[..len])];
+    let rev = key.api_rev();
     key.with_dev(|dev| {
-        dev.exec_op_tbor_oob(&req, &mut items, &mut None)
+        dev.exec_op_tbor_oob(rev, &req, &mut items, &mut None)
             .map_err(HsmError::from)
     })?;
     Ok(len)
@@ -724,8 +727,9 @@ pub(crate) fn aes_xts_generate_key_tbor(
         key_usage: aes_tbor_key_usage(props)?,
         key_label: key_label.to_vec(),
     };
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut None)
+        dev.exec_op_tbor(rev, &req, None, &mut None)
             .map_err(HsmError::from)
     })?;
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
@@ -882,8 +886,9 @@ fn aes_gcm_encrypt_decrypt_tbor(
     };
     let mut items = [TborOobItem::In(&inbuf), TborOobItem::Out(&mut outbuf)];
     let items: &mut [TborOobItem<'_>] = if data_len == 0 { &mut [] } else { &mut items };
+    let rev = key.api_rev();
     let resp = key.with_dev(|dev| {
-        dev.exec_op_tbor_oob(&req, items, &mut None)
+        dev.exec_op_tbor_oob(rev, &req, items, &mut None)
             .map_err(HsmError::from)
     })?;
     let resp_tag: [u8; 16] = resp

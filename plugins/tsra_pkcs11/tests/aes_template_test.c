@@ -15,12 +15,12 @@
  * Covers the complete CK_RV matrix of tsra_pkcs11_keygen_check_template
  * (every accepted key length, every rejected attribute and the code it earns,
  * non-AES key types, wrong value sizes, NULL values, duplicates, the length
- * ceiling, first-failure-wins ordering), the key-family selection between
- * plain AES, GCM (by CKA_ALLOWED_MECHANISMS) and XTS, the append-if-absent
- * rules of tsra_pkcs11_keygen_build_template, the key scope rule, the cipher
- * mechanism table, the allowed-mechanism gate, CK_GCM_PARAMS decoding, the
- * GCM/XTS output length plan, the multi-part length rules, and the status maps
- * including the padded-decrypt remap.
+ * ceiling, first-failure-wins ordering, a token key that must be private), the
+ * key-family selection between plain AES, GCM (by CKA_ALLOWED_MECHANISMS) and
+ * XTS, the append-if-absent rules of tsra_pkcs11_keygen_build_template, the
+ * key scope rule, the cipher mechanism table, the allowed-mechanism gate,
+ * CK_GCM_PARAMS decoding, the GCM/XTS output length plan, the multi-part
+ * length rules, and the status maps including the padded-decrypt remap.
  */
 
 #include "tsra_pkcs11_status.h"
@@ -619,6 +619,62 @@ static void test_check_order(void)
     CHECK(
         check(f, 2, NULL, NULL) == CKR_ATTRIBUTE_VALUE_INVALID,
         "[LABEL, LABEL with NULL value] -> the NULL-value verdict, not the duplicate one"
+    );
+}
+
+/* The file store authenticates only private records, so a token key is private;
+ * a session key never reaches the store's files and may be public. */
+static void test_check_token_private(void)
+{
+    printf("== keygen_check_template: a token key is private ==\n");
+    CK_ATTRIBUTE token_first[] = { VALUE_LEN32,
+                                   BOOL_ATTR(CKA_TOKEN, g_true),
+                                   BOOL_ATTR(CKA_PRIVATE, g_false) };
+    CK_ATTRIBUTE private_first[] = { BOOL_ATTR(CKA_PRIVATE, g_false),
+                                     VALUE_LEN32,
+                                     BOOL_ATTR(CKA_TOKEN, g_true) };
+    CHECK(
+        check(token_first, COUNT(token_first), NULL, NULL) == CKR_TEMPLATE_INCONSISTENT,
+        "[TOKEN=TRUE, PRIVATE=FALSE] -> CKR_TEMPLATE_INCONSISTENT"
+    );
+    CHECK(
+        check(private_first, COUNT(private_first), NULL, NULL) == CKR_TEMPLATE_INCONSISTENT,
+        "[PRIVATE=FALSE, TOKEN=TRUE] -> CKR_TEMPLATE_INCONSISTENT"
+    );
+    CK_ULONG len64 = AES_XTS_KEY_BYTES;
+    CK_ATTRIBUTE xts[] = { ATTR(CKA_VALUE_LEN, len64),
+                           BOOL_ATTR(CKA_PRIVATE, g_false),
+                           BOOL_ATTR(CKA_TOKEN, g_true) };
+    CHECK(
+        check_mech(CKM_AES_XTS_KEY_GEN, xts, COUNT(xts), NULL) == CKR_TEMPLATE_INCONSISTENT,
+        "an XTS token key with PRIVATE=FALSE -> CKR_TEMPLATE_INCONSISTENT"
+    );
+
+    CK_BBOOL token = CK_TRUE;
+    CK_ATTRIBUTE session_public[] = { BOOL_ATTR(CKA_PRIVATE, g_false),
+                                      BOOL_ATTR(CKA_TOKEN, g_false),
+                                      VALUE_LEN32 };
+    CHECK(
+        (check(session_public, COUNT(session_public), NULL, &token) == CKR_OK) &&
+            (token == CK_FALSE),
+        "[PRIVATE=FALSE, TOKEN=FALSE] -> CKR_OK, a session key may be public"
+    );
+    CK_ATTRIBUTE default_scope[] = { VALUE_LEN32, BOOL_ATTR(CKA_PRIVATE, g_false) };
+    CHECK(
+        check(default_scope, COUNT(default_scope), NULL, NULL) == CKR_OK,
+        "PRIVATE=FALSE without CKA_TOKEN -> CKR_OK, a session key by default"
+    );
+    CK_ATTRIBUTE token_default[] = { BOOL_ATTR(CKA_TOKEN, g_true), VALUE_LEN32 };
+    CHECK(
+        (check(token_default, COUNT(token_default), NULL, &token) == CKR_OK) && (token == CK_TRUE),
+        "TOKEN=TRUE without CKA_PRIVATE -> CKR_OK, private by default"
+    );
+    CK_ATTRIBUTE token_private[] = { BOOL_ATTR(CKA_PRIVATE, g_true),
+                                     BOOL_ATTR(CKA_TOKEN, g_true),
+                                     VALUE_LEN32 };
+    CHECK(
+        check(token_private, COUNT(token_private), NULL, NULL) == CKR_OK,
+        "[PRIVATE=TRUE, TOKEN=TRUE] -> CKR_OK"
     );
 }
 
@@ -1557,6 +1613,7 @@ int main(void)
     test_check_unaligned();
     test_check_reject();
     test_check_order();
+    test_check_token_private();
     test_build();
     test_key_scope();
     test_families();

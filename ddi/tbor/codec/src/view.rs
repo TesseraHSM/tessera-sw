@@ -36,7 +36,7 @@ pub type ResponseView<'a> = View<'a, Response>;
 impl<'a, H: Header> View<'a, H> {
     /// Parse and structurally validate a message.
     ///
-    /// Validates: minimum buffer size, protocol version, TOC-count
+    /// Validates: minimum buffer size, TOC-count
     /// consistency with buffer length, per-entry bounds, fixed-size type
     /// lengths, and the `None`-entry reserved-bits invariant.
     ///
@@ -45,11 +45,6 @@ impl<'a, H: Header> View<'a, H> {
         // Minimum: header + 1 TOC entry.
         if buf.len() < H::LEN + TOC_ENTRY_LEN {
             return Err(DecodeError::BufferTooShort);
-        }
-
-        let version = buf[0];
-        if version != PROTOCOL_VERSION {
-            return Err(DecodeError::UnsupportedVersion(version));
         }
 
         let toc_count = toc_count_from_byte(buf[H::TOC_COUNT_BYTE]);
@@ -66,10 +61,24 @@ impl<'a, H: Header> View<'a, H> {
         })
     }
 
-    /// Protocol version byte from the header.
+    /// API major and minor revision from the header.
     #[inline]
-    pub fn version(&self) -> u8 {
-        self.buf[0]
+    pub fn api_rev(&self) -> (u16, u16) {
+        (
+            u16::from_le_bytes([self.buf[0], self.buf[1]]),
+            u16::from_le_bytes([self.buf[2], self.buf[3]]),
+        )
+    }
+
+    /// Reject a response or request carrying a different API revision.
+    pub fn require_api_rev(&self, expected: (u16, u16)) -> Result<(), DecodeError> {
+        if self.api_rev() != expected {
+            return Err(DecodeError::ApiRevisionMismatch {
+                expected,
+                actual: self.api_rev(),
+            });
+        }
+        Ok(())
     }
 
     /// Number of TOC entries (1–32).
@@ -146,7 +155,7 @@ impl<'a> RequestView<'a> {
     /// Operation code from the request header.
     #[inline]
     pub fn opcode(&self) -> u8 {
-        self.buf[3]
+        self.buf[5]
     }
 }
 
@@ -156,18 +165,18 @@ impl<'a> ResponseView<'a> {
     /// Flags byte from the response header.
     #[inline]
     pub fn flags(&self) -> u8 {
-        self.buf[1]
+        self.buf[5]
     }
 
     /// FIPS_APPROVED flag (bit 0 of [`flags`](Self::flags)).
     #[inline]
     pub fn fips_approved(&self) -> bool {
-        self.buf[1] & Response::FIPS_APPROVED_FLAG != 0
+        self.flags() & Response::FIPS_APPROVED_FLAG != 0
     }
 
     /// Status code (4-byte little-endian).
     #[inline]
     pub fn status(&self) -> u32 {
-        u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+        u32::from_le_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]])
     }
 }

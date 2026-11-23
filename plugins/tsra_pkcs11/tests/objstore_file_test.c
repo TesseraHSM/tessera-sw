@@ -525,26 +525,28 @@ int main(void)
     /* --- get_key_body: the crypto layer's read side of the body --- */
     CK_ULONG kb_len = 0;
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, NULL, &kb_len) == CKR_OK &&
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, NULL, &kb_len, NULL, NULL) == CKR_OK &&
             kb_len == sizeof(body),
         "get_key_body two-call probe reports the body length"
     );
     unsigned char kb_buf[8] = { 0 };
     kb_len = sizeof(kb_buf);
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, kb_buf, &kb_len) == CKR_OK &&
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, kb_buf, &kb_len, NULL, NULL) == CKR_OK &&
             kb_len == sizeof(body) && memcmp(kb_buf, body, sizeof(body)) == 0,
         "get_key_body returns the stored masked blob"
     );
     kb_len = 2; /* deliberately too small */
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, kb_buf, &kb_len) == CKR_BUFFER_TOO_SMALL &&
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, kb_buf, &kb_len, NULL, NULL) ==
+                CKR_BUFFER_TOO_SMALL &&
             kb_len == sizeof(body),
         "get_key_body rejects a short buffer and reports the length"
     );
     kb_len = 99;
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, tok, NULL, &kb_len) == CKR_OK && kb_len == 0,
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, tok, NULL, &kb_len, NULL, NULL) == CKR_OK &&
+            kb_len == 0,
         "get_key_body reports length 0 for an object with no body"
     );
     /* Session objects route to the embedded backend: set + get round-trip. */
@@ -555,16 +557,44 @@ int main(void)
     );
     kb_len = sizeof(kb_buf);
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, sess, kb_buf, &kb_len) == CKR_OK &&
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, sess, kb_buf, &kb_len, NULL, NULL) == CKR_OK &&
             kb_len == sizeof(sbody) && memcmp(kb_buf, sbody, sizeof(sbody)) == 0,
         "get_key_body round-trips on a session object"
     );
     /* The private gate applies to the body like any other access. */
     kb_len = sizeof(kb_buf);
     CHECK(
-        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, priv, kb_buf, &kb_len) ==
+        s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, priv, kb_buf, &kb_len, NULL, NULL) ==
             CKR_OBJECT_HANDLE_INVALID,
         "get_key_body on a private object is INVALID when logged out"
+    );
+    /* A refusing check returns neither a length nor a body. */
+    int kb_refusals = 0;
+    memset(kb_buf, 0, sizeof(kb_buf));
+    kb_len = sizeof(kb_buf);
+    CHECK(
+        s.ops->get_key_body(
+            s.ctx,
+            SLOT,
+            CK_FALSE,
+            x,
+            kb_buf,
+            &kb_len,
+            refuse_check,
+            &kb_refusals
+        ) == CKR_ACTION_PROHIBITED &&
+            s.ops->get_key_body(
+                s.ctx,
+                SLOT,
+                CK_FALSE,
+                sess,
+                kb_buf,
+                &kb_len,
+                refuse_check,
+                &kb_refusals
+            ) == CKR_ACTION_PROHIBITED &&
+            kb_refusals == 2 && kb_len == sizeof(kb_buf) && kb_buf[0] == 0,
+        "get_key_body: a refusing check withholds the body, token and session objects alike"
     );
 
     /* --- get_size: attribute values plus body, the same count on both backends --- */
@@ -636,7 +666,7 @@ int main(void)
         "empty slot: get_size -> OBJECT_HANDLE_INVALID"
     );
     CHECK(
-        s.ops->get_key_body(s.ctx, EMPTY_SLOT, CK_TRUE, sz_tok, kb_buf, &probe_len) ==
+        s.ops->get_key_body(s.ctx, EMPTY_SLOT, CK_TRUE, sz_tok, kb_buf, &probe_len, NULL, NULL) ==
             CKR_OBJECT_HANDLE_INVALID,
         "empty slot: get_key_body -> OBJECT_HANDLE_INVALID"
     );
@@ -1039,6 +1069,31 @@ int main(void)
             read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 900, lbuf, sizeof(lbuf), &llen) ==
                 CKR_FUNCTION_FAILED,
         "seal: a clear record claiming CKA_PRIVATE is refused"
+    );
+    CK_OBJECT_CLASS kcls = CKO_PRIVATE_KEY;
+    tsra_pkcs11_rec_attr clear_key_attrs[] = {
+        { CKA_CLASS, (unsigned char *)&kcls, sizeof(kcls) },
+        { CKA_TOKEN, &ck_true, sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, &ck_false, sizeof(CK_BBOOL) },
+    };
+    tsra_pkcs11_rec_object clear_key = { clear_key_attrs, 3, NULL, 0 };
+    fl = sizeof(fbuf);
+    snprintf(path, sizeof(path), "%s/902.object", seal_dir);
+    CHECK(
+        tsra_pkcs11_record_encode(&clear_key, NULL, fbuf, &fl) == CKR_OK && spill(path, fbuf, fl) &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 902, lbuf, sizeof(lbuf), &llen) ==
+                CKR_FUNCTION_FAILED,
+        "seal: a clear record holding a private key is refused"
+    );
+    /* Likewise a secret key: its record limits what its key body may encrypt. */
+    kcls = CKO_SECRET_KEY;
+    fl = sizeof(fbuf);
+    snprintf(path, sizeof(path), "%s/903.object", seal_dir);
+    CHECK(
+        tsra_pkcs11_record_encode(&clear_key, NULL, fbuf, &fl) == CKR_OK && spill(path, fbuf, fl) &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 903, lbuf, sizeof(lbuf), &llen) ==
+                CKR_FUNCTION_FAILED,
+        "seal: a clear record holding a secret key is refused"
     );
     forged_attrs[2].value = &ck_false;
     fl = sizeof(fbuf);

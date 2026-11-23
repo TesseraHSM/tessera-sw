@@ -85,6 +85,8 @@ const KIND_VAULT_DISABLE: u8 = 1;
 const KIND_PROP_RESTORE: u8 = 2;
 const KIND_SESSION_DESTROY: u8 = 3;
 const KIND_SESSION_CLOSE: u8 = 4;
+const KIND_SESSION_AUTH: u8 = 5;
+const KIND_SESSION_REOPEN: u8 = 6;
 
 const MODE_SHIFT: u8 = 3;
 const MODE_MASK: u8 = 0b0000_0011;
@@ -374,6 +376,34 @@ impl<'a> UndoLog<'a> {
         self.push_entry(UndoEntry::session_close(id))
     }
 
+    /// Restore a failed recovery handshake to its reserved stale slot.
+    pub fn push_session_reopen(&mut self, id: HsmSessId) -> HsmResult<()> {
+        self.push_entry(UndoEntry {
+            tag: KIND_SESSION_REOPEN,
+            aux: 0,
+            id: u16::from(id),
+            data: 0,
+        })
+    }
+
+    /// Restore a session's auth binding and rotation-consumed flag on failure.
+    pub fn push_session_auth(
+        &mut self,
+        id: HsmSessId,
+        binding: &[u8],
+        changed: bool,
+    ) -> HsmResult<()> {
+        self.push_bytes(
+            UndoEntry {
+                tag: KIND_SESSION_AUTH,
+                aux: u8::from(changed),
+                id: u16::from(id),
+                data: 0,
+            },
+            binding,
+        )
+    }
+
     /// Record that a property was set while previously **absent**.
     ///
     /// undo → clear the slot; commit → keep.
@@ -395,6 +425,10 @@ impl<'a> UndoLog<'a> {
     /// [`HsmError::UndoLogFull`] if the buffer cannot hold the slot plus
     /// `prior`.
     pub fn push_prop_restore_bytes(&mut self, id: HsmPartPropId, prior: &[u8]) -> HsmResult<()> {
+        self.push_bytes(UndoEntry::prop_restore_bytes(id, 0), prior)
+    }
+
+    fn push_bytes(&mut self, mut entry: UndoEntry, prior: &[u8]) -> HsmResult<()> {
         let len = prior.len();
         // Pre-images sit at the back; this one's offset is from the start.
         let new_arena_used = self
@@ -409,7 +443,8 @@ impl<'a> UndoLog<'a> {
         let handle = pack_bytes_handle(off, len)?;
         // Reserve the slot AND the arena bytes in one overflow check; only
         // then copy the payload, so a full log never leaks arena.
-        self.push_entry_reserving(UndoEntry::prop_restore_bytes(id, handle), len)?;
+        entry.data = handle;
+        self.push_entry_reserving(entry, len)?;
         self.buf[off..off + len].copy_from_slice(prior);
         self.arena_used = new_arena_used;
         Ok(())
@@ -493,6 +528,13 @@ impl<'a> UndoLog<'a> {
             }
             KIND_SESSION_DESTROY => verbs.session_destroy(io, HsmSessId::from(entry.id)).await,
             KIND_SESSION_CLOSE => Ok(()),
+            KIND_SESSION_AUTH => verbs.session_auth(
+                io,
+                HsmSessId::from(entry.id),
+                self.bytes_from_handle(entry.data)?,
+                entry.aux != 0,
+            ),
+            KIND_SESSION_REOPEN => verbs.session_reopen(io, HsmSessId::from(entry.id)).await,
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -565,6 +607,20 @@ pub trait UndoVerbs {
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
+    /// Restore authentication state after a failed rotation.
+    fn session_auth(
+        &self,
+        _io: &Self::Io,
+        _id: HsmSessId,
+        _binding: &HsmDmaBuf,
+        _changed: bool,
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+    /// Roll back an unsuccessful recovery handshake.
+    async fn session_reopen(&self, _io: &Self::Io, _id: HsmSessId) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
 }
 
 impl<P> UndoVerbs for P
@@ -572,8 +628,6 @@ where
     P: HsmVault + HsmPartitionManager + HsmSessionManager + HsmPalFeatures,
 {
     type Io = P::Io;
-
-    const DEFERRED_SESSION_CLOSE: bool = P::IO_PROTOCOL.secure_session();
 
     async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_delete(self, io, id).await
@@ -611,6 +665,20 @@ where
 
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
         HsmSessionManager::session_destroy(self, io, id).await
+    }
+
+    fn session_auth(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        binding: &HsmDmaBuf,
+        changed: bool,
+    ) -> HsmResult<()> {
+        self.session_set_auth_binding(io, id, binding, changed)
+    }
+
+    async fn session_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
+        self.session_rollback_reopen(io, id).await
     }
 }
 

@@ -1,9 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Uno command transport: plaintext requests and responses over the SQE's
-//! PRP pair.
+//! Uno command transport over the SQE's PRP pair.
+//!
+//! In-session TBOR requests and responses travel in the
+//! [`sealed`](tsra_fw_hsm_io::sealed) frame under the session's transport
+//! keys; everything else is plaintext.
 
+use tsra_fw_hsm_io::sealed;
 use tsra_fw_hsm_io::validate_io_fields;
 use tsra_fw_hsm_io::CqeEntry;
 use tsra_fw_hsm_io::SqeEntry;
@@ -31,6 +35,8 @@ impl StdHsmPal {
         io: &StdHsmIo,
         sqe: &SqeEntry,
     ) -> HsmResult<HsmRequest<'_>> {
+        let sealed_id = sealed::sealed_session(sqe)?;
+        let control = sqe.session_ctrl();
         let sqe = sqe.view();
         if sqe.cmd().psdt() != 0 {
             return Err(HsmError::SqeInvalidPsdt);
@@ -44,20 +50,39 @@ impl StdHsmPal {
             sqe.oob_prp(),
         )?;
         let len = sqe.src_len() as usize;
-        let mut buf = self.dma_alloc_exchange(io, len.next_multiple_of(4))?;
+        let headroom = sealed_id.map_or(0, |_| sealed::TRANSPORT_AAD_LEN);
+        let mut buf = self.dma_alloc_exchange(io, headroom + len.next_multiple_of(4))?;
         self.copy_mem_from_host(
             io,
             sqe.src_prp1(),
             sqe.src_prp2(),
-            &mut buf.buffer_mut()[..len],
+            &mut buf.buffer_mut()[headroom..headroom + len],
             true,
         )
         .await
         .map_err(|_| HsmError::FailedToStartDmaTransaction)?;
+        let resp_capacity = sqe.dst_len() as usize;
+        let Some(id) = sealed_id else {
+            return Ok(HsmRequest {
+                buf,
+                len,
+                resp_capacity,
+            });
+        };
+        let (len, binding) = sealed::sealed_open(
+            self,
+            io,
+            id,
+            control,
+            &mut buf.buffer_mut()[..headroom + len],
+        )
+        .await?;
+        io.transport_binding.set(Some(binding));
+        let buf = buf.skip_prefix(headroom)?;
         Ok(HsmRequest {
             buf,
             len,
-            resp_capacity: sqe.dst_len() as usize,
+            resp_capacity: sealed::sealed_msg_capacity(resp_capacity),
         })
     }
 
@@ -67,6 +92,21 @@ impl StdHsmPal {
         sqe: SqeEntry,
         resp: &HsmDmaBuf,
     ) -> HsmResult<()> {
+        let resp = match sealed::sealed_session(&sqe)? {
+            Some(id) => {
+                let binding = io
+                    .transport_binding
+                    .take()
+                    .ok_or(HsmError::SessionTransportError)?;
+                let frame = sealed::sealed_seal(self, io, id, binding, resp).await?;
+                let frame_len = u16::try_from(frame.len()).map_err(|_| HsmError::InvalidArg)?;
+                if let crate::io::StdCqe::Cmd(cqe) = &mut io.cqe {
+                    cqe.view().set_dst_len(frame_len);
+                }
+                frame
+            }
+            None => resp,
+        };
         let sqe = sqe.view();
         if resp.len() > sqe.dst_len() as usize {
             return Err(HsmError::InvalidArg);

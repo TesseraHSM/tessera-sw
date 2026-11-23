@@ -49,6 +49,7 @@ use tsra_fw_hsm_pal_traits::*;
 
 use crate::cert::SharedCertStore;
 use crate::drivers::aes::StdAes;
+use crate::drivers::ecc::EccForm;
 use crate::drivers::ecc::StdEcc;
 use crate::drivers::gdma::StdGdma;
 use crate::drivers::hash::StdHash;
@@ -199,7 +200,7 @@ impl StdHsmPal {
             oic: StdOic::new(),
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(tokio_handle.clone())),
-            ecc: StdEcc::new(WorkerPool::new(tokio_handle.clone()), Self::BYTE_ORDER),
+            ecc: StdEcc::new(WorkerPool::new(tokio_handle.clone()), EccForm::of::<Self>()),
             #[cfg(test)]
             ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(tokio_handle.clone())),
@@ -241,7 +242,7 @@ impl Default for StdHsmPal {
             oic: StdOic::new(),
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(handle.clone())),
-            ecc: StdEcc::new(WorkerPool::new(handle.clone()), Self::BYTE_ORDER),
+            ecc: StdEcc::new(WorkerPool::new(handle.clone()), EccForm::of::<Self>()),
             #[cfg(test)]
             ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(handle.clone())),

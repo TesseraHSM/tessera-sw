@@ -4,7 +4,7 @@ error[E0599]: no method named `finish` found for struct `EarlyFinishEnc<'_, Earl
  6 |   #[tbor(opcode = 0x03)]
    |   ---------------------- method `finish` not found for this struct
 ...
-15 |       let _ = EarlyFinish::encode(&mut buf).unwrap()
+15 |       let _ = EarlyFinish::encode(&mut buf, (1, 1)).unwrap()
    |  _____________-
 16 | |         .finish();
    | |         -^^^^^^ method not found in `EarlyFinishEnc<'_, EarlyFinishS0>`

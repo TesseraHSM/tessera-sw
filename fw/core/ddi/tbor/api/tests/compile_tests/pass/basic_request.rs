@@ -17,7 +17,7 @@ pub struct BasicReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let frame = BasicReq::encode(&mut buf)
+    let frame = BasicReq::encode(&mut buf, (1, 1))
         .unwrap()
         .a(1)
         .unwrap()

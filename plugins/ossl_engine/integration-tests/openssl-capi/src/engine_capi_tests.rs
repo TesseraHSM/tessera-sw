@@ -1044,8 +1044,10 @@ fn capi_rsa_decrypt(pkey: *mut ffi::EVP_PKEY, ct: &[u8], oaep: bool) -> Option<V
 
 /// RSA decrypt over the real C ABI: import a software RSA key with
 /// `keyEncipherment` usage (writing the masked blob), load it back through
-/// `ENGINE_load_private_key`, and decrypt software-encrypted OAEP and PKCS#1
-/// v1.5 ciphertexts with it on the HSM. A tampered OAEP ciphertext must fail.
+/// `ENGINE_load_private_key`, and decrypt a software-encrypted OAEP ciphertext
+/// with it on the HSM. A tampered OAEP ciphertext must fail. PKCS#1 v1.5
+/// decryption is refused with the same error for a valid and a tampered
+/// ciphertext.
 #[test]
 #[serial]
 #[allow(unsafe_code)]
@@ -1085,17 +1087,32 @@ fn decrypt_rsa_key_via_engine_capi() {
     assert_eq!(unsafe { ffi::EVP_PKEY_set1_engine(raw, e) }, 1);
 
     let msg = b"engine rsa decryption over the capi path";
-    for oaep in [true, false] {
-        let ct = sw_rsa_encrypt(&sw, msg, oaep);
-        let pt = capi_rsa_decrypt(raw, &ct, oaep).expect("HSM decrypt failed");
-        assert_eq!(pt, msg, "decrypted plaintext mismatch (oaep={oaep})");
-    }
+    let ct = sw_rsa_encrypt(&sw, msg, true);
+    let pt = capi_rsa_decrypt(raw, &ct, true).expect("HSM decrypt failed");
+    assert_eq!(pt, msg, "decrypted plaintext mismatch");
     let mut bad = sw_rsa_encrypt(&sw, msg, true);
     bad[0] ^= 0xff;
     assert!(
         capi_rsa_decrypt(raw, &bad, true).is_none(),
         "tampered ciphertext unexpectedly decrypted"
     );
+
+    let pkcs1 = sw_rsa_encrypt(&sw, msg, false);
+    let mut pkcs1_bad = pkcs1.clone();
+    pkcs1_bad[0] ^= 0xff;
+    for ct in [&pkcs1, &pkcs1_bad] {
+        // Drop errors left by the tampered OAEP decrypt above.
+        drop(openssl::error::ErrorStack::get());
+        assert!(
+            capi_rsa_decrypt(raw, ct, false).is_none(),
+            "PKCS#1 v1.5 decryption must be refused"
+        );
+        let err = openssl::error::ErrorStack::get().to_string();
+        assert!(
+            err.contains("PKCS#1 v1.5 decryption is not supported"),
+            "unexpected error: {err}"
+        );
+    }
 
     // SAFETY: raw is the owning EVP_PKEY from ENGINE_load_private_key; e is ours.
     unsafe {

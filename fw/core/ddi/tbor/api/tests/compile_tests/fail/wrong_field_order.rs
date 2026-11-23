@@ -12,7 +12,7 @@ pub struct OrderReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = OrderReq::encode(&mut buf).unwrap()
+    let _ = OrderReq::encode(&mut buf, (1, 1)).unwrap()
         .b(2).unwrap()  // ERROR: b is not available on State0
         .a(1).unwrap()
         .finish();

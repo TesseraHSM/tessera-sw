@@ -9,6 +9,11 @@
 # Unimplemented entry points return CKR_FUNCTION_NOT_SUPPORTED; the drive
 # covers init/login, host objects, the SHA digests, and AES keygen with CBC,
 # GCM and XTS. Build output goes to $RUNNER_TEMP, never into the checkout.
+#
+# Every check runs in one job per Ubuntu release, 24.04 and 26.04, with the
+# same steps on both, so a run takes two runners. The steps that were jobs of
+# their own (the unit harnesses, the fuzzer and the ASan suite) run even after
+# an earlier step failed, so a red check does not hide them.
 name: pkcs11
 
 on:
@@ -19,22 +24,37 @@ on:
       - '.github/workflows/pkcs11.yml'
   workflow_dispatch:
 
-env:
-  CACHE_KEY_ID: dd2c2bcffcf0cd62b538fdeaa31c7b89c4d42815
-
 jobs:
-  build-and-drive:
-    runs-on: ubuntu-26.04
+  build-and-test:
+    strategy:
+      fail-fast: false # a failure on one release must not cancel the other
+      matrix:
+        os: [ ubuntu-24.04, ubuntu-26.04 ]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Shared setup: apt packages + Cargo cache. The Rust toolchain comes from
-      # rust-toolchain.toml (rustup installs it on the first cargo call) — the
-      # same way every other workflow gets it.
-      - uses: ./.github/actions/ubuntu-setup
+      # Only what this workflow uses: the shared ubuntu-setup action installs the
+      # repo's cargo tools on a cache miss, which takes minutes and none of
+      # which run here. The Rust toolchain comes from rust-toolchain.toml
+      # (rustup installs it on the first cargo call).
+      - name: Install CMake, OpenSSL headers, OpenSC pkcs11-tool and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libbsd-dev libssl-dev opensc \
+            clang libclang-rt-dev
 
-      - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
-        run: sudo apt-get install -y cmake libssl-dev opensc
+      # The module's CMake build generates tsra.h with cbindgen. Without one on
+      # PATH, Corrosion compiles the newest release into every build tree, so
+      # install the version xtask pins, once.
+      - name: Install the pinned cbindgen
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^const CARGO_CBINDGEN_VERSION: &str = "\([0-9.]*\)";$/\1/p' \
+            xtask/src/setup.rs)"
+          test -n "$ver"
+          cargo install --locked "cbindgen@$ver"
+          cbindgen --version
 
       # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
       # inside the build would inherit the variable and wait forever on the
@@ -45,8 +65,8 @@ jobs:
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never
-      # links one. One server serves every following step: the script sets
-      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      # links one. One server serves the steps up to the ASan suite: the script
+      # sets TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
       - name: Start the simulator (ddi_sock_server)
         run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
@@ -71,9 +91,22 @@ jobs:
       - name: AES keygen via pkcs11-tool
         run: |
           set -euo pipefail
-          # --sensitive is required: the module refuses non-sensitive HSM keys.
+          # --sensitive and --private are required: the module refuses
+          # non-sensitive HSM keys and public token keys.
           pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keygen \
-            --key-type aes:32 --label ci-aes --sensitive
+            --key-type aes:32 --label ci-aes --sensitive --private
+
+      # A private EC key signs or derives, never both, so the tool's default
+      # (both) is refused and a named usage works.
+      - name: EC key pair via pkcs11-tool
+        run: |
+          set -euo pipefail
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keypairgen \
+            --key-type EC:prime256v1 --usage-sign --label ci-ec
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keypairgen \
+            --key-type EC:prime256v1 --label ci-ec-both > "$RUNNER_TEMP/ec-both.log" 2>&1 || true
+          cat "$RUNNER_TEMP/ec-both.log"
+          grep -q CKR_TEMPLATE_INCONSISTENT "$RUNNER_TEMP/ec-both.log"
 
       # Keys enter the token only by generation or unwrap.
       - name: Plaintext key import via pkcs11-tool is refused
@@ -144,40 +177,25 @@ jobs:
           plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --pr "$TSRA_PKCS11_MODULE" \
             "$RUNNER_TEMP/pkcs11-check"
 
-  # Device-free unit harnesses: standalone C programs that link the module
-  # sources they test (no device, no libcrypto), so they need only a compiler.
-  # Every harness runs under UBSan and under ASan.
-  unit-tests:
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        sanitize: [ ubsan, asan ]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Device-free unit harnesses: standalone C programs that link the module
+      # sources they test (no device, no libcrypto), so they need only a
+      # compiler. Every harness runs under UBSan and under ASan.
+      - name: Unit harnesses under UBSan
+        if: ${{ !cancelled() }}
+        run: SANITIZE=ubsan plugins/tsra_pkcs11/tests/build_units.sh "$RUNNER_TEMP/units-ubsan"
 
-      - name: Build and run the unit harnesses (${{ matrix.sanitize }})
-        run: |
-          SANITIZE=${{ matrix.sanitize }} plugins/tsra_pkcs11/tests/build_units.sh \
-            "$RUNNER_TEMP/units"
+      - name: Unit harnesses under ASan
+        if: ${{ !cancelled() }}
+        run: SANITIZE=asan plugins/tsra_pkcs11/tests/build_units.sh "$RUNNER_TEMP/units-asan"
 
-  # libFuzzer over the device-free template decoders (tests/template_fuzz.c),
-  # 60 s per run under ASan and UBSan. A finding prints the input as base64.
-  template-fuzz:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install clang and the libFuzzer runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 libclang-rt-18-dev
-
+      # libFuzzer over the device-free template decoders (tests/template_fuzz.c),
+      # 60 s under ASan and UBSan. A finding prints the input as base64.
       - name: Fuzz the template decoders for 60 s
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           p=plugins/tsra_pkcs11
-          clang-18 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+          clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
             -I"$p/include/pkcs11-v3.1" -I"$p/src" "$p/tests/template_fuzz.c" \
             "$p/src/tsra_pkcs11_attr_types.c" "$p/src/tsra_pkcs11_attr_policy.c" \
             "$p/src/tsra_pkcs11_template.c" -o "$RUNNER_TEMP/template_fuzz"
@@ -185,39 +203,34 @@ jobs:
           cd "$RUNNER_TEMP"
           ./template_fuzz -max_total_time=60 -print_final_stats=1 fuzz-corpus
 
-  # The GoogleTest suite against a module built with AddressSanitizer. CFLAGS
-  # and LDFLAGS reach the module's CMake build through cargo; the suite is
-  # built with ASan too, so the runtime is loaded before the module.
-  functional-asan:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/ubuntu-setup
-
-      - name: Install CMake and OpenSSL headers
-        run: sudo apt-get install -y cmake libssl-dev
-
+      # The GoogleTest suite against a module built with AddressSanitizer, in a
+      # target directory of its own. CFLAGS and LDFLAGS reach the module's CMake
+      # build through cargo; the suite is built with ASan too, so the runtime is
+      # loaded before the module. A fresh simulator, from the server binary the
+      # first start built, serves it; the module path written here holds for
+      # the steps after it.
       - name: Build PKCS#11 module for hardware and the simulator, with ASan
+        id: asan-module
+        if: ${{ !cancelled() }}
         env:
           CFLAGS: -fsanitize=address -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
-          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+          cargo build --target-dir "$RUNNER_TEMP/target-asan" -p tsra_pkcs11
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target-asan/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
-      # The module reaches the simulator over the DDI socket transport; it never
-      # links one. One server serves every following step: the script sets
-      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
-      - name: Start the simulator (ddi_sock_server)
+      - name: Start a fresh simulator for the ASan suite
+        id: asan-server
+        if: ${{ !cancelled() && steps.asan-module.outcome == 'success' }}
         run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Functional tests under ASan
+        if: ${{ !cancelled() && steps.asan-server.outcome == 'success' }}
         run: |
           set -euo pipefail
           cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
-            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release \
+            -B "$RUNNER_TEMP/pkcs11-cpp-tests-asan" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address
-          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
-          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests-asan" --parallel
+          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests-asan" --output-on-failure --no-tests=error

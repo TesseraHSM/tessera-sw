@@ -54,7 +54,7 @@ with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the fixed-length `masked_tmk` and the variable-length
 `masked_key`.
 
@@ -62,11 +62,11 @@ carrying the fixed-length `masked_tmk` and the variable-length
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkGen`/`DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
-| 20 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 24 | `masked_key` | `buffer` (≤ 200 B) | The local masked EC private key to export. Must be an `Ecc{256,384,521}Private`-kind masked key. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkGen`/`DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
+| 24 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 28 | `masked_key` | `buffer` (≤ 200 B) | The local masked EC private key to export. Must be an `Ecc{256,384,521}Private`-kind masked key. |
 
 ### Data section
 
@@ -75,14 +75,14 @@ Carries the 164-byte `masked_tmk` followed by the variable-length
 
 ## Response
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the wrapped key.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `wrapped_key` | `buffer` (≤ 512 B) | The AES-KWP-wrapped EC2 `COSE_Key`. Byte-for-byte what `DarcKeyUnwrap` consumes. |
+| 12 | `wrapped_key` | `buffer` (≤ 512 B) | The AES-KWP-wrapped EC2 `COSE_Key`. Byte-for-byte what `DarcKeyUnwrap` consumes. |
 
 ### Data section
 

@@ -68,7 +68,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // unwritten), then have the PAL derive the wire public key straight
     // into the reserved slot — no scratch buffer and no copy.
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborGetUnwrappingKeyResp::encode(buf, 0, false)?
+        let frame = TborGetUnwrappingKeyResp::encode_for_request(buf, 0, false)?
             .pub_key_reserve(UNWRAPPING_PUB_KEY_LEN)?
             .finish();
         Ok(frame.as_bytes().len())

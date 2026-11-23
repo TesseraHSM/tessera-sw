@@ -756,7 +756,7 @@ static int tsra_ossl_keymgmt_get_pub(const TSRA_RSA_KEY *rsa_key, BIGNUM **n, BI
     {
         const ASN1_BIT_STRING *bits = sk_ASN1_TYPE_value(spki, 1)->value.bit_string;
 
-        pub = tsra_ossl_keymgmt_d2i_pair(bits->data, bits->length);
+        pub = tsra_ossl_keymgmt_d2i_pair(ASN1_STRING_get0_data(bits), ASN1_STRING_length(bits));
     }
 
     if (pub != NULL && ASN1_TYPE_get(sk_ASN1_TYPE_value(pub, 0)) == V_ASN1_INTEGER &&

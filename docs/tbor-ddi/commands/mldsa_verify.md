@@ -33,18 +33,17 @@ caller computes `μ`, on the host or on the device with [`Hash`](./hash.md).
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `pub_key` | `buffer` (up to 2592 B) | ML-DSA public key bytes. |
-| 16 | `mu` | `buffer` (64 B) | The message representative `μ` the signature covers. |
-| 20 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `pub_key` | `buffer` (up to 2592 B) | ML-DSA public key bytes. |
+| 20 | `mu` | `buffer` (64 B) | The message representative `μ` the signature covers. |
+| 24 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes. |
 
 ### Data section
 
 Carries the public key, `μ`, and signature in that order.
 
-Worst-case frame (ML-DSA-87): data `2592 + 64 + 4627 = 7283` B; staged
-`132 + 7283 = 7415` B and encoded `8 + 4*4 + 7283 = 7307` B — both inside
-the 8192-byte transport buffer.
+Worst-case frame (ML-DSA-87): data `2592 + 64 + 4627 = 7283` B, encoded
+directly as `12 + 4*4 + 7283 = 7311` B, inside the 8192-byte transport buffer.
 
 ## Response
 

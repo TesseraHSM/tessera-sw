@@ -67,11 +67,13 @@ pub(crate) async fn handle<P: HsmPal>(
         let key_label = alloc.dma_alloc(caller_label.len())?;
         key_label.copy_from_slice(caller_label);
         let len = cmd_buf.encode_response(|buf| {
-            Ok(TborAesXtsGenerateKeyResp::encode(buf, 0, false)?
-                .masked_key_reserve(masked_len)?
-                .finish()
-                .as_bytes()
-                .len())
+            Ok(
+                TborAesXtsGenerateKeyResp::encode_for_request(buf, 0, false)?
+                    .masked_key_reserve(masked_len)?
+                    .finish()
+                    .as_bytes()
+                    .len(),
+            )
         })?;
 
         let out = TborAesXtsGenerateKeyResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;

@@ -123,7 +123,7 @@ pub(crate) async fn handle<P: HsmPal>(
             let masked_len = masked_blob_len(AeadAlg::AesGcm256, SHARED_SECRET_LEN);
 
             let resp = cmd_buf.buffer_mut();
-            let len = TborMlKemDecapsulateResp::encode(resp, 0, false)?
+            let len = TborMlKemDecapsulateResp::encode_for_request(resp, 0, false)?
                 .masked_shared_secret_reserve(masked_len)?
                 .finish()
                 .as_bytes()

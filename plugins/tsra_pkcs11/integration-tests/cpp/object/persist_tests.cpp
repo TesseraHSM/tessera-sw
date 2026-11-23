@@ -6,15 +6,21 @@
 /// The file object store (TSRA_PKCS11_PERSIST=1): a token object one process
 /// creates is there for the next process that loads the module on the same
 /// store, and a private token object is sealed on disk, readable again after
-/// a logout or a re-initialization, and refused once tampered with.
+/// a logout or a re-initialization, and refused once tampered with. A sealed
+/// record's own key, written into a clear record, encrypts nothing.
 
+#include <climits>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "tsra_pkcs11_key.h"
+#include "tsra_pkcs11_store_record.h"
 #include "utils/aes_helpers.hpp"
 #include "utils/module.hpp"
 #include "utils/sock_server.hpp"
@@ -104,6 +110,96 @@ void reopen(CK_SESSION_HANDLE *s, bool login)
         ASSERT_CKR_OK(login_user(*s));
     }
 }
+
+/// The record layout of tsra_pkcs11_store_record.c: magic, u16 version, u16
+/// flags, u32 attribute count, u32 body length, u32 total length; a sealed
+/// record then holds u32 key length and its key's masked blob.
+const CK_BYTE kRecordMagic[] = { 'P', '1', '1', 'O' };
+constexpr size_t kRecordHeaderLen =
+    sizeof(kRecordMagic) + (2 * sizeof(uint16_t)) + (3 * sizeof(uint32_t));
+constexpr size_t kRecordKeyAt = kRecordHeaderLen + sizeof(uint32_t);
+
+/// Append `v` to `out` little-endian in `n` bytes, as the record codec does.
+void put_le(std::vector<CK_BYTE> &out, uint64_t v, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        out.push_back(static_cast<CK_BYTE>(v >> (i * CHAR_BIT)));
+    }
+}
+
+/// The `n` bytes of `in` at `at` as a little-endian value, as put_le writes it.
+uint64_t get_le(const std::vector<CK_BYTE> &in, size_t at, size_t n)
+{
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        v |= static_cast<uint64_t>(in[at + i]) << (i * CHAR_BIT);
+    }
+    return v;
+}
+
+/// The bytes of a fixed-size attribute value, as the module stores them.
+template <typename T> std::vector<CK_BYTE> raw(const T &v)
+{
+    const CK_BYTE *p = reinterpret_cast<const CK_BYTE *>(&v);
+    return std::vector<CK_BYTE>(p, p + sizeof(T));
+}
+
+/// A clear (unsealed) record holding `attrs` and the masked blob `body`.
+std::vector<CK_BYTE> clear_record(
+    const std::vector<std::pair<CK_ATTRIBUTE_TYPE, std::vector<CK_BYTE>>> &attrs,
+    const std::vector<CK_BYTE> &body
+)
+{
+    std::vector<CK_BYTE> payload;
+    for (const auto &[type, value] : attrs)
+    {
+        put_le(payload, type, sizeof(uint32_t));
+        put_le(payload, value.size(), sizeof(uint32_t));
+        payload.insert(payload.end(), value.begin(), value.end());
+    }
+    payload.insert(payload.end(), body.begin(), body.end());
+    std::vector<CK_BYTE> rec(std::begin(kRecordMagic), std::end(kRecordMagic));
+    put_le(rec, P11_RECORD_VERSION, sizeof(uint16_t));
+    put_le(rec, 0, sizeof(uint16_t)); // flags: not sealed
+    put_le(rec, attrs.size(), sizeof(uint32_t));
+    put_le(rec, body.size(), sizeof(uint32_t));
+    put_le(rec, kRecordHeaderLen + payload.size(), sizeof(uint32_t));
+    rec.insert(rec.end(), payload.begin(), payload.end());
+    return rec;
+}
+
+void write_file(const std::filesystem::path &path, const std::vector<CK_BYTE> &data)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(
+        reinterpret_cast<const char *>(data.data()),
+        static_cast<std::streamsize>(data.size())
+    );
+}
+
+/// The path and bytes of the one record in slot 0 of the store at `dir`;
+/// fails the test unless there is exactly one and it is not empty.
+void only_record(const std::string &dir, std::filesystem::path *path, std::vector<CK_BYTE> *data)
+{
+    path->clear();
+    for (const auto &f : std::filesystem::directory_iterator(dir + "/slot-0"))
+    {
+        if (f.path().extension() == ".object")
+        {
+            ASSERT_TRUE(path->empty()) << "the store holds one object";
+            *path = f.path();
+        }
+    }
+    ASSERT_FALSE(path->empty());
+    std::ifstream in(*path, std::ios::binary);
+    data->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    ASSERT_FALSE(data->empty());
+}
+
+/// A record file whose object number is above every object a test creates.
+const char kForgedRecordFile[] = "900.object";
 
 } // namespace
 
@@ -218,29 +314,12 @@ TEST_F(persist, tampered_private_record_is_refused)
     CK_OBJECT_HANDLE obj = CK_INVALID_HANDLE;
     ASSERT_CKR_OK(create_data(s_, CK_TRUE, kPrivateLabel, kPrivateValue, &obj));
     std::filesystem::path record;
-    for (const auto &f : std::filesystem::directory_iterator(dir_ + "/slot-0"))
-    {
-        if (f.path().extension() == ".object")
-        {
-            ASSERT_TRUE(record.empty()) << "the store holds one object";
-            record = f.path();
-        }
-    }
-    ASSERT_FALSE(record.empty());
-    std::vector<char> data;
-    {
-        std::ifstream in(record, std::ios::binary);
-        data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    }
-    ASSERT_FALSE(data.empty());
-    auto write_record = [&record](const std::vector<char> &d) {
-        std::ofstream out(record, std::ios::binary | std::ios::trunc);
-        out.write(d.data(), static_cast<std::streamsize>(d.size()));
-    };
+    std::vector<CK_BYTE> data;
+    ASSERT_NO_FATAL_FAILURE(only_record(dir_, &record, &data));
 
-    std::vector<char> tampered = data;
+    std::vector<CK_BYTE> tampered = data;
     tampered.back() ^= 0x01; /* the last byte of the GCM tag */
-    write_record(tampered);
+    write_file(record, tampered);
     CK_BYTE buf[64];
     CK_ATTRIBUTE label = { CKA_LABEL, buf, sizeof(buf) };
     EXPECT_CKR(CKR_FUNCTION_FAILED, p11()->C_GetAttributeValue(s_, obj, &label, 1));
@@ -251,8 +330,93 @@ TEST_F(persist, tampered_private_record_is_refused)
     }
     EXPECT_CKR(CKR_FUNCTION_FAILED, find_rv) << "a search fails rather than leave it out";
 
-    write_record(data);
+    write_file(record, data);
     EXPECT_EQ(kPrivateValue, read_value(s_, obj)) << "the untouched record reads again";
+}
+
+TEST_F(persist, a_record_key_in_a_clear_record_encrypts_nothing)
+{
+    // A sealed record keeps its device GCM key's masked blob in the clear
+    // header. As the body of a clear record claiming an AES-GCM key, it would
+    // seal and open records under a caller-chosen IV and AAD.
+    CK_OBJECT_HANDLE key = CK_INVALID_HANDLE;
+    ASSERT_CKR_OK(gen_family_key(s_, CKM_AES_GCM, CK_TRUE, CK_TRUE, "sealed-gcm-key", &key));
+    CK_BYTE iv[AES_GCM_IV_LEN] = { 0 };
+    CK_GCM_PARAMS params{};
+    params.pIv = iv;
+    params.ulIvLen = sizeof(iv);
+    params.ulIvBits = sizeof(iv) * CHAR_BIT;
+    params.ulTagBits = AES_GCM_TAG_LEN * CHAR_BIT;
+    CK_MECHANISM gcm = { CKM_AES_GCM, &params, sizeof(params) };
+    ASSERT_CKR_OK(p11()->C_EncryptInit(s_, &gcm, key)) << "the generated key encrypts";
+    abandon_operations(s_);
+
+    std::filesystem::path sealed;
+    std::vector<CK_BYTE> data;
+    ASSERT_NO_FATAL_FAILURE(only_record(dir_, &sealed, &data));
+    ASSERT_GT(data.size(), kRecordKeyAt);
+    const size_t key_len = get_le(data, kRecordHeaderLen, sizeof(uint32_t));
+    ASSERT_GT(key_len, 0u);
+    ASSERT_GE(data.size(), kRecordKeyAt + key_len);
+    std::vector<CK_BYTE> record_key(
+        data.begin() + kRecordKeyAt,
+        data.begin() + static_cast<std::ptrdiff_t>(kRecordKeyAt + key_len)
+    );
+
+    const std::string label = "lent-record-key";
+    CK_BBOOL yes = CK_TRUE;
+    CK_BBOOL no = CK_FALSE;
+    CK_KEY_TYPE aes = CKK_AES;
+    CK_MECHANISM_TYPE gcm_only = CKM_AES_GCM;
+    // Each record says CKA_PRIVATE FALSE outright; one row leaves it out.
+    auto forge = [&](CK_OBJECT_CLASS cls, CK_ATTRIBUTE_TYPE omit) {
+        std::vector<std::pair<CK_ATTRIBUTE_TYPE, std::vector<CK_BYTE>>> attrs = {
+            { CKA_CLASS, raw(cls) },     { CKA_TOKEN, raw(yes) },
+            { CKA_KEY_TYPE, raw(aes) },  { CKA_ALLOWED_MECHANISMS, raw(gcm_only) },
+            { CKA_ENCRYPT, raw(yes) },   { CKA_DECRYPT, raw(yes) },
+            { CKA_LABEL, bytes(label) }, { CKA_PRIVATE, raw(no) },
+        };
+        std::erase_if(attrs, [omit](const auto &a) { return a.first == omit; });
+        return clear_record(attrs, record_key);
+    };
+    struct Row
+    {
+        CK_OBJECT_CLASS cls;
+        CK_ATTRIBUTE_TYPE omit; // CKA_VENDOR_DEFINED: none of the above
+        CK_RV want;
+        const char *rule;
+    };
+    const Row rows[] = {
+        { CKO_DATA, CKA_VENDOR_DEFINED, CKR_KEY_FUNCTION_NOT_PERMITTED, "only a secret key" },
+        { CKO_PUBLIC_KEY, CKA_VENDOR_DEFINED, CKR_KEY_FUNCTION_NOT_PERMITTED, "only a secret key" },
+        { CKO_DATA, CKA_PRIVATE, CKR_KEY_FUNCTION_NOT_PERMITTED, "no CKA_PRIVATE changes nothing" },
+        { CKO_DATA, CKA_CLASS, CKR_KEY_FUNCTION_NOT_PERMITTED, "no class is no secret key" },
+        { CKO_DATA, CKA_KEY_TYPE, CKR_KEY_TYPE_INCONSISTENT, "no key type is no AES key" },
+    };
+    std::filesystem::path forged = sealed.parent_path() / kForgedRecordFile;
+    CK_OBJECT_HANDLE lent = CK_INVALID_HANDLE;
+    for (const Row &row : rows)
+    {
+        SCOPED_TRACE(row.rule);
+        write_file(forged, forge(row.cls, row.omit));
+        std::vector<CK_OBJECT_HANDLE> found = find_label(s_, label.c_str());
+        ASSERT_EQ(1u, found.size()) << "a clear record of this class is a valid object";
+        lent = found[0];
+        EXPECT_CKR(row.want, p11()->C_EncryptInit(s_, &gcm, lent)) << row.rule << " encrypts";
+        EXPECT_CKR(row.want, p11()->C_DecryptInit(s_, &gcm, lent)) << row.rule << " decrypts";
+        abandon_operations(s_);
+    }
+    // The same record as a secret key: the store never writes a clear one. With
+    // CKA_PRIVATE FALSE it is what an earlier build wrote for a public token key.
+    for (CK_ATTRIBUTE_TYPE omit : { CKA_VENDOR_DEFINED, CKA_PRIVATE })
+    {
+        write_file(forged, forge(CKO_SECRET_KEY, omit));
+        EXPECT_CKR(CKR_FUNCTION_FAILED, p11()->C_EncryptInit(s_, &gcm, lent))
+            << "a clear secret key is refused like a tampered record, CKA_PRIVATE "
+            << (omit == CKA_PRIVATE ? "left out" : "FALSE");
+        abandon_operations(s_);
+    }
+    std::filesystem::remove(forged);
 }
 
 TEST_F(persist, a_private_record_is_sealed_up_to_the_device_limit)

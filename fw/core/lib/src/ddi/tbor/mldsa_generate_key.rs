@@ -93,7 +93,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // ML-DSA-87 no longer has that to spare now the masked blob carries
         // the expanded secret key.
         let resp = cmd_buf.buffer_mut();
-        let len = TborMlDsaGenerateKeyResp::encode(resp, 0, false)?
+        let len = TborMlDsaGenerateKeyResp::encode_for_request(resp, 0, false)?
             .masked_key_reserve(masked_len)?
             .pub_key_reserve(pub_len)?
             .finish()

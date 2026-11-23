@@ -32,7 +32,6 @@ use tsra_ddi_tbor_codec::EncodeError;
 use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
 use tsra_ddi_tbor_types::codec::DecodeError;
 use tsra_ddi_tbor_types::codec::ResponseEncoder;
-use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
 use tsra_ddi_tbor_types::tbor;
 use tsra_ddi_tbor_types::tbor_int::U32;
 use tsra_ddi_tbor_types::tbor_int::U64;
@@ -76,7 +75,7 @@ fn fields(resp: &TborApiRevResp) -> Rev {
 /// Encode the leading `known` API revision fields followed by the
 /// supplied future fields.
 fn encode_api_rev_fields<'a>(buf: &'a mut [u8], known: &[u16], trailing: &[u8]) -> &'a [u8] {
-    let mut encoder = ResponseEncoder::new(buf, PROTOCOL_VERSION, 0, false);
+    let mut encoder = ResponseEncoder::new(buf, (1, 1), 0, false);
     for (index, value) in known.iter().copied().enumerate() {
         encoder = encoder
             .uint16(value)
@@ -255,7 +254,7 @@ fn zero_toc_entries_cannot_be_encoded() {
     // response cannot reach TborApiRevResp::decode_response.
     let mut buf = [0u8; 64];
 
-    let err = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let err = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .finish()
         .expect_err("an empty response must be rejected by the encoder");
 
@@ -347,7 +346,7 @@ fn toc_entry_beyond_encoder_limit_is_rejected() {
     // TooManyTocEntries.
     let mut buf = [0u8; 512];
 
-    let mut encoder = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false);
+    let mut encoder = ResponseEncoder::new(&mut buf, (1, 1), 0, false);
     for value in [1, 0, 1, 1] {
         encoder = encoder.uint16(value).expect("encode known field");
     }
@@ -450,7 +449,7 @@ fn forward_compatibility_preserves_known_fields_at_toc_limit_boundary() {
 
 /// Encode one known buffer field followed by the supplied future fields.
 fn encode_buffer_with_trailing<'a>(buf: &'a mut [u8], value: &[u8], trailing: &[u8]) -> &'a [u8] {
-    let mut encoder = ResponseEncoder::new(buf, PROTOCOL_VERSION, 0, false)
+    let mut encoder = ResponseEncoder::new(buf, (1, 1), 0, false)
         .buffer(value)
         .expect("encode known buffer");
 
@@ -471,7 +470,7 @@ fn ecc_sign_exact_toc_count_decodes_signature() {
     let signature: Vec<u8> = (0..96).map(|index| index as u8).collect();
     let mut buf = [0u8; 512];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .buffer(&signature)
         .expect("encode signature")
         .finish()
@@ -514,7 +513,7 @@ fn ecc_sign_multiple_trailing_toc_entries_are_ignored() {
 /// Verifies forward-compatible decoding of the maximum-size ECDSA signature buffer.
 #[test]
 fn ecc_sign_maximum_signature_with_trailing_entry_is_preserved() {
-    let signature: Vec<u8> = (0..136).map(|index| index as u8).collect();
+    let signature: Vec<u8> = (0..144).map(|index| index as u8).collect();
 
     let mut buf = [0u8; 512];
     let bytes = encode_buffer_with_trailing(&mut buf, &signature, &[0xA5]);
@@ -531,7 +530,7 @@ fn key_report_exact_toc_count_decodes_report() {
 
     let mut buf = [0u8; 2048];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .buffer(&report)
         .expect("encode report")
         .finish()
@@ -597,7 +596,7 @@ fn aes_encrypt_decrypt_extra_trailing_toc_entry_is_ignored() {
 
     let mut buf = [0u8; 512];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .buffer(&msg)
         .expect("encode transformed message")
         .buffer(&iv)
@@ -621,7 +620,7 @@ fn ecc_generate_key_misaligned_masked_key_is_rejected() {
 
     // The data section starts at 8 + 3 * 4 = 20, so 2 bytes of padding put
     // the masked key at offset 22.
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .padding(2)
         .expect("encode misaligning padding")
         .buffer(&[0x11; 180])
@@ -648,7 +647,7 @@ fn ecc_generate_key_extra_trailing_toc_entry_is_ignored() {
 
     let mut buf = [0u8; 1024];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .padding(0)
         .expect("encode masked key alignment padding")
         .buffer(&masked_key)
@@ -681,7 +680,7 @@ fn unwrap_key_extra_trailing_toc_entry_is_ignored() {
 
     let mut buf = [0u8; 1024];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
         .padding(0)
@@ -713,7 +712,7 @@ fn unwrap_key_multiple_trailing_toc_entries_are_ignored() {
 
     let mut buf = [0u8; 1024];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
         .padding(0)
@@ -750,7 +749,7 @@ fn unwrap_key_missing_required_field_is_message_truncated() {
     // TborUnwrapKeyResp expects:
     //   key_kind, masked_key alignment padding, masked_key, pub_key.
     // Encode all but pub_key.
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
         .padding(0)
@@ -772,7 +771,7 @@ fn aes_encrypt_decrypt_missing_iv_is_message_truncated() {
     let msg = vec![0x22; 64];
     let mut buf = [0u8; 512];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .buffer(&msg)
         .expect("encode transformed message")
         .finish()
@@ -793,7 +792,7 @@ fn part_info_extra_trailing_toc_entry_is_ignored() {
 
     let mut buf = [0u8; 512];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .uint8(0x02)
         .expect("encode device kind")
         .uint8(0x03)
@@ -830,18 +829,23 @@ fn part_info_extra_trailing_toc_entry_is_ignored() {
 #[test]
 fn session_open_init_extra_trailing_toc_entry_is_ignored() {
     let session_id = 0x1234;
-    let pk_resp = [0x11u8; 97];
-    let mac_resp = [0x22u8; 48];
+    let enc = [0x11u8; 97];
+    let sig = [0x22u8; 96];
 
     let mut buf = [0u8; 512];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    // session_id, enc's alignment padding, enc, sig, trailing field.
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
+        .with_toc_slots(5)
+        .expect("reserve TOC")
         .session_id(session_id)
         .expect("encode session id")
-        .buffer(&pk_resp)
-        .expect("encode response public key")
-        .buffer(&mac_resp)
-        .expect("encode response MAC")
+        .align_to(4)
+        .expect("align response encapsulation")
+        .buffer(&enc)
+        .expect("encode response encapsulation")
+        .buffer(&sig)
+        .expect("encode response signature")
         .uint8(0xFF)
         .expect("encode trailing future field")
         .finish()
@@ -851,8 +855,8 @@ fn session_open_init_extra_trailing_toc_entry_is_ignored() {
         .expect("trailing entry must not disturb session-open response");
 
     assert_eq!(resp.session_id, session_id);
-    assert_eq!(resp.pk_resp, pk_resp);
-    assert_eq!(resp.mac_resp, mac_resp);
+    assert_eq!(resp.enc, enc);
+    assert_eq!(resp.sig, sig);
 }
 
 /// Verifies forward compatibility for the typed `KeyId` TOC entry.
@@ -862,7 +866,7 @@ fn key_id_extra_trailing_toc_entry_is_ignored() {
 
     let mut buf = [0u8; 128];
 
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .key_id(key_id)
         .expect("encode key id")
         .uint8(0x56)

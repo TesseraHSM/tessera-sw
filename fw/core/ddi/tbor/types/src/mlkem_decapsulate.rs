@@ -85,7 +85,7 @@ mod tests {
         let mut buf = [0u8; 8192];
         let masked = [0x11u8; MASKED_MLKEM_KEY_MAX_LEN];
         let ciphertext = [0x22u8; MLKEM_CIPHERTEXT_MAX_LEN];
-        let frame = TborMlKemDecapsulateReq::encode(&mut buf)
+        let frame = TborMlKemDecapsulateReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -104,7 +104,7 @@ mod tests {
     fn response_round_trips_secret() {
         let mut buf = [0u8; 512];
         let secret = [0x33u8; MASKED_MLKEM_SHARED_SECRET_MAX_LEN];
-        let frame = TborMlKemDecapsulateResp::encode(&mut buf, 0, true)
+        let frame = TborMlKemDecapsulateResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_shared_secret(&secret)
             .unwrap()

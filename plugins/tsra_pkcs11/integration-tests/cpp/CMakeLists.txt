@@ -63,6 +63,8 @@ set(SOURCE
     aes/multipart_tests.cpp
     aes/relation_tests.cpp
     aes/survival_tests.cpp
+    ec/keygen_tests.cpp
+    ec/sign_tests.cpp
     session/login_tests.cpp
     session/op_lifecycle_tests.cpp
     session/logout_tests.cpp

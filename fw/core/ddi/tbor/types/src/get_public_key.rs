@@ -75,7 +75,7 @@ mod tests {
     fn request_round_trips_masked_key() {
         let mut buf = [0u8; 1024];
         let masked = [0xCDu8; 180];
-        let frame = TborGetPublicKeyReq::encode(&mut buf)
+        let frame = TborGetPublicKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(9))
             .unwrap()
@@ -89,7 +89,7 @@ mod tests {
     fn response_round_trips_pub_key() {
         let mut buf = [0u8; 1024];
         let pub_key = [0x5Au8; 96];
-        let frame = TborGetPublicKeyResp::encode(&mut buf, 0, false)
+        let frame = TborGetPublicKeyResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .pub_key(&pub_key)
             .unwrap()

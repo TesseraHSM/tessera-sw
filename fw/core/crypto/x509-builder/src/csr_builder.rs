@@ -19,6 +19,7 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -33,9 +34,6 @@ pub const PRIV_KEY_LEN: usize = 48;
 
 /// ECDSA-P384 raw signature length (`r || s`).
 pub const SIGNATURE_LEN: usize = 96;
-
-/// SHA-384 digest length in bytes.
-const SHA384_DIGEST_LEN: usize = 48;
 
 /// Upper bound on the TBS-template scratch buffer used internally.
 /// Sized for any single P-384 CSR template in this crate.
@@ -145,25 +143,55 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
     let tbs_dma = alloc.dma_alloc(tbs_len)?;
     patch_tbs(tbs_dma, input)?;
 
-    // 2. SHA-384 digest of TBS.
-    let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        tbs_dma,
-        HsmDigestForm::Operand,
-        Some(digest_dma),
-    )
-    .await?;
-
-    // 3. ECDSA-P384 sign — output is `r || s` in operand order.
-    let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, Some(sig_dma))
-        .await?;
+    // 2. SHA-384 + ECDSA-P384 sign — output is `r || s` in operand order.
+    let sig_dma = sign_tbs(pal, io, alloc, priv_key, tbs_dma).await?;
 
     // 4. Assemble the final DER document into `out`.
     let n = assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)?;
     Ok(n)
+}
+
+/// Hashes `tbs` with SHA-384 into the digest lane of a fresh `k ‖ digest`
+/// buffer and ECDSA-P384 signs it in place, returning the buffer, which
+/// then holds `r || s` in operand order.
+pub(crate) async fn sign_tbs<'a, P: HsmCrypto>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    priv_key: &HsmDmaBuf,
+    tbs: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let k_sig = alloc.dma_alloc(SIGNATURE_LEN)?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        tbs,
+        HsmDigestForm::Operand,
+        Some(&mut k_sig[SIGNATURE_LEN / 2..]),
+    )
+    .await?;
+    sign_in_place(pal, io, priv_key, k_sig).await?;
+    Ok(k_sig)
+}
+
+/// ECDSA-P384 signs the operand-order SHA-384 digest in the second half of
+/// `k_sig`, writing `r || s` over all of it.
+pub(crate) async fn sign_in_place<P: HsmCrypto>(
+    pal: &P,
+    io: &P::Io,
+    priv_key: &HsmDmaBuf,
+    k_sig: &mut HsmDmaBuf,
+) -> HsmResult<()> {
+    pal.ecc_sign_in_place(
+        io,
+        HsmEccCurve::P384,
+        HsmHashAlgo::Sha384,
+        priv_key,
+        HsmEcdsaNonce::Generated,
+        k_sig,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Worst-case PKCS#10 `CertificationRequest ::= SEQUENCE { TBS, AlgId, BIT STRING sig }`

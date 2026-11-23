@@ -21,3 +21,15 @@ pub struct TborSessionCloseReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TborSessionCloseResp;
+
+/// Explicit plaintext cleanup, accepted only for a renegotiating slot.
+#[tbor(opcode = TBOR_OP_SESSION_CLOSE, session_ctrl = no_session)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TborSessionClosePlainReq {
+    /// Partition-local stale session identifier.
+    #[tbor(session_id)]
+    pub session_id: u16,
+}
+
+/// Plaintext close uses the same acknowledgement as protected close.
+pub type TborSessionClosePlainResp = TborSessionCloseResp;

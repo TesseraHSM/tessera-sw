@@ -112,7 +112,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // failure, including partial key generation or masking.
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
         let resp = cmd_buf.buffer_mut();
-        let len = TborMlKemGenerateKeyResp::encode(resp, 0, false)?
+        let len = TborMlKemGenerateKeyResp::encode_for_request(resp, 0, false)?
             .masked_key_reserve(masked_len)?
             .pub_key_reserve(pub_len)?
             .finish()
