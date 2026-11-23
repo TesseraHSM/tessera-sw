@@ -1,8 +1,8 @@
 /* Copyright (c) Microsoft Corporation. */
 /* Licensed under the MIT License. */
 
-/* Self-test and cold-path code (certificate chain validation, session open
-   and partition init) and their
+/* Self-test and cold-path code (certificate chain validation, session open,
+   partition provisioning and security-domain backup/restore) and their
    read-only data are kept in separate output
    sections: .gsram_text (executable) first, then .gsram_rodata (not
    executable). The boundary is 32-byte aligned, the ARMv7-M MPU region
@@ -18,10 +18,20 @@ SECTIONS
         /* Cold path: certificate chain validation is not on the crypto
            hot path. */
         *(.text.*tsra_fw_core_crypto_x509_chain*)
-        /* Cold paths: the TBOR SessionOpenInit and PartInit handlers run
-           once per session open and once per partition initialization. */
+        /* Cold paths: session open and partition provisioning. */
         *(.text.*session_open_init*)
         *(.text.*9part_init*)
+        *(.text.*10part_final*)
+        /* Security-domain provisioning and backup/restore handlers, including
+           their async poll bodies and shared backup helpers. */
+        *(.text.*sd_sealing_key_gen*)
+        *(.text.*sd_create_remote_backup*)
+        *(.text.*sd_create_peer_backup*)
+        *(.text.*sd_reseal_remote_backup*)
+        *(.text.*sd_restore_remote_backup*)
+        *(.text.*sd_restore_peer_backup*)
+        *(.text.*sd_restore_local_backup*)
+        *(.text.*sd_backup*)
         . = ALIGN(32);
         __gsram_text_end = .;
     } > GSRAM_CODE
