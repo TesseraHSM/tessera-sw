@@ -21,6 +21,24 @@ use tsra_ddi_tbor_test_harness::pqc::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
+const CONTROL_LEN: usize = 8;
+const KEY_KIND_BYTE: usize = 2;
+const SCOPE_BYTE: usize = 3;
+const SESSION_ID_BYTE: usize = 4;
+const CHECKS_BYTE: usize = 6;
+const CONTEXT_LEN_BYTE: usize = 7;
+const CONTEXT_MAX_LEN: u8 = 32;
+const MESSAGE_MAX_LEN: usize = 256;
+const CHECK_RAW_SESSION: u8 = 2;
+const CHECK_RAW_SCOPE: u8 = 4;
+const PARAMETER_SET_COUNT: usize = 3;
+const PARAMS: [&MlDsaParams; PARAMETER_SET_COUNT] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
+const PARTITION_SCOPES: &[u8] = &[
+    common::KEY_SCOPE_SESSION,
+    common::KEY_SCOPE_EPHEMERAL,
+    common::KEY_SCOPE_LOCAL,
+];
+
 /// Partition/session state established independently of the fuzzed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lifecycle {
@@ -117,8 +135,9 @@ impl<'a> FuzzInput<'a> {
     /// Decode bounded input, including a complete happy path for empty inputs.
     fn from_bytes(data: &'a [u8]) -> Self {
         let byte = |index| data.get(index).copied().unwrap_or(0);
-        let tail = data.get(8..).unwrap_or_default();
-        let context_len = usize::from(byte(7) % 33).min(tail.len());
+        let tail = data.get(CONTROL_LEN..).unwrap_or_default();
+        let context_len =
+            usize::from(byte(CONTEXT_LEN_BYTE) % (CONTEXT_MAX_LEN + 1)).min(tail.len());
         let (context, message) = tail.split_at(context_len);
         Self {
             scenario: Scenario::from_byte(byte(0)),
@@ -127,12 +146,12 @@ impl<'a> FuzzInput<'a> {
             } else {
                 common::FuzzRole::Cu
             },
-            key_kind: byte(2),
-            scope: byte(3),
-            session_id: u16::from_le_bytes([byte(4), byte(5)]),
-            checks: byte(6),
+            key_kind: byte(KEY_KIND_BYTE),
+            scope: byte(SCOPE_BYTE),
+            session_id: u16::from_le_bytes([byte(SESSION_ID_BYTE), byte(SESSION_ID_BYTE + 1)]),
+            checks: byte(CHECKS_BYTE),
             context,
-            message: &message[..message.len().min(256)],
+            message: &message[..message.len().min(MESSAGE_MAX_LEN)],
         }
     }
 
@@ -153,23 +172,20 @@ impl<'a> FuzzInput<'a> {
 
     /// Construct valid baselines, single-field rejects, and unrestricted fields.
     fn request(&self, active_session_id: u16) -> TborMlDsaGenerateKeyReq {
-        let params = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
         let mut req = TborMlDsaGenerateKeyReq {
             session_id: active_session_id,
             scope: match self.scenario {
-                Scenario::Partition => [
-                    common::KEY_SCOPE_SESSION,
-                    common::KEY_SCOPE_EPHEMERAL,
-                    common::KEY_SCOPE_LOCAL,
-                ][usize::from(self.scope % 3)],
+                Scenario::Partition => {
+                    PARTITION_SCOPES[usize::from(self.scope) % PARTITION_SCOPES.len()]
+                }
                 Scenario::SecurityDomain => common::KEY_SCOPE_SECURITY_DOMAIN,
                 _ => common::KEY_SCOPE_SESSION,
             },
-            key_kind: params[usize::from(self.key_kind % 3)].key_kind,
+            key_kind: PARAMS[usize::from(self.key_kind) % PARAMS.len()].key_kind,
         };
         match self.scenario {
             Scenario::ScopeSweep | Scenario::FinalizedScopeSweep => {
-                req.scope = if self.checks & 4 == 0 {
+                req.scope = if self.checks & CHECK_RAW_SCOPE == 0 {
                     common::derive_valid_key_scope(self.scope)
                 } else {
                     self.scope
@@ -182,7 +198,9 @@ impl<'a> FuzzInput<'a> {
                     self.key_kind
                 };
             }
-            Scenario::MismatchedSession => req.session_id ^= 1u16 << (self.session_id % 16),
+            Scenario::MismatchedSession => {
+                req.session_id ^= 1u16 << (u32::from(self.session_id) % u16::BITS)
+            }
             Scenario::Combined
             | Scenario::FinalizedCombined
             | Scenario::SecurityDomainCombined
@@ -192,8 +210,8 @@ impl<'a> FuzzInput<'a> {
                 req.scope = self.scope;
                 req.key_kind = self.key_kind;
                 if self.scenario == Scenario::MismatchedCombined {
-                    req.session_id ^= 1u16 << (self.session_id % 16);
-                } else if self.checks & 2 != 0 {
+                    req.session_id ^= 1u16 << (u32::from(self.session_id) % u16::BITS);
+                } else if self.checks & CHECK_RAW_SESSION != 0 {
                     req.session_id = self.session_id;
                 }
             }
@@ -210,7 +228,7 @@ impl<'a> FuzzInput<'a> {
 
 /// Match a wire kind to the independent harness's parameter/length table.
 fn parameters(key_kind: u8) -> Option<&'static MlDsaParams> {
-    [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87]
+    PARAMS
         .into_iter()
         .find(|params| params.key_kind == key_kind)
 }

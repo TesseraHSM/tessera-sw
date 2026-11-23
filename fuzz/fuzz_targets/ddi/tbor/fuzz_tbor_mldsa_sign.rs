@@ -20,17 +20,35 @@ use tsra_ddi_tbor_codec::*;
 use tsra_ddi_tbor_test_harness::pqc::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
+use tsra_fw_core_crypto_key_masking::aead;
 
 /// Bound malformed blobs while keeping every request inside transport capacity.
 const EXTRA_BYTES: usize = 16;
 /// Stored GCM IV suffix is not part of the 96-bit nonce.
-const IGNORED_IV: std::ops::Range<usize> = 20..24;
+const IGNORED_IV: std::ops::Range<usize> = aead_envelope::HEADER_LEN + GCM_IV_LEN
+    ..aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len();
 /// Metadata label bytes are authenticated without changing scope selection.
-const LABEL_START: usize = 24 + 26;
+const LABEL_START: usize =
+    IGNORED_IV.end + std::mem::offset_of!(aead::MaskedKeyMetadata, key_label);
 /// Scalars occupy thirteen bytes; payload bytes consume the remaining input.
 const CONTROL_LEN: usize = 13;
 
-const MASKED_KEY_ENVELOPE_LEN: usize = 232;
+const MASKED_KEY_ENVELOPE_LEN: usize = aead::masked_blob_len(aead::AeadAlg::AesGcm256, 0);
+const SIGN_TOC_COUNT: usize = 4;
+const MU_TOC_INDEX: usize = 2;
+const PARAMETER_SET_COUNT: usize = 3;
+const PARAMS: [&MlDsaParams; PARAMETER_SET_COUNT] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
+const HEDGE_MODES: &[u8] = &[
+    MLDSA_HEDGE_PREFERRED,
+    MLDSA_HEDGE_REQUIRED,
+    MLDSA_HEDGE_DETERMINISTIC,
+];
+const INVALID_HEDGE_MODES: &[u8] = &[3, 4, 0x80, u8::MAX];
+const MU_LENGTH_MULTIPLIER: usize = 2;
+const MU_MAX_FUZZ_LEN: usize = MU_LENGTH_MULTIPLIER * tsra_ddi_tbor_types::MLDSA_MU_LEN;
+const SWITCH_SESSION: u8 = 2;
+const SWITCH_MU: u8 = 4;
+const SWITCH_KEY: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -194,10 +212,10 @@ impl TborOpReq for SignRequest<'_> {
         if buf.len() <= len {
             return Err(EncodeError::BufferTooSmall);
         }
-        let data_start = REQ_HEADER_LEN + 4 * TOC_ENTRY_LEN;
+        let data_start = REQ_HEADER_LEN + SIGN_TOC_COUNT * TOC_ENTRY_LEN;
         buf.copy_within(data_start..len, data_start + 1);
         buf[data_start] = 0;
-        for index in [1, 2] {
+        for index in [1, MU_TOC_INDEX] {
             let start = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
             let entry = &mut buf[start..start + TOC_ENTRY_LEN];
             let word = u32::from_be_bytes(entry.try_into().expect("four-byte TOC entry"));
@@ -332,7 +350,7 @@ fn check_success(
 /// Construct one bounded scenario and assert its independently predicted result.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario;
-    let p = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87][usize::from(input.params) % 3];
+    let p = PARAMS[usize::from(input.params) % PARAMS.len()];
     let session = session(
         ctx,
         input,
@@ -358,11 +376,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         session_id: sid,
         masked_key: key.masked_key.clone(),
         mu: payload(input, tsra_ddi_tbor_types::MLDSA_MU_LEN),
-        hedge: [
-            MLDSA_HEDGE_PREFERRED,
-            MLDSA_HEDGE_REQUIRED,
-            MLDSA_HEDGE_DETERMINISTIC,
-        ][usize::from(input.hedge) % 3],
+        hedge: HEDGE_MODES[usize::from(input.hedge) % HEDGE_MODES.len()],
     };
     match scenario {
         Scenario::Valid
@@ -371,26 +385,22 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         | Scenario::Ephemeral
         | Scenario::ClosedSession => {}
         Scenario::ArbitraryHedge => req.hedge = input.hedge,
-        Scenario::InvalidHedge => req.hedge = [3, 4, 0x80, 0xFF][usize::from(input.hedge) % 4],
+        Scenario::InvalidHedge => {
+            req.hedge = INVALID_HEDGE_MODES[usize::from(input.hedge) % INVALID_HEDGE_MODES.len()]
+        }
         Scenario::ArbitrarySession => req.session_id = input.session_id,
         Scenario::MismatchedSession => {
             req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX)
         }
         Scenario::MuBoundary => {
             let mu_len = tsra_ddi_tbor_types::MLDSA_MU_LEN;
-            let lengths = [0, 1, mu_len - 1, mu_len, mu_len + 1, mu_len * 2];
+            let lengths = [0, 1, mu_len - 1, mu_len, mu_len + 1, MU_MAX_FUZZ_LEN];
             req.mu = payload(input, lengths[usize::from(input.length) % lengths.len()]);
         }
         Scenario::MuLength => {
-            req.mu = payload(
-                input,
-                usize::from(input.length) % (2 * tsra_ddi_tbor_types::MLDSA_MU_LEN + 1),
-            )
+            req.mu = payload(input, usize::from(input.length) % (MU_MAX_FUZZ_LEN + 1))
         }
-        Scenario::RawMu => {
-            req.mu =
-                input.bytes[..input.bytes.len().min(2 * tsra_ddi_tbor_types::MLDSA_MU_LEN)].to_vec()
-        }
+        Scenario::RawMu => req.mu = input.bytes[..input.bytes.len().min(MU_MAX_FUZZ_LEN)].to_vec(),
         Scenario::RawKey => req.masked_key = input.bytes.clone(),
         Scenario::FlipKey => common::EnvelopeMutation::FlipByte {
             offset: input.offset,
@@ -449,16 +459,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             if input.switches & 1 != 0 {
                 req.hedge = input.hedge;
             }
-            if input.switches & 2 != 0 {
+            if input.switches & SWITCH_SESSION != 0 {
                 req.session_id = input.session_id;
             }
-            if input.switches & 4 != 0 {
-                req.mu = payload(
-                    input,
-                    usize::from(input.length) % (2 * tsra_ddi_tbor_types::MLDSA_MU_LEN + 1),
-                );
+            if input.switches & SWITCH_MU != 0 {
+                req.mu = payload(input, usize::from(input.length) % (MU_MAX_FUZZ_LEN + 1));
             }
-            if input.switches & 8 != 0 {
+            if input.switches & SWITCH_KEY != 0 {
                 common::EnvelopeMutation::FlipByte {
                     offset: input.offset,
                     mask: input.mask,
@@ -467,10 +474,12 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             }
         }
         Scenario::CorruptNonce => {
-            req.masked_key[8 + usize::from(input.offset) % 12] ^= input.mask | 1
+            req.masked_key[aead_envelope::HEADER_LEN + usize::from(input.offset) % GCM_IV_LEN] ^=
+                input.mask | 1
         }
         Scenario::CorruptLabel => {
-            req.masked_key[LABEL_START + usize::from(input.offset) % 128] ^= input.mask | 1
+            req.masked_key[LABEL_START + usize::from(input.offset) % aead::KEY_LABEL_MAX] ^=
+                input.mask | 1
         }
         Scenario::ExtendKey => req
             .masked_key

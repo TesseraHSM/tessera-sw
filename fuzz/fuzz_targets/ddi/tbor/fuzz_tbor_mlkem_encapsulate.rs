@@ -26,9 +26,37 @@ use tsra_ddi_tbor_types::*;
 /// Independent FIPS 203 coefficient modulus and trailing public seed length.
 const MODULUS: u16 = 3329;
 const RHO_LEN: usize = 32;
+const COEFFICIENT_BITS: u32 = 12;
+const COEFFICIENT_LIMIT: u16 = 1 << COEFFICIENT_BITS;
+const NIBBLE_BITS: u32 = 4;
+const NIBBLE_MASK: u8 = (1 << NIBBLE_BITS) - 1;
+const PACKED_PAIR_LEN: usize = 3;
+const PACKED_PAIR_LAST_BYTE: usize = PACKED_PAIR_LEN - 1;
+const BINARY_COEFFICIENT_CHOICES: u16 = 2;
+const OVERSIZE_LENGTH_CHOICES: usize = 2;
+const KEY_MODE_RHO: u8 = 2;
+const KEY_MODE_BOUNDARY: u8 = 3;
+const KEY_MODE_POLYNOMIAL: u8 = 4;
+const KEY_MODE_INVALID_COEFFICIENT: u8 = 5;
+const KEY_MODE_RAW: u8 = 6;
+const KEY_MODE_LENGTH_BOUNDARY: u8 = 7;
+const KEY_MODE_OVERSIZED: u8 = 8;
+const KEY_MODE_LENGTH: u8 = 9;
+const KEY_MODE_COUNT: u8 = 10;
+const ENCAPSULATE_TOC_COUNT: usize = 3;
+const PADDING_TOC_INDEX: usize = 2;
+const PUBLIC_KEY_TOC_INDEX: usize = 2;
+const SHIFTED_LAYOUT_SWITCH: u8 = 0x80;
+const MAX_GAP_TOC_ENTRIES: usize = 16;
+const PARTITION_SCOPES: &[u8] = &[
+    common::KEY_SCOPE_SESSION,
+    common::KEY_SCOPE_EPHEMERAL,
+    common::KEY_SCOPE_LOCAL,
+];
 
 /// Harness-owned parameter sizes, also used to classify final request bytes.
-const PARAMS: [&MlKemParams; 3] = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024];
+const PARAMETER_SET_COUNT: usize = 3;
+const PARAMS: [&MlKemParams; PARAMETER_SET_COUNT] = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024];
 
 /// Partition/session state established independently of the fuzzed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,19 +202,19 @@ impl FuzzInput {
     fn key_mode(&self) -> u8 {
         match self.scenario {
             Scenario::CanonicalKey => 1,
-            Scenario::MutateRho => 2,
-            Scenario::BoundaryCoefficients => 3,
-            Scenario::MutatePolynomial => 4,
-            Scenario::InvalidCoefficient => 5,
-            Scenario::RawKey => 6,
-            Scenario::KeyBoundary => 7,
-            Scenario::OversizedKey => 8,
-            Scenario::KeyLength => 9,
+            Scenario::MutateRho => KEY_MODE_RHO,
+            Scenario::BoundaryCoefficients => KEY_MODE_BOUNDARY,
+            Scenario::MutatePolynomial => KEY_MODE_POLYNOMIAL,
+            Scenario::InvalidCoefficient => KEY_MODE_INVALID_COEFFICIENT,
+            Scenario::RawKey => KEY_MODE_RAW,
+            Scenario::KeyBoundary => KEY_MODE_LENGTH_BOUNDARY,
+            Scenario::OversizedKey => KEY_MODE_OVERSIZED,
+            Scenario::KeyLength => KEY_MODE_LENGTH,
             Scenario::Combined
             | Scenario::DefaultPskCombined
             | Scenario::ClosedCombined
             | Scenario::MismatchedCombined
-            | Scenario::ArbitraryFields => self.key_mode % 10,
+            | Scenario::ArbitraryFields => self.key_mode % KEY_MODE_COUNT,
             _ => 0,
         }
     }
@@ -245,26 +273,29 @@ fn seeded_public_key(input: &FuzzInput, p: &MlKemParams) -> Vec<u8> {
 /// Decode the two little-endian 12-bit coefficients packed into three bytes.
 fn coefficients(bytes: &[u8]) -> (u16, u16) {
     (
-        u16::from(bytes[0]) | (u16::from(bytes[1] & 0x0f) << 8),
-        u16::from(bytes[1] >> 4) | (u16::from(bytes[2]) << 4),
+        u16::from(bytes[0]) | (u16::from(bytes[1] & NIBBLE_MASK) << u8::BITS),
+        u16::from(bytes[1] >> NIBBLE_BITS)
+            | (u16::from(bytes[PACKED_PAIR_LAST_BYTE]) << NIBBLE_BITS),
     )
 }
 
 /// Encode two coefficients that fit in the 12-bit FIPS 203 representation.
 fn write_coefficients(bytes: &mut [u8], first: u16, second: u16) {
     bytes[0] = first as u8;
-    bytes[1] = ((first >> 8) | (second << 4)) as u8;
-    bytes[2] = (second >> 4) as u8;
+    bytes[1] = ((first >> u8::BITS) | (second << NIBBLE_BITS)) as u8;
+    bytes[PACKED_PAIR_LAST_BYTE] = (second >> NIBBLE_BITS) as u8;
 }
 
 /// Check canonical polynomial coefficients without constraining the rho seed.
 ///
 /// Call only after identifying a supported public-key length.
 fn canonical_public_key(bytes: &[u8]) -> bool {
-    bytes[..bytes.len() - RHO_LEN].chunks_exact(3).all(|chunk| {
-        let (first, second) = coefficients(chunk);
-        first < MODULUS && second < MODULUS
-    })
+    bytes[..bytes.len() - RHO_LEN]
+        .chunks_exact(PACKED_PAIR_LEN)
+        .all(|chunk| {
+            let (first, second) = coefficients(chunk);
+            first < MODULUS && second < MODULUS
+        })
 }
 
 /// Construct generated, canonical, mutated, malformed, or arbitrary key bytes.
@@ -284,35 +315,40 @@ fn public_key(ctx: &TestCtx, input: &FuzzInput, p: &MlKemParams, session_id: u16
 
     let mut key = seeded_public_key(input, p);
     let polynomial_len = p.pub_key_len - RHO_LEN;
-    let pair_offset = (usize::from(input.offset) % (polynomial_len / 3)) * 3;
+    let pair_offset =
+        (usize::from(input.offset) % (polynomial_len / PACKED_PAIR_LEN)) * PACKED_PAIR_LEN;
     match input.key_mode() {
         1 => {
             key = input.repeated_bytes(p.pub_key_len);
-            for chunk in key[..polynomial_len].chunks_exact_mut(3) {
+            for chunk in key[..polynomial_len].chunks_exact_mut(PACKED_PAIR_LEN) {
                 let (first, second) = coefficients(chunk);
                 write_coefficients(chunk, first % MODULUS, second % MODULUS);
             }
         }
-        2 => {
+        KEY_MODE_RHO => {
             key[polynomial_len + usize::from(input.offset) % RHO_LEN] ^= input.mask;
         }
-        3 => {
+        KEY_MODE_BOUNDARY => {
             write_coefficients(
-                &mut key[pair_offset..pair_offset + 3],
+                &mut key[pair_offset..pair_offset + PACKED_PAIR_LEN],
                 MODULUS - 1,
-                u16::from(input.mask) % 2,
+                u16::from(input.mask) % BINARY_COEFFICIENT_CHOICES,
             );
         }
-        4 => {
+        KEY_MODE_POLYNOMIAL => {
             key[usize::from(input.offset) % polynomial_len] ^= input.mask;
         }
-        5 => {
-            let (_, second) = coefficients(&key[pair_offset..pair_offset + 3]);
-            let invalid = MODULUS + input.length % (4096 - MODULUS);
-            write_coefficients(&mut key[pair_offset..pair_offset + 3], invalid, second);
+        KEY_MODE_INVALID_COEFFICIENT => {
+            let (_, second) = coefficients(&key[pair_offset..pair_offset + PACKED_PAIR_LEN]);
+            let invalid = MODULUS + input.length % (COEFFICIENT_LIMIT - MODULUS);
+            write_coefficients(
+                &mut key[pair_offset..pair_offset + PACKED_PAIR_LEN],
+                invalid,
+                second,
+            );
         }
-        6 => key = input.repeated_bytes(p.pub_key_len),
-        7 => {
+        KEY_MODE_RAW => key = input.repeated_bytes(p.pub_key_len),
+        KEY_MODE_LENGTH_BOUNDARY => {
             let lengths = [
                 0,
                 1,
@@ -324,9 +360,11 @@ fn public_key(ctx: &TestCtx, input: &FuzzInput, p: &MlKemParams, session_id: u16
             ];
             key.resize(lengths[usize::from(input.length) % lengths.len()], 0);
         }
-        8 => key.resize(MLKEM_PUB_KEY_MAX_LEN + 1, 0),
-        9 => {
-            key = input.repeated_bytes(usize::from(input.length) % (MLKEM_PUB_KEY_MAX_LEN + 2));
+        KEY_MODE_OVERSIZED => key.resize(MLKEM_PUB_KEY_MAX_LEN + 1, 0),
+        KEY_MODE_LENGTH => {
+            key = input.repeated_bytes(
+                usize::from(input.length) % (MLKEM_PUB_KEY_MAX_LEN + OVERSIZE_LENGTH_CHOICES),
+            );
         }
         _ => {}
     }
@@ -367,22 +405,26 @@ impl TborOpReq for EncapsulateRequest {
             return self.req.encode_request(buf, api_rev);
         }
         let len = RequestEncoder::new(buf, api_rev, Self::OPCODE)
-            .with_toc_slots(4)?
+            .with_toc_slots(ENCAPSULATE_TOC_COUNT + 1)?
             .session_id(self.req.session_id)?
             .uint8(self.req.scope)?
             .padding(self.gap)?
             .buffer(&self.req.pub_key)?
             .finish()?
             .len();
-        let padding_toc = REQ_HEADER_LEN + 2 * TOC_ENTRY_LEN;
+        let padding_toc = REQ_HEADER_LEN + PADDING_TOC_INDEX * TOC_ENTRY_LEN;
         buf.copy_within(padding_toc + TOC_ENTRY_LEN..len, padding_toc);
-        Request::write_header(buf, &Request::new(api_rev, Self::OPCODE), 3);
+        Request::write_header(
+            buf,
+            &Request::new(api_rev, Self::OPCODE),
+            ENCAPSULATE_TOC_COUNT,
+        );
         let frame = &buf[..len - TOC_ENTRY_LEN];
         let view = RequestView::parse(frame).expect("relocated request must be structurally valid");
-        assert_eq!(view.toc_count(), 3);
+        assert_eq!(view.toc_count(), ENCAPSULATE_TOC_COUNT);
         assert_eq!(view.toc_entry(0), TocEntry::SessionId(self.req.session_id));
         assert_eq!(view.toc_entry(1), TocEntry::Uint8(self.req.scope));
-        let TocEntry::Buffer(key) = view.toc_entry(2) else {
+        let TocEntry::Buffer(key) = view.toc_entry(PUBLIC_KEY_TOC_INDEX) else {
             panic!("relocated key must retain its buffer TOC type");
         };
         assert_eq!(key, self.req.pub_key);
@@ -397,14 +439,10 @@ impl TborOpReq for EncapsulateRequest {
 /// Construct valid baselines, single-field rejects, or combined-invalid cases.
 fn request(ctx: &TestCtx, input: &FuzzInput, session_id: u16) -> EncapsulateRequest {
     let scenario = input.scenario;
-    let p = PARAMS[usize::from(input.params % 3)];
+    let p = PARAMS[usize::from(input.params) % PARAMS.len()];
     let pub_key = public_key(ctx, input, p, session_id);
     let scope = match scenario {
-        Scenario::Partition => [
-            common::KEY_SCOPE_SESSION,
-            common::KEY_SCOPE_EPHEMERAL,
-            common::KEY_SCOPE_LOCAL,
-        ][usize::from(input.scope % 3)],
+        Scenario::Partition => PARTITION_SCOPES[usize::from(input.scope) % PARTITION_SCOPES.len()],
         Scenario::SecurityDomain => common::KEY_SCOPE_SECURITY_DOMAIN,
         Scenario::ArbitraryScope
         | Scenario::Combined
@@ -418,15 +456,15 @@ fn request(ctx: &TestCtx, input: &FuzzInput, session_id: u16) -> EncapsulateRequ
     };
     let session_id = match scenario {
         Scenario::MismatchedSession | Scenario::MismatchedCombined => {
-            session_id ^ (1u16 << (input.session_id % 16))
+            session_id ^ (1u16 << (u32::from(input.session_id) % u16::BITS))
         }
         Scenario::ArbitrarySession | Scenario::Combined => input.session_id,
         _ => session_id,
     };
     let gap = if scenario == Scenario::ShiftedLayout
-        || (scenario == Scenario::Combined && input.key_mode & 0x80 != 0)
+        || (scenario == Scenario::Combined && input.key_mode & SHIFTED_LAYOUT_SWITCH != 0)
     {
-        (usize::from(input.offset) % 16 + 1) * TOC_ENTRY_LEN
+        (usize::from(input.offset) % MAX_GAP_TOC_ENTRIES + 1) * TOC_ENTRY_LEN
     } else {
         0
     };

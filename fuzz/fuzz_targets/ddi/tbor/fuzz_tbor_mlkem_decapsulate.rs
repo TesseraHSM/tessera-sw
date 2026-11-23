@@ -30,9 +30,34 @@ use zerocopy::*;
 /// Bound extensions while retaining schema maximum + 1 cases.
 const EXTRA_BYTES: usize = 16;
 /// Only the first 12 bytes of the stored IV affect authentication.
-const NONCE_END: usize = aead_envelope::HEADER_LEN + 12;
+const NONCE_END: usize = aead_envelope::HEADER_LEN + GCM_IV_LEN;
 /// End of the 16-byte stored IV, including its ignored suffix.
-const IV_END: usize = aead_envelope::HEADER_LEN + 16;
+const IV_END: usize = aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len();
+const PATTERN_LEN: usize = 16;
+const PARAMETER_SET_COUNT: usize = 3;
+const PARAMS: [&MlKemParams; PARAMETER_SET_COUNT] = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024];
+const PROVISION_SECURITY_DOMAIN: u8 = 2;
+const OVERSIZE_LENGTH_CHOICES: usize = 2;
+const SWITCH_SESSION: u8 = 2;
+const SWITCH_SCOPE: u8 = 4;
+const SWITCH_CIPHERTEXT: u8 = 8;
+const SWITCH_RAW_KEY: u8 = 16;
+const PARTITION_SCOPES: &[u8] = &[
+    common::KEY_SCOPE_SESSION,
+    common::KEY_SCOPE_LOCAL,
+    common::KEY_SCOPE_EPHEMERAL,
+];
+const SECURITY_DOMAIN_SCOPES: &[u8] = &[
+    common::KEY_SCOPE_SECURITY_DOMAIN,
+    common::KEY_SCOPE_SESSION,
+    common::KEY_SCOPE_LOCAL,
+    common::KEY_SCOPE_EPHEMERAL,
+];
+const UNAVAILABLE_SCOPES: &[common::KeyScope] = &[
+    common::KeyScope::Local,
+    common::KeyScope::Ephemeral,
+    common::KeyScope::SecurityDomain,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -139,7 +164,7 @@ struct FuzzInput {
     offset: u16,
     mask: u8,
     switches: u8,
-    pattern: [u8; 16],
+    pattern: [u8; PATTERN_LEN],
     raw_key: BoundedBytes<{ MASKED_MLKEM_KEY_MAX_LEN + 1 }>,
     raw_ciphertext: BoundedBytes<{ MLKEM_CIPHERTEXT_MAX_LEN + 1 }>,
 }
@@ -181,7 +206,7 @@ fn session<'ctx>(ctx: &'ctx TestCtx, input: &FuzzInput, provisioning: u8) -> Ses
     };
     if provisioning != 0 {
         let co = SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK));
-        if provisioning == 2 {
+        if provisioning == PROVISION_SECURITY_DOMAIN {
             common::create_test_security_domain(ctx, co.handshake());
         } else {
             common::finalize_partition(ctx, co.handshake());
@@ -254,7 +279,7 @@ fn expected(
     let scope_available = match req.scope {
         common::KEY_SCOPE_SESSION => true,
         common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_EPHEMERAL => provisioning != 0,
-        common::KEY_SCOPE_SECURITY_DOMAIN => provisioning == 2,
+        common::KEY_SCOPE_SECURITY_DOMAIN => provisioning == PROVISION_SECURITY_DOMAIN,
         _ => false,
     };
     if !scope_available {
@@ -291,10 +316,10 @@ fn check_response(resp: &TborMlKemDecapsulateResp, scope: u8, params: &MlKemPara
 /// Construct one bounded request, predict the outcome, and check its actual result.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario;
-    let params = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024][usize::from(input.parameter_set) % 3];
+    let params = PARAMS[usize::from(input.parameter_set) % PARAMS.len()];
     let provisioning = match scenario {
         Scenario::Local | Scenario::Ephemeral | Scenario::PersistedOutput => 1,
-        Scenario::SecurityDomain => 2,
+        Scenario::SecurityDomain => PROVISION_SECURITY_DOMAIN,
         _ => 0,
     };
     let session = session(ctx, input, provisioning);
@@ -398,7 +423,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         Scenario::CiphertextLength => {
             req.ciphertext = ciphertext(
                 input,
-                usize::from(input.length) % (MLKEM_CIPHERTEXT_MAX_LEN + 2),
+                usize::from(input.length) % (MLKEM_CIPHERTEXT_MAX_LEN + OVERSIZE_LENGTH_CHOICES),
             );
         }
         Scenario::ArbitrarySession => req.session_id = input.session_id,
@@ -449,11 +474,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             req.masked_key[start + usize::from(input.offset) % (end - start)] ^= input.mask;
         }
         Scenario::Local | Scenario::Ephemeral => {
-            req.scope = [
-                common::KEY_SCOPE_SESSION,
-                common::KEY_SCOPE_LOCAL,
-                common::KEY_SCOPE_EPHEMERAL,
-            ][usize::from(input.scope) % 3];
+            req.scope = PARTITION_SCOPES[usize::from(input.scope) % PARTITION_SCOPES.len()];
         }
         Scenario::PersistedOutput => {
             req.scope = if input.mask & 1 == 0 {
@@ -463,25 +484,21 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             };
         }
         Scenario::SecurityDomain => {
-            req.scope = [
-                common::KEY_SCOPE_SECURITY_DOMAIN,
-                common::KEY_SCOPE_SESSION,
-                common::KEY_SCOPE_LOCAL,
-                common::KEY_SCOPE_EPHEMERAL,
-            ][usize::from(input.scope) % 4];
+            req.scope =
+                SECURITY_DOMAIN_SCOPES[usize::from(input.scope) % SECURITY_DOMAIN_SCOPES.len()];
         }
         Scenario::WrongKeyType => {}
         Scenario::Combined => {
-            if input.switches & 2 != 0 {
+            if input.switches & SWITCH_SESSION != 0 {
                 req.session_id = input.session_id;
             }
-            if input.switches & 4 != 0 {
+            if input.switches & SWITCH_SCOPE != 0 {
                 req.scope = input.scope;
             }
-            if input.switches & 8 != 0 {
+            if input.switches & SWITCH_CIPHERTEXT != 0 {
                 req.ciphertext = input.raw_ciphertext.0.clone();
             }
-            if input.switches & 16 != 0 {
+            if input.switches & SWITCH_RAW_KEY != 0 {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
@@ -496,12 +513,8 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             common::EnvelopeMutation::Append(Vec::new()).apply(&mut req.masked_key)
         }
         Scenario::UnavailableScope => {
-            req.scope = [
-                common::KeyScope::Local,
-                common::KeyScope::Ephemeral,
-                common::KeyScope::SecurityDomain,
-            ][usize::from(input.scope) % 3]
-                .to_tbor();
+            req.scope =
+                UNAVAILABLE_SCOPES[usize::from(input.scope) % UNAVAILABLE_SCOPES.len()].to_tbor();
         }
     }
     let closed = scenario == Scenario::ClosedSession;

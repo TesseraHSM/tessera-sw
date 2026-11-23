@@ -25,7 +25,26 @@ use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
 /// Harness-owned parameter sizes, also used to infer the set from final bytes.
-const PARAMS: [&MlDsaParams; 3] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
+const PARAMETER_SET_COUNT: usize = 3;
+const PARAMS: [&MlDsaParams; PARAMETER_SET_COUNT] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
+const LENGTH_NEIGHBOR_COUNT: usize = 3;
+const LENGTH_EXTRA_CHOICES: usize = 3;
+const OVERSIZE_LENGTH_CHOICES: usize = 2;
+const HOST_PAGE_SIZE: usize = 4096;
+const MUTATION_MODE_COUNT: u8 = 6;
+const MUTATION_ZERO: u8 = 2;
+const MUTATION_FILL: u8 = 3;
+const MUTATION_REPLACE: u8 = 4;
+const OFFSET_MODE_COUNT: u16 = 8;
+const OFFSET_BEFORE_PAGE: u16 = 2;
+const OFFSET_AT_PAGE: u16 = 3;
+const OFFSET_AFTER_PAGE: u16 = 4;
+const SESSION_MODE_COUNT: u8 = 8;
+const SESSION_ARBITRARY: u8 = 3;
+const SESSION_ZERO: u8 = 4;
+const SESSION_MAX: u8 = 5;
+const SESSION_MISMATCHED: u8 = 6;
+const SESSION_CLOSED: u8 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -233,38 +252,38 @@ fn check_request(ctx: &TestCtx, req: &TborMlDsaVerifyReq, bound_session: Option<
 /// Choose empty, each valid length and its neighbors, maximum+1, or any bounded
 /// length. The three fields' combined maxima remain below the transport limit.
 fn boundary_len(mode: u8, raw: u16, valid: &[usize], maximum: usize) -> usize {
-    let choice = usize::from(mode) % (valid.len() * 3 + 3);
+    let choice = usize::from(mode) % (valid.len() * LENGTH_NEIGHBOR_COUNT + LENGTH_EXTRA_CHOICES);
     if choice == 0 {
         0
-    } else if choice <= valid.len() * 3 {
+    } else if choice <= valid.len() * LENGTH_NEIGHBOR_COUNT {
         let index = choice - 1;
-        valid[index / 3] + index % 3 - 1
-    } else if choice == valid.len() * 3 + 1 {
+        valid[index / LENGTH_NEIGHBOR_COUNT] + index % LENGTH_NEIGHBOR_COUNT - 1
+    } else if choice == valid.len() * LENGTH_NEIGHBOR_COUNT + 1 {
         maximum + 1
     } else {
-        usize::from(raw) % (maximum + 2)
+        usize::from(raw) % (maximum + OVERSIZE_LENGTH_CHOICES)
     }
 }
 
 /// Vary contents without changing length, retaining genuine no-ops. Offset
 /// selectors target endpoints and both sides of the host-DMA page boundary.
 fn mutate_contents(buf: &mut [u8], mode: u8, input: &FuzzInput) {
-    match mode % 6 {
+    match mode % MUTATION_MODE_COUNT {
         0 => {}
         1 if !buf.is_empty() => {
-            let offset = match input.offset % 8 {
+            let offset = match input.offset % OFFSET_MODE_COUNT {
                 0 => 0,
                 1 => buf.len() - 1,
-                2 => 4095,
-                3 => 4096,
-                4 => 4097,
+                OFFSET_BEFORE_PAGE => HOST_PAGE_SIZE - 1,
+                OFFSET_AT_PAGE => HOST_PAGE_SIZE,
+                OFFSET_AFTER_PAGE => HOST_PAGE_SIZE + 1,
                 _ => usize::from(input.offset),
             } % buf.len();
             buf[offset] ^= input.mask;
         }
-        2 => buf.fill(0),
-        3 => buf.fill(input.mask),
-        4 => buf.copy_from_slice(&repeated_bytes(
+        MUTATION_ZERO => buf.fill(0),
+        MUTATION_FILL => buf.fill(input.mask),
+        MUTATION_REPLACE => buf.copy_from_slice(&repeated_bytes(
             &input.bytes,
             buf.len(),
             usize::from(input.offset),
@@ -319,9 +338,9 @@ fn fuzzed_request(input: &FuzzInput, base: &TborMlDsaVerifyReq) -> (TborMlDsaVer
         );
     }
     match scenario {
-        Scenario::RawPublicKey => mutate_contents(&mut req.pub_key, 4, input),
-        Scenario::RawMu => mutate_contents(&mut req.mu, 4, input),
-        Scenario::RawSignature => mutate_contents(&mut req.signature, 4, input),
+        Scenario::RawPublicKey => mutate_contents(&mut req.pub_key, MUTATION_REPLACE, input),
+        Scenario::RawMu => mutate_contents(&mut req.mu, MUTATION_REPLACE, input),
+        Scenario::RawSignature => mutate_contents(&mut req.signature, MUTATION_REPLACE, input),
         Scenario::WrongSignatureSet => {
             let other = PARAMS[(usize::from(input.params) + 1) % PARAMS.len()];
             req.signature.resize(other.sig_len, input.mask);
@@ -329,18 +348,18 @@ fn fuzzed_request(input: &FuzzInput, base: &TborMlDsaVerifyReq) -> (TborMlDsaVer
         _ => {}
     }
     let session_mode = if scenario == Scenario::Session || mixed {
-        input.session_mode % 8
+        input.session_mode % SESSION_MODE_COUNT
     } else {
         0
     };
     req.session_id = match session_mode {
-        3 => input.session_id,
-        4 => 0,
-        5 => u16::MAX,
-        6 => base.session_id.wrapping_add(1),
+        SESSION_ARBITRARY => input.session_id,
+        SESSION_ZERO => 0,
+        SESSION_MAX => u16::MAX,
+        SESSION_MISMATCHED => base.session_id.wrapping_add(1),
         _ => base.session_id,
     };
-    (req, session_mode == 7)
+    (req, session_mode == SESSION_CLOSED)
 }
 
 /// Cover all parameter sets and core statuses once per process, independently of
