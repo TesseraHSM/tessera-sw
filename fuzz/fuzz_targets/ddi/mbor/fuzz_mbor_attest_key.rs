@@ -117,6 +117,7 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                     input.key_availability,
                     rev,
                     input.key_size as u16,
+                    DdiKeyUsage::SignVerify,
                 ) {
                     Ok(id) => id,
                     Err(err) => {
