@@ -12,6 +12,8 @@
 #[path = "../../common.rs"]
 mod common;
 
+use std::sync::Once;
+
 use libfuzzer_sys::arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto::*;
@@ -34,8 +36,9 @@ const LABEL_START: usize =
 const CONTROL_LEN: usize = 13;
 
 const MASKED_KEY_ENVELOPE_LEN: usize = aead::masked_blob_len(aead::AeadAlg::AesGcm256, 0);
-const SIGN_TOC_COUNT: usize = 4;
-const MU_TOC_INDEX: usize = 2;
+const SIGN_TOC_COUNT: usize = 5;
+const MASKED_KEY_TOC_INDEX: usize = 2;
+const MU_TOC_INDEX: usize = 3;
 const PARAMETER_SET_COUNT: usize = 3;
 const PARAMS: [&MlDsaParams; PARAMETER_SET_COUNT] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
 const HEDGE_MODES: &[u8] = &[
@@ -80,10 +83,10 @@ enum Scenario {
 }
 
 impl Scenario {
-    fn from_byte(byte: u8) -> Self {
+    const SCENARIOS: [Self; 32] = {
         use Scenario::*;
         // Preserve the compact corpus format and success-biased distribution.
-        let scenarios = [
+        [
             Valid,
             Valid,
             Valid,
@@ -116,8 +119,11 @@ impl Scenario {
             CorruptNonce,
             CorruptLabel,
             ExtendKey,
-        ];
-        scenarios[usize::from(byte) % scenarios.len()]
+        ]
+    };
+
+    fn from_byte(byte: u8) -> Self {
+        Self::SCENARIOS[usize::from(byte) % Self::SCENARIOS.len()]
     }
 }
 
@@ -199,7 +205,7 @@ impl TborOpReq for SignRequest<'_> {
         self.req.session_ctrl()
     }
 
-    /// Keep offsets monotonic but displace both buffers by one unused data byte.
+    /// Keep buffers aligned but displace them by one unused TOC entry's width.
     fn encode_request<'b>(
         &self,
         buf: &'b mut [u8],
@@ -209,19 +215,19 @@ impl TborOpReq for SignRequest<'_> {
         if !self.shifted {
             return Ok(&buf[..len]);
         }
-        if buf.len() <= len {
+        if buf.len() < len + TOC_ENTRY_LEN {
             return Err(EncodeError::BufferTooSmall);
         }
         let data_start = REQ_HEADER_LEN + SIGN_TOC_COUNT * TOC_ENTRY_LEN;
-        buf.copy_within(data_start..len, data_start + 1);
-        buf[data_start] = 0;
-        for index in [1, MU_TOC_INDEX] {
+        buf.copy_within(data_start..len, data_start + TOC_ENTRY_LEN);
+        buf[data_start..data_start + TOC_ENTRY_LEN].fill(0);
+        for index in [MASKED_KEY_TOC_INDEX, MU_TOC_INDEX] {
             let start = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
             let entry = &mut buf[start..start + TOC_ENTRY_LEN];
             let word = u32::from_be_bytes(entry.try_into().expect("four-byte TOC entry"));
-            entry.copy_from_slice(&(word + 1).to_be_bytes());
+            entry.copy_from_slice(&(word + TOC_ENTRY_LEN as u32).to_be_bytes());
         }
-        Ok(&buf[..len + 1])
+        Ok(&buf[..len + TOC_ENTRY_LEN])
     }
 }
 
@@ -290,9 +296,11 @@ fn expected(
         MLDSA_HEDGE_DETERMINISTIC,
     ]
     .contains(&req.hedge)
-        || request.shifted
     {
         return Expected::Reject(TborStatus::InvalidArg);
+    }
+    if request.shifted {
+        return Expected::Reject(TborStatus::TborNonCanonicalLayout);
     }
     if wrong_kind {
         return Expected::Reject(TborStatus::InvalidKeyType);
@@ -540,6 +548,37 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
-    common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
-});
+/// Cover every scenario and parameter set independently of corpus discovery.
+fn baseline_sweep() {
+    for (index, &scenario) in Scenario::SCENARIOS.iter().enumerate() {
+        if Scenario::SCENARIOS[..index].contains(&scenario) {
+            continue;
+        }
+        for params in 0..PARAMS.len() {
+            let input = FuzzInput {
+                scenario,
+                role: common::FuzzRole::Co,
+                params: params as u8,
+                hedge: MLDSA_HEDGE_PREFERRED,
+                session_id: 0,
+                length: 1,
+                offset: 0,
+                mask: 1,
+                switches: 1 | SWITCH_SESSION | SWITCH_MU | SWITCH_KEY,
+                fill: 0x5a,
+                bytes: vec![0x5a],
+            };
+            common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+        }
+    }
+}
+
+fuzz_target!(
+    init: {
+        static BASELINE: Once = Once::new();
+        BASELINE.call_once(baseline_sweep);
+    },
+    |input: FuzzInput| {
+        common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+    }
+);

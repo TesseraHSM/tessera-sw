@@ -17,6 +17,8 @@
 #[path = "../../common.rs"]
 mod common;
 
+use std::sync::Once;
+
 use arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto::aead_envelope;
@@ -105,11 +107,11 @@ enum Scenario {
     UnavailableScope,
 }
 
-impl<'a> Arbitrary<'a> for Scenario {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+impl Scenario {
+    const SCENARIOS: [Self; 40] = {
         use Scenario::*;
         // Preserve the compact corpus format and success-biased distribution.
-        let scenarios = [
+        [
             RoundTrip,
             RoundTrip,
             RoundTrip,
@@ -150,8 +152,13 @@ impl<'a> Arbitrary<'a> for Scenario {
             NoTruncation,
             NoAppend,
             UnavailableScope,
-        ];
-        Ok(scenarios[usize::from(u.arbitrary::<u8>()?) % scenarios.len()])
+        ]
+    };
+}
+
+impl<'a> Arbitrary<'a> for Scenario {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self::SCENARIOS[usize::from(u.arbitrary::<u8>()?) % Self::SCENARIOS.len()])
     }
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
@@ -591,6 +598,43 @@ fn check_result(
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
-    common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
-});
+/// Cover every scenario and parameter set independently of corpus discovery.
+fn baseline_sweep() {
+    for (index, &scenario) in Scenario::SCENARIOS.iter().enumerate() {
+        if Scenario::SCENARIOS[..index].contains(&scenario) {
+            continue;
+        }
+        for parameter_set in 0..PARAMS.len() {
+            let input = FuzzInput {
+                scenario,
+                parameter_set: parameter_set as u8,
+                role: 0,
+                session_id: 0,
+                scope: match scenario {
+                    Scenario::Local => 1,
+                    Scenario::Ephemeral => 2,
+                    Scenario::SecurityDomain => 0,
+                    _ => common::KEY_SCOPE_LOCAL,
+                },
+                length: 1,
+                offset: 0,
+                mask: 1,
+                switches: 1 | SWITCH_SESSION | SWITCH_SCOPE | SWITCH_CIPHERTEXT | SWITCH_RAW_KEY,
+                pattern: [0x5a; PATTERN_LEN],
+                raw_key: BoundedBytes(vec![0x5a]),
+                raw_ciphertext: BoundedBytes(vec![0x5a]),
+            };
+            common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+        }
+    }
+}
+
+fuzz_target!(
+    init: {
+        static BASELINE: Once = Once::new();
+        BASELINE.call_once(baseline_sweep);
+    },
+    |input: FuzzInput| {
+        common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+    }
+);

@@ -15,6 +15,8 @@
 #[path = "../../common.rs"]
 mod common;
 
+use std::sync::Once;
+
 use libfuzzer_sys::arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto as crypto;
@@ -99,10 +101,10 @@ enum Scenario {
 }
 
 impl Scenario {
-    fn from_byte(byte: u8) -> Self {
+    const SCENARIOS: [Self; 32] = {
         use Scenario::*;
         // Preserve the compact corpus format and success-biased distribution.
-        let scenarios = [
+        [
             SeededKey,
             SeededKey,
             SeededKey,
@@ -135,8 +137,11 @@ impl Scenario {
             MismatchedCombined,
             DeviceKey,
             ArbitraryFields,
-        ];
-        scenarios[usize::from(byte) % scenarios.len()]
+        ]
+    };
+
+    fn from_byte(byte: u8) -> Self {
+        Self::SCENARIOS[usize::from(byte) % Self::SCENARIOS.len()]
     }
 }
 
@@ -565,28 +570,61 @@ fn check_request(
     assert_not_truncated_at_page(&response.masked_shared_secret, p.name);
 }
 
-fuzz_target!(|input: FuzzInput| {
-    common::common_fuzz_test(&|ctx, _path| {
-        let lifecycle = input.lifecycle();
-        let session = open_session(ctx, &input);
-        let session_id = session.session_id();
-        let request = request(ctx, &input, session_id);
-        let session = if lifecycle == Lifecycle::Closed {
-            session
-                .close()
-                .expect("close session before negative request");
-            None
-        } else {
-            Some(session)
-        };
-        check_request(
-            ctx,
-            &request,
-            session.as_ref().map(SessionGuard::session_id),
-            lifecycle,
-        );
-        if let Some(session) = session {
-            session.close().expect("close fuzz session");
+/// Construct one scenario and check it against the actual fixture state.
+fn exercise(ctx: &TestCtx, input: &FuzzInput) {
+    let lifecycle = input.lifecycle();
+    let session = open_session(ctx, input);
+    let session_id = session.session_id();
+    let request = request(ctx, input, session_id);
+    let session = if lifecycle == Lifecycle::Closed {
+        session
+            .close()
+            .expect("close session before negative request");
+        None
+    } else {
+        Some(session)
+    };
+    check_request(
+        ctx,
+        &request,
+        session.as_ref().map(SessionGuard::session_id),
+        lifecycle,
+    );
+    if let Some(session) = session {
+        session.close().expect("close fuzz session");
+    }
+}
+
+/// Cover every scenario and parameter set independently of corpus discovery.
+fn baseline_sweep() {
+    for (index, &scenario) in Scenario::SCENARIOS.iter().enumerate() {
+        if Scenario::SCENARIOS[..index].contains(&scenario) {
+            continue;
         }
-    });
-});
+        for params in 0..PARAMS.len() {
+            let input = FuzzInput {
+                scenario,
+                role: 0,
+                params: params as u8,
+                session_id: 0,
+                scope: common::KEY_SCOPE_EPHEMERAL,
+                key_mode: KEY_MODE_INVALID_COEFFICIENT,
+                length: 1,
+                offset: 0,
+                mask: 1,
+                bytes: vec![0x5a],
+            };
+            common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+        }
+    }
+}
+
+fuzz_target!(
+    init: {
+        static BASELINE: Once = Once::new();
+        BASELINE.call_once(baseline_sweep);
+    },
+    |input: FuzzInput| {
+        common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
+    }
+);

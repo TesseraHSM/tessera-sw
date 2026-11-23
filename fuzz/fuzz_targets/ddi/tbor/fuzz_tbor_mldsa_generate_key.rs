@@ -15,6 +15,8 @@
 #[path = "../../common.rs"]
 mod common;
 
+use std::sync::Once;
+
 use libfuzzer_sys::fuzz_target;
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::pqc::*;
@@ -70,10 +72,10 @@ enum Scenario {
 }
 
 impl Scenario {
-    fn from_byte(byte: u8) -> Self {
+    const SCENARIOS: [Self; 32] = {
         use Scenario::*;
         // Preserve the compact corpus format and success-biased distribution.
-        let scenarios = [
+        [
             Session,
             Session,
             Session,
@@ -106,8 +108,11 @@ impl Scenario {
             ClosedCombined,
             MismatchedCombined,
             Raw,
-        ];
-        scenarios[usize::from(byte) % scenarios.len()]
+        ]
+    };
+
+    fn from_byte(byte: u8) -> Self {
+        Self::SCENARIOS[usize::from(byte) % Self::SCENARIOS.len()]
     }
 }
 
@@ -388,6 +393,43 @@ fn run(input: &FuzzInput<'_>) {
     });
 }
 
-fuzz_target!(|data: &[u8]| {
-    run(&FuzzInput::from_bytes(data));
-});
+/// Cover every scenario and parameter set independently of corpus discovery.
+fn baseline_sweep() {
+    for (index, &scenario) in Scenario::SCENARIOS.iter().enumerate() {
+        if Scenario::SCENARIOS[..index].contains(&scenario) {
+            continue;
+        }
+        for (index, params) in PARAMS.iter().enumerate() {
+            let input = FuzzInput {
+                scenario,
+                role: common::FuzzRole::Co,
+                key_kind: match scenario {
+                    Scenario::Combined
+                    | Scenario::FinalizedCombined
+                    | Scenario::SecurityDomainCombined
+                    | Scenario::Raw
+                    | Scenario::DefaultPskCombined
+                    | Scenario::ClosedCombined
+                    | Scenario::MismatchedCombined => params.key_kind,
+                    _ => index as u8,
+                },
+                scope: common::KEY_SCOPE_EPHEMERAL,
+                session_id: 0,
+                checks: 0,
+                context: b"baseline",
+                message: b"ML-DSA generation baseline",
+            };
+            run(&input);
+        }
+    }
+}
+
+fuzz_target!(
+    init: {
+        static BASELINE: Once = Once::new();
+        BASELINE.call_once(baseline_sweep);
+    },
+    |data: &[u8]| {
+        run(&FuzzInput::from_bytes(data));
+    }
+);
