@@ -36,7 +36,6 @@ const IV_END: usize = aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm
 const PATTERN_LEN: usize = 16;
 const PARAMETER_SET_COUNT: usize = 3;
 const PARAMS: [&MlKemParams; PARAMETER_SET_COUNT] = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024];
-const PROVISION_SECURITY_DOMAIN: u8 = 2;
 const OVERSIZE_LENGTH_CHOICES: usize = 2;
 const SWITCH_SESSION: u8 = 2;
 const SWITCH_SCOPE: u8 = 4;
@@ -58,6 +57,14 @@ const UNAVAILABLE_SCOPES: &[common::KeyScope] = &[
     common::KeyScope::Ephemeral,
     common::KeyScope::SecurityDomain,
 ];
+
+/// Partition/session state established independently of the fuzzed request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifecycle {
+    Unfinalized,
+    Finalized,
+    SecurityDomain,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -198,15 +205,19 @@ enum Expected {
 }
 
 /// Open the selected role, provisioning persisted scopes under CO only when needed.
-fn session<'ctx>(ctx: &'ctx TestCtx, input: &FuzzInput, provisioning: u8) -> SessionGuard<'ctx> {
+fn session<'ctx>(
+    ctx: &'ctx TestCtx,
+    input: &FuzzInput,
+    lifecycle: Lifecycle,
+) -> SessionGuard<'ctx> {
     let role = if input.role & 1 == 0 {
         common::FuzzRole::Co
     } else {
         common::FuzzRole::Cu
     };
-    if provisioning != 0 {
+    if matches!(lifecycle, Lifecycle::Finalized | Lifecycle::SecurityDomain) {
         let co = SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK));
-        if provisioning == PROVISION_SECURITY_DOMAIN {
+        if lifecycle == Lifecycle::SecurityDomain {
             common::create_test_security_domain(ctx, co.handshake());
         } else {
             common::finalize_partition(ctx, co.handshake());
@@ -248,7 +259,7 @@ fn expected(
     pristine: &[u8],
     params: &MlKemParams,
     scenario: Scenario,
-    provisioning: u8,
+    lifecycle: Lifecycle,
 ) -> Expected {
     if closed {
         return Expected::Session(TborStatus::SessionNotFound);
@@ -278,8 +289,10 @@ fn expected(
     }
     let scope_available = match req.scope {
         common::KEY_SCOPE_SESSION => true,
-        common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_EPHEMERAL => provisioning != 0,
-        common::KEY_SCOPE_SECURITY_DOMAIN => provisioning == PROVISION_SECURITY_DOMAIN,
+        common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_EPHEMERAL => {
+            matches!(lifecycle, Lifecycle::Finalized | Lifecycle::SecurityDomain)
+        }
+        common::KEY_SCOPE_SECURITY_DOMAIN => lifecycle == Lifecycle::SecurityDomain,
         _ => false,
     };
     if !scope_available {
@@ -317,12 +330,12 @@ fn check_response(resp: &TborMlKemDecapsulateResp, scope: u8, params: &MlKemPara
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario;
     let params = PARAMS[usize::from(input.parameter_set) % PARAMS.len()];
-    let provisioning = match scenario {
-        Scenario::Local | Scenario::Ephemeral | Scenario::PersistedOutput => 1,
-        Scenario::SecurityDomain => PROVISION_SECURITY_DOMAIN,
-        _ => 0,
+    let lifecycle = match scenario {
+        Scenario::Local | Scenario::Ephemeral | Scenario::PersistedOutput => Lifecycle::Finalized,
+        Scenario::SecurityDomain => Lifecycle::SecurityDomain,
+        _ => Lifecycle::Unfinalized,
     };
-    let session = session(ctx, input, provisioning);
+    let session = session(ctx, input, lifecycle);
     let sid = session.session_id();
     let input_scope = match scenario {
         Scenario::Local => common::KEY_SCOPE_LOCAL,
@@ -518,7 +531,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         }
     }
     let closed = scenario == Scenario::ClosedSession;
-    let expected = expected(&req, sid, closed, &pristine, params, scenario, provisioning);
+    let expected = expected(&req, sid, closed, &pristine, params, scenario, lifecycle);
     if closed {
         session
             .close()
