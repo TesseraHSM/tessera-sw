@@ -60,6 +60,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::cert::MAX_CERT_DER_LEN;
+use crate::drivers::ecc::EccForm;
 use crate::drivers::session::SessionTable;
 use crate::drivers::vault::KeyVault;
 use crate::StdHsmPal;
@@ -507,7 +508,7 @@ impl HsmPartitionManager for StdHsmPal {
                 HsmVaultKeyKind::EstablishCred,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                StdHsmPal::BYTE_ORDER,
+                EccForm::of::<StdHsmPal>(),
                 &mut pub_key,
             )
             .await?;
@@ -793,7 +794,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::Ecc384Private,
                 id_attrs,
                 HsmEccPct::SignVerify,
-                HsmByteOrder::Be,
+                EccForm::BE,
                 &mut id_pub,
             )
             .await;
@@ -904,7 +905,7 @@ impl StdHsmPal {
                     HsmVaultKeyKind::Ecc384Private,
                     id_attrs,
                     HsmEccPct::SignVerify,
-                    HsmByteOrder::Be,
+                    EccForm::BE,
                     &mut id_pub,
                 )
                 .await?;
@@ -925,7 +926,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::EstablishCred,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                StdHsmPal::BYTE_ORDER,
+                EccForm::of::<StdHsmPal>(),
                 &mut ec_pub,
             )
             .await?;
@@ -944,7 +945,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::SessionEncryption,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                StdHsmPal::BYTE_ORDER,
+                EccForm::of::<StdHsmPal>(),
                 &mut se_pub,
             )
             .await;
@@ -1007,9 +1008,15 @@ impl StdHsmPal {
         // `restore(backup())`).  The snapshot must be taken *before*
         // `clear_enabled_state` wipes the session table and vault.
         let entry = &mut table.entries[idx];
-        let session_backup = entry.session_table.backup();
+        let mut session_table = core::mem::take(&mut entry.session_table);
+        let session_backup = session_table.backup();
+        let psk_co = entry.psk_co.take();
+        let psk_cu = entry.psk_cu.take();
         Self::clear_enabled_state(entry);
-        entry.session_table.restore(session_backup);
+        entry.psk_co = psk_co;
+        entry.psk_cu = psk_cu;
+        session_table.restore(session_backup);
+        entry.session_table = session_table;
         entry.state = HsmPartState::Disabled;
         Ok(())
     }
@@ -1077,10 +1084,10 @@ impl StdHsmPal {
     /// derivation can split off the public half); every other kind stores
     /// the bare raw HSM-format private scalar `d` (48 B for P-384).
     ///
-    /// `big_endian` selects the public-key byte order (the BE↔LE flip is
-    /// the driver's responsibility): [`HsmByteOrder::Be`] yields
+    /// `form` selects the public-key layout (the conversion is the
+    /// driver's responsibility): [`EccForm::BE`] yields exact-width
     /// big-endian coordinates for internally-consumed keys (cert
-    /// generation / POTA hashing); the PAL operand order yields the DDI
+    /// generation / POTA hashing); the PAL operand form yields the DDI
     /// wire form for wire-only keys.
     ///
     /// Bypasses [`HsmEcc::ecc_gen_keypair`] (which now requires an
@@ -1096,13 +1103,13 @@ impl StdHsmPal {
         kind: HsmVaultKeyKind,
         attrs: HsmVaultKeyAttrs,
         pct: HsmEccPct,
-        order: HsmByteOrder,
+        form: EccForm,
         pub_key_out: &mut [u8; P384_PUB_KEY_LEN],
     ) -> HsmResult<HsmKeyId> {
         // Generate the keypair; the driver owns the public-key byte
         // order, so this layer stays free of byte-shuffling boilerplate.
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
-        self.ecc.pub_coords(&pub_key, order, pub_key_out).await?;
+        self.ecc.pub_coords(&pub_key, form, pub_key_out).await?;
 
         // Export the private key as raw HSM scalar bytes (48 B for P-384).
         // `Zeroizing` scrubs the transient heap copy on drop once the vault
@@ -1118,8 +1125,8 @@ impl StdHsmPal {
                 _ => HsmError::PartitionIdKeyGenerationPctFailed,
             };
             let vault_key = EccPrivateKey::from_hsm_bytes(&priv_buf).map_err(|_| error)?;
-            let output_public = Self::ecc_public_from_wire(EccCurve::P384, pub_key_out, order)
-                .map_err(|_| error)?;
+            let output_public =
+                Self::ecc_public_from_wire(EccCurve::P384, pub_key_out, form).map_err(|_| error)?;
             if !self.ecc_pair_pct(&vault_key, &output_public, pct).await? {
                 return Err(error);
             }
@@ -1877,7 +1884,7 @@ mod tests {
                     kind,
                     HsmVaultKeyAttrs::new(),
                     pct,
-                    StdHsmPal::BYTE_ORDER,
+                    EccForm::of::<StdHsmPal>(),
                     &mut public,
                 )
                 .await
@@ -2372,7 +2379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn psk_reset_on_disable_and_reenable() {
+    async fn psk_survives_migration_and_is_cleared_on_free() {
         let (_tx, rx) = async_channel::bounded(1);
         let mut pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
         let entry = &mut pal.part_table.get_mut().entries[0];
@@ -2388,10 +2395,6 @@ mod tests {
             entry
                 .prop_set_bytes(HsmPartPropId::PSK_CO, &psk_co)
                 .unwrap();
-            assert_eq!(
-                entry.prop_get_bytes(HsmPartPropId::PSK_CU).unwrap(),
-                DEFAULT_PSK_CU.as_slice()
-            );
             entry
                 .prop_set_bytes(HsmPartPropId::PSK_CU, &psk_cu)
                 .unwrap();
@@ -2410,19 +2413,19 @@ mod tests {
             pal.part_disable_internal(0).unwrap();
             let entry = &pal.table().entries[0];
             assert_eq!(entry.state, HsmPartState::Disabled);
-            assert!(entry.psk_co.is_none());
-            assert!(entry.psk_cu.is_none());
+            assert!(entry.psk_co.is_some());
+            assert!(entry.psk_cu.is_some());
 
             pal.part_enable_internal(0).await.unwrap();
             let entry = &pal.table().entries[0];
             assert_eq!(entry.state, HsmPartState::Enabled);
             assert_eq!(
                 entry.prop_get_bytes(HsmPartPropId::PSK_CO).unwrap(),
-                DEFAULT_PSK_CO.as_slice()
+                psk_co.as_slice()
             );
             assert_eq!(
                 entry.prop_get_bytes(HsmPartPropId::PSK_CU).unwrap(),
-                DEFAULT_PSK_CU.as_slice()
+                psk_cu.as_slice()
             );
         }
 

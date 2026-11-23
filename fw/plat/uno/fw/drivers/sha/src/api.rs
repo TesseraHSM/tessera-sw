@@ -282,7 +282,9 @@ struct ShaState<const DEPTH: usize> {
 /// # Type Parameters
 ///
 /// - `DEPTH`: Maximum number of concurrent waiters. Must be a power of 2,
-///   at most 128.
+///   at most 128. A caller that finds every slot taken fails with
+///   [`ShaError::QUEUE_FULL`] rather than waiting, so size `DEPTH` to the
+///   number of tasks that can use the engine at once.
 pub struct ShaDriver<const DEPTH: usize> {
     state: SingleCell<ShaState<DEPTH>>,
 }
@@ -396,10 +398,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                     let status = slot.status;
                     slot.status = 0;
 
-                    while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0
-                    {
-                        s.head = s.head.wrapping_add(1);
-                    }
+                    advance_head(s);
 
                     return Poll::Ready(Ok(status));
                 }
@@ -537,9 +536,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
             s.slots[idx].exclusive = false;
             s.slots[idx].status = 0;
             s.active = my.wrapping_add(1);
-            while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0 {
-                s.head = s.head.wrapping_add(1);
-            }
+            advance_head(s);
             if s.active != s.tail {
                 let next = (s.active & Self::MASK) as usize;
                 if !s.slots[next].exclusive {
@@ -626,6 +623,13 @@ impl<const DEPTH: usize> ShaExclusive<'_, DEPTH> {
             Ok(status) => Ok(status),
             Err(_) => tsra_fw_uno_fault::enter_crypto_timeout_error_state("SHA command timeout"),
         }
+    }
+}
+
+/// Advance `head` past consecutive consumed slots.
+fn advance_head<const DEPTH: usize>(s: &mut ShaState<DEPTH>) {
+    while s.head != s.active && s.slots[(s.head as usize) & (DEPTH - 1)].status == 0 {
+        s.head = s.head.wrapping_add(1);
     }
 }
 

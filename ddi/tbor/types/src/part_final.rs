@@ -154,7 +154,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The packed little-endian descriptor image must appear verbatim
         // somewhere in the encoded frame's data section.
@@ -181,7 +181,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         let view = RequestView::parse(frame).expect("parse");
 
         // `CertDescriptor` is `Unaligned`, so the typed `cert_descriptors`

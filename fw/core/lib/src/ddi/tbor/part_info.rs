@@ -58,7 +58,7 @@ pub(crate) async fn handle<P: HsmPal>(
     let sd_initialized = u8::from(part_state::part_is_sd_initialized(pal, io)?);
 
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartInfoResp::encode(buf, 0, FIPS_APPROVED)?
+        let frame = TborPartInfoResp::encode_for_request(buf, 0, FIPS_APPROVED)?
             .device_kind(DeviceKind::Physical)?
             .part_state(PartStateId(part_state_val))?
             .generation(U32::new(generation))?

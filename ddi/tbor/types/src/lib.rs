@@ -93,6 +93,7 @@ mod darc_tmk_gen;
 mod darc_tmk_import;
 mod ecc_generate_key;
 mod ecc_sign;
+mod ecc_verify;
 mod ecdh_derive;
 mod evidence;
 mod get_cert;
@@ -115,6 +116,7 @@ mod part_info;
 mod part_init;
 mod policy;
 mod psk_change;
+mod rsa_encrypt_decrypt;
 mod rsa_mod_exp;
 mod sd_create_peer_backup;
 mod sd_create_remote_backup;
@@ -145,6 +147,7 @@ pub use darc_tmk_gen::*;
 pub use darc_tmk_import::*;
 pub use ecc_generate_key::*;
 pub use ecc_sign::*;
+pub use ecc_verify::*;
 pub use ecdh_derive::*;
 pub use evidence::*;
 pub use get_cert::*;
@@ -167,6 +170,7 @@ pub use part_info::*;
 pub use part_init::*;
 pub use policy::*;
 pub use psk_change::*;
+pub use rsa_encrypt_decrypt::*;
 pub use rsa_mod_exp::*;
 pub use sd_create_peer_backup::*;
 pub use sd_create_remote_backup::*;
@@ -213,7 +217,11 @@ pub trait TborOpReq: Sized {
 
     /// Encode this request into `buf` and return the encoded message
     /// slice. The slice borrows from `buf` for the duration of the call.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError>;
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError>;
 }
 
 /// Trait implemented by owned TBOR response value types.
@@ -227,6 +235,15 @@ pub trait TborResp: Sized {
 
     /// Decode an owned response value from the wire buffer.
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError>;
+
+    /// Validate the echoed revision before decoding the response body.
+    fn decode_response_for_api_rev(
+        buf: &[u8],
+        api_rev: (u16, u16),
+    ) -> Result<Self, codec::DecodeError> {
+        codec::ResponseView::parse(buf)?.require_api_rev(api_rev)?;
+        Self::decode_response(buf)
+    }
 }
 
 /// Session id carried in a TBOR response body, if any.

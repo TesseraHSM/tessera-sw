@@ -134,6 +134,21 @@ impl<'a> HsmDmaAllocation<'a> {
         self.len == 0
     }
 
+    /// Discard a prefix without moving bytes or changing the allocation's end.
+    ///
+    /// The allocator still owns and scrubs the discarded memory. Tail growth
+    /// remains possible; callers must preserve any alignment they require.
+    pub fn skip_prefix(mut self, len: usize) -> HsmResult<Self> {
+        if len > self.len {
+            return Err(HsmError::InvalidArg);
+        }
+        // SAFETY: the checked offset stays within the owned initialized range,
+        // preserving the backing heap's provenance for subsequent growth.
+        self.ptr = unsafe { self.ptr.add(len) };
+        self.len -= len;
+        Ok(self)
+    }
+
     /// Give up the handle for a view of the whole allocation that lives as
     /// long as the allocation itself. With the handle gone it can no longer
     /// grow, so the view stays valid.

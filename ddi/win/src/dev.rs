@@ -57,6 +57,9 @@ const TSRA_CP_CMD_DATA_XFER: u16 = 0x1;
 const TSRA_IOCTL_CONTROL_PATH_CMD_SESSION: u32 = 0x201;
 /// IOCTL function code used for OOB data-transfer commands.
 const TSRA_IOCTL_CONTROL_PATH_CMD_DATA_XFER: u32 = 0x202;
+/// Secure transport extensions; require a driver implementing the ABI in README.md.
+const TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE: u32 = 0x203;
+const TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER: u32 = 0x204;
 /// Maximum number of OOB buffers accepted by the data-transfer IOCTL.
 ///
 /// This application-facing limit determines the IOCTL buffer layout and must
@@ -327,6 +330,44 @@ struct TsraCpDataXferIoctlIndata {
     input_data: TsraCpDataXferInputData,
 }
 
+#[derive(Default)]
+#[repr(C)]
+struct TborTransport {
+    op: u32,
+    frame_id: u32,
+    key_index: u32,
+    aad_length: u32,
+    tag: [u8; 16],
+    iv: [u8; 12],
+    error: u16,
+    reserved: u16,
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct TborSecureIoctlIndata {
+    generic: TsraCpGenericIoctlIndata,
+    transport: TborTransport,
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct TborSecureDataXferIoctlIndata {
+    data_xfer: TsraCpDataXferIoctlIndata,
+    transport: TborTransport,
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct TborSecureIoctlOutData {
+    generic: TsraCpGenericIoctlOutData,
+    transport: TborTransport,
+}
+
+#[cfg(test)]
+#[path = "secure_tests.rs"]
+mod secure_tests;
+
 // Keep the Rust representation pinned to the 64-bit Windows driver ABI.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
@@ -336,6 +377,13 @@ const _: () = {
     assert!(mem::size_of::<DataXferBuffers>() == 1544);
     assert!(mem::size_of::<TsraCpGenericIoctlIndata>() == 344);
     assert!(mem::size_of::<TsraCpDataXferIoctlIndata>() == 4440);
+    assert!(mem::size_of::<TborTransport>() == 48);
+    assert!(mem::offset_of!(TborSecureIoctlIndata, transport) == 344);
+    assert!(mem::size_of::<TborSecureIoctlIndata>() == 392);
+    assert!(mem::offset_of!(TborSecureDataXferIoctlIndata, transport) == 4440);
+    assert!(mem::size_of::<TborSecureDataXferIoctlIndata>() == 4488);
+    assert!(mem::offset_of!(TborSecureIoctlOutData, transport) == 296);
+    assert!(mem::size_of::<TborSecureIoctlOutData>() == 344);
 };
 
 ///TsraFpIoctlErrorKind
@@ -655,6 +703,25 @@ pub struct DdiWinDev {
 }
 
 impl DdiWinDev {
+    /// Probe encrypted TBOR support without allocating a firmware session.
+    ///
+    /// Unsupported drivers return a Windows I/O error. Call this before a
+    /// native encrypted-session handshake; there is no plaintext fallback.
+    pub fn check_secure_transport(&self) -> DdiResult<()> {
+        self.exec_secure_ioctl(0, 0, &[], DdiTransportSeal::default())
+            .map(|_| ())
+    }
+
+    /// Wrap an existing device handle opened with `FILE_FLAG_OVERLAPPED`.
+    ///
+    /// Retains the driver's handle ownership and per-file session state.
+    pub fn from_file(file: File) -> Self {
+        Self {
+            file: Arc::new(RwLock::new(file)),
+            device_kind: DdiDeviceKind::Physical,
+        }
+    }
+
     pub(crate) fn open(path: &str) -> DdiResult<Self> {
         tracing::debug!("{:?} {}", path, "Opening DdiWinDev");
 
@@ -665,10 +732,7 @@ impl DdiWinDev {
             .open(Path::new(path))
             .map_err(DdiError::IoError)?;
 
-        Ok(Self {
-            file: Arc::new(RwLock::new(file)),
-            device_kind: DdiDeviceKind::Physical,
-        })
+        Ok(Self::from_file(file))
     }
 
     fn map_ioctl_status(&self, ioctl_status: u32) -> Result<u32, DdiError> {
@@ -775,6 +839,202 @@ impl DdiWinDev {
             _ => {}
         }
         self.map_ioctl_status(ioctl_status)
+    }
+
+    fn data_xfer_input(oob_items: &mut [TborOobItem<'_>]) -> DdiResult<TsraCpDataXferInputData> {
+        if oob_items.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob_items
+                .iter()
+                .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
+        {
+            return Err(DdiError::InvalidParameter);
+        }
+        let mut input = TsraCpDataXferInputData::default();
+        // SAFETY: the entire union is zeroed, a valid DataXferBuffers value.
+        let data_xfer = unsafe { &mut input.data_xfer };
+        data_xfer.buffer_count = oob_items.len() as u32;
+        for (buffer, item) in data_xfer.buffers.iter_mut().zip(oob_items) {
+            *buffer = DataXferBuffer {
+                xfer_length: item.len() as u32,
+                flags: if item.is_out() {
+                    TSRA_DATA_XFER_BUF_DEV_WRITE
+                } else {
+                    0
+                },
+                buffer_addr: item.dma_ptr(),
+            };
+        }
+        Ok(input)
+    }
+
+    fn submit_ioctl<T, U>(&self, function: u32, input: &T, output: &mut U) -> DdiResult<u32> {
+        let ioctl_code = CTL_CODE(
+            0x3F,
+            function,
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+        let file = self.file.read();
+        let handle = file.as_raw_handle() as HANDLE;
+        let event = IoEvent::new()?;
+        // SAFETY: all-zero is a valid initial OVERLAPPED value.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        overlapped.hEvent = event.handle();
+        // SAFETY: the handle, event, input, output and nested caller buffers
+        // remain alive until GetOverlappedResult completes below.
+        let result = unsafe {
+            DeviceIoControl(
+                handle,
+                ioctl_code,
+                ptr::from_ref(input) as *mut c_void,
+                mem::size_of::<T>() as DWORD,
+                ptr::from_mut(output).cast(),
+                mem::size_of::<U>() as DWORD,
+                ptr::null_mut(),
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                tracing::warn!(?error, function, "DeviceIoControl failed");
+                return Err(DdiError::IoError(error));
+            }
+        }
+        let mut bytes_returned = 0;
+        // SAFETY: use the same live handle and OVERLAPPED even on immediate
+        // success, to obtain the completed output length for either path.
+        let result =
+            unsafe { GetOverlappedResult(handle, &mut overlapped, &mut bytes_returned, 1) };
+        if result == 0 {
+            let error = std::io::Error::last_os_error();
+            tracing::warn!(?error, function, "GetOverlappedResult failed");
+            return Err(DdiError::IoError(error));
+        }
+        Ok(bytes_returned)
+    }
+
+    fn pci_identity(&self) -> DdiResult<(u16, u16)> {
+        let mut info = crate::ddi::TsraCpGetDeviceInfoIoctlOutData::default();
+        let returned = self.submit_ioctl(0x400, &(), &mut info)?;
+        if returned as usize != mem::size_of_val(&info) {
+            tracing::warn!(returned, "Invalid device-info completion size");
+            return Err(DdiError::DeviceInfoIoctlInvalidData);
+        }
+        crate::ddi::pci_identity(&info.pci_info)
+    }
+
+    fn discover_with(
+        (vendor, device): (u16, u16),
+        probe: impl FnOnce() -> DdiResult<()>,
+    ) -> DdiResult<DdiDeviceInfo> {
+        let model = DdiDeviceModel::from_pci_ids(vendor, device).ok_or_else(|| {
+            tracing::warn!(vendor, device, "Unrecognized PCI device identity");
+            DdiError::DeviceNotFound
+        })?;
+        if model == DdiDeviceModel::Duo {
+            probe()?;
+        }
+        Ok(DdiDeviceInfo { model })
+    }
+
+    fn exec_secure_ioctl(
+        &self,
+        op: u32,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        self.exec_secure_ioctl_with(op, session_id, payload, seal, |input, output| {
+            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE, input, output)
+        })
+    }
+
+    fn exec_secure_ioctl_with(
+        &self,
+        op: u32,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        submit: impl FnOnce(&mut TborSecureIoctlIndata, &mut TborSecureIoctlOutData) -> DdiResult<u32>,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if op > 2 || payload.len() > 8192 || (op == 1) == payload.is_empty() {
+            return Err(DdiError::InvalidParameter);
+        }
+        let mut response = if op == 1 { vec![0u8; 8192] } else { Vec::new() };
+        let mut input = TborSecureIoctlIndata::default();
+        input.generic.ioctl_hdr.ioctl_data_size = mem::size_of::<TborSecureIoctlIndata>() as u32;
+        input.generic.ioctl_hdr.app_cmd_id = 0xCD1DDEAD;
+        input.generic.ioctl_hdr.timeout = 100;
+        input.generic.opc = 2;
+        input.generic.session_control = SessionControlFlags::new()
+            .with_kind(3)
+            .with_session_id_is_valid(true);
+        input.generic.session_id = session_id;
+        input.generic.user_buffers.src_length = payload.len() as u32;
+        input.generic.user_buffers.dst_length = response.len() as u32;
+        if !payload.is_empty() {
+            input.generic.user_buffers.src_buf = payload.as_ptr();
+        }
+        if !response.is_empty() {
+            input.generic.user_buffers.dst_buf = response.as_mut_ptr();
+        }
+        input.transport.op = op;
+        input.transport.tag = seal.tag;
+        input.transport.iv = seal.iv;
+        let mut output = TborSecureIoctlOutData::default();
+        let returned = submit(&mut input, &mut output)?;
+        if returned as usize != mem::size_of::<TborSecureIoctlOutData>() {
+            return Err(DdiError::InvalidParameter);
+        }
+        self.map_ioctl_status_tbor(output.generic.ioctl_status)?;
+        if output.generic.ioctl_status != 0 {
+            return Err(DdiError::WinError(output.generic.ioctl_status));
+        }
+        if output.generic.status != 0 {
+            return Err(DdiError::DdiError(output.generic.status));
+        }
+        if output.transport.error != 0 || output.generic.byte_count as usize > response.len() {
+            return Err(DdiError::InvalidParameter);
+        }
+        response.truncate(output.generic.byte_count as usize);
+        Ok((
+            response,
+            DdiTransportSeal {
+                iv: output.transport.iv,
+                tag: output.transport.tag,
+            },
+        ))
+    }
+
+    fn exec_secure_data_xfer_with(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob_items: &mut [TborOobItem<'_>],
+        submit: impl FnOnce(
+            &mut TborSecureDataXferIoctlIndata,
+            &mut TborSecureIoctlOutData,
+        ) -> DdiResult<u32>,
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if oob_items.is_empty() {
+            return Err(DdiError::InvalidParameter);
+        }
+        let input_data = Self::data_xfer_input(oob_items)?;
+        self.exec_secure_ioctl_with(1, session_id, payload, seal, |inner, output| {
+            let mut input = TborSecureDataXferIoctlIndata {
+                data_xfer: TsraCpDataXferIoctlIndata {
+                    generic: mem::take(&mut inner.generic),
+                    input_data,
+                },
+                transport: mem::take(&mut inner.transport),
+            };
+            input.data_xfer.generic.ioctl_hdr.ioctl_data_size =
+                mem::size_of::<TborSecureDataXferIoctlIndata>() as u32;
+            input.data_xfer.generic.cmdset = TSRA_CP_CMD_DATA_XFER;
+            submit(&mut input, output)
+        })
     }
 }
 
@@ -1018,6 +1278,7 @@ impl DdiDev for DdiWinDev {
     /// represented by an NVMe SGL Data Block descriptor.
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: Option<&[&[u8]]>,
         cookie: &mut Option<DdiCookie>,
@@ -1027,16 +1288,16 @@ impl DdiDev for DdiWinDev {
             .iter()
             .map(|item| TborOobItem::In(item))
             .collect();
-        self.exec_op_tbor_oob(req, &mut items, cookie)
+        self.exec_op_tbor_oob(api_rev, req, &mut items, cookie)
     }
 
     /// Execute a TBOR command whose OOB items may be written by the device.
     ///
-    /// Uses the same data-transfer IOCTL as [`Self::exec_op_tbor`]. Its
-    /// buffer table carries no direction, so the driver must map every
-    /// item for device writes for [`TborOobItem::Out`] results to land.
+    /// Uses the same data-transfer IOCTL as [`Self::exec_op_tbor`], with
+    /// explicit direction flags for each input or output buffer.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
@@ -1050,13 +1311,7 @@ impl DdiDev for DdiWinDev {
         // Some(non-empty), the driver pins those user buffers, builds
         // per-buffer NVMe SGL segments, and attaches a 4 KB Metadata
         // Page through the SQE's metadata-with-session source data.
-        if oob_items.len() > TSRA_MAX_DATA_XFER_BUFFERS
-            || oob_items
-                .iter()
-                .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
-        {
-            return Err(DdiError::InvalidParameter);
-        }
+        let input_data = Self::data_xfer_input(oob_items)?;
         let use_data_xfer = !oob_items.is_empty();
 
         const REQ_BUF_LEN: usize = 8192;
@@ -1064,7 +1319,7 @@ impl DdiDev for DdiWinDev {
 
         // -- 1. Encode the TBOR request --------------------------------
         let mut req_buf = [0u8; REQ_BUF_LEN];
-        let req_bytes = req.encode_request(&mut req_buf)?;
+        let req_bytes = req.encode_request(&mut req_buf, api_rev)?;
         let req_len = req_bytes.len();
 
         // Do not log raw request bytes: TBOR requests can carry
@@ -1074,7 +1329,10 @@ impl DdiDev for DdiWinDev {
         let mut resp_buf = Box::<[u8; RESP_BUF_LEN]>::new([0u8; RESP_BUF_LEN]);
 
         // -- 2. Build the ioctl command --------------------------------
-        let mut ioctl_in_buffer = TsraCpDataXferIoctlIndata::default();
+        let mut ioctl_in_buffer = TsraCpDataXferIoctlIndata {
+            input_data,
+            ..Default::default()
+        };
         let mut ioctl_out_buffer = TsraCpGenericIoctlOutData::default();
 
         let ioctl_input_size = if use_data_xfer {
@@ -1111,24 +1369,6 @@ impl DdiDev for DdiWinDev {
         if let Some(sid) = req.get_session_id() {
             generic.session_id = sid;
             generic.session_control.set_session_id_is_valid(true);
-        }
-
-        if use_data_xfer {
-            // SAFETY: `input_data` was fully zero-initialized. All-zero
-            // bytes are a valid representation of `DataXferBuffers`.
-            let data_xfer = unsafe { &mut ioctl_in_buffer.input_data.data_xfer };
-            data_xfer.buffer_count = oob_items.len() as u32;
-            for (i, item) in oob_items.iter_mut().enumerate() {
-                data_xfer.buffers[i] = DataXferBuffer {
-                    xfer_length: item.len() as u32,
-                    flags: if item.is_out() {
-                        TSRA_DATA_XFER_BUF_DEV_WRITE
-                    } else {
-                        0
-                    },
-                    buffer_addr: item.dma_ptr(),
-                };
-            }
         }
 
         // -- 3. Issue the ioctl (overlapped, same as MBOR) ----------------
@@ -1208,8 +1448,8 @@ impl DdiDev for DdiWinDev {
             Err(DdiError::WinError(ioctl_out_buffer.ioctl_status))?;
         }
 
-        if ioctl_out_buffer.status != 0 {
-            Err(DdiError::DdiError(ioctl_out_buffer.status))?;
+        if let Some(error) = DdiError::from_tbor_completion_status(ioctl_out_buffer.status) {
+            return Err(error);
         }
 
         // -- 4. Decode the typed TBOR response --------------------
@@ -1225,7 +1465,33 @@ impl DdiDev for DdiWinDev {
         // sensitive data depending on opcode.
         tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
 
-        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+        Ok(<T::OpResp>::decode_response_for_api_rev(
+            resp_bytes, api_rev,
+        )?)
+    }
+
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Self::discover_with(self.pci_identity()?, || self.check_secure_transport())
+    }
+
+    fn exec_op_tbor_secure(
+        &self,
+        session_id: u16,
+        payload: &[u8],
+        seal: DdiTransportSeal,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        if oob_items.is_empty() {
+            return self.exec_secure_ioctl(1, session_id, payload, seal);
+        }
+        self.exec_secure_data_xfer_with(session_id, payload, seal, oob_items, |input, output| {
+            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER, input, output)
+        })
+    }
+
+    fn flush_session(&self, session_id: u16) -> DdiResult<()> {
+        self.exec_secure_ioctl(2, session_id, &[], DdiTransportSeal::default())
+            .map(|_| ())
     }
 
     /// Execute AES GCM operation (encryption/decryption) with slice-based buffers

@@ -14,7 +14,6 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
-use tsra_ddi_tbor_types::SessionType;
 use zeroize::Zeroize;
 
 use super::*;
@@ -190,6 +189,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { param_key, .. } => ddi::psk_change(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 param_key,
                 new_psk,
@@ -197,6 +197,49 @@ impl HsmSession {
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
+    }
+
+    /// Recover this migrated TBOR session with the current role PSK.
+    ///
+    /// Uses a fresh authenticated handshake while restoring the original
+    /// masking key. Reopen does not grant another PSK change or retry the
+    /// interrupted application command. Only valid for a stale V2 session.
+    pub fn reopen_ex(
+        &self,
+        root_spki_thumbprint: &[u8; 48],
+        psk: Option<&[u8; PSK_LEN]>,
+    ) -> HsmResult<()> {
+        let mut inner = self.inner.write();
+        let SessionKind::Ver2 {
+            psk_id,
+            suite,
+            seed,
+            bmk_session,
+            ..
+        } = &inner.kind
+        else {
+            return Err(HsmError::InvalidSession);
+        };
+        let result = ddi::reopen_session_ex(
+            &inner.partition,
+            inner.rev,
+            root_spki_thumbprint,
+            *psk_id,
+            psk,
+            *suite,
+            inner.id,
+            seed,
+            bmk_session,
+        )?;
+        inner.kind = SessionKind::Ver2 {
+            psk_id: result.psk_id,
+            suite: result.suite,
+            param_key: result.param_key,
+            bmk_session: result.bmk_session.to_vec(),
+            seed: result.seed,
+        };
+        *inner.ddi_cookie.lock() = result.ddi_cookie;
+        Ok(())
     }
 
     pub(crate) fn key_report_auth(
@@ -287,6 +330,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 receiver_cert_chain,
@@ -382,6 +426,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_reseal_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 src_evidence,
@@ -416,6 +461,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_remote_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 sender_cert_chain,
@@ -447,6 +493,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_peer_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 dst_evidence,
@@ -479,6 +526,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_peer_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 masked_sealing_key,
                 src_evidence,
@@ -507,6 +555,7 @@ impl HsmSession {
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_local_backup_ex(
                 &inner.partition,
+                inner.rev,
                 inner.id,
                 pok_local_backup,
                 sd_mk_backup,
@@ -537,15 +586,15 @@ enum SessionKind {
         bmk_session: Vec<u8>,
     },
     /// Version 2 session, established over the two-phase
-    /// `OpenSessionEx` HPKE handshake.
+    /// `OpenSessionEx` handshake.
     Ver2 {
+        /// Secret context for recovering the original session masking key.
+        seed: zeroize::Zeroizing<[u8; 32]>,
         /// PSK id selecting the role (0 = CO, 1 = CU).
         psk_id: u8,
-        /// Channel integrity profile pinned at handshake time.
-        session_type: SessionType,
-        /// HPKE exported secret (`Nh = 48`).
-        exported: Vec<u8>,
-        /// Per-session AES-256 wrap key derived from the HPKE export.
+        /// Key-establishment suite of the handshake.
+        suite: HsmSessionSuite,
+        /// Per-session AES-256 wrap key derived from the handshake secret.
         /// Sensitive — never logged (redacted in the manual `Debug`
         /// impl, since `AesKey` is not `Debug`).
         param_key: AesKey,
@@ -572,18 +621,13 @@ impl fmt::Debug for SessionKind {
                 .finish(),
             SessionKind::Ver2 {
                 psk_id,
-                session_type,
-                exported,
+                suite,
                 bmk_session,
                 ..
             } => f
                 .debug_struct("Ver2")
                 .field("psk_id", psk_id)
-                .field("session_type", session_type)
-                .field(
-                    "exported",
-                    &format_args!("<redacted; {} bytes>", exported.len()),
-                )
+                .field("suite", suite)
                 .field("param_key", &"<redacted>")
                 .field(
                     "bmk_session",
@@ -642,13 +686,13 @@ impl Drop for HsmSessionInner {
                 self.with_dev(|dev| ddi::close_session(dev, self.id, self.rev))
             }
             SessionKind::Ver2 { .. } => {
-                ddi::close_session_ex(&self.partition, self.id, &self.ddi_cookie)
+                ddi::close_session_ex(&self.partition, self.rev, self.id, &self.ddi_cookie)
             }
         };
 
         // Wipe sensitive session material from process memory once the
-        // session is closed: `seed` for V1, the HPKE `exported` secret
-        // for V2, and the device-wrapped `bmk_session` blob for both.
+        // session is closed: `seed` for V1 and the device-wrapped
+        // `bmk_session` blob for both.
         match &mut self.kind {
             SessionKind::Ver1 {
                 seed, bmk_session, ..
@@ -656,12 +700,7 @@ impl Drop for HsmSessionInner {
                 seed.zeroize();
                 bmk_session.zeroize();
             }
-            SessionKind::Ver2 {
-                exported,
-                bmk_session,
-                ..
-            } => {
-                exported.zeroize();
+            SessionKind::Ver2 { bmk_session, .. } => {
                 bmk_session.zeroize();
             }
         }
@@ -723,10 +762,10 @@ impl HsmSessionInner {
             last_restore_epoch: epoch,
             kind: SessionKind::Ver2 {
                 psk_id: result.psk_id,
-                session_type: result.session_type,
-                exported: result.exported.to_vec(),
+                suite: result.suite,
                 param_key: result.param_key,
                 bmk_session: result.bmk_session.to_vec(),
+                seed: result.seed,
             },
         }
     }
@@ -862,5 +901,96 @@ impl HsmSessionInner {
     /// reopened.
     pub(crate) fn last_restore_epoch(&self) -> u64 {
         self.last_restore_epoch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    use super::*;
+
+    #[test]
+    fn tbor_sealing_key_rejection_completes_with_queued_session_writer() {
+        let info = HsmPartitionManager::partition_info_list()
+            .into_iter()
+            .next()
+            .expect("partition");
+        let rev = info.api_rev_range.expect("API revision range").max();
+        let part = HsmPartitionManager::open_partition(&info.path, rev).expect("open partition");
+        let pem = part.cert_chain(0).expect("test chain");
+        let certificates =
+            X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
+        let spki = certificates
+            .last()
+            .expect("test root")
+            .subject_public_key_info_der()
+            .expect("test root SPKI");
+        let root_pin: [u8; 48] = Hasher::hash_vec(&mut HashAlgo::sha384(), spki)
+            .expect("test root hash")
+            .try_into()
+            .expect("SHA-384 length");
+        let session = part
+            .open_session_ex(
+                rev,
+                &root_pin,
+                HsmSessionPsk::new(HsmPskId::CO),
+                HsmSessionSuite::EcdhP384,
+            )
+            .expect("open EX session");
+        let psk = rand::random::<[u8; PSK_LEN]>();
+        session.change_psk(&psk).expect("rotate CO PSK");
+        // Pause with_dev after it holds the session read lock but before its callback.
+        let partition_guard = part.inner().write();
+        let command_session = session.clone();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let command = thread::spawn(move || {
+            let result = ddi::sd_sealing_key_gen(&command_session, u8::MAX);
+            completed_tx.send(result).expect("report command result");
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session
+            .inner
+            .try_write_for(Duration::from_millis(50))
+            .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "command must acquire session lock"
+            );
+            thread::yield_now();
+        }
+        let writer_session = session.clone();
+        let writer = thread::spawn(move || {
+            // A timeout releases the queued writer even if the old code deadlocks.
+            writer_session
+                .inner
+                .try_write_for(Duration::from_secs(5))
+                .is_some()
+        });
+        while session.inner.try_read().is_some() {
+            assert!(Instant::now() < deadline, "session writer must be queued");
+            thread::yield_now();
+        }
+        drop(partition_guard);
+        let result = completed_rx.recv_timeout(Duration::from_secs(2));
+        let writer_acquired = writer.join().expect("session writer");
+        command.join().expect("key generation thread");
+        assert_eq!(
+            result.expect("command must finish without waiting for the queued writer to time out"),
+            Err(HsmError::InvalidArgument)
+        );
+        assert!(
+            writer_acquired,
+            "writer must acquire the lock after the command"
+        );
     }
 }

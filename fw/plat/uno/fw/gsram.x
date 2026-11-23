@@ -16,6 +16,10 @@ SECTIONS
         /* Cold path: certificate chain validation is not on the crypto
            hot path. */
         *(.text.*tsra_fw_core_crypto_x509_chain*)
+        /* Cold paths: the TBOR SessionOpenInit and PartInit handlers run
+           once per session open and once per partition initialization. */
+        *(.text.*session_open_init*)
+        *(.text.*9part_init*)
         /* BK3 provisioning only (init_bk3 also matches secure_init_bk3 and
            set_init_bk3_pin); keep shared credential and crypto code in ITCM. */
         *(.text.*tsra_fw_hsm_core*mbor*init_bk3*)

@@ -235,8 +235,8 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 let build_res = async {
                     let field = curve.priv_key_len();
-                    let wc = curve.wire_coord_len(P::BYTE_ORDER);
-                    let wire_pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+                    let wc = curve.wire_coord_len(P::ECC_COORD_PAD);
+                    let wire_pub_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
 
                     // Re-derive the operand-order public key and the big-endian
                     // COSE scalar `d` from the vault key.
@@ -297,7 +297,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcKeyWrap` response around the wrapped key.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, wrapped_key: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcKeyWrapResp::encode(buf, 0, false)?
+        let frame = TborDarcKeyWrapResp::encode_for_request(buf, 0, false)?
             .wrapped_key(wrapped_key)?
             .finish();
         Ok(frame.as_bytes().len())

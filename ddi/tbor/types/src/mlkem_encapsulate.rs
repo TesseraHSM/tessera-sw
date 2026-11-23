@@ -76,7 +76,7 @@ mod tests {
             pub_key: alloc::vec![0x22u8; 64],
         };
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.windows(4).any(|w| w == [0x22u8; 4]),
             "encoded frame must carry the public-key bytes",

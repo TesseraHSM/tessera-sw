@@ -38,6 +38,7 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The sender's masked SD-sealing key (from
 ///   `SdSealingKeyGen`), exactly [`MASKED_SEALING_KEY_LEN`] bytes.
@@ -57,6 +58,7 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
 /// failures from the round-trip.
 pub(crate) fn sd_create_remote_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
     receiver_cert_chain: &[HsmCert<'_>],
@@ -99,7 +101,7 @@ pub(crate) fn sd_create_remote_backup_ex(
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(HsmSdRemoteBackupResult::from)
             .map_err(HsmError::from)
     })

@@ -11,7 +11,8 @@ use crate::tbor;
 /// TBOR opcode for `SessionOpenFinish`.
 pub const TBOR_OP_SESSION_OPEN_FINISH: u8 = 0x04;
 
-/// Length of the Phase-2 confirmation MAC (HMAC-SHA-384).
+/// Length of the host's handshake confirmation
+/// `fin = HMAC-SHA-384(fin_key, T1)`.
 pub const MAC_FIN_LEN: usize = 48;
 
 /// Length of the host-supplied `seed`, encrypted inside
@@ -24,13 +25,24 @@ pub const SEED_LEN: usize = 32;
 /// constant name verbatim.
 pub const SESSION_SEED_LEN: usize = SEED_LEN;
 
-/// HMAC label binding the Phase-2 (client-auth) confirm signature.
+/// HKDF-Expand label (followed by `T1`) producing the 48 B handshake
+/// secret `hs` from the handshake PRK.
 ///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_PHASE2_LABEL`.
-pub const SESSION_PHASE2_LABEL: &[u8] = b"phase2-confirm";
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HS_LABEL`.
+pub const SESSION_HS_LABEL: &[u8] = b"tsra-session-hs-v1";
 
-/// HKDF-Expand label producing the per-session **param key** — a raw
-/// 32-byte AES-256 key consumed by the AEAD-envelope crate to
+/// Length in bytes of the handshake secret `hs`.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HS_LEN`.
+pub const SESSION_HS_LEN: usize = 48;
+
+/// HKDF-Expand-Labeled label producing the 48 B `fin_key` from `hs`.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_HOST_FIN_LABEL`.
+pub const SESSION_HOST_FIN_LABEL: &[u8] = b"tsra-session-host-fin-v1";
+
+/// HKDF-Expand-Labeled label producing the per-session **param key** — a
+/// raw 32-byte AES-256 key consumed by the AEAD-envelope crate to
 /// AEAD-seal/open the `seed_envelope` and per-parameter envelopes
 /// carried by in-session commands such as `PskChange` / `PartInit`.
 ///
@@ -43,31 +55,14 @@ pub const SESSION_PARAM_KEY_LABEL: &[u8] = b"tsra-session-param-v1";
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN`.
 pub const SESSION_PARAM_KEY_LEN: usize = 32;
 
-/// HKDF-Expand label producing the **VM→HSM** message-MAC key.
-/// Derived only for Authenticated sessions.
-///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MAC_TX_LABEL`.
-pub const SESSION_MAC_TX_LABEL: &[u8] = b"tsra-session-mac-tx-v1";
-
-/// HKDF-Expand label producing the **HSM→VM** message-MAC key.
-/// Derived only for Authenticated sessions.
-///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MAC_RX_LABEL`.
-pub const SESSION_MAC_RX_LABEL: &[u8] = b"tsra-session-mac-rx-v1";
-
-/// Length in bytes of each directional message-MAC key (HMAC-SHA-384).
-///
-/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN`.
-pub const SESSION_MAC_DIR_KEY_LEN: usize = 48;
-
-/// HKDF-Expand label producing the **VM→HSM** session transport key
-/// (API revision 2.x).
+/// HKDF-Expand-Labeled label producing the **VM→HSM** session transport
+/// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_H2M_LABEL`.
 pub const SESSION_TRANSPORT_H2M_LABEL: &[u8] = b"tsra-session-xport-h2m-v1";
 
-/// HKDF-Expand label producing the **HSM→VM** session transport key
-/// (API revision 2.x).
+/// HKDF-Expand-Labeled label producing the **HSM→VM** session transport
+/// secret.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_M2H_LABEL`.
 pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
@@ -77,10 +72,27 @@ pub const SESSION_TRANSPORT_M2H_LABEL: &[u8] = b"tsra-session-xport-m2h-v1";
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_KEY_LEN`.
 pub const SESSION_TRANSPORT_KEY_LEN: usize = 32;
 
-/// AES-GCM IV length of a session transport message.
+/// Length in bytes of each directional nonce salt.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SALT_LEN`.
+pub const SESSION_TRANSPORT_SALT_LEN: usize = 4;
+
+/// Length in bytes of the big-endian per-direction sequence number that
+/// completes a nonce (`nonce = salt ‖ seq`).
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SEQ_LEN`.
+pub const SESSION_TRANSPORT_SEQ_LEN: usize = 8;
+
+/// Length in bytes of each directional transport secret, `key ‖ salt`.
+///
+/// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_SECRET_LEN`.
+pub const SESSION_TRANSPORT_SECRET_LEN: usize =
+    SESSION_TRANSPORT_KEY_LEN + SESSION_TRANSPORT_SALT_LEN;
+
+/// AES-GCM IV length of a session transport message: `salt ‖ seq`.
 ///
 /// Mirror of `tsra_fw_hsm_pal_traits::SESSION_TRANSPORT_IV_LEN`.
-pub const SESSION_TRANSPORT_IV_LEN: usize = 12;
+pub const SESSION_TRANSPORT_IV_LEN: usize = SESSION_TRANSPORT_SALT_LEN + SESSION_TRANSPORT_SEQ_LEN;
 
 /// AES-GCM tag length of a session transport message.
 ///
@@ -95,17 +107,19 @@ pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Host-facing TBOR `SessionOpenFinish` request.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_FINISH, session_ctrl = in_session)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSessionOpenFinishReq {
     /// Pending session identifier reserved in Phase 1.
     #[tbor(session_id)]
     pub session_id: u16,
-    /// Phase-2 confirmation MAC (HMAC-SHA-384, 48 B).
+    /// Handshake confirmation `fin = HMAC-SHA-384(fin_key, T1)` (48 B).
     pub mac_fin: [u8; MAC_FIN_LEN],
     /// AEAD `seed_envelope` wrapping the 32-byte session seed under
     /// the session's `param_key`.  See [`SEED_ENVELOPE_LEN`] for the
     /// fixed wire layout.
     pub seed_envelope: [u8; SEED_ENVELOPE_LEN],
+    /// Saved masking-key recovery blob; empty for a fresh open.
+    pub bmk_session: Vec<u8>,
 }
 
 impl Default for TborSessionOpenFinishReq {
@@ -114,6 +128,7 @@ impl Default for TborSessionOpenFinishReq {
             session_id: 0,
             mac_fin: [0u8; MAC_FIN_LEN],
             seed_envelope: [0u8; SEED_ENVELOPE_LEN],
+            bmk_session: Vec::new(),
         }
     }
 }

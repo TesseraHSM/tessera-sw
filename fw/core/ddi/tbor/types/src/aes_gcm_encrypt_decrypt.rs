@@ -156,7 +156,7 @@ mod tests {
         let iv = [0x33u8; GCM_IV_LEN];
         let tag = [0x44u8; GCM_TAG_LEN];
         let masked = [0x11u8; MASKED_AES_KEY_MAX_LEN];
-        let frame = TborAesGcmEncryptDecryptReq::encode(&mut buf)
+        let frame = TborAesGcmEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn request_rejects_wrong_iv_len() {
         let mut buf = [0u8; 512];
-        let err = TborAesGcmEncryptDecryptReq::encode(&mut buf)
+        let err = TborAesGcmEncryptDecryptReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()

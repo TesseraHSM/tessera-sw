@@ -8,15 +8,22 @@
 /// the ciphertext c0; check() encrypts it again and expects CKR_OK and c0.
 /// Presence of the object proves nothing here: the key has to work, and give
 /// the same answer. The caller names the cipher of the key's family
-/// (CKM_AES_CBC for a plain AES key, CKM_AES_GCM or CKM_AES_XTS); the store
-/// backend is whatever the module runs on, so one case covers both the memory
-/// store and the file store (TSRA_PKCS11_PERSIST=1).
+/// (CKM_AES_CBC for a plain AES key, CKM_AES_GCM or CKM_AES_XTS). An EC
+/// signing key gives a different signature every time, so for it record() and
+/// check() sign and verify the signature on the host against the public point
+/// read before the event. The store backend is whatever the module runs on, so
+/// one case covers both the memory store and the file store
+/// (TSRA_PKCS11_PERSIST=1).
 
 #include <cstring>
 #include <gtest/gtest.h>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "utils/aes_helpers.hpp"
+#include "utils/ec_helpers.hpp"
+#include "utils/host_crypto.hpp"
 #include "utils/module.hpp"
 
 class SurvivingKey
@@ -44,6 +51,17 @@ class SurvivingKey
             break;
         }
     }
+    /// An EC signing key: `key` is the private key, `point` the uncompressed
+    /// point of its public key on `curve` ("P-256", ...).
+    SurvivingKey(
+        CK_SESSION_HANDLE s,
+        CK_OBJECT_HANDLE key,
+        const char *curve,
+        std::vector<CK_BYTE> point
+    )
+        : s_(s), key_(key), plain_(pattern(32)), curve_(curve), point_(std::move(point))
+    {
+    }
     SurvivingKey(const SurvivingKey &) = delete; /* mech_ points into this object */
     SurvivingKey &operator=(const SurvivingKey &) = delete;
 
@@ -51,6 +69,11 @@ class SurvivingKey
     /// ASSERT_NO_FATAL_FAILURE(k.record()).
     void record()
     {
+        if (!point_.empty())
+        {
+            ASSERT_NO_FATAL_FAILURE(signs_for_point("generation"));
+            return;
+        }
         ASSERT_CKR_OK(crypt_oneshot(s_, true, &mech_, key_, plain_, c0_));
         ASSERT_FALSE(c0_.empty());
     }
@@ -67,6 +90,11 @@ class SurvivingKey
     /// it as ASSERT_NO_FATAL_FAILURE(k.check("...")).
     void check(const char *event)
     {
+        if (!point_.empty())
+        {
+            ASSERT_NO_FATAL_FAILURE(signs_for_point(event));
+            return;
+        }
         std::vector<CK_BYTE> c;
         ASSERT_CKR_OK(crypt_oneshot(s_, true, &mech_, key_, plain_, c))
             << "the key is not usable after " << event;
@@ -74,6 +102,17 @@ class SurvivingKey
     }
 
   private:
+    /// The EC key signs, and the host verifies that under the recorded point.
+    void signs_for_point(const char *event)
+    {
+        std::vector<CK_BYTE> sig;
+        ASSERT_CKR_OK(sign_oneshot(s_, CKM_ECDSA_SHA256, key_, plain_, sig))
+            << "the key is not usable after " << event;
+        host::Pkey pub = host::ec_public(curve_.c_str(), point_);
+        ASSERT_TRUE(host::ecdsa_verify(pub.get(), "SHA256", plain_, sig))
+            << "the key is not the same key after " << event;
+    }
+
     static constexpr CK_ULONG kGcmIv = 12;
     static constexpr CK_ULONG kGcmTagBits = 128;
 
@@ -81,6 +120,8 @@ class SurvivingKey
     CK_OBJECT_HANDLE key_;
     std::vector<CK_BYTE> plain_;
     std::vector<CK_BYTE> c0_;
+    std::string curve_;
+    std::vector<CK_BYTE> point_; /* EC keys only */
     CK_BYTE iv_[kAesBlock];
     CK_GCM_PARAMS gcm_{};
     CK_MECHANISM mech_{};

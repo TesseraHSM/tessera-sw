@@ -49,13 +49,13 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
             /// Status code (4-byte LE unsigned integer).
             #[inline]
             pub fn status(&self) -> u32 {
-                u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+                u32::from_le_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]])
             }
 
             /// FIPS_APPROVED flag (bit 0 of flags).
             #[inline]
             pub fn fips_approved(&self) -> bool {
-                self.buf[1] & 0x01 != 0
+                self.buf[5] & 0x01 != 0
             }
         }
     } else {
@@ -78,6 +78,14 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
         }
 
         impl<'a> #view_name<'a> {
+            /// API revision carried in the message header.
+            pub fn api_rev(&self) -> (u16, u16) {
+                (
+                    u16::from_le_bytes([self.buf[0], self.buf[1]]),
+                    u16::from_le_bytes([self.buf[2], self.buf[3]]),
+                )
+            }
+
             /// Construct from a validated buffer. Not public — use
             #[doc = concat!("[`", stringify!(#name), "::decode()`] instead.")]
             fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Self {
@@ -236,7 +244,7 @@ fn gen_accessor(
 fn data_start_expr(header_len: &TokenStream, _needs_data_start: bool) -> TokenStream {
     quote! {
         {
-            let toc_count = (self.buf[2] & 0x1F) as usize + 1;
+            let toc_count = (self.buf[4] & 0x1F) as usize + 1;
             #header_len + toc_count * 4
         }
     }

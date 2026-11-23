@@ -517,8 +517,9 @@ fn sealing_key_gen_sd_scope_reopen() {
     let reopened = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &sd_provision::ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("reopen CO session");
 
@@ -549,8 +550,9 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
         let bootstrap = part
             .open_session_ex(
                 rev,
+                &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open bootstrap CO session");
         bootstrap.change_psk(&rotated_psk).expect("rotate CO PSK");
@@ -559,8 +561,9 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
     let session = part
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&part),
             HsmSessionPsk::with_psk(HsmPskId::CO, &rotated_psk),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
     let props = HsmKeyPropsBuilder::default()

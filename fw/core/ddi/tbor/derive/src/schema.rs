@@ -353,9 +353,9 @@ impl Schema {
     /// Compute MAX_ENCODED_SIZE (header + TOC + worst-case data).
     pub fn max_encoded_size(&self) -> proc_macro2::TokenStream {
         let header_len: usize = match self.kind {
-            MessageKind::Request { .. } => 8, // REQ_HEADER_LEN
-            MessageKind::Response => 8,       // RESP_HEADER_LEN
-            MessageKind::Fields => 0,         // no header
+            MessageKind::Request { .. } => 12, // REQ_HEADER_LEN
+            MessageKind::Response => 12,       // RESP_HEADER_LEN
+            MessageKind::Fields => 0,          // no header
         };
         let toc_count = self.toc_count_expr();
         let data = self.worst_case_data_size();

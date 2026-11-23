@@ -463,28 +463,7 @@ pub(crate) fn finalized_co_session() -> HsmSession {
 pub(crate) fn finalized_co_partition() -> (HsmPartition, HsmApiRev, HsmSession) {
     let (part, rev) = new_partition();
 
-    // Bootstrap the CO session under the default PSK and rotate it; the
-    // bootstrap session closes on drop at the end of this block.
-    {
-        let bootstrap = part
-            .open_session_ex(
-                rev,
-                HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
-            )
-            .expect("open bootstrap CO session");
-        bootstrap
-            .change_psk(&ROTATED_CO_PSK)
-            .expect("rotate CO PSK");
-    }
-
-    let session = part
-        .open_session_ex(
-            rev,
-            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
-        )
-        .expect("open rotated CO session");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, rev);
 
     provision_partition(&session);
     (part, rev, session)
@@ -798,28 +777,7 @@ fn provision_backing_core(
 ) -> (HsmSession, Vec<u8>, [u8; RAW_PUB_LEN], Vec<u8>) {
     let (part, rev) = new_partition();
 
-    // Bootstrap the CO session under the default PSK and rotate it; the
-    // bootstrap session closes on drop at the end of this block.
-    {
-        let bootstrap = part
-            .open_session_ex(
-                rev,
-                HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
-            )
-            .expect("open bootstrap CO session");
-        bootstrap
-            .change_psk(&ROTATED_CO_PSK)
-            .expect("rotate CO PSK");
-    }
-
-    let session = part
-        .open_session_ex(
-            rev,
-            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
-        )
-        .expect("open rotated CO session");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, rev);
 
     // PID / PID public key are materialized before part_init_ex.
     let pid = part.pid().expect("PartInfo PID");
@@ -988,28 +946,7 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
 
     let (part, rev) = new_partition();
 
-    // Bootstrap the CO session under the default PSK and rotate it off the
-    // default so the DARC commands clear the default-PSK gate.
-    {
-        let bootstrap = part
-            .open_session_ex(
-                rev,
-                HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
-            )
-            .expect("open bootstrap CO session");
-        bootstrap
-            .change_psk(&ROTATED_CO_PSK)
-            .expect("rotate CO PSK");
-    }
-
-    let session = part
-        .open_session_ex(
-            rev,
-            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
-        )
-        .expect("open rotated CO session");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, rev);
 
     let pid = part.pid().expect("PartInfo PID");
     let pid_pub_vec = part.ex_pub_key().expect("PartInfo PID public key");

@@ -12,9 +12,9 @@
 //! This driver owns the persistent indirection state — `alloc_mask`,
 //! `renego_mask`, and the logical→physical map — which is the 18-byte
 //! `session_table` region carried in each partition's persistent store. It
-//! also tracks two volatile, single-byte bitmasks — the in-flight Pending
-//! set and the one-shot PSK-change budget — in the partition store's 2-byte
-//! `session_meta` region (cleared on reset, not migrated). Both regions are
+//! also tracks the volatile, single-byte in-flight Pending set in the
+//! partition store's 2-byte `session_meta` region; its second byte is
+//! reserved. The region is cleared on reset, not migrated. Both regions are
 //! reached through the partition-store driver's
 //! [`Partition`](tsra_fw_uno_drivers_part_store::Partition) handle, so the
 //! GSRAM addressing lives in one place.

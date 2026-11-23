@@ -134,4 +134,5 @@ impl HsmPalFeatures for StdHsmPal {
 /// Crypto operands are big-endian (exact-width P-521 coordinates).
 impl HsmCryptoOrder for StdHsmPal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Be;
+    const ECC_COORD_PAD: usize = 8;
 }

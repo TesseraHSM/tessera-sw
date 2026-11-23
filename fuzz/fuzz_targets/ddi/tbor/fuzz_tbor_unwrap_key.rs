@@ -534,7 +534,7 @@ fn expected(case: &Case, input: &Input<'_>, active: u16) -> Expected {
         return Expected::Reject(status);
     }
     let mut buf = [0; common::FUZZ_REQ_BUF_SIZE];
-    if req.encode_request(&mut buf).is_err() {
+    if req.encode_request(&mut buf, (1, 1)).is_err() {
         return Expected::HostEncode;
     }
     let status = if req.key_label.len() > TBOR_KEY_LABEL_MAX_LEN

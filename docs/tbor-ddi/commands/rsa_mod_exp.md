@@ -37,11 +37,11 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
-| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 20 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
-| 24 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
+| 20 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 24 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
+| 28 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
 
 ### Data section
 
@@ -56,7 +56,7 @@ must be updated together.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `x` | `buffer` (256 / 384 / 512 B) | The result `x = y^d mod n` in device byte order, exactly the key's modulus length. |
+| 12 | `x` | `buffer` (256 / 384 / 512 B) | The result `x = y^d mod n` in device byte order, exactly the key's modulus length. |
 
 ### Data section
 

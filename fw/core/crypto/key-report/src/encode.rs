@@ -19,6 +19,7 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -209,21 +210,28 @@ where
     minicbor::encode(&sig_struct_val, as_mut_slice(sig_struct))
         .map_err(|_| HsmError::InternalError)?;
 
-    // 4. SHA-384 digest in operand order, matching `ecc_sign`'s input.
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
+    // 4. SHA-384 digest in operand order into the digest lane of
+    //    `k ‖ digest`, as `ecc_sign_in_place` consumes it.
+    let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
     pal.hash(
         io,
         HsmHashAlgo::Sha384,
         sig_struct,
         HsmDigestForm::Operand,
-        Some(digest),
+        Some(&mut sig[SIGNATURE_LEN / 2..]),
     )
     .await?;
 
-    // 5. ECDSA-P384 sign — output is `r || s` in operand order.
-    let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest, Some(sig))
-        .await?;
+    // 5. ECDSA-P384 sign in place — `r || s` in operand order.
+    pal.ecc_sign_in_place(
+        io,
+        HsmEccCurve::P384,
+        HsmHashAlgo::Sha384,
+        priv_key,
+        HsmEcdsaNonce::Generated,
+        sig,
+    )
+    .await?;
 
     // 6. Convert the signature in place to big-endian per half for COSE.
     sig_halves_swap(P::BYTE_ORDER, sig)?;

@@ -142,7 +142,7 @@ mod tests {
         };
         let chain = [cert];
         let mut buf = [0u8; 2048];
-        let frame = TborSdResealRemoteBackupReq::encode(&mut buf)
+        let frame = TborSdResealRemoteBackupReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -176,7 +176,7 @@ mod tests {
     fn response_round_trips_dst_remote_backup() {
         let sealed = [0xABu8; POK_REMOTE_BACKUP_LEN];
         let mut buf = [0u8; 512];
-        let frame = TborSdResealRemoteBackupResp::encode(&mut buf, 0, true)
+        let frame = TborSdResealRemoteBackupResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .dst_remote_backup(&sealed)
             .unwrap()

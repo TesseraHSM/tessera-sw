@@ -175,7 +175,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let wrapped = [0x5Au8; 300];
         let key_label = b"imported-key";
-        let frame = TborUnwrapKeyReq::encode(&mut buf)
+        let frame = TborUnwrapKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -208,7 +208,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let masked = [0xABu8; 196];
         let pub_key = [0xCDu8; 96];
-        let frame = TborUnwrapKeyResp::encode(&mut buf, 0, true)
+        let frame = TborUnwrapKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .key_kind(28)
             .unwrap()

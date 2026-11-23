@@ -23,13 +23,14 @@ use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
-use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
+use crate::csr_builder::sign_in_place;
+use crate::csr_builder::sign_tbs;
 use crate::csr_builder::PRIV_KEY_LEN;
 use crate::csr_builder::SIGNATURE_LEN;
 use crate::der_helpers::ECDSA_SHA384_ALG_ID;
@@ -261,11 +262,7 @@ pub async fn build_leaf_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
     // variant has no priv_key to check, so this preflight is exclusive to
     // this default-signer entry point.
     preflight(priv_key, crate::leaf_cert::TBS_TEMPLATE.len())?;
-    let signer = EccP384Signer {
-        pal,
-        alloc,
-        priv_key,
-    };
+    let signer = EccP384Signer { pal, priv_key };
     build_leaf_cert_with_signer(pal, io, alloc, params, &signer, out).await
 }
 
@@ -346,9 +343,9 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
     let tbs_dma = alloc.dma_alloc(template_len)?;
     patch(tbs_dma)?;
 
-    let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
     // Standard SHA-384 over the TBS; the `TbsSigner` converts it to its
     // operand order.
+    let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
     pal.hash(
         io,
         HsmHashAlgo::Sha384,
@@ -364,27 +361,23 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
     assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)
 }
 
-struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
+struct EccP384Signer<'a, P: HsmCrypto> {
     pal: &'a P,
-    alloc: &'a A,
     priv_key: &'a HsmDmaBuf,
 }
 
-impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, A> {
+impl<P: HsmCrypto> TbsSigner<P::Io> for EccP384Signer<'_, P> {
     async fn sign_digest(
         &self,
         io: &P::Io,
         digest: &HsmDmaBuf,
         sig: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        // `ecc_sign` consumes the message hash in operand order; `digest`
-        // is the standard SHA-384 (per the `TbsSigner` contract).
-        let e = self.alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-        byte_order::int_copy_from_be(P::BYTE_ORDER, e, digest)?;
-        self.pal
-            .ecc_sign(io, HsmEccCurve::P384, self.priv_key, e, Some(sig))
-            .await
-            .map(|_| ())
+        // `digest` is the standard SHA-384 (per the `TbsSigner` contract);
+        // `ecc_sign_in_place` reads it in operand order from the digest lane
+        // of `k ‖ digest`, which `sig` is big enough to hold.
+        byte_order::int_copy_from_be(P::BYTE_ORDER, &mut sig[SIGNATURE_LEN / 2..], digest)?;
+        sign_in_place(self.pal, io, self.priv_key, sig).await
     }
 }
 
@@ -416,20 +409,7 @@ where
     let tbs_dma = alloc.dma_alloc(tbs_len)?;
     patch(tbs_dma)?;
 
-    // SHA-384 straight into the operand form `ecc_sign` consumes.
-    let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        tbs_dma,
-        HsmDigestForm::Operand,
-        Some(digest_dma),
-    )
-    .await?;
-
-    let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, Some(sig_dma))
-        .await?;
+    let sig_dma = sign_tbs(pal, io, alloc, priv_key, tbs_dma).await?;
 
     Ok((tbs_dma, sig_dma))
 }

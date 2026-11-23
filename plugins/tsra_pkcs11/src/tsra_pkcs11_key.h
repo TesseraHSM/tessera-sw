@@ -4,6 +4,7 @@
 #pragma once
 
 #include "tsra_pkcs11_compat.h"
+#include "tsra_pkcs11_ec_template.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -250,6 +251,100 @@ CK_RV tsra_pkcs11_key_aes_cbc_stream_final(
 
 /* Free a stream: the SDK context first, then the params it points at. NULL-safe. */
 void tsra_pkcs11_key_aes_cbc_stream_free(tsra_pkcs11_aes_cbc_stream_t *stream);
+
+/*
+ * Generate an EC key pair on `curve` in the device session `hsm_session`,
+ * masked under the masking key `scope` names. The private key signs when
+ * `sign` is set and derives otherwise, and the public key verifies or derives
+ * to match: the SDK takes no other combination. Returns the pair's masked
+ * blob (one blob unmasks both halves; wipe it before free, as for AES) and the
+ * public key's DER SubjectPublicKeyInfo, each in a malloc'd buffer the caller
+ * owns. The transient device handles are already freed on return.
+ */
+CK_RV tsra_pkcs11_key_ec_generate(
+    uint32_t hsm_session,
+    tsra_pkcs11_ec_curve_t curve,
+    bool sign,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+);
+
+/*
+ * Unmask a stored EC key pair blob into live device handles for both halves
+ * in `hsm_session`, and report the pair's curve as the device states it.
+ * Release both handles with tsra_pkcs11_key_release when the operation ends;
+ * on failure there are none.
+ */
+CK_RV tsra_pkcs11_key_ec_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    tsra_pkcs11_ec_curve_t *out_curve
+);
+
+/*
+ * One-shot sign of `in` with the sign mechanism `mech` (a row of
+ * tsra_pkcs11_sign_mech_find) under the device key `key_handle`. *sig_len is
+ * the capacity of `sig` in and the bytes written out; the caller sizes `sig`
+ * from the key, so a too-small one is CKR_BUFFER_TOO_SMALL with nothing
+ * written. `in` and `sig` may overlap.
+ */
+CK_RV tsra_pkcs11_key_sign(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *sig,
+    CK_ULONG *sig_len
+);
+
+/* One-shot verify of `sig` over `in`: CKR_OK for a valid signature,
+ * CKR_SIGNATURE_INVALID for one that does not verify. */
+CK_RV tsra_pkcs11_key_verify(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    const CK_BYTE *sig,
+    CK_ULONG sig_len
+);
+
+/*
+ * Multi-part sign (`sign`) or verify through the SDK's stream context, for a
+ * mechanism that hashes the message. *out_ctx is the context: feed it with
+ * tsra_pkcs11_key_sign_stream_update, finish it with
+ * tsra_pkcs11_key_sign_stream_final or tsra_pkcs11_key_verify_stream_final,
+ * and release it with tsra_pkcs11_key_sign_stream_free whatever happened.
+ * The key handle stays the caller's and must outlive the context.
+ */
+CK_RV tsra_pkcs11_key_sign_stream_new(
+    bool sign,
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    uint32_t *out_ctx
+);
+
+/* Feed `in` (at most 32 bits long) to a stream of the direction `sign`. */
+CK_RV tsra_pkcs11_key_sign_stream_update(
+    bool sign,
+    uint32_t ctx,
+    const CK_BYTE *in,
+    CK_ULONG in_len
+);
+
+/* Finish a sign stream into `sig`; *sig_len as for tsra_pkcs11_key_sign. */
+CK_RV tsra_pkcs11_key_sign_stream_final(uint32_t ctx, CK_BYTE *sig, CK_ULONG *sig_len);
+
+/* Finish a verify stream against `sig`; results as for tsra_pkcs11_key_verify. */
+CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_ULONG sig_len);
+
+/* Free a sign or verify stream context (no-op if 0). */
+void tsra_pkcs11_key_sign_stream_free(uint32_t ctx);
 
 #ifdef __cplusplus
 }

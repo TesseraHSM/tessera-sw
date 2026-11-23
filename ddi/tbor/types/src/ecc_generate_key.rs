@@ -20,8 +20,8 @@ pub const TBOR_OP_ECC_GENERATE_KEY: u8 = 0x17;
 pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 /// Maximum masked ECC private-key envelope length (P-521).
 pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
-/// Maximum wire public-key length (`x ‖ y`, P-521 little-endian word-padded).
-pub const ECC_PUB_KEY_MAX_LEN: usize = 136;
+/// Maximum wire public-key length (`x ‖ y`, P-521 8-byte-padded big-endian lanes).
+pub const ECC_PUB_KEY_MAX_LEN: usize = 144;
 
 /// `EccCurve` discriminant for NIST P-256.
 pub const ECC_CURVE_P256: u8 = 1;
@@ -67,8 +67,8 @@ pub struct TborEccGenerateKeyResp {
     #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
-    #[tbor(max_len = 136)]
+    /// The wire public key `x ‖ y` (device byte order; P-521 lanes padded to 4 B on little-endian and 8 B on big-endian devices).
+    #[tbor(max_len = 144)]
     pub pub_key: Vec<u8>,
 }
 
@@ -89,7 +89,7 @@ mod tests {
             key_label: b"lbl".to_vec(),
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&ECC_CURVE_P384),
             "encoded frame must carry the curve discriminant",

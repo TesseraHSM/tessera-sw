@@ -37,16 +37,17 @@ extern "C"
 typedef struct tsra_pkcs11_objstore_ops tsra_pkcs11_objstore_ops;
 
 /*
- * Reads one attribute of the object a set_attr or destroy check is deciding
- * on, with get_attr semantics for a single-entry template.
+ * Reads one attribute of the object a check is deciding on, with get_attr
+ * semantics for a single-entry template.
  */
 typedef CK_RV (*tsra_pkcs11_objstore_reader)(void *rctx, CK_ATTRIBUTE *a);
 
 /*
- * Decides whether a set_attr or destroy may go ahead, from the object as `read`
- * sees it; anything but CKR_OK refuses the call. The backend runs it after it
- * has locked and loaded the object and before it writes, so the decision and
- * the write see the same state even when another process shares the store.
+ * Decides whether a set_attr, destroy or get_key_body may go ahead, from the
+ * object as `read` sees it; anything but CKR_OK refuses the call. The backend
+ * runs it after it has locked and loaded the object and before it writes or
+ * returns the body, so the decision and the result see the same state even
+ * when another process shares the store.
  */
 typedef CK_RV (*tsra_pkcs11_objstore_check)(
     void *cctx,
@@ -148,7 +149,9 @@ struct tsra_pkcs11_objstore_ops
      * Retrieve a key object's masked-blob body (the input to tsra_key_unmask).
      * Two-call sizing: with blob == NULL, *len receives the body length; a
      * length of 0 means the object carries no body. The body is internal to the
-     * module and is never exposed through C_GetAttributeValue.
+     * module and is never exposed through C_GetAttributeValue. `check`, if not
+     * NULL, decides on the record the body comes from, so a key's policy and
+     * its body are read together.
      */
     CK_RV(*get_key_body)
     (void *ctx,
@@ -156,7 +159,9 @@ struct tsra_pkcs11_objstore_ops
      CK_BBOOL user_logged_in,
      CK_OBJECT_HANDLE h,
      CK_BYTE *blob,
-     CK_ULONG *len);
+     CK_ULONG *len,
+     tsra_pkcs11_objstore_check check,
+     void *cctx);
 
     /*
      * The object's size for C_GetObjectSize: the bytes of its attribute values

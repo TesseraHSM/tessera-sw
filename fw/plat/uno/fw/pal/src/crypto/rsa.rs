@@ -96,6 +96,10 @@ fn digest_info_prefix(algo: HsmHashAlgo) -> HsmResult<&'static [u8]> {
     })
 }
 
+fn ct_is_zero(value: u8) -> u8 {
+    ((value | value.wrapping_neg()) >> 7) ^ 1
+}
+
 // =============================================================================
 // Vault operand assembly (imported RSA private key → PKA layout)
 // =============================================================================
@@ -742,6 +746,8 @@ impl HsmRsa for UnoHsmPal {
             em[k - m_len - 1] = 0x00;
             em[k - m_len..].copy_from_slice(message);
 
+            // RFC 8017 encodes EM big-endian; the PKA operands are LE.
+            em.reverse();
             self.rsa_mod_exp_pub_in_workspace(
                 key_size,
                 pub_key,
@@ -776,25 +782,30 @@ impl HsmRsa for UnoHsmPal {
             let em = scope.dma_alloc(k)?;
             self.mod_exp_priv(io, key_size, priv_key, ciphertext, Some(em))
                 .await?;
+            // The private operation returns the PKA-native LE operand;
+            // PKCS#1 v1.5 unpadding uses the standard BE encoded block.
+            em.reverse();
 
             // Verify EM = 0x00 || 0x02 || PS || 0x00 || M
-            if em[0] != 0x00 || em[1] != 0x02 {
+            let header_valid = tsra_fw_uno_pct::ct_eq(&em[..2], &[0x00, 0x02]);
+            let mut separator = 0usize;
+            let mut found = 0u8;
+            for (offset, &byte) in em[2..].iter().enumerate() {
+                let is_zero = ct_is_zero(byte);
+                let take = is_zero & (found ^ 1);
+                separator |= (offset + 2) & 0usize.wrapping_sub(take as usize);
+                found |= is_zero;
+            }
+            if !(header_valid & (found == 1) & (separator >= 10)) {
                 return Err(HsmError::RsaDecryptFailed);
             }
 
-            // Find the 0x00 separator after PS (PS must be >= 8 bytes)
-            let sep = em[2..].iter().position(|&b| b == 0).map(|i| i + 2);
-            let sep = match sep {
-                Some(s) if s >= 10 => s,
-                _ => return Err(HsmError::RsaDecryptFailed),
-            };
-
-            let m_len = k - sep - 1;
+            let m_len = k - separator - 1;
             if output.len() < m_len {
                 return Err(HsmError::InvalidArg);
             }
 
-            output[..m_len].copy_from_slice(&em[sep + 1..k]);
+            output[..m_len].copy_from_slice(&em[separator + 1..k]);
             Ok(m_len)
         })
         .await
@@ -979,6 +990,8 @@ impl HsmRsa for UnoHsmPal {
                 self.mgf1_xor_in_workspace(algo, db, seed, scratch).await?;
             }
 
+            // Keep RFC 8017's encoded message BE until the PKA boundary.
+            em.reverse();
             self.rsa_mod_exp_pub_in_workspace(key_size, pub_key, em, &mut output[..k], scratch)
                 .await?;
             Ok(k)
@@ -1024,9 +1037,7 @@ impl HsmRsa for UnoHsmPal {
             // LE→BE first (the std PAL does the same flip around OpenSSL).
             em[..k].reverse();
 
-            if em[0] != 0x00 {
-                return Err(HsmError::RsaDecryptFailed);
-            }
+            let leading_byte_valid = tsra_fw_uno_pct::ct_eq(&em[..1], &[0x00]);
 
             // Recover seed: seed = maskedSeed XOR MGF(maskedDB, hLen)
             {
@@ -1047,19 +1058,27 @@ impl HsmRsa for UnoHsmPal {
                 .await?;
             let db_hash: &[u8] = &db[..h_len];
             let label_hash_slice: &[u8] = &label_hash[..h_len];
-            if db_hash != label_hash_slice {
+            let label_hash_valid = tsra_fw_uno_pct::ct_eq(db_hash, label_hash_slice);
+
+            // Validate every DB byte before selecting the first 0x01 separator.
+            let ps_and_m = &db[h_len..];
+            let mut separator = 0usize;
+            let mut found = 0u8;
+            let mut invalid_ps = 0u8;
+            for (offset, &byte) in ps_and_m.iter().enumerate() {
+                let is_zero = ct_is_zero(byte);
+                let is_one = ct_is_zero(byte ^ 0x01);
+                let before_separator = found ^ 1;
+                invalid_ps |= before_separator & (is_zero ^ 1) & (is_one ^ 1);
+                let take = before_separator & is_one;
+                separator |= offset & 0usize.wrapping_sub(take as usize);
+                found |= is_one;
+            }
+            if !(leading_byte_valid & label_hash_valid & (invalid_ps == 0) & (found == 1)) {
                 return Err(HsmError::RsaDecryptFailed);
             }
 
-            // Find 0x01 separator in DB after lHash
-            let ps_and_m = &db[h_len..];
-            let sep = ps_and_m.iter().position(|&b| b == 0x01);
-            let sep = match sep {
-                Some(s) if ps_and_m[..s].iter().all(|&b| b == 0x00) => s,
-                _ => return Err(HsmError::RsaDecryptFailed),
-            };
-
-            let m_start = h_len + sep + 1;
+            let m_start = h_len + separator + 1;
             let m_len = db_len - m_start;
             // Contract (matches the std PAL): a recovered message longer than
             // the caller's output buffer is a key/output-length error, reported

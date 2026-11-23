@@ -170,7 +170,7 @@ mod tests {
             key_label: b"imported-key".to_vec(),
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&KEY_CLASS_HMAC_SHA256),
             "encoded frame must carry the key-class discriminant",

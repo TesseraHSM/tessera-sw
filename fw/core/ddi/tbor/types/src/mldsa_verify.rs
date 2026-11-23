@@ -90,7 +90,7 @@ mod tests {
         let pub_key = [0x11u8; MLDSA_PUB_KEY_MAX_LEN];
         let mu = [0x55u8; MLDSA_MU_LEN];
         let signature = [0x33u8; MLDSA_SIGNATURE_MAX_LEN];
-        let frame = TborMlDsaVerifyReq::encode(&mut buf)
+        let frame = TborMlDsaVerifyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -104,15 +104,15 @@ mod tests {
         assert_eq!(frame.pub_key(), &pub_key[..]);
         assert_eq!(frame.mu(), &mu[..]);
         assert_eq!(frame.signature(), &signature[..]);
-        // header(8) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
-        assert_eq!(frame.len(), 7307);
+        // header(12) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
+        assert_eq!(frame.len(), 7311);
         assert_eq!(frame.len(), TborMlDsaVerifyReq::MAX_ENCODED_SIZE);
     }
 
     #[test]
     fn response_carries_no_payload() {
         let mut buf = [0u8; 512];
-        let _ = TborMlDsaVerifyResp::encode(&mut buf, 0, true)
+        let _ = TborMlDsaVerifyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .finish();
     }

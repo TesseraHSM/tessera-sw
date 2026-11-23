@@ -153,7 +153,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let secret = [0x11u8; CONCAT_MASKED_SECRET_MIN_LEN];
         let info = [0x22u8; 16];
-        let frame = TborConcatKdfDeriveReq::encode(&mut buf)
+        let frame = TborConcatKdfDeriveReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -182,7 +182,7 @@ mod tests {
     fn response_round_trips_masked_key() {
         let mut buf = [0u8; 512];
         let masked = [0x44u8; CONCAT_MASKED_KEY_MAX_LEN];
-        let frame = TborConcatKdfDeriveResp::encode(&mut buf, 0, false)
+        let frame = TborConcatKdfDeriveResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

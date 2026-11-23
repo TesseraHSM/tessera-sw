@@ -94,7 +94,7 @@ mod tests {
         ] {
             let mut buf = [0u8; 512];
             let msg = [0x61u8; 64];
-            let frame = TborHashReq::encode(&mut buf)
+            let frame = TborHashReq::encode(&mut buf, (1, 1))
                 .unwrap()
                 .session_id(SessionId(9))
                 .unwrap()
@@ -115,7 +115,7 @@ mod tests {
     fn response_round_trips_digest() {
         let mut buf = [0u8; 512];
         let digest = [0x5Au8; HASH_DIGEST_MAX_LEN];
-        let frame = TborHashResp::encode(&mut buf, 0, false)
+        let frame = TborHashResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .digest(&digest)
             .unwrap()

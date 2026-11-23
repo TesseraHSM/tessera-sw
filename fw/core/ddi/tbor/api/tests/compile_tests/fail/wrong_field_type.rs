@@ -10,7 +10,7 @@ pub struct TypeReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = TypeReq::encode(&mut buf).unwrap()
+    let _ = TypeReq::encode(&mut buf, (1, 1)).unwrap()
         .value("not a u8").unwrap() // ERROR: expected u8
         .finish();
 }

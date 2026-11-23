@@ -623,14 +623,17 @@ impl HsmSqe for DuoSqeEntry {
     fn session_id(&self) -> Option<u16> {
         let sqe = self.view();
         match sqe.op() {
-            Ok(DuoOp::TborSecure | DuoOp::FlushSession) => Some(sqe.session_id()),
+            Ok(DuoOp::Tbor | DuoOp::TborSecure | DuoOp::FlushSession) => Some(sqe.session_id()),
             _ => None,
         }
     }
 
     #[inline]
     fn session_ctrl(&self) -> HsmSessCtrl {
-        HsmSessCtrl::Unspecified
+        match self.view().op() {
+            Ok(DuoOp::Tbor) => HsmSessCtrl::NoSession,
+            _ => HsmSessCtrl::Unspecified,
+        }
     }
 }
 

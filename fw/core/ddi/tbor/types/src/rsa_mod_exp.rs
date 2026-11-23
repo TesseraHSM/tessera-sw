@@ -130,7 +130,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let masked = [0x11u8; RSA_MASKED_KEY_MIN_LEN];
         let y = [0x22u8; 256];
-        let frame = TborRsaModExpReq::encode(&mut buf)
+        let frame = TborRsaModExpReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -149,7 +149,7 @@ mod tests {
     fn response_round_trips_x() {
         let mut buf = [0u8; 1024];
         let x = [0x33u8; RSA_MOD_EXP_MAX_LEN];
-        let frame = TborRsaModExpResp::encode(&mut buf, 0, true)
+        let frame = TborRsaModExpResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .x(&x)
             .unwrap()

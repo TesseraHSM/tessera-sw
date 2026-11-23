@@ -98,13 +98,19 @@ fn on_struct(
 
     let encode_fn = match schema.kind {
         schema::MessageKind::Request { .. } => quote! {
-            pub fn encode<'a>(buf: &'a mut [u8]) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
-                #enc_name::new(buf)
+            pub fn encode<'a>(buf: &'a mut [u8], api_rev: (u16, u16)) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+                #enc_name::new(buf, api_rev)
             }
         },
         schema::MessageKind::Response => quote! {
-            pub fn encode<'a>(buf: &'a mut [u8], status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
-                #enc_name::new(buf, status, fips_approved)
+            pub fn encode<'a>(buf: &'a mut [u8], api_rev: (u16, u16), status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+                #enc_name::new(buf, api_rev, status, fips_approved)
+            }
+
+            /// Reuse request storage, echoing its API revision in the response.
+            pub fn encode_for_request<'a>(buf: &'a mut [u8], status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+                let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(buf)?;
+                #enc_name::new(buf, api_rev, status, fips_approved)
             }
         },
         schema::MessageKind::Fields => unreachable!(),

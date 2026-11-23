@@ -76,7 +76,8 @@ pub(crate) async fn handle<P: HsmPal>(
         }
 
         // Success carries no payload: the response exists only to say so.
-        let frame = TborMlDsaVerifyResp::encode(cmd_buf.buffer_mut(), 0, false)?.finish();
+        let frame =
+            TborMlDsaVerifyResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?.finish();
         Ok(frame.as_bytes().len())
     }
     .await

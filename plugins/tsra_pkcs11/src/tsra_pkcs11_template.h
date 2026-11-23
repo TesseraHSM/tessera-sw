@@ -15,11 +15,12 @@ extern "C"
 #endif
 
 /*
- * AES key-generation template handling and the per-mechanism cipher policy:
- * the CK_ATTRIBUTE and CK_MECHANISM logic the key-backed entry points run
- * before they touch the device or the object store. It depends on neither, so
- * it is unit-tested on its own (tests/aes_template_test.c) and reused by
- * tsra_pkcs11_crypt.c. Everything here speaks CK_RV only.
+ * AES key-generation template handling and the per-mechanism cipher and sign
+ * policy: the CK_ATTRIBUTE and CK_MECHANISM logic the key-backed entry points
+ * run before they touch the device or the object store. It depends on
+ * neither, so it is unit-tested on its own (tests/aes_template_test.c, the
+ * sign table in tests/ec_template_test.c) and reused by tsra_pkcs11_crypt.c
+ * and tsra_pkcs11_sign.c. Everything here speaks CK_RV only.
  */
 
 /* Supported AES key lengths (CKA_VALUE_LEN values). An XTS key is two AES-256
@@ -82,6 +83,21 @@ const CK_ATTRIBUTE *tsra_pkcs11_tmpl_find(
  * otherwise, including for a NULL attribute, value or `out`. */
 CK_RV tsra_pkcs11_tmpl_bool(const CK_ATTRIBUTE *a, CK_BBOOL *out);
 
+/* Read a CK_ULONG-wide attribute (CKA_CLASS, CKA_KEY_TYPE, ...) into *out; the
+ * value length must be exactly sizeof(CK_ULONG). CKR_ATTRIBUTE_VALUE_INVALID
+ * otherwise, including for a NULL attribute, value or `out`. */
+CK_RV tsra_pkcs11_tmpl_ulong(const CK_ATTRIBUTE *a, CK_ULONG *out);
+
+/* Append `a` to `full` at index *n (and advance *n) unless `tmpl`, the
+ * caller's template of `count` entries, already carries its type. */
+void tsra_pkcs11_tmpl_append(
+    CK_ATTRIBUTE *full,
+    CK_ULONG *n,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    CK_ATTRIBUTE a
+);
+
 /*
  * Validate an AES key-generation template for `mech` (CKM_AES_KEY_GEN or
  * CKM_AES_XTS_KEY_GEN), pick the key family it asks for (*policy), and
@@ -105,16 +121,19 @@ CK_RV tsra_pkcs11_tmpl_bool(const CK_ATTRIBUTE *a, CK_BBOOL *out);
  *                                 or naming any mechanism outside the family
  *                                 `mech` produces), CKA_SENSITIVE=FALSE,
  *                                 CKA_EXTRACTABLE=TRUE (device keys only ever
- *                                 exist masked), or key material (generated
- *                                 keys take none)
+ *                                 exist masked), key material (generated
+ *                                 keys take none), or CKA_TOKEN=TRUE with
+ *                                 CKA_PRIVATE=FALSE (the file store seals only
+ *                                 private records)
  *   CKR_ATTRIBUTE_READ_ONLY       an attribute only the token sets
  *                                 (tsra_pkcs11_attr_is_token_set)
  *   CKR_TEMPLATE_INCOMPLETE       no CKA_VALUE_LEN
  *   CKR_OK                        otherwise; unknown types are accepted and
  *                                 later stored verbatim
  * Attribute shapes are checked in template order and the first failure wins;
- * the checks that depend on the family (it can be named by an attribute later
- * in the template) run after that pass.
+ * the checks that combine attributes (CKA_TOKEN with CKA_PRIVATE, and the
+ * family, which an attribute later in the template can name) run after that
+ * pass.
  */
 CK_RV tsra_pkcs11_keygen_check_template(
     CK_MECHANISM_TYPE mech,
@@ -189,6 +208,23 @@ typedef struct
 /* The table entry for `mech`, or NULL for any mechanism this token cannot run
  * through C_Encrypt/C_Decrypt. */
 const tsra_pkcs11_cipher_mech *tsra_pkcs11_cipher_mech_find(CK_MECHANISM_TYPE mech);
+
+/*
+ * The sign and verify mechanisms and what each needs from a key. A mechanism
+ * that hashes the message streams through the SDK (C_SignUpdate and
+ * C_VerifyUpdate); one over a hash the caller computed is one-shot only,
+ * because the SDK has no stream for it.
+ */
+typedef struct
+{
+    CK_MECHANISM_TYPE mech;
+    CK_KEY_TYPE key_type;
+    bool multipart;
+} tsra_pkcs11_sign_mech;
+
+/* The table entry for `mech`, or NULL for any mechanism this token cannot run
+ * through C_Sign/C_Verify. */
+const tsra_pkcs11_sign_mech *tsra_pkcs11_sign_mech_find(CK_MECHANISM_TYPE mech);
 
 /*
  * Whether a key may run `mech`, given how reading its CKA_ALLOWED_MECHANISMS

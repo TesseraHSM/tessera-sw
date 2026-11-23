@@ -71,6 +71,10 @@ impl Device {
     pub(crate) async fn part_disable(&self, pid: u8) -> Result<(), String> {
         forward!(self, hsm => hsm.part_disable(pid).await)
     }
+
+    pub(crate) async fn part_free(&self, pid: u8) -> Result<(), String> {
+        forward!(self, hsm => hsm.part_free(pid).await)
+    }
 }
 
 #[cfg(test)]

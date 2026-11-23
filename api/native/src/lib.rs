@@ -602,38 +602,16 @@ impl<'a> TryFrom<&'a mut TsraKeyProp> for &'a mut [u8] {
     }
 }
 
-type TsraSessionExType = shared_types::HsmSessionExType;
+type TsraSessionSuite = shared_types::HsmSessionSuite;
 
-impl TryFrom<u32> for TsraSessionExType {
-    type Error = TsraStatus;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(TsraSessionExType::PlainText),
-            1 => Ok(TsraSessionExType::Authenticated),
-            _ => Err(TsraStatus::InvalidArgument),
-        }
-    }
-}
-
-impl From<api::HsmSessionExType> for TsraSessionExType {
-    /// Converts an `api::HsmSessionExType` into an `TsraSessionExType`.
+impl From<TsraSessionSuite> for api::HsmSessionSuite {
+    /// Converts a `TsraSessionSuite` into an `api::HsmSessionSuite`.
     ///
     /// Both types are `#[open_enum]` wrappers over a `u32`, so the
     /// conversion copies the underlying discriminant directly and never
-    /// relies on layout assumptions.
-    fn from(session_type: api::HsmSessionExType) -> Self {
-        shared_types::HsmSessionExType(session_type.0)
-    }
-}
-
-impl From<TsraSessionExType> for api::HsmSessionExType {
-    /// Converts an `TsraSessionExType` into an `api::HsmSessionExType`.
-    ///
-    /// Both types are `#[open_enum]` wrappers over a `u32`, so the
-    /// conversion copies the underlying discriminant directly and never
-    /// relies on layout assumptions.
-    fn from(session_type: TsraSessionExType) -> Self {
-        api::HsmSessionExType(session_type.0)
+    /// relies on layout assumptions. Unknown values are rejected by
+    /// `open_session_ex`.
+    fn from(suite: TsraSessionSuite) -> Self {
+        api::HsmSessionSuite(suite.0)
     }
 }

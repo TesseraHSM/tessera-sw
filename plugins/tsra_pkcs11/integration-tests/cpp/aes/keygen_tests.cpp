@@ -230,6 +230,41 @@ TEST_F(aes_keygen, token_object_needs_a_read_write_session)
     EXPECT_CKR_OK(p11()->C_CloseSession(ro));
 }
 
+TEST_F(aes_keygen, a_token_key_must_be_private)
+{
+    // The file store authenticates only private records, and a key's record
+    // holds its masked blob and the attributes that limit it.
+    const char label[] = "token-key-public";
+    CK_ATTRIBUTE by_label = { CKA_LABEL, const_cast<char *>(label), sizeof(label) - 1 };
+    auto count_labelled = [this, &by_label](CK_ULONG *n) {
+        CK_OBJECT_HANDLE found[2];
+        ASSERT_CKR_OK(p11()->C_FindObjectsInit(s_, &by_label, 1));
+        ASSERT_CKR_OK(p11()->C_FindObjects(s_, found, 2, n));
+        ASSERT_CKR_OK(p11()->C_FindObjectsFinal(s_));
+    };
+    CK_OBJECT_HANDLE key = CK_INVALID_HANDLE;
+    ASSERT_CKR_OK(gen_family_key(s_, CKM_AES_CBC, CK_FALSE, CK_FALSE, label, &key))
+        << "a session key may be public";
+    CK_ULONG n = 0;
+    ASSERT_NO_FATAL_FAILURE(count_labelled(&n));
+    ASSERT_EQ(1u, n) << "the search finds the session key";
+    CK_BYTE iv[kAesBlock] = { 0 };
+    CK_MECHANISM cbc = { CKM_AES_CBC, iv, sizeof(iv) };
+    std::vector<CK_BYTE> ct;
+    EXPECT_CKR_OK(crypt_oneshot(s_, true, &cbc, key, pattern(kAesBlock), ct))
+        << "a public session key encrypts";
+    ASSERT_CKR_OK(p11()->C_DestroyObject(s_, key));
+
+    key = CK_INVALID_HANDLE;
+    EXPECT_CKR(
+        CKR_TEMPLATE_INCONSISTENT,
+        gen_family_key(s_, CKM_AES_CBC, CK_TRUE, CK_FALSE, label, &key)
+    ) << "a token secret key must be private";
+    EXPECT_EQ(CK_INVALID_HANDLE, key);
+    ASSERT_NO_FATAL_FAILURE(count_labelled(&n));
+    EXPECT_EQ(0u, n) << "nothing was created";
+}
+
 TEST_F(aes_keygen, generates_all_three_key_sizes)
 {
     for (CK_ULONG bytes : { 16ul, 24ul, 32ul })

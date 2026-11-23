@@ -95,7 +95,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked_tmk = [0x5Au8; MASKED_TMK_LEN];
         let masked_key = [0xA5u8; 120];
-        let frame = TborDarcKeyWrapReq::encode(&mut buf)
+        let frame = TborDarcKeyWrapReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -113,7 +113,7 @@ mod tests {
     fn response_round_trips_fields() {
         let mut buf = [0u8; 1024];
         let wrapped = [0xCDu8; 240];
-        let frame = TborDarcKeyWrapResp::encode(&mut buf, 0, false)
+        let frame = TborDarcKeyWrapResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .wrapped_key(&wrapped)
             .unwrap()
