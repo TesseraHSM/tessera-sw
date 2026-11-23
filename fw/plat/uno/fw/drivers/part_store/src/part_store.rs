@@ -306,8 +306,9 @@ pub struct PinPolicy {
 
 // ── On-storage sub-structs (crate-private; mirror reference layout) ───────
 
-/// Partition identity: random id, identity private key (reserved/unused on
-/// Uno — the private key lives in the vault), and reserved public-key space.
+/// Partition identity: random id, identity private key (the persistent copy;
+/// the vault holds a re-importable working copy), and reserved public-key
+/// space.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PartitionIdentifier {
@@ -627,15 +628,16 @@ impl Partition {
         slot.unwrapping_key_id = absent;
     }
 
-    /// Zeroes the provisioned identity and drops its key handle.
+    /// Zeroes the provisioned identity (id and private key), clears its
+    /// valid flag, and drops its key handle.
     #[inline(never)]
     pub fn clear_identity(mut self) {
         self.id_mut().fill(0);
         self.set_id_key_id(None);
-        self.slot_mut()
-            .partition_identifier
-            .reserved_pub_key
-            .fill(0);
+        let slot = self.slot_mut();
+        slot.partition_identifier.priv_key.fill(0);
+        slot.partition_identifier.reserved_pub_key.fill(0);
+        slot.partition_id_valid = false;
     }
 
     /// Zeroes the enable-time keys: the establish-credential and
@@ -822,10 +824,37 @@ impl Partition {
         Ok(())
     }
 
-    /// Whether the partition identity has been provisioned.
+    /// Whether the partition identity (id and private key) is stored. Set
+    /// at allocation and kept across Disable/Enable and warm reset; cleared
+    /// only by [`clear_identity`](Self::clear_identity).
     #[inline(never)]
     pub fn id_valid(self) -> bool {
         self.slot().partition_id_valid
+    }
+
+    /// Borrows the stored 48-byte identity private key.
+    #[inline(never)]
+    pub fn id_priv_key(self) -> &'static HsmDmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { HsmDmaBuf::from_raw(&self.slot().partition_identifier.priv_key) }
+    }
+
+    /// Stores the 48-byte identity private key.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `ID_PRIV_LEN` bytes.
+    #[inline(never)]
+    pub fn set_id_priv_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != ID_PRIV_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut()
+            .partition_identifier
+            .priv_key
+            .copy_from_slice(src);
+        Ok(())
     }
 
     /// Sets the partition-identity-valid flag.
@@ -1187,17 +1216,13 @@ impl Partition {
         )
     }
 
-    /// Sets (or clears, with `None`) the identity key handle.
-    ///
-    /// Keeps `partition_id_valid` in sync with handle presence: the PAL
-    /// gates identity-property access on `id_key_id().is_some()`, so the
-    /// stored validity flag tracks the same "identity provisioned" state
-    /// (set on provisioning, cleared on `clear_identity` / free).
+    /// Sets (or clears, with `None`) the identity key handle: the vault
+    /// working copy of the stored identity key. Clearing it leaves the stored
+    /// identity and [`id_valid`](Self::id_valid) intact, so the key can be
+    /// re-imported.
     #[inline(never)]
     pub fn set_id_key_id(mut self, key: Option<HsmKeyId>) {
-        let slot = self.slot_mut();
-        slot.id_key_id = write_handle(key);
-        slot.partition_id_valid = key.is_some();
+        self.slot_mut().id_key_id = write_handle(key);
     }
 
     /// Reads the establish-credential key handle.

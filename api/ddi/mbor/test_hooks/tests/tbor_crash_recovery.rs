@@ -119,6 +119,7 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
     let pota = PotaFixture::generate();
     let co = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     provision_partition(&ctx, &co, &pota, "before crash");
+    let before = part_info(&ctx, "before crash");
     ctx.session_close(co.session_id)
         .unwrap_or_else(|e| panic!("before crash: CO session close failed: {e:?}"));
     let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
@@ -151,11 +152,19 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
     println!("Close of pre-crash CU session after recovery: {close:?}");
 
     // After the host's recovery (Disable then Enable) the partition must be
-    // back to Enabled, ready to be provisioned again.
+    // back to Enabled, ready to be provisioned again, with its identity kept.
+    let after = part_info(&ctx, "after recovery");
     assert_eq!(
-        part_info(&ctx, "after recovery").part_state,
-        PART_STATE_ENABLED,
+        after.part_state, PART_STATE_ENABLED,
         "after recovery: partition must be Enabled for re-provisioning",
+    );
+    assert_eq!(
+        after.pid, before.pid,
+        "after recovery: partition ID must be unchanged"
+    );
+    assert_eq!(
+        after.pid_pub_key, before.pid_pub_key,
+        "after recovery: partition identity key must be unchanged",
     );
     ctx.cert_chain_info()
         .unwrap_or_else(|e| panic!("after recovery: GetCertChainInfo failed: {e:?}"));
