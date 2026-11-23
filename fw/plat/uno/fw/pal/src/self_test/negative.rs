@@ -9,6 +9,10 @@
 //! the SP pre-operational marker. The HSM writes HSM IDs for periodic
 //! requests. Each core clears only IDs of the self-tests it runs, so the HSM
 //! never touches an Admin ID.
+//!
+//! IDs 0-4 select the AES XTS (0, 1) and GCM (2-4) self-tests. With
+//! `bulk_crypto` Admin runs them on the FP cores; otherwise the HSM serves
+//! bulk IOs on the BCP and one HSM KAT covers each group of IDs.
 
 #[cfg(feature = "fips_validation_hooks")]
 use core::sync::atomic::Ordering;
@@ -35,7 +39,13 @@ pub(crate) enum NegativeTarget {
 
 pub(crate) fn classify(id: u32) -> HsmResult<NegativeTarget> {
     Ok(match id {
-        0..=4 | 6 | 7 => NegativeTarget::Admin,
+        #[cfg(feature = "bulk_crypto")]
+        0..=4 => NegativeTarget::Admin,
+        #[cfg(not(feature = "bulk_crypto"))]
+        0 | 1 => NegativeTarget::Hsm(SelfTest::BulkAesXts),
+        #[cfg(not(feature = "bulk_crypto"))]
+        2..=4 => NegativeTarget::Hsm(SelfTest::BulkAesGcm),
+        6 | 7 => NegativeTarget::Admin,
         5 => NegativeTarget::Hsm(SelfTest::AesCbc),
         8 => NegativeTarget::Hsm(SelfTest::Rng),
         9..=72 => {
@@ -56,9 +66,16 @@ pub(crate) fn classify(id: u32) -> HsmResult<NegativeTarget> {
     })
 }
 
+/// Returns the ID the HSM writes to select `test`.
+///
+/// A KAT selected by several IDs uses the lowest of them.
 #[cfg(any(test, feature = "fips_validation_hooks"))]
 fn test_id(test: SelfTest) -> u32 {
     match test {
+        #[cfg(not(feature = "bulk_crypto"))]
+        SelfTest::BulkAesXts => 0,
+        #[cfg(not(feature = "bulk_crypto"))]
+        SelfTest::BulkAesGcm => 2,
         SelfTest::AesCbc => 5,
         SelfTest::Rng => 8,
         SelfTest::Ecdh(n) => 9 + 4 * u32::from(n),
@@ -134,15 +151,47 @@ pub(super) fn take_negative_self_test(test: SelfTest) -> HsmResult<bool> {
 mod tests {
     use super::*;
 
+    fn is_admin_id(id: u32) -> bool {
+        matches!(id, 6 | 7) || (cfg!(feature = "bulk_crypto") && id <= 4)
+    }
+
     #[test]
-    fn selection_ids_map_to_distinct_kats() {
+    fn selection_ids_map_to_kats() {
         for id in 0..=76 {
             match classify(id).unwrap() {
-                NegativeTarget::Admin => assert!(matches!(id, 0..=4 | 6 | 7)),
-                NegativeTarget::Hsm(test) => assert_eq!(test_id(test), id),
+                NegativeTarget::Admin => assert!(is_admin_id(id)),
+                NegativeTarget::Hsm(test) => {
+                    assert!(!is_admin_id(id));
+                    // Staging the KAT re-selects the same KAT.
+                    assert!(matches!(
+                        classify(test_id(test)),
+                        Ok(NegativeTarget::Hsm(t)) if t == test
+                    ));
+                    // Outside the bulk AES groups each ID selects its own KAT.
+                    if id > 4 {
+                        assert_eq!(test_id(test), id);
+                    }
+                }
             }
         }
         assert!(classify(77).is_err());
         assert!(classify(NO_NEGATIVE_SELF_TEST).is_err());
+    }
+
+    #[cfg(not(feature = "bulk_crypto"))]
+    #[test]
+    fn bulk_aes_ids_select_hsm_bulk_kats() {
+        for id in 0..=1 {
+            assert!(matches!(
+                classify(id),
+                Ok(NegativeTarget::Hsm(SelfTest::BulkAesXts))
+            ));
+        }
+        for id in 2..=4 {
+            assert!(matches!(
+                classify(id),
+                Ok(NegativeTarget::Hsm(SelfTest::BulkAesGcm))
+            ));
+        }
     }
 }

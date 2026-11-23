@@ -6,8 +6,9 @@
 //!
 //! Set `TSRA_NEGATIVE_TEST_ID` to the self-test ID to fail; the test is
 //! skipped when it is not set. The firmware accepts the request and runs that
-//! periodic self-test shortly afterwards. Test IDs 0-4, 6 and 7 run on
-//! Admin/FP; all other IDs run on the HSM.
+//! periodic self-test shortly afterwards. Test IDs 6 and 7 run on Admin.
+//! IDs 0-4 (AES XTS/GCM) run on Admin/FP when the firmware is built with
+//! `bulk_crypto` and on the HSM otherwise. All other IDs run on the HSM.
 //!
 //! Behaviour on this firmware:
 //! - Requires a **physical** device; virtual/mock devices are skipped.

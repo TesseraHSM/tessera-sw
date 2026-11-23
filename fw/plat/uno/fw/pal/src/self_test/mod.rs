@@ -298,9 +298,9 @@ impl SelfTest {
             Self::Hkdf => kdf::run_hkdf(pal, io, inject).await,
             Self::Kbkdf => kdf::run_kbkdf(pal, io, inject).await,
             #[cfg(not(feature = "bulk_crypto"))]
-            Self::BulkAesGcm => bulk::run_aes_gcm(pal, io).await,
+            Self::BulkAesGcm => bulk::run_aes_gcm(pal, io, inject).await,
             #[cfg(not(feature = "bulk_crypto"))]
-            Self::BulkAesXts => bulk::run_aes_xts(pal, io).await,
+            Self::BulkAesXts => bulk::run_aes_xts(pal, io, inject).await,
             Self::RsaModExp(e) => pka::run_rsa_mod_exp_on_engine(pal, io, e, inject).await,
             Self::RsaModExpCrt(e) => pka::run_rsa_mod_exp_crt_on_engine(pal, io, e, inject).await,
             Self::Ecdh(e) => pka::run_ecdh_on_engine(pal, io, e, inject).await,
