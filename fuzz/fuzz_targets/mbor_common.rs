@@ -5,6 +5,10 @@
 
 #![allow(dead_code)]
 
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
 use ddi_sock_server as _;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
@@ -44,6 +48,24 @@ pub enum HmacKeyType {
     VarHmac256(u8),
     VarHmac384(u8),
     VarHmac512(u8),
+}
+
+static DEVICE_DISPLAY: std::sync::Once = std::sync::Once::new();
+
+pub fn common_fuzz_test(test: impl FnOnce(&mut Dev)) {
+    let ddi = DdiTest::default();
+    let dev_infos = ddi.dev_info_list();
+    let path = std::env::var("FUZZ_DEVICE")
+        .unwrap_or_else(|_| dev_infos.first().expect("No devices found").path.clone());
+    DEVICE_DISPLAY.call_once(|| {
+        for dev_info in &dev_infos {
+            println!("Found device: {}", dev_info.path);
+        }
+        println!("Selected device: {}", path);
+    });
+    let mut dev = ddi.open_dev(&path).expect("Failed to open device");
+    cleanup(&ddi, &path, None);
+    test(&mut dev);
 }
 
 pub fn cleanup(ddi: &DdiTest, path: &str, session: Option<u16>) {
@@ -148,8 +170,26 @@ pub fn import_rsa_key(
     availability: DdiKeyAvailability,
     rev: Option<DdiApiRev>,
     bits: u16,
+    usage: DdiKeyUsage,
 ) -> Result<u16, DdiError> {
-    let unwrapping = helper_get_unwrapping_key(dev, Some(session), rev)?;
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    let interval = Duration::from_secs(5);
+    let unwrapping = loop {
+        match helper_get_unwrapping_key(dev, Some(session), rev) {
+            Ok(resp) => break resp,
+            Err(err @ DdiError::DdiStatus(DdiStatus::PendingKeyGeneration)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(err);
+                }
+                thread::sleep(interval.min(remaining));
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    };
     let key = RsaPrivateKey::generate(usize::from(bits) / 8).expect("Failed to generate RSA key");
     let key_bytes = key.to_vec().expect("Failed to export RSA key");
     let wrapped = wrap_data(unwrapping.data.pub_key.der.as_slice(), &key_bytes)
@@ -163,7 +203,7 @@ pub fn import_rsa_key(
         DdiKeyClass::Rsa,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        helper_key_properties(DdiKeyUsage::SignVerify, availability),
+        helper_key_properties(usage, availability),
     )
     .map(|resp| resp.data.key_id)
 }
@@ -175,11 +215,11 @@ pub fn create_secret_key(
     curve: DdiEccCurve,
     availability: DdiKeyAvailability,
 ) -> Result<u16, DdiError> {
-    let secret_type = match curve {
-        DdiEccCurve::P256 => DdiKeyType::Secret256,
-        DdiEccCurve::P384 => DdiKeyType::Secret384,
-        DdiEccCurve::P521 => DdiKeyType::Secret521,
-        _ => return Err(DdiError::InvalidParameter),
+    let (curve, secret_type) = match curve {
+        DdiEccCurve::P256 => (DdiEccCurve::P256, DdiKeyType::Secret256),
+        DdiEccCurve::P384 => (DdiEccCurve::P384, DdiKeyType::Secret384),
+        DdiEccCurve::P521 => (DdiEccCurve::P521, DdiKeyType::Secret521),
+        _ => (DdiEccCurve::P256, DdiKeyType::Secret256),
     };
     let properties = helper_key_properties(DdiKeyUsage::Derive, availability);
     let first = helper_ecc_generate_key_pair(dev, Some(session), rev, curve, properties)?;
@@ -223,7 +263,13 @@ pub fn helper_create_hmac_key(
         Some(session),
         rev,
         secret,
-        hash,
+        match hash {
+            DdiHashAlgorithm::Sha1
+            | DdiHashAlgorithm::Sha256
+            | DdiHashAlgorithm::Sha384
+            | DdiHashAlgorithm::Sha512 => hash,
+            _ => DdiHashAlgorithm::Sha256,
+        },
         None,
         None,
         key_type,
@@ -245,6 +291,8 @@ fn check_driver_failure(err: &DdiError) {
     match err {
         DdiError::DriverError(_)
         | DdiError::DdiError(_)
+        | DdiError::DdiDecodingFault(_)
+        | DdiError::MborError(MborError::DecodeError)
         | DdiError::IoError(_)
         | DdiError::DeviceNotFound
         | DdiError::DeviceNotReady

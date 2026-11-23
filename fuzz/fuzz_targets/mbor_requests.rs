@@ -15,9 +15,78 @@ use tsra_ddi::Ddi;
 use tsra_ddi::DdiDev;
 use tsra_ddi::DdiError;
 use tsra_ddi::TsraDdi;
+use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_types::*;
 
 const REQUEST_BUFFER_SIZE: usize = 16 * 1024;
+
+// Keep bounded generation local to fuzzing, including nested and optional arrays.
+pub trait BoundedArbitrary: Sized {
+    fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self>;
+}
+
+// Unlike #[arbitrary(with)], this does not impose size_of::<T>() as a minimum input size.
+#[derive(Debug)]
+pub struct Bounded<T>(pub T);
+
+impl<'a, T: BoundedArbitrary> Arbitrary<'a> for Bounded<T> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        T::bounded_arbitrary(u).map(Self)
+    }
+}
+
+impl<const N: usize> BoundedArbitrary for MborByteArray<N> {
+    fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(0..=N)?;
+        Self::from_slice(u.bytes(len)?).map_err(|_| arbitrary::Error::IncorrectFormat)
+    }
+}
+
+impl<T: BoundedArbitrary> BoundedArbitrary for Option<T> {
+    fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Some(T::bounded_arbitrary(u)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl BoundedArbitrary for DdiRsaOpType {
+    fn bounded_arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        match u.int_in_range(0..=2)? {
+            0 => Ok(Self::Sign),
+            1 => Ok(Self::Decrypt),
+            _ => Ok(Self(u.arbitrary()?)),
+        }
+    }
+}
+
+macro_rules! bounded_structs {
+    ($($ty:ident { $($field:ident $(=> $generator:ident)?),* $(,)? }),* $(,)?) => {
+        $(impl BoundedArbitrary for $ty {
+            fn bounded_arbitrary(_u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+                Ok(Self {
+                    $($field: bounded_structs!(@field _u $(, $generator)?)),*
+                })
+            }
+        })*
+    };
+    (@field $u:ident) => { $u.arbitrary()? };
+    (@field $u:ident, bounded) => { BoundedArbitrary::bounded_arbitrary($u)? };
+}
+
+bounded_structs! {
+    DdiDerPublicKey { der => bounded, key_kind },
+    DdiTargetKeyProperties { key_metadata, key_label => bounded },
+    DdiEncryptedEstablishCredential {
+        encrypted_id => bounded, encrypted_pin => bounded, iv => bounded, nonce, tag,
+    },
+    DdiEncryptedSessionCredential {
+        encrypted_id => bounded, encrypted_pin => bounded, encrypted_seed => bounded,
+        iv => bounded, nonce, tag,
+    },
+}
 
 pub struct RequestBuffers {
     input: [u8; REQUEST_BUFFER_SIZE],
@@ -34,7 +103,12 @@ impl Default for RequestBuffers {
 }
 
 macro_rules! requests {
-    ($($op:ident => ($request:ty, $command:ident)),+ $(,)?) => {
+    ($($op:ident => ($request:ident, $command:ident)
+        { $($field:ident $(=> $generator:ident)?),* $(,)? }),+ $(,)?) => {
+        bounded_structs! {
+            $($request { $($field $(=> $generator)?),* }),+
+        }
+
         #[derive(Arbitrary, Debug, Clone, Copy)]
         pub enum TestDdiReqs {
             $($op),+
@@ -79,7 +153,7 @@ macro_rules! requests {
                 let mut input = Unstructured::new(&buffers.input);
                 match self {
                     $(Self::$op => {
-                        let data = <$request>::arbitrary(&mut input)
+                        let data = <$request>::bounded_arbitrary(&mut input)
                             .map_err(|err| err.to_string())?;
                         if valid_header {
                             header.op = DdiOp::$op;
@@ -103,12 +177,13 @@ macro_rules! requests {
                 let mut input = Unstructured::new(&buffers.input);
                 match self {
                     $(Self::$op => {
-                        let Ok(data) = <$request>::arbitrary(&mut input) else {
+                        let Ok(data) = <$request>::bounded_arbitrary(&mut input) else {
                             return Ok(());
                         };
                         if valid_header {
                             header.op = DdiOp::$op;
                         }
+
                         let mut resp = None;
                         dev.exec_op_mbor(
                             &$command { hdr: header, data, ext: None },
@@ -118,33 +193,74 @@ macro_rules! requests {
                 }
             }
         }
+
+        #[cfg(test)]
+        #[test]
+        fn seeded_requests_generate_without_rejection() {
+            let mut buffers = RequestBuffers::default();
+            for seed in 0..64 {
+                StdRng::seed_from_u64(seed).fill_bytes(&mut buffers.input);
+                $(
+                    let mut input = Unstructured::new(&buffers.input);
+                    <$request>::bounded_arbitrary(&mut input)
+                        .expect(concat!("Failed to generate ", stringify!($request)));
+                )+
+            }
+        }
     };
 }
 
 requests! {
-    GetApiRev => (DdiGetApiRevReq, DdiGetApiRevCmdReq),
-    GetDeviceInfo => (DdiGetDeviceInfoReq, DdiGetDeviceInfoCmdReq),
-    GetCertChainInfo => (DdiGetCertChainInfoReq, DdiGetCertChainInfoCmdReq),
-    GetCertificate => (DdiGetCertificateReq, DdiGetCertificateCmdReq),
-    GetEstablishCredEncryptionKey => (DdiGetEstablishCredEncryptionKeyReq, DdiGetEstablishCredEncryptionKeyCmdReq),
-    EstablishCredential => (DdiEstablishCredentialReq, DdiEstablishCredentialCmdReq),
-    GetSessionEncryptionKey => (DdiGetSessionEncryptionKeyReq, DdiGetSessionEncryptionKeyCmdReq),
-    OpenSession => (DdiOpenSessionReq, DdiOpenSessionCmdReq),
-    CloseSession => (DdiCloseSessionReq, DdiCloseSessionCmdReq),
-    InitBk3 => (DdiInitBk3Req, DdiInitBk3CmdReq),
-    GetUnwrappingKey => (DdiGetUnwrappingKeyReq, DdiGetUnwrappingKeyCmdReq),
-    DeleteKey => (DdiDeleteKeyReq, DdiDeleteKeyCmdReq),
-    EccGenerateKeyPair => (DdiEccGenerateKeyPairReq, DdiEccGenerateKeyPairCmdReq),
-    EccSign => (DdiEccSignReq, DdiEccSignCmdReq),
-    EcdhKeyExchange => (DdiEcdhKeyExchangeReq, DdiEcdhKeyExchangeCmdReq),
-    AesGenerateKey => (DdiAesGenerateKeyReq, DdiAesGenerateKeyCmdReq),
-    AesEncryptDecrypt => (DdiAesEncryptDecryptReq, DdiAesEncryptDecryptCmdReq),
-    Hmac => (DdiHmacReq, DdiHmacCmdReq),
-    HkdfDerive => (DdiHkdfDeriveReq, DdiHkdfDeriveCmdReq),
-    KbkdfCounterHmacDerive => (DdiKbkdfCounterHmacDeriveReq, DdiKbkdfCounterHmacDeriveCmdReq),
-    RsaUnwrap => (DdiRsaUnwrapReq, DdiRsaUnwrapCmdReq),
-    RsaModExp => (DdiRsaModExpReq, DdiRsaModExpCmdReq),
-    AttestKey => (DdiAttestKeyReq, DdiAttestKeyCmdReq),
+    GetApiRev => (DdiGetApiRevReq, DdiGetApiRevCmdReq) {},
+    GetDeviceInfo => (DdiGetDeviceInfoReq, DdiGetDeviceInfoCmdReq) {},
+    GetCertChainInfo => (DdiGetCertChainInfoReq, DdiGetCertChainInfoCmdReq) { slot_id },
+    GetCertificate => (DdiGetCertificateReq, DdiGetCertificateCmdReq) { slot_id, cert_id },
+    GetEstablishCredEncryptionKey => (DdiGetEstablishCredEncryptionKeyReq, DdiGetEstablishCredEncryptionKeyCmdReq) {},
+    EstablishCredential => (DdiEstablishCredentialReq, DdiEstablishCredentialCmdReq) {
+        encrypted_credential => bounded, pub_key => bounded, masked_bk3 => bounded,
+        bmk => bounded, masked_unwrapping_key => bounded, pota_sig => bounded,
+        pota_pub_key => bounded,
+    },
+    GetSessionEncryptionKey => (DdiGetSessionEncryptionKeyReq, DdiGetSessionEncryptionKeyCmdReq) {},
+    OpenSession => (DdiOpenSessionReq, DdiOpenSessionCmdReq) {
+        encrypted_credential => bounded, pub_key => bounded,
+    },
+    CloseSession => (DdiCloseSessionReq, DdiCloseSessionCmdReq) {},
+    InitBk3 => (DdiInitBk3Req, DdiInitBk3CmdReq) { bk3 => bounded },
+    GetUnwrappingKey => (DdiGetUnwrappingKeyReq, DdiGetUnwrappingKeyCmdReq) {},
+    DeleteKey => (DdiDeleteKeyReq, DdiDeleteKeyCmdReq) { key_id },
+    EccGenerateKeyPair => (DdiEccGenerateKeyPairReq, DdiEccGenerateKeyPairCmdReq) {
+        curve, key_tag, key_properties => bounded,
+    },
+    EccSign => (DdiEccSignReq, DdiEccSignCmdReq) {
+        key_id, digest => bounded, digest_algo,
+    },
+    EcdhKeyExchange => (DdiEcdhKeyExchangeReq, DdiEcdhKeyExchangeCmdReq) {
+        priv_key_id, pub_key_der => bounded, key_type, key_tag, key_properties => bounded,
+    },
+    AesGenerateKey => (DdiAesGenerateKeyReq, DdiAesGenerateKeyCmdReq) {
+        key_size, key_tag, key_properties => bounded,
+    },
+    AesEncryptDecrypt => (DdiAesEncryptDecryptReq, DdiAesEncryptDecryptCmdReq) {
+        key_id, op, msg => bounded, iv => bounded,
+    },
+    Hmac => (DdiHmacReq, DdiHmacCmdReq) { key_id, msg => bounded },
+    HkdfDerive => (DdiHkdfDeriveReq, DdiHkdfDeriveCmdReq) {
+        key_id, hash_algorithm, salt => bounded, info => bounded, key_type, key_tag,
+        key_properties => bounded, key_length,
+    },
+    KbkdfCounterHmacDerive => (DdiKbkdfCounterHmacDeriveReq, DdiKbkdfCounterHmacDeriveCmdReq) {
+        key_id, hash_algorithm, label => bounded, context => bounded, key_type, key_tag,
+        key_properties => bounded, key_length,
+    },
+    RsaUnwrap => (DdiRsaUnwrapReq, DdiRsaUnwrapCmdReq) {
+        key_id, wrapped_blob => bounded, wrapped_blob_key_class, wrapped_blob_padding,
+        wrapped_blob_hash_algorithm, key_tag, key_properties => bounded,
+    },
+    RsaModExp => (DdiRsaModExpReq, DdiRsaModExpCmdReq) {
+        key_id, y => bounded, op_type => bounded,
+    },
+    AttestKey => (DdiAttestKeyReq, DdiAttestKeyCmdReq) { key_id, report_data => bounded },
 }
 
 pub fn generate_random_testddireqs_list(count: usize, seed: u64) -> Vec<TestDdiReqs> {

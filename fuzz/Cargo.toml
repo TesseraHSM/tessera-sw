@@ -10,6 +10,7 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary.workspace = true
 ddi_sock_server = { path = "../ddi/sock/server" }
 rand.workspace = true
 tokio = { features = ["rt-multi-thread", "time"], workspace = true }
@@ -38,6 +39,10 @@ minicbor = "0.19.1"
 default = []
 # Fuzz against an in-process simulated HSM reached over the sock transport.
 autostart-isolated = ["ddi_sock_server/autostart-isolated"]
+
+[lib]
+doctest = false
+path = "fuzz_targets/mbor_requests.rs"
 
 [[bin]]
 bench = false
@@ -415,4 +420,74 @@ bench = false
 doc = false
 name = "fuzz_tbor_rsa_encrypt_decrypt"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_encrypt_decrypt.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_dispatcher_aes_fp"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher_aes_fp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_dispatcher"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_dispatcher.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_ecc_sign"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecc_sign.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_ecdh_key_exchange"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_ecdh_key_exchange.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_rsa_unwrap"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_unwrap.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_establish_credential"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_establish_credential.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_hkdf"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_hkdf.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_hmac"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_hmac.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_kbkdf"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_kbkdf.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_mbor_rsa_mod_exp"
+path = "fuzz_targets/ddi/mbor/fuzz_mbor_rsa_mod_exp.rs"
 test = false
