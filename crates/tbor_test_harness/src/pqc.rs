@@ -102,7 +102,7 @@ pub const ML_KEM_1024: MlKemParams = MlKemParams {
 
 /// Host-DMA page size. A response is carried to the host as a PRP pair of
 /// 4 KiB pages.
-const HOST_PAGE: usize = 4096;
+pub const HOST_PAGE: usize = 4096;
 
 /// Fail if a response field that crosses the 4 KiB host-DMA page boundary
 /// is all zeroes past it.

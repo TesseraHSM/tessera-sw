@@ -30,7 +30,6 @@ const PARAMS: [&MlDsaParams; PARAMETER_SET_COUNT] = [&ML_DSA_44, &ML_DSA_65, &ML
 const LENGTH_NEIGHBOR_COUNT: usize = 3;
 const LENGTH_EXTRA_CHOICES: usize = 3;
 const OVERSIZE_LENGTH_CHOICES: usize = 2;
-const HOST_PAGE_SIZE: usize = 4096;
 const MUTATION_MODE_COUNT: u8 = 6;
 const MUTATION_ZERO: u8 = 2;
 const MUTATION_FILL: u8 = 3;
@@ -274,9 +273,9 @@ fn mutate_contents(buf: &mut [u8], mode: u8, input: &FuzzInput) {
             let offset = match input.offset % OFFSET_MODE_COUNT {
                 0 => 0,
                 1 => buf.len() - 1,
-                OFFSET_BEFORE_PAGE => HOST_PAGE_SIZE - 1,
-                OFFSET_AT_PAGE => HOST_PAGE_SIZE,
-                OFFSET_AFTER_PAGE => HOST_PAGE_SIZE + 1,
+                OFFSET_BEFORE_PAGE => HOST_PAGE - 1,
+                OFFSET_AT_PAGE => HOST_PAGE,
+                OFFSET_AFTER_PAGE => HOST_PAGE + 1,
                 _ => usize::from(input.offset),
             } % buf.len();
             buf[offset] ^= input.mask;
