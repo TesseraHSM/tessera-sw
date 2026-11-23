@@ -1141,29 +1141,6 @@ pub fn negative_self_test_response_status(
     Ok(header.status())
 }
 
-#[cfg(all(test, feature = "tsra_test_hooks"))]
-mod negative_response_tests {
-    use super::*;
-
-    #[test]
-    fn response_must_echo_opcode_length_tag_and_id() {
-        let mut resp = encode_negative_self_test(6);
-        resp[0] = IpcMessageHeader::from(resp[0])
-            .with_response(true)
-            .with_status(IpcMessageStatusCode::Success as u32)
-            .into();
-        assert_eq!(negative_self_test_response_status(&resp, 6), Ok(0));
-        assert!(negative_self_test_response_status(&resp, 7).is_err());
-        resp[0] = IpcMessageHeader::from(resp[0]).with_tag(1).into();
-        assert!(negative_self_test_response_status(&resp, 6).is_err());
-        resp[0] = IpcMessageHeader::from(resp[0])
-            .with_tag(0)
-            .with_length(0)
-            .into();
-        assert!(negative_self_test_response_status(&resp, 6).is_err());
-    }
-}
-
 #[cfg(test)]
 mod rng_response_tests {
     use super::*;

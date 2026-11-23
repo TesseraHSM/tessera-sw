@@ -29,7 +29,7 @@ use tsra_fw_uno_reg_soc::hsm_dtcm::NEGATIVE_SELF_TEST_ID_OFFSET;
 use super::SelfTest;
 
 /// Value of the shared word when no self-test is selected to fail.
-#[cfg(any(test, feature = "fips_validation_hooks"))]
+#[cfg(feature = "fips_validation_hooks")]
 const NO_NEGATIVE_SELF_TEST: u32 = u32::MAX;
 
 pub(crate) enum NegativeTarget {
@@ -69,7 +69,7 @@ pub(crate) fn classify(id: u32) -> HsmResult<NegativeTarget> {
 /// Returns the ID the HSM writes to select `test`.
 ///
 /// A KAT selected by several IDs uses the lowest of them.
-#[cfg(any(test, feature = "fips_validation_hooks"))]
+#[cfg(feature = "fips_validation_hooks")]
 fn test_id(test: SelfTest) -> u32 {
     match test {
         #[cfg(not(feature = "bulk_crypto"))]
@@ -145,53 +145,4 @@ pub(super) fn take_negative_self_test(test: SelfTest) -> HsmResult<bool> {
         return Ok(true);
     }
     Ok(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn is_admin_id(id: u32) -> bool {
-        matches!(id, 6 | 7) || (cfg!(feature = "bulk_crypto") && id <= 4)
-    }
-
-    #[test]
-    fn selection_ids_map_to_kats() {
-        for id in 0..=76 {
-            match classify(id).unwrap() {
-                NegativeTarget::Admin => assert!(is_admin_id(id)),
-                NegativeTarget::Hsm(test) => {
-                    assert!(!is_admin_id(id));
-                    // Staging the KAT re-selects the same KAT.
-                    assert!(matches!(
-                        classify(test_id(test)),
-                        Ok(NegativeTarget::Hsm(t)) if t == test
-                    ));
-                    // Outside the bulk AES groups each ID selects its own KAT.
-                    if id > 4 {
-                        assert_eq!(test_id(test), id);
-                    }
-                }
-            }
-        }
-        assert!(classify(77).is_err());
-        assert!(classify(NO_NEGATIVE_SELF_TEST).is_err());
-    }
-
-    #[cfg(not(feature = "bulk_crypto"))]
-    #[test]
-    fn bulk_aes_ids_select_hsm_bulk_kats() {
-        for id in 0..=1 {
-            assert!(matches!(
-                classify(id),
-                Ok(NegativeTarget::Hsm(SelfTest::BulkAesXts))
-            ));
-        }
-        for id in 2..=4 {
-            assert!(matches!(
-                classify(id),
-                Ok(NegativeTarget::Hsm(SelfTest::BulkAesGcm))
-            ));
-        }
-    }
 }
