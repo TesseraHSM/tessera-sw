@@ -851,12 +851,13 @@ fn aes_gcm_rejects_empty_masked_key() {
     let sid = finalized_co_session(&ctx).session_id;
 
     let pt = [0x55u8; 16];
+    let iv = random(GCM_IV_LEN);
 
     let r = req(
         sid,
         AES_OP_ENCRYPT,
         &[],
-        &[0; GCM_IV_LEN],
+        &iv,
         &[0; GCM_TAG_LEN],
         0,
         pt.len(),
@@ -876,6 +877,7 @@ fn aes_gcm_rejects_truncated_masked_key() {
     let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
 
     let pt = [0x55u8; 16];
+    let iv = random(GCM_IV_LEN);
 
     for removed in [1, 2, 4, 8] {
         if key.len() <= removed {
@@ -888,7 +890,7 @@ fn aes_gcm_rejects_truncated_masked_key() {
             sid,
             AES_OP_ENCRYPT,
             truncated,
-            &[0; GCM_IV_LEN],
+            &iv,
             &[0; GCM_TAG_LEN],
             0,
             pt.len(),

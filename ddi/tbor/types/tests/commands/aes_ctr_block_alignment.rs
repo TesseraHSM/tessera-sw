@@ -22,9 +22,8 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborHmacGenerateKeyReq;
 use tsra_ddi_tbor_types::HMAC_HASH_SHA256;
 
-use crate::commands::sd_sealing_key_gen::finalized_co_session;
-
 use crate::commands::common::SCOPE_LOCAL;
+use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// AES block size; the granularity the engine demands.
 const AES_BLOCK_SIZE: u8 = 16;
@@ -179,31 +178,15 @@ fn masking_accepts_mixed_partial_block_lengths() {
 fn masking_sock_diagnostic() {
     let ctx = TestCtx::new();
 
-    println!("STEP 1: Creating finalized session");
     let session = finalized_co_session(&ctx);
 
-    println!("STEP 2: Session created: {}", session.session_id);
-
     for key_length in [32u8, 33, 47, 48, 49, 63, 64] {
-        println!(
-            "STEP 3: Testing key_length={}, remainder={}",
-            key_length,
-            key_length % AES_BLOCK_SIZE
-        );
-
-        let result = ctx.tbor(&TborHmacGenerateKeyReq {
+        let _result = ctx.tbor(&TborHmacGenerateKeyReq {
             session_id: session.session_id,
             scope: SCOPE_LOCAL,
             hash_algo: HMAC_HASH_SHA256,
             key_length,
             key_label: Vec::new(),
         });
-
-        println!(
-            "RESULT: key_length={}, success={}, error={:?}",
-            key_length,
-            result.is_ok(),
-            result.as_ref().err()
-        );
     }
 }
