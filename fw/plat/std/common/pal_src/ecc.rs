@@ -640,7 +640,7 @@ impl HsmEcc for StdHsmPal {
         if pub_out.len() < len {
             return Err(HsmError::InvalidArg);
         }
-        self.ecc_public_point(import_priv(priv_key)?, Some(pub_out))
+        self.ecc_public_point(import_priv(priv_key)?, Some(&mut pub_out[..len]))
             .await
     }
 
@@ -665,7 +665,7 @@ impl HsmEcc for StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let pk = import_priv(key)?;
-        self.ecc_public_point(pk, Some(out)).await
+        self.ecc_public_point(pk, Some(&mut out[..len])).await
     }
 }
 
@@ -824,6 +824,8 @@ mod tests {
                 let private = alloc.dma_alloc(curve.wire_priv_key_len(StdHsmPal::ECC_COORD_PAD))?;
                 let public_len = curve.wire_pub_key_len(StdHsmPal::ECC_COORD_PAD);
                 let public = alloc.dma_alloc(public_len)?;
+                let priv_pub_storage = alloc.dma_alloc(public_len.max(144) + 4)?;
+                priv_pub_storage.fill(0xCC);
                 pal.ecc_gen_keypair(&io, curve, HsmEccPct::None, Some((private, public)))
                     .await?;
                 let hash = standard_hash(curve);
@@ -930,12 +932,21 @@ mod tests {
                         public_len
                     );
                     assert_eq!(
+                        pal.ecc_priv_pub_key(&io, private, Some(&mut *priv_pub_storage))
+                            .await?,
+                        public_len
+                    );
+                    assert_eq!(
                         pal.ecdh_derive(&io, curve, private, public, Some(secret))
                             .await?,
                         secret_len
                     );
                     assert_eq!(allocation_marks(&pal, &io), marks);
                     assert_eq!(&derived[..public_len], &public[..]);
+                    assert_eq!(&priv_pub_storage[..public_len], &public[..]);
+                    assert!(priv_pub_storage[public_len..]
+                        .iter()
+                        .all(|&byte| byte == 0xCC));
                     assert!(secret[..secret_len].iter().any(|&b| b != 0xCC));
                     assert_eq!(&signature[signature_len..], &[0xCC; 4]);
                     assert_eq!(&derived[public_len..], &[0xCC; 4]);

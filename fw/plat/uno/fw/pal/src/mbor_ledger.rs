@@ -9,7 +9,7 @@
 //! `.await` (see [`SingleCell::with`]).
 
 use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmSqe;
+use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 pub(crate) use tsra_fw_uno_mbor_ledger::Kind;
@@ -26,7 +26,11 @@ static LEDGER: SingleCell<Ledger<IO_SLOTS>> = SingleCell::new(Ledger::new());
 
 /// Record that the MBOR host IO `io` created `id`. No-op for any other IO.
 pub(crate) fn record(io: &UnoHsmIo, kind: Kind, id: u16, session: Option<u16>) {
-    if (io.index() as u32) >= IO_SQ_COUNT || io.sqe().opcode() != OP_MBOR {
+    // Bulk slot indices alias command slots, so only command IOs record.
+    if io.kind() != HsmIoKind::Cmd
+        || (io.index() as u32) >= IO_SQ_COUNT
+        || io.sqe().opcode() != OP_MBOR
+    {
         return;
     }
     let pid = u8::from(io.pid());
@@ -51,6 +55,9 @@ pub(crate) fn invalidate_pid(pid: HsmPartId) {
 /// Whether `id`, created by `io`, has since been freed by another path, so
 /// `io`'s undo must leave the (possibly reallocated) ID alone.
 pub(crate) fn is_stale_own(io: &UnoHsmIo, kind: Kind, id: u16) -> bool {
+    if io.kind() != HsmIoKind::Cmd {
+        return false;
+    }
     let pid = u8::from(io.pid());
     LEDGER.with(|l| l.is_stale_own(usize::from(io.index()), pid, kind, id))
 }

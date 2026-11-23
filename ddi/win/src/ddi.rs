@@ -22,16 +22,24 @@ use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::DevInfo;
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::DWORD;
+use winapi::shared::winerror::ERROR_INSUFFICIENT_BUFFER;
 use winapi::shared::winerror::ERROR_NO_MORE_ITEMS;
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::INVALID_HANDLE_VALUE;
 use winapi::um::ioapiset::DeviceIoControl;
 use winapi::um::minwinbase::OVERLAPPED;
+use winapi::um::setupapi::SetupDiDestroyDeviceInfoList;
+use winapi::um::setupapi::SetupDiEnumDeviceInfo;
 use winapi::um::setupapi::SetupDiEnumDeviceInterfaces;
 use winapi::um::setupapi::SetupDiGetClassDevsW;
 use winapi::um::setupapi::SetupDiGetDeviceInterfaceDetailA;
+use winapi::um::setupapi::SetupDiGetDeviceRegistryPropertyW;
 use winapi::um::setupapi::DIGCF_DEVICEINTERFACE;
 use winapi::um::setupapi::DIGCF_PRESENT;
+use winapi::um::setupapi::HDEVINFO;
+use winapi::um::setupapi::SPDRP_ADDRESS;
+use winapi::um::setupapi::SPDRP_BUSNUMBER;
+use winapi::um::setupapi::SPDRP_HARDWAREID;
 use winapi::um::setupapi::SP_DEVICE_INTERFACE_DATA;
 use winapi::um::setupapi::SP_DEVICE_INTERFACE_DETAIL_DATA_A;
 use winapi::um::setupapi::SP_DEVINFO_DATA;
@@ -40,11 +48,16 @@ use winapi::um::winioctl::FILE_READ_ACCESS;
 use winapi::um::winioctl::FILE_WRITE_ACCESS;
 use winapi::um::winioctl::METHOD_BUFFERED;
 use winapi::um::winnt::HANDLE;
+use winapi::um::winnt::REG_DWORD;
+use winapi::um::winnt::REG_MULTI_SZ;
 use winapi::DEFINE_GUID;
 
 use crate::dev::DdiWinDev;
 
 const MAX_MC_DEVICES_SUPPORTED: u32 = 10;
+
+DEFINE_GUID! {GUID_MSFTMC_IFACE,
+0x44a8ec43, 0x14be, 0x4fae, 0x88, 0xc4, 0xd7, 0x2b, 0x4d, 0xb0, 0xf4, 0xa0}
 
 /// DDI Implementation - TSRA Windows Device Interface
 #[derive(Default)]
@@ -82,9 +95,6 @@ pub struct DdiWin {}
 /// disabled or the device is in some error state
 /// )
 fn discover_tsra_dev() -> Vec<String> {
-    DEFINE_GUID! {GUID_MSFTMC_IFACE,
-    0x44a8ec43, 0x14be, 0x4fae, 0x88, 0xc4, 0xd7, 0x2b, 0x4d, 0xb0, 0xf4, 0xa0};
-
     let u1 = mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
     let u2 = mem::size_of::<SP_DEVINFO_DATA>() as u32;
     let mut dev_vec = Vec::new();
@@ -192,10 +202,10 @@ fn discover_tsra_dev() -> Vec<String> {
 }
 
 #[repr(C)]
-struct TsraCpGetDeviceInfoIoctlOutData {
+pub(crate) struct TsraCpGetDeviceInfoIoctlOutData {
     argsz: u32,
     ctrl_id: u16,
-    pci_info: [u8; 33],
+    pub(crate) pci_info: [u8; 33],
     serial_number: [u8; 33],
     model_num: [u8; 5],
     fw_rev: [u8; 33],
@@ -220,6 +230,191 @@ impl Default for TsraCpGetDeviceInfoIoctlOutData {
             hot_patch_reserved: [0usize; 16],
         }
     }
+}
+
+struct DeviceInfoSet(HDEVINFO);
+
+impl Drop for DeviceInfoSet {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper owns the successful SetupDiGetClassDevsW result.
+        if unsafe { SetupDiDestroyDeviceInfoList(self.0) } == 0 {
+            // SAFETY: read the error immediately after the failed API call.
+            let error = unsafe { GetLastError() };
+            tracing::warn!(error, "SetupDiDestroyDeviceInfoList failed");
+        }
+    }
+}
+
+fn pci_location(pci_info: &[u8]) -> DdiResult<(u32, u32, u32)> {
+    let end = pci_info
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(DdiError::DeviceInfoIoctlInvalidData)?;
+    let text =
+        std::str::from_utf8(&pci_info[..end]).map_err(|_| DdiError::DeviceInfoIoctlInvalidData)?;
+    let parts: Vec<_> = text.split(':').collect();
+    let ["MCR", bus, device, function] = parts.as_slice() else {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    };
+    let parse = |value: &str| {
+        value
+            .parse::<u32>()
+            .map_err(|_| DdiError::DeviceInfoIoctlInvalidData)
+    };
+    let location = (parse(bus)?, parse(device)?, parse(function)?);
+    if location.0 > 255 || location.1 > 31 || location.2 > 7 {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    }
+    Ok(location)
+}
+
+fn pci_ids(hardware_ids: &[u8]) -> DdiResult<(u16, u16)> {
+    if hardware_ids.len() < 4
+        || !hardware_ids.len().is_multiple_of(2)
+        || !hardware_ids.ends_with(&[0; 4])
+    {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    }
+    let words: Vec<_> = hardware_ids
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|&word| word != 0)
+        .collect();
+    let first = String::from_utf16(&words)
+        .map_err(|_| DdiError::DeviceInfoIoctlInvalidData)?
+        .to_ascii_uppercase();
+    let mut parts = first.split('&');
+    let vendor = parts.next().and_then(|part| part.strip_prefix("PCI\\VEN_"));
+    let device = parts.next().and_then(|part| part.strip_prefix("DEV_"));
+    let parse = |value: Option<&str>| {
+        value
+            .filter(|value| value.len() == 4)
+            .and_then(|value| u16::from_str_radix(value, 16).ok())
+            .ok_or(DdiError::DeviceInfoIoctlInvalidData)
+    };
+    Ok((parse(vendor)?, parse(device)?))
+}
+
+fn device_property(
+    devices: &DeviceInfoSet,
+    device: &mut SP_DEVINFO_DATA,
+    property: u32,
+) -> DdiResult<(u32, Vec<u8>)> {
+    let mut kind = 0;
+    let mut size = 0;
+    // SAFETY: the live device-info set and caller-owned output fields are valid.
+    let result = unsafe {
+        SetupDiGetDeviceRegistryPropertyW(
+            devices.0,
+            device,
+            property,
+            &mut kind,
+            ptr::null_mut(),
+            0,
+            &mut size,
+        )
+    };
+    if result == 0 {
+        // SAFETY: read the error immediately after the failed API call.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_INSUFFICIENT_BUFFER {
+            return Err(DdiError::WinError(error));
+        }
+    }
+    if size == 0 || size > 65536 {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    }
+    let mut bytes = vec![0; size as usize];
+    // SAFETY: bytes is a writable buffer of the size passed to SetupAPI.
+    let result = unsafe {
+        SetupDiGetDeviceRegistryPropertyW(
+            devices.0,
+            device,
+            property,
+            &mut kind,
+            bytes.as_mut_ptr(),
+            size,
+            &mut size,
+        )
+    };
+    if result == 0 {
+        // SAFETY: read the error immediately after the failed API call.
+        return Err(DdiError::WinError(unsafe { GetLastError() }));
+    }
+    if size as usize > bytes.len() {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    }
+    bytes.truncate(size as usize);
+    Ok((kind, bytes))
+}
+
+fn device_dword(
+    devices: &DeviceInfoSet,
+    device: &mut SP_DEVINFO_DATA,
+    property: u32,
+) -> DdiResult<u32> {
+    let (kind, bytes) = device_property(devices, device, property)?;
+    if kind != REG_DWORD {
+        return Err(DdiError::DeviceInfoIoctlInvalidData);
+    }
+    let bytes = bytes
+        .try_into()
+        .map_err(|_| DdiError::DeviceInfoIoctlInvalidData)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+pub(crate) fn pci_identity(pci_info: &[u8]) -> DdiResult<(u16, u16)> {
+    let location = pci_location(pci_info)?;
+    // SAFETY: the device-interface GUID is valid; optional parameters are null.
+    let devices = unsafe {
+        SetupDiGetClassDevsW(
+            &GUID_MSFTMC_IFACE,
+            ptr::null(),
+            ptr::null_mut(),
+            DIGCF_DEVICEINTERFACE | DIGCF_PRESENT,
+        )
+    };
+    if devices == INVALID_HANDLE_VALUE {
+        // SAFETY: read the error immediately after the failed API call.
+        return Err(DdiError::WinError(unsafe { GetLastError() }));
+    }
+    let devices = DeviceInfoSet(devices);
+    let mut identity = None;
+    for index in 0.. {
+        // SAFETY: SP_DEVINFO_DATA is a C structure with a valid all-zero state.
+        let mut device: SP_DEVINFO_DATA = unsafe { mem::zeroed() };
+        device.cbSize = mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        // SAFETY: devices owns a live set and device has the required cbSize.
+        if unsafe { SetupDiEnumDeviceInfo(devices.0, index, &mut device) } == 0 {
+            // SAFETY: read the error immediately after the failed API call.
+            let error = unsafe { GetLastError() };
+            if error == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            return Err(DdiError::WinError(error));
+        }
+        let bus = device_dword(&devices, &mut device, SPDRP_BUSNUMBER)?;
+        let address = device_dword(&devices, &mut device, SPDRP_ADDRESS)?;
+        if (bus, address >> 16, address & 0xffff) != location {
+            continue;
+        }
+        if identity.is_some() {
+            tracing::warn!("Ambiguous PCI location during device discovery");
+            return Err(DdiError::DeviceInfoIoctlInvalidData);
+        }
+        let (kind, bytes) = device_property(&devices, &mut device, SPDRP_HARDWAREID)?;
+        if kind != REG_MULTI_SZ {
+            return Err(DdiError::DeviceInfoIoctlInvalidData);
+        }
+        identity = Some(pci_ids(&bytes)?);
+    }
+    identity.ok_or_else(|| {
+        tracing::warn!(
+            ?location,
+            "No matching present PCI device for the open handle"
+        );
+        DdiError::DeviceNotFound
+    })
 }
 
 ///
@@ -355,5 +550,71 @@ impl Ddi for DdiWin {
     /// * `DdiError` - Error encountered while opening the device
     fn open_dev(&self, path: &str) -> DdiResult<Self::Dev> {
         DdiWinDev::open(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_parses_the_existing_driver_pci_location() {
+        assert_eq!(
+            pci_location(b"MCR:0:4:0\0").expect("PCI location"),
+            (0, 4, 0)
+        );
+        for invalid in [
+            &b"MCR:0:4:0"[..],
+            &b"MCR:0:4\0"[..],
+            &b"MCR:256:4:0\0"[..],
+            &b"MCR:0:32:0\0"[..],
+            &b"MCR:0:4:8\0"[..],
+            &b"MCR:0:4:0:1\0"[..],
+            &b"MCR:x:4:0\0"[..],
+            &b"0:4:0\0"[..],
+        ] {
+            assert!(matches!(
+                pci_location(invalid),
+                Err(DdiError::DeviceInfoIoctlInvalidData)
+            ));
+        }
+    }
+
+    #[test]
+    fn discovery_parses_pci_hardware_ids_without_guessing_a_model() {
+        let multi_sz = |text: &str| -> Vec<u8> {
+            text.encode_utf16()
+                .chain([0, 0])
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        };
+        for (text, expected) in [
+            (
+                "PCI\\VEN_1414&DEV_C003&SUBSYS_00000000&REV_01",
+                (0x1414, 0xc003),
+            ),
+            ("pci\\ven_1414&dev_c008", (0x1414, 0xc008)),
+            ("PCI\\VEN_1234&DEV_5678", (0x1234, 0x5678)),
+        ] {
+            assert_eq!(pci_ids(&multi_sz(text)).expect("PCI identity"), expected);
+        }
+        for invalid in [
+            "",
+            "USB\\VEN_1414&DEV_C008",
+            "PCI\\VEN_1414&DEV_C00",
+            "PCI\\VEN_1414&DEV_ZZZZ",
+            "PCI\\VEN_1414",
+        ] {
+            assert!(matches!(
+                pci_ids(&multi_sz(invalid)),
+                Err(DdiError::DeviceInfoIoctlInvalidData)
+            ));
+        }
+        let mut truncated = multi_sz("PCI\\VEN_1414&DEV_C008");
+        truncated.pop();
+        assert!(matches!(
+            pci_ids(&truncated),
+            Err(DdiError::DeviceInfoIoctlInvalidData)
+        ));
     }
 }

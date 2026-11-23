@@ -47,7 +47,6 @@
 //! On real Cortex-M7 hardware, these operations would be offloaded
 //! to a PKA (Public Key Accelerator) engine via DMA.
 
-use tsra_crypto::DecodeOp;
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::HashAlgo;
@@ -56,7 +55,6 @@ use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaKeyOp;
-use tsra_crypto::RsaPadPkcs1EncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
@@ -71,6 +69,18 @@ use crate::worker::WorkerPool;
 /// Fixed width (bytes) of the public exponent `e` in the raw wire
 /// public-key encoding (`n || e`).
 pub const RSA_PUB_EXP_WIRE_LEN: usize = 4;
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    core::hint::black_box(diff) == 0
+}
+
+fn ct_is_zero(value: u8) -> u8 {
+    ((value | value.wrapping_neg()) >> 7) ^ 1
+}
 
 /// Serialize an RSA public-key handle into the raw wire form `n || e`
 /// in operand order `order` — the modulus followed by a fixed 4-byte
@@ -383,31 +393,46 @@ impl StdRsa {
     /// whereas the PAL contract (and the hardware PAL) report an error.
     ///
     /// # Errors
-    /// - [`HsmError::InvalidArg`] — ciphertext out of range, or `output`
-    ///   too small for the recovered message.
-    /// - [`HsmError::RsaDecryptFailed`] — padding check failed.
+    /// - [`HsmError::InvalidArg`] — key or ciphertext length mismatch, or
+    ///   `output` too small for the recovered message.
+    /// - [`HsmError::RsaDecryptFailed`] — ciphertext out of range or invalid padding.
     pub async fn pkcs1_decrypt(
         &self,
+        key_size: HsmRsaKey,
         priv_key: &RsaPrivateKey,
         ciphertext: &[u8],
         output: &mut [u8],
     ) -> HsmResult<usize> {
-        let em = self
-            .mod_exp_priv_result(priv_key, ciphertext, ciphertext.len())
-            .await?;
-        let mut decoded = <RsaPadPkcs1EncryptAlgo as DecodeOp>::from_bytes(&em, ())
-            .map_err(|_| HsmError::RsaDecryptFailed)?;
-        let message = decoded.message_mut();
-        let len = message.len();
-        let result = match output.get_mut(..len) {
-            Some(dst) => {
-                dst.copy_from_slice(message);
-                Ok(len)
-            }
-            None => Err(HsmError::InvalidArg),
+        let k = key_size.modulus_len();
+        if ciphertext.len() != k || priv_key.size() != k {
+            return Err(HsmError::InvalidArg);
+        }
+        let encoded = match self.mod_exp_priv_result(priv_key, ciphertext, k).await {
+            Ok(encoded) => encoded,
+            Err(HsmError::InvalidArg) => return Err(HsmError::RsaDecryptFailed),
+            Err(error) => return Err(error),
         };
-        zeroize::Zeroize::zeroize(message);
-        result
+        if encoded.len() != k {
+            return Err(HsmError::RsaDecryptFailed);
+        }
+        let header_valid = ct_eq(&encoded[..2], &[0, 2]);
+        let mut separator = 0usize;
+        let mut found = 0u8;
+        for (offset, &byte) in encoded[2..].iter().enumerate() {
+            let is_zero = ct_is_zero(byte);
+            let take = is_zero & (found ^ 1);
+            separator |= (offset + 2) & 0usize.wrapping_sub(take as usize);
+            found |= is_zero;
+        }
+        if !(header_valid & (found == 1) & (separator >= 10)) {
+            return Err(HsmError::RsaDecryptFailed);
+        }
+        let message = &encoded[separator + 1..];
+        if output.len() < message.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        output[..message.len()].copy_from_slice(message);
+        Ok(message.len())
     }
 
     /// Sign a pre-computed `digest` with PKCS#1 v1.5 padding, or PSS
@@ -529,7 +554,7 @@ impl StdRsa {
             .pool
             .submit_with_result(async move {
                 let mut algo = RsaEncryptAlgo::with_oaep_padding(hash, label.as_deref());
-                let mut buf = vec![0u8; scratch_len];
+                let mut buf = Zeroizing::new(vec![0u8; scratch_len]);
                 let written = algo
                     .decrypt(&key, &ct_be, Some(&mut buf))
                     .map_err(|_| HsmError::RsaDecryptFailed)?;
