@@ -142,7 +142,7 @@ mod tests {
         };
         let chain = [cert];
         let mut buf = [0u8; 2048];
-        let frame = TborSdCreatePeerBackupReq::encode(&mut buf)
+        let frame = TborSdCreatePeerBackupReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -169,7 +169,7 @@ mod tests {
     fn response_round_trips_pok_peer_backup() {
         let pok_peer = [0xABu8; POK_REMOTE_BACKUP_LEN];
         let mut buf = [0u8; 2048];
-        let frame = TborSdCreatePeerBackupResp::encode(&mut buf, 0, true)
+        let frame = TborSdCreatePeerBackupResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .pok_peer_backup(&pok_peer)
             .unwrap()

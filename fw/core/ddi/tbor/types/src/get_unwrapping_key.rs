@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn request_round_trips_session_id() {
         let mut buf = [0u8; 128];
-        let frame = TborGetUnwrappingKeyReq::encode(&mut buf)
+        let frame = TborGetUnwrappingKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(11))
             .unwrap()
@@ -81,7 +81,7 @@ mod tests {
     fn response_round_trips_pub_key() {
         let mut buf = [0u8; 512];
         let pub_key = [0xA5u8; UNWRAPPING_PUB_KEY_LEN];
-        let frame = TborGetUnwrappingKeyResp::encode(&mut buf, 0, true)
+        let frame = TborGetUnwrappingKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .pub_key(&pub_key)
             .unwrap()

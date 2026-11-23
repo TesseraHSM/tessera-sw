@@ -153,8 +153,8 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 HsmHashAlgo::Sha384,
                 policy,
-                expected,
                 HsmDigestForm::Standard,
+                Some(expected),
             )
             .await?;
 
@@ -256,10 +256,10 @@ pub(crate) async fn handle<P: HsmPal>(
             // operand-order `X ‖ Y` into the coordinate region; converting
             // in place yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
             let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, rcvr_priv, Some(&mut pk_r[1..1 + 2 * coord]))
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_r[1..])?;
+            byte_order::pair_to_be::<P>(SD_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` requires a plaintext buffer at least the
             // ciphertext length (`ct` = BKS3 + GCM tag = 64 B); the recovered
@@ -317,7 +317,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `SdResealRemoteBackup` response around the resealed backup.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, pok: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdResealRemoteBackupResp::encode_for_request(buf, 0, false)?
             .dst_remote_backup(pok)?
             .finish();
         Ok(frame.as_bytes().len())

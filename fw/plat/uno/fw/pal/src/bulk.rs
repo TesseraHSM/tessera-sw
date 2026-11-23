@@ -5,7 +5,7 @@
 //!
 //! - **default build** — a bulk key is a vault entry holding its AES-256
 //!   material, and its host-visible bulk key id is its vault key id. Bulk
-//!   IOs will run on the BCP; they are not serviced yet.
+//!   IOs run on the BCP (see `crypto::bulk_bcp`).
 //! - **`bulk_crypto`** — the fast-path firmware hosts the bulk engine: the
 //!   key is registered with it over IPC, the vault keeps the 2-byte engine
 //!   handle, and that handle is the bulk key id. Bulk IOs never reach the
@@ -86,7 +86,13 @@ impl HsmBulkCrypto for UnoHsmPal {
         Ok(u16::from(key_id))
     }
 
-    async fn bulk_crypt(&self, _io: &mut UnoHsmIo) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+    async fn bulk_crypt(&self, io: &mut UnoHsmIo) -> HsmResult<()> {
+        #[cfg(not(feature = "bulk_crypto"))]
+        return self.bulk_bcp_crypt(io).await;
+        #[cfg(feature = "bulk_crypto")]
+        {
+            let _ = io;
+            Err(HsmError::UnsupportedCmd)
+        }
     }
 }

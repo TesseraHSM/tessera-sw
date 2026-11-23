@@ -145,6 +145,120 @@ fn build_test_root_cert(key: &TestKeyPair) -> Vec<u8> {
     out[..len].to_vec()
 }
 
+fn with_extra_extensions(cert: &[u8], signer: &TestKeyPair, extra: &[u8]) -> Vec<u8> {
+    use der::Decode;
+    use der::Encode;
+    use der::Reader;
+    use der::Tag;
+    use der::TagNumber;
+    use der::asn1::AnyRef;
+    use der::asn1::ContextSpecific;
+
+    fn wrap(tag: Tag, bytes: &[u8]) -> Vec<u8> {
+        let value = AnyRef::new(tag, bytes).unwrap();
+        let mut encoded = vec![0; usize::try_from(value.encoded_len().unwrap()).unwrap()];
+        value.encode_to_slice(&mut encoded).unwrap();
+        encoded
+    }
+
+    let tbs = AnyRef::from_der(cert)
+        .unwrap()
+        .sequence(|certificate| {
+            let tbs = AnyRef::decode(certificate)?;
+            while !certificate.is_finished() {
+                AnyRef::decode(certificate)?;
+            }
+            tbs.sequence(|fields| {
+                let mut prefix = Vec::new();
+                while fields.peek_tag()?
+                    != (Tag::ContextSpecific {
+                        constructed: true,
+                        number: TagNumber::N3,
+                    })
+                {
+                    prefix.extend_from_slice(fields.tlv_bytes()?);
+                }
+                let extensions =
+                    ContextSpecific::<AnyRef>::decode_explicit(fields, TagNumber::N3)?.unwrap();
+                let mut extensions = extensions.value.value().to_vec();
+                extensions.extend_from_slice(extra);
+                let extensions = wrap(Tag::Sequence, &extensions);
+                prefix.extend(wrap(
+                    Tag::ContextSpecific {
+                        constructed: true,
+                        number: TagNumber::N3,
+                    },
+                    &extensions,
+                ));
+                Ok(wrap(Tag::Sequence, &prefix))
+            })
+        })
+        .unwrap();
+    let (r, s) = signer.sign_data(&tbs);
+    let mut out = vec![0; 2048];
+    let length = cert_builder::assemble_cert(&tbs, &r, &s, &mut out).unwrap();
+    out.truncate(length);
+    out
+}
+
+#[test]
+fn test_dice_profile_and_verified_path() {
+    let root_key = TestKeyPair::generate();
+    let inter_key = TestKeyPair::generate();
+    let other_key = TestKeyPair::generate();
+    let leaf_key = TestKeyPair::generate();
+    let root = X509Certificate::from_der(&build_test_root_cert(&root_key)).unwrap();
+    let base = build_test_intermediate_cert(&inter_key, &root_key, 0);
+    let profile = [
+        0x30, 0x0F, 0x06, 0x06, 0x67, 0x81, 0x05, 0x05, 0x04, 0x01, 0x04, 0x05, 0x30, 0x03, 0x84,
+        0x01, 0x00, 0x30, 0x16, 0x06, 0x03, 0x55, 0x1D, 0x25, 0x04, 0x0F, 0x30, 0x0D, 0x06, 0x0B,
+        0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x66, 0x01, 0x32, 0x01,
+    ];
+    let inter =
+        X509Certificate::from_der(&with_extra_extensions(&base, &root_key, &profile)).unwrap();
+    let leaf = X509Certificate::from_der(&build_test_leaf_cert(
+        &leaf_key,
+        &inter_key,
+        INTER_CN,
+        "INTERCA01",
+        KeyUsage::DIGITAL_SIGNATURE,
+    ))
+    .unwrap();
+    let unrelated =
+        X509Certificate::from_der(&build_test_intermediate_cert(&other_key, &root_key, 0)).unwrap();
+    assert!(inter.has_dice_tcb_info_layer(0).unwrap());
+    assert!(!inter.has_dice_tcb_info_layer(1).unwrap());
+    assert!(
+        inter
+            .has_extended_key_usage("1.3.6.1.4.1.311.102.1.50.1")
+            .unwrap()
+    );
+    assert!(!inter.has_extended_key_usage("1.2.3").unwrap());
+    assert!(!root.has_dice_tcb_info_layer(0).unwrap());
+    assert_eq!(
+        inter.subject_public_key_info_der().unwrap(),
+        inter.get_public_key_der().unwrap()
+    );
+    let path = leaf
+        .verified_chain(&[unrelated, inter.clone(), root.clone()])
+        .unwrap()
+        .expect("valid path");
+    assert_eq!(
+        path.iter().map(X509Certificate::as_der).collect::<Vec<_>>(),
+        vec![leaf.as_der(), inter.as_der(), root.as_der()]
+    );
+
+    let mut svn_only = profile;
+    svn_only[14] = 0x83; // SVN does not substitute for an explicit layer.
+    let cert =
+        X509Certificate::from_der(&with_extra_extensions(&base, &root_key, &svn_only)).unwrap();
+    assert!(!cert.has_dice_tcb_info_layer(0).unwrap());
+    let duplicate = [profile.as_slice(), profile.as_slice()].concat();
+    let cert =
+        X509Certificate::from_der(&with_extra_extensions(&base, &root_key, &duplicate)).unwrap();
+    assert!(cert.has_dice_tcb_info_layer(0).is_err());
+}
+
 fn patch_tbs_root(tbs: &mut [u8], params: &RootCertParams<'_>) {
     use tsra_crypto::x509_builder::root_cert::*;
     let cn = pad_cn(params.subject_cn);

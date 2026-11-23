@@ -177,6 +177,19 @@ pub enum DdiDeviceModel {
     Duo,
 }
 
+impl DdiDeviceModel {
+    /// Identify supported physical devices by PCI vendor and device IDs.
+    ///
+    /// Unknown identities are not assumed to be legacy Uno devices.
+    pub fn from_pci_ids(vendor: u16, device: u16) -> Option<Self> {
+        match (vendor, device) {
+            (0x1414, 0xc003) => Some(Self::Uno),
+            (0x1414, 0xc008) => Some(Self::Duo),
+            _ => None,
+        }
+    }
+}
+
 /// Result of [`DdiDev::discover`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DdiDeviceInfo {
@@ -346,6 +359,7 @@ pub trait DdiDev {
     /// that have been wired to emit `OP_TBOR` SQEs.
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        _api_rev: (u16, u16),
         _req: &T,
         _oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
@@ -370,6 +384,7 @@ pub trait DdiDev {
     /// map device-writable buffers.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
@@ -381,7 +396,7 @@ pub trait DdiDev {
                 TborOobItem::Out(_) => return Err(DdiError::UnsupportedEncoding),
             }
         }
-        self.exec_op_tbor(req, Some(&inputs), cookie)
+        self.exec_op_tbor(api_rev, req, Some(&inputs), cookie)
     }
 
     /// Identify the device model.

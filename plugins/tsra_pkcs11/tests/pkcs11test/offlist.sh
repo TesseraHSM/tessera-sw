@@ -32,7 +32,6 @@ RULES=(
     'rsa-keygen ^(Signatures/SignTest\.|KeyPairTest\.)'
     'rsa-keygen ^ReadOnlySessionTest\.SignVerifyRecover$'
     'rsa-keygen ^ReadWriteSessionTest\.(ExtractKeys|AsymmetricTokenKeyPair|PublicExponent4Bytes)$'
-    'later ^ReadOnlySessionTest\.GenerateKeyPairInvalid$'
     'so ^(RWSOSessionTest\.|RWUserSessionTest\.SOLoginFail$)'
     'so ^(ReadOnlySessionTest\.SOLoginFail|ReadWriteSessionTest\.(ReadOnlySessionSOLoginFail|SOLogin))$'
     'so ^(PKCS11Test\.TokenInit|ReadOnlySessionTest\.TokenInitWithSession$)'
@@ -47,7 +46,7 @@ RULES=(
 )
 
 # What keeps each bucket off the list, in table order.
-BUCKETS=(des aes-ecb rsa-keygen hmac md5 so rng import sensitive unsupported later sdk-lag spec-gap)
+BUCKETS=(des aes-ecb rsa-keygen hmac md5 so rng import sensitive unsupported sdk-lag spec-gap)
 declare -A WHY=(
     [des]="DES or 3DES, which the SDK does not have: the cipher and dual-function fixtures' DES cases, and FindObjectSubset, which generates DES keys and RSA key pairs."
     [aes-ecb]="AES-ECB, out of scope for the module. The two IV cases pass without asserting anything: ECB takes no IV."
@@ -59,7 +58,6 @@ declare -A WHY=(
     [import]="Plaintext key material through C_CreateObject, which is not a way to make keys on this token."
     [sensitive]="The fixture asks C_GenerateKey for a key with CKA_SENSITIVE=FALSE. Device keys exist only masked, so the token refuses it (CKR_TEMPLATE_INCONSISTENT)."
     [unsupported]="Entry points the module does not offer: C_CopyObject, C_DigestKey, C_GetOperationState, the dual-function calls and key wrapping."
-    [later]="C_GenerateKeyPair, not implemented yet (it comes with EC key generation)."
     [sdk-lag]="SDK behaviour the module cannot change: the CBC stream holds back the last full block until the final call (SDK issue #51), and a wrong PIN is the generic -8 (SDK issue #53), so C_Login cannot answer CKR_PIN_INCORRECT."
     [spec-gap]="Expectations this token does not share: CKR_KEY_TYPE_INCONSISTENT for a mechanism it does not offer, and an error for a NULL mechanism, which PKCS#11 3.0 defines as ending the active operation."
 )

@@ -31,6 +31,10 @@ CK_RV tsra_pkcs11_session_reset_op(tsra_pkcs11_session_t *s)
     {
         tsra_pkcs11_cipher_op_free(s->op_ctx);
     }
+    if (((s->op == P11_OP_SIGN) || (s->op == P11_OP_VERIFY)) && (s->op_ctx != NULL))
+    {
+        tsra_pkcs11_sign_op_free(s->op_ctx);
+    }
     s->op_ctx = NULL;
     if (s->op == P11_OP_FIND && s->find_cursor != NULL)
     {
@@ -450,10 +454,11 @@ CK_RV C_Logout(CK_SESSION_HANDLE hSession)
         tsra_pkcs11_unlock();
         return CKR_USER_NOT_LOGGED_IN;
     }
-    /* Logout closes the token's device session, and cipher operations hold
-     * device key handles scoped to it: release them first, while the session
-     * they belong to is still alive. A search collected its handles while
-     * logged in, so it ends too, or it would hand out private ones. */
+    /* Logout closes the token's device session, and cipher and sign
+     * operations hold device key handles scoped to it: release them first,
+     * while the session they belong to is still alive. A search collected its
+     * handles while logged in, so it ends too, or it would hand out private
+     * ones. Only a digest, which needs no device, outlives the logout. */
     for (size_t i = 0; i < TSRA_PKCS11_MAX_SESSIONS; i++)
     {
         tsra_pkcs11_session_t *t = &g_tsra_pkcs11.sessions[i];
@@ -461,7 +466,7 @@ CK_RV C_Logout(CK_SESSION_HANDLE hSession)
         {
             continue;
         }
-        if ((t->op == P11_OP_ENCRYPT) || (t->op == P11_OP_DECRYPT) || (t->op == P11_OP_FIND))
+        if (t->op != P11_OP_DIGEST)
         {
             tsra_pkcs11_session_reset_op(t);
         }

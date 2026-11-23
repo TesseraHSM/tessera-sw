@@ -133,8 +133,7 @@ const _: () = assert!(crate::PSK_LEN == tsra_ddi_tbor_types::PSK_LEN);
 /// Minimum negotiated API revision required by TBOR operations.
 pub(crate) const TBOR_MIN_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
 
-/// API revision whose sessions encrypt in-session commands with the
-/// session transport keys.
+/// API revision 2.0 (Duo): big-endian wire and no MBOR transport.
 pub(crate) const SESSION_TRANSPORT_API_REV: HsmApiRev = HsmApiRev { major: 2, minor: 0 };
 
 /// Returns `true` when `rev` supports TBOR operations.
@@ -213,6 +212,15 @@ impl From<DdiError> for HsmError {
             DdiError::TborStatus(TborStatus::SdPeerCloningNotAllowed) => {
                 HsmError::SdPeerCloningNotAllowed
             }
+            DdiError::TborStatus(TborStatus::DefaultPskMustRotate) => {
+                HsmError::DefaultPskMustRotate
+            }
+            DdiError::TborStatus(TborStatus::DefaultPskChanged) => HsmError::DefaultPskChanged,
+            DdiError::TborStatus(TborStatus::PskChangeAlreadyUsed) => {
+                HsmError::PskChangeAlreadyUsed
+            }
+            DdiError::TborStatus(TborStatus::SessionNeedsRenegotiation)
+            | DdiError::DdiError(0xCD) => HsmError::SessionNeedsRenegotiation,
             // Map the firmware's contract-level `InvalidArg` to the same
             // `InvalidArgument` the host guards return, so callers see a
             // consistent argument-rejection error across transports.
@@ -437,6 +445,19 @@ impl From<HsmKeyFlags> for DdiTargetKeyMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_errors_preserve_the_reopen_instruction() {
+        for (status, error) in [
+            (
+                TborStatus::DefaultPskMustRotate,
+                HsmError::DefaultPskMustRotate,
+            ),
+            (TborStatus::DefaultPskChanged, HsmError::DefaultPskChanged),
+        ] {
+            assert_eq!(HsmError::from(DdiError::TborStatus(status)), error);
+        }
+    }
 
     #[test]
     fn masked_key_authentication_failure_is_not_a_generic_command_failure() {

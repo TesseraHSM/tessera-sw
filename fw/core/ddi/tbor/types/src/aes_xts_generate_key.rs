@@ -78,7 +78,7 @@ mod tests {
         let mut buf = [0u8; 256];
         let label = b"my-xts-key";
         let usage = KeyUsage::from_bits(KeyUsage::ENCRYPT | KeyUsage::DECRYPT);
-        let frame = TborAesXtsGenerateKeyReq::encode(&mut buf)
+        let frame = TborAesXtsGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(5))
             .unwrap()
@@ -99,7 +99,7 @@ mod tests {
     fn response_round_trips_masked_key() {
         let mut buf = [0u8; 512];
         let masked = [0xABu8; MASKED_AES_XTS_KEY_LEN];
-        let frame = TborAesXtsGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborAesXtsGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

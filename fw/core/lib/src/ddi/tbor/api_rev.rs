@@ -29,7 +29,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// platform's API revision range.
 pub(crate) fn handle<P: HsmPalFeatures>(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
     TborApiRevReq::decode(cmd_buf.request())?;
-    let frame = TborApiRevResp::encode(cmd_buf.buffer_mut(), 0, false)?
+    let frame = TborApiRevResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
         .min_major(U16::new(P::API_REV_MIN.major))?
         .min_minor(U16::new(P::API_REV_MIN.minor))?
         .max_major(U16::new(P::API_REV_MAX.major))?

@@ -147,12 +147,13 @@ async fn attested_pub_key<'a, P: HsmPal>(
 
     let coord_raw = curve.priv_key_len();
 
-    let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
-    pal.ecc_pub_from_priv(io, curve, priv_key, pub_key).await?;
+    let pub_key = alloc.dma_alloc(curve.wire_pub_key_len(P::ECC_COORD_PAD))?;
+    pal.ecc_pub_from_priv(io, curve, priv_key, Some(pub_key))
+        .await?;
 
     // The COSE_Key encodes big-endian coordinates; convert the PAL's
     // operand-order `x ‖ y` in place to the exact-width BE pair.
-    byte_order::pair_to_be(P::BYTE_ORDER, curve, pub_key)?;
+    byte_order::pair_to_be::<P>(curve, pub_key)?;
     let pub_key: &'a HsmDmaBuf = pub_key;
     let (x, y) = pub_key[..2 * coord_raw].split_at(coord_raw);
 
@@ -251,8 +252,8 @@ async fn authenticate_request<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         data,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
     let view = aead_open(pal, io, param_key, envelope)
@@ -294,7 +295,7 @@ async fn build_key_report<'a, P: HsmPal>(
 /// Encode the `KeyReport` response frame around the finished report.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_bytes: &[u8]) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborKeyReportResp::encode(buf, 0, false)?
+        let frame = TborKeyReportResp::encode_for_request(buf, 0, false)?
             .report(report_bytes)?
             .finish();
         Ok(frame.as_bytes().len())

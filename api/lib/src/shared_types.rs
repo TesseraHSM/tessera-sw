@@ -227,22 +227,20 @@ pub enum HsmPotaEndorsementSource {
     Tpm = 2,
 }
 
-/// Channel-level integrity profile for a security-domain (TBOR) session,
-/// selected by the caller when opening a session via `open_session_ex`.
+/// Key-establishment suite of a security-domain (TBOR) session, selected
+/// by the caller when opening a session via `open_session_ex`.
 ///
-/// API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
-/// separate `#[open_enum]` so the public API surface does not leak the
-/// DDI-layer wire type.
+/// Every such session encrypts its in-session traffic; the suite picks
+/// how the session keys are agreed. The suite authenticates the HSM with
+/// its partition identity key (ECDSA P-384 over the handshake transcript)
+/// and the caller with the role PSK. The discriminant is the wire
+/// `suite_id`.
 #[repr(u32)]
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoBytes, Immutable)]
-pub enum HsmSessionExType {
-    /// Channel transports bodies without per-message MAC.
-    PlainText = 0,
-
-    /// Channel transports bodies wrapped in an outer per-message HMAC
-    /// envelope.
-    Authenticated = 1,
+pub enum HsmSessionSuite {
+    /// Ephemeral ECDH P-384 key agreement.
+    EcdhP384 = 1,
 }
 
 /// Length, in bytes, of a partition PSK (Pre-Shared Key). This module is

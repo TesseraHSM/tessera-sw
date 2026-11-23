@@ -63,8 +63,8 @@ enum FrameCase {
     TrailingData,
     /// Replace the placeholder with a forward-compatible unknown type.
     UnknownToc,
-    /// Force a version different from the supported protocol version.
-    UnsupportedVersion,
+    /// Change the revision from the host's locally selected context.
+    ChangedRevision,
     /// Remove part of the header or mandatory TOC, retaining at least one byte.
     Truncated,
     /// Vary the claimed TOC count, rejecting only counts beyond the frame.
@@ -94,6 +94,8 @@ struct FuzzInput {
 #[derive(Debug, Clone, Copy)]
 enum Expected {
     Success,
+    /// The error response echoes a revision outside the host's expected context.
+    RevisionMismatch,
     /// Parse failures precede dispatch and have no TBOR response body.
     CqeReject,
 }
@@ -107,7 +109,11 @@ impl TborOpReq for WireRequest {
     /// Copy the bounded frame unchanged, retaining the trait's NoSession defaults.
     ///
     /// Invalid frames must reach firmware, not be rejected by a host encoder.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        _api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
         let out = buf
             .get_mut(..self.0.len())
             .ok_or(EncodeError::BufferTooSmall)?;
@@ -127,10 +133,10 @@ fn set_entry(bytes: &mut [u8], kind: u8, payload: u32) {
 /// Each rejection introduces exactly one structural defect. In particular,
 /// fixed-length faults remain in bounds, and truncation retains a nonzero
 /// source length so SQE validation does not mask the framing rejection.
-fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
+fn build_request(input: &FuzzInput, api_rev: (u16, u16)) -> (WireRequest, Expected) {
     let mut storage = [0; WIRE_CAPACITY];
     let mut bytes = TborPartInfoReq::new()
-        .encode_request(&mut storage)
+        .encode_request(&mut storage, api_rev)
         .expect("canonical PartInfo must encode")
         .to_vec();
     let mut expected = Expected::Success;
@@ -138,14 +144,14 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
     match input.frame {
         FrameCase::Canonical => {}
         FrameCase::ReservedHeader => {
-            bytes[1] = input.selector | 1;
-            bytes[2] |= (input.data[0] & 0xE0) | 0x20;
-            bytes[4..REQ_HEADER_LEN].copy_from_slice(&input.value.to_le_bytes());
+            bytes[4] |= (input.data[0] & 0xE0) | 0x20;
+            bytes[6..8].copy_from_slice(&u16::from(input.selector | 1).to_le_bytes());
+            bytes[8..REQ_HEADER_LEN].copy_from_slice(&input.value.to_le_bytes());
         }
         FrameCase::AdditionalToc => {
             let count = 2 + usize::from(input.selector) % (MAX_TOC_ENTRIES - 1);
             bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
-            bytes[2] = (count - 1) as u8;
+            bytes[4] = (count - 1) as u8;
             for i in 1..count {
                 let word = ((TocType::Uint16 as u32) << 26)
                     | u32::from(u16::from_be_bytes([
@@ -157,7 +163,7 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
         }
         FrameCase::AlternativeToc => {
             bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
-            bytes[2] = 0;
+            bytes[4] = 0;
             let kinds = [
                 TocType::SessionId,
                 TocType::KeyId,
@@ -196,10 +202,9 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
             let kind = first_unknown + input.selector % (64 - first_unknown);
             set_entry(&mut bytes, kind, input.value);
         }
-        FrameCase::UnsupportedVersion => {
-            // A nonzero XOR cannot accidentally produce the original version.
-            bytes[0] = PROTOCOL_VERSION ^ (input.selector | 1);
-            expected = Expected::CqeReject;
+        FrameCase::ChangedRevision => {
+            bytes[0] ^= input.selector | 1;
+            expected = Expected::RevisionMismatch;
         }
         FrameCase::Truncated => {
             let length = 1 + usize::from(input.selector) % (bytes.len() - 1);
@@ -207,8 +212,8 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
             expected = Expected::CqeReject;
         }
         FrameCase::MissingToc => {
-            bytes[2] = 1 + input.selector % (MAX_TOC_ENTRIES as u8 - 1);
-            let count = usize::from(bytes[2]) + 1;
+            bytes[4] = 1 + input.selector % (MAX_TOC_ENTRIES as u8 - 1);
+            let count = usize::from(bytes[4]) + 1;
             if REQ_HEADER_LEN + count * TOC_ENTRY_LEN > bytes.len() {
                 expected = Expected::CqeReject;
             }
@@ -223,7 +228,7 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
         }
         FrameCase::OutOfBounds => {
             bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
-            bytes[2] = 0;
+            bytes[4] = 0;
             bytes.extend_from_slice(&input.data);
             let offset = input.value % (input.data.len() as u32 + 1);
             let length = input.data.len() as u32 - offset + 1 + u32::from(input.selector);
@@ -232,7 +237,7 @@ fn build_request(input: &FuzzInput) -> (WireRequest, Expected) {
         }
         FrameCase::InvalidFixedLength => {
             bytes.truncate(REQ_HEADER_LEN + TOC_ENTRY_LEN);
-            bytes[2] = 0;
+            bytes[4] = 0;
             bytes.extend_from_slice(&input.data);
             let (kind, required) = if input.selector & 1 == 0 {
                 (TocType::Uint32, 4)
@@ -282,12 +287,17 @@ fn assert_identity(before: &TborPartInfoResp, after: &TborPartInfoResp) {
 ///
 /// The real response decoder is used for every successful request. Only the
 /// specific pre-dispatch CQE decode status is accepted for malformed frames;
-/// driver faults, encode/decode failures, and command errors remain failures.
+/// a changed header revision must instead fail the host's revision check.
+/// Other driver faults, encode/decode failures, and command errors remain failures.
 fn exercise(ctx: &TestCtx, input: &FuzzInput, baseline: &TborPartInfoResp) {
-    let (request, expected) = build_request(input);
+    let api_rev = match ctx.model() {
+        tsra_ddi_interface::DdiDeviceModel::Uno => (1, 1),
+        tsra_ddi_interface::DdiDeviceModel::Duo => (2, 0),
+    };
+    let (request, expected) = build_request(input, api_rev);
     assert_eq!(
         RequestView::parse(&request.0).is_ok(),
-        matches!(expected, Expected::Success),
+        !matches!(expected, Expected::CqeReject),
         "construction-based framing oracle must agree with structural decoding: {input:?}"
     );
     for _ in 0..1 + input.repeats % MAX_REPEAT_CALLS {
@@ -297,6 +307,10 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput, baseline: &TborPartInfoResp) {
                 result.expect("structurally valid PartInfo frame must succeed"),
                 *baseline,
                 "accepted framing must not change PartInfo"
+            ),
+            Expected::RevisionMismatch => assert!(
+                matches!(result, Err(DdiError::TborDecodeError)),
+                "changed revision must not match the host context: {result:?}"
             ),
             Expected::CqeReject => assert!(
                 matches!(result, Err(DdiError::DdiError(status)) if status == REQUEST_DECODE_STATUS),
@@ -325,7 +339,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput) {
                 common::FuzzRole::Cu
             };
             let pending = ctx
-                .session_open_init(role.psk_id(), role.session_type())
+                .session_open_init(role.psk_id(), role.suite())
                 .expect("pending handshake setup must succeed");
             assert_eq!(read_info(ctx, PART_STATE_ENABLED, false), before);
             exercise(ctx, input, &before);

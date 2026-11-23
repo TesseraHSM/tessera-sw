@@ -34,5 +34,8 @@ zeroize.workspace = true
 [dev-dependencies]
 ddi_sock_server = { features = ["autostart"], workspace = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+openssl.workspace = true
+
 [lints]
 workspace = true

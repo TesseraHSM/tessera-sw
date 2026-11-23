@@ -360,6 +360,19 @@ impl<S: TableStorage> KeyVault<S> {
         self.blob_of(table, &entry)
     }
 
+    /// Overwrite a checked range without changing the key's identity.
+    pub fn update(&mut self, key_id: HsmKeyId, offset: usize, bytes: &[u8]) -> HsmResult<()> {
+        let (table, off, len) = self.key_location(key_id)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(HsmError::InvalidArg)?;
+        if end > len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.storage.blob_mut(table)?[off + offset..off + end].copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Disabled-aware variant of [`key`](Self::key), for the teardown walks
     /// that also visit disabled entries (see [`key_entry`](Self::key_entry)).
     fn key_present(&self, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {

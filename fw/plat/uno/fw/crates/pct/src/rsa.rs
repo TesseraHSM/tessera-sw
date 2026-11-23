@@ -67,8 +67,8 @@ pub async fn rsa_pct<P: HsmRsa + HsmHash>(
             io,
             algo,
             message,
-            &mut input[..algo.digest_len()],
             HsmDigestForm::Operand,
+            Some(&mut input[..algo.digest_len()]),
         )
         .await?;
     } else {
@@ -93,9 +93,9 @@ pub async fn rsa_pct<P: HsmRsa + HsmHash>(
                 (&*middle, &mut *output)
             };
             if private {
-                pal.mod_exp_priv(io, key, priv_key, x, y).await?;
+                pal.mod_exp_priv(io, key, priv_key, x, Some(y)).await?;
             } else {
-                pal.mod_exp_pub(io, key.pub_variant(), pub_key, x, y)
+                pal.mod_exp_pub(io, key.pub_variant(), pub_key, x, Some(y))
                     .await?;
             }
         }

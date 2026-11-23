@@ -142,15 +142,10 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
 
 /// Whether `len` is a legal `SessionEx` blob length.
 ///
-/// The kind is variable-length, but only a few blobs are legal. Both
-/// bounds come from [`crate::session`], the module that actually builds
-/// the blob, so the check cannot drift from the writer:
-///
-/// * [`SESSION_CU_BLOB_SIZE`](crate::session::SESSION_CU_BLOB_SIZE) — PlainText (CU): `api_rev ‖ param_key ‖ masking_key ‖ auth_binding`
-/// * [`SESSION_CU_AUTH_BLOB_SIZE`](crate::session::SESSION_CU_AUTH_BLOB_SIZE) — Authenticated (CO): the above `‖ mac_tx ‖ mac_rx`
-/// * `SESSION_SECURE_BLOB_SIZE` (Duo only) — secure transport: the PlainText blob `‖ h2m ‖ m2h`
+/// The size comes from [`crate::session`], the module that actually
+/// builds the blob, so the check cannot drift from the writer.
 fn session_ex_len_valid(len: usize) -> bool {
-    crate::session::is_session_ex_len(len)
+    len == crate::session::SESSION_EX_BLOB_SIZE
 }
 
 /// Compute the firmware-equivalent storage cost for a key.
@@ -358,6 +353,18 @@ impl KeyVault {
         Ok(&entry.key)
     }
 
+    /// Overwrite a checked range without changing the key's identity.
+    pub fn update(&mut self, key_id: HsmKeyId, offset: usize, bytes: &[u8]) -> HsmResult<()> {
+        self.get_entry(key_id)?;
+        let entry = self.entry_mut_present(key_id)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(HsmError::InvalidArg)?;
+        let dst = entry.key.get_mut(offset..end).ok_or(HsmError::InvalidArg)?;
+        dst.copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Return the firmware raw key size for a given kind.
     pub fn key_len(kind: HsmVaultKeyKind) -> HsmResult<u16> {
         fw_key_size(kind)
@@ -440,25 +447,19 @@ fn split_key_id(key_id: HsmKeyId) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SESSION_CU_AUTH_BLOB_SIZE;
-    use crate::session::SESSION_CU_BLOB_SIZE;
+    use crate::session::SESSION_EX_BLOB_SIZE;
 
-    /// The `SessionEx` bounds must be the sizes the session layer
-    /// actually writes, and both must round-trip through `create`.
+    /// The `SessionEx` bound must be the size the session layer actually
+    /// writes.
     #[test]
-    fn session_ex_len_matches_session_blob_sizes() {
-        assert_eq!(SESSION_CU_BLOB_SIZE, 140);
-        assert_eq!(SESSION_CU_AUTH_BLOB_SIZE, 236);
-
-        // Both real blobs are accepted.
-        assert!(session_ex_len_valid(SESSION_CU_BLOB_SIZE));
-        assert!(session_ex_len_valid(SESSION_CU_AUTH_BLOB_SIZE));
-
-        // Tight on both sides.
-        assert!(!session_ex_len_valid(SESSION_CU_BLOB_SIZE - 1));
-        assert!(!session_ex_len_valid(SESSION_CU_AUTH_BLOB_SIZE + 1));
-        // The legacy CBC-derived bounds are no longer honoured.
-        assert!(!session_ex_len_valid(216));
+    fn session_ex_len_matches_session_blob_size() {
+        assert_eq!(SESSION_EX_BLOB_SIZE, 216);
+        assert!(session_ex_len_valid(SESSION_EX_BLOB_SIZE));
+        assert!(!session_ex_len_valid(SESSION_EX_BLOB_SIZE - 1));
+        assert!(!session_ex_len_valid(SESSION_EX_BLOB_SIZE + 1));
+        // The retired PlainText / Authenticated sizes are rejected.
+        assert!(!session_ex_len_valid(140));
+        assert!(!session_ex_len_valid(236));
     }
 
     /// A wrong-sized `SessionEx` blob must be rejected at `create`.
@@ -473,7 +474,7 @@ mod tests {
         );
         assert!(v
             .create(
-                &[0u8; SESSION_CU_BLOB_SIZE],
+                &[0u8; SESSION_EX_BLOB_SIZE],
                 HsmVaultKeyKind::SessionEx,
                 None,
                 attrs

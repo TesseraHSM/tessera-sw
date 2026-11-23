@@ -12,9 +12,9 @@
 //! The target slot is **always** derived from the session role; the
 //! request carries no slot-selection field:
 //!
-//! * Crypto Officer session (slot 0, Authenticated) → changes the CO
+//! * Crypto Officer session (slot 0) → changes the CO
 //!   PSK.
-//! * Crypto User session (slot 1..=7, PlainText) → changes the CU
+//! * Crypto User session (slot 1..=7) → changes the CU
 //!   PSK.
 //!
 //! This removes any cross-role rotation matrix: each role is the only
@@ -24,14 +24,16 @@
 //!
 //! ## Replay model
 //!
-//! Cross-session replay is structurally impossible: `param_key` is
-//! HPKE-derived per session, so a captured envelope cannot decrypt
+//! Cross-session replay fails authentication: `param_key` is
+//! derived per session, so a captured envelope cannot decrypt
 //! under a different session's key (the AEAD tag fails before any
 //! plaintext is produced).
 //!
-//! Intra-session replay is bounded to **one successful change per
-//! session**: a second `PskChange` on the same session is rejected
-//! with [`HsmError::InvalidPermissions`].
+//! Rotation is serialized at partition scope and requires the session's
+//! authenticated PSK to match the current credential. A default-authenticated
+//! CU session receives [`HsmError::DefaultPskChanged`] after rotation.
+//! Other stale credentials receive [`HsmError::SessionAuthFailure`].
+//! Failed attempts do not consume a per-session budget.
 //!
 //! ## AEAD envelope contents
 //!

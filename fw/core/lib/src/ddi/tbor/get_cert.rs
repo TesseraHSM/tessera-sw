@@ -47,7 +47,7 @@ pub(crate) async fn handle<P: HsmPal>(
         }
         let cert = super::pta::pid_certificate(pal, io).await?;
         let resp = cmd_buf.encode_response(|buf| {
-            let frame = TborGetCertResp::encode(buf, 0, false)?
+            let frame = TborGetCertResp::encode_for_request(buf, 0, false)?
                 .certificate(cert)?
                 .finish();
             Ok(frame.as_bytes().len())
@@ -70,7 +70,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // unwritten), then have the PAL copy the DER bytes straight into the
     // reserved slot — no scratch buffer and no copy.
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborGetCertResp::encode(buf, 0, false)?
+        let frame = TborGetCertResp::encode_for_request(buf, 0, false)?
             .certificate_reserve(len)?
             .finish();
         Ok(frame.as_bytes().len())

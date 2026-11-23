@@ -27,8 +27,7 @@ enum KeyAvailability {
     Session,
 }
 
-/// Hash selector from the MBOR request; TBOR identifies the digest algorithm
-/// by its byte length instead.
+/// Hash selector from the MBOR request, carried as TBOR's 1-byte `HashAlgo`.
 #[derive(Arbitrary, Debug)]
 enum DigestAlgorithm {
     Sha1,
@@ -45,7 +44,23 @@ impl DigestAlgorithm {
             Self::Sha256 => 32,
             Self::Sha384 => 48,
             Self::Sha512 => 64,
-            Self::Unknown(value) => *value as usize % (ECC_DIGEST_MAX_LEN + 1),
+            Self::Unknown(value) => *value as usize % 65,
+        }
+    }
+
+    fn tbor(&self) -> u8 {
+        match self {
+            Self::Sha1 => HASH_ALGO_SHA1,
+            Self::Sha256 => HASH_ALGO_SHA256,
+            Self::Sha384 => HASH_ALGO_SHA384,
+            Self::Sha512 => HASH_ALGO_SHA512,
+            // Keep unknown selectors off the SHA-1/SHA-2 discriminants so a
+            // short digest padded into the lane cannot form a valid request
+            // that the expected result treats as invalid.
+            Self::Unknown(value) => match *value as u8 {
+                v @ HASH_ALGO_SHA1..=HASH_ALGO_SHA512 => 0x80 | v,
+                v => v,
+            },
         }
     }
 }
@@ -72,7 +87,7 @@ struct FuzzEccSignReq {
     key_id: u16,
     /// Host-order digest bytes.
     digest: Vec<u8>,
-    /// MBOR hash selector, mapped to TBOR's digest-length selector.
+    /// MBOR hash selector, mapped to TBOR's `HashAlgo`.
     digest_algo: DigestAlgorithm,
     /// Arbitrary masked-key bytes used when a valid key is not generated.
     masked_key: Vec<u8>,
@@ -153,14 +168,23 @@ fuzz_target!(|input: FuzzInput| {
         };
 
         let digest = wire_digest(&input.cmdreq_data);
-        // TBOR accepts every supported SHA-2 length on every curve;
-        // ECDSA truncates longer digests to the most significant curve bits.
-        let expect_success = generate_valid_key && matches!(digest.len(), 32 | 48 | 64);
+        let hash_algo = input.cmdreq_data.digest_algo.tbor();
+        // TBOR accepts SHA-256 / SHA-384 / SHA-512 on every curve; ECDSA
+        // truncates longer digests to the most significant curve bits.
+        let expect_success = generate_valid_key
+            && matches!(
+                hash_algo,
+                HASH_ALGO_SHA256 | HASH_ALGO_SHA384 | HASH_ALGO_SHA512
+            )
+            && ecc_sign_hash_algo(digest.len()) == Some(hash_algo);
 
+        // The simulator is little-endian: 4-byte lanes.
         let req = TborEccSignReq {
             session_id: session.session_id,
+            hash_algo,
             masked_key,
-            digest,
+            input: ecc_sign_input(input.curve.wire_sig_len() / 2, 4, &digest)
+                .expect("bounded ECC signing layout"),
         };
         let result = ctx.tbor(&req);
 
@@ -176,7 +200,7 @@ fuzz_target!(|input: FuzzInput| {
                     .as_deref()
                     .expect("valid request always carries a generated public key");
                 assert!(
-                    verify_wire_ecdsa(input.curve, pub_key, &resp.signature, &req.digest),
+                    verify_wire_ecdsa(input.curve, pub_key, &resp.signature, &digest),
                     "signature must verify under the generated public key"
                 );
             }

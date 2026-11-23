@@ -29,9 +29,9 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (≤ 3168 B) | The masked private key; unmasked in place. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (≤ 3168 B) | The masked private key; unmasked in place. |
 
 ### Data section
 
@@ -43,7 +43,7 @@ Carries the masked key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pub_key` | `buffer` (≤ 520 B) | RSA: `n ‖ e` (modulus bytes + 4). ECC: `x ‖ y`. Each integer is in device byte order and sized to its wire length. |
+| 12 | `pub_key` | `buffer` (≤ 520 B) | RSA: `n ‖ e` (modulus bytes + 4). ECC: `x ‖ y`. Each integer is in device byte order and sized to its wire length. |
 
 ### Data section
 

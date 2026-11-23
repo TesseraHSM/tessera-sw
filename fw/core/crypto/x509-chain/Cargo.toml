@@ -15,3 +15,10 @@ der = { default-features = false, features = ["oid"], version = "0.8" }
 tsra_fw_ddi_tbor_types = { workspace = true }
 tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
+
+[dev-dependencies]
+async-channel.workspace = true
+tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }
+tsra_crypto.workspace = true
+tsra_fw_hsm_pal_std_duo.workspace = true
+tsra_fw_hsm_pal_std_uno.workspace = true

@@ -24,6 +24,7 @@ use super::*;
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the source backup, exactly
@@ -42,6 +43,7 @@ use super::*;
 /// and surfaces DDI/device failures from the round-trip.
 pub(crate) fn sd_reseal_remote_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
     src_evidence: &HsmSdEvidence<'_>,
@@ -86,7 +88,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(|resp| resp.dst_remote_backup.to_vec())
             .map_err(HsmError::from)
     })

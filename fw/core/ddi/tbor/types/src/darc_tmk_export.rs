@@ -164,7 +164,7 @@ mod tests {
         ];
 
         let mut buf = [0u8; 2048];
-        let frame = TborDarcTmkExportReq::encode(&mut buf)
+        let frame = TborDarcTmkExportReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -191,7 +191,7 @@ mod tests {
     fn response_round_trips_sealed_tmk() {
         let sealed = [0xCDu8; SEALED_TMK_LEN];
         let mut buf = [0u8; 512];
-        let frame = TborDarcTmkExportResp::encode(&mut buf, 0, true)
+        let frame = TborDarcTmkExportResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .sealed_tmk(&sealed)
             .unwrap()

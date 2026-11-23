@@ -11,6 +11,7 @@ use xshell::cmd;
 use xshell::Shell;
 
 use crate::fw_util::FwPaths;
+use crate::fw_util::NIGHTLY_TOOLCHAIN;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -27,20 +28,21 @@ impl Xtask for Fmt {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let sh = Shell::new()?;
         let fw = FwPaths::new(&ctx)?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
         let fmt_check = (!self.fix).then_some("--check");
 
         // Firmware workspaces (nightly).
         for (label, dir) in fw.firmware_workspaces() {
             let _dir = sh.push_dir(dir);
             log::info!("Running fmt on {label} workspace...");
-            cmd!(sh, "cargo +nightly fmt -- {fmt_check...}").run()?;
+            cmd!(sh, "cargo {toolchain} fmt -- {fmt_check...}").run()?;
         }
 
         // Top platform workspace (xtask + reggen + systemrdl).
         {
             let _dir = sh.push_dir(&ctx.root);
             log::info!("Running fmt on platform workspace...");
-            cmd!(sh, "cargo +nightly fmt --all -- {fmt_check...}").run()?;
+            cmd!(sh, "cargo {toolchain} fmt --all -- {fmt_check...}").run()?;
         }
 
         Ok(())

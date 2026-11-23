@@ -303,8 +303,15 @@ async fn reimport_unwrapping_key<P: HsmPal>(
                 &masked[layout.plaintext_offset..layout.plaintext_offset + key_len],
             );
 
-            pal.vault_key_create(io, key_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)
-                .await
+            pal.vault_key_create(
+                io,
+                key_buf,
+                HsmVaultKeyKind::Rsa2kPrivate,
+                None,
+                attrs,
+                HsmVaultPct::UnwrappingKey,
+            )
+            .await
         })
         .await?;
 
@@ -378,30 +385,29 @@ async fn verify_pota_signature<P: HsmPal>(
     id_uncompressed[0] = 0x04;
     crate::part_state::part_id_pub_key(pal, io, id_uncompressed.split_at_mut(1).1).await?;
 
-    // `ecc_verify` consumes the digest in operand order.
-    let digest = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
+    // `ecc_verify` consumes `r ‖ s ‖ digest` with the digest in operand
+    // order.
+    let curve = HsmEccCurve::P384;
+    let hash = HsmHashAlgo::Sha384;
+    let input = pal.dma_alloc(io, curve.ecdsa_verify_input_len(hash, P::ECC_COORD_PAD))?;
+    let (signature, digest) = input.split_at_mut(curve.wire_sig_len(P::ECC_COORD_PAD));
+    if signature_raw.len() != signature.len() {
+        return Err(HsmError::InvalidArg);
+    }
+    signature.copy_from_slice(signature_raw);
     pal.hash(
         io,
-        HsmHashAlgo::Sha384,
+        hash,
         id_uncompressed,
-        digest,
         HsmDigestForm::Operand,
+        Some(digest),
     )
     .await?;
 
-    let verify_result = pal.dma_alloc(io, 4)?;
-
-    pal.ecc_verify(
-        io,
-        HsmEccCurve::P384,
-        signer_pub_key_raw,
-        digest,
-        signature_raw,
-        verify_result,
-    )
-    .await?;
-
-    if (verify_result[0] & 1) != 0 {
+    if !pal
+        .ecc_verify(io, curve, hash, signer_pub_key_raw, input)
+        .await?
+    {
         return Err(HsmError::EccVerifyFailed);
     }
     Ok(())
@@ -450,7 +456,7 @@ async fn derive_credential_keys<P: HsmPal>(
             HsmEccCurve::P384,
             priv_key,
             host_eph_pub_key_raw,
-            secret,
+            Some(secret),
         )
         .await?;
     }
@@ -462,7 +468,7 @@ async fn derive_credential_keys<P: HsmPal>(
 
     // HKDF-Extract with the RFC 5869 §2.2 default (absent) salt.
     let prk = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
-    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, prk)
+    pal.hkdf_extract(io, HsmHashAlgo::Sha384, None, secret, Some(prk))
         .await?;
 
     pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(nonce), okm_out)
@@ -671,6 +677,7 @@ async fn provision_mk<P: HsmPal>(
                 HsmVaultKeyKind::MaskingKey,
                 None,
                 MK_VAULT_ATTRS,
+                HsmVaultPct::None,
             )
             .await;
     }
@@ -680,8 +687,15 @@ async fn provision_mk<P: HsmPal>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let mk_pt = &bmk[layout.plaintext_offset..layout.plaintext_offset + BK_LEN];
-    pal.vault_key_create(io, mk_pt, HsmVaultKeyKind::MaskingKey, None, MK_VAULT_ATTRS)
-        .await
+    pal.vault_key_create(
+        io,
+        mk_pt,
+        HsmVaultKeyKind::MaskingKey,
+        None,
+        MK_VAULT_ATTRS,
+        HsmVaultPct::None,
+    )
+    .await
 }
 
 /// Envelopes the vault-resident `MK` (referenced by `mk_key_id`) under

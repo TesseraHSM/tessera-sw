@@ -103,14 +103,14 @@ mod tests {
             hedge: MLDSA_HEDGE_DETERMINISTIC,
         };
         let mut buf = [0u8; 8192];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame
                 .windows(MLDSA_MU_LEN)
                 .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
             "encoded frame must carry mu",
         );
-        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
-        assert_eq!(frame.len(), 5252);
+        // header(12) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5256);
     }
 }

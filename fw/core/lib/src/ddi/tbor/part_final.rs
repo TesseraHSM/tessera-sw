@@ -422,8 +422,8 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         part_policy,
-        digest,
         HsmDigestForm::Standard,
+        Some(digest),
     )
     .await?;
 
@@ -567,6 +567,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionLocalMaskingKey,
             None,
             PART_LOCAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(local_id)?;
@@ -578,6 +579,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionEphemeralMaskingKey,
             None,
             EPHEMERAL_MK_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ephemeral_id)?;
@@ -589,6 +591,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(ups_id)?;
@@ -658,7 +661,7 @@ fn commit_final<P: HsmPal>(
 /// Encode the `TborPartFinalResp` into a fresh IO-scoped HsmDmaBuf.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, backup: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartFinalResp::encode(buf, 0, false)?
+        let frame = TborPartFinalResp::encode_for_request(buf, 0, false)?
             .local_mk_backup(backup)?
             .finish();
         Ok(frame.as_bytes().len())

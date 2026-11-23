@@ -110,6 +110,40 @@ static void stage_free(CK_BYTE *staged, CK_ULONG len)
     }
 }
 
+/*
+ * Read a variable-length key property of `key` into a malloc'd buffer the
+ * caller owns (two-call sizing). Masked blobs come through here, so a
+ * failure wipes what it allocated.
+ */
+static CK_RV get_prop_alloc(tsra_handle key, uint32_t id, CK_BYTE **out, CK_ULONG *out_len)
+{
+    struct tsra_key_prop prop = { id, NULL, 0 };
+    tsra_status st = tsra_key_get_prop(key, &prop);
+    if ((st != TSRA_STATUS_BUFFER_TOO_SMALL) || (prop.len == 0))
+    {
+        TSRA_PKCS11_LOG("key property %u sizing failed: %d", id, (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    CK_BYTE *buf = (CK_BYTE *)malloc(prop.len);
+    if (buf == NULL)
+    {
+        return CKR_HOST_MEMORY;
+    }
+    uint32_t cap = prop.len;
+    prop.val = buf;
+    st = tsra_key_get_prop(key, &prop);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key property %u readback failed: %d", id, (int)st);
+        tsra_pkcs11_wipe(buf, cap);
+        free(buf);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    *out = buf;
+    *out_len = prop.len;
+    return CKR_OK;
+}
+
 CK_RV tsra_pkcs11_key_aes_generate(
     uint32_t hsm_session,
     tsra_pkcs11_key_kind_t kind,
@@ -165,44 +199,9 @@ CK_RV tsra_pkcs11_key_aes_generate(
         return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
     }
 
-    /* Read back the masked blob (two-call sizing), then drop the transient
-     * device handle — the blob is the durable form of the key. */
-    CK_RV rv = CKR_FUNCTION_FAILED;
-    CK_BYTE *blob = NULL;
-    struct tsra_key_prop masked = { TSRA_KEY_PROP_ID_MASKED_KEY, NULL, 0 };
-    st = tsra_key_get_prop(key, &masked);
-    if ((st != TSRA_STATUS_BUFFER_TOO_SMALL) || (masked.len == 0))
-    {
-        TSRA_PKCS11_LOG("masked-key sizing failed: %d", (int)st);
-        rv = tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
-        goto cleanup;
-    }
-    blob = (CK_BYTE *)malloc(masked.len);
-    if (blob == NULL)
-    {
-        rv = CKR_HOST_MEMORY;
-        goto cleanup;
-    }
-    masked.val = blob;
-    st = tsra_key_get_prop(key, &masked);
-    if (st != TSRA_STATUS_SUCCESS)
-    {
-        TSRA_PKCS11_LOG("masked-key readback failed: %d", (int)st);
-        rv = tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
-        goto cleanup;
-    }
-
-    *out_blob = blob;
-    *out_blob_len = masked.len;
-    blob = NULL; /* ownership moved to the caller */
-    rv = CKR_OK;
-
-cleanup:
-    if (blob != NULL)
-    {
-        tsra_pkcs11_wipe(blob, masked.len);
-        free(blob);
-    }
+    /* Read back the masked blob, then drop the transient device handle: the
+     * blob is the durable form of the key. */
+    CK_RV rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
     (void)tsra_key_delete(key);
     return rv;
 }
@@ -625,6 +624,332 @@ void tsra_pkcs11_key_aes_cbc_stream_free(tsra_pkcs11_aes_cbc_stream_t *stream)
     free(stream);
 }
 
+/* The curve values tsra_pkcs11_ec_template.h names must be the SDK's. */
+_Static_assert((uint32_t)TSRA_PKCS11_CURVE_P256 == (uint32_t)TSRA_ECC_CURVE_P256, "P-256 curve id");
+_Static_assert((uint32_t)TSRA_PKCS11_CURVE_P384 == (uint32_t)TSRA_ECC_CURVE_P384, "P-384 curve id");
+_Static_assert((uint32_t)TSRA_PKCS11_CURVE_P521 == (uint32_t)TSRA_ECC_CURVE_P521, "P-521 curve id");
+
+CK_RV tsra_pkcs11_key_ec_generate(
+    uint32_t hsm_session,
+    tsra_pkcs11_ec_curve_t curve,
+    bool sign,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (out_spki == NULL) ||
+        (out_spki_len == NULL) || (tsra_pkcs11_ec_coord_len(curve) == 0) ||
+        ((scope != TSRA_PKCS11_SCOPE_PARTITION) && (scope != TSRA_PKCS11_SCOPE_SESSION)))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    *out_spki = NULL;
+    *out_spki_len = 0;
+
+    /* As for AES, the SDK sets SENSITIVE, EXTRACTABLE and LOCAL itself, and
+     * both halves must name the same masking scope. */
+    uint32_t class_priv = TSRA_KEY_CLASS_PRIVATE;
+    uint32_t class_pub = TSRA_KEY_CLASS_PUBLIC;
+    uint32_t kind = TSRA_KEY_KIND_ECC;
+    uint32_t dev_curve = (uint32_t)curve;
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop priv_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &class_priv, sizeof(class_priv) },
+        { TSRA_KEY_PROP_ID_KIND, &kind, sizeof(kind) },
+        { TSRA_KEY_PROP_ID_EC_CURVE, &dev_curve, sizeof(dev_curve) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { sign ? TSRA_KEY_PROP_ID_SIGN : TSRA_KEY_PROP_ID_DERIVE, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop pub_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &class_pub, sizeof(class_pub) },
+        { TSRA_KEY_PROP_ID_KIND, &kind, sizeof(kind) },
+        { TSRA_KEY_PROP_ID_EC_CURVE, &dev_curve, sizeof(dev_curve) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { sign ? TSRA_KEY_PROP_ID_VERIFY : TSRA_KEY_PROP_ID_DERIVE, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list priv_list = { priv_props,
+                                            sizeof(priv_props) / sizeof(priv_props[0]) };
+    struct tsra_key_prop_list pub_list = { pub_props, sizeof(pub_props) / sizeof(pub_props[0]) };
+    struct tsra_algo algo = { TSRA_ALGO_ID_EC_KEY_PAIR_GEN, NULL, 0 };
+
+    tsra_handle priv = 0;
+    tsra_handle pub = 0;
+    tsra_status st = tsra_key_gen_pair(hsm_session, &algo, &priv_list, &pub_list, &priv, &pub);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_gen_pair(curve %u) failed: %d", dev_curve, (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+    CK_RV rv = get_prop_alloc(priv, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+    if (rv == CKR_OK)
+    {
+        rv = get_prop_alloc(pub, TSRA_KEY_PROP_ID_PUB_KEY_INFO, out_spki, out_spki_len);
+    }
+    if ((rv != CKR_OK) && (*out_blob != NULL))
+    {
+        tsra_pkcs11_wipe(*out_blob, *out_blob_len);
+        free(*out_blob);
+        *out_blob = NULL;
+        *out_blob_len = 0;
+    }
+    (void)tsra_key_delete(priv);
+    (void)tsra_key_delete(pub);
+    return rv;
+}
+
+CK_RV tsra_pkcs11_key_ec_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    tsra_pkcs11_ec_curve_t *out_curve
+)
+{
+    if ((blob == NULL) || (blob_len == 0) || (blob_len > (CK_ULONG)UINT32_MAX) ||
+        (out_priv == NULL) || (out_pub == NULL) || (out_curve == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    struct tsra_buffer masked = { (void *)blob, (uint32_t)blob_len };
+    tsra_handle priv = 0;
+    tsra_handle pub = 0;
+    tsra_status st = tsra_key_unmask_pair(hsm_session, TSRA_KEY_KIND_ECC, &masked, &priv, &pub);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unmask_pair failed: %d", (int)st);
+        /* As for AES: the only handle passed is the device session. */
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+    uint32_t curve = 0;
+    struct tsra_key_prop prop = { TSRA_KEY_PROP_ID_EC_CURVE, &curve, sizeof(curve) };
+    st = tsra_key_get_prop(pub, &prop);
+    if ((st != TSRA_STATUS_SUCCESS) || (tsra_pkcs11_ec_coord_len(curve) == 0))
+    {
+        TSRA_PKCS11_LOG("EC curve readback failed: %d (curve %u)", (int)st, curve);
+        (void)tsra_key_delete(priv);
+        (void)tsra_key_delete(pub);
+        return CKR_KEY_HANDLE_INVALID;
+    }
+    *out_priv = priv;
+    *out_pub = pub;
+    *out_curve = (tsra_pkcs11_ec_curve_t)curve;
+    return CKR_OK;
+}
+
+/* The SDK algorithm of a sign mechanism; false for any other mechanism. */
+static bool sign_algo(CK_MECHANISM_TYPE mech, uint32_t *out)
+{
+    switch (mech)
+    {
+    case CKM_ECDSA:
+        *out = TSRA_ALGO_ID_ECDSA;
+        return true;
+    case CKM_ECDSA_SHA1:
+        *out = TSRA_ALGO_ID_ECDSA_SHA1;
+        return true;
+    case CKM_ECDSA_SHA256:
+        *out = TSRA_ALGO_ID_ECDSA_SHA256;
+        return true;
+    case CKM_ECDSA_SHA384:
+        *out = TSRA_ALGO_ID_ECDSA_SHA384;
+        return true;
+    case CKM_ECDSA_SHA512:
+        *out = TSRA_ALGO_ID_ECDSA_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+CK_RV tsra_pkcs11_key_sign(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *sig,
+    CK_ULONG *sig_len
+)
+{
+    uint32_t id = 0;
+    if ((sig == NULL) || (sig_len == NULL) || ((in == NULL) && (in_len > 0)) ||
+        (in_len > (CK_ULONG)UINT32_MAX) || !sign_algo(mech, &id))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    uint32_t cap = (*sig_len > (CK_ULONG)UINT32_MAX) ? UINT32_MAX : (uint32_t)*sig_len;
+    CK_BYTE *staged = NULL;
+    CK_RV rv = stage_overlap(in, in_len, sig, cap, &staged);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    struct tsra_algo algo = { id, NULL, 0 };
+    struct tsra_buffer inbuf = { (staged != NULL) ? staged : (void *)in, (uint32_t)in_len };
+    struct tsra_buffer sigbuf = { sig, cap };
+    tsra_status st = tsra_crypt_sign(&algo, key_handle, &inbuf, &sigbuf);
+    stage_free(staged, in_len);
+    if (st == TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        *sig_len = sigbuf.len;
+        return CKR_BUFFER_TOO_SMALL;
+    }
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_sign(algo %u) failed: %d", id, (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    *sig_len = sigbuf.len;
+    return CKR_OK;
+}
+
+/*
+ * The CK_RV of a failed verification; `invalid_handle` as for
+ * tsra_pkcs11_ckr_from_tsra_hint. INTERNAL_ERROR (-5) is the crypto library
+ * refusing the signature's values outright (r or s zero, or not below the
+ * group order): the SDK checks EC signatures on the host, so no device fault
+ * arrives as that status, and to the caller such a signature is invalid.
+ */
+static CK_RV verify_status(tsra_status st, CK_RV invalid_handle)
+{
+    if (st == TSRA_STATUS_INTERNAL_ERROR)
+    {
+        return CKR_SIGNATURE_INVALID;
+    }
+    return tsra_pkcs11_ckr_from_tsra_hint((int)st, invalid_handle);
+}
+
+CK_RV tsra_pkcs11_key_verify(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    const CK_BYTE *sig,
+    CK_ULONG sig_len
+)
+{
+    uint32_t id = 0;
+    if (((in == NULL) && (in_len > 0)) || ((sig == NULL) && (sig_len > 0)) ||
+        (in_len > (CK_ULONG)UINT32_MAX) || (sig_len > (CK_ULONG)UINT32_MAX) ||
+        !sign_algo(mech, &id))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    struct tsra_algo algo = { id, NULL, 0 };
+    struct tsra_buffer inbuf = { (void *)in, (uint32_t)in_len };
+    struct tsra_buffer sigbuf = { (void *)sig, (uint32_t)sig_len };
+    tsra_status st = tsra_crypt_verify(&algo, key_handle, &inbuf, &sigbuf);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_verify(algo %u): %d", id, (int)st);
+        return verify_status(st, CKR_KEY_HANDLE_INVALID);
+    }
+    return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_new(
+    bool sign,
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    uint32_t *out_ctx
+)
+{
+    uint32_t id = 0;
+    if ((out_ctx == NULL) || !sign_algo(mech, &id))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_ctx = 0;
+    struct tsra_algo algo = { id, NULL, 0 };
+    tsra_handle ctx = 0;
+    tsra_status st = sign ? tsra_crypt_sign_init(&algo, key_handle, &ctx)
+                          : tsra_crypt_verify_init(&algo, key_handle, &ctx);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_%s_init(algo %u) failed: %d", sign ? "sign" : "verify", id, (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    *out_ctx = ctx;
+    return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_update(
+    bool sign,
+    uint32_t ctx,
+    const CK_BYTE *in,
+    CK_ULONG in_len
+)
+{
+    if (((in == NULL) && (in_len > 0)) || (in_len > (CK_ULONG)UINT32_MAX))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    struct tsra_buffer inbuf = { (void *)in, (uint32_t)in_len };
+    tsra_status st =
+        sign ? tsra_crypt_sign_update(ctx, &inbuf) : tsra_crypt_verify_update(ctx, &inbuf);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_%s_update failed: %d", sign ? "sign" : "verify", (int)st);
+        /* The only handle passed is this module's own context. */
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_FUNCTION_FAILED);
+    }
+    return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_final(uint32_t ctx, CK_BYTE *sig, CK_ULONG *sig_len)
+{
+    if ((sig == NULL) || (sig_len == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    uint32_t cap = (*sig_len > (CK_ULONG)UINT32_MAX) ? UINT32_MAX : (uint32_t)*sig_len;
+    struct tsra_buffer sigbuf = { sig, cap };
+    tsra_status st = tsra_crypt_sign_finish(ctx, &sigbuf);
+    if (st == TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        *sig_len = sigbuf.len;
+        return CKR_BUFFER_TOO_SMALL;
+    }
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_sign_finish failed: %d", (int)st);
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_FUNCTION_FAILED);
+    }
+    *sig_len = sigbuf.len;
+    return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_ULONG sig_len)
+{
+    if (((sig == NULL) && (sig_len > 0)) || (sig_len > (CK_ULONG)UINT32_MAX))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    struct tsra_buffer sigbuf = { (void *)sig, (uint32_t)sig_len };
+    tsra_status st = tsra_crypt_verify_finish(ctx, &sigbuf);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_verify_finish: %d", (int)st);
+        /* The only handle passed is this module's own context. */
+        return verify_status(st, CKR_FUNCTION_FAILED);
+    }
+    return CKR_OK;
+}
+
+void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
+{
+    if (ctx != 0)
+    {
+        (void)tsra_free_ctx_handle(ctx);
+    }
+}
+
 #else /* !TSRA_WITH_HSM ---------------------------------------------------- */
 
 /* No device linked: key material cannot exist, so the key-backed paths report
@@ -784,6 +1109,131 @@ CK_RV tsra_pkcs11_key_aes_cbc_stream_final(
 void tsra_pkcs11_key_aes_cbc_stream_free(tsra_pkcs11_aes_cbc_stream_t *stream)
 {
     (void)stream; /* no stream can exist without a device */
+}
+
+CK_RV tsra_pkcs11_key_ec_generate(
+    uint32_t hsm_session,
+    tsra_pkcs11_ec_curve_t curve,
+    bool sign,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    (void)hsm_session;
+    (void)curve;
+    (void)sign;
+    (void)scope;
+    (void)out_blob;
+    (void)out_blob_len;
+    (void)out_spki;
+    (void)out_spki_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_ec_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    tsra_pkcs11_ec_curve_t *out_curve
+)
+{
+    (void)hsm_session;
+    (void)blob;
+    (void)blob_len;
+    (void)out_priv;
+    (void)out_pub;
+    (void)out_curve;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_sign(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *sig,
+    CK_ULONG *sig_len
+)
+{
+    (void)mech;
+    (void)key_handle;
+    (void)in;
+    (void)in_len;
+    (void)sig;
+    (void)sig_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_verify(
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    const CK_BYTE *sig,
+    CK_ULONG sig_len
+)
+{
+    (void)mech;
+    (void)key_handle;
+    (void)in;
+    (void)in_len;
+    (void)sig;
+    (void)sig_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_new(
+    bool sign,
+    CK_MECHANISM_TYPE mech,
+    uint32_t key_handle,
+    uint32_t *out_ctx
+)
+{
+    (void)sign;
+    (void)mech;
+    (void)key_handle;
+    (void)out_ctx;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_update(
+    bool sign,
+    uint32_t ctx,
+    const CK_BYTE *in,
+    CK_ULONG in_len
+)
+{
+    (void)sign;
+    (void)ctx;
+    (void)in;
+    (void)in_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_sign_stream_final(uint32_t ctx, CK_BYTE *sig, CK_ULONG *sig_len)
+{
+    (void)ctx;
+    (void)sig;
+    (void)sig_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_ULONG sig_len)
+{
+    (void)ctx;
+    (void)sig;
+    (void)sig_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
+{
+    (void)ctx; /* no context can exist without a device */
 }
 
 #endif /* TSRA_WITH_HSM */

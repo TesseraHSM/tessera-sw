@@ -116,7 +116,7 @@ mod tests {
         mu: &[u8],
         hedge: MlDsaHedge,
     ) -> TborMlDsaSignReqFrame<'a> {
-        TborMlDsaSignReq::encode(buf)
+        TborMlDsaSignReq::encode(buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -140,8 +140,8 @@ mod tests {
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.mu(), &mu[..]);
         assert_eq!(frame.hedge(), MlDsaHedge::Deterministic);
-        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
-        assert_eq!(frame.len(), 5252);
+        // header(12) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5256);
         assert!(frame.len() <= TborMlDsaSignReq::MAX_ENCODED_SIZE);
     }
 
@@ -167,7 +167,7 @@ mod tests {
     fn response_round_trips_signature() {
         let mut buf = [0u8; 8192];
         let sig = [0x33u8; MLDSA_SIGNATURE_MAX_LEN];
-        let frame = TborMlDsaSignResp::encode(&mut buf, 0, true)
+        let frame = TborMlDsaSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&sig)
             .unwrap()

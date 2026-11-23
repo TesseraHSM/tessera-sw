@@ -5,7 +5,8 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
-/// Length of the Phase-2 confirmation MAC (HMAC-SHA-384).
+/// Length of the host's handshake confirmation `fin` (HMAC-SHA-384 over
+/// the transcript hash under the derived `fin_key`).
 pub const MAC_FIN_LEN: usize = 48;
 
 /// Length of the host-supplied `seed`, encrypted inside
@@ -17,19 +18,22 @@ pub const SEED_LEN: usize = 32;
 /// Layout (see [`tsra_fw_core_crypto_aead_envelope`]):
 /// `"AEAD"(4) ‖ alg=AesGcm256(1) ‖ rsv=0(1) ‖ aad_len_be=0(2) ‖
 ///  IV(16) ‖ seed(32) ‖ TAG(16)` = 72 B.  No AAD: `param_key` is
-/// HPKE-derived per session, so the envelope is structurally bound
+/// derived per session, so the envelope is structurally bound
 /// to the active session by key uniqueness.
 pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Upper bound on the `bmk_session` envelope length on the wire.
 ///
-/// Today's tight layout (AEAD-GCM with 32-byte AAD wrapping the
-/// 80-byte `masking_key`): `8 + 16 + 32 + 80 + 16` = 152 B.  The
+/// Today's tight layout (AEAD-GCM with 192-byte AAD wrapping the
+/// 32-byte `masking_key`): `8 + 16 + 192 + 32 + 16` = 264 B. The
 /// declared cap is kept generous to accommodate future AAD growth
 /// without breaking the schema.
 pub const BMK_SESSION_MAX_LEN: usize = 512;
 
 /// `SessionOpenFinish` request schema.
+///
+/// Travels on the session's encrypted channel (served from the Pending
+/// slot's transport keys).
 #[tbor(opcode = 0x04, pair = TborSessionOpenFinishResp)]
 pub struct TborSessionOpenFinishReq<'a> {
     /// Pending session identifier the handshake reserved in Phase 1.
@@ -39,7 +43,7 @@ pub struct TborSessionOpenFinishReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// Phase-2 confirmation MAC.
+    /// Host handshake confirmation (`fin`).
     #[tbor(buffer, len = 48)]
     pub mac_fin: &'a [u8],
 
@@ -55,16 +59,18 @@ pub struct TborSessionOpenFinishReq<'a> {
     /// `TborSessionOpenFinishReqViewMut` destructured view.
     #[tbor(buffer, len = 72, mutable)]
     pub seed_envelope: &'a [u8],
+    /// Saved masking-key recovery blob; empty for a fresh open.
+    #[tbor(buffer, max_len = 512, mutable)]
+    pub bmk_session: &'a [u8],
 }
 
 /// `SessionOpenFinish` response schema.
 ///
 /// Carries the `bmk_session` blob: an AEAD-GCM envelope of the
-/// 80-byte session `masking_key`, wrapped under
+/// 32-byte session `masking_key`, wrapped under
 /// `BK_SESSION = KBKDF-SHA384(BK_BOOT, "SESSION_BK", seed)`.  The
-/// host persists this blob and replays it through the MBOR
-/// `ReopenSession` command to recover masked-key compatibility
-/// after the device resets or the slot is destroyed.
+/// host retains this blob with its original seed and supplies it to
+/// recovery Finish to restore masked-key compatibility after migration.
 #[tbor(response, pair = TborSessionOpenFinishReq)]
 pub struct TborSessionOpenFinishResp<'a> {
     /// Wrapped session-key blob.  Variable length up to

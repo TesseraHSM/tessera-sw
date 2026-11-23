@@ -10,7 +10,9 @@
 #   presence-only: claim key persistence but only find the object again;
 #     key survival is the GoogleTest suite's job
 #   tool: check pkcs11-check's own tables, not the module
-#   environment: depend on host tools (p11-kit) the gate does not pin
+#   environment: depend on host tools (p11-kit) the gate does not pin, or on
+#     how much memory the host can map (a count of 2^32 is checked only where
+#     the host can map the array it claims, and is a note elsewhere)
 #   timing: benchmarks and timing ratios: meaningless or flaky on shared runners
 #   import-refused: set up a plaintext key, which C_CreateObject refuses, and
 #     pass on that refusal without reaching what they test
@@ -38,11 +40,21 @@ tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_sess
 tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_token_universal_in_tuple
 tool testcases/ckr/test_ckr_universal.py::TestUniversalInfrastructure::test_universal_codes_in_tuple
 tool testcases/test_mech_coverage.py::TestMechanismRegistryCoverage::test_advertised_mechanisms_have_registry_coverage
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflow::test_template_count_overflow[create_object-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflow::test_template_count_overflow[find_objects_init-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflow::test_template_count_overflow[generate_key-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflow::test_template_count_overflow[set_attribute_value-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflowValidHandles::test_template_count_overflow_with_valid_object_handle[copy_object-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflowValidHandles::test_template_count_overflow_with_valid_object_handle[get_attribute_value-0x100000000]
+environment testcases/security/test_arithmetic_overflow.py::TestTemplateCountOverflowValidHandles::test_template_count_overflow_with_valid_object_handle[set_attribute_value-0x100000000]
+environment testcases/security/test_field_size_boundary.py::TestFindObjectsCountTruncation::test_find_objects_oversized_count_survives
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_load_module_via_p11kit
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_list_modules
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_proxy_exists
+timing testcases/security/test_cve_regression.py::TestECDSATimingBasic::test_ecdsa_timing_variance
 timing testcases/security/test_padding_oracle.py::TestTimingBasic::test_aes_cbc_pad_decrypt_timing_sanity
 timing testcases/test_benchmark.py::test_bench_aes256_cbc_encrypt
 timing testcases/test_benchmark.py::test_bench_aes_keygen
+timing testcases/test_benchmark.py::test_bench_ecdsa_p256_sign
 timing testcases/test_benchmark.py::test_bench_sha256_digest
 import-refused testcases/test_surface_audit.py::TestMechanismLimitProbing::test_hmac_short_key

@@ -167,7 +167,9 @@ struct AesState<const DEPTH: usize> {
 /// # Type Parameters
 ///
 /// - `DEPTH`: Maximum number of concurrent waiters. Must be a power of 2,
-///   at most 128.
+///   at most 128. A caller that finds every slot taken fails with
+///   [`AesError::QUEUE_FULL`] rather than waiting, so size `DEPTH` to the
+///   number of tasks that can use the engine at once.
 pub struct AesDriver<const DEPTH: usize> {
     #[allow(dead_code)] // reserved for future interrupt-driven mode
     interrupt: bool,
@@ -275,11 +277,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                     let status = slot.status;
                     slot.status = 0;
 
-                    // Advance head past consecutive consumed slots.
-                    while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0
-                    {
-                        s.head = s.head.wrapping_add(1);
-                    }
+                    advance_head(s);
 
                     return Poll::Ready(map_status(status));
                 }
@@ -420,9 +418,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
             s.slots[idx].exclusive = false;
             s.slots[idx].status = 0;
             s.active = my.wrapping_add(1);
-            while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0 {
-                s.head = s.head.wrapping_add(1);
-            }
+            advance_head(s);
             if s.active != s.tail {
                 let next = (s.active & Self::MASK) as usize;
                 if !s.slots[next].exclusive {
@@ -577,6 +573,13 @@ fn map_status(status: u8) -> HsmResult<()> {
         return Err(AesError::FAULT_ERROR);
     }
     Err(AesError::FAULT_ERROR)
+}
+
+/// Advance `head` past consecutive consumed slots.
+fn advance_head<const DEPTH: usize>(s: &mut AesState<DEPTH>) {
+    while s.head != s.active && s.slots[(s.head as usize) & (DEPTH - 1)].status == 0 {
+        s.head = s.head.wrapping_add(1);
+    }
 }
 
 #[cfg(test)]

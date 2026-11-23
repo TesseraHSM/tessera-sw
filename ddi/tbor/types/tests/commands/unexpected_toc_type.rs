@@ -6,7 +6,6 @@
 
 use tsra_ddi_tbor_types::codec::DecodeError;
 use tsra_ddi_tbor_types::codec::ResponseEncoder;
-use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborResp;
 
@@ -16,7 +15,7 @@ fn wrong_toc_entry_type_yields_unexpected_toc_type() {
     // first slot as a SessionId (a wrong type) instead — status is 0
     // so the FwError gate does not short-circuit the schema decoder.
     let mut buf = [0u8; 64];
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0, false)
         .session_id(0xAAAA)
         .expect("encode session_id")
         .uint16(0)

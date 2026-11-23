@@ -14,7 +14,7 @@
 //! ```ignore
 //! use tsra_fw_uno_drivers_gdma::ChannelConfig;
 //!
-//! type Gdma = GdmaDriver<32>;
+//! type Gdma = GdmaDriver<64, 32>;
 //! let gdma = static_init!(Gdma, Gdma::new(ChannelConfig {
 //!     channel: 0,
 //!     sq_base: 0x2003_e400,

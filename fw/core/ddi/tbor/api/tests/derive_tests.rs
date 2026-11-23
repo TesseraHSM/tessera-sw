@@ -37,7 +37,7 @@ pub struct PairedResp<'a> {
 #[test]
 fn paired_frames_reuse_metadata_without_moving_payload() {
     let mut buffer = [0xA5; 32];
-    let request = PairedReq::encode(&mut buffer).unwrap().finish();
+    let request = PairedReq::encode(&mut buffer, (1, 1)).unwrap().finish();
     let request = tsra_fw_ddi_tbor::RequestView::parse(brand(request.as_bytes())).unwrap();
     let base = request.data_start();
     assert_eq!(request.toc_count(), 2);
@@ -48,7 +48,7 @@ fn paired_frames_reuse_metadata_without_moving_payload() {
     let bytes = b"output";
     buffer[base..base + bytes.len()].copy_from_slice(bytes);
     let payload_address = buffer[base..].as_ptr();
-    let response = PairedResp::encode(&mut buffer, 0, false)
+    let response = PairedResp::encode(&mut buffer, (1, 1), 0, false)
         .unwrap()
         .code(7)
         .unwrap()
@@ -64,7 +64,10 @@ fn paired_frames_reuse_metadata_without_moving_payload() {
 #[test]
 fn paired_request_rejects_nonempty_reserved_toc_slot() {
     let mut buffer = [0; 32];
-    let len = PairedReq::encode(&mut buffer).unwrap().finish().len();
+    let len = PairedReq::encode(&mut buffer, (1, 1))
+        .unwrap()
+        .finish()
+        .len();
     tsra_fw_ddi_tbor::toc::write_toc_word(
         &mut buffer,
         tsra_fw_ddi_tbor::REQ_HEADER_LEN,
@@ -86,7 +89,7 @@ fn existing_payload_still_checks_length_and_capacity() {
         (8, 23, HsmError::TborBufferTooSmall),
     ] {
         let mut buffer = [0xA5; 32];
-        let result = PairedResp::encode(&mut buffer[..capacity], 0, false)
+        let result = PairedResp::encode(&mut buffer[..capacity], (1, 1), 0, false)
             .unwrap()
             .code(7)
             .unwrap()
@@ -98,7 +101,7 @@ fn existing_payload_still_checks_length_and_capacity() {
 #[test]
 fn reserved_payload_clears_previous_contents() {
     let mut buffer = [0xA5; 32];
-    let response = PairedResp::encode(&mut buffer, 0, false)
+    let response = PairedResp::encode(&mut buffer, (1, 1), 0, false)
         .unwrap()
         .code(7)
         .unwrap()
@@ -119,7 +122,7 @@ pub struct GetCertificateReq {
 #[test]
 fn request_scalar_encode_decode() {
     let mut buf = [0u8; 256];
-    let frame = GetCertificateReq::encode(&mut buf)
+    let frame = GetCertificateReq::encode(&mut buf, (1, 1))
         .unwrap()
         .slot_id(3)
         .unwrap()
@@ -127,14 +130,14 @@ fn request_scalar_encode_decode() {
         .unwrap()
         .finish();
 
-    assert_eq!(frame.len(), 16); // 8 header + 2*4 TOC
+    assert_eq!(frame.len(), 20); // 12 header + 2*4 TOC
     assert_eq!(frame.slot_id(), 3);
     assert_eq!(frame.cert_id(), 1);
 
     let view = GetCertificateReq::decode(brand(frame.as_bytes())).unwrap();
     assert_eq!(view.slot_id(), 3);
     assert_eq!(view.cert_id(), 1);
-    assert_eq!(view.len(), 16);
+    assert_eq!(view.len(), 20);
 }
 
 // ── Response with buffer field ─────────────────────────────────────────
@@ -149,14 +152,14 @@ pub struct GetCertificateResp<'a> {
 fn response_buffer_encode_decode() {
     let cert_data = b"mock-certificate-data";
     let mut buf = [0u8; 256];
-    let frame = GetCertificateResp::encode(&mut buf, 0, false)
+    let frame = GetCertificateResp::encode(&mut buf, (1, 1), 0, false)
         .unwrap()
         .certificate(cert_data.as_slice())
         .unwrap()
         .finish();
 
-    // 8 header + 4 TOC + 21 data = 33
-    assert_eq!(frame.len(), 33);
+    // 12 header + 4 TOC + 21 data = 37
+    assert_eq!(frame.len(), 37);
     assert_eq!(frame.certificate(), cert_data);
 
     let view = GetCertificateResp::decode(brand(frame.as_bytes())).unwrap();
@@ -186,7 +189,7 @@ fn request_mixed_types_round_trip() {
     let plaintext = b"hello world";
 
     let mut buf = [0u8; 512];
-    let frame = AesEncryptReq::encode(&mut buf)
+    let frame = AesEncryptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .sess_id(tsra_fw_ddi_tbor_api::SessionId(43))
         .unwrap()
@@ -220,7 +223,7 @@ pub struct BigFieldReq {
 #[test]
 fn request_u32_u64_round_trip() {
     let mut buf = [0u8; 512];
-    let frame = BigFieldReq::encode(&mut buf)
+    let frame = BigFieldReq::encode(&mut buf, (1, 1))
         .unwrap()
         .count(0xDEADBEEF)
         .unwrap()
@@ -247,7 +250,7 @@ pub struct DeviceInfoResp {
 #[test]
 fn response_fips_flag() {
     let mut buf = [0u8; 256];
-    let frame = DeviceInfoResp::encode(&mut buf, 0, true)
+    let frame = DeviceInfoResp::encode(&mut buf, (1, 1), 0, true)
         .unwrap()
         .kind(2)
         .unwrap()
@@ -287,7 +290,7 @@ fn enum_try_from_and_into() {
 #[test]
 fn view_display() {
     let mut buf = [0u8; 256];
-    let frame = GetCertificateReq::encode(&mut buf)
+    let frame = GetCertificateReq::encode(&mut buf, (1, 1))
         .unwrap()
         .slot_id(3)
         .unwrap()
@@ -307,14 +310,13 @@ fn view_display() {
 #[test]
 fn decode_wrong_opcode() {
     let mut buf = [0u8; 256];
-    let msg =
-        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0xFF)
-            .uint8(1)
-            .unwrap()
-            .uint8(2)
-            .unwrap()
-            .finish()
-            .unwrap();
+    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, (1, 1), 0xFF)
+        .uint8(1)
+        .unwrap()
+        .uint8(2)
+        .unwrap()
+        .finish()
+        .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborOpcodeMismatch);
@@ -323,16 +325,15 @@ fn decode_wrong_opcode() {
 #[test]
 fn decode_wrong_toc_count() {
     let mut buf = [0u8; 256];
-    let msg =
-        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x09)
-            .uint8(1)
-            .unwrap()
-            .uint8(2)
-            .unwrap()
-            .uint8(3)
-            .unwrap()
-            .finish()
-            .unwrap();
+    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, (1, 1), 0x09)
+        .uint8(1)
+        .unwrap()
+        .uint8(2)
+        .unwrap()
+        .uint8(3)
+        .unwrap()
+        .finish()
+        .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborMessageTruncated);
@@ -341,14 +342,13 @@ fn decode_wrong_toc_count() {
 #[test]
 fn decode_wrong_toc_type() {
     let mut buf = [0u8; 256];
-    let msg =
-        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x09)
-            .session_id(1)
-            .unwrap()
-            .uint8(2)
-            .unwrap()
-            .finish()
-            .unwrap();
+    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, (1, 1), 0x09)
+        .session_id(1)
+        .unwrap()
+        .uint8(2)
+        .unwrap()
+        .finish()
+        .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType);
@@ -366,7 +366,7 @@ pub struct OptionalScalarReq {
 #[test]
 fn optional_scalar_all_present() {
     let mut buf = [0u8; 256];
-    let frame = OptionalScalarReq::encode(&mut buf)
+    let frame = OptionalScalarReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required_id(5)
         .unwrap()
@@ -389,7 +389,7 @@ fn optional_scalar_all_present() {
 #[test]
 fn optional_scalar_some_absent() {
     let mut buf = [0u8; 256];
-    let frame = OptionalScalarReq::encode(&mut buf)
+    let frame = OptionalScalarReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required_id(3)
         .unwrap()
@@ -413,7 +413,7 @@ fn optional_scalar_some_absent() {
 fn optional_scalar_all_absent_early_finish() {
     // Skip trailing optionals by calling finish() early.
     let mut buf = [0u8; 256];
-    let frame = OptionalScalarReq::encode(&mut buf)
+    let frame = OptionalScalarReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required_id(1)
         .unwrap()
@@ -433,7 +433,7 @@ fn optional_scalar_all_absent_early_finish() {
 fn optional_skip_intermediate() {
     // Skip opt_value, jump to opt_flags directly.
     let mut buf = [0u8; 256];
-    let frame = OptionalScalarReq::encode(&mut buf)
+    let frame = OptionalScalarReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required_id(7)
         .unwrap()
@@ -461,7 +461,7 @@ pub struct OptionalBufferReq<'a> {
 #[test]
 fn optional_buffer_present() {
     let mut buf = [0u8; 512];
-    let frame = OptionalBufferReq::encode(&mut buf)
+    let frame = OptionalBufferReq::encode(&mut buf, (1, 1))
         .unwrap()
         .sess(tsra_fw_ddi_tbor_api::SessionId(10))
         .unwrap()
@@ -484,7 +484,7 @@ fn optional_buffer_present() {
 #[test]
 fn optional_buffer_absent_early_finish() {
     let mut buf = [0u8; 512];
-    let frame = OptionalBufferReq::encode(&mut buf)
+    let frame = OptionalBufferReq::encode(&mut buf, (1, 1))
         .unwrap()
         .sess(tsra_fw_ddi_tbor_api::SessionId(10))
         .unwrap()
@@ -499,8 +499,8 @@ fn optional_buffer_absent_early_finish() {
     assert_eq!(view.data(), b"hello");
     assert_eq!(view.opt_extra(), None);
 
-    // 8 header + 3*4 TOC + 5 data = 21
-    assert_eq!(frame.len(), 25);
+    // 12 header + 3*4 TOC + 5 data = 29
+    assert_eq!(frame.len(), 29);
 }
 
 // ── Optional with offset types: Some/None/Some pattern ────────────────
@@ -518,7 +518,7 @@ pub struct SomeNoneSomeReq<'a> {
 fn some_none_some_offset_compression() {
     let mut buf = [0u8; 512];
     // Skip middle, jump to last.
-    let frame = SomeNoneSomeReq::encode(&mut buf)
+    let frame = SomeNoneSomeReq::encode(&mut buf, (1, 1))
         .unwrap()
         .first(b"AAAA")
         .unwrap()
@@ -531,8 +531,8 @@ fn some_none_some_offset_compression() {
     assert_eq!(frame.last(), b"BBBB");
 
     // Data section: 4 (first) + 0 (middle absent) + 4 (last) = 8
-    // Total: 8 header + 3*4 TOC + 8 data = 24
-    assert_eq!(frame.len(), 28);
+    // Total: 12 header + 3*4 TOC + 8 data = 32
+    assert_eq!(frame.len(), 32);
 
     let view = SomeNoneSomeReq::decode(brand(frame.as_bytes())).unwrap();
     assert_eq!(view.first(), b"AAAA");
@@ -543,7 +543,7 @@ fn some_none_some_offset_compression() {
 #[test]
 fn some_some_some_full() {
     let mut buf = [0u8; 512];
-    let frame = SomeNoneSomeReq::encode(&mut buf)
+    let frame = SomeNoneSomeReq::encode(&mut buf, (1, 1))
         .unwrap()
         .first(b"AAAA")
         .unwrap()
@@ -557,7 +557,7 @@ fn some_some_some_full() {
     assert_eq!(frame.middle(), Some(0xDEAD));
     assert_eq!(frame.last(), b"BBBB");
 
-    assert_eq!(frame.len(), 32);
+    assert_eq!(frame.len(), 36);
 }
 
 // ── Optional response ─────────────────────────────────────────────────
@@ -572,7 +572,7 @@ pub struct OptionalResp<'a> {
 #[test]
 fn optional_response_round_trip() {
     let mut buf = [0u8; 256];
-    let frame = OptionalResp::encode(&mut buf, 0, true)
+    let frame = OptionalResp::encode(&mut buf, (1, 1), 0, true)
         .unwrap()
         .result_code(1)
         .unwrap()
@@ -588,7 +588,7 @@ fn optional_response_round_trip() {
 
     // Without data — early finish
     let mut buf2 = [0u8; 256];
-    let frame2 = OptionalResp::encode(&mut buf2, 0x05, false)
+    let frame2 = OptionalResp::encode(&mut buf2, (1, 1), 0x05, false)
         .unwrap()
         .result_code(0)
         .unwrap()
@@ -605,7 +605,7 @@ fn optional_response_round_trip() {
 #[test]
 fn optional_display() {
     let mut buf = [0u8; 256];
-    let frame = OptionalScalarReq::encode(&mut buf)
+    let frame = OptionalScalarReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required_id(5)
         .unwrap()
@@ -642,7 +642,7 @@ pub struct TypedU8Req {
 #[test]
 fn typed_u8_newtype_round_trips() {
     let mut buf = [0u8; 256];
-    let frame = TypedU8Req::encode(&mut buf)
+    let frame = TypedU8Req::encode(&mut buf, (1, 1))
         .unwrap()
         .psk_id(1)
         .unwrap()
@@ -650,8 +650,8 @@ fn typed_u8_newtype_round_trips() {
         .unwrap()
         .finish();
 
-    // Wire is identical to two inline u8 fields: 4 header + 2*4 TOC.
-    assert_eq!(frame.len(), 16);
+    // Wire is identical to two inline u8 fields: 12 header + 2*4 TOC.
+    assert_eq!(frame.len(), 20);
     // Typed accessor returns the newtype.
     assert_eq!(frame.suite_id(), WireTag(0x07));
 
@@ -675,7 +675,7 @@ pub struct AlignedReq<'a> {
 #[test]
 fn aligned_field_with_padding_needed() {
     let mut buf = [0u8; 512];
-    let frame = AlignedReq::encode(&mut buf)
+    let frame = AlignedReq::encode(&mut buf, (1, 1))
         .unwrap()
         .header(b"ABCDE")
         .unwrap()
@@ -694,7 +694,7 @@ fn aligned_field_with_padding_needed() {
 #[test]
 fn aligned_field_already_aligned() {
     let mut buf = [0u8; 512];
-    let frame = AlignedReq::encode(&mut buf)
+    let frame = AlignedReq::encode(&mut buf, (1, 1))
         .unwrap()
         .header(b"ABCD")
         .unwrap()
@@ -723,7 +723,7 @@ pub struct Aligned8Req<'a> {
 #[test]
 fn align_8_with_padding() {
     let mut buf = [0u8; 512];
-    let frame = Aligned8Req::encode(&mut buf)
+    let frame = Aligned8Req::encode(&mut buf, (1, 1))
         .unwrap()
         .prefix(b"ABC")
         .unwrap()
@@ -740,11 +740,11 @@ fn align_8_with_padding() {
 }
 
 /// Alignment is measured from the start of the message, not the data
-/// section: with three TOC entries the data section starts at byte 20.
+/// section: with three TOC entries the data section starts at byte 24.
 #[test]
 fn align_is_relative_to_message_start() {
     let mut buf = [0u8; 512];
-    let len = Aligned8Req::encode(&mut buf)
+    let len = Aligned8Req::encode(&mut buf, (1, 1))
         .unwrap()
         .prefix(b"ABC")
         .unwrap()
@@ -759,13 +759,13 @@ fn align_is_relative_to_message_start() {
         (data_start + tsra_fw_ddi_tbor::toc::raw_toc_offset(word)) % 8,
         0
     );
-    assert_eq!(tsra_fw_ddi_tbor::toc::raw_toc_offset(word), 4);
+    assert_eq!(tsra_fw_ddi_tbor::toc::raw_toc_offset(word), 8);
 }
 
 #[test]
 fn decode_rejects_misaligned_field() {
     let mut buf = [0u8; 512];
-    let len = Aligned8Req::encode(&mut buf)
+    let len = Aligned8Req::encode(&mut buf, (1, 1))
         .unwrap()
         .prefix(b"ABC")
         .unwrap()
@@ -802,7 +802,7 @@ pub struct MultiAlignReq<'a> {
 #[test]
 fn multiple_aligned_fields() {
     let mut buf = [0u8; 512];
-    let frame = MultiAlignReq::encode(&mut buf)
+    let frame = MultiAlignReq::encode(&mut buf, (1, 1))
         .unwrap()
         .tag(b"XYZ")
         .unwrap()
@@ -870,7 +870,7 @@ fn typed_slice_unaligned_needs_no_padding() {
     ];
 
     let mut backing = AlignedBuf([0u8; 512]);
-    let frame = TypedSliceReq::encode(&mut backing.0)
+    let frame = TypedSliceReq::encode(&mut backing.0, (1, 1))
         .unwrap()
         // 5 bytes → odd, so `items` lands on an odd offset. An `Unaligned`
         // element type means no padding entry is inserted, yet the cast
@@ -903,7 +903,7 @@ pub struct OptAlignReq<'a> {
 #[test]
 fn optional_aligned_present() {
     let mut buf = [0u8; 512];
-    let frame = OptAlignReq::encode(&mut buf)
+    let frame = OptAlignReq::encode(&mut buf, (1, 1))
         .unwrap()
         .prefix(b"AB")
         .unwrap()
@@ -927,7 +927,7 @@ fn optional_aligned_present() {
 fn optional_aligned_absent_skip_ahead() {
     // Skip opt_value, jump to suffix directly.
     let mut buf = [0u8; 512];
-    let frame = OptAlignReq::encode(&mut buf)
+    let frame = OptAlignReq::encode(&mut buf, (1, 1))
         .unwrap()
         .prefix(b"AB")
         .unwrap()
@@ -950,7 +950,7 @@ fn optional_aligned_absent_skip_ahead() {
 #[test]
 fn encode_buffer_too_small() {
     let mut buf = [0u8; 4]; // too small for header + TOC
-    let result = GetCertificateReq::encode(&mut buf);
+    let result = GetCertificateReq::encode(&mut buf, (1, 1));
     assert!(matches!(
         result,
         Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall)
@@ -972,7 +972,7 @@ fn fixed_array_round_trip() {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
     ];
     let mut buf = [0u8; 256];
-    let frame = FixedArrayReq::encode(&mut buf)
+    let frame = FixedArrayReq::encode(&mut buf, (1, 1))
         .unwrap()
         .nonce(&nonce)
         .unwrap()
@@ -994,14 +994,13 @@ fn fixed_array_round_trip() {
 fn fixed_array_wrong_length_rejected() {
     // Manually encode with wrong length for the nonce field.
     let mut buf = [0u8; 256];
-    let msg =
-        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x40)
-            .buffer(b"short") // only 5 bytes instead of 12
-            .unwrap()
-            .buffer(b"payload")
-            .unwrap()
-            .finish()
-            .unwrap();
+    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, (1, 1), 0x40)
+        .buffer(b"short") // only 5 bytes instead of 12
+        .unwrap()
+        .buffer(b"payload")
+        .unwrap()
+        .finish()
+        .unwrap();
 
     let err = FixedArrayReq::decode(brand(msg)).unwrap_err();
     assert_eq!(
@@ -1023,7 +1022,7 @@ pub struct ConstrainedReq<'a> {
 #[test]
 fn len_constraint_valid() {
     let mut buf = [0u8; 512];
-    let frame = ConstrainedReq::encode(&mut buf)
+    let frame = ConstrainedReq::encode(&mut buf, (1, 1))
         .unwrap()
         .tag(b"hello")
         .unwrap()
@@ -1043,7 +1042,7 @@ fn len_constraint_valid() {
 fn len_constraint_too_short() {
     let mut buf = [0u8; 512];
     // tag has min_len=1, empty slice should fail.
-    let result = ConstrainedReq::encode(&mut buf).unwrap().tag(b"");
+    let result = ConstrainedReq::encode(&mut buf, (1, 1)).unwrap().tag(b"");
     assert!(matches!(
         result,
         Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge)
@@ -1054,7 +1053,9 @@ fn len_constraint_too_short() {
 fn len_constraint_too_long() {
     let mut buf = [0u8; 512];
     let long_tag = [0u8; 33]; // max_len is 32
-    let result = ConstrainedReq::encode(&mut buf).unwrap().tag(&long_tag);
+    let result = ConstrainedReq::encode(&mut buf, (1, 1))
+        .unwrap()
+        .tag(&long_tag);
     assert!(matches!(
         result,
         Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge)
@@ -1065,14 +1066,13 @@ fn len_constraint_too_long() {
 fn len_constraint_decode_too_short() {
     // Manually encode with empty tag (violates min_len=1).
     let mut buf = [0u8; 256];
-    let msg =
-        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x41)
-            .buffer(&[]) // empty tag
-            .unwrap()
-            .buffer(b"data")
-            .unwrap()
-            .finish()
-            .unwrap();
+    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, (1, 1), 0x41)
+        .buffer(&[]) // empty tag
+        .unwrap()
+        .buffer(b"data")
+        .unwrap()
+        .finish()
+        .unwrap();
 
     let err = ConstrainedReq::decode(brand(msg)).unwrap_err();
     assert_eq!(
@@ -1092,7 +1092,7 @@ pub struct AllOptReq {
 #[test]
 fn all_optional_immediate_finish() {
     let mut buf = [0u8; 64];
-    let frame = AllOptReq::encode(&mut buf).unwrap().finish();
+    let frame = AllOptReq::encode(&mut buf, (1, 1)).unwrap().finish();
 
     assert_eq!(frame.opt_a(), None);
     assert_eq!(frame.opt_b(), None);
@@ -1105,7 +1105,7 @@ fn all_optional_immediate_finish() {
 #[test]
 fn all_optional_set_first_then_finish() {
     let mut buf = [0u8; 64];
-    let frame = AllOptReq::encode(&mut buf)
+    let frame = AllOptReq::encode(&mut buf, (1, 1))
         .unwrap()
         .opt_a(Some(42))
         .unwrap()
@@ -1129,7 +1129,7 @@ pub struct SealedKeyReq<'a> {
 fn derive_sealed_key_round_trip() {
     let blob = b"sealed-key-data-here";
     let mut buf = [0u8; 256];
-    let frame = SealedKeyReq::encode(&mut buf)
+    let frame = SealedKeyReq::encode(&mut buf, (1, 1))
         .unwrap()
         .session(tsra_fw_ddi_tbor_api::SessionId(5))
         .unwrap()
@@ -1157,7 +1157,7 @@ pub struct OptFixedArrayReq {
 fn optional_fixed_array_present() {
     let nonce = [0xAA; 16];
     let mut buf = [0u8; 256];
-    let frame = OptFixedArrayReq::encode(&mut buf)
+    let frame = OptFixedArrayReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required(1)
         .unwrap()
@@ -1174,7 +1174,7 @@ fn optional_fixed_array_present() {
 #[test]
 fn optional_fixed_array_absent() {
     let mut buf = [0u8; 256];
-    let frame = OptFixedArrayReq::encode(&mut buf)
+    let frame = OptFixedArrayReq::encode(&mut buf, (1, 1))
         .unwrap()
         .required(1)
         .unwrap()
@@ -1192,7 +1192,7 @@ fn optional_fixed_array_absent() {
 fn len_constraint_exact_min() {
     let mut buf = [0u8; 512];
     // min_len=1: exactly 1 byte should pass.
-    let frame = ConstrainedReq::encode(&mut buf)
+    let frame = ConstrainedReq::encode(&mut buf, (1, 1))
         .unwrap()
         .tag(b"x")
         .unwrap()
@@ -1206,7 +1206,7 @@ fn len_constraint_exact_min() {
 fn len_constraint_exact_max() {
     let mut buf = [0u8; 512];
     let tag32 = [0u8; 32]; // max_len=32: exactly 32 should pass.
-    let frame = ConstrainedReq::encode(&mut buf)
+    let frame = ConstrainedReq::encode(&mut buf, (1, 1))
         .unwrap()
         .tag(&tag32)
         .unwrap()
@@ -1221,7 +1221,7 @@ fn len_constraint_exact_max() {
 #[test]
 fn response_encode_buffer_too_small() {
     let mut buf = [0u8; 4]; // too small for response header + TOC
-    let result = GetCertificateResp::encode(&mut buf, 0, false);
+    let result = GetCertificateResp::encode(&mut buf, (1, 1), 0, false);
     assert!(matches!(
         result,
         Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall)
@@ -1255,20 +1255,15 @@ fn enum_u16_try_from_and_into() {
 #[test]
 fn derive_response_wrong_toc_count() {
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::ResponseEncoder::new(
-        &mut buf,
-        tsra_fw_ddi_tbor::PROTOCOL_VERSION,
-        0,
-        false,
-    )
-    .uint8(1)
-    .unwrap()
-    .uint8(2)
-    .unwrap()
-    .uint8(3)
-    .unwrap()
-    .finish()
-    .unwrap();
+    let msg = tsra_fw_ddi_tbor::ResponseEncoder::new(&mut buf, (1, 1), 0, false)
+        .uint8(1)
+        .unwrap()
+        .uint8(2)
+        .unwrap()
+        .uint8(3)
+        .unwrap()
+        .finish()
+        .unwrap();
 
     // DeviceInfoResp expects 2 TOC entries, not 3.
     let err = DeviceInfoResp::decode(brand(msg)).unwrap_err();
@@ -1297,7 +1292,7 @@ pub struct IncludeReq<'a> {
 #[test]
 fn include_group_encode_decode() {
     let mut buf = [0u8; 512];
-    let frame = IncludeReq::encode(&mut buf)
+    let frame = IncludeReq::encode(&mut buf, (1, 1))
         .unwrap()
         .header(|h| {
             h.session(tsra_fw_ddi_tbor_api::SessionId(7))?
@@ -1366,7 +1361,7 @@ pub struct NestedIncludeReq<'a> {
 #[test]
 fn nested_include_encode_decode() {
     let mut buf = [0u8; 512];
-    let frame = NestedIncludeReq::encode(&mut buf)
+    let frame = NestedIncludeReq::encode(&mut buf, (1, 1))
         .unwrap()
         .header(|h| {
             h.session(tsra_fw_ddi_tbor_api::SessionId(99))?
@@ -1429,7 +1424,7 @@ fn tbor_request_trait_opcode() {
 fn tbor_request_trait_decode() {
     // Encode via the struct, decode via the trait.
     let mut buf = [0u8; 256];
-    let frame = GetCertificateReq::encode(&mut buf)
+    let frame = GetCertificateReq::encode(&mut buf, (1, 1))
         .unwrap()
         .slot_id(3)
         .unwrap()
@@ -1446,7 +1441,7 @@ fn tbor_request_trait_decode() {
 fn trait_based_dispatch() {
     // Simulate receiving a wire message and dispatching by opcode.
     let mut buf = [0u8; 256];
-    let frame = GetCertificateReq::encode(&mut buf)
+    let frame = GetCertificateReq::encode(&mut buf, (1, 1))
         .unwrap()
         .slot_id(5)
         .unwrap()
@@ -1487,7 +1482,7 @@ pub struct MixedMutableReq<'a> {
 #[test]
 fn decode_mut_with_uint32_uint64_siblings() {
     let mut buf = [0u8; 256];
-    let frame = MixedMutableReq::encode(&mut buf)
+    let frame = MixedMutableReq::encode(&mut buf, (1, 1))
         .unwrap()
         .epoch(0xCAFEBABE)
         .unwrap()
@@ -1557,7 +1552,7 @@ fn field_group_typed_slice_and_buffer_round_trip() {
     };
 
     let mut buf = [0u8; 512];
-    let frame = GroupBufReq::encode(&mut buf)
+    let frame = GroupBufReq::encode(&mut buf, (1, 1))
         .unwrap()
         .ev(|g| {
             g.session(tsra_fw_ddi_tbor_api::SessionId(42))?
@@ -1597,7 +1592,7 @@ fn single_typed_pod_ref_top_level_round_trip() {
         b: zerocopy::little_endian::U16::new(0x5678),
     };
     let mut buf = [0u8; 256];
-    let frame = SinglePodReq::encode(&mut buf)
+    let frame = SinglePodReq::encode(&mut buf, (1, 1))
         .unwrap()
         .pair(&p)
         .unwrap()
@@ -1647,7 +1642,7 @@ fn decode_mut_with_include_group_sibling() {
     };
 
     let mut buf = [0u8; 512];
-    let frame = GroupMutableReq::encode(&mut buf)
+    let frame = GroupMutableReq::encode(&mut buf, (1, 1))
         .unwrap()
         .secret(b"initial-secret!!")
         .unwrap()

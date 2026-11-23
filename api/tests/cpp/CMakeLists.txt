@@ -147,6 +147,7 @@ else()
             GTest::gtest_main
             scope_guard::scope_guard
             bcrypt
+            crypt32
             ncrypt
     )
 endif()

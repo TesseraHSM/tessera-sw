@@ -8,8 +8,6 @@
 //! are parameterised over a [`Header`] impl; everything else — TOC
 //! layout, validation, framing — is identical for both message kinds.
 
-use crate::toc::PROTOCOL_VERSION;
-
 mod sealed {
     pub trait Sealed {}
 }
@@ -32,44 +30,41 @@ pub trait Header: sealed::Sealed {
 
 // ── Request ────────────────────────────────────────────────────────────
 
-/// Request-message header data: protocol version + opcode.
+/// Request-message header data: API revision and opcode.
 #[derive(Debug, Clone, Copy)]
 pub struct Request {
-    pub version: u8,
+    pub api_rev: (u16, u16),
     pub opcode: u8,
 }
 
 impl Request {
-    /// Construct a request header with the current protocol version.
+    /// Construct a request header for the selected API revision.
     #[inline]
-    pub const fn new(opcode: u8) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            opcode,
-        }
+    pub const fn new(api_rev: (u16, u16), opcode: u8) -> Self {
+        Self { api_rev, opcode }
     }
 }
 
 impl sealed::Sealed for Request {}
 
 impl Header for Request {
-    const LEN: usize = 8;
-    const TOC_COUNT_BYTE: usize = 2;
+    const LEN: usize = 12;
+    const TOC_COUNT_BYTE: usize = 4;
 
     fn write_header(buf: &mut [u8], hdr: &Self, toc_count: usize) {
-        // Wire layout (LE u32): [version, 0x00, toc_count-1, opcode].
-        let word = u32::from_le_bytes([hdr.version, 0x00, (toc_count - 1) as u8, hdr.opcode]);
-        buf[..4].copy_from_slice(&word.to_le_bytes());
-        buf[4..8].fill(0);
+        buf[..2].copy_from_slice(&hdr.api_rev.0.to_le_bytes());
+        buf[2..4].copy_from_slice(&hdr.api_rev.1.to_le_bytes());
+        buf[4..8].copy_from_slice(&[(toc_count - 1) as u8, hdr.opcode, 0, 0]);
+        buf[8..12].fill(0);
     }
 }
 
 // ── Response ───────────────────────────────────────────────────────────
 
-/// Response-message header data: protocol version + flags + status.
+/// Response-message header data: API revision, flags and status.
 #[derive(Debug, Clone, Copy)]
 pub struct Response {
-    pub version: u8,
+    pub api_rev: (u16, u16),
     pub flags: u8,
     pub status: u32,
 }
@@ -78,11 +73,11 @@ impl Response {
     /// FIPS_APPROVED flag bit inside the flags byte.
     pub const FIPS_APPROVED_FLAG: u8 = 0x01;
 
-    /// Construct a response header with the current protocol version.
+    /// Construct a response header echoing the request's API revision.
     #[inline]
-    pub const fn new(status: u32, fips_approved: bool) -> Self {
+    pub const fn new(api_rev: (u16, u16), status: u32, fips_approved: bool) -> Self {
         Self {
-            version: PROTOCOL_VERSION,
+            api_rev,
             flags: if fips_approved {
                 Self::FIPS_APPROVED_FLAG
             } else {
@@ -96,14 +91,13 @@ impl Response {
 impl sealed::Sealed for Response {}
 
 impl Header for Response {
-    const LEN: usize = 8;
-    const TOC_COUNT_BYTE: usize = 2;
+    const LEN: usize = 12;
+    const TOC_COUNT_BYTE: usize = 4;
 
     fn write_header(buf: &mut [u8], hdr: &Self, toc_count: usize) {
-        // Wire layout (two LE u32 words):
-        //   [version, flags, toc_count-1, reserved] [status u32 LE]
-        let word0 = u32::from_le_bytes([hdr.version, hdr.flags, (toc_count - 1) as u8, 0x00]);
-        buf[..4].copy_from_slice(&word0.to_le_bytes());
-        buf[4..8].copy_from_slice(&hdr.status.to_le_bytes());
+        buf[..2].copy_from_slice(&hdr.api_rev.0.to_le_bytes());
+        buf[2..4].copy_from_slice(&hdr.api_rev.1.to_le_bytes());
+        buf[4..8].copy_from_slice(&[(toc_count - 1) as u8, hdr.flags, 0, 0]);
+        buf[8..12].copy_from_slice(&hdr.status.to_le_bytes());
     }
 }

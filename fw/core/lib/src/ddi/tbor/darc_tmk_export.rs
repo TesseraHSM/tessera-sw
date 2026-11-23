@@ -228,10 +228,10 @@ pub(crate) async fn handle<P: HsmPal>(
                 // operand-order `X ‖ Y`; converting each coordinate in place
                 // yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
                 let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-                pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
+                pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                     .await?;
                 pk_s[0] = SEC1_UNCOMPRESSED;
-                byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_s[1..])?;
+                byte_order::pair_to_be::<P>(DARC_CURVE, &mut pk_s[1..])?;
 
                 // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
                 let cfg = HpkeSealConfig::auth(
@@ -271,7 +271,7 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `DarcTmkExport` response around the sealed TMK.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, sealed_tmk: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkExportResp::encode(buf, 0, false)?
+        let frame = TborDarcTmkExportResp::encode_for_request(buf, 0, false)?
             .sealed_tmk(sealed_tmk)?
             .finish();
         Ok(frame.as_bytes().len())

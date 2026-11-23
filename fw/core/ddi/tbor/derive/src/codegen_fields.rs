@@ -567,7 +567,7 @@ fn gen_group_view_accessor(field: &SchemaField, toc_idx: &TokenStream) -> TokenS
         WireType::Uint32 | WireType::Uint64 | WireType::Buffer | WireType::SealedKey => {
             let ds = quote! {
                 {
-                    let tc = (self.buf[2] & 0x1F) as usize + 1;
+                    let tc = (self.buf[4] & 0x1F) as usize + 1;
                     self.header_len + tc * 4
                 }
             };

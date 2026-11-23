@@ -9,7 +9,7 @@
 use super::common::*;
 
 fn build_kitchen_sink_request(buf: &mut [u8]) -> &[u8] {
-    RequestEncoder::new(buf, PROTOCOL_VERSION, OPCODE)
+    RequestEncoder::new(buf, (1, 1), OPCODE)
         .session_id(0xDEAD)
         .expect("session_id")
         .key_id(0xBEEF)
@@ -43,7 +43,7 @@ fn request_display_renders_every_toc_variant() -> TestResult {
     let view = RequestView::parse(bytes)?;
     let rendered = std::format!("{}", view);
 
-    assert!(rendered.contains("Request v1"));
+    assert!(rendered.contains("Request API 1.1"));
     assert!(rendered.contains("opcode=0x42"));
     assert!(rendered.contains("session_id  = 0xDEAD"));
     assert!(rendered.contains("key_id      = 0xBEEF"));
@@ -83,13 +83,13 @@ fn request_alternate_display_emits_hex_dump() -> TestResult {
 #[test]
 fn response_display_renders_status_and_flags() -> TestResult {
     let mut buf = [0u8; 256];
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0xCAFE_F00D, true)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), 0xCAFE_F00D, true)
         .uint16(0x1234)?
         .finish()?;
     let view = ResponseView::parse(bytes)?;
     let rendered = std::format!("{}", view);
 
-    assert!(rendered.contains("Response v1"));
+    assert!(rendered.contains("Response API 1.1"));
     assert!(rendered.contains("status=0xCAFEF00D"));
     assert!(rendered.contains("flags=[FIPS]"));
     assert!(rendered.contains("uint16      = 0x1234"));
@@ -99,13 +99,13 @@ fn response_display_renders_status_and_flags() -> TestResult {
 #[test]
 fn response_display_omits_flags_when_not_fips() -> TestResult {
     let mut buf = [0u8; 256];
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, STATUS_OK, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), STATUS_OK, false)
         .none()?
         .finish()?;
     let view = ResponseView::parse(bytes)?;
     let rendered = std::format!("{}", view);
 
-    assert!(rendered.contains("Response v1"));
+    assert!(rendered.contains("Response API 1.1"));
     assert!(rendered.contains("status=0x00000000"));
     assert!(!rendered.contains("flags="));
     Ok(())
@@ -114,7 +114,7 @@ fn response_display_omits_flags_when_not_fips() -> TestResult {
 #[test]
 fn response_alternate_display_emits_hex_dump() -> TestResult {
     let mut buf = [0u8; 256];
-    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, STATUS_OK, false)
+    let bytes = ResponseEncoder::new(&mut buf, (1, 1), STATUS_OK, false)
         .none()?
         .finish()?;
     let view = ResponseView::parse(bytes)?;
@@ -128,7 +128,7 @@ fn display_renders_unknown_toc_entry_type() -> TestResult {
     // Encode a normal request, then patch TOC[0] to an unknown 6-bit type
     // (10..=63 are unassigned) so the formatter takes the `Unknown` arm.
     let mut buf = [0u8; 256];
-    let len = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let len = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .none()?
         .finish()?
         .len();
@@ -147,12 +147,12 @@ fn display_renders_unknown_toc_entry_type() -> TestResult {
 fn view_exposes_data_layout_accessors() -> TestResult {
     let mut buf = [0u8; 256];
     let payload = [0xAB; 5];
-    let bytes = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, OPCODE)
+    let bytes = RequestEncoder::new(&mut buf, (1, 1), OPCODE)
         .buffer(&payload)?
         .finish()?;
     let view = RequestView::parse(bytes)?;
 
-    // 4-byte request header + 1 TOC entry * 4 bytes = data section starts at 8.
+    // 12-byte request header + 1 TOC entry * 4 bytes = data section starts at 16.
     assert_eq!(view.data_start(), REQ_HEADER_LEN + TOC_ENTRY_LEN);
     assert_eq!(view.data_size(), payload.len());
     assert_eq!(view.data_section(), &payload[..]);

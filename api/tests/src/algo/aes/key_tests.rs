@@ -468,13 +468,24 @@ fn test_aes_unmask_rejects_key_from_another_session() {
     let other = other_partition
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&other_partition),
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionExType::PlainText,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open a different session");
+    let rotated_psk = [0x5A; PSK_LEN];
     other
-        .change_psk(&[0x5A; PSK_LEN])
+        .change_psk(&rotated_psk)
         .expect("rotate the target session's default CU PSK");
+    drop(other);
+    let other = other_partition
+        .open_session_ex(
+            rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&other_partition),
+            HsmSessionPsk::with_psk(HsmPskId::CU, &rotated_psk),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("reopen the target session with the rotated CU PSK");
     let target_key = HsmKeyManager::generate_key(&other, &mut HsmAesKeyGenAlgo::default(), props)
         .expect("generate a key in the target session");
     let plaintext = [0x11; 32];

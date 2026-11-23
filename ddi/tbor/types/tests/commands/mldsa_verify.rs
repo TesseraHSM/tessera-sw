@@ -46,7 +46,9 @@ fn mldsa_verify_request_wire_shape() {
     assert_eq!(req.session_ctrl(), SessionControlKind::InSession);
 
     let mut buf = [0u8; 8192];
-    let bytes = req.encode_request(&mut buf).expect("encode request");
+    let bytes = req
+        .encode_request(&mut buf, (1, 1))
+        .expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLDSA_VERIFY);
     assert_eq!(view.toc_count(), 4);

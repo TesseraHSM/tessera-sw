@@ -139,7 +139,7 @@ pub(super) async fn dispatch(
 }
 
 fn decode_request(
-    decoder: &mut MborDecoder,
+    decoder: &mut MborDecoder<'_>,
     request_field_count: u8,
     request_len: usize,
 ) -> HsmResult<CrashRequest> {
@@ -301,6 +301,7 @@ fn execute_local(request: CrashRequest) -> HsmResult<Infallible> {
             // SAFETY: The undefined instruction intentionally faults this
             // core and never returns.
             #[cfg(target_arch = "arm")]
+            #[allow(unsafe_code)]
             unsafe {
                 core::arch::asm!("udf #0", options(noreturn));
             }

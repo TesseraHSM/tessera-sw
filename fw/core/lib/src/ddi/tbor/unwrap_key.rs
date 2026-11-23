@@ -44,6 +44,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_hsm_undo::UndoLog;
 use zeroize::Zeroize;
 
@@ -263,8 +264,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 let created = async {
                     let decoded = decode(pal, io, &mut *material, dclass, attrs).await?;
                     // Transient, partition-scoped (`None` session): deleted below.
-                    pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
-                        .await
+                    pal.vault_key_create(
+                        io,
+                        decoded.material,
+                        decoded.kind,
+                        None,
+                        attrs,
+                        HsmVaultPct::None,
+                    )
+                    .await
                 }
                 .await;
                 material.zeroize();
@@ -336,7 +344,7 @@ async fn encode_and_mask<P: HsmPal>(
 
     // Build the response with both data slots reserved (sized exactly).
     let len = cmd_buf.encode_response(|buf| {
-        Ok(TborUnwrapKeyResp::encode(buf, 0, false)?
+        Ok(TborUnwrapKeyResp::encode_for_request(buf, 0, false)?
             .key_kind(kind.0)?
             .masked_key_reserve(masked_len)?
             .pub_key_reserve(pub_len)?

@@ -175,8 +175,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             io,
             HsmHashAlgo::Sha384,
             policy_dma,
-            policy_hash_dma,
             HsmDigestForm::Standard,
+            Some(policy_hash_dma),
         )
         .await?;
 
@@ -339,17 +339,13 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     let pub_sec1 = alloc.dma_alloc(P384_PUB_SEC1_LEN)?;
     pub_sec1[0] = 0x04;
     let pub_xy = pub_sec1.split_at_mut(1).1;
-    let _ = kdf::derive_pta_keypair(pal, io, alloc, root, Some((priv_scalar, pub_xy))).await?;
+    let _ = kdf::derive_pta_keypair(pal, io, root, Some((priv_scalar, pub_xy))).await?;
     // `ecc_gen_keypair_from_root` returns each coordinate in operand
     // order, but every downstream consumer here (CSR SPKI, PTAID hash,
     // KeyReport `pk_x`/`pk_y`) expects standard SEC1 big-endian.
     // Convert in place so `pub_sec1` is canonical SEC1
     // (`0x04 || X_be || Y_be`).
-    byte_order::pair_to_be(
-        P::BYTE_ORDER,
-        tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
-        pub_xy,
-    )?;
+    byte_order::pair_to_be::<P>(tsra_fw_hsm_pal_traits::HsmEccCurve::P384, pub_xy)?;
     Ok(PtaKeypair {
         priv_scalar,
         pub_sec1,
@@ -376,8 +372,8 @@ async fn build_signed_csr<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         ptaid_input,
-        ptaid_digest,
         HsmDigestForm::Standard,
+        Some(ptaid_digest),
     )
     .await?;
 
@@ -442,8 +438,8 @@ async fn build_pta_report<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         policy,
-        policy_hash_dma,
         HsmDigestForm::Standard,
+        Some(policy_hash_dma),
     )
     .await?;
 
@@ -505,8 +501,8 @@ async fn build_report_data<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         input,
-        report_data,
         HsmDigestForm::Standard,
+        Some(report_data),
     )
     .await?;
     Ok(report_data)
@@ -539,6 +535,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::UniquePartitionSecret,
             None,
             PART_ROOT_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(root_key_id)?;
@@ -550,6 +547,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
             HsmVaultKeyKind::PartitionTrustAnchor,
             None,
             PTA_VAULT_ATTRS,
+            HsmVaultPct::None,
         )
         .await?;
     undo.push_vault_create(pta_key_id)?;
@@ -621,7 +619,7 @@ fn encode_response(
     pta_report_bytes: &[u8],
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartInitResp::encode(buf, 0, false)?
+        let frame = TborPartInitResp::encode_for_request(buf, 0, false)?
             .pta_csr(pta_csr_bytes)?
             .pta_report(pta_report_bytes)?
             .finish();
@@ -896,8 +894,6 @@ pub(crate) mod kdf {
     /// - `pal` — PAL providing
     ///   [`HsmEcc::ecc_gen_keypair_from_root`].
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `alloc` — scoped allocator forwarded to the PAL derive
-    ///   primitive.
     /// - `root` — `PartRoot` from [`derive_part_root`].  Length
     ///   must equal [`PART_ROOT_LEN`].
     /// - `out` — `None` to query buffer sizes; `Some((priv_out,
@@ -916,13 +912,12 @@ pub(crate) mod kdf {
     pub async fn derive_pta_keypair<P: HsmPal>(
         pal: &P,
         io: &P::Io,
-        alloc: &impl HsmScopedAlloc,
         root: &HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let curve = HsmEccCurve::P384;
-        let priv_len = curve.wire_coord_len(P::BYTE_ORDER);
-        let pub_len = curve.wire_pub_key_len(P::BYTE_ORDER);
+        let priv_len = curve.wire_coord_len(P::ECC_COORD_PAD);
+        let pub_len = curve.wire_pub_key_len(P::ECC_COORD_PAD);
 
         if root.len() != PART_ROOT_LEN {
             return Err(HsmError::InvalidArg);
@@ -941,11 +936,10 @@ pub(crate) mod kdf {
         // signs, so its derivation gets a sign/verify PCT.
         pal.ecc_gen_keypair_from_root(
             io,
-            alloc,
             curve,
             root,
-            Some((priv_out, pub_out)),
             HsmEccPct::SignVerify,
+            Some((priv_out, pub_out)),
         )
         .await
     }

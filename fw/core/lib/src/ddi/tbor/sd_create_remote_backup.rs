@@ -303,10 +303,10 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // `pk_s`; converting in place then yields SEC1
             // `0x04 ‖ X_be ‖ Y_be` with no separate scratch buffer or copy.
             let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
-            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
+            pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;
+            byte_order::pair_to_be::<P>(SD_CURVE, &mut pk_s[1..])?;
 
             // ── Fresh BKS3 + HPKE-Auth seal to RcvrPub ───────────────
             let bks3 = alloc.dma_alloc(BKS3_LEN)?;
@@ -394,7 +394,7 @@ fn encode_response(
     sd_mk_backup: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdCreateRemoteBackupResp::encode_for_request(buf, 0, false)?
             .pok_remote_backup(pok)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk_backup)?

@@ -252,8 +252,9 @@ fn verify_key_tbor(session: &HsmSession, masked_key: &[u8]) -> HsmResult<()> {
         masked_key: masked_key.to_vec(),
     };
     let mut cookie = None;
+    let rev = session.api_rev();
     session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
     Ok(())
@@ -305,8 +306,9 @@ fn unmask_key_pair_tbor(
         masked_key: masked_key.to_vec(),
     };
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

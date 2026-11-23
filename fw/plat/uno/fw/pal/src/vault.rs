@@ -50,10 +50,10 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
-use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_vault::VaultStorage;
 use tsra_fw_uno_key_vault::KeyVault;
@@ -95,6 +95,38 @@ fn blob_ref(table: usize, off: usize, len: usize) -> &'static HsmDmaBuf {
     unsafe { HsmDmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
 }
 
+/// A bulk key's material, for a bulk IO.
+///
+/// Checks that `bulk_id` names a live key of one of the `accept` kinds and, for
+/// a session-bound key, that `session_id` (from the bulk submission entry)
+/// is the session it is bound to.
+///
+/// # Errors
+/// - [`HsmError::KeyNotFound`] — no such key.
+/// - [`HsmError::InvalidKeyType`] — wrong kind.
+/// - [`HsmError::SessionNotFound`] — session mismatch.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) fn bulk_vault_key(
+    io: &UnoHsmIo,
+    bulk_id: u32,
+    session_id: u16,
+    accept: &[HsmVaultKeyKind],
+) -> HsmResult<(&'static HsmDmaBuf, HsmVaultKeyKind)> {
+    let key_id = HsmKeyId::from(u16::try_from(bulk_id).map_err(|_| HsmError::KeyNotFound)?);
+    let v = vault(io);
+    let kind = v.key_kind(key_id)?;
+    if !accept.contains(&kind) {
+        return Err(HsmError::InvalidKeyType);
+    }
+    if v.key_session(key_id)?
+        .is_some_and(|bound| bound != session_id)
+    {
+        return Err(HsmError::SessionNotFound);
+    }
+    let (table, off, len) = v.key_location(key_id)?;
+    Ok((blob_ref(table, off, len), kind))
+}
+
 impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
@@ -125,6 +157,7 @@ impl HsmVault for UnoHsmPal {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId> {
         // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if is_bulk_kind(kind) {
@@ -134,9 +167,12 @@ impl HsmVault for UnoHsmPal {
         // installed by the `RawKeyImport` test hook, gets its pairwise
         // consistency test before it's stored. A key that fails sends the
         // module to the FIPS error state.
-        if crate::unwrapping_key::is_unwrapping_key(kind, attrs)
-            && !self.unwrapping_key_pct(io, key).await?
+        let unwrapping = crate::unwrapping_key::is_unwrapping_key(kind, attrs);
+        if unwrapping != (pct == HsmVaultPct::UnwrappingKey) || (unwrapping && session_id.is_some())
         {
+            return Err(HsmError::InvalidArg);
+        }
+        if pct == HsmVaultPct::UnwrappingKey && !self.unwrapping_key_pct(io, key).await? {
             tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed);
         }
         let app_id = u8::from(io.pid());

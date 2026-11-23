@@ -110,7 +110,7 @@ impl BulkCqe {
             data_len: 0,
             sq_head: 0,
             sq_id,
-            status: BulkStatus::from_error(BulkCipher::from_attr(attr), err),
+            status: BulkStatus::from_io_error(BulkCipher::from_attr(attr), err, sqe_src_len(sqe)),
             phase: false,
         }
     }
@@ -194,12 +194,15 @@ impl Default for BulkCqeEntry {
 }
 
 impl BulkCqeEntry {
-    /// An entry stamped with the command attributes and id of `sqe`.
+    /// An entry stamped with the command attributes and id of `sqe`, and
+    /// its source length, which [`HsmCqe::set_err`] uses to refine an XTS
+    /// length error (see [`BulkStatus::from_io_error`]).
     pub fn for_sqe(sqe: &[u32]) -> Self {
         let dw1 = sqe_dw1(sqe);
         let mut c = [0u32; BULK_CQE_DWORDS];
         wr(&mut c, OFF_ATTR, &(dw1 as u16).to_le_bytes());
         wr(&mut c, OFF_CID, &((dw1 >> 16) as u16).to_le_bytes());
+        wr(&mut c, OFF_DATA_LEN, &sqe_src_len(sqe).to_le_bytes());
         Self(c)
     }
 }
@@ -217,7 +220,7 @@ impl HsmCqe for BulkCqeEntry {
     fn set_err(&mut self, err: HsmError) {
         let attr = rd_u16(&self.0, OFF_ATTR);
         let mut cqe = BulkCqe::decode(&self.0);
-        cqe.status = BulkStatus::from_error(BulkCipher::from_attr(attr), err);
+        cqe.status = BulkStatus::from_io_error(BulkCipher::from_attr(attr), err, cqe.data_len);
         cqe.tag = [0; GCM_TAG_LEN];
         cqe.iv = [0; GCM_IV_LEN];
         cqe.tail_len = 0;
