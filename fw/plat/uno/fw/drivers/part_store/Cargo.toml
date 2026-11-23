@@ -10,6 +10,9 @@ version = "0.1.0"
 bench = false
 doctest = false
 
+[features]
+fips_validation_hooks = []
+
 [dependencies]
 tsra_fw_hsm_pal_traits = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }

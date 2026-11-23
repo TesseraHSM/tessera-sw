@@ -231,9 +231,9 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// one-shot key was consumed. Caller holds the partition write lock.
     async fn part_ensure_establish_cred_key(&self, io: &Self::Io) -> HsmResult<()>;
 
-    /// Atomically commit the one-shot BK3 gate, secure/legacy classification,
-    /// and an optional replacement boot key generated after ClearBk3.
-    /// Validate everything before mutation; `None` retains the allocation's key.
+    /// Commit the one-shot BK3 gate, secure/legacy classification, and an
+    /// optional replacement boot key. Caller holds the partition write lock.
+    /// Validate before any mutation; `None` retains the allocation's key.
     fn part_commit_bk3(
         &self,
         io: &Self::Io,
@@ -803,10 +803,6 @@ impl HsmPartPropId {
     /// flag is also reset PAL-internally on partition free / NSSR.
     pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
-    /// Volatile BK3 provisioning ID followed by PIN (16 + 16 bytes).
-    /// Never exported or restored with the persistent partition store.
-    pub const BK3_PROV_CREDENTIAL: HsmPartPropId = HsmPartPropId(0x0024);
-
     // ── Vault references (0x0010..) ───────────────────────────────
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition identity
@@ -836,7 +832,7 @@ impl HsmPartPropId {
     pub const SESSION_ENC_KEY_ID: HsmPartPropId = HsmPartPropId(0x0015);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's
-    /// one-shot establish-credential RSA-OAEP key.
+    /// one-shot P-384 establish-credential key.
     pub const ESTABLISH_CRED_KEY_ID: HsmPartPropId = HsmPartPropId(0x0016);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition-local key
@@ -889,6 +885,10 @@ impl HsmPartPropId {
     /// event.  Sensitive.  Caller refreshes by writing a fresh
     /// PAL-RNG buffer via [`HsmPartitionManager::part_prop_set_bytes`].
     pub const NONCE: HsmPartPropId = HsmPartPropId(0x0023);
+
+    /// Volatile BK3 provisioning ID followed by PIN (16 + 16 bytes).
+    /// Never exported or restored with the persistent partition store.
+    pub const BK3_PROV_CREDENTIAL: HsmPartPropId = HsmPartPropId(0x0024);
 
     // ── Boot / launch-time bound material (0x0030..) ──────────────
 

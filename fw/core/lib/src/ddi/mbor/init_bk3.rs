@@ -19,10 +19,9 @@
 //! Multiple `InitBk3` commands can arrive simultaneously.  Partition
 //! writes are serialized by the per-partition write mutex acquired via
 //! [`HsmPartitionLock::partition_lock`].  Read-only / hot-path
-//! partition getters do **not** take this lock.  The PAL also
-//! re-checks the one-shot state atomically inside
-//! [`HsmPartitionManager::part_commit_bk3`] so the lock is
-//! an optimization, not the correctness barrier.
+//! partition getters do **not** take this lock. The PAL rechecks the
+//! one-shot state in [`HsmPartitionManager::part_commit_bk3`] and
+//! publishes the validated update without yielding.
 //!
 //! ## Masking
 //!
@@ -117,7 +116,7 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
     hdr: &DdiReqHdr,
     secure: bool,
 ) -> HsmResult<&'p HsmDmaBuf> {
-    // Fail-fast; the authoritative commit below re-checks atomically.
+    // Fail fast; the PAL rechecks this at commit.
     if crate::part_state::part_is_bk3_initialized(pal, io)? {
         return Err(HsmError::Bk3AlreadyInitialized);
     }
@@ -137,8 +136,8 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
         key_length: BK3_LEN as u16,
     };
 
-    // ClearBk3 leaves BK_BOOT zeroized. Recreate it during initialization
-    // and publish the replacement only at the final commit.
+    // Allocation normally supplies BK_BOOT. The FIPS-only ClearBk3
+    // action can remove it; initialization only recreates an absent key.
     let new_masked_boot = match crate::part_state::part_masked_bk_boot(pal, io) {
         Ok(_) => None,
         Err(HsmError::PartPropNotFound) => {

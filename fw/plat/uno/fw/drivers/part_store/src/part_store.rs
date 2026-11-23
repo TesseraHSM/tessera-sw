@@ -1065,11 +1065,12 @@ impl Partition {
         slot.bk3_session_key.is_valid = false;
     }
 
-    /// Zeroize persistent BK3 provisioning state.
+    /// Zeroize BK3 provisioning state for FIPS validation only.
     ///
     /// Application credentials, vault keys, sessions, and launch identity
     /// are deliberately untouched.
     /// A subsequent InitBk3/SecureInitBk3 generates and commits a new boot key.
+    #[cfg_attr(not(test), cfg(feature = "fips_validation_hooks"))]
     #[inline(never)]
     pub fn clear_bk3_info(self) {
         self.set_fips_status(0);

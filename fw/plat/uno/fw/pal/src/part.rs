@@ -848,12 +848,27 @@ impl HsmPartitionManager for UnoHsmPal {
                 .ecc_gen_keypair(
                     io,
                     HsmEccCurve::P384,
-                    HsmEccPct::KeyAgreement,
+                    HsmEccPct::None,
                     Some((priv_key, pub_key)),
                 )
                 .await?;
             if priv_len != P384_PRIV_LEN || pub_len != ID_PUB_KEY_LEN {
                 return Err(HsmError::EccInvalidKeyLength);
+            }
+            if !tsra_fw_uno_pct::ecc_pct(
+                self,
+                io,
+                alloc,
+                HsmEccCurve::P384,
+                &HsmEccPct::KeyAgreement,
+                priv_key,
+                pub_key,
+            )
+            .await?
+            {
+                tsra_fw_uno_fault::enter_error_state(
+                    HsmError::PctValidationEstablishCredEncKeyFailed,
+                );
             }
             let attrs = HsmVaultKeyAttrs::new()
                 .with_internal(true)
