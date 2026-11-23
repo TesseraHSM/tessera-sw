@@ -662,11 +662,12 @@ impl Partition {
     ///
     /// [`PartResetKind::Disable`] additionally wipes the write-once
     /// provisioning material (policy hash, sealed BK3 + incarnation flag,
-    /// rotated PSKs, and the VM
-    /// launch GUID); [`PartResetKind::Migrate`] preserves it so a host that
-    /// resets via NSSR keeps its provisioning and only re-establishes its
-    /// credential. This helper leaves the partition identity,
-    /// `Masked_BK_BOOT`, persistent session table, resource mask, generation
+    /// and rotated PSKs); [`PartResetKind::Migrate`] preserves it so a host
+    /// that resets via NSSR keeps its provisioning and only re-establishes
+    /// its credential. This helper leaves the partition identity, the VM
+    /// launch GUID (cleared only when the partition is freed, as in the
+    /// reference `reset()`), `Masked_BK_BOOT`, persistent session table,
+    /// resource mask, generation
     /// counter, lifecycle state, and the SP-published unwrapping-key slot
     /// (Gate 1 + backup, wiped only when the partition is freed so a
     /// re-enabled partition re-imports the same key) for the caller to
@@ -745,7 +746,6 @@ impl Partition {
             let slot = self.slot_mut();
             slot.psk_co = [0u8; PSK_LEN];
             slot.psk_cu = [0u8; PSK_LEN];
-            slot.vm_launch_guid = [0u8; GUID_LEN];
         }
     }
 

@@ -114,6 +114,9 @@ impl UnoHsmPal {
         // `PartStore::rearm_unwrapping_key_required()` in `init()`.
         let state = part.state()?;
         if state != HsmPartState::Faulted && mask == part.res_mask() && part.id_valid() {
+            // As in the reference `handle_set_res_cnt`, every SetResource
+            // (replays included) binds its VM launch GUID.
+            part.set_vm_launch_guid(vm_launch_guid);
             return Ok(());
         }
 
@@ -224,6 +227,7 @@ impl UnoHsmPal {
         }
         part.clear_identity();
         part.clear_masked_bk_boot();
+        part.set_vm_launch_guid(&[0u8; 16]);
         // Disarm Gate 1 and wipe any SP-staged unwrapping key: `set_resource`
         // armed Gate 1 before provisioning, so on this failure path the SP must
         // not be left thinking a key is still required for a partition rolled
@@ -296,6 +300,9 @@ impl UnoHsmPal {
         // The masked boot key persists across enable/disable; it is wiped
         // only here, on free.
         part.clear_masked_bk_boot();
+        // Likewise the VM launch GUID (reference `reset()`); the next
+        // `SetResource` binds the new launch's GUID.
+        part.set_vm_launch_guid(&[0u8; 16]);
         // Disarm Gate 1 and wipe the SP-published unwrapping key. Like the
         // masked boot key, it persists across enable/disable and belongs to
         // the allocation; a later `SetResource` re-arms Gate 1 so the SP
@@ -541,7 +548,8 @@ impl UnoHsmPal {
     /// the identity key, every enable-time and provisioning vault key plus
     /// the mapped Active/Pending session blobs, then zeroizes cached public
     /// keys, caller-presented secrets, write-once provisioning fields, the
-    /// nonce, VM launch GUID, and BK3 incarnation flag. Established logical
+    /// nonce, and BK3 incarnation flag. The VM launch GUID is kept, as in the
+    /// reference `disable()`. Established logical
     /// session slots remain reserved as NeedsRenegotiation; pending slots are
     /// released.
     ///

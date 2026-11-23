@@ -40,6 +40,8 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
     let p = Partition(14);
     p.reset();
     p.bake_default_psks();
+    let guid = [0x4Du8; GUID_LEN];
+    p.set_vm_launch_guid(&guid);
 
     for round in 0..2u8 {
         let psk_co = [0xA1 + round; PSK_LEN];
@@ -52,6 +54,13 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
         p.clear_state(PartResetKind::Disable);
         assert_eq!(&p.psk_co()[..], &[0u8; PSK_LEN]);
         assert_eq!(&p.psk_cu()[..], &[0u8; PSK_LEN]);
+        // As in the reference `disable()`, the VM launch GUID is kept; only a
+        // free clears it.
+        assert_eq!(
+            &p.vm_launch_guid()[..],
+            &guid,
+            "Disable must keep the VM launch GUID"
+        );
 
         p.bake_default_psks();
         assert_eq!(&p.psk_co()[..], &DEFAULT_PSK_CO);
