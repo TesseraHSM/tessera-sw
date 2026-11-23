@@ -5,9 +5,10 @@
 `from_file` wraps a device handle opened with `FILE_FLAG_OVERLAPPED` without
 reopening it or losing per-file session state.
 
-**Driver prerequisite:** the secure Windows IOCTL extensions below are a new
-SDK-side contract, not handlers implemented by the existing Martichoras Windows
-driver. A matching kernel driver is required for hardware use. Probe support
+**Driver prerequisite:** the secure Windows IOCTL below matches the Tiger
+driver's `CP_ENCRYPT_DECRYPT` ABI, including the implementation on Martichoras
+`ajisaxena/v2_tiger_impl` at `fad43ff536dd6fdbf00def46331073fab8ce799b`.
+A matching kernel driver is required for hardware use. Probe support
 before beginning an encrypted-session handshake. Unsupported drivers return a
 Windows I/O error; the SDK never retries a sealed request through a plaintext
 or legacy IOCTL.
@@ -37,22 +38,21 @@ character device, with the same model mapping and capability policy.
 
 ## Secure Windows ABI (64-bit)
 
-Both extensions use device type `0x3f`, `METHOD_BUFFERED`, and
+The combined normal/OOB interface uses device type `0x3f`, `METHOD_BUFFERED`, and
 `FILE_READ_ACCESS | FILE_WRITE_ACCESS`. These are Windows function codes, not
 Linux `_IOWR` numbers; the Linux command structures must not be sent on Windows.
 
 | Function | Input | Input size | Output | Output size |
 |---|---|---:|---|---:|
-| `0x203` | 344-byte generic Windows input + transport | 392 | 296-byte generic Windows output + transport | 344 |
-| `0x204` | 4440-byte Windows DATA_XFER input + transport | 4488 | 296-byte generic Windows output + transport | 344 |
+| `0x203` | generic input + transport + inline OOB table + reservations | 1680 | generic output + transport + reservations | 600 |
 
-The existing Windows prefixes, including hot-patch reservations and the fixed
-4096-byte DATA_XFER input union, are preserved. `ioctl_data_size` contains the
-complete extended **input** size. The driver must return the complete extended
-output size, including for capability and flush operations. Short or otherwise
-incorrect completion lengths are rejected before interpreting output fields.
+There is no separate encrypted `0x204` IOCTL. The existing Windows prefixes,
+including hot-patch reservations, are preserved. The legacy plaintext `0x202`
+DATA_XFER input retains its 4096-byte union; the secure interface does not use it.
+`ioctl_data_size` contains the complete extended **input** size.
 
-The 48-byte `repr(C)` transport extension has the same field layout as Linux:
+The 176-byte Windows `repr(C)` transport starts with the same fixed fields as
+Linux, but includes an additional 128-byte Windows reservation:
 
 | Offset | Field | Type |
 |---:|---|---|
@@ -64,14 +64,33 @@ The 48-byte `repr(C)` transport extension has the same field layout as Linux:
 | 32 | IV | 12 bytes |
 | 44 | transport error | `u16` |
 | 46 | reserved | `u16`, zero |
+| 48 | reserved words | 32 `u32` values, zero |
 
-Function `0x204` accepts operation 1 only. Probe and flush use `0x203` with null
+The secure input layout is:
+
+| Offset | Field | Size |
+|---:|---|---:|
+| 0 | generic Windows input | 344 |
+| 344 | transport | 176 |
+| 520 | OOB buffer count | 4 |
+| 524 | reserved, zero | 4 |
+| 528 | 64 inline OOB descriptors | 1024 |
+| 1552 | 32 reserved `u32` values, zero | 128 |
+
+The output contains the 296-byte generic prefix, transport at offset 296, and
+32 reserved `u32` values at offset 472. Successful operations, including probe
+and flush, require the full 600-byte output before the SDK reads the response
+seal. Software rejection/cancellation may return only the 296-byte prefix:
+its driver/firmware errors are preserved, but a prefix-only success is rejected.
+Other completion lengths are rejected before interpreting any fields.
+
+Probe and flush use `0x203` with null
 DMA pointers and zero inline buffer lengths. Sealed requests carry a nonempty
 ciphertext of at most 8192 bytes and reserve 8192 bytes for the sealed response.
 The generic input uses TBOR opcode hint 2 and session-control flags 7 with the
-caller-supplied session ID. The kernel driver must translate these extensions
-into native Gen2 secure SQE/CQE metadata, not forward the hint as a legacy
-firmware operation.
+caller-supplied session ID. Zero OOB buffers select command set 0; 1-64 OOB
+buffers select command set 1. The driver translates this interface into native
+Gen2 secure SQE/CQE metadata rather than a legacy firmware operation.
 
 OOB data remains outside the inline transport encryption. A request may contain
 1-64 OOB descriptors of 1-65536 bytes each. A descriptor's flag bit 0 means the
@@ -94,7 +113,8 @@ cargo clippy --locked --package tsra_ddi_win --all-targets -- -D warnings
 ```
 
 Tests inject completions to verify ciphertext/seal round trips, bounds,
-direction flags, final-descriptor writes, status propagation, and short-output
-rejection. Public transport entry points are also exercised against `NUL` to
+direction flags, reserved fields, final-descriptor writes, prefix-only error
+propagation, and malformed/short successful-output rejection.
+Public transport entry points are also exercised against `NUL` to
 confirm that unsupported-IOCTL errors are surfaced without fallback. These
 tests do not establish Windows Gen2 hardware support.

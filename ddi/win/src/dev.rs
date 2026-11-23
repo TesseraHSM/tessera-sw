@@ -59,7 +59,6 @@ const TSRA_IOCTL_CONTROL_PATH_CMD_SESSION: u32 = 0x201;
 const TSRA_IOCTL_CONTROL_PATH_CMD_DATA_XFER: u32 = 0x202;
 /// Secure transport extensions; require a driver implementing the ABI in README.md.
 const TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE: u32 = 0x203;
-const TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER: u32 = 0x204;
 /// Maximum number of OOB buffers accepted by the data-transfer IOCTL.
 ///
 /// This application-facing limit determines the IOCTL buffer layout and must
@@ -341,20 +340,30 @@ struct TborTransport {
     iv: [u8; 12],
     error: u16,
     reserved: u16,
+    rsvd: [u32; 32],
 }
 
-#[derive(Default)]
 #[repr(C)]
 struct TborSecureIoctlIndata {
     generic: TsraCpGenericIoctlIndata,
     transport: TborTransport,
+    buffer_count: u32,
+    reserved: u32,
+    buffers: [DataXferBuffer; TSRA_MAX_DATA_XFER_BUFFERS],
+    rsvd: [u32; 32],
 }
 
-#[derive(Default)]
-#[repr(C)]
-struct TborSecureDataXferIoctlIndata {
-    data_xfer: TsraCpDataXferIoctlIndata,
-    transport: TborTransport,
+impl Default for TborSecureIoctlIndata {
+    fn default() -> Self {
+        Self {
+            generic: TsraCpGenericIoctlIndata::default(),
+            transport: TborTransport::default(),
+            buffer_count: 0,
+            reserved: 0,
+            buffers: [DataXferBuffer::default(); TSRA_MAX_DATA_XFER_BUFFERS],
+            rsvd: [0; 32],
+        }
+    }
 }
 
 #[derive(Default)]
@@ -362,6 +371,7 @@ struct TborSecureDataXferIoctlIndata {
 struct TborSecureIoctlOutData {
     generic: TsraCpGenericIoctlOutData,
     transport: TborTransport,
+    rsvd: [u32; 32],
 }
 
 #[cfg(test)]
@@ -377,13 +387,16 @@ const _: () = {
     assert!(mem::size_of::<DataXferBuffers>() == 1544);
     assert!(mem::size_of::<TsraCpGenericIoctlIndata>() == 344);
     assert!(mem::size_of::<TsraCpDataXferIoctlIndata>() == 4440);
-    assert!(mem::size_of::<TborTransport>() == 48);
+    assert!(mem::size_of::<TborTransport>() == 176);
+    assert!(mem::offset_of!(TborTransport, rsvd) == 48);
     assert!(mem::offset_of!(TborSecureIoctlIndata, transport) == 344);
-    assert!(mem::size_of::<TborSecureIoctlIndata>() == 392);
-    assert!(mem::offset_of!(TborSecureDataXferIoctlIndata, transport) == 4440);
-    assert!(mem::size_of::<TborSecureDataXferIoctlIndata>() == 4488);
+    assert!(mem::offset_of!(TborSecureIoctlIndata, buffer_count) == 520);
+    assert!(mem::offset_of!(TborSecureIoctlIndata, buffers) == 528);
+    assert!(mem::offset_of!(TborSecureIoctlIndata, rsvd) == 1552);
+    assert!(mem::size_of::<TborSecureIoctlIndata>() == 1680);
     assert!(mem::offset_of!(TborSecureIoctlOutData, transport) == 296);
-    assert!(mem::size_of::<TborSecureIoctlOutData>() == 344);
+    assert!(mem::offset_of!(TborSecureIoctlOutData, rsvd) == 472);
+    assert!(mem::size_of::<TborSecureIoctlOutData>() == 600);
 };
 
 ///TsraFpIoctlErrorKind
@@ -841,18 +854,22 @@ impl DdiWinDev {
         self.map_ioctl_status(ioctl_status)
     }
 
-    fn data_xfer_input(oob_items: &mut [TborOobItem<'_>]) -> DdiResult<TsraCpDataXferInputData> {
+    fn data_xfer_buffers(oob_items: &mut [TborOobItem<'_>]) -> DdiResult<DataXferBuffers> {
         if oob_items.len() > TSRA_MAX_DATA_XFER_BUFFERS
             || oob_items
                 .iter()
                 .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
         {
+            tracing::warn!(
+                buffer_count = oob_items.len(),
+                "Invalid OOB buffer count or length"
+            );
             return Err(DdiError::InvalidParameter);
         }
-        let mut input = TsraCpDataXferInputData::default();
-        // SAFETY: the entire union is zeroed, a valid DataXferBuffers value.
-        let data_xfer = unsafe { &mut input.data_xfer };
-        data_xfer.buffer_count = oob_items.len() as u32;
+        let mut data_xfer = DataXferBuffers {
+            buffer_count: oob_items.len() as u32,
+            ..Default::default()
+        };
         for (buffer, item) in data_xfer.buffers.iter_mut().zip(oob_items) {
             *buffer = DataXferBuffer {
                 xfer_length: item.len() as u32,
@@ -864,6 +881,13 @@ impl DdiWinDev {
                 buffer_addr: item.dma_ptr(),
             };
         }
+        Ok(data_xfer)
+    }
+
+    fn data_xfer_input(oob_items: &mut [TborOobItem<'_>]) -> DdiResult<TsraCpDataXferInputData> {
+        let data_xfer = Self::data_xfer_buffers(oob_items)?;
+        let mut input = TsraCpDataXferInputData::default();
+        input.data_xfer = data_xfer;
         Ok(input)
     }
 
@@ -959,6 +983,11 @@ impl DdiWinDev {
         submit: impl FnOnce(&mut TborSecureIoctlIndata, &mut TborSecureIoctlOutData) -> DdiResult<u32>,
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
         if op > 2 || payload.len() > 8192 || (op == 1) == payload.is_empty() {
+            tracing::warn!(
+                op,
+                payload_length = payload.len(),
+                "Invalid secure IOCTL request"
+            );
             return Err(DdiError::InvalidParameter);
         }
         let mut response = if op == 1 { vec![0u8; 8192] } else { Vec::new() };
@@ -984,7 +1013,11 @@ impl DdiWinDev {
         input.transport.iv = seal.iv;
         let mut output = TborSecureIoctlOutData::default();
         let returned = submit(&mut input, &mut output)?;
-        if returned as usize != mem::size_of::<TborSecureIoctlOutData>() {
+        let returned = returned as usize;
+        if returned != mem::size_of::<TsraCpGenericIoctlOutData>()
+            && returned != mem::size_of::<TborSecureIoctlOutData>()
+        {
+            tracing::warn!(returned, "Invalid secure IOCTL completion size");
             return Err(DdiError::InvalidParameter);
         }
         self.map_ioctl_status_tbor(output.generic.ioctl_status)?;
@@ -994,7 +1027,17 @@ impl DdiWinDev {
         if output.generic.status != 0 {
             return Err(DdiError::DdiError(output.generic.status));
         }
+        // Software rejections can return only the generic prefix, never a seal.
+        if returned != mem::size_of::<TborSecureIoctlOutData>() {
+            tracing::warn!(returned, "Missing secure IOCTL transport completion");
+            return Err(DdiError::InvalidParameter);
+        }
         if output.transport.error != 0 || output.generic.byte_count as usize > response.len() {
+            tracing::warn!(
+                transport_error = output.transport.error,
+                byte_count = output.generic.byte_count,
+                "Invalid secure IOCTL transport completion"
+            );
             return Err(DdiError::InvalidParameter);
         }
         response.truncate(output.generic.byte_count as usize);
@@ -1013,27 +1056,18 @@ impl DdiWinDev {
         payload: &[u8],
         seal: DdiTransportSeal,
         oob_items: &mut [TborOobItem<'_>],
-        submit: impl FnOnce(
-            &mut TborSecureDataXferIoctlIndata,
-            &mut TborSecureIoctlOutData,
-        ) -> DdiResult<u32>,
+        submit: impl FnOnce(&mut TborSecureIoctlIndata, &mut TborSecureIoctlOutData) -> DdiResult<u32>,
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
         if oob_items.is_empty() {
+            tracing::warn!("Secure OOB IOCTL requires at least one buffer");
             return Err(DdiError::InvalidParameter);
         }
-        let input_data = Self::data_xfer_input(oob_items)?;
-        self.exec_secure_ioctl_with(1, session_id, payload, seal, |inner, output| {
-            let mut input = TborSecureDataXferIoctlIndata {
-                data_xfer: TsraCpDataXferIoctlIndata {
-                    generic: mem::take(&mut inner.generic),
-                    input_data,
-                },
-                transport: mem::take(&mut inner.transport),
-            };
-            input.data_xfer.generic.ioctl_hdr.ioctl_data_size =
-                mem::size_of::<TborSecureDataXferIoctlIndata>() as u32;
-            input.data_xfer.generic.cmdset = TSRA_CP_CMD_DATA_XFER;
-            submit(&mut input, output)
+        let data_xfer = Self::data_xfer_buffers(oob_items)?;
+        self.exec_secure_ioctl_with(1, session_id, payload, seal, |input, output| {
+            input.generic.cmdset = TSRA_CP_CMD_DATA_XFER;
+            input.buffer_count = data_xfer.buffer_count;
+            input.buffers = data_xfer.buffers;
+            submit(input, output)
         })
     }
 }
@@ -1485,7 +1519,7 @@ impl DdiDev for DdiWinDev {
             return self.exec_secure_ioctl(1, session_id, payload, seal);
         }
         self.exec_secure_data_xfer_with(session_id, payload, seal, oob_items, |input, output| {
-            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE_DATA_XFER, input, output)
+            self.submit_ioctl(TSRA_IOCTL_CONTROL_PATH_TBOR_SECURE, input, output)
         })
     }
 

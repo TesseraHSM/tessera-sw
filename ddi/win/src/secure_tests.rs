@@ -67,7 +67,7 @@ fn secure_ioctl_round_trips_ciphertext_and_seals() {
     };
     let (response, seal) = dev()
         .exec_secure_ioctl_with(1, 23, b"sealed request", request_seal, |input, output| {
-            assert_eq!(input.generic.ioctl_hdr.ioctl_data_size, 392);
+            assert_eq!(input.generic.ioctl_hdr.ioctl_data_size, 1680);
             assert_eq!(input.generic.opc, 2);
             assert_eq!(input.generic.cmdset, TSRA_CP_CMD_SESSION_GENERIC);
             assert_eq!(input.generic.session_id, 23);
@@ -76,6 +76,14 @@ fn secure_ioctl_round_trips_ciphertext_and_seals() {
             assert_eq!(input.transport.frame_id, 0);
             assert_eq!(input.transport.key_index, 0);
             assert_eq!(input.transport.aad_length, 0);
+            assert_eq!(input.transport.reserved, 0);
+            assert_eq!(input.transport.rsvd, [0; 32]);
+            assert_eq!(input.buffer_count, 0);
+            assert_eq!(input.reserved, 0);
+            assert_eq!(input.rsvd, [0; 32]);
+            assert!(input.buffers.iter().all(|buffer| buffer.xfer_length == 0
+                && buffer.flags == 0
+                && buffer.buffer_addr.is_null()));
             assert_eq!(input.transport.iv, request_seal.iv);
             assert_eq!(input.transport.tag, request_seal.tag);
             let buffers = &input.generic.user_buffers;
@@ -146,6 +154,46 @@ fn secure_ioctl_rejects_malformed_completions_and_preserves_errors() {
 }
 
 #[test]
+fn secure_ioctl_preserves_prefix_only_errors_but_requires_a_full_success() {
+    let prefix_size = mem::size_of::<TsraCpGenericIoctlOutData>() as u32;
+    for returned in [prefix_size, COMPLETION_SIZE] {
+        for (ioctl_status, device_status) in [(12, 0), (0xdead, 0), (0, 0xcc)] {
+            let result = dev().exec_secure_ioctl_with(
+                1,
+                23,
+                b"x",
+                DdiTransportSeal::default(),
+                |_, output| {
+                    output.generic.ioctl_status = ioctl_status;
+                    output.generic.status = device_status;
+                    Ok(returned)
+                },
+            );
+            match (ioctl_status, device_status) {
+                (12, 0) => assert!(matches!(
+                    result,
+                    Err(DdiError::TborStatus(TborStatus::SessionNotFound))
+                )),
+                (0xdead, 0) => assert!(matches!(result, Err(DdiError::WinError(0xdead)))),
+                (0, 0xcc) => assert!(matches!(result, Err(DdiError::DdiError(0xcc)))),
+                _ => unreachable!(),
+            }
+        }
+    }
+    for returned in [prefix_size - 1, prefix_size, prefix_size + 1] {
+        assert!(matches!(
+            dev().exec_secure_ioctl_with(1, 23, b"x", DdiTransportSeal::default(), |_, output| {
+                if returned != prefix_size {
+                    output.generic.ioctl_status = 12;
+                }
+                Ok(returned)
+            }),
+            Err(DdiError::InvalidParameter)
+        ));
+    }
+}
+
+#[test]
 fn secure_ioctl_validates_payload_and_bufferless_operations() {
     let seal = DdiTransportSeal::default();
     for (op, payload) in [
@@ -166,6 +214,12 @@ fn secure_ioctl_validates_payload_and_bufferless_operations() {
         let (response, _) = dev()
             .exec_secure_ioctl_with(op, 23, &[], seal, |input, _| {
                 assert_eq!(input.transport.op, op);
+                assert_eq!(input.generic.ioctl_hdr.ioctl_data_size, 1680);
+                assert_eq!(input.generic.cmdset, TSRA_CP_CMD_SESSION_GENERIC);
+                assert_eq!(input.buffer_count, 0);
+                assert_eq!(input.reserved, 0);
+                assert_eq!(input.transport.rsvd, [0; 32]);
+                assert_eq!(input.rsvd, [0; 32]);
                 let buffers = &input.generic.user_buffers;
                 assert!(buffers.src_buf.is_null());
                 assert!(buffers.dst_buf.is_null());
@@ -212,25 +266,31 @@ fn secure_oob_maps_directions_and_preserves_response_and_seals() {
             request_seal,
             &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
             |cmd, completion| {
-                let generic = &cmd.data_xfer.generic;
-                assert_eq!(generic.ioctl_hdr.ioctl_data_size, 4488);
+                let generic = &cmd.generic;
+                assert_eq!(generic.ioctl_hdr.ioctl_data_size, 1680);
                 assert_eq!(generic.cmdset, TSRA_CP_CMD_DATA_XFER);
                 assert_eq!(generic.session_id, 23);
                 assert_eq!(generic.session_control.into_bits(), 7);
                 assert_eq!(cmd.transport.tag, request_seal.tag);
                 assert_eq!(cmd.transport.iv, request_seal.iv);
-                // SAFETY: the builder initialized the union as DataXferBuffers.
-                let buffers = unsafe { &cmd.data_xfer.input_data.data_xfer };
-                assert_eq!(buffers.buffer_count, 2);
-                assert_eq!(buffers.buffers[0].flags, 0);
-                assert_eq!(buffers.buffers[0].xfer_length, 65536);
-                assert_eq!(buffers.buffers[0].buffer_addr.cast_const(), input.as_ptr());
-                assert_eq!(buffers.buffers[1].flags, TSRA_DATA_XFER_BUF_DEV_WRITE);
-                assert_eq!(buffers.buffers[1].buffer_addr, output_ptr);
-                assert_eq!(buffers.buffers[1].xfer_length, 8);
+                assert_eq!(cmd.transport.reserved, 0);
+                assert_eq!(cmd.transport.rsvd, [0; 32]);
+                assert_eq!(cmd.reserved, 0);
+                assert_eq!(cmd.rsvd, [0; 32]);
+                assert_eq!(cmd.buffer_count, 2);
+                let buffers = &cmd.buffers;
+                assert_eq!(buffers[0].flags, 0);
+                assert_eq!(buffers[0].xfer_length, 65536);
+                assert_eq!(buffers[0].buffer_addr.cast_const(), input.as_ptr());
+                assert_eq!(buffers[1].flags, TSRA_DATA_XFER_BUF_DEV_WRITE);
+                assert_eq!(buffers[1].buffer_addr, output_ptr);
+                assert_eq!(buffers[1].xfer_length, 8);
+                assert!(buffers[2..].iter().all(|buffer| buffer.xfer_length == 0
+                    && buffer.flags == 0
+                    && buffer.buffer_addr.is_null()));
                 // SAFETY: the caller's OOB output and inline response are live.
                 unsafe {
-                    buffers.buffers[1].buffer_addr.write_bytes(0xab, 8);
+                    buffers[1].buffer_addr.write_bytes(0xab, 8);
                     generic.user_buffers.dst_buf.write(0xcd);
                 }
                 completion.generic.byte_count = 1;
@@ -287,12 +347,10 @@ fn secure_oob_accepts_last_descriptor_and_propagates_errors() {
             DdiTransportSeal::default(),
             &mut items,
             |cmd, _| {
-                // SAFETY: the builder initialized the union as DataXferBuffers.
-                let buffers = unsafe { &cmd.data_xfer.input_data.data_xfer };
-                assert_eq!(buffers.buffer_count, 64);
-                assert_eq!(buffers.buffers[63].flags, TSRA_DATA_XFER_BUF_DEV_WRITE);
+                assert_eq!(cmd.buffer_count, 64);
+                assert_eq!(cmd.buffers[63].flags, TSRA_DATA_XFER_BUF_DEV_WRITE);
                 // SAFETY: the last descriptor borrows the live output byte.
-                unsafe { buffers.buffers[63].buffer_addr.write(0xab) };
+                unsafe { cmd.buffers[63].buffer_addr.write(0xab) };
                 Ok(COMPLETION_SIZE)
             },
         )
