@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Semantic DARC TMK imports through the real TBOR transport. Frequent valid
-//! HPKE-Auth imports and isolated mutations reach policy/chain validation,
+//! HPKE Base imports with PID operation reports and isolated mutations reach policy/chain validation,
 //! receiver-key unmasking, HPKE opening, and TMK masking. Predictions use inputs
 //! and authentic fixture snapshots, never the command's observed result.
 //! Successful imports unwrap host-known material to check plaintext semantics.
@@ -74,6 +74,8 @@ enum Scenario {
     MissingOobItem,
     IvSuffix,
     SingleCertificate,
+    ReportFlip,
+    PublicKeyReport,
 }
 
 /// Eight optional control bytes precede at most 1024 payload bytes.
@@ -110,7 +112,7 @@ impl<'a> Arbitrary<'a> for FuzzInput<'a> {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
         let data = u.bytes(u.len())?;
         let byte = |index| data.get(index).copied().unwrap_or(0);
-        let scenario = match byte(0) % 48 {
+        let scenario = match byte(0) % 50 {
             0..=11 => Scenario::Valid,
             12 => Scenario::ArbitrarySession,
             13 => Scenario::MismatchedSession,
@@ -147,7 +149,9 @@ impl<'a> Arbitrary<'a> for FuzzInput<'a> {
             44 => Scenario::MaskedKeyScope,
             45 => Scenario::MissingOobItem,
             46 => Scenario::IvSuffix,
-            _ => Scenario::SingleCertificate,
+            47 => Scenario::SingleCertificate,
+            48 => Scenario::ReportFlip,
+            _ => Scenario::PublicKeyReport,
         };
         Ok(Self {
             scenario,
@@ -209,6 +213,7 @@ fn dummy_request(session_id: u16) -> TborDarcTmkImportReq {
         masked_kex_key: [0; MASKED_KEX_KEY_LEN],
         policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         sealed_tmk: [0; SEALED_TMK_LEN],
+        report: vec![0],
         remote_cert_chain: vec![CertDescriptor {
             index: 0,
             length: 1u16.into(),
@@ -246,23 +251,7 @@ fn valid_import(
     sender_pub[..common::COORD_LEN].copy_from_slice(&x);
     sender_pub[common::COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let sealed = seal_vec(
-        &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            &recipient,
-            &[],
-            &[],
-            &sender,
-        ),
-        tmk,
-    )
-    .expect("seal fuzz-derived TMK");
-    let (ex, ey) = sealed.enc.coord_vec().expect("encapsulated coordinates");
-    let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[0] = 4;
-    sealed_tmk[1..1 + common::COORD_LEN].copy_from_slice(&ex);
-    sealed_tmk[1 + common::COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
-    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let (sealed_tmk, report) = common::seal_darc_transfer(&recipient, &sender, tmk);
     let mut items = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -275,6 +264,7 @@ fn valid_import(
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
             sealed_tmk,
+            report,
             remote_cert_chain,
         },
         items,
@@ -330,33 +320,21 @@ fn masked_key_outcome(original: &[u8], changed: &[u8]) -> Expected {
     }
 }
 
-/// Predict SEC1/point errors before HPKE integrity, retaining byte-identical seals.
+/// The signed operation report rejects any envelope change before HPKE opening.
 fn sealed_outcome(original: &[u8], changed: &[u8]) -> Expected {
     if original == changed {
         return Expected::Success;
     }
-    if changed[0] != 4 {
-        return Expected::Reject(TborStatus::InvalidArg);
-    }
-    let x = &changed[1..1 + common::COORD_LEN];
-    let y = &changed[1 + common::COORD_LEN..SEC1_PUB_LEN];
-    let curve = tsra_crypto::EccCurve::P384;
-    if !curve.coordinate_in_range(x) || !curve.coordinate_in_range(y) {
-        return Expected::Reject(TborStatus::EccPublicKeyValidationFailed);
-    }
-    if !EccPublicKey::is_on_curve(curve, x, y).expect("host point validation") {
-        return Expected::Reject(TborStatus::EccPointValidationFailed);
-    }
-    Expected::Reject(TborStatus::AesGcmDecryptTagDoesNotMatch)
+    Expected::Reject(TborStatus::InvalidArg)
 }
 
 /// Classify descriptor changes referencing the two authentic baseline certificates.
 ///
 /// Length mismatches fail before DER parsing. Repeating the root can validate
-/// as a chain, but recovers the CA rather than the sender and fails HPKE Auth.
+/// as a chain, but recovers the CA rather than the operation-report signer.
 fn descriptor_outcome(import: &Import, original_items: &[Vec<u8>]) -> Expected {
     let descriptors = &import.req.remote_cert_chain;
-    if !(1..=2).contains(&descriptors.len()) {
+    if !(1..=3).contains(&descriptors.len()) {
         return Expected::Reject(TborStatus::TborInvalidFixedLength);
     }
     let mut roots = Vec::new();
@@ -383,8 +361,11 @@ fn descriptor_outcome(import: &Import, original_items: &[Vec<u8>]) -> Expected {
     if roots.len() == 1 {
         return Expected::Reject(TborStatus::InvalidArg);
     }
+    if roots.len() == 3 {
+        return Expected::Reject(TborStatus::X509NotCa);
+    }
     if roots[1] {
-        Expected::Reject(TborStatus::AesGcmDecryptTagDoesNotMatch)
+        Expected::Reject(TborStatus::InvalidArg)
     } else {
         Expected::Success
     }
@@ -401,6 +382,32 @@ fn mutate(
     let original_items = import.items.clone();
     let req = &mut import.req;
     match input.scenario {
+        Scenario::ReportFlip => {
+            flip(&mut req.report, input.offset, input.mask);
+            return if req.report == original.report {
+                Expected::Success
+            } else {
+                Expected::Reject(TborStatus::InvalidArg)
+            };
+        }
+        Scenario::PublicKeyReport => {
+            let key = ctx
+                .tbor(&TborSdSealingKeyGenReq {
+                    session_id: req.session_id,
+                    scope: input.scope,
+                })
+                .expect("public-key report fixture");
+            req.report = ctx
+                .tbor(&TborKeyReportReq {
+                    session_id: req.session_id,
+                    masked_key: key.masked_key.to_vec(),
+                    report_data: [0; KEY_REPORT_DATA_LEN],
+                    auth_envelope: Vec::new(),
+                })
+                .expect("public-key report is not an operation report")
+                .report;
+            return Expected::Reject(TborStatus::InvalidArg);
+        }
         Scenario::MaskedKeyFlip | Scenario::IvSuffix => {
             let offset = if input.scenario == Scenario::IvSuffix {
                 (HEADER_LEN + GCM_NONCE_LEN + usize::from(input.control % 4)) as u16
@@ -442,7 +449,7 @@ fn mutate(
                 })
                 .expect("second receiver key")
                 .masked_key;
-            return Expected::Reject(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            return Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::PolicyFlip
         | Scenario::PolicyInfo
@@ -474,7 +481,7 @@ fn mutate(
                 req.sealed_tmk = input.bytes();
             } else {
                 let offset = if input.scenario == Scenario::CiphertextFlip {
-                    SEC1_PUB_LEN + usize::from(input.offset) % (SEALED_TMK_LEN - SEC1_PUB_LEN)
+                    210 + usize::from(input.offset) % (SEALED_TMK_LEN - 210)
                 } else {
                     usize::from(input.offset) % SEALED_TMK_LEN
                 };
@@ -504,11 +511,7 @@ fn mutate(
                 .iter()
                 .map(|der| common::add_evidence_item(&mut import.items, der))
                 .collect();
-            return Expected::Reject(if input.scenario == Scenario::ForeignAnchor {
-                TborStatus::InvalidArg
-            } else {
-                TborStatus::AesGcmDecryptTagDoesNotMatch
-            });
+            return Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::DescriptorCount | Scenario::SingleCertificate => {
             let count = if input.scenario == Scenario::SingleCertificate {

@@ -68,9 +68,9 @@ section carrying the masked key and public key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_key` | `buffer` (280 B) | The P-384 private key masked under the scope's masking key. Not stored on-device. |
-| 16 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new key-exchange key. Not a SEC1 point encoding (no `0x04` prefix). |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_key` | `buffer` (280 B) | The P-384 private key masked under the scope's masking key. Not stored on-device. |
+| 20 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new key-exchange key. Not a SEC1 point encoding (no `0x04` prefix). |
 
 ### Data section
 

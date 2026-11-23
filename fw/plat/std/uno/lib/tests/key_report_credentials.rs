@@ -28,9 +28,9 @@ use tsra_fw_hsm_pal_std_uno::HsmPartId;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
-use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
@@ -489,7 +489,7 @@ async fn check_typed_reports() {
     let private = pal.dma_alloc_zeroed(&io, 48).expect("private key");
     private[0] = 1;
     let public = pal.dma_alloc(&io, 96).expect("public key");
-    pal.ecc_pub_from_priv(&io, HsmEccCurve::P384, private, public)
+    pal.ecc_pub_from_priv(&io, HsmEccCurve::P384, private, Some(public))
         .await
         .expect("derive public key");
     let fields = pal.dma_alloc(&io, 48 * 4 + 16 + 128 + 16).expect("fields");
@@ -657,7 +657,6 @@ async fn check_transfer_bindings() {
     use tsra_fw_core_crypto_key_report::ReportParams;
     use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
     use tsra_fw_hsm_byte_order::pair_to_be;
-    use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
     use tsra_fw_hsm_pal_traits::HsmDmaBuf;
     use tsra_fw_hsm_pal_traits::HsmEccPct;
 
@@ -683,20 +682,15 @@ async fn check_transfer_bindings() {
         let key = &mut keys[i * 145..(i + 1) * 145];
         let (private, public) = key.split_at_mut(48);
         public[0] = 4;
-        pal.alloc_scoped_async(&io, async |alloc| {
-            pal.ecc_gen_keypair(
-                &io,
-                alloc,
-                HsmEccCurve::P384,
-                Some((private, &mut public[1..])),
-                HsmEccPct::KeyAgreement,
-            )
-            .await
-        })
+        pal.ecc_gen_keypair(
+            &io,
+            HsmEccCurve::P384,
+            HsmEccPct::KeyAgreement,
+            Some((private, &mut public[1..])),
+        )
         .await
         .expect("generate P384 key pair");
-        pair_to_be(StdHsmPal::BYTE_ORDER, HsmEccCurve::P384, &mut public[1..])
-            .expect("SEC1 coordinates");
+        pair_to_be::<StdHsmPal>(HsmEccCurve::P384, &mut public[1..]).expect("SEC1 coordinates");
     }
     let source_private = &keys[..48];
     let source_public = &keys[48..145];

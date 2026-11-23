@@ -303,8 +303,15 @@ async fn domain_hash<P: HsmCrypto>(
     let input = alloc.dma_alloc(domain.len() + bytes.len())?;
     input[..domain.len()].copy_from_slice(domain);
     input[domain.len()..].copy_from_slice(bytes);
-    pal.hash(io, HsmHashAlgo::Sha384, input, out, HsmDigestForm::Standard)
-        .await
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        input,
+        HsmDigestForm::Standard,
+        Some(out),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Select typed report inputs from an envelope and its firmware-computed hash.
@@ -488,7 +495,7 @@ pub async fn verify_transfer<'a, P: HsmCrypto>(
     };
     let signer = alloc.dma_alloc(P384_PUBLIC_LEN - 1)?;
     signer.copy_from_slice(&cfg.signer_public_key[1..]);
-    pair_from_be(P::BYTE_ORDER, HsmEccCurve::P384, signer)?;
+    pair_from_be::<P>(HsmEccCurve::P384, signer)?;
     if !verify_signature(pal, io, alloc, cose, signer).await? {
         return Err(HsmError::InvalidArg);
     }

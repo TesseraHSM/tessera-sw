@@ -71,7 +71,7 @@ mod tests {
             length: U16::new(32),
         }];
         let mut buf = [0; 2048];
-        let frame = TborDarcTmkExportReq::encode(&mut buf)
+        let frame = TborDarcTmkExportReq::encode(&mut buf, (1, 1))
             .expect("encode")
             .session_id(SessionId(7))
             .expect("session")
@@ -95,7 +95,7 @@ mod tests {
         let sealed = [0xCD; SEALED_TMK_LEN];
         let report = [0xAB; 320];
         let mut buf = [0; 1024];
-        let frame = TborDarcTmkExportResp::encode(&mut buf, 0, true)
+        let frame = TborDarcTmkExportResp::encode(&mut buf, (1, 1), 0, true)
             .expect("encode")
             .sealed_tmk(&sealed)
             .expect("envelope")

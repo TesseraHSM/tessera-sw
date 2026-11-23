@@ -74,7 +74,7 @@ pub(crate) async fn handle<P: HsmPal>(
         })
         .await?;
     cmd.encode_response(|buf| {
-        let frame = TborSdCreatePeerBackupResp::encode(buf, 0, false)?
+        let frame = TborSdCreatePeerBackupResp::encode_for_request(buf, 0, false)?
             .pok_peer_backup(envelope)?
             .report(&report[..report_len])?
             .finish();

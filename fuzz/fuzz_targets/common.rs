@@ -41,7 +41,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
-use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
@@ -692,6 +691,106 @@ pub struct SecurityDomainFixture {
     pub policy: Vec<u8>,
 }
 
+pub fn sha384(bytes: &[u8]) -> [u8; 48] {
+    let mut digest = [0; 48];
+    HashAlgo::sha384()
+        .hash(bytes, Some(&mut digest))
+        .expect("SHA384");
+    digest
+}
+
+pub fn darc_key_id(key: &impl EccKeyOp) -> [u8; 48] {
+    let (x, y) = key.coord_vec().expect("public coordinates");
+    sha384(&[b"TSRA-P384-KEY-v1".as_slice(), &[4], &x, &y].concat())
+}
+
+/// Independently seal a TMK and sign its canonical v2 DARC operation report.
+pub fn seal_darc_transfer(
+    recipient: &EccPublicKey,
+    sender: &EccPrivateKey,
+    tmk: &[u8; TMK_LEN],
+) -> ([u8; SEALED_TMK_LEN], Vec<u8>) {
+    let source = darc_key_id(sender);
+    let destination = darc_key_id(recipient);
+    let header = [
+        b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02".as_slice(),
+        &source,
+        &destination,
+    ]
+    .concat();
+    let sealed = seal_vec(
+        &HpkeSealConfig::base(
+            HpkeSuite::DHKemP384Sha384AesGcm256,
+            recipient,
+            &header,
+            &header,
+        ),
+        tmk,
+    )
+    .expect("seal TMK");
+    let (x, y) = sealed.enc.coord_vec().expect("encapsulated coordinates");
+    let envelope: [u8; SEALED_TMK_LEN] = [header, vec![4], x, y, sealed.ct]
+        .concat()
+        .try_into()
+        .expect("DARC envelope length");
+    let digest = sha384(&[b"TSRA-XFER-HASH-v1".as_slice(), &envelope].concat());
+    let mut payload = minicbor::Encoder::new(Vec::new());
+    payload
+        .map(5)
+        .expect("claims")
+        .u8(0)
+        .expect("version label")
+        .u8(2)
+        .expect("version")
+        .u8(8)
+        .expect("kind label")
+        .u8(1)
+        .expect("DARC")
+        .u8(9)
+        .expect("source label")
+        .bytes(&source)
+        .expect("source")
+        .u8(10)
+        .expect("recipient label")
+        .bytes(&destination)
+        .expect("recipient")
+        .u8(11)
+        .expect("digest label")
+        .bytes(&digest)
+        .expect("digest");
+    let payload = payload.into_writer();
+    let protected = b"\xa2\x01\x38\x22\x03\x70application/cbor";
+    let mut input = minicbor::Encoder::new(Vec::new());
+    input
+        .array(4)
+        .expect("Sig_structure")
+        .str("Signature1")
+        .expect("context")
+        .bytes(protected)
+        .expect("protected")
+        .bytes(&[])
+        .expect("AAD")
+        .bytes(&payload)
+        .expect("payload");
+    let mut signature = [0; RAW_PUB_LEN];
+    EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(sender, &input.into_writer(), Some(&mut signature))
+        .expect("sign DARC report");
+    let mut report = minicbor::Encoder::new(vec![0xd2]);
+    report
+        .array(4)
+        .expect("COSE")
+        .bytes(protected)
+        .expect("protected")
+        .map(0)
+        .expect("unprotected")
+        .bytes(&payload)
+        .expect("payload")
+        .bytes(&signature)
+        .expect("signature");
+    (envelope, report.into_writer())
+}
+
 /// Import a host-known TMK through the POTA-authenticated DARC transfer flow.
 ///
 /// The fixture must belong to this initialized security domain. Keeping the
@@ -718,26 +817,7 @@ pub fn import_darc_tmk(
     sender_pub[..COORD_LEN].copy_from_slice(&x);
     sender_pub[COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let sealed = seal_vec(
-        &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            &recipient,
-            &[],
-            &[],
-            &sender,
-        ),
-        tmk,
-    )
-    .expect("seal known TMK");
-    let (ex, ey) = sealed
-        .enc
-        .coord_vec()
-        .expect("encapsulated public coordinates");
-    let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[0] = 4;
-    sealed_tmk[1..1 + COORD_LEN].copy_from_slice(&ex);
-    sealed_tmk[1 + COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
-    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let (sealed_tmk, report) = seal_darc_transfer(&recipient, &sender, tmk);
     let mut evidence = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -751,6 +831,7 @@ pub fn import_darc_tmk(
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
             sealed_tmk,
+            report,
             remote_cert_chain,
         },
         &oob,
@@ -844,7 +925,6 @@ pub fn create_test_security_domain_with_custom_policy(
 
     let req = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain: receiver_chain,
         receiver_mfgr_cert_chain: mfgr_chain,
         receiver_owner_cert_chain: owner_chain,

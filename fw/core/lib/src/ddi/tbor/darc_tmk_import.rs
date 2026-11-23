@@ -106,9 +106,14 @@ pub(crate) async fn handle<P: HsmPal>(
         }
         let recipient = alloc.dma_alloc(97)?;
         recipient[0] = 4;
-        pal.ecc_pub_from_priv(io, HsmEccCurve::P384, view.target_key, &mut recipient[1..])
-            .await?;
-        byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut recipient[1..])?;
+        pal.ecc_pub_from_priv(
+            io,
+            HsmEccCurve::P384,
+            view.target_key,
+            Some(&mut recipient[1..]),
+        )
+        .await?;
+        byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut recipient[1..])?;
         let cfg = TransferOpenConfig {
             verification: TransferVerifyConfig {
                 expected_kind: ReportKind::Darc,
@@ -136,7 +141,7 @@ pub(crate) async fn handle<P: HsmPal>(
     .await?;
 
     cmd_buf.encode_response(|buf| {
-        let frame = TborDarcTmkImportResp::encode(buf, 0, false)?
+        let frame = TborDarcTmkImportResp::encode_for_request(buf, 0, false)?
             .masked_tmk(masked_tmk)?
             .finish();
         Ok(frame.as_bytes().len())

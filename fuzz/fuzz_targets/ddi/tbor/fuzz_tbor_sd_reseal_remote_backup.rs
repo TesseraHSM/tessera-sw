@@ -250,8 +250,6 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
 
     let (masked_receiver, receiver_report, receiver_pub) =
         sealing_key_report_and_pub(ctx, session.session_id, key_scope);
-    let (masked_sender, sender_report, _) =
-        sealing_key_report_and_pub(ctx, session.session_id, key_scope);
     let (_masked_destination, destination_report, _) =
         sealing_key_report_and_pub(ctx, session.session_id, key_scope);
     let wrong_receiver_key = wrong_receiver_key
@@ -267,7 +265,6 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
 
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: masked_sender,
         receiver_cert_chain: receiver_chain,
         receiver_mfgr_cert_chain: mfgr,
         receiver_owner_cert_chain: owner,
@@ -278,12 +275,12 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
         },
         policy: policy.clone(),
     };
-    let src_remote_backup = ctx
+    let source = ctx
         .tbor_oob(&request, &oob)
-        .expect("create real source remote backup")
-        .pok_remote_backup;
+        .expect("create real source remote backup");
+    let src_remote_backup = source.pok_remote_backup;
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &sender_report, &destination_report);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &source.report, &destination_report);
     let request = TborSdResealRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_receiver,

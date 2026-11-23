@@ -286,7 +286,6 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
 
     let create_remote = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain: evidence.receiver.clone(),
         receiver_mfgr_cert_chain: evidence.manufacturer.clone(),
         receiver_owner_cert_chain: evidence.owner.clone(),
@@ -298,7 +297,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         .tbor_oob(&create_remote, &evidence.oob())
         .expect("SdCreateRemoteBackup should succeed");
 
-    let (peer_sealing_key, peer_evidence) = if key_scope == common::KeyScope::SecurityDomain {
+    let (peer_sealing_key, mut peer_evidence) = if key_scope == common::KeyScope::SecurityDomain {
         let sealing_key = ctx
             .tbor(&TborSdSealingKeyGenReq {
                 session_id: session.session_id,
@@ -337,7 +336,6 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
 
     let create_peer = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: peer_sealing_key.masked_key,
         policy: policy.clone(),
         dst_mfgr_cert_chain: peer_evidence.manufacturer.clone(),
         dst_owner_cert_chain: peer_evidence.owner.clone(),
@@ -348,6 +346,10 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     let create_peer_response = ctx
         .tbor_oob(&create_peer, &peer_evidence.oob())
         .expect("SdCreatePeerBackup should succeed");
+    peer_evidence.report.length = u16::try_from(create_peer_response.report.len())
+        .expect("operation report length")
+        .into();
+    peer_evidence.items[usize::from(peer_evidence.report.index)] = create_peer_response.report;
 
     ctx.session_close(session.session_id)
         .expect("source session close should succeed");

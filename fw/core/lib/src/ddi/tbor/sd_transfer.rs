@@ -27,8 +27,8 @@ pub(super) async fn policy_hash<'a, P: HsmPal>(
         io,
         HsmHashAlgo::Sha384,
         policy,
-        hash,
         HsmDigestForm::Standard,
+        Some(hash),
     )
     .await?;
     Ok(hash)
@@ -48,9 +48,9 @@ pub(super) async fn seal_backup<P: HsmPal>(
     let private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
     let public = alloc.dma_alloc(97)?;
     public[0] = 4;
-    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, &mut public[1..])
+    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, Some(&mut public[1..]))
         .await?;
-    byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut public[1..])?;
+    byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut public[1..])?;
     let ids = alloc.dma_alloc(96)?;
     let (source, destination) = ids.split_at_mut(48);
     sd_spki_thumbprint(pal, io, public, source, alloc).await?;
@@ -120,9 +120,9 @@ pub(super) async fn open_backup<P: HsmPal>(
 ) -> HsmResult<()> {
     let recipient = alloc.dma_alloc(97)?;
     recipient[0] = 4;
-    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, &mut recipient[1..])
+    pal.ecc_pub_from_priv(io, HsmEccCurve::P384, private, Some(&mut recipient[1..]))
         .await?;
-    byte_order::pair_to_be(P::BYTE_ORDER, HsmEccCurve::P384, &mut recipient[1..])?;
+    byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut recipient[1..])?;
     let hash: &[u8] = policy_hash;
     let config = TransferOpenConfig {
         verification: TransferVerifyConfig {

@@ -109,7 +109,7 @@ pub(crate) async fn handle<P: HsmPal>(
         })
         .await?;
     cmd.encode_response(|buf| {
-        let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdResealRemoteBackupResp::encode_for_request(buf, 0, false)?
             .dst_remote_backup(envelope)?
             .report(&report[..report_len])?
             .finish();

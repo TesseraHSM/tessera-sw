@@ -108,7 +108,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         })
         .await?;
     cmd.encode_response(|buf| {
-        let frame = TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
+        let frame = TborSdCreateRemoteBackupResp::encode_for_request(buf, 0, false)?
             .pok_remote_backup(remote)?
             .pok_local_backup(local)?
             .sd_mk_backup(mk_backup)?

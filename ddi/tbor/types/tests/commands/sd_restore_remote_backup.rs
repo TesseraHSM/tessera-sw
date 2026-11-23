@@ -464,7 +464,6 @@ fn sd_restore_remote_backup_rejects_max_session_id() {
 
     ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
     assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
-    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 }
 
 #[test]
@@ -540,12 +539,7 @@ fn sd_restore_remote_backup_rejects_corrupted_remote_backup_tail() {
     let last = req.src_remote_backup.len() - 1;
     req.src_remote_backup[last] ^= 0x80;
 
-    assert_remote_restore_rejected(
-        &ctx,
-        &req,
-        &backup,
-        TborStatus::AesGcmDecryptTagDoesNotMatch,
-    );
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -600,7 +594,7 @@ fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup_tail() {
 }
 
 #[test]
-fn sd_restore_remote_backup_rejects_missing_sender_chain() {
+fn sd_restore_remote_backup_rejects_missing_sender_pid_key() {
     let seed = mach_seed();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
@@ -609,7 +603,7 @@ fn sd_restore_remote_backup_rejects_missing_sender_chain() {
     let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
 
     let mut req = restore_remote_req(session_id, &backup);
-    req.sender_cert_chain.clear();
+    req.sender_pid_pub_key.clear();
 
     assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }

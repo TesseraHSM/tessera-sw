@@ -38,11 +38,11 @@ fn sd_restore_local_backup_uses_negotiated_session_revision() {
     let sata = CaKey::generate();
     let pota = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata, &pota, None, None);
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
     drop(session);

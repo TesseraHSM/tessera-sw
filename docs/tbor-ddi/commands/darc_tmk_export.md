@@ -52,18 +52,18 @@ with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the policy document, fixed-length key buffers and the packed cert-descriptor list.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Aligns `masked_tmk` to a 4-byte boundary. |
-| 16 | `masked_tmk` | `buffer` (264 B) | The locally-masked `DarcTmk` from `DarcTmkGen` or `DarcTmkImport`. |
-| 20 | `policy` | `buffer` (1-384 B) | Unified `PartPolicy`; its SHA-384 digest must equal the bound `policy_hash`. |
-| 24 | `target_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | DATA-anchored recipient chain, root first; DER bytes travel **out of band**. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Aligns `masked_tmk` to a 4-byte boundary. |
+| 20 | `masked_tmk` | `buffer` (264 B) | The locally-masked `DarcTmk` from `DarcTmkGen` or `DarcTmkImport`. |
+| 24 | `policy` | `buffer` (1-384 B) | Unified `PartPolicy`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 28 | `target_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | DATA-anchored recipient chain, root first; DER bytes travel **out of band**. |
 
 ### Data section
 
@@ -73,15 +73,15 @@ referenced by the descriptors travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, two TOC entries, then the encrypted envelope
+Wire layout: 12-byte header, two TOC entries, then the encrypted envelope
 and operation report.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `sealed_tmk` | `buffer` (258 B) | Canonical header (113 B), SEC1 encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 12 | `report` | `buffer` (1..=896 B) | PID-signed v2 `Darc` COSE_Sign1 report over the exact envelope and recipient. |
+| 12 | `sealed_tmk` | `buffer` (258 B) | Canonical header (113 B), SEC1 encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
+| 16 | `report` | `buffer` (1..=896 B) | PID-signed v2 `Darc` COSE_Sign1 report over the exact envelope and recipient. |
 
 ### Data section
 

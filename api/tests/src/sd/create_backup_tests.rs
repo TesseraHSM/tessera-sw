@@ -37,7 +37,7 @@ fn sd_create_remote_backup_uses_negotiated_session_revision() {
     }
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
     drop(session);
 
@@ -49,7 +49,7 @@ fn sd_create_remote_backup_uses_negotiated_session_revision() {
     assert_ne!(part.api_rev(), session.api_rev());
     let result = evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
         })
         .expect("create remote backup using the session revision");
     assert_eq!(result.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);

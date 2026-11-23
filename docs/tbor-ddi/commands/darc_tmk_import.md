@@ -61,20 +61,20 @@ do not by themselves provide replay protection or certificate freshness.
 
 ## Request
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the policy document, fixed-length key buffers and the packed cert-descriptor list.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_kex_key` | `buffer` (280 B) | The receiver's masked `DarcKex` private key from `DarcKexKeyGen`. |
-| 20 | `policy` | `buffer` (1-384 B) | The unified `PartPolicy` whose `pota_spki_thumbprint` anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
-| 24 | `sealed_tmk` | `buffer` (258 B) | Canonical DARC header (113 B), encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 28 | `report` | `buffer` (1..=896 B) | Required PID-signed v2 `Darc` operation report accompanying `sealed_tmk`. |
-| 32 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=3]`, 3 B each) | POTA-anchored source PID chain, root first; DER bytes travel **out of band**. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_kex_key` | `buffer` (280 B) | The receiver's masked `DarcKex` private key from `DarcKexKeyGen`. |
+| 24 | `policy` | `buffer` (1-384 B) | The unified `PartPolicy` whose `pota_spki_thumbprint` anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 28 | `sealed_tmk` | `buffer` (258 B) | Canonical DARC header (113 B), encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
+| 32 | `report` | `buffer` (1..=896 B) | Required PID-signed v2 `Darc` operation report accompanying `sealed_tmk`. |
+| 36 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=3]`, 3 B each) | POTA-anchored source PID chain, root first; DER bytes travel **out of band**. |
 
 ### Data section
 
@@ -91,8 +91,8 @@ the masked TMK.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_tmk` | `buffer` (264 B) | The imported TMK, masked under the SDMK and recorded under the `DarcTmk` key kind. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_tmk` | `buffer` (264 B) | The imported TMK, masked under the SDMK and recorded under the `DarcTmk` key kind. |
 
 ### Data section
 
