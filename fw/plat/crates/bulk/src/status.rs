@@ -96,6 +96,26 @@ impl BulkStatus {
         self.sts == sts::SUCCESS && self.err == 0
     }
 
+    /// [`from_error`](Self::from_error), refined by the IO's source length
+    /// `src_len`: an XTS length error names the length problem when it is
+    /// over [`MAX_DATA_LEN`] or not a multiple of [`BLOCK_LEN`].
+    pub fn from_io_error(cipher: BulkCipher, err: HsmError, src_len: u32) -> Self {
+        if cipher == BulkCipher::Xts && err == HsmError::AesXtsInvalidBufferSize {
+            let err = if src_len > MAX_DATA_LEN {
+                xts_err::DATA_LENGTH_EXCEEDED
+            } else if !src_len.is_multiple_of(BLOCK_LEN) {
+                xts_err::LENGTH_UNALIGNED_16B
+            } else {
+                xts_err::UNDEFINED
+            };
+            return Self {
+                sts: sts::INVALID_FIELD_XTS,
+                err,
+            };
+        }
+        Self::from_error(cipher, err)
+    }
+
     /// Maps a failed bulk IO's error onto a (never successful) CQE status.
     ///
     /// # Parameters

@@ -78,6 +78,10 @@ the order from the selected API revision and converts at the DDI
 boundary. `PartInfo.pid_pub_key` is the exception: it is big-endian on
 every device.
 
+For [`RsaEncryptDecrypt`](./commands/rsa_encrypt_decrypt.md), this applies to
+the RSA ciphertext only. Plaintext and OAEP labels are opaque byte strings
+and are never reversed.
+
 ## Certificate-chain algorithms
 
 Firmware verifies ECDSA (any combination of P-256/P-384/P-521 and SHA-256/384/512),
@@ -271,6 +275,10 @@ storage is zero.
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x30` | `PartInitWithObk` | InSession | [`commands/part_init_with_obk.md`](./commands/part_init_with_obk.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
+| `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
+
+`0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
+the upcoming `RsaSign` and `RsaVerify` commands.
 
 ## Default-PSK gate
 

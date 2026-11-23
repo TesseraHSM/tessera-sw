@@ -55,6 +55,7 @@ pub mod part_info;
 pub mod part_init;
 pub mod part_init_with_obk;
 pub mod psk_change;
+pub mod rsa_encrypt_decrypt;
 pub mod rsa_mod_exp;
 pub mod sd_create_peer_backup;
 pub mod sd_create_remote_backup;

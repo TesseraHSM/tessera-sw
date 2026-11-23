@@ -48,9 +48,9 @@ use tsra_fw_uno_drivers_aes::AesOp;
 use tsra_fw_uno_drivers_bcp::BCP_ADDR_ALIGN;
 use tsra_fw_uno_drivers_bcp::BCP_KEY_LEN;
 use tsra_fw_uno_drivers_bcp::BCP_MAX_SRC_LEN;
+use tsra_fw_uno_drivers_bcp::BcpData;
 use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_bcp::GcmCompletion;
-use tsra_fw_uno_drivers_bcp::GcmData;
 use tsra_fw_uno_drivers_bcp::GcmOp;
 use tsra_fw_uno_drivers_bcp::GcmRequest;
 
@@ -87,7 +87,7 @@ fn padded_aad_len(aad_len: usize) -> usize {
 }
 
 /// GCM length block `[8·aad_len]₆₄ ‖ [8·text_len]₆₄`.
-fn len_block(aad_len: usize, text_len: usize) -> Block {
+pub(super) fn len_block(aad_len: usize, text_len: usize) -> Block {
     let mut b = [0u8; AES_BLOCK_SIZE];
     b[..8].copy_from_slice(&(aad_len as u64 * 8).to_be_bytes());
     b[8..].copy_from_slice(&(text_len as u64 * 8).to_be_bytes());
@@ -114,12 +114,12 @@ fn read_block(b: &Block) -> Block {
     out
 }
 
-fn xor(a: &Block, b: &Block) -> Block {
+pub(super) fn xor(a: &Block, b: &Block) -> Block {
     core::array::from_fn(|i| a[i] ^ b[i])
 }
 
 /// Constant-time comparison of two blocks.
-fn constant_time_eq(a: &Block, b: &Block) -> bool {
+pub(super) fn constant_time_eq(a: &Block, b: &Block) -> bool {
     let mut diff = 0u8;
     for (&x, &y) in a.iter().zip(b) {
         diff |= x ^ y;
@@ -183,13 +183,13 @@ impl Bufs<'_> {
     }
 
     /// Hand the first `n` bytes to the engine as they are.
-    fn engine_data(&mut self, n: usize) -> GcmData<'_> {
+    fn engine_data(&mut self, n: usize) -> BcpData<'_> {
         match self {
-            Self::Copy { src, dst } => GcmData::Copy {
+            Self::Copy { src, dst } => BcpData::Copy {
                 src: &src[..n],
                 dst: &mut dst[..n],
             },
-            Self::InPlace(buf) => GcmData::InPlace(&mut buf[..n]),
+            Self::InPlace(buf) => BcpData::InPlace(&mut buf[..n]),
         }
     }
 }
@@ -324,7 +324,7 @@ impl UnoHsmPal {
                 let work = engine_buf(scope, pad + rounded)?;
                 work[..len].copy_from_slice(bufs.src());
                 work[len..].fill(0);
-                let done = self.bcp.gcm(req(GcmData::InPlace(work))).await;
+                let done = self.bcp.gcm(req(BcpData::InPlace(work))).await;
                 let result = verdict(dir, &engine_tag, done);
                 if result.is_ok() {
                     if tail != 0 {

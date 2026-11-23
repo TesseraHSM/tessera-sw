@@ -4,7 +4,7 @@ A standalone **PKCS#11 (Cryptoki) v3.1** module for the TSRA. It links the
 native C API (`tsra.h`, generated from `api/native`) the same way
 `plugins/ossl_prov` does.
 
-## Status: digests, AES and EC keys, ciphers, ECDSA, host objects
+## Status: digests, AES and EC keys, ciphers, ECDSA, key unwrap, host objects
 
 Unimplemented PKCS#11 entry points return `CKR_FUNCTION_NOT_SUPPORTED` (after
 `C_Initialize`; before it every entry point other than `C_Initialize` and the
@@ -16,7 +16,7 @@ the spec requires). Implemented so far:
   login state machine. The "PKCS 11" interface comes in versions 3.1 (the
   default), 3.0 and 2.40 (`C_GetInterfaceList`, `C_GetInterface`), and
   `C_GetFunctionList` returns the 2.40 table.
-  `C_GetMechanismList` reports only the sixteen mechanisms below, and
+  `C_GetMechanismList` reports only the eighteen mechanisms below, and
   `C_GetTokenInfo` the real session counts (at most 256 sessions).
 - **`C_Login`**: runs the TSRA provisioning ceremony and opens one device
   session for the token. Provisioning is done lazily: login opens a device
@@ -144,8 +144,43 @@ the spec requires). Implemented so far:
   Deviations). A signature of the wrong length returns
   `CKR_SIGNATURE_LEN_RANGE`, a wrong one `CKR_SIGNATURE_INVALID`. A key's
   `CKA_ALLOWED_MECHANISMS`, if it has one, is enforced.
+- **`C_GenerateKeyPair` (`CKM_RSA_PKCS_KEY_PAIR_GEN`)**: returns a public and
+  a private object for the partition's RSA unwrapping key, the only RSA key
+  the device has (see Deviations). The template must ask for exactly that
+  key: `CKA_MODULUS_BITS` 2048 and `CKA_WRAP` TRUE in the public template,
+  `CKA_UNWRAP` TRUE in the private one, no other usage TRUE, and, if given,
+  the exponent 65537. Anything else that asks for another key returns
+  `CKR_TEMPLATE_INCONSISTENT` (no `CKA_MODULUS_BITS`:
+  `CKR_TEMPLATE_INCOMPLETE`). As in other templates, a value of the wrong size
+  or `CKA_ALWAYS_AUTHENTICATE` TRUE returns `CKR_ATTRIBUTE_VALUE_INVALID` (see
+  Deviations), an attribute only the token sets `CKR_ATTRIBUTE_READ_ONLY`, and
+  an attribute array `CKR_ATTRIBUTE_TYPE_INVALID`. Both objects carry the
+  modulus, the exponent, `CKA_ID` (the SHA-1 of the modulus) and
+  `CKA_ALLOWED_MECHANISMS = { CKM_RSA_AES_KEY_WRAP }`; the private one is
+  sensitive and unextractable, and private on the token (see Deviations).
+- **`C_UnwrapKey` (`CKM_RSA_AES_KEY_WRAP`)**: the only way a key from outside
+  enters the token. The blob is the RSA-OAEP encryption of an AES
+  key-encryption key under the unwrapping key, then the target key wrapped
+  under that key with RFC 5649. `CK_RSA_PKCS_OAEP_PARAMS` must name SHA-256,
+  SHA-384 or SHA-512 with MGF1 of the same hash, `CKZ_DATA_SPECIFIED` and no
+  label (the SDK passes none to the device); `ulAESKeyBits` is 128, 192 or
+  256. The target is an AES, AES-GCM or AES-XTS key, picked by the template
+  as at generation (`CKA_CLASS` and `CKA_KEY_TYPE` are required); its length
+  comes from the blob, so `CKA_VALUE_LEN` may be left out. A blob of the
+  wrong length returns `CKR_WRAPPED_KEY_LEN_RANGE`; every other bad blob
+  (tampered, wrong key-encryption key, wrong OAEP hash) returns one
+  `CKR_WRAPPED_KEY_INVALID`, so the error tells nothing about where the
+  unwrap failed, and no object is created. The unwrapping key needs
+  `CKA_UNWRAP` (`CKR_KEY_FUNCTION_NOT_PERMITTED`). An unwrapped key is
+  sensitive and unextractable like a generated one, but not local
+  (`CKA_LOCAL`, `CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` FALSE,
+  `CKA_KEY_GEN_MECHANISM` unavailable). An XTS key whose two halves are equal
+  unwraps but is refused at use (`CKR_FUNCTION_FAILED`), as FIPS 140-3
+  requires. Private (EC, RSA) key targets are not implemented yet.
+- **`C_WrapKey`** returns `CKR_FUNCTION_NOT_SUPPORTED`: no key ever leaves
+  the device.
 
-  The other key-backed mechanisms (RSA, wrap/unwrap, derive) are not
+  The other key-backed mechanisms (RSA operations, derive) are not
   implemented yet.
 - **Ending an operation**: `C_DigestInit`, `C_EncryptInit`,
   `C_DecryptInit`, `C_SignInit` and `C_VerifyInit` with a NULL mechanism end
@@ -172,8 +207,8 @@ the spec requires). Implemented so far:
   IV in `CK_GCM_PARAMS`, and neither the module nor the device checks that an
   IV is never reused with the same key. The message-based API, in which a
   token can generate the IVs, is not implemented.
-- **No plaintext key import.** Keys enter the token only by generation (and
-  later by unwrap); the device holds them only masked. `C_CreateObject` with
+- **No plaintext key import.** Keys enter the token only by generation and by
+  unwrap; the device holds them only masked. `C_CreateObject` with
   a secret, private or public key that carries key material (`CKA_VALUE`,
   `CKA_PRIVATE_EXPONENT`, `CKA_PRIME_1`, `CKA_PRIME_2`, `CKA_EXPONENT_1`,
   `CKA_EXPONENT_2`, `CKA_COEFFICIENT`) returns `CKR_TEMPLATE_INCONSISTENT`, and
@@ -214,6 +249,21 @@ the spec requires). Implemented so far:
   with `C_CreateObject` cannot verify (`CKR_KEY_HANDLE_INVALID`).
 - **No attribute arrays.** `CKA_WRAP_TEMPLATE`, `CKA_UNWRAP_TEMPLATE` and
   `CKA_DERIVE_TEMPLATE` return `CKR_ATTRIBUTE_TYPE_INVALID` in every template.
+- **The one RSA key pair is the partition's unwrapping key.** The device
+  generates no general RSA keys. `C_GenerateKeyPair` with
+  `CKM_RSA_PKCS_KEY_PAIR_GEN` returns the partition's one fixed RSA-2048
+  unwrapping key: the same key on every call and for every application, so
+  repeated calls make further objects for the same key (with the same
+  `CKA_ID`), and destroying the objects does not destroy the device key. The
+  objects hold no key body; `C_UnwrapKey` fetches the device key each time and
+  refuses an object whose modulus is not the partition's
+  (`CKR_UNWRAPPING_KEY_HANDLE_INVALID`).
+- **An XTS key is unwrapped from the SDK's container.** The device keeps the
+  two halves of an XTS key as two keys, and the SDK unwraps them from a
+  format of its own: a 16-byte header (the bytes `TSRA-XTS`, then version 1,
+  the lengths of the two blobs and two zero bytes, each a little-endian
+  16-bit value), then one `CKM_RSA_AES_KEY_WRAP` blob for each 32-byte half. A
+  single blob of the 64-byte key returns `CKR_WRAPPED_KEY_LEN_RANGE`.
 - **XTS tweaks are 64-bit.** The tweak, read as a little-endian 128-bit
   integer, must be below 2^64 - 1: its upper 8 bytes zero and its lower 8 not
   all 0xFF, so the device can advance it past the data unit. Any other tweak
@@ -221,8 +271,9 @@ the spec requires). Implemented so far:
 
 ## Key storage and key lifetime
 
-The TSRA device keeps no keys. When it generates a key, it returns the key
-encrypted under a masking key that never leaves the device: the masked blob.
+The TSRA device keeps no keys. When it generates or unwraps a key, it returns
+the key encrypted under a masking key that never leaves the device: the masked
+blob.
 The masked blob is the key's only durable form. The module stores it as the
 key body of the PKCS#11 object, in memory or, with `TSRA_PKCS11_PERSIST=1`, in
 the file store.
@@ -242,6 +293,10 @@ device session per login and closes it at `C_Logout`, when the slot's last
 PKCS#11 session closes, at `C_CloseAllSessions` and at `C_Finalize`. With the
 device-session masking key every key would become unusable at each of those
 points, whatever its PKCS#11 lifetime.
+
+The partition's RSA unwrapping key is the exception: the device keeps it for
+good, so its objects hold no masked blob, and `C_UnwrapKey` asks the device
+for the key at every call.
 
 PKCS#11 object lifetime is therefore managed by the module alone, as the
 specification describes it:
@@ -317,6 +372,7 @@ secret key, so no clear record can lend them either blob.
 | File store | `tsra_pkcs11_objstore_file.c`, `tsra_pkcs11_store_record.c`, `tsra_pkcs11_store_io.c` | the persistent backend for token objects (session objects stay in memory): one record file per object, private ones sealed through the device, the record codec, and the crash-safe, owner-only filesystem primitives with a cross-process lock |
 | Object policy | `tsra_pkcs11_attr_types.c`, `tsra_pkcs11_attr_policy.c` | the attribute type table and template ceilings every template entry point uses; what `C_CreateObject` may create and which attributes `C_SetAttributeValue` may change, per class; device-free units of their own |
 | Key operations | `tsra_pkcs11_crypt.c`, `tsra_pkcs11_sign.c`, `tsra_pkcs11_template.c`, `tsra_pkcs11_ec_template.c` | key-backed entry points: operation state and the masked-blob store/unmask flow (CK_RV only); the keygen template validation, key-family choice, cipher and sign mechanism policy, and the EC templates and encodings are device-free units of their own |
+| Key import | `tsra_pkcs11_unwrap.c`, `tsra_pkcs11_unwrap_params.c` | `C_UnwrapKey` and the unwrapping key pair behind `C_GenerateKeyPair`; the mechanism parameters, the unwrap and key pair templates and the public key decoding are a device-free unit of their own |
 | Configuration | `tsra_pkcs11_config.c` | the configuration file and environment, the PIN rules and the owner backup key file; a device-free unit of its own |
 | HSM binding | `tsra_pkcs11_hsm.c`, `tsra_pkcs11_key.c`, `tsra_pkcs11_status.c` | the only code that calls `tsra_*` and maps `tsra_status` to `CK_RV` |
 | Not implemented | `tsra_pkcs11_stubs.c` (generated) | everything else → `CKR_FUNCTION_NOT_SUPPORTED` |
@@ -444,7 +500,9 @@ every `CK_BBOOL` and `CK_ULONG` attribute at the lengths callers get wrong),
 verdict, per object class), `tests/ec_template_test.c` (the EC key-pair
 template verdicts, the curve and point encodings, the raw ECDSA lengths and
 the sign mechanism table), `tests/mech_table_test.c` (the mechanism table
-against the dispatch arms, in both directions), `tests/config_test.c` (the
+against the dispatch arms, in both directions), `tests/unwrap_params_test.c`
+(the `CKM_RSA_AES_KEY_WRAP` parameters, the unwrap and key pair templates, the
+blob lengths and the public key decoding), `tests/config_test.c` (the
 environment configuration, the PIN rules and the owner backup key, built as a
 hardware build) and `tests/config_file_test.c` (the configuration file
 parser). `integration-tests/cpp/` is the functional suite
@@ -455,9 +513,12 @@ and ECDSA with every mechanism, each signature verified by the host oracle,
 the two-call sizing discipline, the operation state machine and init
 precedence, an init path for every advertised mechanism, attribute changes
 and object sizes, the object policy and attribute typing, key survival
-across every event that ends the device session, what `C_Logout` does to
-session objects, private token objects sealed at rest, the configuration at
-`C_Initialize`, the interface list, and the login rules (each
+across every event that ends the device session, the unwrapping key pair and
+`C_UnwrapKey`, known-answer tests on keys unwrapped from published vectors
+(NIST CAVP AES-CBC and AES-XTS; the Project Wycheproof AES-CBC-PKCS#7,
+AES-GCM and AES key wrap sets, invalid vectors included), what `C_Logout`
+does to session objects, private token objects sealed at rest, the
+configuration at `C_Initialize`, the interface list, and the login rules (each
 login case in a process of its own, because the first login of a process
 provisions the emulated partition with its PIN). So it needs the emulator or
 hardware build (see the CMakeLists.txt header for
@@ -475,7 +536,11 @@ HMAC, HKDF, AES-CBC, AES key wrap, ECDSA verification, ECDH, RSA signatures and
 OAEP, and the `CKM_RSA_AES_KEY_WRAP` blob builder), checked against published
 vectors by `host_crypto_tests.cpp`; `integration-tests/cpp/vectors/` holds
 known answers that `tools/gen_vectors.py` takes from the NIST and BoringSSL
-vectors in `crates/crypto/src/testvectors/`. The CI
+vectors in `crates/crypto/src/testvectors/`. Wycheproof is not in the
+repository: the functional suite's CMake build fetches it at a pinned commit
+with a hash check and `tools/gen_wycheproof.py` converts the sets it uses in
+the build directory (`FETCHCONTENT_SOURCE_DIR_WYCHEPROOF` points it at a local
+copy). The CI
 workflow (`.github/workflows/pkcs11.yml`) runs all of these on pushes/PRs to
 the staging branch: the unit harnesses under UBSan and under ASan
 (`tests/build_units.sh`), the functional suite on the memory store, on the

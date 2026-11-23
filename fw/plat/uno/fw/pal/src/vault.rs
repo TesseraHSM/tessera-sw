@@ -50,7 +50,6 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
-use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -94,6 +93,38 @@ fn blob_ref(table: usize, off: usize, len: usize) -> &'static HsmDmaBuf {
     // SAFETY: the caller's `key_location{,_present}` validated that
     // `addr..addr+len` lies within that table's 'static GSRAM blob region.
     unsafe { HsmDmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
+}
+
+/// A bulk key's material, for a bulk IO.
+///
+/// Checks that `bulk_id` names a live key of one of the `accept` kinds and, for
+/// a session-bound key, that `session_id` (from the bulk submission entry)
+/// is the session it is bound to.
+///
+/// # Errors
+/// - [`HsmError::KeyNotFound`] — no such key.
+/// - [`HsmError::InvalidKeyType`] — wrong kind.
+/// - [`HsmError::SessionNotFound`] — session mismatch.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) fn bulk_vault_key(
+    io: &UnoHsmIo,
+    bulk_id: u32,
+    session_id: u16,
+    accept: &[HsmVaultKeyKind],
+) -> HsmResult<(&'static HsmDmaBuf, HsmVaultKeyKind)> {
+    let key_id = HsmKeyId::from(u16::try_from(bulk_id).map_err(|_| HsmError::KeyNotFound)?);
+    let v = vault(io);
+    let kind = v.key_kind(key_id)?;
+    if !accept.contains(&kind) {
+        return Err(HsmError::InvalidKeyType);
+    }
+    if v.key_session(key_id)?
+        .is_some_and(|bound| bound != session_id)
+    {
+        return Err(HsmError::SessionNotFound);
+    }
+    let (table, off, len) = v.key_location(key_id)?;
+    Ok((blob_ref(table, off, len), kind))
 }
 
 impl UnoHsmPal {

@@ -71,7 +71,7 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     id: HsmSessId,
-    binding: &HsmDmaBuf,
+    binding: &[u8],
 ) -> HsmResult<()> {
     let role = id.role();
     let expected_role = u32::from(role == HsmSessionRole::CryptoUser).to_le_bytes();
@@ -90,7 +90,7 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
         Some(digest),
     )
     .await?;
-    if binding[4 + APP_ID_LEN..] != digest[..] {
+    if digest[..] != binding[4 + APP_ID_LEN..] {
         if role == HsmSessionRole::CryptoUser {
             psk.copy_from_slice(&DEFAULT_PSK_CU);
             pal.hash(
@@ -101,7 +101,7 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
                 Some(digest),
             )
             .await?;
-            if binding[4 + APP_ID_LEN..] == digest[..] {
+            if digest[..] == binding[4 + APP_ID_LEN..] {
                 return Err(HsmError::DefaultPskChanged);
             }
         }
@@ -111,21 +111,27 @@ pub(crate) async fn validate_auth_binding<P: HsmPal>(
 }
 
 /// Apply CU credential policy to the bulk path, which bypasses TBOR dispatch.
+///
+/// The binding is copied to the stack rather than the IO's DMA heap: it is
+/// only compared, and a platform may give a bulk IO a small heap (Uno uses
+/// the IO's 128-byte bulk scratch), which then needs to hold only the PSK
+/// and its digest.
 pub(crate) async fn validate_bulk_session<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
     let id = HsmSessId::from(io.sqe().session_id().ok_or(HsmError::SessionNotFound)?);
     if id.role() != HsmSessionRole::CryptoUser {
         return Ok(());
     }
+    let mut binding = [0u8; SESSION_AUTH_BINDING_LEN];
     match pal.session_auth_binding(io, id) {
-        Ok(_) => {}
+        Ok(source) if source.len() == SESSION_AUTH_BINDING_LEN => binding.copy_from_slice(source),
+        Ok(_) => return Err(HsmError::InvalidPermissions),
         // Legacy MBOR sessions have no SessionEx binding and retain
         // their existing bulk authorization and key-binding rules.
         Err(HsmError::InvalidPermissions) => return Ok(()),
         Err(err) => return Err(err),
     }
     pal.alloc_scoped_async(io, async |alloc| {
-        let binding = copy_auth_binding(pal, io, alloc, id)?;
-        validate_auth_binding(pal, io, alloc, id, binding).await?;
+        validate_auth_binding(pal, io, alloc, id, &binding).await?;
         if crate::part_state::part_psk_is_default(pal, io, 1)? {
             return Err(HsmError::DefaultPskMustRotate);
         }

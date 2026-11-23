@@ -18,8 +18,10 @@ impl BcpError {
     pub const INVALID_KEY_LEN: HsmError = make_component_error(ComponentId::BCP, 1);
 
     /// Buffers the engine cannot take: AAD not a 32-byte multiple, text
-    /// empty or not a 16-byte multiple, source over one chunk, destination
-    /// shorter than the source, or a misaligned address.
+    /// empty or not a 16-byte multiple, source over
+    /// [`BCP_MAX_SRC_LEN`](crate::BCP_MAX_SRC_LEN), destination shorter
+    /// than the source, a misaligned address, or an invalid host interface
+    /// or XTS data unit.
     pub const INVALID_DATA_LEN: HsmError = make_component_error(ComponentId::BCP, 2);
 
     /// The engine completed a command with an error other than a decrypt
