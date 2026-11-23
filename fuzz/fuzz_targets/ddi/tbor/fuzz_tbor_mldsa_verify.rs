@@ -151,8 +151,9 @@ fn repeated_bytes(bytes: &[u8], len: usize, offset: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Generate and cross-check a deterministic external-mu signature without
-/// provisioning device keys or exporting any private-key material.
+/// Generate and cross-check an external-mu signature without provisioning device
+/// keys or exporting any private-key material. Keys are reproducible; signatures
+/// are deterministic on Linux and hedged on Windows, as required by CNG.
 fn valid_request(input: &FuzzInput, p: &MlDsaParams, session_id: u16) -> TborMlDsaVerifyReq {
     let variant = match p.key_kind {
         MLDSA_KEY_KIND_44_SEED => crypto::MlDsaVariant::MlDsa44,
@@ -168,12 +169,13 @@ fn valid_request(input: &FuzzInput, p: &MlDsaParams, session_id: u16) -> TborMlD
         .expect("export host ML-DSA public key");
     assert_eq!(written, p.pub_key_len);
     let mu = repeated_bytes(&input.bytes, MLDSA_MU_LEN, crypto::MLDSA_SEED_LEN);
-    let signature = crypto::Signer::sign_vec(
-        &mut crypto::MlDsaAlgo::external_mu().deterministic(),
-        &key,
-        &mu,
-    )
-    .expect("host external-mu signing");
+    let mut algo = crypto::MlDsaAlgo::external_mu();
+    #[cfg(target_os = "linux")]
+    {
+        algo = algo.deterministic();
+    }
+    let signature =
+        crypto::Signer::sign_vec(&mut algo, &key, &mu).expect("host external-mu signing");
     assert_eq!(signature.len(), p.sig_len);
     assert_not_truncated_at_page(&signature, p.name);
     let req = TborMlDsaVerifyReq {
