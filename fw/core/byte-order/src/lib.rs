@@ -9,18 +9,24 @@
 //! [`HsmCryptoOrder::BYTE_ORDER`](tsra_fw_hsm_pal_traits::HsmCryptoOrder).
 //! Standard encodings — SEC1, X.509 / DER, COSE, HPKE KDF input — are
 //! big-endian with exact-width ECC components. These helpers convert
-//! between the two **in place**: on [`HsmByteOrder::Be`] platforms they
-//! only check lengths, and on [`HsmByteOrder::Le`] platforms they reverse
-//! bytes and move P-521 components between their padded slots and the
-//! exact-width layout. Pass the PAL's const order so the branch folds.
+//! between the two **in place**: integers are reversed on
+//! [`HsmByteOrder::Le`] platforms and left untouched on
+//! [`HsmByteOrder::Be`] ones. Pass the PAL's const order so the branch
+//! folds.
+//!
+//! An operand ECC component sits at the head of a lane of
+//! `wire_coord_len(P::ECC_COORD_PAD)` bytes with a zero tail, so ECC
+//! helpers move P-521 components between their lanes and the exact-width
+//! layout on both orders.
 //!
 //! Shapes:
 //!
 //! - integer — a whole buffer: RSA operands, ECDH secrets, digests.
-//! - coord — one ECC component in a `wire_coord_len(order)` slot.
+//! - coord — one ECC component in a `wire_coord_len(P::ECC_COORD_PAD)` lane.
 //! - pair — two ECC components: a point `x || y` or a signature `r || s`.
 
 use tsra_fw_hsm_pal_traits::HsmByteOrder;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -74,14 +80,11 @@ pub fn int_copy_from_be(order: HsmByteOrder, dst: &mut [u8], src: &[u8]) -> HsmR
 ///
 /// # Errors
 /// [`HsmError::InvalidArg`] if `slot` is shorter than
-/// `curve.wire_coord_len(order)`.
+/// `curve.wire_coord_len(P::ECC_COORD_PAD)`.
 #[inline]
-pub fn coord_to_be(
-    order: HsmByteOrder,
-    curve: HsmEccCurve,
-    slot: &mut [u8],
-) -> HsmResult<&mut [u8]> {
-    if slot.len() < curve.wire_coord_len(order) {
+pub fn coord_to_be<P: HsmCryptoOrder>(curve: HsmEccCurve, slot: &mut [u8]) -> HsmResult<&mut [u8]> {
+    let order = P::BYTE_ORDER;
+    if slot.len() < curve.wire_coord_len(P::ECC_COORD_PAD) {
         return Err(HsmError::InvalidArg);
     }
     let be = &mut slot[..curve.priv_key_len()];
@@ -91,19 +94,19 @@ pub fn coord_to_be(
 
 /// Converts the big-endian ECC component at the head of `slot`
 /// (`curve.priv_key_len()` bytes) to operand order in place, returning the
-/// `curve.wire_coord_len(order)` operand; padding is zeroed.
+/// `curve.wire_coord_len(P::ECC_COORD_PAD)` operand; padding is zeroed.
 ///
 /// # Errors
 /// [`HsmError::InvalidArg`] if `slot` is shorter than
-/// `curve.wire_coord_len(order)`.
+/// `curve.wire_coord_len(P::ECC_COORD_PAD)`.
 #[inline]
-pub fn coord_from_be(
-    order: HsmByteOrder,
+pub fn coord_from_be<P: HsmCryptoOrder>(
     curve: HsmEccCurve,
     slot: &mut [u8],
 ) -> HsmResult<&mut [u8]> {
+    let order = P::BYTE_ORDER;
     let raw = curve.priv_key_len();
-    let wire = curve.wire_coord_len(order);
+    let wire = curve.wire_coord_len(P::ECC_COORD_PAD);
     if slot.len() < wire {
         return Err(HsmError::InvalidArg);
     }
@@ -114,17 +117,18 @@ pub fn coord_from_be(
 }
 
 /// Converts an operand-order component pair (`x || y` or `r || s`, each in
-/// a `curve.wire_coord_len(order)` slot) at the head of `buf` to the
+/// a `curve.wire_coord_len(P::ECC_COORD_PAD)` lane) at the head of `buf` to the
 /// big-endian exact-width pair in place, returning the
 /// `2 * curve.priv_key_len()` result at the head of `buf`.
 ///
 /// # Errors
 /// [`HsmError::InvalidArg`] if `buf` is shorter than
-/// `2 * curve.wire_coord_len(order)`.
+/// `2 * curve.wire_coord_len(P::ECC_COORD_PAD)`.
 #[inline]
-pub fn pair_to_be(order: HsmByteOrder, curve: HsmEccCurve, buf: &mut [u8]) -> HsmResult<&mut [u8]> {
+pub fn pair_to_be<P: HsmCryptoOrder>(curve: HsmEccCurve, buf: &mut [u8]) -> HsmResult<&mut [u8]> {
+    let order = P::BYTE_ORDER;
     let raw = curve.priv_key_len();
-    let wire = curve.wire_coord_len(order);
+    let wire = curve.wire_coord_len(P::ECC_COORD_PAD);
     if buf.len() < 2 * wire {
         return Err(HsmError::InvalidArg);
     }
@@ -138,19 +142,16 @@ pub fn pair_to_be(order: HsmByteOrder, curve: HsmEccCurve, buf: &mut [u8]) -> Hs
 
 /// Converts the big-endian exact-width component pair at the head of `buf`
 /// (`2 * curve.priv_key_len()` bytes) to operand order in place, returning
-/// the `2 * curve.wire_coord_len(order)` operand; padding is zeroed.
+/// the `2 * curve.wire_coord_len(P::ECC_COORD_PAD)` operand; padding is zeroed.
 ///
 /// # Errors
 /// [`HsmError::InvalidArg`] if `buf` is shorter than
-/// `2 * curve.wire_coord_len(order)`.
+/// `2 * curve.wire_coord_len(P::ECC_COORD_PAD)`.
 #[inline]
-pub fn pair_from_be(
-    order: HsmByteOrder,
-    curve: HsmEccCurve,
-    buf: &mut [u8],
-) -> HsmResult<&mut [u8]> {
+pub fn pair_from_be<P: HsmCryptoOrder>(curve: HsmEccCurve, buf: &mut [u8]) -> HsmResult<&mut [u8]> {
+    let order = P::BYTE_ORDER;
     let raw = curve.priv_key_len();
-    let wire = curve.wire_coord_len(order);
+    let wire = curve.wire_coord_len(P::ECC_COORD_PAD);
     if buf.len() < 2 * wire {
         return Err(HsmError::InvalidArg);
     }

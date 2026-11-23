@@ -27,8 +27,11 @@ use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::dev_rev_in_place;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
+use tsra_ddi_tbor_types::ecc_sign_hash_algo;
+use tsra_ddi_tbor_types::ecc_sign_input;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
@@ -38,6 +41,9 @@ use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyResp;
+use tsra_ddi_tbor_types::ECC_CURVE_P256;
+use tsra_ddi_tbor_types::ECC_CURVE_P384;
+use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
@@ -249,15 +255,55 @@ pub(crate) fn assert_rsa_decrypts(
     );
 }
 
-/// Sign `digest` with a caller-held masked key.
-pub(crate) fn sign(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>, digest: &[u8]) -> Vec<u8> {
-    ctx.tbor(&TborEccSignReq {
-        session_id,
-        masked_key,
-        digest: digest.to_vec(),
+/// Wire coordinate lane length of TBOR curve `curve`.
+pub(crate) fn curve_coord_len(curve: u8) -> usize {
+    wire_coord_len(match curve {
+        ECC_CURVE_P256 => 32,
+        ECC_CURVE_P384 => 48,
+        ECC_CURVE_P521 => 66,
+        _ => panic!("unsupported ECC curve {curve}"),
     })
-    .expect("EccSign")
-    .signature
+}
+
+/// Build an `EccSign` request for the device-order SHA-2 `digest`, packed
+/// as `k ‖ digest` with `coord`-byte coordinate lanes.
+pub(crate) fn sign_req(
+    session_id: u16,
+    masked_key: Vec<u8>,
+    coord: usize,
+    digest: &[u8],
+) -> TborEccSignReq {
+    TborEccSignReq {
+        session_id,
+        hash_algo: ecc_sign_hash_algo(digest.len()).expect("SHA-2 digest length"),
+        masked_key,
+        input: ecc_sign_input(coord, wire_coord_len(1), digest).expect("valid ECC layout"),
+    }
+}
+
+/// Sign `digest` with a caller-held masked key on `curve`.
+pub(crate) fn sign(
+    ctx: &TestCtx,
+    session_id: u16,
+    curve: u8,
+    masked_key: Vec<u8>,
+    digest: &[u8],
+) -> Vec<u8> {
+    sign_coord(ctx, session_id, curve_coord_len(curve), masked_key, digest)
+}
+
+/// Sign `digest` with a caller-held masked key whose curve has
+/// `coord`-byte wire coordinate lanes.
+fn sign_coord(
+    ctx: &TestCtx,
+    session_id: u16,
+    coord: usize,
+    masked_key: Vec<u8>,
+    digest: &[u8],
+) -> Vec<u8> {
+    ctx.tbor(&sign_req(session_id, masked_key, coord, digest))
+        .expect("EccSign")
+        .signature
 }
 
 /// Verify a wire-LE ECDSA signature on the host with `tsra_crypto`.
@@ -302,7 +348,7 @@ pub(crate) fn assert_ecc_signs(
     let digest: Vec<u8> = (0..digest_len)
         .map(|i| (i as u8).wrapping_mul(7).wrapping_add(0x11))
         .collect();
-    let signature = sign(ctx, session_id, masked_key, &digest);
+    let signature = sign_coord(ctx, session_id, pub_le.len() / 2, masked_key, &digest);
     assert_eq!(
         signature.len(),
         pub_le.len(),

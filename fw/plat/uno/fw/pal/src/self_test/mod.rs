@@ -18,9 +18,11 @@
 //!
 //! # Status
 //!
-//! AES-256-CBC, AES-256-ECB, AES-256-KWP, HKDF, KBKDF, per-engine RSA-2048
-//! mod-exp (standard and CRT), ECDH-P384, ECDSA-P384, and the RNG/DRBG FW-mode
-//! KAT are implemented, pre-operationally and periodically (the periodic RNG
+//! AES-256-CBC, AES-256-ECB, AES-256-KWP, HKDF, KBKDF, bulk AES-256-GCM and
+//! AES-256-XTS on the BCP (default build only; with `bulk_crypto` the FP
+//! firmware owns that engine and Admin tests it), per-engine RSA-2048 mod-exp
+//! (standard and CRT), ECDH-P384, ECDSA-P384, and the RNG/DRBG FW-mode KAT
+//! are implemented, pre-operationally and periodically (the periodic RNG
 //! KAT runs only while Admin holds host IO quiesced; see
 //! [`run_rng_periodic`]). Further tests are appended to [`run_pre_op`] as they
 //! are added — each is a direct call, with per-PKA-engine tests wrapped in a
@@ -29,6 +31,8 @@
 mod aes_cbc;
 mod aes_ecb;
 mod aes_kwp;
+#[cfg(not(feature = "bulk_crypto"))]
+mod bulk;
 mod kdf;
 mod pka;
 mod vectors;
@@ -40,6 +44,8 @@ use embassy_time::with_timeout;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_drivers_aes::AesError;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_sha::ShaError;
 use tsra_fw_uno_drivers_upka::UpkaError;
 
@@ -130,6 +136,12 @@ enum SelfTest {
     AesKwp,
     Hkdf,
     Kbkdf,
+    /// AES-256-GCM on the BCP, as host bulk IOs use it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    BulkAesGcm,
+    /// AES-256-XTS on the BCP, as host bulk IOs use it.
+    #[cfg(not(feature = "bulk_crypto"))]
+    BulkAesXts,
     RsaModExp(u8),
     RsaModExpCrt(u8),
     Ecdh(u8),
@@ -141,12 +153,16 @@ enum SelfTest {
 }
 
 /// Tests without a per-engine instance, in execution order.
-const FIXED_TESTS: [SelfTest; 5] = [
+const FIXED_TESTS: &[SelfTest] = &[
     SelfTest::AesCbc,
     SelfTest::AesEcb,
     SelfTest::AesKwp,
     SelfTest::Hkdf,
     SelfTest::Kbkdf,
+    #[cfg(not(feature = "bulk_crypto"))]
+    SelfTest::BulkAesGcm,
+    #[cfg(not(feature = "bulk_crypto"))]
+    SelfTest::BulkAesXts,
 ];
 
 /// PKA tests per engine.
@@ -174,6 +190,17 @@ const PERIODIC_INTERVAL_SECS: u64 = 60;
 /// Delay between attempts to acquire a busy crypto queue.
 const QUEUE_RETRY_INTERVAL_SECS: u64 = 1;
 
+/// Budget for one attempt of a scheduled test.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Budget for one attempt of a bulk (BCP) test: its two engine commands may
+/// each wait for a command ID held by a host bulk IO and then run, up to the
+/// driver's 2 s deadline apiece, while the driver recovers an engine that a
+/// stalled host transfer has stuck. The driver then always resolves the
+/// test's commands before the budget runs out.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl SelfTest {
     /// Returns `(test kind, engine)` for periodic failure attribution.
     fn id(self) -> (u32, u32) {
@@ -188,6 +215,37 @@ impl SelfTest {
             Self::Ecdh(e) => (8, e as u32),
             Self::Ecdsa(e) => (9, e as u32),
             Self::Rng => (10, 0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm => (11, 0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesXts => (12, 0),
+        }
+    }
+
+    /// Budget for one scheduled attempt of this test.
+    fn attempt_timeout(self) -> Duration {
+        match self {
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm | Self::BulkAesXts => BULK_ATTEMPT_TIMEOUT,
+            _ => ATTEMPT_TIMEOUT,
+        }
+    }
+
+    /// Whether `e` means the test's engine could not run it now, rather
+    /// than that the test failed: a full crypto queue, or, for a bulk test,
+    /// a BCP that the driver had to reset (a host bulk IO's transfer stalled
+    /// the engine, failing every command in flight) or could not bring up.
+    /// Such an attempt is retried within the admission window.
+    fn engine_busy(self, e: HsmError) -> bool {
+        if e == AesError::QUEUE_FULL || e == ShaError::QUEUE_FULL || e == UpkaError::QUEUE_FULL {
+            return true;
+        }
+        match self {
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm | Self::BulkAesXts => {
+                e == BcpError::TIMEOUT || e == BcpError::RESET_FAILED
+            }
+            _ => false,
         }
     }
 
@@ -199,6 +257,10 @@ impl SelfTest {
             Self::AesKwp => aes_kwp::run_aes_kwp(pal, io).await,
             Self::Hkdf => kdf::run_hkdf(pal, io).await,
             Self::Kbkdf => kdf::run_kbkdf(pal, io).await,
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesGcm => bulk::run_aes_gcm(pal, io).await,
+            #[cfg(not(feature = "bulk_crypto"))]
+            Self::BulkAesXts => bulk::run_aes_xts(pal, io).await,
             Self::RsaModExp(e) => pka::run_rsa_mod_exp_on_engine(pal, io, e).await,
             Self::RsaModExpCrt(e) => pka::run_rsa_mod_exp_crt_on_engine(pal, io, e).await,
             Self::Ecdh(e) => pka::run_ecdh_on_engine(pal, io, e).await,
@@ -248,7 +310,7 @@ fn notify_self_test_failure(test: SelfTest, err: HsmError) -> ! {
 /// as the reference firmware does when `preops_cast` fails. Mirrors
 /// the reference firmware's `preops_cast` — positive known-answer tests only.
 pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
-    for test in FIXED_TESTS {
+    for &test in FIXED_TESTS {
         test.run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
@@ -272,26 +334,25 @@ pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> 
 
 /// Runs one scheduled non-RNG test on the self-test slot.
 ///
-/// A full crypto queue is retried for at most one interval; a test that does
-/// not finish within one second, or any other failure, stops the HSM.
+/// An engine that cannot run the test now (see [`SelfTest::engine_busy`]) is
+/// retried for at most one interval; a test that does not finish within its
+/// attempt budget, or any other failure, stops the HSM. On a timeout the
+/// test's future is not dropped: the HSM stops with any engine command it
+/// has in flight.
 async fn run_scheduled_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) {
     let admission_deadline = Instant::now() + Duration::from_secs(PERIODIC_INTERVAL_SECS);
     loop {
         let result = {
             let future = test.run(pal, io);
             let mut future = core::pin::pin!(future);
-            match with_timeout(Duration::from_secs(1), future.as_mut()).await {
+            match with_timeout(test.attempt_timeout(), future.as_mut()).await {
                 Ok(result) => result,
                 Err(_) => notify_self_test_failure(test, HsmError::CryptoTimeout),
             }
         };
         match result {
             Ok(()) => return,
-            Err(e)
-                if e == AesError::QUEUE_FULL
-                    || e == ShaError::QUEUE_FULL
-                    || e == UpkaError::QUEUE_FULL =>
-            {
+            Err(e) if test.engine_busy(e) => {
                 let retry_at = (Instant::now() + Duration::from_secs(QUEUE_RETRY_INTERVAL_SECS))
                     .min(admission_deadline);
                 Timer::at(retry_at).await;

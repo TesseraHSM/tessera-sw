@@ -289,7 +289,7 @@ pub(crate) fn verify_key_report(
     let expected_curve = match sealing_pub_le.len() {
         64 => 1,        // P-256
         96 => 2,        // P-384
-        132 | 136 => 3, // P-521
+        136 | 144 => 3, // P-521
         other => panic!("unexpected public-key length {other}"),
     };
 

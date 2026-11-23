@@ -207,7 +207,7 @@ pub(crate) async fn handle<P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, Some(&mut pk_s[1..1 + 2 * coord]))
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
-            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;
+            byte_order::pair_to_be::<P>(SD_CURVE, &mut pk_s[1..])?;
 
             // Recover BKS3 from the caller's local backup (unmask under
             // `PartLocalMK`), then copy it out of the staging buffer.

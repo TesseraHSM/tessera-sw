@@ -38,7 +38,7 @@ pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 312;
 
 /// Max recovered public-key length (matches the firmware schema's
 /// `DARC_UNWRAP_PUB_KEY_MAX_LEN`).
-pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 136;
+pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 144;
 
 /// `KeyScope` discriminant for an ephemeral key.
 pub const KEY_SCOPE_EPHEMERAL: u8 = 0b010;
@@ -94,7 +94,7 @@ pub struct TborDarcKeyUnwrapResp {
     pub masked_key: Vec<u8>,
 
     /// The recovered key's wire public key (`x ‖ y`, device byte order).
-    #[tbor(max_len = 136)]
+    #[tbor(max_len = 144)]
     pub pub_key: Vec<u8>,
 }
 

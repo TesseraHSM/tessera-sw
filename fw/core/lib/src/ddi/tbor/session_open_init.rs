@@ -274,14 +274,13 @@ async fn ecdh_encapsulate<'a, P: HsmPal>(
     alloc: &'a impl HsmScopedAlloc,
     pk_init: &HsmDmaBuf,
 ) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
-    let order = P::BYTE_ORDER;
-    let coord = CURVE.wire_coord_len(order);
+    let coord = CURVE.wire_coord_len(P::ECC_COORD_PAD);
     if pk_init[0] != 0x04 {
         return Err(HsmError::InvalidArg);
     }
     let peer = alloc.dma_alloc(2 * coord)?;
     peer[..SESSION_P384_SEC1_LEN - 1].copy_from_slice(&pk_init[1..]);
-    byte_order::pair_from_be(order, CURVE, peer)?;
+    byte_order::pair_from_be::<P>(CURVE, peer)?;
 
     // The ephemeral key is used for ECDH, so its generation runs a
     // key-agreement PCT.
@@ -300,11 +299,11 @@ async fn ecdh_encapsulate<'a, P: HsmPal>(
 
     let z = alloc.dma_alloc(coord)?;
     pal.ecdh_derive(io, CURVE, sk, peer, Some(z)).await?;
-    let z_len = byte_order::coord_to_be(order, CURVE, z)?.len();
+    let z_len = byte_order::coord_to_be::<P>(CURVE, z)?.len();
 
     let enc = alloc.dma_alloc(SESSION_P384_SEC1_LEN)?;
     enc[0] = 0x04;
-    let xy = byte_order::pair_to_be(order, CURVE, pk)?;
+    let xy = byte_order::pair_to_be::<P>(CURVE, pk)?;
     if xy.len() != SESSION_P384_SEC1_LEN - 1 {
         return Err(HsmError::InvalidArg);
     }
@@ -370,14 +369,25 @@ async fn sign_transcript<'a, P: HsmPal>(
     alloc: &'a impl HsmScopedAlloc,
     t1: &HsmDmaBuf,
 ) -> HsmResult<&'a mut [u8]> {
-    let order = P::BYTE_ORDER;
-    let digest = alloc.dma_alloc(t1.len())?;
-    byte_order::int_copy_from_be(order, digest, t1)?;
-    let sig = alloc.dma_alloc(CURVE.wire_sig_len(order))?;
+    let hash = HsmHashAlgo::Sha384;
+    let coord = CURVE.wire_coord_len(P::ECC_COORD_PAD);
+    let input = alloc.dma_alloc(CURVE.ecdsa_sign_input_len(hash, P::ECC_COORD_PAD))?;
+    input.fill(0);
+    byte_order::int_copy_from_be(P::BYTE_ORDER, &mut input[coord..coord + t1.len()], t1)?;
+    let sig = alloc.dma_alloc(CURVE.wire_sig_len(P::ECC_COORD_PAD))?;
     let key_id = crate::part_state::part_id_key_id(pal, io)?;
     let sk_hsm = pal.vault_key(io, key_id)?;
-    pal.ecc_sign(io, CURVE, sk_hsm, digest, Some(sig)).await?;
-    let sig = byte_order::pair_to_be(order, CURVE, sig)?;
+    pal.ecc_sign(
+        io,
+        CURVE,
+        hash,
+        sk_hsm,
+        HsmEcdsaNonce::Generated,
+        input,
+        Some(sig),
+    )
+    .await?;
+    let sig = byte_order::pair_to_be::<P>(CURVE, sig)?;
     if sig.len() != SIG_LEN {
         return Err(HsmError::InvalidArg);
     }

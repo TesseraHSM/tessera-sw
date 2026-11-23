@@ -32,6 +32,7 @@ pub(crate) mod darc_tmk_gen;
 pub(crate) mod darc_tmk_import;
 pub(crate) mod ecc_generate_key;
 pub(crate) mod ecc_sign;
+pub(crate) mod ecc_verify;
 pub(crate) mod ecdh_derive;
 pub(crate) mod from_pal;
 pub(crate) mod get_cert;
@@ -55,6 +56,7 @@ pub mod part_init;
 pub mod policy;
 pub(crate) mod psk_change;
 pub(crate) mod pta;
+pub(crate) mod rsa_encrypt_decrypt;
 pub(crate) mod rsa_mod_exp;
 pub(crate) mod sd_backup;
 pub(crate) mod sd_create_peer_backup;
@@ -73,9 +75,11 @@ pub(crate) mod verify_key;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
+use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -87,6 +91,15 @@ use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 use crate::part_state;
+
+pub(crate) fn ecc_hash_from_selector(algo: HashAlgo) -> Option<HsmHashAlgo> {
+    match algo {
+        HashAlgo::Sha256 => Some(HsmHashAlgo::Sha256),
+        HashAlgo::Sha384 => Some(HsmHashAlgo::Sha384),
+        HashAlgo::Sha512 => Some(HsmHashAlgo::Sha512),
+        _ => None,
+    }
+}
 
 /// TBOR opcodes recognised by the firmware dispatcher.
 ///
@@ -398,9 +411,18 @@ pub(crate) mod opcode {
     /// private key. See [`super::get_public_key`].
     pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
 
+    /// `RsaEncryptDecrypt` — perform padded RSA encryption or decryption
+    /// with a caller-held masked private key. See
+    /// [`super::rsa_encrypt_decrypt`].
+    pub(crate) const RSA_ENCRYPT_DECRYPT: u8 = 0x34;
+
     /// `VerifyKey` — authenticate a masked key of any kind without using
     /// it. See [`super::verify_key`].
     pub(crate) const VERIFY_KEY: u8 = 0x32;
+
+    /// `EccVerify` — verify a precomputed digest using an authenticated
+    /// masked ECC private key.
+    pub(crate) const ECC_VERIFY: u8 = 0x33;
 }
 
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
@@ -602,8 +624,10 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::UNWRAP_KEY => types::TborUnwrapKeyResp::MAX_ENCODED_SIZE,
         opcode::AES_GENERATE_KEY => types::TborAesGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::ECC_GENERATE_KEY => types::TborEccGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECC_VERIFY => types::TborEccVerifyResp::MAX_ENCODED_SIZE,
         opcode::ECDH_DERIVE => types::TborEcdhDeriveResp::MAX_ENCODED_SIZE,
         opcode::RSA_MOD_EXP => types::TborRsaModExpResp::MAX_ENCODED_SIZE,
+        opcode::RSA_ENCRYPT_DECRYPT => types::TborRsaEncryptDecryptResp::MAX_ENCODED_SIZE,
         opcode::HASH => types::TborHashResp::MAX_ENCODED_SIZE,
         opcode::HKDF_DERIVE => types::TborHkdfDeriveResp::MAX_ENCODED_SIZE,
         opcode::CONCAT_KDF_DERIVE => types::TborConcatKdfDeriveResp::MAX_ENCODED_SIZE,
@@ -745,6 +769,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::HASH => hash::handle(pal, io, cmd_buf).await,
         opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, cmd_buf).await,
         opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf).await,
+        opcode::ECC_VERIFY => ecc_verify::handle(pal, io, cmd_buf).await,
         opcode::SESSION_OPEN_INIT => {
             session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
@@ -778,6 +803,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
         opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
+        opcode::RSA_ENCRYPT_DECRYPT => rsa_encrypt_decrypt::handle(pal, io, cmd_buf).await,
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
         opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,
@@ -839,8 +865,10 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::AES_ENCRYPT_DECRYPT
             | opcode::ECC_GENERATE_KEY
             | opcode::ECC_SIGN
+            | opcode::ECC_VERIFY
             | opcode::ECDH_DERIVE
             | opcode::RSA_MOD_EXP
+            | opcode::RSA_ENCRYPT_DECRYPT
             | opcode::HASH
             | opcode::HKDF_DERIVE
             | opcode::CONCAT_KDF_DERIVE
@@ -907,8 +935,10 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECC_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
+        | opcode::RSA_ENCRYPT_DECRYPT
         | opcode::HASH
         | opcode::HKDF_DERIVE
         | opcode::CONCAT_KDF_DERIVE
@@ -977,8 +1007,10 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECC_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
+        | opcode::RSA_ENCRYPT_DECRYPT
         | opcode::HASH
         | opcode::HKDF_DERIVE
         | opcode::CONCAT_KDF_DERIVE

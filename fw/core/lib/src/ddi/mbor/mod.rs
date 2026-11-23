@@ -273,6 +273,37 @@ pub(crate) fn success_hdr_sess(req: &DdiReqHdr, op: DdiOp, sess_id: u16) -> DdiR
     }
 }
 
+/// Signs `SHA-384(message)` with the P-384 `priv_key` in place in the
+/// response signature slot `sig`: the digest is hashed into the digest
+/// lane of `sig` read as `k ‖ digest`, and `r ‖ s` replaces it.
+pub(crate) async fn sign_p384_in_slot<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    priv_key: &HsmDmaBuf,
+    message: &HsmDmaBuf,
+    sig: &mut HsmDmaBuf,
+) -> HsmResult<()> {
+    let coord = HsmEccCurve::P384.wire_coord_len(P::ECC_COORD_PAD);
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        message,
+        HsmDigestForm::Operand,
+        Some(&mut sig[coord..]),
+    )
+    .await?;
+    pal.ecc_sign_in_place(
+        io,
+        HsmEccCurve::P384,
+        HsmHashAlgo::Sha384,
+        priv_key,
+        HsmEcdsaNonce::Generated,
+        sig,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Encode a DDI error response into `smem`.
 ///
 /// Writes `DdiRespHdr { op, status } + DdiErrResp {}` and returns the
