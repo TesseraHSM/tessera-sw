@@ -29,17 +29,108 @@ use zerocopy::*;
 
 /// Bound extensions while retaining schema maximum + 1 cases.
 const EXTRA_BYTES: usize = 16;
-/// Number of isolated and combined scenarios selected by the first byte.
-const SCENARIOS: u8 = 40;
 /// Only the first 12 bytes of the stored IV affect authentication.
 const NONCE_END: usize = aead_envelope::HEADER_LEN + 12;
 /// End of the 16-byte stored IV, including its ignored suffix.
 const IV_END: usize = aead_envelope::HEADER_LEN + 16;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    RoundTrip,
+    MutateCiphertext,
+    ZeroCiphertext,
+    ArbitraryCiphertext,
+    RawCiphertext,
+    CiphertextBoundary,
+    CiphertextLength,
+    ArbitrarySession,
+    MismatchedSession,
+    BoundarySession,
+    ClosedSession,
+    ArbitraryScope,
+    KnownScope,
+    UnchangedKey,
+    FlipKey,
+    TruncateKey,
+    AppendKey,
+    CorruptTag,
+    RawKey,
+    KeyBoundary,
+    MutateHeader,
+    MutateNonce,
+    MutateMetadata,
+    MutatePayload,
+    IgnoredIv,
+    Local,
+    Ephemeral,
+    PersistedOutput,
+    SecurityDomain,
+    WrongKeyType,
+    Combined,
+    NoMutation,
+    NoTruncation,
+    NoAppend,
+    UnavailableScope,
+}
+
+impl<'a> Arbitrary<'a> for Scenario {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        use Scenario::*;
+        // Preserve the compact corpus format and success-biased distribution.
+        let scenarios = [
+            RoundTrip,
+            RoundTrip,
+            RoundTrip,
+            RoundTrip,
+            RoundTrip,
+            RoundTrip,
+            MutateCiphertext,
+            ZeroCiphertext,
+            ArbitraryCiphertext,
+            RawCiphertext,
+            CiphertextBoundary,
+            CiphertextLength,
+            ArbitrarySession,
+            MismatchedSession,
+            BoundarySession,
+            ClosedSession,
+            ArbitraryScope,
+            KnownScope,
+            UnchangedKey,
+            FlipKey,
+            TruncateKey,
+            AppendKey,
+            CorruptTag,
+            RawKey,
+            KeyBoundary,
+            MutateHeader,
+            MutateNonce,
+            MutateMetadata,
+            MutatePayload,
+            IgnoredIv,
+            Local,
+            Ephemeral,
+            PersistedOutput,
+            SecurityDomain,
+            WrongKeyType,
+            Combined,
+            NoMutation,
+            NoTruncation,
+            NoAppend,
+            UnavailableScope,
+        ];
+        Ok(scenarios[usize::from(u.arbitrary::<u8>()?) % scenarios.len()])
+    }
+
+    fn size_hint(depth: usize) -> (usize, Option<usize>) {
+        u8::size_hint(depth)
+    }
+}
+
 /// Scalar controls precede bounded vectors so small corpus entries reach crypto.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    scenario: u8,
+    scenario: Scenario,
     parameter_set: u8,
     role: u8,
     session_id: u16,
@@ -131,7 +222,7 @@ fn expected(
     closed: bool,
     pristine: &[u8],
     params: &MlKemParams,
-    scenario: u8,
+    scenario: Scenario,
     provisioning: u8,
 ) -> Expected {
     if closed {
@@ -148,13 +239,13 @@ fn expected(
         return Expected::Status(TborStatus::TborInvalidFixedLength);
     }
     if !unchanged_key(&req.masked_key, pristine) {
-        return if scenario == 22 {
+        return if scenario == Scenario::CorruptTag {
             Expected::Status(TborStatus::AesGcmDecryptTagDoesNotMatch)
         } else {
             Expected::BadKey
         };
     }
-    if scenario == 34 {
+    if scenario == Scenario::WrongKeyType {
         return Expected::Status(TborStatus::InvalidKeyType);
     }
     if req.ciphertext.len() != params.ciphertext_len {
@@ -199,22 +290,22 @@ fn check_response(resp: &TborMlKemDecapsulateResp, scope: u8, params: &MlKemPara
 
 /// Construct one bounded request, predict the outcome, and check its actual result.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
-    let scenario = input.scenario % SCENARIOS;
+    let scenario = input.scenario;
     let params = [&ML_KEM_512, &ML_KEM_768, &ML_KEM_1024][usize::from(input.parameter_set) % 3];
     let provisioning = match scenario {
-        30..=32 => 1,
-        33 => 2,
+        Scenario::Local | Scenario::Ephemeral | Scenario::PersistedOutput => 1,
+        Scenario::SecurityDomain => 2,
         _ => 0,
     };
     let session = session(ctx, input, provisioning);
     let sid = session.session_id();
     let input_scope = match scenario {
-        30 => common::KEY_SCOPE_LOCAL,
-        31 => common::KEY_SCOPE_EPHEMERAL,
-        33 => common::KEY_SCOPE_SECURITY_DOMAIN,
+        Scenario::Local => common::KEY_SCOPE_LOCAL,
+        Scenario::Ephemeral => common::KEY_SCOPE_EPHEMERAL,
+        Scenario::SecurityDomain => common::KEY_SCOPE_SECURITY_DOMAIN,
         _ => common::KEY_SCOPE_SESSION,
     };
-    let (pristine, pub_key) = if scenario == 34 {
+    let (pristine, pub_key) = if scenario == Scenario::WrongKeyType {
         let key = ctx
             .tbor(&TborMlDsaGenerateKeyReq {
                 session_id: sid,
@@ -241,7 +332,15 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         masked_key: pristine.clone(),
         ciphertext: ciphertext(input, params.ciphertext_len),
     };
-    if matches!(scenario, 0..=6 | 30..=33) {
+    if matches!(
+        scenario,
+        Scenario::RoundTrip
+            | Scenario::MutateCiphertext
+            | Scenario::Local
+            | Scenario::Ephemeral
+            | Scenario::PersistedOutput
+            | Scenario::SecurityDomain
+    ) {
         let encap = ctx
             .tbor(&TborMlKemEncapsulateReq {
                 session_id: sid,
@@ -253,17 +352,17 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         req.ciphertext = encap.ciphertext;
     }
     let mutation = match scenario {
-        19 | 35 => common::EnvelopeMutation::FlipByte {
+        Scenario::FlipKey | Scenario::Combined => common::EnvelopeMutation::FlipByte {
             offset: input.offset,
             mask: input.mask,
         },
-        20 => common::EnvelopeMutation::Truncate { len: input.length },
-        21 => common::EnvelopeMutation::Append(
+        Scenario::TruncateKey => common::EnvelopeMutation::Truncate { len: input.length },
+        Scenario::AppendKey => common::EnvelopeMutation::Append(
             input.raw_key.0.iter().copied().take(EXTRA_BYTES).collect(),
         ),
         _ => common::EnvelopeMutation::None,
     };
-    if scenario != 35 || input.switches & 1 != 0 {
+    if scenario != Scenario::Combined || input.switches & 1 != 0 {
         let noop = mutation.is_noop(&req.masked_key);
         mutation.apply(&mut req.masked_key);
         if noop {
@@ -271,12 +370,18 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         }
     }
     match scenario {
-        0..=5 | 18..=21 => {}
-        6 => req.ciphertext[usize::from(input.offset) % params.ciphertext_len] ^= input.mask | 1,
-        7 => req.ciphertext.fill(0),
-        8 => {}
-        9 => req.ciphertext = input.raw_ciphertext.0.clone(),
-        10 => {
+        Scenario::RoundTrip
+        | Scenario::UnchangedKey
+        | Scenario::FlipKey
+        | Scenario::TruncateKey
+        | Scenario::AppendKey => {}
+        Scenario::MutateCiphertext => {
+            req.ciphertext[usize::from(input.offset) % params.ciphertext_len] ^= input.mask | 1
+        }
+        Scenario::ZeroCiphertext => req.ciphertext.fill(0),
+        Scenario::ArbitraryCiphertext => {}
+        Scenario::RawCiphertext => req.ciphertext = input.raw_ciphertext.0.clone(),
+        Scenario::CiphertextBoundary => {
             let lengths = [
                 0,
                 1,
@@ -290,24 +395,28 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             ];
             req.ciphertext = ciphertext(input, lengths[usize::from(input.length) % lengths.len()]);
         }
-        11 => {
+        Scenario::CiphertextLength => {
             req.ciphertext = ciphertext(
                 input,
                 usize::from(input.length) % (MLKEM_CIPHERTEXT_MAX_LEN + 2),
             );
         }
-        12 => req.session_id = input.session_id,
-        13 => req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX),
-        14 => req.session_id = if input.mask & 1 == 0 { 0 } else { u16::MAX },
-        15 => {}
-        16 => req.scope = input.scope,
-        17 => req.scope = common::derive_valid_key_scope(input.scope),
-        22 => {
+        Scenario::ArbitrarySession => req.session_id = input.session_id,
+        Scenario::MismatchedSession => {
+            req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX)
+        }
+        Scenario::BoundarySession => {
+            req.session_id = if input.mask & 1 == 0 { 0 } else { u16::MAX }
+        }
+        Scenario::ClosedSession => {}
+        Scenario::ArbitraryScope => req.scope = input.scope,
+        Scenario::KnownScope => req.scope = common::derive_valid_key_scope(input.scope),
+        Scenario::CorruptTag => {
             let last = req.masked_key.len() - 1;
             req.masked_key[last] ^= input.mask | 1;
         }
-        23 => req.masked_key = input.raw_key.0.clone(),
-        24 => {
+        Scenario::RawKey => req.masked_key = input.raw_key.0.clone(),
+        Scenario::KeyBoundary => {
             let lengths = [
                 0,
                 1,
@@ -323,33 +432,37 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 input.mask,
             );
         }
-        25..=29 => {
+        Scenario::MutateHeader
+        | Scenario::MutateNonce
+        | Scenario::MutateMetadata
+        | Scenario::MutatePayload
+        | Scenario::IgnoredIv => {
             let payload_at = aead::payload_offset(aead::AeadAlg::AesGcm256);
             let tag_at = pristine.len() - aead::AeadAlg::AesGcm256.tag_len();
             let (start, end) = match scenario {
-                25 => (0, aead_envelope::HEADER_LEN),
-                26 => (aead_envelope::HEADER_LEN, NONCE_END),
-                27 => (IV_END, payload_at),
-                28 => (payload_at, tag_at),
+                Scenario::MutateHeader => (0, aead_envelope::HEADER_LEN),
+                Scenario::MutateNonce => (aead_envelope::HEADER_LEN, NONCE_END),
+                Scenario::MutateMetadata => (IV_END, payload_at),
+                Scenario::MutatePayload => (payload_at, tag_at),
                 _ => (NONCE_END, IV_END),
             };
             req.masked_key[start + usize::from(input.offset) % (end - start)] ^= input.mask;
         }
-        30 | 31 => {
+        Scenario::Local | Scenario::Ephemeral => {
             req.scope = [
                 common::KEY_SCOPE_SESSION,
                 common::KEY_SCOPE_LOCAL,
                 common::KEY_SCOPE_EPHEMERAL,
             ][usize::from(input.scope) % 3];
         }
-        32 => {
+        Scenario::PersistedOutput => {
             req.scope = if input.mask & 1 == 0 {
                 common::KEY_SCOPE_LOCAL
             } else {
                 common::KEY_SCOPE_EPHEMERAL
             };
         }
-        33 => {
+        Scenario::SecurityDomain => {
             req.scope = [
                 common::KEY_SCOPE_SECURITY_DOMAIN,
                 common::KEY_SCOPE_SESSION,
@@ -357,8 +470,8 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 common::KEY_SCOPE_EPHEMERAL,
             ][usize::from(input.scope) % 4];
         }
-        34 => {}
-        35 => {
+        Scenario::WrongKeyType => {}
+        Scenario::Combined => {
             if input.switches & 2 != 0 {
                 req.session_id = input.session_id;
             }
@@ -372,15 +485,17 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
-        36 => {}
-        37 => {
+        Scenario::NoMutation => {}
+        Scenario::NoTruncation => {
             common::EnvelopeMutation::Truncate {
                 len: pristine.len() as u16,
             }
             .apply(&mut req.masked_key);
         }
-        38 => common::EnvelopeMutation::Append(Vec::new()).apply(&mut req.masked_key),
-        39 => {
+        Scenario::NoAppend => {
+            common::EnvelopeMutation::Append(Vec::new()).apply(&mut req.masked_key)
+        }
+        Scenario::UnavailableScope => {
             req.scope = [
                 common::KeyScope::Local,
                 common::KeyScope::Ephemeral,
@@ -388,9 +503,8 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             ][usize::from(input.scope) % 3]
                 .to_tbor();
         }
-        _ => unreachable!("scenario reduced modulo SCENARIOS"),
     }
-    let closed = scenario == 15;
+    let closed = scenario == Scenario::ClosedSession;
     let expected = expected(&req, sid, closed, &pristine, params, scenario, provisioning);
     if closed {
         session
@@ -412,14 +526,14 @@ fn check_result(
     req: &TborMlKemDecapsulateReq,
     expected: Expected,
     params: &MlKemParams,
-    scenario: u8,
+    scenario: Scenario,
 ) {
     let result = ctx.tbor(req);
     match expected {
         Expected::Success => {
             let resp = result.unwrap_or_else(|err| {
                 panic!(
-                    "valid ML-KEM {} scenario {scenario} failed: {err}",
+                    "valid ML-KEM {} scenario {scenario:?} failed: {err}",
                     params.name
                 )
             });
@@ -445,7 +559,7 @@ fn check_result(
                     TborStatus::UnsupportedKeyScope,
                     TborStatus::AesGcmDecryptTagDoesNotMatch,
                 ].contains(&status)),
-                "unexpected key rejection in scenario {scenario}: {err}"
+                "unexpected key rejection in scenario {scenario:?}: {err}"
             );
         }
     }

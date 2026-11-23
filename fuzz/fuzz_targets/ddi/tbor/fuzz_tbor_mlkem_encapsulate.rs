@@ -40,6 +40,78 @@ enum Lifecycle {
     DefaultPsk,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    SeededKey,
+    CanonicalKey,
+    MutateRho,
+    BoundaryCoefficients,
+    DeviceKey,
+    Partition,
+    SecurityDomain,
+    ArbitraryScope,
+    DefaultPsk,
+    ClosedSession,
+    MismatchedSession,
+    ArbitrarySession,
+    KeyBoundary,
+    InvalidCoefficient,
+    MutatePolynomial,
+    RawKey,
+    OversizedKey,
+    KeyLength,
+    ShiftedLayout,
+    Combined,
+    FinalizedScope,
+    SecurityDomainScope,
+    DefaultPskCombined,
+    ClosedCombined,
+    MismatchedCombined,
+    ArbitraryFields,
+}
+
+impl Scenario {
+    fn from_byte(byte: u8) -> Self {
+        use Scenario::*;
+        // Preserve the compact corpus format and success-biased distribution.
+        let scenarios = [
+            SeededKey,
+            SeededKey,
+            SeededKey,
+            SeededKey,
+            CanonicalKey,
+            MutateRho,
+            BoundaryCoefficients,
+            DeviceKey,
+            Partition,
+            SecurityDomain,
+            ArbitraryScope,
+            DefaultPsk,
+            ClosedSession,
+            MismatchedSession,
+            ArbitrarySession,
+            KeyBoundary,
+            InvalidCoefficient,
+            MutateRho,
+            MutatePolynomial,
+            CanonicalKey,
+            RawKey,
+            OversizedKey,
+            KeyLength,
+            ShiftedLayout,
+            Combined,
+            FinalizedScope,
+            SecurityDomainScope,
+            DefaultPskCombined,
+            ClosedCombined,
+            MismatchedCombined,
+            DeviceKey,
+            ArbitraryFields,
+        ];
+        scenarios[usize::from(byte) % scenarios.len()]
+    }
+}
+
 /// Twelve little-endian control bytes followed by a bounded binary payload.
 ///
 /// Controls are scenario, role, parameter set, session ID (u16), scope, key mode,
@@ -47,7 +119,7 @@ enum Lifecycle {
 /// so even an empty corpus entry exercises a successful encapsulation.
 #[derive(Debug)]
 struct FuzzInput {
-    scenario: u8,
+    scenario: Scenario,
     role: u8,
     params: u8,
     session_id: u16,
@@ -63,7 +135,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     /// Decode compact controls and retain at most one oversized public key.
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
         Ok(Self {
-            scenario: u.arbitrary().unwrap_or_default(),
+            scenario: Scenario::from_byte(u.arbitrary().unwrap_or_default()),
             role: u.arbitrary().unwrap_or_default(),
             params: u.arbitrary().unwrap_or_default(),
             session_id: u.arbitrary().unwrap_or_default(),
@@ -80,11 +152,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 impl FuzzInput {
     /// Keep costly provisioning uncommon while retaining each lifecycle.
     fn lifecycle(&self) -> Lifecycle {
-        match self.scenario % 32 {
-            8 | 25 => Lifecycle::Finalized,
-            9 | 26 => Lifecycle::SecurityDomain,
-            11 | 27 => Lifecycle::DefaultPsk,
-            12 | 28 => Lifecycle::Closed,
+        match self.scenario {
+            Scenario::Partition | Scenario::FinalizedScope => Lifecycle::Finalized,
+            Scenario::SecurityDomain | Scenario::SecurityDomainScope => Lifecycle::SecurityDomain,
+            Scenario::DefaultPsk | Scenario::DefaultPskCombined => Lifecycle::DefaultPsk,
+            Scenario::ClosedSession | Scenario::ClosedCombined => Lifecycle::Closed,
             _ => Lifecycle::Unfinalized,
         }
     }
@@ -100,17 +172,21 @@ impl FuzzInput {
 
     /// Choose isolated key mutations or combine them with arbitrary scalars.
     fn key_mode(&self) -> u8 {
-        match self.scenario % 32 {
-            4 | 19 => 1,
-            5 | 17 => 2,
-            6 => 3,
-            18 => 4,
-            16 => 5,
-            20 => 6,
-            15 => 7,
-            21 => 8,
-            22 => 9,
-            24 | 27..=29 | 31 => self.key_mode % 10,
+        match self.scenario {
+            Scenario::CanonicalKey => 1,
+            Scenario::MutateRho => 2,
+            Scenario::BoundaryCoefficients => 3,
+            Scenario::MutatePolynomial => 4,
+            Scenario::InvalidCoefficient => 5,
+            Scenario::RawKey => 6,
+            Scenario::KeyBoundary => 7,
+            Scenario::OversizedKey => 8,
+            Scenario::KeyLength => 9,
+            Scenario::Combined
+            | Scenario::DefaultPskCombined
+            | Scenario::ClosedCombined
+            | Scenario::MismatchedCombined
+            | Scenario::ArbitraryFields => self.key_mode % 10,
             _ => 0,
         }
     }
@@ -193,7 +269,7 @@ fn canonical_public_key(bytes: &[u8]) -> bool {
 
 /// Construct generated, canonical, mutated, malformed, or arbitrary key bytes.
 fn public_key(ctx: &TestCtx, input: &FuzzInput, p: &MlKemParams, session_id: u16) -> Vec<u8> {
-    if matches!(input.scenario % 32, 7 | 30) {
+    if input.scenario == Scenario::DeviceKey {
         let key = ctx
             .tbor(&TborMlKemGenerateKeyReq {
                 session_id,
@@ -320,25 +396,36 @@ impl TborOpReq for EncapsulateRequest {
 
 /// Construct valid baselines, single-field rejects, or combined-invalid cases.
 fn request(ctx: &TestCtx, input: &FuzzInput, session_id: u16) -> EncapsulateRequest {
-    let scenario = input.scenario % 32;
+    let scenario = input.scenario;
     let p = PARAMS[usize::from(input.params % 3)];
     let pub_key = public_key(ctx, input, p, session_id);
     let scope = match scenario {
-        8 => [
+        Scenario::Partition => [
             common::KEY_SCOPE_SESSION,
             common::KEY_SCOPE_EPHEMERAL,
             common::KEY_SCOPE_LOCAL,
         ][usize::from(input.scope % 3)],
-        9 => common::KEY_SCOPE_SECURITY_DOMAIN,
-        10 | 24..=29 | 31 => input.scope,
+        Scenario::SecurityDomain => common::KEY_SCOPE_SECURITY_DOMAIN,
+        Scenario::ArbitraryScope
+        | Scenario::Combined
+        | Scenario::FinalizedScope
+        | Scenario::SecurityDomainScope
+        | Scenario::DefaultPskCombined
+        | Scenario::ClosedCombined
+        | Scenario::MismatchedCombined
+        | Scenario::ArbitraryFields => input.scope,
         _ => common::KEY_SCOPE_SESSION,
     };
     let session_id = match scenario {
-        13 | 29 => session_id ^ (1u16 << (input.session_id % 16)),
-        14 | 24 => input.session_id,
+        Scenario::MismatchedSession | Scenario::MismatchedCombined => {
+            session_id ^ (1u16 << (input.session_id % 16))
+        }
+        Scenario::ArbitrarySession | Scenario::Combined => input.session_id,
         _ => session_id,
     };
-    let gap = if scenario == 23 || (scenario == 24 && input.key_mode & 0x80 != 0) {
+    let gap = if scenario == Scenario::ShiftedLayout
+        || (scenario == Scenario::Combined && input.key_mode & 0x80 != 0)
+    {
         (usize::from(input.offset) % 16 + 1) * TOC_ENTRY_LEN
     } else {
         0

@@ -31,19 +31,79 @@ enum Lifecycle {
     DefaultPsk,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    Session,
+    Partition,
+    SecurityDomain,
+    ScopeSweep,
+    FinalizedScopeSweep,
+    InvalidKind,
+    MismatchedSession,
+    ClosedSession,
+    DefaultPsk,
+    Combined,
+    FinalizedCombined,
+    SecurityDomainCombined,
+    Raw,
+    DefaultPskCombined,
+    ClosedCombined,
+    MismatchedCombined,
+}
+
+impl Scenario {
+    fn from_byte(byte: u8) -> Self {
+        use Scenario::*;
+        // Preserve the compact corpus format and success-biased distribution.
+        let scenarios = [
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Session,
+            Partition,
+            SecurityDomain,
+            ScopeSweep,
+            FinalizedScopeSweep,
+            InvalidKind,
+            MismatchedSession,
+            ClosedSession,
+            DefaultPsk,
+            Combined,
+            FinalizedCombined,
+            SecurityDomainCombined,
+            Raw,
+            DefaultPskCombined,
+            ClosedCombined,
+            MismatchedCombined,
+            Raw,
+        ];
+        scenarios[usize::from(byte) % scenarios.len()]
+    }
+}
+
 /// Eight-byte header: scenario, role, kind, scope, session ID (u16 LE),
 /// check selector, context length selector; then context (at most 32 bytes)
 /// and message (at most 256 bytes). Missing bytes default to zero.
 ///
-/// Scenarios modulo 32: 0..15 valid Session; 16 valid partition scope;
-/// 17 valid SD; 18/19 scope sweep before/after finalization; 20 invalid
-/// kind; 21 mismatched ID; 22 closed; 23 default PSK; 24..26 mixed
-/// before/finalized/SD; 27 raw; 28 mixed default; 29 mixed closed;
-/// 30 mixed mismatch; 31 raw. Role bit 0 selects CU rather than CO.
+/// Half the scenario selectors choose valid Session requests; the remainder
+/// select persisted scopes, isolated rejects, or combined arbitrary fields.
+/// Role bit 0 selects CU rather than CO.
 /// Check bit 0 skips signing, bit 1 selects raw IDs in mixed cases,
 /// and bit 2 selects unrestricted rather than known scopes in scope sweeps.
 struct FuzzInput<'a> {
-    scenario: u8,
+    scenario: Scenario,
     role: common::FuzzRole,
     key_kind: u8,
     scope: u8,
@@ -61,7 +121,7 @@ impl<'a> FuzzInput<'a> {
         let context_len = usize::from(byte(7) % 33).min(tail.len());
         let (context, message) = tail.split_at(context_len);
         Self {
-            scenario: byte(0) % 32,
+            scenario: Scenario::from_byte(byte(0)),
             role: if byte(1) & 1 == 0 {
                 common::FuzzRole::Co
             } else {
@@ -79,10 +139,14 @@ impl<'a> FuzzInput<'a> {
     /// Keep costly provisioning rare while making every lifecycle reachable.
     fn lifecycle(&self) -> Lifecycle {
         match self.scenario {
-            16 | 19 | 25 => Lifecycle::Finalized,
-            17 | 26 => Lifecycle::SecurityDomain,
-            22 | 29 => Lifecycle::Closed,
-            23 | 28 => Lifecycle::DefaultPsk,
+            Scenario::Partition | Scenario::FinalizedScopeSweep | Scenario::FinalizedCombined => {
+                Lifecycle::Finalized
+            }
+            Scenario::SecurityDomain | Scenario::SecurityDomainCombined => {
+                Lifecycle::SecurityDomain
+            }
+            Scenario::ClosedSession | Scenario::ClosedCombined => Lifecycle::Closed,
+            Scenario::DefaultPsk | Scenario::DefaultPskCombined => Lifecycle::DefaultPsk,
             _ => Lifecycle::Unfinalized,
         }
     }
@@ -93,42 +157,47 @@ impl<'a> FuzzInput<'a> {
         let mut req = TborMlDsaGenerateKeyReq {
             session_id: active_session_id,
             scope: match self.scenario {
-                16 => [
+                Scenario::Partition => [
                     common::KEY_SCOPE_SESSION,
                     common::KEY_SCOPE_EPHEMERAL,
                     common::KEY_SCOPE_LOCAL,
                 ][usize::from(self.scope % 3)],
-                17 => common::KEY_SCOPE_SECURITY_DOMAIN,
+                Scenario::SecurityDomain => common::KEY_SCOPE_SECURITY_DOMAIN,
                 _ => common::KEY_SCOPE_SESSION,
             },
             key_kind: params[usize::from(self.key_kind % 3)].key_kind,
         };
         match self.scenario {
-            18 | 19 => {
+            Scenario::ScopeSweep | Scenario::FinalizedScopeSweep => {
                 req.scope = if self.checks & 4 == 0 {
                     common::derive_valid_key_scope(self.scope)
                 } else {
                     self.scope
                 };
             }
-            20 => {
+            Scenario::InvalidKind => {
                 req.key_kind = if parameters(self.key_kind).is_some() {
                     0
                 } else {
                     self.key_kind
                 };
             }
-            21 => req.session_id ^= 1u16 << (self.session_id % 16),
-            24..=26 | 28..=30 => {
+            Scenario::MismatchedSession => req.session_id ^= 1u16 << (self.session_id % 16),
+            Scenario::Combined
+            | Scenario::FinalizedCombined
+            | Scenario::SecurityDomainCombined
+            | Scenario::DefaultPskCombined
+            | Scenario::ClosedCombined
+            | Scenario::MismatchedCombined => {
                 req.scope = self.scope;
                 req.key_kind = self.key_kind;
-                if self.scenario == 30 {
+                if self.scenario == Scenario::MismatchedCombined {
                     req.session_id ^= 1u16 << (self.session_id % 16);
                 } else if self.checks & 2 != 0 {
                     req.session_id = self.session_id;
                 }
             }
-            27 | 31 => {
+            Scenario::Raw => {
                 req.session_id = self.session_id;
                 req.scope = self.scope;
                 req.key_kind = self.key_kind;

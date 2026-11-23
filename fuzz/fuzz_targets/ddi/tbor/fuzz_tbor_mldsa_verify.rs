@@ -27,12 +27,55 @@ use tsra_ddi_tbor_types::*;
 /// Harness-owned parameter sizes, also used to infer the set from final bytes.
 const PARAMS: [&MlDsaParams; 3] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    Valid,
+    MutatePublicKey,
+    MutateMu,
+    MutateSignature,
+    PublicKeyLength,
+    MuLength,
+    SignatureLength,
+    RawPublicKey,
+    RawMu,
+    RawSignature,
+    Session,
+    Combined,
+    WrongSignatureSet,
+}
+
+impl Scenario {
+    fn from_byte(byte: u8) -> Self {
+        use Scenario::*;
+        // Preserve the compact corpus format and success-biased distribution.
+        let scenarios = [
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            MutatePublicKey,
+            MutateMu,
+            MutateSignature,
+            PublicKeyLength,
+            MuLength,
+            SignatureLength,
+            RawPublicKey,
+            RawMu,
+            RawSignature,
+            Session,
+            Combined,
+            WrongSignatureSet,
+        ];
+        scenarios[usize::from(byte) % scenarios.len()]
+    }
+}
+
 /// Small controls precede a bounded payload that supplies key seeds, mu, and
 /// replacement bytes. Short inputs also serve as payload, keeping small corpus
 /// entries useful; missing controls default to zero so empty inputs execute.
 #[derive(Debug)]
 struct FuzzInput {
-    scenario: u8,
+    scenario: Scenario,
     params: u8,
     session_mode: u8,
     session_id: u16,
@@ -52,7 +95,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let bytes = u.bytes(u.len().min(MLDSA_SIGNATURE_MAX_LEN + MLDSA_MU_LEN))?;
         let mut controls = Unstructured::new(bytes);
         let mut input = Self {
-            scenario: controls.arbitrary().unwrap_or_default(),
+            scenario: Scenario::from_byte(controls.arbitrary().unwrap_or_default()),
             params: controls.arbitrary().unwrap_or_default(),
             session_mode: controls.arbitrary().unwrap_or_default(),
             session_id: controls.arbitrary().unwrap_or_default(),
@@ -234,18 +277,18 @@ fn mutate_contents(buf: &mut [u8], mode: u8, input: &FuzzInput) {
 /// Only explicit session scenarios change binding; arbitrary IDs may be valid.
 fn fuzzed_request(input: &FuzzInput, base: &TborMlDsaVerifyReq) -> (TborMlDsaVerifyReq, bool) {
     let mut req = base.clone();
-    let scenario = input.scenario % 16;
-    let mixed = scenario == 14;
-    if scenario == 4 || mixed {
+    let scenario = input.scenario;
+    let mixed = scenario == Scenario::Combined;
+    if scenario == Scenario::MutatePublicKey || mixed {
         mutate_contents(&mut req.pub_key, input.pub_mode, input);
     }
-    if scenario == 5 || mixed {
+    if scenario == Scenario::MutateMu || mixed {
         mutate_contents(&mut req.mu, input.mu_mode, input);
     }
-    if scenario == 6 || mixed {
+    if scenario == Scenario::MutateSignature || mixed {
         mutate_contents(&mut req.signature, input.sig_mode, input);
     }
-    if scenario == 7 || mixed {
+    if scenario == Scenario::PublicKeyLength || mixed {
         let lengths = PARAMS.map(|p| p.pub_key_len);
         req.pub_key.resize(
             boundary_len(
@@ -257,13 +300,13 @@ fn fuzzed_request(input: &FuzzInput, base: &TborMlDsaVerifyReq) -> (TborMlDsaVer
             input.mask,
         );
     }
-    if scenario == 8 || mixed {
+    if scenario == Scenario::MuLength || mixed {
         req.mu.resize(
             boundary_len(input.mu_mode, input.length, &[MLDSA_MU_LEN], MLDSA_MU_LEN),
             input.mask,
         );
     }
-    if scenario == 9 || mixed {
+    if scenario == Scenario::SignatureLength || mixed {
         let lengths = PARAMS.map(|p| p.sig_len);
         req.signature.resize(
             boundary_len(
@@ -276,16 +319,16 @@ fn fuzzed_request(input: &FuzzInput, base: &TborMlDsaVerifyReq) -> (TborMlDsaVer
         );
     }
     match scenario {
-        10 => mutate_contents(&mut req.pub_key, 4, input),
-        11 => mutate_contents(&mut req.mu, 4, input),
-        12 => mutate_contents(&mut req.signature, 4, input),
-        15 => {
+        Scenario::RawPublicKey => mutate_contents(&mut req.pub_key, 4, input),
+        Scenario::RawMu => mutate_contents(&mut req.mu, 4, input),
+        Scenario::RawSignature => mutate_contents(&mut req.signature, 4, input),
+        Scenario::WrongSignatureSet => {
             let other = PARAMS[(usize::from(input.params) + 1) % PARAMS.len()];
             req.signature.resize(other.sig_len, input.mask);
         }
         _ => {}
     }
-    let session_mode = if scenario == 13 || mixed {
+    let session_mode = if scenario == Scenario::Session || mixed {
         input.session_mode % 8
     } else {
         0

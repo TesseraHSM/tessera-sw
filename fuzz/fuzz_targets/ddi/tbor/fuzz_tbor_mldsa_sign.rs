@@ -32,10 +32,81 @@ const CONTROL_LEN: usize = 13;
 
 const MASKED_KEY_ENVELOPE_LEN: usize = 232;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scenario {
+    Valid,
+    ArbitraryHedge,
+    InvalidHedge,
+    ArbitrarySession,
+    MismatchedSession,
+    MuBoundary,
+    MuLength,
+    RawMu,
+    RawKey,
+    FlipKey,
+    TruncateKey,
+    AppendKey,
+    CorruptTag,
+    IgnoredIv,
+    WrongKeyType,
+    OversizedKey,
+    KeyBoundary,
+    ShiftedLayout,
+    Local,
+    Ephemeral,
+    Combined,
+    ClosedSession,
+    CorruptNonce,
+    CorruptLabel,
+    ExtendKey,
+}
+
+impl Scenario {
+    fn from_byte(byte: u8) -> Self {
+        use Scenario::*;
+        // Preserve the compact corpus format and success-biased distribution.
+        let scenarios = [
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            Valid,
+            ArbitraryHedge,
+            InvalidHedge,
+            ArbitrarySession,
+            MismatchedSession,
+            MuBoundary,
+            MuLength,
+            RawMu,
+            RawKey,
+            FlipKey,
+            TruncateKey,
+            AppendKey,
+            CorruptTag,
+            IgnoredIv,
+            WrongKeyType,
+            OversizedKey,
+            KeyBoundary,
+            ShiftedLayout,
+            Local,
+            Ephemeral,
+            Combined,
+            ClosedSession,
+            CorruptNonce,
+            CorruptLabel,
+            ExtendKey,
+        ];
+        scenarios[usize::from(byte) % scenarios.len()]
+    }
+}
+
 /// Scalar controls stay ahead of optional bytes so small inputs execute commands.
 #[derive(Debug)]
 struct FuzzInput {
-    scenario: u8,
+    scenario: Scenario,
     role: common::FuzzRole,
     params: u8,
     hedge: u8,
@@ -52,7 +123,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     /// Decode scalar selectors followed by a bounded, possibly empty payload.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
-            scenario: u.arbitrary()?,
+            scenario: Scenario::from_byte(u.arbitrary()?),
             role: if u.arbitrary::<u8>()? & 1 == 0 {
                 common::FuzzRole::Co
             } else {
@@ -260,13 +331,17 @@ fn check_success(
 
 /// Construct one bounded scenario and assert its independently predicted result.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
-    let scenario = input.scenario % 32;
+    let scenario = input.scenario;
     let p = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87][usize::from(input.params) % 3];
-    let session = session(ctx, input, matches!(scenario, 25 | 26));
+    let session = session(
+        ctx,
+        input,
+        matches!(scenario, Scenario::Local | Scenario::Ephemeral),
+    );
     let sid = session.session_id();
     let scope = match scenario {
-        25 => common::KEY_SCOPE_LOCAL,
-        26 => common::KEY_SCOPE_EPHEMERAL,
+        Scenario::Local => common::KEY_SCOPE_LOCAL,
+        Scenario::Ephemeral => common::KEY_SCOPE_EPHEMERAL,
         _ => common::KEY_SCOPE_SESSION,
     };
     let key = ctx
@@ -290,46 +365,54 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
         ][usize::from(input.hedge) % 3],
     };
     match scenario {
-        0..=7 | 24..=26 | 28 => {}
-        8 => req.hedge = input.hedge,
-        9 => req.hedge = [3, 4, 0x80, 0xFF][usize::from(input.hedge) % 4],
-        10 => req.session_id = input.session_id,
-        11 => req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX),
-        12 => {
+        Scenario::Valid
+        | Scenario::ShiftedLayout
+        | Scenario::Local
+        | Scenario::Ephemeral
+        | Scenario::ClosedSession => {}
+        Scenario::ArbitraryHedge => req.hedge = input.hedge,
+        Scenario::InvalidHedge => req.hedge = [3, 4, 0x80, 0xFF][usize::from(input.hedge) % 4],
+        Scenario::ArbitrarySession => req.session_id = input.session_id,
+        Scenario::MismatchedSession => {
+            req.session_id = sid.wrapping_add(1 + input.session_id % u16::MAX)
+        }
+        Scenario::MuBoundary => {
             let mu_len = tsra_ddi_tbor_types::MLDSA_MU_LEN;
             let lengths = [0, 1, mu_len - 1, mu_len, mu_len + 1, mu_len * 2];
             req.mu = payload(input, lengths[usize::from(input.length) % lengths.len()]);
         }
-        13 => {
+        Scenario::MuLength => {
             req.mu = payload(
                 input,
                 usize::from(input.length) % (2 * tsra_ddi_tbor_types::MLDSA_MU_LEN + 1),
             )
         }
-        14 => {
+        Scenario::RawMu => {
             req.mu =
                 input.bytes[..input.bytes.len().min(2 * tsra_ddi_tbor_types::MLDSA_MU_LEN)].to_vec()
         }
-        15 => req.masked_key = input.bytes.clone(),
-        16 => common::EnvelopeMutation::FlipByte {
+        Scenario::RawKey => req.masked_key = input.bytes.clone(),
+        Scenario::FlipKey => common::EnvelopeMutation::FlipByte {
             offset: input.offset,
             mask: input.mask,
         }
         .apply(&mut req.masked_key),
-        17 => common::EnvelopeMutation::Truncate { len: input.length }.apply(&mut req.masked_key),
-        18 => common::EnvelopeMutation::Append(
+        Scenario::TruncateKey => {
+            common::EnvelopeMutation::Truncate { len: input.length }.apply(&mut req.masked_key)
+        }
+        Scenario::AppendKey => common::EnvelopeMutation::Append(
             input.bytes[..input.bytes.len().min(EXTRA_BYTES)].to_vec(),
         )
         .apply(&mut req.masked_key),
-        19 => {
+        Scenario::CorruptTag => {
             let last = req.masked_key.len() - 1;
             req.masked_key[last] ^= input.mask | 1;
         }
-        20 => {
+        Scenario::IgnoredIv => {
             req.masked_key[IGNORED_IV.start + usize::from(input.offset) % IGNORED_IV.len()] ^=
                 input.mask | 1;
         }
-        21 => {
+        Scenario::WrongKeyType => {
             req.masked_key = ctx
                 .tbor(&TborMlKemGenerateKeyReq {
                     session_id: sid,
@@ -339,10 +422,10 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 .expect("generate authenticated wrong-class key")
                 .masked_key;
         }
-        22 => req
+        Scenario::OversizedKey => req
             .masked_key
             .resize(MASKED_MLDSA_KEY_MAX_LEN + 1, input.fill),
-        23 => {
+        Scenario::KeyBoundary => {
             let lengths = [
                 0,
                 1,
@@ -362,7 +445,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 input.fill,
             );
         }
-        27 => {
+        Scenario::Combined => {
             if input.switches & 1 != 0 {
                 req.hedge = input.hedge;
             }
@@ -383,14 +466,17 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 .apply(&mut req.masked_key);
             }
         }
-        29 => req.masked_key[8 + usize::from(input.offset) % 12] ^= input.mask | 1,
-        30 => req.masked_key[LABEL_START + usize::from(input.offset) % 128] ^= input.mask | 1,
-        31 => req
+        Scenario::CorruptNonce => {
+            req.masked_key[8 + usize::from(input.offset) % 12] ^= input.mask | 1
+        }
+        Scenario::CorruptLabel => {
+            req.masked_key[LABEL_START + usize::from(input.offset) % 128] ^= input.mask | 1
+        }
+        Scenario::ExtendKey => req
             .masked_key
             .extend_from_slice(&payload(input, EXTRA_BYTES)),
-        _ => unreachable!("scenario reduced modulo 32"),
     }
-    let active = scenario != 28;
+    let active = scenario != Scenario::ClosedSession;
     let live_session = if active {
         Some(session)
     } else {
@@ -399,21 +485,24 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     };
     let request = SignRequest {
         req: &req,
-        shifted: scenario == 24,
+        shifted: scenario == Scenario::ShiftedLayout,
     };
     let predicted = expected(
         &request,
         sid,
         active,
         &key.masked_key,
-        scenario == 21,
-        matches!(scenario, 19 | 29 | 30),
+        scenario == Scenario::WrongKeyType,
+        matches!(
+            scenario,
+            Scenario::CorruptTag | Scenario::CorruptNonce | Scenario::CorruptLabel
+        ),
     );
     let result = ctx.tbor(&request);
     match predicted {
         Expected::Success => {
             let resp = result
-                .unwrap_or_else(|err| panic!("valid ML-DSA scenario {scenario} failed: {err}"));
+                .unwrap_or_else(|err| panic!("valid ML-DSA scenario {scenario:?} failed: {err}"));
             check_success(ctx, input, p, &key.pub_key, &req, &resp);
         }
         Expected::Reject(status) => {
@@ -433,7 +522,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                     TborStatus::UnsupportedKeyScope,
                     TborStatus::AesGcmDecryptTagDoesNotMatch,
                 ].contains(&status)),
-                "unexpected envelope rejection in ML-DSA scenario {scenario}: {err}",
+                "unexpected envelope rejection in ML-DSA scenario {scenario:?}: {err}",
             );
         }
     }
