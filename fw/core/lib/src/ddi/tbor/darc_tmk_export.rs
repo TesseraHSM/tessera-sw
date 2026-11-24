@@ -110,15 +110,16 @@ pub(crate) async fn handle<P: HsmPal>(
 
         let pid_private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
         let pid_public = alloc.dma_alloc(97)?;
-        pid_public[0] = 4;
         pal.ecc_pub_from_priv(
             io,
             HsmEccCurve::P384,
             pid_private,
-            Some(&mut pid_public[1..]),
+            Some(&mut pid_public[..96]),
         )
         .await?;
-        byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut pid_public[1..])?;
+        byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut pid_public[..96])?;
+        pid_public.copy_within(..96, 1);
+        pid_public[0] = 4;
         let ids = alloc.dma_alloc(96)?;
         let (source_id, recipient_id) = ids.split_at_mut(48);
         transfer_spki_thumbprint(pal, io, pid_public, source_id, alloc).await?;

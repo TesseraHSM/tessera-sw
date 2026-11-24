@@ -105,15 +105,16 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::UnsupportedKeyType);
         }
         let recipient = alloc.dma_alloc(97)?;
-        recipient[0] = 4;
         pal.ecc_pub_from_priv(
             io,
             HsmEccCurve::P384,
             view.target_key,
-            Some(&mut recipient[1..]),
+            Some(&mut recipient[..96]),
         )
         .await?;
-        byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut recipient[1..])?;
+        byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut recipient[..96])?;
+        recipient.copy_within(..96, 1);
+        recipient[0] = 4;
         let cfg = TransferOpenConfig {
             verification: TransferVerifyConfig {
                 expected_kind: ReportKind::Darc,

@@ -15,6 +15,8 @@ use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
 
 const SEC1_UNCOMPRESSED: u8 = 0x04;
+const COSE_PAYLOAD_OFFSET: usize = 11;
+const SD_TRANSFER_HEADER_LEN: usize = 161;
 const POLICY_MUTATION_MASK: u8 = 1;
 const MIN_REPEAT_CALLS: usize = 2;
 const REPEAT_COUNT_VARIANTS: u8 = 3;
@@ -164,7 +166,8 @@ fn checked_success(ctx: &TestCtx, req: &TborSdCreatePeerBackupReq, oob: &[&[u8]]
         "peer backup response must not be all zero",
     );
     assert_eq!(
-        response.pok_peer_backup[161], SEC1_UNCOMPRESSED,
+        response.pok_peer_backup[COSE_PAYLOAD_OFFSET + SD_TRANSFER_HEADER_LEN],
+        SEC1_UNCOMPRESSED,
         "HPKE encapsulated key must begin with an uncompressed P-384 point",
     );
 }
