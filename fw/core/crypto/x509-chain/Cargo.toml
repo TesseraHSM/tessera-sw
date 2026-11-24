@@ -22,3 +22,5 @@ tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }
 tsra_crypto.workspace = true
 tsra_fw_hsm_pal_std_duo.workspace = true
 tsra_fw_hsm_pal_std_uno.workspace = true
+
+[lints]

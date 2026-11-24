@@ -20,3 +20,5 @@ array = []
 fuzzing = ["arbitrary"]
 post_decode = []
 pre_encode = []
+
+[lints]

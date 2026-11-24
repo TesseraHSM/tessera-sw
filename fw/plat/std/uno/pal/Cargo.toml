@@ -28,3 +28,5 @@ trace-io = []
 [dev-dependencies]
 hex.workspace = true
 tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }
+
+[lints]

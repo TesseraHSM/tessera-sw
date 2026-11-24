@@ -31,3 +31,5 @@ trace-io = ["tsra_fw_hsm_pal_std_duo/trace-io"]
 tokio = { features = ["macros", "rt-multi-thread", "time"], workspace = true }
 tsra_fw_ddi_tbor_types.workspace = true
 x509.workspace = true
+
+[lints]

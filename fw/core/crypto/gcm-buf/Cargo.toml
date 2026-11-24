@@ -10,3 +10,5 @@ version = "0.1.0"
 bench = false
 doctest = false
 test = false
+
+[lints]

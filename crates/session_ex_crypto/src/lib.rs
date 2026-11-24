@@ -598,7 +598,7 @@ impl SessionTransport {
     /// Reserve the next VM→HSM sequence number; fails rather than wrap.
     fn next_h2m_seq(&self) -> SessionExCryptoResult<u64> {
         self.h2m_seq
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
                 seq.checked_add(1)
             })
             .map_err(|_| SessionExCryptoError::Crypto)

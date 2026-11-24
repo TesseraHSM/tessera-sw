@@ -30,3 +30,5 @@ vtpm-tests = ["getrandom"]
 
 [dev-dependencies]
 num-bigint = { workspace = true }
+
+[lints]
