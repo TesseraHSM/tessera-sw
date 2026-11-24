@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 //! MBOR secure BK3 provisioning. The PIN is volatile and separate from
-//! application credentials; successful authentication consumes a tunnel key.
+//! application credentials; successful authentication consumes the establish-credential key.
 
 use tsra_fw_ddi_mbor_types::secure_init_bk3::DdiSecureInitBk3Req;
 use tsra_fw_ddi_mbor_types::set_init_bk3_pin::DdiSetInitBk3PinReq;
 use tsra_fw_ddi_mbor_types::set_init_bk3_pin::DdiSetInitBk3PinResp;
 
-use super::establish_credential::consume_tunnel_key;
+use super::establish_credential::consume_establish_cred_key;
 use super::establish_credential::decrypt_credential;
 use super::establish_credential::derive_credential_keys;
 use super::establish_credential::derive_credential_prk;
@@ -63,7 +63,7 @@ pub(crate) async fn set_init_bk3_pin<'p, P: HsmPal>(
     verify_credential_hmac(pal, io, &body.encrypted_credential, hmac_key).await?;
     refresh_nonce(pal, io)?;
     decrypt_credential(pal, io, &mut body.encrypted_credential, aes_key).await?;
-    consume_tunnel_key(pal, io).await?;
+    consume_establish_cred_key(pal, io).await?;
 
     let credential = pal.dma_alloc(io, 32)?;
     credential[..16].copy_from_slice(body.encrypted_credential.encrypted_id);
@@ -145,7 +145,7 @@ pub(crate) async fn secure_init_bk3<'p, P: HsmPal>(
         None,
     )
     .await?;
-    consume_tunnel_key(pal, io).await?;
+    consume_establish_cred_key(pal, io).await?;
     pal.part_prop_clear(io, HsmPartPropId::BK3_PROV_CREDENTIAL)?;
 
     // Failures after key/PIN consumption require a new provisioning

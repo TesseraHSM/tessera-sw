@@ -1065,6 +1065,15 @@ pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
     pal.part_prop_get_bytes(io, HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY)
 }
 
+/// Set the establish-credential public key (x ∥ y, 96 B).
+pub fn part_set_establish_cred_pub_key<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
+    data: &HsmDmaBuf,
+) -> HsmResult<()> {
+    pal.part_prop_set_bytes(io, HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY, data)
+}
+
 /// Derive the Partition Trust Anchor public key as big-endian P-384 `x || y`.
 pub async fn part_pta_pub_key<P: HsmPal>(
     pal: &P,

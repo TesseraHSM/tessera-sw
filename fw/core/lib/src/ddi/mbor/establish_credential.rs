@@ -133,7 +133,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
         return Err(HsmError::InvalidAppCredentials);
     }
 
-    // Credential commit and tunnel-key consumption
+    // Credential commit and establish-credential key consumption
     // and BK3 session commit (`part_set_bk3_session`) are intentionally
     // deferred to the final atomic-commit block at the end of this
     // handler.  Deferring lets a failure in steps 8-13 (e.g. tampered
@@ -192,7 +192,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // is required even on failure to prevent replay of the original
     // request.
     //
-    // After tunnel-key consumption, the property writes under the
+    // After establish-credential key consumption, the property writes under the
     // partition lock are effectively infallible:
     // - CREDENTIAL prop write validates length, write-once, and
     //   non-zero id/pin; both halves are pre-checked above so this
@@ -214,7 +214,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     cred[CRED_FIELD_LEN..].copy_from_slice(pin);
     // Delete before unlinking, and before the infallible property commits.
     // Merely clearing the handle strands the private key in the vault.
-    consume_tunnel_key(pal, io).await?;
+    consume_establish_cred_key(pal, io).await?;
     crate::part_state::part_set_credential(pal, io, cred)?;
     crate::part_state::part_set_bk3_session(pal, io, bk3_session)?;
     crate::part_state::part_set_mk_key_id(pal, io, mk_key_id)?;
@@ -231,10 +231,55 @@ pub(super) fn refresh_nonce<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
     crate::part_state::part_set_nonce(pal, io, nonce)
 }
 
-pub(super) async fn consume_tunnel_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+pub(super) async fn consume_establish_cred_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
     let key_id = crate::part_state::part_establish_cred_key_id(pal, io)?;
     pal.vault_key_delete(io, key_id).await?;
     crate::part_state::part_clear_establish_cred_key(pal, io)
+}
+
+/// Replace an establish-credential key consumed by an earlier BK3 phase.
+/// The caller holds the partition write lock.
+pub(super) async fn create_establish_cred_key<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    match crate::part_state::part_establish_cred_key_id(pal, io) {
+        Ok(_) => return Ok(()),
+        Err(HsmError::PartPropNotFound) => {}
+        Err(e) => return Err(e),
+    }
+
+    // Stored as `pub ‖ priv`, the layout `derive_credential_prk` expects.
+    let pub_key_len = HsmEccCurve::P384.pub_key_len();
+    let priv_key_len = HsmEccCurve::P384.priv_key_len();
+    let blob = pal.dma_alloc(io, pub_key_len + priv_key_len)?;
+    let (pub_key, priv_key) = blob.split_at_mut(pub_key_len);
+    let (priv_len, pub_len) = pal
+        .ecc_gen_keypair(
+            io,
+            HsmEccCurve::P384,
+            HsmEccPct::KeyAgreement,
+            Some((priv_key, pub_key)),
+        )
+        .await?;
+    if priv_len != priv_key_len || pub_len != pub_key_len {
+        return Err(HsmError::EccInvalidKeyLength);
+    }
+
+    // Publish the public key first: without a key id it is never served.
+    crate::part_state::part_set_establish_cred_pub_key(pal, io, &blob[..pub_key_len])?;
+    let attrs = HsmVaultKeyAttrs::new()
+        .with_internal(true)
+        .with_local(true)
+        .with_derive(true);
+    let key_id = pal
+        .vault_key_create(
+            io,
+            blob,
+            HsmVaultKeyKind::EstablishCred,
+            None,
+            attrs,
+            HsmVaultPct::None,
+        )
+        .await?;
+    crate::part_state::part_set_establish_cred_key_id(pal, io, key_id)
 }
 
 /// Re-import the partition unwrapping key from a host-persisted masked

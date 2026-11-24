@@ -453,40 +453,6 @@ pub enum PartCommand {
 // ---------------------------------------------------------------------------
 
 impl HsmPartitionManager for StdHsmPal {
-    async fn part_ensure_establish_cred_key(&self, io: &StdHsmIo) -> HsmResult<()> {
-        let pid = u8::from(io.pid());
-        let idx = pid as usize;
-        if self
-            .table()
-            .entries
-            .get(idx)
-            .ok_or(HsmError::InvalidArg)?
-            .establish_cred_key_id
-            .is_some()
-        {
-            return Ok(());
-        }
-        let mut pub_key = [0u8; P384_PUB_KEY_LEN];
-        let attrs = HsmVaultKeyAttrs::new()
-            .with_internal(true)
-            .with_local(true)
-            .with_derive(true);
-        let kid = self
-            .create_internal_ecc384_key(
-                pid,
-                HsmVaultKeyKind::EstablishCred,
-                attrs,
-                HsmEccPct::KeyAgreement,
-                EccForm::of::<StdHsmPal>(),
-                &mut pub_key,
-            )
-            .await?;
-        let entry = &mut self.table_mut().entries[idx];
-        entry.establish_cred_pub_key = pub_key;
-        entry.establish_cred_key_id = Some(kid);
-        Ok(())
-    }
-
     // ─── Property API ──────────────────────────────────────────────────
     //
     // Forwarding shims to the inherent `prop_*` implementations on
@@ -1557,6 +1523,10 @@ impl PartitionEntry {
             }
             HsmPartPropId::NONCE => {
                 self.nonce.copy_from_slice(data);
+                Ok(())
+            }
+            HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY => {
+                self.establish_cred_pub_key.copy_from_slice(data);
                 Ok(())
             }
             // ID/VM_LAUNCH_GUID are Ro —

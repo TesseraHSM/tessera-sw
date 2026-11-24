@@ -227,10 +227,6 @@ impl HsmPartState {
 ///
 /// Partition scoping is implicit via the platform's private IO metadata.
 pub trait HsmPartitionManager: HsmIoTypes {
-    /// Materialize a new P-384 establish-credential key if the previous
-    /// one-shot key was consumed. Caller holds the partition write lock.
-    async fn part_ensure_establish_cred_key(&self, io: &Self::Io) -> HsmResult<()>;
-
     /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters
@@ -853,8 +849,8 @@ impl HsmPartPropId {
     pub const SESSION_ENC_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0018);
 
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
-    /// one-shot establish-credential key.  Read-only from caller
-    /// perspective.
+    /// one-shot establish-credential key.  Written by core when it
+    /// replaces a consumed key.
     pub const ESTABLISH_CRED_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0019);
 
     // ── Caller-presented secrets (0x0020..) ───────────────────────
@@ -990,9 +986,8 @@ impl HsmPartPropId {
             | Self::RSA_UNWRAPPING_KEY_ID => VAULT_REF_RW,
 
             // ── Public-key views (fixed P-384 sizes) ──
-            Self::SESSION_ENC_ECC_PUB_KEY | Self::ESTABLISH_CRED_ECC_PUB_KEY => {
-                HsmPartPropMeta::fixed(96, Ro, Abs, false)
-            }
+            Self::SESSION_ENC_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Ro, Abs, false),
+            Self::ESTABLISH_CRED_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Rw, Abs, false),
 
             // ── Caller-presented secrets ──
             Self::PSK_CO | Self::PSK_CU => HsmPartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),

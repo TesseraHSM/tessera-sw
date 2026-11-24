@@ -15,7 +15,6 @@
 //! [`HsmPartState::Unallocated`]; a non-zero `SetResource` allocates the
 //! partition and a `PfnEnable` IPC enables it.
 
-use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -31,7 +30,6 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
@@ -810,64 +808,6 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
-    async fn part_ensure_establish_cred_key(&self, io: &UnoHsmIo) -> HsmResult<()> {
-        let part = PartStore::partition(io.pid())?;
-        if part.ec_key_id().is_some() {
-            return Ok(());
-        }
-        self.alloc_scoped_async(io, async |alloc| {
-            let priv_key = alloc.dma_alloc(P384_PRIV_LEN)?;
-            let pub_key = alloc.dma_alloc(ID_PUB_KEY_LEN)?;
-            let (priv_len, pub_len) = self
-                .ecc_gen_keypair(
-                    io,
-                    HsmEccCurve::P384,
-                    HsmEccPct::None,
-                    Some((priv_key, pub_key)),
-                )
-                .await?;
-            if priv_len != P384_PRIV_LEN || pub_len != ID_PUB_KEY_LEN {
-                return Err(HsmError::EccInvalidKeyLength);
-            }
-            if !tsra_fw_uno_pct::ecc_pct(
-                self,
-                io,
-                alloc,
-                HsmEccCurve::P384,
-                &HsmEccPct::KeyAgreement,
-                priv_key,
-                pub_key,
-            )
-            .await?
-            {
-                tsra_fw_uno_fault::enter_error_state(
-                    HsmError::PctValidationEstablishCredEncKeyFailed,
-                );
-            }
-            let attrs = HsmVaultKeyAttrs::new()
-                .with_internal(true)
-                .with_local(true)
-                .with_derive(true);
-            let blob = alloc.dma_alloc(ENABLE_KEY_LEN)?;
-            blob[..ID_PUB_KEY_LEN].copy_from_slice(pub_key);
-            blob[ID_PUB_KEY_LEN..].copy_from_slice(priv_key);
-            let kid = self
-                .vault_key_create(
-                    io,
-                    blob,
-                    HsmVaultKeyKind::EstablishCred,
-                    None,
-                    attrs,
-                    HsmVaultPct::None,
-                )
-                .await?;
-            part.set_ec_pub_key(pub_key)?;
-            part.set_ec_key_id(Some(kid));
-            Ok(())
-        })
-        .await
-    }
-
     fn part_prop_get_u8(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {
@@ -1116,6 +1056,7 @@ impl HsmPartitionManager for UnoHsmPal {
                 Ok(())
             }
             HsmPartPropId::NONCE => p.set_nonce(data),
+            HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY => p.set_ec_pub_key(data),
             HsmPartPropId::PSK_CO => p.set_psk_co(data),
             HsmPartPropId::PSK_CU => p.set_psk_cu(data),
             HsmPartPropId::CREDENTIAL => p.set_credential(data),
