@@ -542,7 +542,7 @@ impl HostSgl {
             self.blk_rem = 0;
         }
         // Descriptors left over describe bytes beyond `total`.
-        if self.seg_rem != 0 {
+        if self.seg_rem != 0 || !self.seg_last {
             return Err(HsmError::InvalidArg);
         }
         Ok(())
