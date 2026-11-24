@@ -10,12 +10,9 @@ use common::EccCurve;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_crypto::aead_envelope::HEADER_LEN;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_test_harness::TestCtx;
-use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
-use tsra_ddi_tbor_test_harness::dev_rev;
-use tsra_ddi_tbor_test_harness::device_is_little_endian;
+use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -126,6 +123,7 @@ fuzz_target!(|input: FuzzInput| {
         let mut masked_key = generated.masked_key.clone();
         let mut packed = packed_input(input.curve, &digest_wire, &signature);
         let mut hash_algo = input.hash.selector();
+        let mut envelope_mutation_is_ignored = false;
 
         match input.mutation {
             Mutation::Valid => {}
@@ -176,6 +174,8 @@ fuzz_target!(|input: FuzzInput| {
             Mutation::Envelope => {
                 let at = usize::from(input.index) % masked_key.len();
                 masked_key[at] ^= 1;
+                // Unmasking uses only the first 12 bytes of the 16-byte IV slot.
+                envelope_mutation_is_ignored = (HEADER_LEN + 12..HEADER_LEN + 16).contains(&at);
             }
         }
 
@@ -197,7 +197,8 @@ fuzz_target!(|input: FuzzInput| {
                 Err(DdiError::TborStatus(TborStatus::InvalidArg)),
                 Mutation::Hash | Mutation::Length | Mutation::Padding,
             ) => {}
-            (Err(_), Mutation::Envelope) => {}
+            (Ok(_), Mutation::Envelope) if envelope_mutation_is_ignored => {}
+            (Err(_), Mutation::Envelope) if !envelope_mutation_is_ignored => {}
             (Ok(_), mutation) => panic!("invalid EccVerify request succeeded: {mutation:?}"),
             (Err(err), mutation) => {
                 panic!("unexpected EccVerify rejection for {mutation:?}: {err}")
