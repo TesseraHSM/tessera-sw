@@ -31,6 +31,18 @@ impl Xtask for FuzzBuild {
             .or_else(|| sh.var("RUST_TOOLCHAIN").ok())
             .map(|s| format!("+{s}"));
 
+        // Elevate warnings to errors, but do not clobber existing RUSTFLAGS (e.g., custom linker)
+        let existing = sh.var("RUSTFLAGS").unwrap_or_default();
+        let new_rf = if existing.trim().is_empty() {
+            "-D warnings".to_string()
+        } else {
+            format!("{existing} -D warnings")
+        };
+        sh.set_var("RUSTFLAGS", new_rf);
+
+        // Elevate cargo build warnings to errors
+        sh.set_var("CARGO_BUILD_WARNINGS", "deny");
+
         cmd!(sh, "cargo {rust_toolchain...} fuzz build")
             .quiet()
             .run()?;
