@@ -19,9 +19,9 @@
 //! Multiple `InitBk3` commands can arrive simultaneously.  Partition
 //! writes are serialized by the per-partition write mutex acquired via
 //! [`HsmPartitionLock::partition_lock`].  Read-only / hot-path
-//! partition getters do **not** take this lock. The PAL rechecks the
-//! one-shot state in [`HsmPartitionManager::part_commit_bk3`] and
-//! publishes the validated update without yielding.
+//! partition getters do **not** take this lock.  The PAL also
+//! re-checks the one-shot state atomically inside
+//! [`part_mark_bk3_initialized`](crate::part_state::part_mark_bk3_initialized).
 //!
 //! ## Masking
 //!
@@ -179,9 +179,15 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
             .copy_from_slice(&guid[..vm_launch_guid_len]);
     }
 
-    // Last fallible operation. Transport delivery can still fail after
-    // commit; neither init path rolls provisioning back on a lost response.
-    pal.part_commit_bk3(io, secure, new_masked_boot.as_deref())?;
+    // Authoritative one-shot commit, after the optional replacement boot
+    // key and before the classification, which the PAL also treats as
+    // initialized. Transport delivery can still fail after commit;
+    // neither init path rolls provisioning back on a lost response.
+    if let Some(boot) = new_masked_boot.as_deref() {
+        crate::part_state::part_set_masked_bk_boot(pal, io, boot)?;
+    }
+    crate::part_state::part_mark_bk3_initialized(pal, io)?;
+    crate::part_state::part_set_bk3_provisioning_status(pal, io, secure)?;
 
     Ok(resp)
 }

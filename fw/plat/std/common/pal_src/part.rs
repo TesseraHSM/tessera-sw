@@ -249,7 +249,7 @@ pub(crate) struct PartitionEntry {
 
     /// BK3 initialization state for the current partition incarnation.
     ///
-    /// Set by `part_commit_bk3` and preserved across disable/enable.
+    /// Set through `BK3_INITIALIZED` and preserved across disable/enable.
     /// Cleared on free or ClearBk3; authoritative one-shot gate for init.
     bk3_initialized: bool,
 
@@ -453,37 +453,6 @@ pub enum PartCommand {
 // ---------------------------------------------------------------------------
 
 impl HsmPartitionManager for StdHsmPal {
-    fn part_commit_bk3(
-        &self,
-        io: &StdHsmIo,
-        secure: bool,
-        masked_boot: Option<&HsmDmaBuf>,
-    ) -> HsmResult<()> {
-        let entry = self
-            .table_mut()
-            .entries
-            .get_mut(usize::from(u8::from(io.pid())))
-            .ok_or(HsmError::InvalidArg)?;
-        if entry.bk3_initialized {
-            return Err(HsmError::Bk3AlreadyInitialized);
-        }
-        if let Some(boot) = masked_boot {
-            if boot.is_empty() || boot.len() > entry.masked_bk_boot.len() {
-                return Err(HsmError::InvalidArg);
-            }
-        } else if entry.masked_bk_boot_len == 0 {
-            return Err(HsmError::InvalidArg);
-        }
-        if let Some(boot) = masked_boot {
-            entry.masked_bk_boot.fill(0);
-            entry.masked_bk_boot[..boot.len()].copy_from_slice(boot);
-            entry.masked_bk_boot_len = boot.len() as u32;
-        }
-        entry.bk3_initialized = true;
-        entry.fips_provisioning_status = if secure { 1 } else { 2 };
-        Ok(())
-    }
-
     async fn part_ensure_establish_cred_key(&self, io: &StdHsmIo) -> HsmResult<()> {
         let pid = u8::from(io.pid());
         let idx = pid as usize;
@@ -1322,6 +1291,7 @@ impl PartitionEntry {
             HsmPartPropId::PART_RES_COUNT => Ok(self.res_mask.count_ones()),
             HsmPartPropId::BK3_INITIALIZED => Ok(u32::from(self.bk3_initialized)),
             HsmPartPropId::SD_INITIALIZED => Ok(u32::from(self.sd_initialized)),
+            HsmPartPropId::BK3_PROVISIONING_STATUS => Ok(u32::from(self.fips_provisioning_status)),
             HsmPartPropId::PART_ID_ECC_KEY_ID => key_id_to_u32(self.id_key_id),
             HsmPartPropId::MK_KEY_ID => key_id_to_u32(self.mk_key_id),
             HsmPartPropId::UPS_KEY_ID => key_id_to_u32(self.ups_key_id),
@@ -1416,6 +1386,14 @@ impl PartitionEntry {
                     return Err(HsmError::SdAlreadyInitialized);
                 }
                 self.sd_initialized = want;
+                Ok(())
+            }
+            HsmPartPropId::BK3_PROVISIONING_STATUS => {
+                // Classification only; reset happens PAL-internally.
+                if !matches!(value, 1 | 2) {
+                    return Err(HsmError::InvalidArg);
+                }
+                self.fips_provisioning_status = value as u8;
                 Ok(())
             }
             // GEN/SVN/RES_COUNT/PART_ID_ECC_KEY_ID are Ro
@@ -1895,44 +1873,20 @@ mod tests {
     }
 
     #[test]
-    fn bk3_commit_replaces_missing_boot_only_after_validation() -> HsmResult<()> {
-        for secure in [false, true] {
-            let pal = StdHsmPal::default();
-            let (tx, _rx) = tokio::sync::oneshot::channel();
-            let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, tx);
+    fn bk3_provisioning_status_accepts_only_secure_or_legacy() {
+        let id = HsmPartPropId::BK3_PROVISIONING_STATUS;
+        let mut entry = fresh_entry();
+        for invalid in [0, 3] {
             assert!(matches!(
-                pal.part_commit_bk3(&io, secure, None),
+                entry.prop_set_scalar(id, invalid),
                 Err(HsmError::InvalidArg)
             ));
-
-            let oversized = pal.dma_alloc(&io, MASKED_BK_BOOT_LEN + 1)?;
-            let (empty, _) = oversized.split_at(0);
-            for boot in [empty, &*oversized] {
-                assert!(matches!(
-                    pal.part_commit_bk3(&io, secure, Some(boot)),
-                    Err(HsmError::InvalidArg)
-                ));
-            }
-            assert_eq!(pal.table().entries[0].masked_bk_boot_len, 0);
-            assert!(!pal.table().entries[0].bk3_initialized);
-            assert_eq!(pal.table().entries[0].fips_provisioning_status, 0);
-
-            let boot = pal.dma_alloc(&io, 80)?;
-            boot.fill(0x77);
-            pal.part_commit_bk3(&io, secure, Some(boot))?;
-            assert_eq!(pal.table().entries[0].masked_bk_boot_len, 80);
-            assert_eq!(&pal.table().entries[0].masked_bk_boot[..80], &[0x77; 80]);
-            assert!(pal.table().entries[0].bk3_initialized);
-            assert_eq!(
-                pal.table().entries[0].fips_provisioning_status,
-                if secure { 1 } else { 2 }
-            );
-            assert!(matches!(
-                pal.part_commit_bk3(&io, secure, Some(boot)),
-                Err(HsmError::Bk3AlreadyInitialized)
-            ));
         }
-        Ok(())
+        assert_eq!(entry.prop_get_scalar(id).unwrap(), 0);
+        for status in [1, 2] {
+            entry.prop_set_scalar(id, status).unwrap();
+            assert_eq!(entry.prop_get_scalar(id).unwrap(), status);
+        }
     }
 
     #[test]

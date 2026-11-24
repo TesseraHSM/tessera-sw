@@ -32,7 +32,6 @@ use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::HsmVaultPct;
-use tsra_fw_hsm_pal_traits::MASKED_BK_BOOT_LEN;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
@@ -811,31 +810,6 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
-    fn part_commit_bk3(
-        &self,
-        io: &UnoHsmIo,
-        secure: bool,
-        masked_boot: Option<&HsmDmaBuf>,
-    ) -> HsmResult<()> {
-        let part = PartStore::partition(io.pid())?;
-        if part.bk3_initialized() {
-            return Err(HsmError::Bk3AlreadyInitialized);
-        }
-        if let Some(boot) = masked_boot {
-            if boot.is_empty() || boot.len() > MASKED_BK_BOOT_LEN {
-                return Err(HsmError::InvalidArg);
-            }
-        } else if part.masked_bk_boot().is_empty() {
-            return Err(HsmError::InvalidArg);
-        }
-        if let Some(boot) = masked_boot {
-            part.set_masked_bk_boot(boot)?;
-        }
-        part.set_bk3_initialized(true);
-        part.set_fips_status(if secure { 1 } else { 2 });
-        Ok(())
-    }
-
     async fn part_ensure_establish_cred_key(&self, io: &UnoHsmIo) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         if part.ec_key_id().is_some() {
@@ -899,6 +873,7 @@ impl HsmPartitionManager for UnoHsmPal {
         match id {
             HsmPartPropId::PART_STATE => Ok(part.state()? as u8),
             HsmPartPropId::PART_RES_COUNT => Ok(part.res_mask().count_ones() as u8),
+            HsmPartPropId::BK3_PROVISIONING_STATUS => Ok(part.fips_status()),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
@@ -913,6 +888,14 @@ impl HsmPartitionManager for UnoHsmPal {
                 // prior states through this raw path.
                 let target = HsmPartState::from_u8(value).ok_or(HsmError::InvalidArg)?;
                 part.set_state(target);
+                Ok(())
+            }
+            // Classification only; reset happens PAL-internally.
+            HsmPartPropId::BK3_PROVISIONING_STATUS => {
+                if !matches!(value, 1 | 2) {
+                    return Err(HsmError::InvalidArg);
+                }
+                part.set_fips_status(value);
                 Ok(())
             }
             // RES_COUNT is read-only; it is derived from the resource mask.

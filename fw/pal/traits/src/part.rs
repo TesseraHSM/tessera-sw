@@ -231,16 +231,6 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// one-shot key was consumed. Caller holds the partition write lock.
     async fn part_ensure_establish_cred_key(&self, io: &Self::Io) -> HsmResult<()>;
 
-    /// Commit the one-shot BK3 gate, secure/legacy classification, and an
-    /// optional replacement boot key. Caller holds the partition write lock.
-    /// Validate before any mutation; `None` retains the allocation's key.
-    fn part_commit_bk3(
-        &self,
-        io: &Self::Io,
-        secure: bool,
-        masked_boot: Option<&HsmDmaBuf>,
-    ) -> HsmResult<()>;
-
     /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters
@@ -803,6 +793,12 @@ impl HsmPartPropId {
     /// flag is also reset PAL-internally on partition free / NSSR.
     pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
+    /// BK3 provisioning classification.  `U8`, `RequiredPresent`,
+    /// `Rw`: `0` = unclassified, `1` = secure (`SecureInitBk3`),
+    /// `2` = legacy (`InitBk3`).  The PAL setter accepts only `1` or
+    /// `2`; reset to `0` happens PAL-internally.
+    pub const BK3_PROVISIONING_STATUS: HsmPartPropId = HsmPartPropId(0x000A);
+
     // ── Vault references (0x0010..) ───────────────────────────────
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition identity
@@ -978,6 +974,7 @@ impl HsmPartPropId {
             Self::PART_RES_COUNT => HsmPartPropMeta::scalar(U8, Ro, Req, false),
             Self::BK3_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
             Self::SD_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
+            Self::BK3_PROVISIONING_STATUS => HsmPartPropMeta::scalar(U8, Rw, Req, false),
             Self::BK3_PROV_CREDENTIAL => HsmPartPropMeta::fixed(32, Rw, Abs, true),
 
             // ── Vault refs (HsmKeyId as u16) ──

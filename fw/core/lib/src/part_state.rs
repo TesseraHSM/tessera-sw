@@ -1113,6 +1113,25 @@ pub fn part_is_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> H
     pal.part_prop_get_bool(io, HsmPartPropId::BK3_INITIALIZED)
 }
 
+/// Atomically commit the partition's one-shot BK3 init state to
+/// `true`.  Returns [`HsmError::Bk3AlreadyInitialized`] if the flag
+/// was already set in the current partition incarnation.  This is the
+/// authoritative race-winner gate for `DdiInitBk3` and `DdiSecureInitBk3`.
+pub fn part_mark_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    pal.part_prop_set_bool(io, HsmPartPropId::BK3_INITIALIZED, true)
+}
+
+/// Set the BK3 provisioning classification: secure (`DdiSecureInitBk3`)
+/// or legacy (`DdiInitBk3`).
+pub fn part_set_bk3_provisioning_status<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
+    secure: bool,
+) -> HsmResult<()> {
+    let status = if secure { 1 } else { 2 };
+    pal.part_prop_set_u8(io, HsmPartPropId::BK3_PROVISIONING_STATUS, status)
+}
+
 /// Whether the partition has completed one-shot security-domain
 /// initialization (its `SDMK` is provisioned).
 pub fn part_is_sd_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
