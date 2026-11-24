@@ -582,29 +582,26 @@ impl HsmIoController for UnoHsmPal {
 
     async fn recv_oob(&self, io: &UnoHsmIo, index: usize, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         let desc = self.oob_desc(io, index).await?;
+        self.check_host_sgl_len(io, &desc, dst.len()).await?;
         self.copy_mem_from_host_raw(io, &desc, dst, false).await
     }
 
     /// Writes `src` to the host buffer of OOB descriptor `index`, which
-    /// must be an SGL Data Block of exactly `src.len()` bytes.
+    /// must describe exactly `src.len()` bytes.
+    ///
+    /// The GDMA does not honor an SGL as a host destination, so this
+    /// walks the descriptor with [`HostSgl`](crate::gdma::HostSgl) and
+    /// writes page-bounded PRPs.
     async fn send_oob(&self, io: &UnoHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
-        const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
-
         let desc = self.oob_desc(io, index).await?;
-        let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
-        if desc[15] >> 4 != SGL_TYPE_DATA_BLOCK || len as usize != src.len() {
-            return Err(HsmError::InvalidArg);
-        }
-        self.gdma
-            .copy_mem(
-                crate::gdma::device_dma_buf(src.as_ptr(), len),
-                MemInterface::Device,
-                len,
-                crate::gdma::sgl_desc_buf(&desc),
-                crate::gdma::host_interface(io.pid())?,
-                len,
-            )?
-            .await
+        self.check_host_sgl_len(io, &desc, src.len()).await?;
+        self.alloc_scoped_async(io, async |scope| {
+            let scratch = scope.dma_alloc(OOB_ENTRY_LEN as usize)?;
+            crate::gdma::HostSgl::new(&desc, src.len())?
+                .write_from(self, io, scratch, src)
+                .await
+        })
+        .await
     }
 
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {

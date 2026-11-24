@@ -302,6 +302,7 @@ impl HsmHash for UnoHsmPal {
         } else {
             let desc = self.oob_desc(io, index).await?;
             validate_oob_hash_desc(&desc, expected_len)?;
+            self.check_host_sgl_len(io, &desc, expected_len).await?;
             Some(desc)
         };
 
