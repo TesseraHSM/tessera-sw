@@ -202,7 +202,7 @@ allocation. Errors overwrite the response prefix in the same storage. Every publ
 including padding or gaps, must be initialized; overlapping crypto requires an
 explicitly supported in-place PAL operation.
 
-All 46 commands encode their compact responses directly into this shared
+All commands encode their compact responses directly into this shared
 allocation; there is no legacy dispatch bridge or separately allocated encoded
 response. Existing cryptographic working buffers remain scoped independently.
 Hash consumes the input before reclaiming it for the digest.
@@ -280,8 +280,8 @@ storage is zero.
 | `0x37` | `EcdsaSign` | InSession | [`commands/ecdsa_sign.md`](./commands/ecdsa_sign.md) |
 | `0x38` | `EcdsaVerify` | InSession | [`commands/ecdsa_verify.md`](./commands/ecdsa_verify.md) |
 
-`0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
-the upcoming `RsaSign` and `RsaVerify` commands.
+`0x33` is assigned to `EccVerify`, `0x35` and `0x36` to `RsaSign` and
+`RsaVerify`, and `0x37` and `0x38` to `EcdsaSign` and `EcdsaVerify`.
 
 ## Default-PSK gate
 
