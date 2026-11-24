@@ -88,9 +88,7 @@ fn create_sd_on_first_device(seed: &[u8], sata: &CaKey, pota: &CaKey) -> Created
         &pota.raw_pub(),
     );
 
-    let init = ctx
-        .part_init(&session, seed, &policy)
-        .expect("PartInit");
+    let init = ctx.part_init(&session, seed, &policy).expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -132,9 +130,7 @@ fn create_sd_on_resettable_partition(
         &pota.raw_pub(),
     );
 
-    let init = ctx
-        .part_init(&session, seed, &policy)
-        .expect("PartInit");
+    let init = ctx.part_init(&session, seed, &policy).expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -357,9 +353,7 @@ fn sd_restore_local_backup_is_one_shot() {
         &sata.raw_pub(),
         &pota.raw_pub(),
     );
-    let init = ctx
-        .part_init(&session, &seed, &policy)
-        .expect("PartInit");
+    let init = ctx.part_init(&session, &seed, &policy).expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
