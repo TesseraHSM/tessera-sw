@@ -273,12 +273,12 @@ storage is zero.
 | `0x23` | `DarcTmkGen` | InSession | [`commands/darc_tmk_gen.md`](./commands/darc_tmk_gen.md) |
 | `0x24` | `DarcTmkExport` | InSession | [`commands/darc_tmk_export.md`](./commands/darc_tmk_export.md) |
 | `0x25` | `DarcKeyWrap` | InSession | [`commands/darc_key_wrap.md`](./commands/darc_key_wrap.md) |
-| `0x26` | `MlDsaGenerateKey` | NoSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) (**schema-only**) |
+| `0x26` | `MlDsaGenerateKey` | InSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) |
 | `0x27` | `MlDsaSign` | InSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) |
 | `0x28` | `MlDsaVerify` | InSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) |
-| `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
-| `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
-| `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
+| `0x29` | `MlKemGenerateKey` | InSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) |
+| `0x2A` | `MlKemEncapsulate` | InSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) |
+| `0x2B` | `MlKemDecapsulate` | InSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 | `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
