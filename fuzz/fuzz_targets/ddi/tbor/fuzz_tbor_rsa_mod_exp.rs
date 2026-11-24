@@ -176,6 +176,9 @@ struct FuzzInput {
 
 /// `KeyScope::Session` discriminant — masked keys generated here only need
 /// to outlive the fuzzed `RsaModExp` call.
+/// `HashAlgo::Sha256` discriminant used to OAEP-wrap the KEK in `UnwrapKey`.
+const RSA_OAEP_SHA256: u8 = 1;
+
 /// Deterministic xorshift64* fill used to materialize the fuzzed `y`
 /// operand from `rand_seed`, avoiding a dependency on the `rand` crate.
 fn fill_rand(seed: u64, buf: &mut [u8]) {
