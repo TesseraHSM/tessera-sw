@@ -77,17 +77,18 @@ fn part_init_sapota_presence_changes_pta_key() {
 }
 
 /// A session created before an NSSR cannot be used for PartInit until it is
-/// reopened.
+/// reopened. The host keeps its stale channel keys, so the request reaches
+/// the session's state on every platform.
 #[test]
-fn part_init_with_stale_session_after_erase_is_rejected() {
+fn part_init_with_stale_session_after_migration_is_rejected() {
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
-    ctx.erase().expect("erase must succeed");
+    ctx.migrate().expect("migration must succeed");
 
     let err = ctx
         .part_init(&session, &mach_seed(), &known_good_part_policy())
-        .expect_err("PartInit with a session created before erase must be rejected");
+        .expect_err("PartInit with a session created before migration must be rejected");
 
     assert!(
         matches!(

@@ -287,8 +287,8 @@ pub(crate) struct PartitionEntry {
     /// The unwrapping key's private material, standing in for the slot the
     /// SP publishes it in on hardware: generated once per allocation and
     /// kept across disable and NSSR, which wipe the vault, so the partition
-    /// re-imports the same key.  Zeroed on free.
-    unwrapping_key_bk: Option<Vec<u8>>,
+    /// re-imports the same key.  Zeroized when dropped, on free.
+    unwrapping_key_bk: Option<Zeroizing<Vec<u8>>>,
 
     /// Crypto Officer PSK.  `None` while the well-known default
     /// applies; set to `Some` once `part_psk_set(psk_id=0, ..)` is
@@ -628,44 +628,36 @@ impl StdHsmPal {
             return Ok(());
         }
 
-        let published = entry.unwrapping_key_bk.clone();
-        let mut priv_buf = Vec::new();
+        let priv_buf = match entry.unwrapping_key_bk.clone() {
+            Some(published) => published,
+            None => {
+                let pk = RsaPrivateKey::generate(256).map_err(|_| HsmError::RsaGenerateError)?;
+                let mut buf = Zeroizing::new(vec![0u8; pk.hsm_bytes_len()]);
+                pk.to_hsm_bytes(&mut buf[..])
+                    .map_err(|_| HsmError::RsaToDerError)?;
+                buf
+            }
+        };
+        let stored =
+            RsaPrivateKey::from_hsm_bytes(&priv_buf[..]).map_err(|_| HsmError::InvalidArg)?;
+        let passed = crate::drivers::rsa::unwrapping_key_pct(&stored)?;
+        #[cfg(test)]
+        let passed = passed && !self.rsa_pct_fail.get();
+        if !passed {
+            return Err(HsmError::PctValidationUnwrappingKeyFailed);
+        }
+
         let attrs = HsmVaultKeyAttrs::new()
             .with_internal(true)
             .with_local(true)
             .with_unwrap(true);
-        let result = (|| {
-            match published {
-                Some(bk) => priv_buf = bk,
-                None => {
-                    let pk =
-                        RsaPrivateKey::generate(256).map_err(|_| HsmError::RsaGenerateError)?;
-                    priv_buf.resize(pk.hsm_bytes_len(), 0);
-                    pk.to_hsm_bytes(&mut priv_buf)
-                        .map_err(|_| HsmError::RsaToDerError)?;
-                }
-            }
-            let stored =
-                RsaPrivateKey::from_hsm_bytes(&priv_buf).map_err(|_| HsmError::InvalidArg)?;
-            let passed = crate::drivers::rsa::unwrapping_key_pct(&stored)?;
-            #[cfg(test)]
-            let passed = passed && !self.rsa_pct_fail.get();
-            if !passed {
-                return Err(HsmError::PctValidationUnwrappingKeyFailed);
-            }
-
-            let entry = self.active_part_mut(pid)?;
-            let kid = entry
-                .vault
-                .create(&priv_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)?;
-            entry.unwrapping_key_id = Some(kid);
-            entry
-                .unwrapping_key_bk
-                .get_or_insert_with(|| priv_buf.clone());
-            Ok(())
-        })();
-        priv_buf.fill(0);
-        result
+        let entry = self.active_part_mut(pid)?;
+        let kid = entry
+            .vault
+            .create(&priv_buf[..], HsmVaultKeyKind::Rsa2kPrivate, None, attrs)?;
+        entry.unwrapping_key_id = Some(kid);
+        entry.unwrapping_key_bk.get_or_insert(priv_buf);
+        Ok(())
     }
 
     /// Borrow a partition that is actively serving host traffic.
@@ -967,8 +959,10 @@ impl StdHsmPal {
     /// the per-tenant state and `PartInit`'s provisioning (see
     /// [`clear_tenant_state`](Self::clear_tenant_state)), which returns the
     /// PSKs to their defaults, then regenerates the partition identity and
-    /// the enable-time keys, leaving the partition `Enabled`. An unallocated
-    /// partition is left as it is.
+    /// the enable-time keys, leaving the partition `Enabled`. The partition
+    /// is `Disabled` until then, so a failure leaves it not serving; a later
+    /// NSSR retries the migration, and an enable restores it too. An
+    /// unallocated partition is left as it is.
     pub async fn part_migrate_internal(&self, pid: u8) -> HsmResult<()> {
         let idx = pid as usize;
         if idx >= NUM_PARTITIONS {
@@ -978,6 +972,7 @@ impl StdHsmPal {
         if entry.state == HsmPartState::Unallocated {
             return Ok(());
         }
+        entry.state = HsmPartState::Disabled;
         let mut session_table = core::mem::take(&mut entry.session_table);
         let survivors = session_table.backup();
         Self::clear_tenant_state(entry);
@@ -1063,10 +1058,9 @@ impl StdHsmPal {
         entry.masked_bk_boot[..entry.masked_bk_boot_len as usize].fill(0);
         entry.masked_bk_boot_len = 0;
 
-        // The published unwrapping key likewise lives until free.
-        if let Some(mut bk) = entry.unwrapping_key_bk.take() {
-            bk.fill(0);
-        }
+        // The published unwrapping key likewise lives until free; dropping it
+        // zeroizes it.
+        entry.unwrapping_key_bk = None;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;
@@ -1881,10 +1875,36 @@ mod tests {
         pal.provision_unwrapping_key(pid).expect("re-import");
         let entry = pal.active_part(pid).unwrap();
         let kid = entry.unwrapping_key_id.expect("imported");
-        assert_eq!(Some(entry.vault.key(kid).unwrap()), published.as_deref());
+        assert_eq!(
+            entry.vault.key(kid).unwrap(),
+            published.as_ref().unwrap().as_slice()
+        );
 
         pal.part_free_internal(1).unwrap();
         assert!(pal.table().entries[1].unwrapping_key_bk.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_migration_leaves_partition_disabled_until_retried() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.part_alloc_internal(1, 1)
+            .await
+            .expect("allocate partition");
+        pal.part_enable_internal(1).await.expect("enable");
+        pal.table_mut().entries[1].state = HsmPartState::Initialized;
+
+        pal.ecc_pct_fail.set(true);
+        assert!(pal.part_migrate_internal(1).await.is_err());
+        assert_eq!(pal.table().entries[1].state, HsmPartState::Disabled);
+
+        pal.ecc_pct_fail.set(false);
+        pal.part_migrate_internal(1)
+            .await
+            .expect("retried migration");
+        let entry = &pal.table().entries[1];
+        assert_eq!(entry.state, HsmPartState::Enabled);
+        assert!(entry.id_key_id.is_some());
     }
 
     #[tokio::test]

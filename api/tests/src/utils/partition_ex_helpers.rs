@@ -9,10 +9,6 @@
 //! and identity key, so they need only a freshly reset partition — no MBOR
 //! credential establishment (`init`).
 
-use std::collections::HashSet;
-use std::sync::LazyLock;
-
-use parking_lot::Mutex;
 use tsra_api::*;
 
 pub(crate) use crate::utils::partition::PARTITION_LOCK;
@@ -39,8 +35,9 @@ pub(crate) fn test_root_spki_sha384(part: &HsmPartition) -> [u8; 48] {
 }
 
 /// Open the backend's partition at its maximum supported revision and
-/// reset its provisioning state. NSSR preserves PSKs and live session
-/// reservations. Returns the partition and negotiated API revision.
+/// reset it with an NSSR, which returns its PSKs to their defaults and keeps
+/// live session reservations for renegotiation. Returns the partition and
+/// negotiated API revision.
 pub(crate) fn new_partition() -> (HsmPartition, HsmApiRev) {
     let info = HsmPartitionManager::partition_info_list()
         .into_iter()
@@ -55,31 +52,31 @@ pub(crate) fn new_partition() -> (HsmPartition, HsmApiRev) {
     (part, rev)
 }
 
-/// Open a provisioned-fixture CO session, retaining the known PSK across NSSR.
+/// Rotate the CO PSK of a just-reset partition, whose NSSR returned it to
+/// its default, and open a CO session under the rotated PSK.
 pub(crate) fn open_rotated_co_session(part: &HsmPartition, rev: HsmApiRev) -> HsmSession {
-    static ROTATED_PARTITIONS: LazyLock<Mutex<HashSet<String>>> =
-        LazyLock::new(|| Mutex::new(HashSet::new()));
-    let mut rotated = ROTATED_PARTITIONS.lock();
-    let path = part.path();
-    let root = test_root_spki_sha384(part);
-    let psk = &crate::utils::sd_provision::ROTATED_CO_PSK;
-    if !rotated.contains(&path) {
-        let bootstrap = part
-            .open_session_ex(
-                rev,
-                &root,
-                HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionSuite::EcdhP384,
-            )
-            .expect("open bootstrap CO session");
-        bootstrap.change_psk(psk).expect("rotate CO PSK");
-        rotated.insert(path);
-        drop(bootstrap);
-    }
+    let bootstrap = part
+        .open_session_ex(
+            rev,
+            &test_root_spki_sha384(part),
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("open bootstrap CO session");
+    bootstrap
+        .change_psk(&crate::utils::sd_provision::ROTATED_CO_PSK)
+        .expect("rotate CO PSK");
+    drop(bootstrap);
+    open_co_session_with_rotated_psk(part, rev)
+}
+
+/// Open a CO session on a partition whose CO PSK [`open_rotated_co_session`]
+/// rotated with no reset since.
+pub(crate) fn open_co_session_with_rotated_psk(part: &HsmPartition, rev: HsmApiRev) -> HsmSession {
     part.open_session_ex(
         rev,
-        &root,
-        HsmSessionPsk::with_psk(HsmPskId::CO, psk),
+        &test_root_spki_sha384(part),
+        HsmSessionPsk::with_psk(HsmPskId::CO, &crate::utils::sd_provision::ROTATED_CO_PSK),
         HsmSessionSuite::EcdhP384,
     )
     .expect("open rotated CO session")

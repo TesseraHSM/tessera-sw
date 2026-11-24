@@ -50,7 +50,9 @@ fn sd_restore_local_backup_uses_negotiated_session_revision() {
 
     let part =
         HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
-    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, range.max());
+    // The provisioning above rotated the CO PSK, with no reset since.
+    let session =
+        crate::utils::partition_ex_helpers::open_co_session_with_rotated_psk(&part, range.max());
     assert_ne!(part.api_rev(), session.api_rev());
     let result = session.sd_restore_local_backup(&created.pok_local_backup, &created.sd_mk_backup);
     assert_eq!(result.err(), Some(HsmError::SdAlreadyInitialized));
