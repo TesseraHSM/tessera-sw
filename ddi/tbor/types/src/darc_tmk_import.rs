@@ -57,8 +57,8 @@ pub struct TborDarcTmkImportReq {
     #[tbor(align = 4)]
     pub masked_kex_key: [u8; MASKED_KEX_KEY_LEN],
 
-    /// Unified [`PartPolicy`] whose `pota_spki_thumbprint` anchors
-    /// `remote_cert_chain`.  Encoded as its 584-byte little-endian image.
+    /// Unified partition policy whose `pota_spki_thumbprint` anchors
+    /// `remote_cert_chain`. Encoded as deterministic CBOR, at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 

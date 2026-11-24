@@ -14,7 +14,7 @@ The actual unmasked receiver key must match the envelope's recipient.
 Direct signature, transfer kind, source PID thumbprint, recipient thumbprint,
 and **target SD policy hash** are checked before HPKE decapsulation.
 
-**SATA sender authorization is removed.** `sender_pid_pub_key` is the
+**SATA does not authorize the sender.** `sender_pid_pub_key` is the
 DER SubjectPublicKeyInfo of the operation signer. The field is
 length-delimited; the current profile accepts only canonical uncompressed
 P-384 SPKI (120 bytes, `id-ecPublicKey` with the `secp384r1` named curve).
@@ -31,6 +31,21 @@ are ignored, but the embedded signature is **still mandatory**. This mode
 checks signature integrity and transfer bindings, **not trusted SA identity**.
 The SA's local policy may differ from the SD; its signed envelope must
 nevertheless bind the transferred SD policy.
+
+## BKS3 compromise and restore authorization
+
+A leaked plaintext BKS3 can enable restoration in signature-only mode when
+the caller also has the matching `prev_sd_mk_backup`, an active CO session,
+a usable recipient sealing key, and an eligible partition with the bound
+policy and compatible manufacturer/owner seed lineage. The caller can seal
+that BKS3 to the recipient and sign the envelope with a caller-selected key;
+the matching SDMK backup still authenticates. BKS3 alone does not reveal SDMK
+off-device or bypass the session, policy, key, lineage, or one-shot checks.
+
+Set `require_trusted_sa_key` when restoration must require a
+SAPOTA-authorized source PID. Knowing BKS3 does not forge that PID's
+signature. This is not replay prevention: a previously valid signed
+transfer can still be accepted when all restore checks pass.
 
 ## Request fields, in wire order
 
