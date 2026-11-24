@@ -117,7 +117,6 @@ test_with_tracing = { path = "crates/test_with_tracing" }
 test_with_tracing_macro = { path = "crates/test_with_tracing/test_with_tracing_macro" }
 tsra_api = { path = "api/lib" }
 tsra_api_native = { path = "api/native" }
-tsra_api_tests = { path = "api/tests" }
 tsra_api_tests_macro = { path = "api/tests/macro" }
 tsra_cred_encrypt = { path = "crates/cred_encrypt" }
 tsra_crypto = { path = "crates/crypto" }
@@ -126,7 +125,6 @@ tsra_ddi_interface = { path = "ddi/interface" }
 tsra_ddi_mbor_codec = { path = "ddi/mbor/codec" }
 tsra_ddi_mbor_derive = { path = "ddi/mbor/derive" }
 tsra_ddi_mbor_test_helpers = { path = "ddi/mbor/test_helpers" }
-tsra_ddi_mbor_test_hooks = { path = "api/ddi/mbor/test_hooks" }
 tsra_ddi_mbor_types = { features = [
   "array",
   "post_decode",
@@ -165,20 +163,16 @@ tsra_fw_ddi_tbor_types = { path = "fw/core/ddi/tbor/types" }
 
 # Firmware crates — crypto
 tsra_fw_core_crypto_aead_envelope = { path = "fw/core/crypto/aead-envelope" }
-tsra_fw_core_crypto_aes_cbc_pad = { path = "fw/core/crypto/aes-cbc-pad" }
 tsra_fw_core_crypto_cose_key = { path = "fw/core/crypto/cose-key" }
-tsra_fw_core_crypto_gcm_buf = { path = "fw/core/crypto/gcm-buf" }
 tsra_fw_core_crypto_hpke = { path = "fw/core/crypto/hpke" }
 tsra_fw_core_crypto_key_derive = { path = "fw/core/crypto/key-derive" }
 tsra_fw_core_crypto_key_masking = { path = "fw/core/crypto/key-masking" }
 tsra_fw_core_crypto_key_report = { path = "fw/core/crypto/key-report" }
 tsra_fw_core_crypto_x509_builder = { path = "fw/core/crypto/x509-builder" }
-tsra_fw_core_crypto_x509_builder_gen = { path = "fw/core/crypto/x509-builder/gen" }
 tsra_fw_core_crypto_x509_chain = { path = "fw/core/crypto/x509-chain" }
 tsra_fw_core_evidence = { path = "fw/core/evidence" }
 
 # Firmware crates — common
-tsra_crypto_x509_builder_gen = { path = "crates/crypto/x509_builder/gen" }
 tsra_fw_hsm_bulk = { path = "fw/plat/crates/bulk" }
 tsra_fw_hsm_byte_order = { path = "fw/core/byte-order" }
 tsra_fw_hsm_core = { path = "fw/core/lib" }
