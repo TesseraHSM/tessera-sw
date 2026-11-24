@@ -4,7 +4,9 @@
 use core::task::Context;
 
 use embassy_sync::waitqueue::WakerRegistration;
+use tsra_fw_uno_reg_soc::io_gsram::UPKA_TICKET_CMD_COUNT;
 
+use crate::executor::EngineExecutor;
 use crate::EngineId;
 use crate::EngineState;
 use crate::QueueSlotState;
@@ -25,6 +27,14 @@ pub(crate) struct EngineSlot {
 
     /// Indicates whether the engine should produce a completion wake-up.
     pub(crate) completion_armed: bool,
+
+    /// A post-operation wipe is running; its completion releases the
+    /// engine (see `UpkaEngine::release_after_wipe`).
+    pub(crate) wiping: bool,
+
+    /// Ticket of the staged command running on this engine (see
+    /// [`UpkaState::submit_staged`]).
+    pub(crate) ticket: Option<u8>,
 }
 
 impl EngineSlot {
@@ -32,6 +42,8 @@ impl EngineSlot {
         self.status = 0;
         self.state = EngineState::Idle;
         self.completion_armed = false;
+        self.wiping = false;
+        self.ticket = None;
     }
 
     pub(crate) fn mark_in_use(&mut self, awaiting_completion: bool) {
@@ -40,6 +52,7 @@ impl EngineSlot {
         };
         self.completion_armed = awaiting_completion;
         self.status = 0;
+        self.wiping = false;
     }
 
     pub(crate) fn take_completion_status(&mut self) -> Option<u8> {
@@ -113,6 +126,10 @@ pub(crate) struct QueueSlot {
 
     /// Explicit lifecycle state for this queue slot.
     pub(crate) state: QueueSlotState,
+
+    /// Ticket of the staged command waiting here, when the slot is
+    /// pre-staged.
+    pub(crate) ticket: u8,
 }
 
 impl QueueSlot {
@@ -184,6 +201,62 @@ impl QueueSlot {
     }
 }
 
+/// Staged commands one driver tracks at once (see
+/// [`UpkaState::submit_staged`]). A caller holds its ticket from submission
+/// until it collects the result, so this covers every task that can run a
+/// PKA command at once (one per IO slot, plus the admin and boot paths)
+/// with room to spare. Each has a descriptor slot in GSRAM.
+pub(crate) const TICKETS: usize = 64;
+
+const _: () = assert!(TICKETS == UPKA_TICKET_CMD_COUNT as usize);
+
+/// One PKA command: its opcode, result operand and argument operands.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StagedCmd {
+    pub(crate) opcode: u32,
+    pub(crate) result: u32,
+    pub(crate) arg1: u32,
+    pub(crate) arg2: u32,
+    pub(crate) arg3: u32,
+}
+
+impl StagedCmd {
+    /// Write this command to ticket `t`'s descriptor slot.
+    #[inline(always)]
+    fn write_to_ticket(self, t: u8) {
+        EngineExecutor::write_ticket_command(
+            t,
+            self.opcode,
+            self.result,
+            self.arg1,
+            self.arg2,
+            self.arg3,
+        );
+    }
+}
+
+/// Where a staged command is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TicketState {
+    Free,
+    /// Waiting for an engine at this queue slot.
+    Queued(u8),
+    /// Running on an engine.
+    Running,
+    /// Finished with this engine status, which its caller has yet to take.
+    Done(u8),
+    /// Running, but its caller has gone: freed when the command finishes.
+    Abandoned,
+}
+
+/// A staged command's state and its caller's waker. The command itself is
+/// in the ticket's GSRAM descriptor slot (see
+/// [`EngineExecutor::write_ticket_command`]).
+pub(crate) struct Ticket {
+    pub(crate) waker: WakerRegistration,
+    pub(crate) state: TicketState,
+}
+
 /// Shared mutable state for the async PKA engine pool.
 pub(crate) struct UpkaState<const DEPTH: usize, const ENGINES: usize> {
     /// Bitmask of currently free engines.
@@ -203,6 +276,12 @@ pub(crate) struct UpkaState<const DEPTH: usize, const ENGINES: usize> {
 
     /// Monotonic tail index of the waiter queue.
     pub(crate) queue_tail: u8,
+
+    /// Staged commands, by ticket.
+    pub(crate) tickets: [Ticket; TICKETS],
+
+    /// Bitmask of free tickets.
+    pub(crate) ticket_free: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +377,17 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
             if self.queue_slots[idx].is_unassigned_waiter() {
                 let pre_staged = self.queue_slots[idx].pre_staged();
                 self.free_mask &= !(1u16 << id);
+                if pre_staged {
+                    // A staged command: start it here, without waking its
+                    // caller, which waits for the command's completion.
+                    let t = self.queue_slots[idx].ticket;
+                    self.clear_queue_entry(idx as u8);
+                    self.start_ticket(id, t);
+                    return Some(QueueDispatchAction {
+                        queue_slot: idx as u8,
+                        pre_staged,
+                    });
+                }
                 self.engine_slots[id as usize].mark_in_use(pre_staged);
                 self.queue_slots[idx].assign_engine(id);
                 self.queue_slots[idx].waker.wake();
@@ -310,5 +400,115 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         }
 
         None
+    }
+
+    /// Run `cmd` on any engine: start it now if one is free and nothing is
+    /// queued ahead of it, else queue it to start, in order, on an engine
+    /// as it is released (see
+    /// [`release_engine_and_dispatch`](Self::release_engine_and_dispatch)).
+    /// Either way its descriptor is written to the ticket's slot first, so
+    /// that a release starts it with one command-register write. Its
+    /// completion wipes the engine at once (see
+    /// [`finish_staged`](Self::finish_staged)).
+    ///
+    /// Returns the command's ticket, or `None` if no ticket or queue slot
+    /// is free.
+    pub(crate) fn submit_staged(&mut self, cmd: StagedCmd) -> Option<u8> {
+        if self.ticket_free == 0 {
+            return None;
+        }
+        let t = self.ticket_free.trailing_zeros() as u8;
+        let engine = if self.has_any_waiters() {
+            None
+        } else {
+            self.try_claim_free_engine(false)
+        };
+        match engine {
+            Some(id) => {
+                self.ticket_free &= !(1u64 << t);
+                cmd.write_to_ticket(t);
+                self.start_ticket(id, t);
+            }
+            None => {
+                let q = self.reserve_queue_slot(true)?;
+                self.ticket_free &= !(1u64 << t);
+                cmd.write_to_ticket(t);
+                self.tickets[t as usize].state = TicketState::Queued(q);
+                self.queue_slots[q as usize].ticket = t;
+            }
+        }
+        Some(t)
+    }
+
+    /// Start ticket `t`'s command, already in its descriptor slot, on engine
+    /// `id`, which the caller holds.
+    fn start_ticket(&mut self, id: u8, t: u8) {
+        self.tickets[t as usize].state = TicketState::Running;
+        let slot = &mut self.engine_slots[id as usize];
+        slot.arm_completion_wait();
+        slot.ticket = Some(t);
+        EngineExecutor::submit_ticket_command(id, t);
+    }
+
+    /// Engine `id` finished ticket `t`'s command with `status`: start wiping
+    /// the engine, whose completion releases it, then hand the status to the
+    /// ticket, waking its caller. The wipe goes first: the engine idles until
+    /// it starts, and the wake is not free.
+    pub(crate) fn finish_staged(&mut self, id: u8, t: u8, status: u8) {
+        let slot = &mut self.engine_slots[id as usize];
+        slot.ticket = None;
+        slot.arm_completion_wait();
+        slot.wiping = true;
+        EngineExecutor::submit_wipe(id);
+        let ticket = &mut self.tickets[t as usize];
+        if ticket.state == TicketState::Abandoned {
+            ticket.state = TicketState::Free;
+            self.ticket_free |= 1u64 << t;
+        } else {
+            ticket.state = TicketState::Done(status);
+            ticket.waker.wake();
+        }
+    }
+
+    /// Ticket `t`'s status, freeing the ticket, once its command has
+    /// finished; until then registers the caller's waker.
+    pub(crate) fn take_staged(&mut self, t: u8, cx: &Context<'_>) -> Option<u8> {
+        let ticket = &mut self.tickets[t as usize];
+        if let TicketState::Done(status) = ticket.state {
+            ticket.state = TicketState::Free;
+            self.ticket_free |= 1u64 << t;
+            Some(status)
+        } else {
+            ticket.waker.register(cx.waker());
+            None
+        }
+    }
+
+    /// Give up ticket `t`, whose caller has gone. A queued command is
+    /// dropped; a running one is left to finish (it is freed then), and the
+    /// engine running it is returned so the caller can wait for the engine
+    /// to stop using its buffers.
+    pub(crate) fn abandon_staged(&mut self, t: u8) -> Option<u8> {
+        match self.tickets[t as usize].state {
+            TicketState::Queued(q) => {
+                self.clear_queue_entry(q);
+                self.tickets[t as usize].state = TicketState::Free;
+                self.ticket_free |= 1u64 << t;
+                None
+            }
+            TicketState::Running => {
+                self.tickets[t as usize].state = TicketState::Abandoned;
+                self.engine_slots
+                    .iter()
+                    .position(|e| e.ticket == Some(t))
+                    .map(|id| id as u8)
+            }
+            TicketState::Done(_) => {
+                self.tickets[t as usize].state = TicketState::Free;
+                self.ticket_free |= 1u64 << t;
+                None
+            }
+            TicketState::Free | TicketState::Abandoned => None,
+        }
     }
 }

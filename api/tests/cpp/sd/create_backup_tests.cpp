@@ -127,10 +127,16 @@ class tsra_sd_create_backup_test : public ::testing::Test
     // the returned handle must be closed by the caller.
     static tsra_handle open_sd_session(tsra_handle part_handle)
     {
+        TestRootPin root(part_handle);
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(
+            part_handle,
+            &root.buffer,
+            &psk,
+            TSRA_SESSION_SUITE_ECDH_P384,
+            &sess_handle
+        );
         if (err != TSRA_STATUS_SUCCESS || sess_handle == 0)
         {
             ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;
@@ -145,6 +151,10 @@ class tsra_sd_create_backup_test : public ::testing::Test
 // wire lengths.
 TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -213,6 +223,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 // cannot reach because it calls the session method directly.
 TEST_F(tsra_sd_create_backup_test, create_backup_empty_evidence_ffi)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -275,6 +289,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_empty_evidence_ffi)
 // firmware with `SD_ALREADY_INITIALIZED`.
 TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -332,6 +350,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
 // session resolves and before the domain is created.
 TEST_F(tsra_sd_create_backup_test, create_backup_null_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -361,6 +383,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_null_params)
 // created.
 TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)

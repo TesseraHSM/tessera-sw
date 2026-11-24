@@ -37,6 +37,7 @@ impl From<TborSdRestoreLocalBackupResp> for HsmSdRestoreResult {
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `pok_local_backup` - The device-local partition-owner-key backup to
 ///   restore, exactly [`MASKED_SD_LEN`] bytes.
@@ -50,9 +51,11 @@ impl From<TborSdRestoreLocalBackupResp> for HsmSdRestoreResult {
 /// from the round-trip.
 pub(crate) fn sd_restore_local_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     pok_local_backup: &[u8],
     sd_mk_backup: &[u8],
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmSdRestoreResult> {
     // The wire fields are `Vec`, but the firmware requires exactly these
     // lengths; enforce them via fixed-size array conversion.
@@ -71,8 +74,12 @@ pub(crate) fn sd_restore_local_backup_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
-    dev.exec_op_tbor(&req, None, &mut cookie)
-        .map(HsmSdRestoreResult::from)
-        .map_err(HsmError::from)
+    // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
+    // cookie explicitly since this call also runs outside
+    // `with_session_cookie`'s scope.
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(api_rev, &req, None, cookie)
+            .map(HsmSdRestoreResult::from)
+            .map_err(HsmError::from)
+    })
 }

@@ -53,7 +53,7 @@ with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 4-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the fixed-length `masked_tmk` and the variable-length
 `wrapped_key`.
 
@@ -61,11 +61,12 @@ carrying the fixed-length `masked_tmk` and the variable-length
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (`KeyScope`) | Output scope masking the recovered key. Restricted to `Ephemeral` (`0b010`) / `Local` (`0b011`). |
-| — | `key_usage` | `u64` (`KeyUsage` bitfield) | Requested key-usage permissions; intersected on-device with the `COSE_Key`'s `key_ops`. |
-| — | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
-| — | `wrapped_key` | `buffer` (≤ 512 B) | The AES-KWP-wrapped EC2 `COSE_Key`. |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `scope` | `u8` (`KeyScope`) | Output scope masking the recovered key. Restricted to `Ephemeral` (`0b010`) / `Local` (`0b011`). |
+| 20 | `key_usage` | `u64` (`KeyUsage` bitfield) | Requested key-usage permissions; intersected on-device with the `COSE_Key`'s `key_ops`. |
+| 24 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 28 | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
+| 32 | `wrapped_key` | `buffer` (≤ 512 B) | The AES-KWP-wrapped EC2 `COSE_Key`. |
 
 ### Data section
 
@@ -74,16 +75,17 @@ Carries the 164-byte `masked_tmk` followed by the variable-length
 
 ## Response
 
-Wire layout: 8-byte header, the TOC entries, then the data section
+Wire layout: 12-byte header, the TOC entries, then the data section
 carrying the masked key and the public key.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `key_kind` | `u8` | The recovered key's vault-kind discriminant (`Ecc{256,384,521}Private`). |
-| — | `masked_key` | `buffer` (≤ 200 B) | The recovered EC private key, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(vault scalar) ‖ tag(16)`. |
-| — | `pub_key` | `buffer` (≤ 136 B) | The recovered key's wire public key (`x ‖ y`, wire little-endian, P-521 padded). |
+| 12 | `key_kind` | `u8` | The recovered key's vault-kind discriminant (`Ecc{256,384,521}Private`). |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (≤ 200 B) | The recovered EC private key, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(vault scalar) ‖ tag(16)`. |
+| 24 | `pub_key` | `buffer` (≤ 136 B) | The recovered key's wire public key (`x ‖ y`, device byte order; P-521 word-padded on little-endian devices). |
 
 ### Data section
 

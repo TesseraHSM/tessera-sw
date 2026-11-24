@@ -12,14 +12,22 @@
 //! Requires `ENGINE_SO` (the engine `.so`) and `MASKED_KEYGEN` (the helper that
 //! stages the blob), set by `xtask integration-tests` / the engine matrix. The
 //! blob is staged out-of-process, sharing the keymat set up here so it unmasks.
+//!
+//! Run with `cargo nextest`, as the engine matrix does: a dynamic engine binds
+//! at most once per process, so each test needs its own process, which also
+//! gives it its own auto-started simulator and keymat. A plain `cargo test`
+//! fails every test after the first at `LOAD`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used)]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_TEST_ARGS`.
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
 
+use ddi_sock_server as _;
 use openssl::ec::EcGroup;
 use openssl::ec::EcKey;
 use openssl::encrypt::Encrypter;
@@ -39,6 +47,19 @@ use tsra_ossl_engine_sys as ffi;
 /// the masked-blob buffer size, and the hint in `output_file` mode.
 const MASKED_KEY_MAX_BUFFER: usize = 8192;
 const FILE_OUTPUT_SIZE_HINT: usize = 1;
+
+/// The AES-GCM tag size (core `cipher_method::GCM_TAG_LEN`).
+const GCM_TAG_LEN: usize = 16;
+
+/// The AES-XTS tweak size (core `cipher_method::XTS_TWEAK_LEN`).
+const XTS_TWEAK_LEN: usize = 16;
+
+/// The longest AES-XTS data unit with an HSM key (core
+/// `cipher_method::XTS_MAX_DATA_UNIT`).
+const XTS_MAX_DATA_UNIT: usize = 8192;
+
+/// OpenSSL's success return.
+const OSSL_OK: std::ffi::c_int = 1;
 
 /// Write owner-only (0600) key material.
 fn write_secret(path: &std::path::Path, data: &[u8]) {
@@ -93,6 +114,9 @@ fn setup_keymat() -> PathBuf {
         // SAFETY: single-threaded test setup before any HSM/engine call.
         unsafe { std::env::set_var(k, v) };
     };
+    // Credentials the simulated HSM is provisioned with by the test suite.
+    set("TSRA_CREDENTIALS_ID", "01".repeat(16));
+    set("TSRA_CREDENTIALS_PIN", "02".repeat(16));
     set("TSRA_RESILIENCY_ENABLED", "1".into());
     set("TSRA_RESILIENCY_STORAGE_DIR", res.display().to_string());
     set("TSRA_OBK_SOURCE", "caller".into());
@@ -1020,8 +1044,10 @@ fn capi_rsa_decrypt(pkey: *mut ffi::EVP_PKEY, ct: &[u8], oaep: bool) -> Option<V
 
 /// RSA decrypt over the real C ABI: import a software RSA key with
 /// `keyEncipherment` usage (writing the masked blob), load it back through
-/// `ENGINE_load_private_key`, and decrypt software-encrypted OAEP and PKCS#1
-/// v1.5 ciphertexts with it on the HSM. A tampered OAEP ciphertext must fail.
+/// `ENGINE_load_private_key`, and decrypt a software-encrypted OAEP ciphertext
+/// with it on the HSM. A tampered OAEP ciphertext must fail. PKCS#1 v1.5
+/// decryption is refused with the same error for a valid and a tampered
+/// ciphertext.
 #[test]
 #[serial]
 #[allow(unsafe_code)]
@@ -1061,17 +1087,32 @@ fn decrypt_rsa_key_via_engine_capi() {
     assert_eq!(unsafe { ffi::EVP_PKEY_set1_engine(raw, e) }, 1);
 
     let msg = b"engine rsa decryption over the capi path";
-    for oaep in [true, false] {
-        let ct = sw_rsa_encrypt(&sw, msg, oaep);
-        let pt = capi_rsa_decrypt(raw, &ct, oaep).expect("HSM decrypt failed");
-        assert_eq!(pt, msg, "decrypted plaintext mismatch (oaep={oaep})");
-    }
+    let ct = sw_rsa_encrypt(&sw, msg, true);
+    let pt = capi_rsa_decrypt(raw, &ct, true).expect("HSM decrypt failed");
+    assert_eq!(pt, msg, "decrypted plaintext mismatch");
     let mut bad = sw_rsa_encrypt(&sw, msg, true);
     bad[0] ^= 0xff;
     assert!(
         capi_rsa_decrypt(raw, &bad, true).is_none(),
         "tampered ciphertext unexpectedly decrypted"
     );
+
+    let pkcs1 = sw_rsa_encrypt(&sw, msg, false);
+    let mut pkcs1_bad = pkcs1.clone();
+    pkcs1_bad[0] ^= 0xff;
+    for ct in [&pkcs1, &pkcs1_bad] {
+        // Drop errors left by the tampered OAEP decrypt above.
+        drop(openssl::error::ErrorStack::get());
+        assert!(
+            capi_rsa_decrypt(raw, ct, false).is_none(),
+            "PKCS#1 v1.5 decryption must be refused"
+        );
+        let err = openssl::error::ErrorStack::get().to_string();
+        assert!(
+            err.contains("PKCS#1 v1.5 decryption is not supported"),
+            "unexpected error: {err}"
+        );
+    }
 
     // SAFETY: raw is the owning EVP_PKEY from ENGINE_load_private_key; e is ours.
     unsafe {
@@ -1322,6 +1363,14 @@ fn capi_derive_aes_blob(e: *mut ffi::ENGINE, dir: &std::path::Path, bits: u32) -
     out
 }
 
+/// The bytes of the hex string `s`.
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
 /// `len` bytes of a repeating 0..=255 pattern.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len)
@@ -1544,12 +1593,6 @@ fn aes_cbc_engine_as_default_capi() {
     let dir = setup_keymat();
     let e = open_dynamic_engine(&engine_so);
     let blob = capi_derive_aes_blob(e, &dir, 256);
-    let hex = |s: &str| -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
-    };
     let key = hex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4");
     let iv = hex("000102030405060708090a0b0c0d0e0f");
     let pt = hex(concat!(
@@ -1634,6 +1677,756 @@ fn aes_cbc_engine_as_default_capi() {
         assert_eq!(
             ffi::EVP_CIPHER_CTX_cipher(ctx),
             ffi::EVP_aes_256_cbc(),
+            "unregistering must restore the built-in"
+        );
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fresh random IV, so no two runs share one.
+fn random_gcm_iv() -> Vec<u8> {
+    let mut iv = vec![0u8; Cipher::aes_256_gcm().iv_len().unwrap()];
+    openssl::rand::rand_bytes(&mut iv).unwrap();
+    iv
+}
+
+/// An AES-256-GCM context with `blob` attached and `iv` set; `None` (errors
+/// cleared) if a step fails.
+#[allow(unsafe_code)]
+fn capi_gcm_ctx(
+    e: *mut ffi::ENGINE,
+    blob: &std::path::Path,
+    encrypt: bool,
+    iv: &[u8],
+) -> Option<*mut ffi::EVP_CIPHER_CTX> {
+    let enc = std::ffi::c_int::from(encrypt);
+    let (null, no_engine) = (std::ptr::null(), std::ptr::null_mut());
+    let uri = CString::new(format!("tsra://{};type=aes-gcm", blob.display())).unwrap();
+    let nid = std::ffi::c_int::try_from(ffi::NID_aes_256_gcm).unwrap();
+    // SAFETY: standard EVP cipher calls on a fresh context, freed on failure;
+    // uri is NUL-terminated and iv holds the IV length.
+    unsafe {
+        let cipher = ffi::ENGINE_get_cipher(e, nid);
+        assert!(!cipher.is_null(), "ENGINE_get_cipher(AES-256-GCM)");
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        let ready = ffi::EVP_CipherInit_ex(ctx, cipher, e, null, null, enc) == OSSL_OK
+            && ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast())
+                == OSSL_OK
+            && ffi::EVP_CipherInit_ex(ctx, std::ptr::null(), no_engine, null, iv.as_ptr(), enc)
+                == OSSL_OK;
+        if ready {
+            Some(ctx)
+        } else {
+            ffi::EVP_CIPHER_CTX_free(ctx);
+            ffi::ERR_clear_error();
+            None
+        }
+    }
+}
+
+/// One message with `tag` set first (decryption) or read after (encryption);
+/// `None` (errors cleared) if a step fails.
+#[allow(unsafe_code)]
+fn capi_gcm_run(
+    ctx: *mut ffi::EVP_CIPHER_CTX,
+    aad: &[u8],
+    input: &[u8],
+    tag: Option<&[u8; GCM_TAG_LEN]>,
+) -> Option<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+    let len = |b: &[u8]| std::ffi::c_int::try_from(b.len()).unwrap();
+    let ctrl = |typ: u32| std::ffi::c_int::try_from(typ).unwrap();
+    let tag_len = std::ffi::c_int::try_from(GCM_TAG_LEN).unwrap();
+    let mut tag_buf = tag.copied().unwrap_or_default();
+    let mut out = vec![0u8; input.len()];
+    let (mut n, mut fin) = (0, 0);
+    // SAFETY: update/final/ctrl calls on a live context; out has room for
+    // input and tag_buf holds a whole tag.
+    unsafe {
+        let tag_ptr = tag_buf.as_mut_ptr().cast();
+        let ok = (tag.is_none()
+            || ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl(ffi::EVP_CTRL_AEAD_SET_TAG), tag_len, tag_ptr)
+                == OSSL_OK)
+            && ffi::EVP_CipherUpdate(ctx, std::ptr::null_mut(), &mut n, aad.as_ptr(), len(aad))
+                == OSSL_OK
+            && ffi::EVP_CipherUpdate(ctx, out.as_mut_ptr(), &mut n, input.as_ptr(), len(input))
+                == OSSL_OK
+            && ffi::EVP_CipherFinal_ex(
+                ctx,
+                out[usize::try_from(n).unwrap()..].as_mut_ptr(),
+                &mut fin,
+            ) == OSSL_OK
+            && (tag.is_some()
+                || ffi::EVP_CIPHER_CTX_ctrl(
+                    ctx,
+                    ctrl(ffi::EVP_CTRL_AEAD_GET_TAG),
+                    tag_len,
+                    tag_ptr,
+                ) == OSSL_OK);
+        if !ok {
+            ffi::ERR_clear_error();
+            return None;
+        }
+    }
+    out.truncate(usize::try_from(n + fin).unwrap());
+    Some((out, tag_buf))
+}
+
+/// Encrypts without `tag`, decrypts with it.
+#[allow(unsafe_code)]
+fn capi_aes_gcm(
+    e: *mut ffi::ENGINE,
+    blob: &std::path::Path,
+    iv: &[u8],
+    aad: &[u8],
+    input: &[u8],
+    tag: Option<&[u8; GCM_TAG_LEN]>,
+) -> Option<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+    let ctx = capi_gcm_ctx(e, blob, tag.is_none(), iv)?;
+    let out = capi_gcm_run(ctx, aad, input, tag);
+    // SAFETY: ctx is the live context from capi_gcm_ctx, not used afterwards.
+    unsafe { ffi::EVP_CIPHER_CTX_free(ctx) };
+    out
+}
+
+/// AES-256-GCM with an HSM key over the C ABI; the emu round trip checks
+/// equality with the SDK.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn aes_gcm_via_engine_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let blob = dir.join("aes_gcm.bin");
+    assert!(capi_generate_key(
+        e,
+        &format!("tsra://{};type=aes-gcm", blob.display())
+    ));
+    let iv = random_gcm_iv();
+    // The firmware's limit: AAD padded to 32 bytes, plus data.
+    let max = 16 * 1024;
+
+    for (aad, room) in [(Vec::new(), max), (pattern(20), max - 32)] {
+        assert!(
+            capi_aes_gcm(e, &blob, &iv, &aad, &pattern(room + 1), None).is_none(),
+            "over the limit with {} bytes of AAD",
+            aad.len()
+        );
+        for len in [0, 4113, room] {
+            let msg = pattern(len);
+            let (ct, tag) =
+                capi_aes_gcm(e, &blob, &iv, &aad, &msg, None).expect("HSM AES-GCM encrypt");
+            assert_eq!(ct.len(), msg.len(), "GCM does not pad");
+            let (pt, _) =
+                capi_aes_gcm(e, &blob, &iv, &aad, &ct, Some(&tag)).expect("HSM AES-GCM decrypt");
+            assert_eq!(pt, msg, "{len} bytes, {} bytes of AAD", aad.len());
+            let mut bad_tag = tag;
+            bad_tag[0] ^= 1;
+            assert!(
+                capi_aes_gcm(e, &blob, &iv, &aad, &ct, Some(&bad_tag)).is_none(),
+                "a changed tag must fail"
+            );
+        }
+    }
+
+    let msg = pattern(40);
+    let (ct, _) = capi_aes_gcm(e, &blob, &iv, &[], &msg, None).expect("HSM AES-GCM encrypt");
+    let mut out = vec![0u8; msg.len()];
+    let mut n = 0;
+    let ivlen = std::ffi::c_int::try_from(ffi::EVP_CTRL_AEAD_SET_IVLEN).unwrap();
+    let (half, rest) = (
+        msg.len() / 2,
+        std::ffi::c_int::try_from(msg.len() / 2).unwrap(),
+    );
+    // SAFETY: standard EVP calls on live contexts from capi_gcm_ctx, freed
+    // below; out has room for the whole message.
+    unsafe {
+        let ctx = capi_gcm_ctx(e, &blob, false, &iv).unwrap();
+        let len = std::ffi::c_int::try_from(ct.len()).unwrap();
+        assert_eq!(
+            ffi::EVP_DecryptUpdate(ctx, out.as_mut_ptr(), &mut n, ct.as_ptr(), len),
+            0,
+            "the tag must come before the ciphertext"
+        );
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        let ctx = capi_gcm_ctx(e, &blob, true, &iv).unwrap();
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_ctrl(ctx, ivlen, 16, std::ptr::null_mut()),
+            0,
+            "a 16-byte IV length"
+        );
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(ctx, out.as_mut_ptr(), &mut n, msg.as_ptr(), rest),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(
+                ctx,
+                out[half..].as_mut_ptr(),
+                &mut n,
+                msg[half..].as_ptr(),
+                rest
+            ),
+            0,
+            "a second data update"
+        );
+        assert_eq!(
+            ffi::EVP_EncryptFinal_ex(ctx, out.as_mut_ptr(), &mut n),
+            0,
+            "the failed message's final"
+        );
+        ffi::EVP_CIPHER_CTX_free(ctx);
+        ffi::ERR_clear_error();
+    }
+
+    let plain = dir.join("aes_plain.bin");
+    assert!(capi_generate_key(
+        e,
+        &format!("tsra://{};type=aes", plain.display())
+    ));
+    assert!(
+        capi_gcm_ctx(e, &plain, true, &iv).is_none(),
+        "a plain AES key must not attach to AES-256-GCM"
+    );
+
+    // SAFETY: e is the initialized ENGINE from open_dynamic_engine.
+    unsafe {
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The engine as the default AES-256-GCM: raw keys still match GCM test case
+/// 16 (McGrew and Viega).
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn aes_gcm_engine_as_default_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let blob = dir.join("aes_gcm.bin");
+    assert!(capi_generate_key(
+        e,
+        &format!("tsra://{};type=aes-gcm", blob.display())
+    ));
+    let key = hex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+    let iv = hex("cafebabefacedbaddecaf888");
+    let aad = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+    let pt = hex(concat!(
+        "d9313225f88406e5a55909c5aff5269a",
+        "86a7a9531534f7da2e4c303d8a318a72",
+        "1c3c0c95956809532fcf0e2449a6b525",
+        "b16aedf5aa0de657ba637b39"
+    ));
+    let ct = hex(concat!(
+        "522dc1f099567d07f47f37a32a84427d",
+        "643a8cdcbfe5c0c97598a2bd2555d1aa",
+        "8cb08e48590dbb3da7b08b1056828838",
+        "c5f61e6393ba7a0abcc9f662"
+    ));
+    let tag: [u8; GCM_TAG_LEN] = hex("76fc6ece0f4e1768cddf8853bb2d551b").try_into().unwrap();
+    let nid = std::ffi::c_int::try_from(ffi::NID_aes_256_gcm).unwrap();
+    let ctrl = |typ: u32| std::ffi::c_int::try_from(typ).unwrap();
+    let tag_len = std::ffi::c_int::try_from(GCM_TAG_LEN).unwrap();
+    let aad_len = std::ffi::c_int::try_from(aad.len()).unwrap();
+    let (null, no_engine) = (std::ptr::null(), std::ptr::null_mut());
+    // SAFETY: standard ENGINE/EVP calls; every context is freed and the
+    // default registration is undone before the engine is released.
+    unsafe {
+        assert_eq!(ffi::ENGINE_set_default_ciphers(e), 1);
+        let ours = ffi::ENGINE_get_cipher(e, nid);
+
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        let builtin = ffi::EVP_aes_256_gcm();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr()),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_cipher(ctx),
+            ours,
+            "the default engine must serve AES-256-GCM"
+        );
+        assert_eq!(
+            capi_gcm_run(ctx, &aad, &pt, None),
+            Some((ct.clone(), tag)),
+            "GCM test case 16"
+        );
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr()),
+            1
+        );
+        let mut n = 0;
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(ctx, std::ptr::null_mut(), &mut n, aad.as_ptr(), aad_len),
+            1
+        );
+        assert_eq!(
+            capi_cipher_run(ctx, &pt, 16),
+            Some(ct.clone()),
+            "16-byte updates"
+        );
+        let mut got = [0u8; GCM_TAG_LEN];
+        let got_ptr = got.as_mut_ptr().cast();
+        let get_tag = ctrl(ffi::EVP_CTRL_AEAD_GET_TAG);
+        assert_eq!(ffi::EVP_CIPHER_CTX_ctrl(ctx, get_tag, tag_len, got_ptr), 1);
+        assert_eq!(got, tag);
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_DecryptInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr()),
+            1
+        );
+        let mut out = vec![0u8; ct.len()];
+        let mut fin = 0;
+        let ct_len = std::ffi::c_int::try_from(ct.len()).unwrap();
+        let mut expected = tag;
+        let set_tag = ctrl(ffi::EVP_CTRL_AEAD_SET_TAG);
+        assert_eq!(
+            ffi::EVP_DecryptUpdate(ctx, std::ptr::null_mut(), &mut n, aad.as_ptr(), aad_len),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_DecryptUpdate(ctx, out.as_mut_ptr(), &mut n, ct.as_ptr(), ct_len),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_ctrl(ctx, set_tag, tag_len, expected.as_mut_ptr().cast()),
+            1,
+            "the tag after the ciphertext"
+        );
+        assert_eq!(ffi::EVP_DecryptFinal_ex(ctx, out.as_mut_ptr(), &mut fin), 1);
+        assert_eq!(out, pt);
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        let uri = CString::new(format!("tsra://{};type=aes-gcm", blob.display())).unwrap();
+        let hsm_iv = random_gcm_iv();
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, null, null),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast()),
+            1,
+            "an HSM key must attach to a default-engine context"
+        );
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, std::ptr::null(), no_engine, null, hsm_iv.as_ptr()),
+            1
+        );
+        let (hsm_ct, hsm_tag) = capi_gcm_run(ctx, &aad, &pt, None).expect("HSM AES-GCM encrypt");
+        ffi::EVP_CIPHER_CTX_free(ctx);
+        assert_eq!(
+            capi_aes_gcm(e, &blob, &hsm_iv, &aad, &hsm_ct, Some(&hsm_tag)).map(|(p, _)| p),
+            Some(pt),
+            "HSM AES-GCM decrypt"
+        );
+
+        ffi::ENGINE_unregister_ciphers(e);
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr()),
+            1
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_cipher(ctx),
+            builtin,
+            "unregistering must restore the built-in"
+        );
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An AES-256-XTS context with `blob` attached and no tweak set yet; `None`
+/// (errors cleared) if a step fails.
+#[allow(unsafe_code)]
+fn capi_xts_ctx(
+    e: *mut ffi::ENGINE,
+    blob: &std::path::Path,
+    encrypt: bool,
+) -> Option<*mut ffi::EVP_CIPHER_CTX> {
+    let enc = std::ffi::c_int::from(encrypt);
+    let null = std::ptr::null();
+    let uri = CString::new(format!("tsra://{};type=aes-xts", blob.display())).unwrap();
+    let nid = std::ffi::c_int::try_from(ffi::NID_aes_256_xts).unwrap();
+    // SAFETY: standard EVP cipher calls on a fresh context, freed on failure;
+    // uri is NUL-terminated.
+    unsafe {
+        let cipher = ffi::ENGINE_get_cipher(e, nid);
+        assert!(!cipher.is_null(), "ENGINE_get_cipher(AES-256-XTS)");
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        let ready = ffi::EVP_CipherInit_ex(ctx, cipher, e, null, null, enc) == OSSL_OK
+            && ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast())
+                == OSSL_OK;
+        if ready {
+            Some(ctx)
+        } else {
+            ffi::EVP_CIPHER_CTX_free(ctx);
+            ffi::ERR_clear_error();
+            None
+        }
+    }
+}
+
+/// One data unit on `ctx`: an init setting `tweak` (keeping the direction),
+/// then one update that must write all of it. `None` (errors cleared) if a
+/// step fails.
+#[allow(unsafe_code)]
+fn capi_xts_unit(
+    ctx: *mut ffi::EVP_CIPHER_CTX,
+    tweak: &[u8; XTS_TWEAK_LEN],
+    input: &[u8],
+) -> Option<Vec<u8>> {
+    // EVP_CipherInit_ex's "keep the direction".
+    let keep = -1;
+    let len = std::ffi::c_int::try_from(input.len()).unwrap();
+    let (null, no_engine) = (std::ptr::null(), std::ptr::null_mut());
+    let mut out = vec![0u8; input.len()];
+    let mut n = 0;
+    // SAFETY: init/update calls on a live context; tweak holds the IV length
+    // and out has room for input.
+    let ok = unsafe {
+        ffi::EVP_CipherInit_ex(ctx, std::ptr::null(), no_engine, null, tweak.as_ptr(), keep)
+            == OSSL_OK
+            && ffi::EVP_CipherUpdate(ctx, out.as_mut_ptr(), &mut n, input.as_ptr(), len) == OSSL_OK
+            && n == len
+    };
+    if !ok {
+        // SAFETY: clears this thread's error queue.
+        unsafe { ffi::ERR_clear_error() };
+        return None;
+    }
+    Some(out)
+}
+
+/// One data unit under `tweak` on a fresh context with `blob` attached; `None`
+/// if a step fails.
+#[allow(unsafe_code)]
+fn capi_aes_xts(
+    e: *mut ffi::ENGINE,
+    blob: &std::path::Path,
+    encrypt: bool,
+    tweak: &[u8; XTS_TWEAK_LEN],
+    input: &[u8],
+) -> Option<Vec<u8>> {
+    let ctx = capi_xts_ctx(e, blob, encrypt)?;
+    let out = capi_xts_unit(ctx, tweak, input);
+    // SAFETY: ctx is the live context from capi_xts_ctx, not used afterwards.
+    unsafe { ffi::EVP_CIPHER_CTX_free(ctx) };
+    out
+}
+
+/// AES-256-XTS with an HSM key over the C ABI, one data unit per update under
+/// the tweak set for it; the emu round trip checks equality with the SDK.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn aes_xts_via_engine_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let blob = dir.join("aes_xts.bin");
+    assert!(capi_generate_key(
+        e,
+        &format!("tsra://{};type=aes-xts", blob.display())
+    ));
+    // The AES block: the XTS cipher itself reports a block size of 1.
+    let block = Cipher::aes_128_cbc().block_size();
+    let tweak: [u8; XTS_TWEAK_LEN] = pattern(XTS_TWEAK_LEN).try_into().unwrap();
+    let mut other_tweak = tweak;
+    other_tweak[XTS_TWEAK_LEN - 1] ^= 1;
+
+    for len in [block, 512, 4096, XTS_MAX_DATA_UNIT] {
+        let msg = pattern(len);
+        let ct = capi_aes_xts(e, &blob, true, &tweak, &msg).expect("HSM AES-XTS encrypt");
+        assert_ne!(ct, msg, "{len} bytes");
+        assert_eq!(
+            capi_aes_xts(e, &blob, false, &tweak, &ct),
+            Some(msg.clone()),
+            "{len} bytes"
+        );
+        let wrong = capi_aes_xts(e, &blob, false, &other_tweak, &ct).expect("HSM AES-XTS decrypt");
+        assert_ne!(wrong, msg, "{len} bytes under another tweak");
+    }
+    for len in [1, block - 1, block + 1, XTS_MAX_DATA_UNIT + block] {
+        assert!(
+            capi_aes_xts(e, &blob, true, &tweak, &pattern(len)).is_none(),
+            "a {len}-byte data unit must be refused"
+        );
+    }
+    for encrypt in [true, false] {
+        assert!(
+            capi_aes_xts(e, &blob, encrypt, &[u8::MAX; XTS_TWEAK_LEN], &pattern(512)).is_none(),
+            "the all-ones tweak must be refused"
+        );
+    }
+
+    let msg = pattern(512);
+    let mut out = vec![0u8; msg.len()];
+    let mut n = 0;
+    let len = std::ffi::c_int::try_from(msg.len()).unwrap();
+    // SAFETY: standard EVP calls on live contexts from capi_xts_ctx, freed
+    // below; out has room for the whole message.
+    unsafe {
+        let ctx = capi_xts_ctx(e, &blob, true).unwrap();
+        assert_ne!(
+            ffi::EVP_EncryptUpdate(ctx, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK,
+            "a data unit before the tweak is set"
+        );
+        ffi::ERR_clear_error();
+        let first = capi_xts_unit(ctx, &tweak, &msg).expect("first data unit");
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(ctx, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK
+        );
+        assert_eq!(out, first, "the tweak stays as set");
+        let second = capi_xts_unit(ctx, &other_tweak, &msg).expect("second data unit");
+        assert_ne!(second, first, "a new tweak changes the output");
+        assert_eq!(
+            ffi::EVP_EncryptFinal_ex(ctx, out.as_mut_ptr(), &mut n),
+            OSSL_OK
+        );
+        assert_eq!(n, 0, "the final writes nothing");
+        ffi::EVP_CIPHER_CTX_free(ctx);
+    }
+
+    for ty in ["aes", "aes-gcm"] {
+        let other = dir.join(format!("xts_other_{ty}.bin"));
+        assert!(capi_generate_key(
+            e,
+            &format!("tsra://{};type={ty}", other.display())
+        ));
+        assert!(
+            capi_xts_ctx(e, &other, true).is_none(),
+            "an {ty} key must not attach to AES-256-XTS"
+        );
+    }
+
+    // SAFETY: e is the initialized ENGINE from open_dynamic_engine.
+    unsafe {
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The first two blocks of IEEE Std 1619 XTS-AES-256 vector 10 (whole blocks
+/// are enciphered independently): key, tweak, plaintext and ciphertext.
+fn xts_vector_10() -> (Vec<u8>, [u8; XTS_TWEAK_LEN], Vec<u8>, Vec<u8>) {
+    let key = hex(concat!(
+        "2718281828459045235360287471352662497757247093699959574966967627",
+        "3141592653589793238462643383279502884197169399375105820974944592"
+    ));
+    let tweak = hex("ff000000000000000000000000000000").try_into().unwrap();
+    let ct = hex("1c3b3a102f770386e4836c99e370cf9bea00803f5e482357a4ae12d414a3e63b");
+    (key, tweak, pattern(32), ct)
+}
+
+/// How an AES-256-XTS context holds its key over the C ABI: none yet, in
+/// place, across a copy, after another attach and after a raw key.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn aes_xts_context_handling_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let blob = dir.join("aes_xts.bin");
+    let uri = CString::new(format!("tsra://{};type=aes-xts", blob.display())).unwrap();
+    assert!(capi_generate_key(e, uri.to_str().unwrap()));
+    let tweak: [u8; XTS_TWEAK_LEN] = pattern(XTS_TWEAK_LEN).try_into().unwrap();
+    let msg = pattern(512);
+    let len = std::ffi::c_int::try_from(msg.len()).unwrap();
+    let ct = capi_aes_xts(e, &blob, true, &tweak, &msg).expect("HSM AES-XTS encrypt");
+    let nid = std::ffi::c_int::try_from(ffi::NID_aes_256_xts).unwrap();
+    // EVP_CipherInit_ex's "keep the direction".
+    let keep = -1;
+    let (null, no_cipher, no_engine) = (std::ptr::null(), std::ptr::null(), std::ptr::null_mut());
+    let mut out = vec![0u8; msg.len()];
+    let mut n = 0;
+    // SAFETY: standard EVP calls on live contexts, each freed below; the
+    // buffers hold len bytes and uri is NUL-terminated.
+    unsafe {
+        // No key: an IV alone does not make the context usable.
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        let cipher = ffi::ENGINE_get_cipher(e, nid);
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, cipher, e, null, tweak.as_ptr()),
+            OSSL_OK
+        );
+        assert_ne!(
+            ffi::EVP_EncryptUpdate(ctx, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK,
+            "a data unit without a key"
+        );
+        ffi::ERR_clear_error();
+        ffi::EVP_CIPHER_CTX_free(ctx);
+
+        // In place, both directions.
+        let mut buf = msg.clone();
+        for (encrypt, expected) in [(true, &ct), (false, &msg)] {
+            let ctx = capi_xts_ctx(e, &blob, encrypt).unwrap();
+            assert_eq!(
+                ffi::EVP_CipherInit_ex(ctx, no_cipher, no_engine, null, tweak.as_ptr(), keep),
+                OSSL_OK
+            );
+            let data = buf.as_mut_ptr();
+            assert_eq!(
+                ffi::EVP_CipherUpdate(ctx, data, &mut n, data.cast_const(), len),
+                OSSL_OK
+            );
+            assert_eq!(&buf, expected, "in place, encrypt {encrypt}");
+            ffi::EVP_CIPHER_CTX_free(ctx);
+        }
+
+        // A copy carries the key and the tweak.
+        let ctx = capi_xts_ctx(e, &blob, true).unwrap();
+        assert_eq!(capi_xts_unit(ctx, &tweak, &msg).as_ref(), Some(&ct));
+        let dup = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(ffi::EVP_CIPHER_CTX_copy(dup, ctx), OSSL_OK);
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(dup, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK
+        );
+        assert_eq!(out, ct, "the copy's data unit");
+
+        // Another attach clears the tweak, on its own context only.
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast()),
+            OSSL_OK
+        );
+        assert_ne!(
+            ffi::EVP_EncryptUpdate(ctx, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK,
+            "a data unit before the tweak is set again"
+        );
+        ffi::ERR_clear_error();
+        assert_eq!(capi_xts_unit(ctx, &tweak, &msg).as_ref(), Some(&ct));
+        ffi::EVP_CIPHER_CTX_free(ctx);
+        out.fill(0);
+        assert_eq!(
+            ffi::EVP_EncryptUpdate(dup, out.as_mut_ptr(), &mut n, msg.as_ptr(), len),
+            OSSL_OK
+        );
+        assert_eq!(out, ct, "the copy outlives its source");
+
+        // A raw key replaces the HSM key.
+        let (raw_key, raw_tweak, raw_pt, raw_ct) = xts_vector_10();
+        assert_eq!(
+            ffi::EVP_CipherInit_ex(
+                dup,
+                no_cipher,
+                no_engine,
+                raw_key.as_ptr(),
+                raw_tweak.as_ptr(),
+                keep
+            ),
+            OSSL_OK
+        );
+        assert_eq!(
+            capi_cipher_run(dup, &raw_pt, raw_pt.len()),
+            Some(raw_ct),
+            "IEEE 1619 vector 10 after an HSM key"
+        );
+        ffi::EVP_CIPHER_CTX_free(dup);
+
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The engine as the default AES-256-XTS: raw keys still match IEEE Std 1619
+/// XTS-AES-256 vector 10, and an HSM key attaches to such a context as well.
+/// Unregistering restores the built-in.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn aes_xts_engine_as_default_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let blob = dir.join("aes_xts.bin");
+    assert!(capi_generate_key(
+        e,
+        &format!("tsra://{};type=aes-xts", blob.display())
+    ));
+    let (key, iv, pt, ct) = xts_vector_10();
+    let nid = std::ffi::c_int::try_from(ffi::NID_aes_256_xts).unwrap();
+    let (null, no_engine) = (std::ptr::null(), std::ptr::null_mut());
+    // SAFETY: standard ENGINE/EVP calls; every context is freed and the
+    // default registration is undone before the engine is released.
+    unsafe {
+        assert_eq!(ffi::ENGINE_set_default_ciphers(e), OSSL_OK);
+        let ours = ffi::ENGINE_get_cipher(e, nid);
+
+        let builtin = ffi::EVP_aes_256_xts();
+        for (encrypt, input, expected) in [(true, &pt, &ct), (false, &ct, &pt)] {
+            let ctx = ffi::EVP_CIPHER_CTX_new();
+            let enc = std::ffi::c_int::from(encrypt);
+            assert_eq!(
+                ffi::EVP_CipherInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr(), enc),
+                OSSL_OK
+            );
+            assert_eq!(
+                ffi::EVP_CIPHER_CTX_cipher(ctx),
+                ours,
+                "the default engine must serve AES-256-XTS"
+            );
+            assert_eq!(
+                capi_cipher_run(ctx, input, input.len()).as_ref(),
+                Some(expected),
+                "IEEE 1619 vector 10, encrypt {encrypt}"
+            );
+            ffi::EVP_CIPHER_CTX_free(ctx);
+        }
+
+        let uri = CString::new(format!("tsra://{};type=aes-xts", blob.display())).unwrap();
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, null, null),
+            OSSL_OK
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast()),
+            OSSL_OK,
+            "an HSM key must attach to a default-engine context"
+        );
+        let hsm_ct = capi_xts_unit(ctx, &iv, &pt).expect("HSM AES-XTS encrypt");
+        ffi::EVP_CIPHER_CTX_free(ctx);
+        assert_ne!(hsm_ct, ct, "the HSM key is not the raw key");
+        assert_eq!(
+            capi_aes_xts(e, &blob, false, &iv, &hsm_ct),
+            Some(pt),
+            "HSM AES-XTS decrypt"
+        );
+
+        ffi::ENGINE_unregister_ciphers(e);
+        let ctx = ffi::EVP_CIPHER_CTX_new();
+        assert_eq!(
+            ffi::EVP_EncryptInit_ex(ctx, builtin, no_engine, key.as_ptr(), iv.as_ptr()),
+            OSSL_OK
+        );
+        assert_eq!(
+            ffi::EVP_CIPHER_CTX_cipher(ctx),
+            builtin,
             "unregistering must restore the built-in"
         );
         ffi::EVP_CIPHER_CTX_free(ctx);

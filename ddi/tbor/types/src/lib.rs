@@ -93,7 +93,10 @@ mod darc_tmk_gen;
 mod darc_tmk_import;
 mod ecc_generate_key;
 mod ecc_sign;
+mod ecc_verify;
 mod ecdh_derive;
+mod ecdsa_sign;
+mod ecdsa_verify;
 mod evidence;
 mod get_cert;
 mod get_cert_chain_info;
@@ -115,7 +118,10 @@ mod part_info;
 mod part_init;
 mod policy;
 mod psk_change;
+mod rsa_encrypt_decrypt;
 mod rsa_mod_exp;
+mod rsa_sign;
+mod rsa_verify;
 mod sd_create_peer_backup;
 mod sd_create_remote_backup;
 mod sd_reseal_remote_backup;
@@ -145,7 +151,10 @@ pub use darc_tmk_gen::*;
 pub use darc_tmk_import::*;
 pub use ecc_generate_key::*;
 pub use ecc_sign::*;
+pub use ecc_verify::*;
 pub use ecdh_derive::*;
+pub use ecdsa_sign::*;
+pub use ecdsa_verify::*;
 pub use evidence::*;
 pub use get_cert::*;
 pub use get_cert_chain_info::*;
@@ -167,7 +176,10 @@ pub use part_info::*;
 pub use part_init::*;
 pub use policy::*;
 pub use psk_change::*;
+pub use rsa_encrypt_decrypt::*;
 pub use rsa_mod_exp::*;
+pub use rsa_sign::*;
+pub use rsa_verify::*;
 pub use sd_create_peer_backup::*;
 pub use sd_create_remote_backup::*;
 pub use sd_reseal_remote_backup::*;
@@ -193,7 +205,7 @@ pub trait TborOpReq: Sized {
     const OPCODE: u8;
 
     /// Owned, decoded response type.
-    type OpResp: TborResp;
+    type OpResp: TborResp + TborRespSessionId;
 
     /// Session identifier for this request, if any. The default
     /// `None` matches the current bootstrap commands which are all
@@ -213,7 +225,11 @@ pub trait TborOpReq: Sized {
 
     /// Encode this request into `buf` and return the encoded message
     /// slice. The slice borrows from `buf` for the duration of the call.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError>;
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError>;
 }
 
 /// Trait implemented by owned TBOR response value types.
@@ -227,4 +243,29 @@ pub trait TborResp: Sized {
 
     /// Decode an owned response value from the wire buffer.
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError>;
+
+    /// Validate the echoed revision before decoding the response body.
+    fn decode_response_for_api_rev(
+        buf: &[u8],
+        api_rev: (u16, u16),
+    ) -> Result<Self, codec::DecodeError> {
+        codec::ResponseView::parse(buf)?.require_api_rev(api_rev)?;
+        Self::decode_response(buf)
+    }
+}
+
+/// Session id carried in a TBOR response body, if any.
+///
+/// Mirrors `tsra_ddi_mbor_types::DdiRespSessionId` for the TBOR
+/// transport: lets `DdiDev::exec_op_tbor` record a response's own
+/// session id (e.g. `SessionOpenInit`'s FW-assigned id) the same way
+/// `exec_op_mbor` does for `OpenSession`/`ReopenSession`.
+///
+/// The `#[tbor(response)]` derive implements this for every response
+/// struct automatically: a response with a `#[tbor(session_id)]`-tagged
+/// field returns that field's value; every other response (the vast
+/// majority, which carry no session id of their own) returns `None`.
+pub trait TborRespSessionId {
+    /// The session id this response reports, if any.
+    fn resp_session_id(&self) -> Option<u16>;
 }

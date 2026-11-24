@@ -4,8 +4,8 @@
 //! Error types for TBOR encoding and decoding.
 //!
 //! Variants carry a payload only when a consumer needs it:
-//! * [`DecodeError::UnsupportedVersion`] preserves the offending version byte
-//!   so error messages can identify it.
+//! * [`DecodeError::ApiRevisionMismatch`] preserves the expected and actual
+//!   API revisions.
 //! * [`DecodeError::FwError`] carries the firmware status code so callers
 //!   (`tsra_ddi_interface`) can surface the exact FW error.
 //!
@@ -17,8 +17,11 @@
 pub enum DecodeError {
     /// Message buffer shorter than the minimum required size.
     BufferTooShort,
-    /// Protocol version not supported.
-    UnsupportedVersion(u8),
+    /// Message API revision differs from the request's selected revision.
+    ApiRevisionMismatch {
+        expected: (u16, u16),
+        actual: (u16, u16),
+    },
     /// Declared TOC count implies more bytes than the buffer holds.
     MessageTruncated,
     /// A TOC entry's offset+length exceeds the data section.
@@ -29,6 +32,9 @@ pub enum DecodeError {
     UnexpectedTocType,
     /// `None` TOC entry has non-zero reserved payload bits.
     InvalidNonePayload,
+    /// An aligned field does not start on its boundary from the start of
+    /// the message.
+    MisalignedField,
     /// Response carries a non-zero firmware status code.
     FwError(u32),
 }
@@ -50,18 +56,25 @@ pub enum EncodeError {
     DataTooLarge,
     /// Data section total exceeds the 13-bit offset range.
     DataOffsetOverflow,
+    /// Requested alignment is zero or unsupported by the operand layout.
+    InvalidAlignment,
 }
 
 impl core::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BufferTooShort => f.write_str("buffer too short"),
-            Self::UnsupportedVersion(v) => write!(f, "unsupported protocol version: 0x{:02X}", v),
+            Self::ApiRevisionMismatch { expected, actual } => write!(
+                f,
+                "API revision mismatch: expected {}.{}, received {}.{}",
+                expected.0, expected.1, actual.0, actual.1,
+            ),
             Self::MessageTruncated => f.write_str("message truncated"),
             Self::OffsetLengthOutOfBounds => f.write_str("TOC offset+length out of bounds"),
             Self::InvalidFixedLength => f.write_str("TOC entry has invalid length"),
             Self::UnexpectedTocType => f.write_str("unexpected TOC entry type"),
             Self::InvalidNonePayload => f.write_str("none entry has non-zero reserved bits"),
+            Self::MisalignedField => f.write_str("aligned field is misaligned"),
             Self::FwError(status) => write!(f, "firmware error: 0x{:08X}", status),
         }
     }
@@ -75,6 +88,7 @@ impl core::fmt::Display for EncodeError {
             Self::MissingTocEntries => f.write_str("missing required TOC entries"),
             Self::DataTooLarge => f.write_str("data too large (max 8191 bytes)"),
             Self::DataOffsetOverflow => f.write_str("data offset overflow (max 8191)"),
+            Self::InvalidAlignment => f.write_str("invalid alignment"),
         }
     }
 }

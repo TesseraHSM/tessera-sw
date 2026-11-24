@@ -22,7 +22,7 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 
 use crate::utils::partition_ex_helpers::PARTITION_LOCK;
 use crate::utils::sd_provision::CaKey;
-use crate::utils::sd_provision::build_receiver_evidence;
+use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::build_receiver_evidence_trusted;
 use crate::utils::sd_provision::finalized_backing_session_trusted;
 use crate::utils::sd_provision::masked_key_and_report;
@@ -35,6 +35,9 @@ use crate::utils::sd_provision::provision_backing_trusted;
 /// non-zero backups of the pinned wire lengths.
 #[test]
 fn sd_create_remote_backup_trusted_sa_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let sapota_key = CaKey::generate();
@@ -74,6 +77,9 @@ fn sd_create_remote_backup_trusted_sa_roundtrip() {
 /// equal the recovered `RcvrPub`.
 #[test]
 fn sd_create_remote_backup_trusted_sa_rcvr_pub_mismatch_is_rejected() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let sapota_key = CaKey::generate();
@@ -105,6 +111,9 @@ fn sd_create_remote_backup_trusted_sa_rcvr_pub_mismatch_is_rejected() {
 /// device-local backups of the pinned wire lengths.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let sapota = CaKey::generate();
@@ -161,6 +170,9 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
 /// suffice.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let sapota = CaKey::generate();
@@ -191,6 +203,9 @@ fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
 /// enforced. Sequential incarnations also exercise receiver-key persistence.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let sapota = CaKey::generate();
@@ -222,7 +237,7 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
             source.sd_create_remote_backup(&policy, &source_key, chain, &evidence)
         })
         .expect("seal the SD backup to the external authority");
-    let source_evidence = build_receiver_evidence(&source_pid, &source_pub, &sata, &source_report);
+    let source_evidence = build_evidence(&source_pid, &source_pub, &sata, &pota, &source_report);
     drop(source);
 
     let (authority, _, _, _) = provision_backing(

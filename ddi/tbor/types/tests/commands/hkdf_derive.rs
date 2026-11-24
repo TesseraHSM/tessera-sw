@@ -19,10 +19,12 @@
 //! tests, which share the same `pal.hkdf_extract` / `pal.hkdf_expand`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::*;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::CU;
 use crate::commands::common::SCOPE_EPHEMERAL;
 use crate::commands::common::SCOPE_LOCAL;
@@ -688,7 +690,7 @@ fn hkdf_derive_allowed_on_cu_session() {
 fn hkdf_derive_default_cu_psk_rejected() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session");
 
     ctx.expect_fw_reject(
@@ -869,5 +871,27 @@ fn hkdf_derive_cu_invalid_request_preserves_session() {
         masked.len(),
         MASK_OVERHEAD + 32,
         "CU session must remain usable after invalid HKDF request",
+    );
+}
+
+/// Rejects a misaligned masked secret and one without its padding entry.
+#[test]
+fn hkdf_derive_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborHkdfDeriveReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            hash_algo: HASH_ALGO_SHA384,
+            key_type: KDF_KEY_TYPE_AES256,
+            key_length: 0,
+            masked_secret: ikm,
+            salt: Vec::new(),
+            info: Vec::new(),
+            key_label: Vec::new(),
+        },
     );
 }

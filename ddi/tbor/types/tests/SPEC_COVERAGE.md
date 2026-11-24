@@ -54,7 +54,7 @@ All test names below are relative to the
 | Role gate: CU + Authenticated → `InvalidSessionType` | ✅ | `open_session::open_session_cu_authenticated_rejected_emu` |  |
 | `psk_id` not in `{0, 1}` → `InvalidPskId` | ✅ 🔁 | `open_session::open_session_invalid_psk_id_emu` | Loop over `[2, 0x7F, 0xFF]` |
 | `session_type` byte not in `{0, 1}` → `InvalidSessionType` | ✅ | `open_session::open_session_invalid_session_type_byte_emu` | Bypasses typed enum; ships raw byte `42` |
-| `suite_id` not in `{0x01}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id_emu` | Loop over `[0x00, 0x02, 0xff]` |
+| `suite_id` not in `{0x01}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id` | Loop over `[0x00, 0x02, 0x03, 0xff]`; includes removed suite `0x02` |
 | Default-PSK gate bypass (E3, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_open_init_bypass_emu` |  |
 | Multiple concurrent sessions return distinct session ids | ✅ | `open_session::open_session_multiple_concurrent_emu` |  |
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |
@@ -99,7 +99,11 @@ All test names below are relative to the
 | Happy path (CU); rotation took effect (reopen under rotated bytes succeeds) | ✅ | `psk_change::psk_change_happy_cu_emu` | Shared body via `run_psk_change_happy` |
 | Happy path (CO); rotation took effect | ✅ | `psk_change::psk_change_happy_co_emu` |  |
 | Reopen with old default PSK fails after rotation | ✅ | `psk_change::psk_change_reopen_with_old_psk_fails_emu` | Either host- or FW-side rejection accepted |
-| One-shot per session: second `PskChange` on same session → `InvalidPermissions` | ✅ | `psk_change::psk_change_second_attempt_same_session_fails_emu` |  |
+| Default-authenticated CU remains bootstrap-only after rotation → `DefaultPskChanged` | ✅ | `psk_change::psk_change_second_attempt_same_session_fails` | Includes the winning session |
+| Failed envelope permits a valid rotation retry on the same session | ✅ | `psk_change::psk_change_failed_envelope_then_valid_rotation` | No per-session attempt budget |
+| Every ordinary CU session command is blocked before and after bootstrap rotation | ✅ | `default_psk_gate::cu_bootstrap_blocks_*` | Separate test per opcode; `DefaultPskMustRotate` before rotation, `DefaultPskChanged` after |
+| Seven concurrent CU bootstrap sessions produce one committed rotation | ✅ | `psk_change::psk_change_seven_cu_bootstrap_sessions_have_one_winner` | All old bootstrap sessions, including the winner, remain blocked |
+| Failed completion restores the old CU PSK and permits same-session retry | ✅ (std Uno) | `key_report_credentials::psk_change_failed_completion_restores_default_and_allows_same_session_retry` | Exercises IO undo, not just envelope rejection |
 | Envelope ciphertext bit-flip → `AeadEnvelopeAuthFailed` | ✅ 🔁 | `psk_change::psk_change_envelope_tampered_emu` | Loop over `[ct_flip, aad_flip]` |
 | Envelope AAD bit-flip → `AeadEnvelopeAuthFailed` | ✅ 🔁 | `psk_change::psk_change_envelope_tampered_emu` | Same test, second sub-case |
 | Empty `psk_envelope` → `InvalidArg` | ✅ | `psk_change::psk_change_empty_envelope_emu` |  |
@@ -117,7 +121,7 @@ All test names below are relative to the
 |---|---|---|---|
 | CO session with default PSK → `DefaultPskMustRotate` (dispatcher gate) | ✅ | `part_init::fw_rejects::part_init_reject_default_psk_co` |  |
 | CU session (under rotated PSK) → `InvalidPermissions` (handler role gate) | ✅ | `part_init::fw_rejects::part_init_reject_cu_session` | CU PSK rotated up-front so default-PSK gate doesn't fire first |
-| Rotated CO session with malformed `PartPolicy` (all zeros) → `InvalidArg` (`policy::from_bytes` decode gate) | ✅ | `part_init::fw_rejects::part_init_reject_bad_policy` |  |
+| Rotated CO session with malformed CBOR `part_policy` (all zeros) → `InvalidArg` (`policy::from_bytes` decode gate) | ✅ | `part_init::fw_rejects::part_init_reject_bad_policy` |  |
 | Second `PartInit` after a successful one → `PtaKeyAlreadySet` (one-shot `part_set_pta_key` guard) | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Verified as step 2 of the smoke roundtrip |
 | Concurrent valid `PartInit` requests → exactly one success; every loser gets `PtaKeyAlreadySet`; final state is `Initializing` | ✅ | `part_init::success_path::part_init_multi_threaded_single_winner` | Runs on emulator and hardware using the same active CO session; verifies the winning atomic commit through `PartInfo` |
 
@@ -130,7 +134,8 @@ All test names below are relative to the
 | Returns CBOR-tagged (`0xD2` = COSE_Sign1) PTAReport ≤ `PTA_REPORT_MAX_LEN` | ✅ | `part_init::success_path::part_init_smoke_roundtrip` |  |
 | PTAReport COSE_Sign1 verifies under PID-leaf pubkey (slot-0 cert chain leaf) | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Via `verify_pta_report` helper using `KeyAttester::verify` |
 | PTAReport's embedded COSE_Key `(pk_x, pk_y)` matches CSR SPKI | ✅ | `part_init::success_path::part_init_smoke_roundtrip` | Cross-binds report to CSR pubkey |
-| Cold-start determinism: same `(UDS, MachineSeed, Policy, POTA thumb)` → byte-identical PTA pubkey | ✅ | `part_init::success_path::part_init_determinism` | Uses `ctx.erase()` between runs |
+| Cold-start determinism: same `(UDS, MachineSeed, Policy)` → byte-identical PTA pubkey | ✅ | `part_init::success_path::part_init_determinism` | Uses `ctx.erase()` between runs |
+| Any policy change (POTA/SATA thumbprint, SAPOTA presence) → different PTA pubkey | ✅ | `part_init::success_path::part_init_changed_inputs_are_still_deterministic`, `part_init::sd_config::part_init_sata_thumbprint_changes_pta_key`, `part_init::sd_config::part_init_sapota_presence_changes_pta_key` | Anchor thumbprints live inside the policy document |
 
 ### `mach_seed_envelope` AEAD bindings
 
@@ -141,7 +146,16 @@ All test names below are relative to the
 | Envelope from a different session's `param_key` | ✅ | `part_init::crypto_rejects::part_init_envelope_from_other_session` | Two CO sessions sequentially (close A, open B); CO + Authenticated cannot run concurrent because of `VaultSessionLimitReached` |
 | AAD length ≠ `PART_INIT_MACH_SEED_AAD_LEN` | ✅ | `part_init::crypto_rejects::part_init_wrong_aad_length` | 64-byte AAD; FW length-checks before AAD compare |
 | `mach_seed` plaintext length ≠ `MACH_SEED_LEN` | ✅ 🔁 | `part_init::crypto_rejects::part_init_wrong_mach_seed_length` | Loop over `[MACH_SEED_LEN - 1, MACH_SEED_LEN + 1]`; one rotated-CO session reused across iterations (length check fires before any partition mutation) |
-| Malformed `pota_thumbprint` length | ⚠️ | — | Wire field is fixed-size; FW reaction not exercised |
+
+### `part_policy` CBOR document (deterministic encoding)
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Non-deterministic or schema-violating policy → `InvalidArg` | ✅ 🔁 | `part_init::fw_rejects::part_init_rejects_malformed_cbor_policies` | Table: empty doc, bad version / flags type or range, reserved flag bits, missing required key, unknown key, keys out of order or duplicated, non-shortest heads, indefinite map, trailing bytes, truncation, map-count mismatch, `backup_part_id` / `backup_part_spki_thumbprint` pairing, `info` length 0 / 65, wrong thumbprint / id length or type; valid policy still accepted afterwards |
+| All-`0xFF` and version-0 policies → `InvalidArg` | ✅ | `part_init::fw_rejects::part_init_reject_all_ff_policy`, `part_init::fw_rejects::part_init_reject_zero_policy_version` |  |
+| Policy with every optional field (SAPOTA, backup pair, all flags, 64-byte info, DATA) accepted | ✅ | `part_init::fw_rejects::part_init_accepts_policy_with_all_optional_fields` |  |
+| Minimal policy (required keys only) and 1-byte `info` accepted | ✅ | `part_init::fw_rejects::part_init_accepts_minimal_policy_boundaries` |  |
+| Policy longer than `PART_POLICY_MAX_LEN` → harness `InvalidParameter`; raw request → `TborInvalidFixedLength` | ✅ | `part_init::fw_rejects::part_init_rejects_oversized_policy` | FW codec enforces the schema `max_len` |
 
 ## `PartFinal` (opcode in-session, gated)
 
@@ -171,13 +185,16 @@ full native certificate-chain validation remains M1.5 work.
 The gate (see `fw/core/lib/src/ddi/tbor/mod.rs::dispatch`) rejects
 in-session commands not on the bootstrap allow-list when the calling
 role's partition PSK still matches the compiled-in default.
+CU sessions also retain their authenticated credential: after bootstrap
+rotation, every protected command except close returns `DefaultPskChanged`,
+including another `PskChange`.
 
 | Spec arm | Status | Test | Notes |
 |---|---|---|---|
 | E1: `PskChange` is allow-listed (CO) | ✅ | `default_psk_gate::default_psk_gate_psk_change_bypass_emu` | CU implicitly via `psk_change_happy_cu_emu` |
 | E2: `SessionClose` is allow-listed (both roles) | ✅ | `default_psk_gate::default_psk_gate_session_close_bypass_emu` |  |
 | E3: `SessionOpenInit` is out-of-session (both roles) | ✅ | `default_psk_gate::default_psk_gate_session_open_init_bypass_emu` |  |
-| E4: A non-allow-listed in-session command under default PSK is rejected with `DefaultPskMustRotate` | ✅ | `part_init::fw_rejects::part_init_reject_default_psk_co` | `PartInit` is currently the only such opcode; this row collapses what `default_psk_gate.rs` calls E4 |
+| E4: Every ordinary CU opcode is rejected before and after bootstrap rotation | ✅ | `default_psk_gate::cu_bootstrap_blocks_*` | 40 independently named tests; `DefaultPskMustRotate` before rotation, `DefaultPskChanged` after |
 | E5: `ApiRev` is out-of-session | ✅ | `default_psk_gate::default_psk_gate_api_rev_bypass_emu` |  |
 
 ## Host-side TBOR codec (no FW round-trip required)
@@ -403,6 +420,23 @@ invalid requests, and CU authorization. SHA-1 HMAC is unsupported.
 | Imported HMAC keys with SIGN and VERIFY permissions compute valid MACs | ✅ 🔁 | `hmac::hmac_accepts_key_with_sign_permission` | Tests SHA-256, SHA-384, and SHA-512 using `UnwrapKey` with `KEY_USAGE_SIGN \| KEY_USAGE_VERIFY`; verifies correct MAC tag lengths |
 
 
+## `EccVerify` (opcode in-session, gated)
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Host schema encodes aligned request fields and typed empty response | ✅ | `ecc_verify::tests::ecc_verify_request_encodes_aligned_fields`, `ecc_verify::tests::ecc_verify_empty_response_decodes` | Includes decoding `EccVerifyFailed` through the host response path. |
+| Device-generated signatures verify for all nine curve/SHA-2 pairs | ✅ 🔁 | `ecc_verify::ecc_verify_all_curve_hash_pairs` | P-256/P-384/P-521 with SHA-256/384/512; generated sign-only keys. |
+| Active CO and CU sessions may verify | ✅ | `ecc_verify::ecc_verify_all_curve_hash_pairs`, `ecc_verify::ecc_verify_crypto_user_session` | CO and CU use active sessions and normal dispatcher policy. |
+| Default-PSK session is rejected by the normal in-session gate | ✅ | `malformed_requests::malformed_ecc_verify_is_rejected_by_default_psk_gate` | Uses a raw all-`none` request to reach dispatch without requiring a valid key envelope. |
+| Imported private key verifies an independently generated host signature | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Key imported through `UnwrapKey`; verifies without `EccSign`. |
+| SHA-384 truncation retains the leading P-256 bits and discards trailing bits | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Changing discarded bits still verifies; changing retained bits returns `EccVerifyFailed`. |
+| Invalid signature returns `EccVerifyFailed`; subsequent valid request succeeds | ✅ | `ecc_verify::ecc_verify_invalid_signature_then_recovers` | Exercises ordinary status propagation and session recovery. |
+| Unsupported hash and incorrect packed length are rejected | ✅ | `ecc_verify::ecc_verify_rejects_unsupported_hash_and_input_length` | Wrong length remains within broad schema bounds to reach handler validation. |
+| P-521 nonzero signature and digest padding are rejected | ✅ | `ecc_verify::ecc_verify_host_signature_and_p521_padding` | Uses platform-specific P-521 wire lanes. |
+| Non-ECC key kinds and derive-only ECC keys are rejected | ✅ | `ecc_verify::ecc_verify_rejects_non_ecc_key_kind`, `ecc_verify::ecc_verify_rejects_derive_only_key` | Non-ECC kind is checked before usage permission. |
+| Misaligned/noncanonical masked-key request layout is rejected | ✅ | `ecc_verify::ecc_verify_rejects_bad_masked_key_layout` | Uses existing codec fault wrappers. |
+| Derive-only key is rejected | ✅ | `ecc_verify::ecc_verify_rejects_derive_only_key` | Expects `InvalidPermissions`. |
+
 ## `EccGenerateKey` (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `EccGenerateKey` command. These tests exercise
@@ -525,6 +559,23 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | TOC entry of wrong type yields `TborDecodeError::UnexpectedTocType` | ✅ | `unexpected_toc_type::wrong_toc_entry_type_yields_unexpected_toc_type` | emu |
 | `mach_seed` AAD wire-layout encoder stability | ✅ | `part_init::success_path::mach_seed_aad_layout` | Unit test; pure host-side |
 
+## `RsaModExp` (opcode in-session, gated)
+
+Firmware integration coverage for all four raw RSA exponentiation selectors.
+The host retains padding and signature-block validation; every operation uses
+an authenticated masked RSA private key.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Encrypt matches independent host public exponentiation for every size and key layout | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_encrypt_matches_host_reference_all_sizes_and_key_classes` | RSA-2048/3072/4096; non-CRT and CRT |
+| Verify returns the independent host public-exponentiation result for every size and key layout | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_verify_matches_host_reference_all_sizes_and_key_classes` | Raw recovered block; not signature validation |
+| Device Encrypt then Decrypt recovers an admissible representative | ✅ | `rsa_mod_exp::rsa_mod_exp_encrypt_decrypt_roundtrip` |  |
+| Device Sign then Verify recovers the raw encoded block | ✅ | `rsa_mod_exp::rsa_mod_exp_sign_verify_roundtrip` |  |
+| Public operands `0`, `1`, `2`, `n-2`, `n-1` are accepted; `n`, `n+1`, and maximum are rejected | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_public_representative_boundaries` | Encrypt and Verify; model-aware device byte order |
+| Public-operation usage groups are separated | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_public_operation_permissions_separated` | Encryption group denies Sign/Verify; signing group denies Decrypt/Encrypt |
+| Unknown selectors are rejected | ✅ | `rsa_mod_exp::rsa_mod_exp_unknown_operation_rejected` |  |
+| Existing private Decrypt/Sign behavior, size checks, and key-class failures remain covered | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_sign_roundtrip_2k`, `rsa_mod_exp::rsa_mod_exp_decrypt_roundtrip_2k`, and related size/CRT tests | Existing private representative bounds and in-place results remain unchanged |
+
 ## `HkdfDerive` (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `HkdfDerive` command.
@@ -585,6 +636,7 @@ Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
 | A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts` | No public key |
 | Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material` | 32, 48 and 72 bytes; `InvalidArg` |
 | Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage` | `InvalidPermissions` |
+| A maximum-size blob (6 KiB AES-KWP plaintext) reaches AES-KWP | ✅ | `unwrap_key::unwrap_key_max_size_blob_reaches_kwp` | Intact: `InvalidArg` from key decode; tampered: `RsaUnwrapAesUnwrapFailed` |
 | An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
 
 ## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)
@@ -718,13 +770,34 @@ and `EcdhDerive` do.
 | Masked key is not an ML-DSA key → `InvalidKeyType` | ✅ | `mldsa_sign::mldsa_sign_wrong_key_class_rejected` | Supplies a valid masked ML-KEM-512 key, which also lacks `sign` |
 | Masked key is not an ML-KEM key → `InvalidKeyType` | ✅ | `mlkem_decapsulate::mlkem_decapsulate_wrong_key_class_rejected` | Supplies a valid masked ML-DSA-44 key, which also lacks `derive` |
 
+## `RsaEncryptDecrypt` (opcode in-session)
+
+The command uses a masked RSA private key and mandatory OAEP or PKCS#1 v1.5
+encryption padding. Ciphertexts are modulus-sized device-order operands;
+plaintext and labels are opaque bytes.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Independent PKCS#1 v1.5 encrypt/decrypt interoperability | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_pkcs1_independent_interop_all_sizes_and_layouts` | RSA-2048/3072/4096, CRT and non-CRT; host decrypts device ciphertext and device decrypts host ciphertext |
+| Independent OAEP/SHA-256 interoperability across sizes and layouts | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_oaep_independent_interop_all_sizes_and_layouts` | RSA-2048/3072/4096, CRT and non-CRT; exact maximum plaintext |
+| OAEP SHA-256/384/512, same-hash MGF1, labels, and per-hash maximums | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_oaep_hashes_labels_and_boundaries` | Includes 256-byte label, empty plaintext, label mismatch, and wrong decrypt hash |
+| PKCS#1 v1.5 accepts empty through exact maximum and rejects maximum plus one | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_pkcs1_plaintext_boundaries` | Includes host-generated ciphertext decrypting to empty plaintext |
+| Missing/inapplicable hash, nonempty PKCS#1 label, unknown selectors, malformed padding, and ciphertext widths | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers` | Cryptographic failures are `RsaDecryptFailed`; bad lengths/selectors are `InvalidArg`; valid key succeeds after failure |
+| Signing-only RSA permissions are rejected for both directions | ✅ 🔁 | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_signing_keys_are_not_encryption_keys` | Exact encrypt/decrypt permission required |
+| Non-RSA masked private key is rejected | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_non_rsa_private_keys` | Valid masked ECC key |
+| Tampered masked envelope rejected and original remains usable | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_rejects_invalid_parameters_and_padding_then_recovers` | Expects the existing AEAD authentication status |
+| Default-PSK session is rejected before command execution | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_default_psk_is_gated` | Uses a valid schema-shaped request with a placeholder key |
+| Closed session is rejected | ✅ | `rsa_encrypt_decrypt::rsa_encrypt_decrypt_closed_session_is_rejected` | Session is closed before the request |
+| All-`none` malformed request rejected | ✅ | `malformed_requests::malformed_requests_for_every_command_are_rejected_and_session_survives` | Opcode is included in the global malformed-request matrix |
+| Maximum host/firmware schema request fits in 4096-byte frame | ✅ | `rsa_encrypt_decrypt::maximum_request_fits_transport_frame`; firmware `rsa_encrypt_decrypt::maximum_request_schema_fits_4096_bytes` | Derive-generated maximum size and complete encoded frame are checked |
+| Decryption padding checks are constant-time | ⚠️ | — | No constant-time claim; explicit PKCS#1 v1.5 failures retain padding-oracle considerations |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:
 
 1. **`SessionOpenInit`**: malformed `pk_init` (length / curve) — no negative test.
 2. **`SessionOpenFinish`**: Finish against a pending slot opened for a different role — no test.
-3. **`PartInit` wire fields**: `pota_thumbprint` is fixed-size on the wire so the FW reaction to a malformed value is not exercised; would require host-side encoding bypass.
 
 Indirect coverage (🟡) — these rows assert only `DdiError::DdiError(_)`
 and could be tightened to assert a specific `TborStatus`:

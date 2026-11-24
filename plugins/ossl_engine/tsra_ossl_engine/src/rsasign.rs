@@ -86,8 +86,8 @@ impl RsaSignHandler for TsraRsaSign {
                     .into(),
             ));
         }
-        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData for
-        // the engine's lifetime; this callback runs while the key is live.
+        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData until
+        // the key using it is freed; this callback runs while that key is live.
         let key = unsafe { &*key_ptr };
 
         // The HSM does the raw private-key operation; the SDK builds the PKCS#1
@@ -95,6 +95,11 @@ impl RsaSignHandler for TsraRsaSign {
         let hash = hash_from_nid(md_nid)?;
         let mut algo = HsmRsaSignAlgo::with_pkcs1_padding(hash);
         HsmSigner::sign_vec(&mut algo, key, m).map_err(|e| EngineError::wrap("RSA sign", e))
+    }
+
+    /// Release the freed key's HSM key (see [`crate::rsaload::release_on_free`]).
+    fn finish(rsa: *mut ffi::RSA) {
+        crate::rsaload::release_on_free(rsa);
     }
 }
 
@@ -136,8 +141,8 @@ impl RsaPssSignHandler for TsraRsaPssSign {
                 "no HSM key attached to RSA for PSS signing".into(),
             ));
         }
-        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData for
-        // the engine's lifetime; this callback runs while the key is live.
+        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData until
+        // the key using it is freed; this callback runs while that key is live.
         let key = unsafe { &*key_ptr };
 
         // The SDK builds the EMSA-PSS block (MGF1 = signing digest) over the

@@ -13,12 +13,10 @@ use tsra_ddi_mbor_types::*;
 use crate::common::*;
 
 pub(super) const DIGEST: [u8; 32] = [100; 32];
-const KEY_TAG: u16 = 0x5453;
 
 fn ecc_gen_key_tsra(
     dev: &mut <DdiTest as Ddi>::Dev,
     curve: DdiEccCurve,
-    key_tag: Option<u16>,
     session_id: Option<u16>,
     key_usage: DdiKeyUsage,
 ) -> (u16, DdiDerPublicKey, MborByteArray<3072>) {
@@ -28,7 +26,6 @@ fn ecc_gen_key_tsra(
         session_id,
         Some(DdiApiRev { major: 1, minor: 0 }),
         curve,
-        key_tag,
         key_props,
     )
     .unwrap();
@@ -47,7 +44,6 @@ pub(super) fn generate_ecc_key(
     let (private_key_id, public_key, _) = ecc_gen_key_tsra(
         dev,
         DdiEccCurve::P256,
-        None,
         Some(session_id),
         DdiKeyUsage::SignVerify,
     );
@@ -62,7 +58,6 @@ pub(super) fn create_aes_key(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) -
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes128,
-        Some(KEY_TAG),
         key_properties,
     )
     .unwrap()
@@ -142,9 +137,9 @@ pub(super) fn create_ecdh_secrets(
     };
 
     let (private_key_id1, public_key1, _) =
-        ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::Derive);
+        ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::Derive);
     let (private_key_id2, public_key2, _) =
-        ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::Derive);
+        ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::Derive);
 
     let key_properties = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
     let secret_key_id1 = helper_ecdh_key_exchange(
@@ -153,7 +148,6 @@ pub(super) fn create_ecdh_secrets(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id1,
         MborByteArray::from_slice(&public_key2.der.data()[..public_key2.der.len()]).unwrap(),
-        None,
         secret_key_type,
         key_properties,
     )
@@ -168,7 +162,6 @@ pub(super) fn create_ecdh_secrets(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id2,
         MborByteArray::from_slice(&public_key1.der.data()[..public_key1.der.len()]).unwrap(),
-        None,
         secret_key_type,
         key_properties,
     )
@@ -198,7 +191,6 @@ pub(super) fn create_hmac_key(
         None,
         None,
         key_type,
-        None,
         key_properties,
         key_len,
     )
@@ -258,7 +250,6 @@ pub(super) fn generate_aes_bulk_256_key(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         key_size,
-        None,
         key_properties,
     )
 }

@@ -1,0 +1,1467 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tsra_ddi_sock_proto::ProtoError;
+use tsra_ddi_sock_proto::ResponseFrame;
+
+use super::Connection;
+use super::SocketHsm;
+
+async fn write_response(
+    stream: &mut TcpStream,
+    response: &ResponseFrame,
+) -> Result<(), ProtoError> {
+    let body = response.encode()?;
+    stream.write_u32_le(body.len() as u32).await?;
+    stream.write_all(&body).await?;
+    Ok(())
+}
+
+async fn serve_connection(mut stream: TcpStream, hsm: Arc<SocketHsm>) -> Result<(), String> {
+    let connection = Connection::new(hsm);
+    loop {
+        let Some(request) = super::read_request_with_timeout(&mut stream).await? else {
+            return Ok(());
+        };
+        let response =
+            match tokio::time::timeout(super::CONNECTION_READ_TIMEOUT, connection.execute(request))
+                .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => return Ok(()),
+            };
+        tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            write_response(&mut stream, &response),
+        )
+        .await
+        .map_err(|_elapsed| "failed to write DDI response: timed out".to_string())?
+        .map_err(|error| format!("failed to write DDI response: {error}"))?;
+    }
+}
+
+fn spawn_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    hsm: &Arc<SocketHsm>,
+) -> Result<(), String> {
+    stream
+        .set_nodelay(true)
+        .map_err(|error| format!("failed to configure TCP connection: {error}"))?;
+    let hsm = Arc::clone(hsm);
+    tokio::spawn(async move {
+        if let Err(error) = serve_connection(stream, hsm).await {
+            tracing::warn!(%peer, %error, "TCP client failed");
+        }
+    });
+    Ok(())
+}
+
+async fn run_server(listener: TcpListener, hsm: Arc<SocketHsm>) -> Result<(), String> {
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("failed to accept TCP connection: {error}"))?;
+        spawn_connection(stream, peer, &hsm)?;
+    }
+}
+
+fn bind(address: &str) -> Result<(std::net::TcpListener, SocketAddr), String> {
+    let listener = std::net::TcpListener::bind(address)
+        .map_err(|error| format!("failed to bind TCP listener at {address}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TCP listener: {error}"))?;
+    let bound_address = listener
+        .local_addr()
+        .map_err(|error| format!("failed to query TCP listener address: {error}"))?;
+    Ok((listener, bound_address))
+}
+
+fn serve(
+    listener: std::net::TcpListener,
+    bound_address: SocketAddr,
+    on_listening: impl FnOnce(&super::Listening),
+    first: Option<(std::net::TcpStream, SocketAddr)>,
+) -> Result<(), String> {
+    super::run_with_hsm(|hsm| async move {
+        let listener = TcpListener::from_std(listener)
+            .map_err(|error| format!("failed to register TCP listener: {error}"))?;
+        super::init_partition(&hsm).await?;
+        on_listening(&super::Listening::new(format!("tcp://{bound_address}")));
+        if let Some((stream, peer)) = first {
+            let stream = TcpStream::from_std(stream)
+                .map_err(|error| format!("failed to register TCP connection: {error}"))?;
+            spawn_connection(stream, peer, &hsm)?;
+        }
+        run_server(listener, hsm).await
+    })
+}
+
+/// Blocks until the first client connects, so the HSM is only booted for
+/// processes that use it. Background HSM crypto racing the process's exit
+/// (OpenSSL's library destructors) would otherwise crash short-lived
+/// processes that never talk to the HSM.
+fn accept_first(
+    listener: &std::net::TcpListener,
+) -> Result<(std::net::TcpStream, SocketAddr), String> {
+    listener
+        .set_nonblocking(false)
+        .map_err(|error| format!("failed to configure TCP listener: {error}"))?;
+    let (stream, peer) = listener
+        .accept()
+        .map_err(|error| format!("failed to accept TCP connection: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TCP listener: {error}"))?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TCP connection: {error}"))?;
+    Ok((stream, peer))
+}
+
+pub(super) fn run(
+    address: &str,
+    on_listening: impl FnOnce(&super::Listening),
+) -> Result<(), String> {
+    let (listener, bound_address) = bind(address)?;
+    if !bound_address.ip().is_loopback() {
+        tracing::warn!(
+            %bound_address,
+            "This unauthenticated test server is listening outside loopback"
+        );
+    }
+    serve(listener, bound_address, on_listening, None)
+}
+
+/// Start the server in this process on an ephemeral loopback TCP port.
+///
+/// The listener is bound before returning, so clients may connect
+/// immediately. The HSM is booted and its partition set up when the first
+/// client connects; clients are served once that completes. The server
+/// runs on a background thread for the rest of the process lifetime. Call at
+/// most once per process: the emulated HSM is process-global.
+pub fn spawn_loopback() -> Result<SocketAddr, String> {
+    spawn_loopback_with(|_| {})
+}
+
+/// [`spawn_loopback`], calling `on_bound` with the bound address before the
+/// server thread is spawned.
+pub(crate) fn spawn_loopback_with(on_bound: impl FnOnce(SocketAddr)) -> Result<SocketAddr, String> {
+    let (listener, bound_address) = bind("127.0.0.1:0")?;
+    on_bound(bound_address);
+    std::thread::Builder::new()
+        .name("tsra-ddi-sock-server".into())
+        .spawn(move || {
+            let result = accept_first(&listener)
+                .and_then(|first| serve(listener, bound_address, |_| {}, Some(first)));
+            if let Err(error) = result {
+                tracing::error!(%error, "TSRA DDI socket server failed");
+            }
+        })
+        .map_err(|error| format!("failed to start server thread: {error}"))?;
+    Ok(bound_address)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use tsra_crypto::EccPublicKey;
+    use tsra_crypto::ImportableKey;
+    use tsra_ddi_interface::Ddi;
+    use tsra_ddi_interface::DdiAesGcmParams;
+    use tsra_ddi_interface::DdiDev;
+    use tsra_ddi_interface::DdiDeviceModel;
+    use tsra_ddi_interface::DdiError;
+    use tsra_ddi_interface::DdiResult;
+    use tsra_ddi_interface::DdiTransportSeal;
+    use tsra_ddi_interface::TborOobItem;
+    use tsra_ddi_mbor_types::*;
+    use tsra_ddi_sock::DdiSock;
+    use tsra_ddi_sock::DdiSockDev;
+    use tsra_ddi_sock_proto::OobItem;
+    use tsra_ddi_sock_proto::Request;
+    use tsra_ddi_sock_proto::RequestFrame;
+    use tsra_ddi_tbor_types::SESSION_SEED_LEN;
+    use tsra_ddi_tbor_types::TborApiRevReq;
+    use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
+    use tsra_ddi_tbor_types::TborGetCertReq;
+    use tsra_ddi_tbor_types::TborOpReq;
+    use tsra_ddi_tbor_types::TborPskChangeReq;
+    use tsra_ddi_tbor_types::TborResp;
+    use tsra_ddi_tbor_types::TborSessionCloseReq;
+    use tsra_ddi_tbor_types::TborSessionCloseResp;
+    use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
+    use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
+    use tsra_ddi_tbor_types::TborSessionOpenInitReq;
+    use tsra_ddi_tbor_types::TborStatus;
+    use tsra_session_ex_crypto::*;
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    use super::*;
+
+    fn tbor<R: TborOpReq>(device: &DdiSockDev, request: &R) -> R::OpResp {
+        device
+            .exec_op_tbor(revision(device), request, None, &mut None)
+            .expect("TBOR command")
+    }
+
+    /// A handshake in progress (after `SessionOpenInit`) and, once
+    /// [`Session::finish`] succeeds, an open session.
+    struct Session {
+        session_id: u16,
+        psk_id: u8,
+        /// The `SessionOpenFinish` request; tests may tamper with it.
+        finish: TborSessionOpenFinishReq,
+        keys: SessionHandshake,
+        transport: Arc<SessionTransport>,
+        duo: bool,
+    }
+
+    impl Session {
+        /// Seal `request` under the session transport, execute it, and
+        /// open and decode the response.
+        fn exec<R: TborOpReq>(&self, device: &DdiSockDev, request: &R) -> DdiResult<R::OpResp> {
+            self.exec_oob(device, request, &mut [])
+        }
+
+        fn exec_oob<R: TborOpReq>(
+            &self,
+            device: &DdiSockDev,
+            request: &R,
+            oob_items: &mut [TborOobItem<'_>],
+        ) -> DdiResult<R::OpResp> {
+            if self.duo {
+                return secure(device, &self.transport, self.session_id, request, oob_items);
+            }
+            let (frame, context) = self
+                .transport
+                .seal_frame(
+                    self.session_id,
+                    request.session_ctrl(),
+                    &encode(request, (1, 1)),
+                )
+                .expect("seal frame");
+            let sealed = SealedFrameReq {
+                session_ctrl: request.session_ctrl(),
+                session_id: self.session_id,
+                frame,
+            };
+            let SealedFrameResp(mut response) =
+                device.exec_op_tbor_oob((1, 1), &sealed, oob_items, &mut None)?;
+            self.open(context, &mut response);
+            Ok(R::OpResp::decode_response_for_api_rev(&response, (1, 1))?)
+        }
+
+        /// Open a sealed Uno response frame in place.
+        fn open(&self, context: SessionTransportRequest, frame: &mut Vec<u8>) {
+            self.transport
+                .open_frame(context, frame)
+                .expect("open frame");
+        }
+
+        /// The harness view of the open session, for its envelope helpers.
+        fn handshake(&self, bmk_session: Vec<u8>) -> tsra_ddi_tbor_test_harness::SessionHandshake {
+            tsra_ddi_tbor_test_harness::SessionHandshake {
+                session_id: self.session_id,
+                psk_id: self.psk_id,
+                suite: SessionSuite::EcdhP384,
+                param_key: self.keys.param_key().expect("parameter key"),
+                bmk_session,
+                seed: [0x5A; SESSION_SEED_LEN].into(),
+            }
+        }
+
+        fn try_finish(&self, device: &DdiSockDev) -> DdiResult<TborSessionOpenFinishResp> {
+            self.exec(device, &self.finish)
+        }
+
+        fn finish(&self, device: &DdiSockDev) -> TborSessionOpenFinishResp {
+            self.try_finish(device).expect("SessionOpenFinish")
+        }
+
+        fn close(&self, device: &DdiSockDev) {
+            self.exec(
+                device,
+                &TborSessionCloseReq {
+                    session_id: self.session_id,
+                },
+            )
+            .expect("SessionClose");
+        }
+    }
+
+    fn revision(device: &DdiSockDev) -> (u16, u16) {
+        match device.discover().expect("discover").model {
+            DdiDeviceModel::Uno => (1, 1),
+            DdiDeviceModel::Duo => (2, 0),
+        }
+    }
+
+    fn encode<R: TborOpReq>(request: &R, api_rev: (u16, u16)) -> Vec<u8> {
+        let mut buf = vec![0u8; 4096];
+        let len = request
+            .encode_request(&mut buf, api_rev)
+            .expect("encode")
+            .len();
+        buf.truncate(len);
+        buf
+    }
+
+    /// Run `SessionOpenInit` with the role's default PSK and prepare the
+    /// matching `SessionOpenFinish`.
+    fn open_init(device: &DdiSockDev, psk_id: u8) -> Session {
+        let duo = device.discover().expect("discover").model == DdiDeviceModel::Duo;
+        let chain = tbor(device, &TborGetCertChainInfoReq::new(0));
+        let leaf = tbor(device, &TborGetCertReq::new(0, chain.num_certs - 1));
+        let cert = X509Certificate::from_der(&leaf.certificate).expect("partition certificate");
+        let pk_hsm =
+            EccPublicKey::from_bytes(&cert.get_public_key_der().expect("partition public key"))
+                .expect("decode partition public key");
+        let initiator = SessionInitiator::generate(SessionSuite::EcdhP384, revision(device))
+            .expect("ephemeral");
+        let request = TborSessionOpenInitReq {
+            psk_id,
+            pk_init: initiator.pk_init().to_vec(),
+            ..Default::default()
+        };
+        let response = tbor(device, &request);
+        let keys = initiator
+            .complete(
+                request.psk_id,
+                request.session_type,
+                &pk_hsm,
+                default_psk(request.psk_id).expect("default PSK"),
+                &response.enc,
+                &response.sig,
+            )
+            .expect("verify handshake");
+        let param_key = keys.param_key().expect("parameter key");
+        let finish = TborSessionOpenFinishReq {
+            bmk_session: Vec::new(),
+            session_id: response.session_id,
+            mac_fin: keys.fin().expect("host confirmation"),
+            seed_envelope: seal_seed_envelope(&param_key, &[0x5A; SESSION_SEED_LEN])
+                .expect("seed envelope")
+                .try_into()
+                .expect("seed envelope length"),
+        };
+        Session {
+            session_id: response.session_id,
+            psk_id,
+            finish,
+            transport: Arc::new(keys.transport().expect("transport keys")),
+            keys,
+            duo,
+        }
+    }
+
+    fn with_session_clients(test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static) {
+        let _guard = crate::test_partition_lock();
+        with_clients(crate::test_hsm(), test);
+    }
+
+    fn with_clients(
+        hsm: Arc<SocketHsm>,
+        test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static,
+    ) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let serving = tokio::spawn(run_server(listener, Arc::clone(&hsm)));
+            let client_hsm = Arc::clone(&hsm);
+            let clients = tokio::task::spawn_blocking(move || test(endpoint, client_hsm));
+            tokio::time::timeout(Duration::from_secs(30), clients)
+                .await
+                .expect("session clients complete")
+                .expect("session client task");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if hsm.sessions.read().await.is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("all client sessions cleaned up");
+            serving.abort();
+        });
+    }
+
+    fn generation(hsm: &SocketHsm, id: u16) -> Weak<()> {
+        Arc::downgrade(
+            &hsm.sessions
+                .blocking_read()
+                .get(&id)
+                .expect("session owner")
+                .generation,
+        )
+    }
+
+    fn wait_for_cleanup(generation: Weak<()>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while generation.upgrade().is_some() {
+            assert!(Instant::now() < deadline, "disconnect cleanup timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_not_owned<R: TborOpReq>(device: &DdiSockDev, request: &R) {
+        assert!(matches!(
+            device.exec_op_tbor(revision(device), request, None, &mut None),
+            Err(DdiError::DdiStatus(
+                DdiStatus::FileHandleSessionIdDoesNotMatch
+            ))
+        ));
+    }
+
+    fn bulk_error(device: &DdiSockDev, session_id: u16) -> DdiError {
+        device
+            .exec_op_fp_gcm(
+                DdiAesOp::Encrypt,
+                DdiAesGcmParams {
+                    key_id: u32::MAX,
+                    iv: [0; 12],
+                    aad: None,
+                    tag: None,
+                    session_id,
+                    short_app_id: 0,
+                },
+                vec![0; 16],
+            )
+            .expect_err("unallocated bulk key")
+    }
+
+    #[test]
+    fn unsupported_api_revisions_echo_the_request_and_leave_the_device_usable() {
+        for hsm in [crate::test_hsm(), crate::test_duo_hsm()] {
+            with_clients(hsm, |endpoint, _| {
+                let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+                let (major, minor) = revision(&device);
+                for selected in [
+                    (major ^ 1, minor),
+                    (major, minor + 1),
+                    (0, 0),
+                    (u16::MAX, u16::MAX),
+                ] {
+                    assert!(matches!(
+                        device.exec_op_tbor(selected, &TborApiRevReq, None, &mut None),
+                        Err(DdiError::TborStatus(TborStatus::UnsupportedRevision))
+                    ));
+                }
+                tbor(&device, &TborApiRevReq);
+            });
+        }
+    }
+
+    #[test]
+    fn uno_rejects_changed_revision_before_and_after_promotion() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            device.erase().expect("initial reset");
+            let session = open_init(&device, 0);
+            for active in [false, true] {
+                if active {
+                    session.finish(&device);
+                }
+                let close = TborSessionCloseReq {
+                    session_id: session.session_id,
+                };
+                let (frame, context) = session
+                    .transport
+                    .seal_frame(
+                        session.session_id,
+                        close.session_ctrl(),
+                        &encode(&close, (1, 0)),
+                    )
+                    .expect("seal request");
+                let sealed = SealedFrameReq {
+                    session_ctrl: close.session_ctrl(),
+                    session_id: session.session_id,
+                    frame,
+                };
+                let SealedFrameResp(mut response) = device
+                    .exec_op_tbor_oob((1, 1), &sealed, &mut [], &mut None)
+                    .expect("encrypted rejection");
+                session.open(context, &mut response);
+                assert!(matches!(
+                    TborSessionCloseResp::decode_response_for_api_rev(&response, (1, 0)),
+                    Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(status))
+                        if status == TborStatus::UnsupportedRevision.0
+                ));
+            }
+            session.close(&device);
+        });
+    }
+
+    #[test]
+    fn uno_routes_sealed_open_init_lookalike_to_session_authentication() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            device.erase().expect("initial reset");
+            let pending = open_init(&device, 0);
+            let lookalike = TborSessionOpenInitReq {
+                reopen_id: pending.session_id ^ 1,
+                ..Default::default()
+            };
+            let frame = encode(&lookalike, (1, 1));
+            assert_eq!(crate::tbor_reopen_target(&frame), Some(lookalike.reopen_id));
+            let sealed = SealedFrameReq {
+                session_ctrl: tsra_ddi_tbor_types::SessionControlKind::InSession,
+                session_id: pending.session_id,
+                frame,
+            };
+            assert!(matches!(
+                device.exec_op_tbor_oob((1, 1), &sealed, &mut [], &mut None),
+                Err(DdiError::DdiError(0xCC))
+            ));
+            pending.finish(&device);
+            pending.close(&device);
+        });
+    }
+
+    #[test]
+    fn uno_rejects_tampered_session_control_before_dispatch() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            device.erase().expect("initial reset");
+            let pending = open_init(&device, 0);
+            let (frame, _) = pending
+                .transport
+                .seal_frame(
+                    pending.session_id,
+                    tsra_ddi_tbor_types::SessionControlKind::InSession,
+                    &encode(&pending.finish, (1, 1)),
+                )
+                .expect("seal finish");
+            let tampered = SealedFrameReq {
+                session_ctrl: tsra_ddi_tbor_types::SessionControlKind::Close,
+                session_id: pending.session_id,
+                frame,
+            };
+            assert!(matches!(
+                device.exec_op_tbor_oob((1, 1), &tampered, &mut [], &mut None),
+                Err(DdiError::DdiError(0xCC))
+            ));
+            pending.finish(&device);
+            pending
+                .exec(
+                    &device,
+                    &TborSessionCloseReq {
+                        session_id: pending.session_id,
+                    },
+                )
+                .expect("session remains usable");
+        });
+    }
+
+    #[test]
+    fn bulk_rejects_pending_and_failed_finish_sessions() {
+        with_session_clients(|endpoint, hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let mut pending = open_init(&owner, 0);
+            assert!(matches!(
+                bulk_error(&owner, pending.session_id),
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+
+            pending.finish.mac_fin[0] ^= 1;
+            assert!(matches!(
+                pending.try_finish(&owner),
+                Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
+            ));
+            // The sealed error hides the failure from the server, so the
+            // lease stays Pending (never promoted) until disconnect or reuse.
+            assert!(
+                hsm.sessions
+                    .blocking_read()
+                    .get(&pending.session_id)
+                    .is_none_or(|owner| owner.state == crate::SessionState::Pending)
+            );
+            assert!(matches!(
+                bulk_error(&owner, pending.session_id),
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+
+            let replacement = open_init(&owner, 0);
+            replacement.finish(&owner);
+            assert!(matches!(
+                bulk_error(&owner, replacement.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+        });
+    }
+
+    #[test]
+    fn bulk_rejects_reset_session_until_authenticated_again() {
+        with_session_clients(|endpoint, hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let session = open_init(&owner, 0);
+            session.finish(&owner);
+            let lease = generation(&hsm, session.session_id);
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+
+            owner.erase().expect("reset");
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
+                DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
+            ));
+            drop(owner);
+            wait_for_cleanup(lease);
+
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("replacement socket");
+            let replacement = open_init(&owner, 0);
+            replacement.finish(&owner);
+            assert!(matches!(
+                bulk_error(&owner, replacement.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+        });
+    }
+
+    #[test]
+    fn cancelled_oob_submission_completes_before_disconnect_cleanup() {
+        use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
+        use tsra_ddi_tbor_test_harness::encrypt_psk_envelope;
+        use tsra_ddi_tbor_test_harness::policy::TestPolicy;
+        use tsra_ddi_tbor_test_harness::x509_fixture::PotaFixture;
+        use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+        use tsra_ddi_tbor_types::CertDescriptor;
+        use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
+        use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
+        use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
+        use tsra_ddi_tbor_types::TborPartFinalReq;
+        use tsra_ddi_tbor_types::TborPartInitReq;
+        use tsra_ddi_tbor_types::TborResp;
+
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let server = Arc::clone(&hsm);
+            let serving = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                serve_connection(stream, server).await
+            });
+            let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+            let (submit_tx, submit_rx) = tokio::sync::oneshot::channel();
+            let client_hsm = Arc::clone(&hsm);
+            let client = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&endpoint)
+                    .expect("client socket");
+                device.erase().expect("initial reset");
+                let pending = open_init(&device, 0);
+                let finished = pending.finish(&device);
+                let session = pending.handshake(finished.bmk_session);
+                pending
+                    .exec(
+                        &device,
+                        &TborPskChangeReq {
+                            session_id: session.session_id,
+                            psk_envelope: encrypt_psk_envelope(&session, &[0xA5; 32])
+                                .expect("PSK envelope"),
+                        },
+                    )
+                    .expect("PskChange");
+                let pota = PotaFixture::generate();
+                let policy =
+                    TestPolicy::new(pota.spki_thumbprint(), pota.spki_thumbprint()).encode();
+                let init = pending
+                    .exec(
+                        &device,
+                        &TborPartInitReq {
+                            session_id: session.session_id,
+                            mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
+                                .expect("machine seed envelope"),
+                            part_policy: policy.clone(),
+                        },
+                    )
+                    .expect("PartInit");
+                let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
+                let certs = chain.der_items();
+                let final_request = TborPartFinalReq {
+                    session_id: session.session_id,
+                    part_policy: policy,
+                    cert_descriptors: certs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, cert)| CertDescriptor {
+                            index: u8::try_from(index).expect("certificate index"),
+                            length: u16::try_from(cert.len())
+                                .expect("certificate length")
+                                .into(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                };
+                let mut cert_items: Vec<_> = certs.iter().map(|c| TborOobItem::In(c)).collect();
+                pending
+                    .exec_oob(&device, &final_request, &mut cert_items)
+                    .expect("finalize partition");
+                let key = pending
+                    .exec(
+                        &device,
+                        &TborAesGenerateKeyReq {
+                            session_id: session.session_id,
+                            scope: 3,
+                            key_size: tsra_ddi_tbor_types::AES_KEY_SIZE_256,
+                            key_usage: tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT
+                                | tsra_ddi_tbor_types::KEY_USAGE_DECRYPT,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("AesGenerateKey");
+                let request = TborAesGcmEncryptDecryptReq {
+                    session_id: session.session_id,
+                    op: tsra_ddi_tbor_types::AES_OP_ENCRYPT,
+                    iv_source: tsra_ddi_tbor_types::GCM_IV_SOURCE_HOST,
+                    aad_len: 0,
+                    data_len: 16,
+                    in_index: 0,
+                    out_index: 1,
+                    iv: vec![0x11; 12],
+                    tag: vec![0; 16],
+                    masked_key: key.masked_key,
+                };
+                let input = [0x42; 16];
+                let mut output = [0; 16];
+                let expected = pending
+                    .exec_oob(
+                        &device,
+                        &request,
+                        &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
+                    )
+                    .expect("reference OOB encryption");
+                assert_ne!(output, input);
+                let (frame, context) = pending
+                    .transport
+                    .seal_frame(
+                        session.session_id,
+                        request.session_ctrl(),
+                        &encode(&request, (1, 1)),
+                    )
+                    .expect("seal cancelled request");
+                let sealed = SealedFrameReq {
+                    session_ctrl: request.session_ctrl(),
+                    session_id: session.session_id,
+                    frame,
+                };
+                prepared_tx
+                    .send((
+                        expected,
+                        output,
+                        generation(&client_hsm, session.session_id),
+                        Arc::clone(&pending.transport),
+                        context,
+                    ))
+                    .unwrap_or_else(|_| panic!("submission preparation"));
+                submit_rx.blocking_recv().expect("submit cancelled request");
+                assert!(
+                    device
+                        .exec_op_tbor_oob(
+                            (1, 1),
+                            &sealed,
+                            &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
+                            &mut None,
+                        )
+                        .is_err(),
+                    "cancelled connection must not return the discarded response"
+                );
+            });
+
+            let (expected, output, lease, transport, context) =
+                tokio::time::timeout(Duration::from_secs(30), prepared_rx)
+                    .await
+                    .expect("prepare OOB submission")
+                    .expect("prepared client");
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+            *hsm.submission_probe.lock().await = Some(crate::SubmissionProbe {
+                started: started_tx,
+                resume: resume_rx,
+                completed: completed_tx,
+            });
+            submit_tx.send(()).expect("start submission");
+            tokio::time::timeout(Duration::from_secs(10), started_rx)
+                .await
+                .expect("submission reached DMA handoff")
+                .expect("submission started");
+            serving.abort();
+            assert!(
+                serving
+                    .await
+                    .expect_err("cancel connection waiter")
+                    .is_cancelled()
+            );
+            assert!(
+                lease.upgrade().is_some(),
+                "cleanup must wait for firmware completion"
+            );
+            resume_tx.send(()).expect("allow firmware completion");
+            let response = tokio::time::timeout(Duration::from_secs(10), completed_rx)
+                .await
+                .expect("firmware completes after cancellation")
+                .expect("submission completion");
+            assert_eq!(response.status, 0);
+            let mut raw = crate::cqe_dwords(&response.cqe);
+            assert_eq!(tsra_fw_hsm_io::Cqe::from(&mut raw).status(), 0);
+            let mut payload = response.payload.clone();
+            transport
+                .open_frame(context, &mut payload)
+                .expect("open sealed response");
+            assert_eq!(
+                TborAesGcmEncryptDecryptResp::decode_response(&payload)
+                    .expect("DMA destination response"),
+                expected
+            );
+            assert_eq!(response.oob_items, vec![output.to_vec()]);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while lease.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("disconnect cleanup after completion");
+            client.await.expect("disconnected client task");
+        });
+    }
+
+    #[test]
+    fn session_commands_reject_foreign_connection_ownership() {
+        with_session_clients(|endpoint, _hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let pending = open_init(&owner, 0);
+            let foreign = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("foreign socket");
+            assert_not_owned(&foreign, &pending.finish);
+            pending.finish(&owner);
+            assert_not_owned(
+                &foreign,
+                &TborPskChangeReq {
+                    session_id: pending.session_id,
+                    ..Default::default()
+                },
+            );
+            assert_not_owned(
+                &foreign,
+                &TborSessionCloseReq {
+                    session_id: pending.session_id,
+                },
+            );
+            let delete = DdiDeleteKeyCmdReq {
+                hdr: DdiReqHdr {
+                    op: DdiOp::DeleteKey,
+                    rev: None,
+                    sess_id: Some(pending.session_id),
+                },
+                data: DdiDeleteKeyReq { key_id: 0 },
+                ext: None,
+            };
+            assert!(matches!(
+                foreign.exec_op_mbor(&delete, &mut None),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+            let close = DdiCloseSessionCmdReq {
+                hdr: DdiReqHdr {
+                    op: DdiOp::CloseSession,
+                    rev: None,
+                    sess_id: Some(pending.session_id),
+                },
+                data: DdiCloseSessionReq {},
+                ext: None,
+            };
+            assert!(matches!(
+                foreign.exec_op_mbor(&close, &mut None),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+            pending.close(&owner);
+        });
+    }
+
+    #[test]
+    fn failed_finish_disconnect_flushes_already_destroyed_slot() {
+        with_session_clients(|endpoint, hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let mut pending = open_init(&owner, 0);
+            let lease = generation(&hsm, pending.session_id);
+            pending.finish.mac_fin[0] ^= 1;
+            assert!(matches!(
+                pending.try_finish(&owner),
+                Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
+            ));
+            drop(owner);
+            wait_for_cleanup(lease);
+        });
+    }
+
+    #[test]
+    fn one_connection_can_own_multiple_sessions() {
+        with_session_clients(|endpoint, _hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let co = open_init(&owner, 0);
+            co.finish(&owner);
+            let cu = open_init(&owner, 1);
+            cu.finish(&owner);
+            assert_ne!(co.session_id, cu.session_id);
+            for session in [co, cu] {
+                session.close(&owner);
+            }
+        });
+    }
+
+    #[test]
+    fn disconnected_pending_owner_cannot_close_reused_active_slot() {
+        with_session_clients(|endpoint, hsm| {
+            for reset in [false, true] {
+                let first = DdiSock::default()
+                    .open_dev(&endpoint)
+                    .expect("first socket");
+                first.erase().expect("initial reset");
+                let pending = open_init(&first, 0);
+                let first_generation = generation(&hsm, pending.session_id);
+                let second = DdiSock::default()
+                    .open_dev(&endpoint)
+                    .expect("second socket");
+                if reset {
+                    second.erase().expect("reset discards pending slot");
+                }
+                let replacement = open_init(&second, 0);
+                assert_eq!(replacement.session_id, pending.session_id);
+                assert_not_owned(&first, &replacement.finish);
+                replacement.finish(&second);
+                assert_not_owned(
+                    &first,
+                    &TborSessionCloseReq {
+                        session_id: replacement.session_id,
+                    },
+                );
+
+                drop(first);
+                wait_for_cleanup(first_generation);
+                replacement.close(&second);
+            }
+        });
+    }
+
+    #[test]
+    fn replacement_bootstrap_waits_for_delayed_disconnect_cleanup() {
+        with_session_clients(|endpoint, hsm| {
+            let first = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("first socket");
+            first.erase().expect("initial reset");
+            let session = open_init(&first, 0);
+            session.finish(&first);
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            *hsm.cleanup_probe.blocking_lock() = Some(crate::CleanupProbe {
+                started: started_tx,
+                resume: resume_rx,
+            });
+            drop(first);
+            started_rx.blocking_recv().expect("cleanup is delayed");
+            std::thread::scope(|scope| {
+                let (reset_tx, reset_rx) = std::sync::mpsc::channel();
+                let replacement = scope.spawn(move || {
+                    let device = DdiSock::default()
+                        .open_dev(&endpoint)
+                        .expect("replacement socket");
+                    device.erase().expect("replacement reset");
+                    reset_tx.send(()).expect("reset notification");
+                    let session = open_init(&device, 0);
+                    session.finish(&device);
+                    session.close(&device);
+                });
+                let early_reset = reset_rx.recv_timeout(Duration::from_millis(100));
+                resume_tx.send(()).expect("release disconnect cleanup");
+                assert!(
+                    matches!(early_reset, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                    "replacement reset must not bypass delayed cleanup"
+                );
+                replacement.join().expect("replacement bootstrap");
+            });
+        });
+    }
+
+    #[test]
+    fn reset_preserves_active_ownership_for_disconnect_cleanup() {
+        with_session_clients(|endpoint, hsm| {
+            let first = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("first socket");
+            first.erase().expect("initial reset");
+            let pending = open_init(&first, 0);
+            pending.finish(&first);
+            let first_generation = generation(&hsm, pending.session_id);
+            let second = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("second socket");
+            second.erase().expect("reset preserves renegotiation slot");
+
+            drop(first);
+            wait_for_cleanup(first_generation);
+            let pending = open_init(&second, 0);
+            pending.finish(&second);
+            pending.close(&second);
+        });
+    }
+
+    #[test]
+    fn serves_concurrent_connections_on_the_same_partition() {
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let serving = tokio::spawn(run_server(listener, hsm));
+            let clients = tokio::task::spawn_blocking(move || {
+                std::thread::scope(|scope| {
+                    let mut workers = Vec::new();
+                    for _ in 0..4 {
+                        let endpoint = &endpoint;
+                        workers.push(scope.spawn(move || {
+                            let device = DdiSock::default().open_dev(endpoint).expect("TCP device");
+                            let request = DdiGetApiRevCmdReq {
+                                hdr: DdiReqHdr {
+                                    op: DdiOp::GetApiRev,
+                                    rev: None,
+                                    sess_id: None,
+                                },
+                                data: DdiGetApiRevReq {},
+                                ext: None,
+                            };
+                            for _ in 0..3 {
+                                let response =
+                                    device.exec_op_mbor(&request, &mut None).expect("GetApiRev");
+                                assert!(response.data.max.major >= response.data.min.major);
+                            }
+                        }));
+                    }
+                    for worker in workers {
+                        worker.join().expect("worker");
+                    }
+                });
+            });
+            tokio::time::timeout(Duration::from_secs(30), clients)
+                .await
+                .expect("clients complete")
+                .expect("client task");
+            serving.abort();
+        });
+    }
+
+    #[test]
+    fn rejects_invalid_dma_and_oob_fields() {
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            for (src_len, dst_cap, oob) in [
+                (1, 4096, [0; 3]),
+                (0, 0, [0; 3]),
+                (0, 8193, [0; 3]),
+                (0, 4096, [0x1000, 0, 16]),
+            ] {
+                let mut request = Request {
+                    sqe: vec![0; 16],
+                    payload: Vec::new(),
+                    oob_items: Vec::new(),
+                    tail: Vec::new(),
+                };
+                request.sqe[1] = src_len;
+                request.sqe[6] = dst_cap;
+                request.sqe[13..=15].copy_from_slice(&oob);
+                let response = super::super::execute_request(&hsm, request).await;
+                assert_eq!(response.status, super::super::TRANSPORT_INVALID_REQUEST);
+                assert!(response.payload.is_empty());
+            }
+            for (count, oob_len) in [(1, 0), (1, 32), (65, 1040)] {
+                let mut request = Request {
+                    sqe: vec![0; 16],
+                    payload: Vec::new(),
+                    oob_items: vec![OobItem::In(vec![1]); count],
+                    tail: Vec::new(),
+                };
+                request.sqe[0] = 2;
+                request.sqe[6] = 4096;
+                request.sqe[15] = oob_len;
+                let response = super::super::execute_request(&hsm, request).await;
+                assert_eq!(response.status, super::super::TRANSPORT_INVALID_REQUEST);
+            }
+        });
+    }
+
+    #[test]
+    fn reset_waits_for_inflight_execution_and_survives_connection_cancellation() {
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let active_submission = hsm.execution.read().await;
+            let server = Arc::clone(&hsm);
+            let connection = tokio::spawn(super::super::execute_frame(server, RequestFrame::Reset));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hsm.execution.try_read().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reset is waiting on active submissions");
+            assert!(!connection.is_finished());
+            connection.abort();
+            assert!(
+                connection
+                    .await
+                    .expect_err("cancel connection")
+                    .is_cancelled()
+            );
+            drop(active_submission);
+            let completed = tokio::time::timeout(Duration::from_secs(10), hsm.execution.write())
+                .await
+                .expect("owned reset completes after connection cancellation");
+            drop(completed);
+            assert!(matches!(
+                super::super::execute_frame(Arc::clone(&hsm), RequestFrame::Reset).await,
+                ResponseFrame::Reset { status: 0 }
+            ));
+        });
+    }
+
+    #[test]
+    fn idle_timeout_disconnects_one_client_but_preserves_an_active_peer() {
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        // Pausing `Instant::now` requires `current_thread`; letting `sleep`
+        // auto-advance through the idle deadline is what makes it practical
+        // to actually let that deadline expire (rather than waiting out the
+        // real 5-minute window) in a test.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let serving = tokio::spawn(run_server(listener, Arc::clone(&hsm)));
+
+            let idle_endpoint = endpoint.clone();
+            let (idle_device, idle_session_id) = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&idle_endpoint)
+                    .expect("idle device");
+                device.erase().expect("initial reset");
+                let session = open_init(&device, 0);
+                session.finish(&device);
+                (device, session.session_id)
+            })
+            .await
+            .expect("idle session opened");
+
+            let active_endpoint = endpoint.clone();
+            let (mut active_device, active_session_id) = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&active_endpoint)
+                    .expect("active device");
+                // A distinct PSK ID (CryptoUser, slots 1..=7) so this session
+                // doesn't contend with the idle connection's CO slot (0).
+                let session = open_init(&device, 1);
+                session.finish(&device);
+                (device, session.session_id)
+            })
+            .await
+            .expect("active session opened");
+
+            assert!(hsm.sessions.read().await.contains_key(&idle_session_id));
+            assert!(hsm.sessions.read().await.contains_key(&active_session_id));
+            // `generation()` uses `blocking_read()`, which panics if called
+            // directly on this (non-blocking-pool) async task, so read the
+            // lock the ordinary async way instead.
+            let idle_generation = Arc::downgrade(
+                &hsm.sessions
+                    .read()
+                    .await
+                    .get(&idle_session_id)
+                    .expect("idle session owner")
+                    .generation,
+            );
+
+            // Run most, but not all, of the idle window: neither connection
+            // has gone idle long enough to be reclaimed yet.
+            tokio::time::sleep(super::super::IDLE_WAIT_TIMEOUT - Duration::from_secs(1)).await;
+            assert!(hsm.sessions.read().await.contains_key(&idle_session_id));
+            assert!(hsm.sessions.read().await.contains_key(&active_session_id));
+
+            // The "active" connection keeps talking, resetting its own
+            // idle-wait deadline; the "idle" connection sends nothing further
+            // from here on.
+            active_device = tokio::task::spawn_blocking(move || {
+                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+                active_device
+            })
+            .await
+            .expect("active connection stays busy");
+
+            // Elapse most (but comfortably less than all) of a second idle
+            // window. The idle connection's original deadline (never reset)
+            // is now long past, while the active connection's deadline
+            // (reset a moment ago) still has a healthy margin left, so only
+            // the idle one must be reclaimed.
+            tokio::time::sleep(super::super::IDLE_WAIT_TIMEOUT / 2).await;
+
+            // Disconnect cleanup runs on a task spawned from `Connection`'s
+            // `Drop`, so it may not have completed the instant the idle
+            // deadline elapses. `wait_for_cleanup` polls with real
+            // `std::time::Instant`/`std::thread::sleep`, not tokio's paused
+            // clock, so run it inside `spawn_blocking`: that both lets it
+            // observe genuine real-world progress and inhibits the paused
+            // clock's auto-advance while it does. A busy-poll driven by
+            // `tokio::task::yield_now` instead would race the auto-advance
+            // heuristic and can overshoot straight past the active
+            // connection's own (later) deadline.
+            tokio::task::spawn_blocking(move || wait_for_cleanup(idle_generation))
+                .await
+                .expect("idle connection's session is cleaned up");
+            assert!(
+                !hsm.sessions.read().await.contains_key(&idle_session_id),
+                "an idle connection's session must be cleaned up once its deadline elapses"
+            );
+            assert!(
+                hsm.sessions.read().await.contains_key(&active_session_id),
+                "a separate, actively used connection's session must not be affected"
+            );
+
+            // The surviving session must still be fully usable, not merely
+            // present in the ownership map.
+            tokio::task::spawn_blocking(move || {
+                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+            })
+            .await
+            .expect("active session still usable after the peer's idle disconnect");
+
+            drop(idle_device);
+            serving.abort();
+        });
+    }
+
+    /// Encode, seal, execute, open and decode one Duo secure command.
+    fn secure<R: TborOpReq>(
+        device: &DdiSockDev,
+        transport: &SessionTransport,
+        session_id: u16,
+        request: &R,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> Result<R::OpResp, DdiError> {
+        let mut buf = encode(request, (2, 0));
+        let (sealed, context) = transport
+            .seal_request(session_id, &mut buf)
+            .expect("seal request");
+        let (mut payload, seal) = device.exec_op_tbor_secure(
+            session_id,
+            &buf,
+            DdiTransportSeal {
+                iv: sealed.iv,
+                tag: sealed.tag,
+            },
+            oob_items,
+        )?;
+        transport
+            .open_response(
+                context,
+                &SessionTransportSeal {
+                    iv: seal.iv,
+                    tag: seal.tag,
+                },
+                &mut payload,
+            )
+            .expect("open response");
+        Ok(R::OpResp::decode_response_for_api_rev(&payload, (2, 0))?)
+    }
+
+    #[test]
+    fn duo_client_runs_secure_session() {
+        with_clients(crate::test_duo_hsm(), |endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            assert_eq!(
+                device.discover().expect("discover").model,
+                DdiDeviceModel::Duo
+            );
+            let rev = tbor(&device, &TborApiRevReq);
+            assert_eq!(rev.max_major.get(), 2);
+            assert!(matches!(
+                bulk_error(&device, 0),
+                DdiError::UnsupportedEncoding
+            ));
+
+            let session = open_init(&device, 0);
+            session.finish(&device);
+            let id = session.session_id;
+            let transport = &session.transport;
+
+            // A tampered request fails transport authentication.
+            let close = TborSessionCloseReq { session_id: id };
+            let mut buf = encode(&close, (2, 0));
+            let (sealed, _) = transport.seal_request(id, &mut buf).expect("seal");
+            let mut tag = sealed.tag;
+            tag[0] ^= 1;
+            assert!(matches!(
+                device.exec_op_tbor_secure(
+                    id,
+                    &buf,
+                    DdiTransportSeal { iv: sealed.iv, tag },
+                    &mut []
+                ),
+                Err(DdiError::DdiError(0xCC))
+            ));
+
+            secure(&device, transport, id, &close, &mut []).expect("close");
+
+            let pending = open_init(&device, 0);
+            device
+                .flush_session(pending.session_id)
+                .expect("flush session");
+        });
+    }
+
+    /// Open an active Duo session; returns its id and transport keys.
+    fn open_secure(device: &DdiSockDev, psk_id: u8) -> (u16, Arc<SessionTransport>) {
+        let session = open_init(device, psk_id);
+        session.finish(device);
+        (session.session_id, session.transport)
+    }
+
+    #[test]
+    fn duo_secure_session_rejects_misuse() {
+        with_clients(crate::test_duo_hsm(), |endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            let (co, co_keys) = open_secure(&device, 0);
+            let (cu, cu_keys) = open_secure(&device, 1);
+            let close = |session_id| TborSessionCloseReq { session_id };
+
+            // A command must name the session whose keys sealed it.
+            assert!(matches!(
+                secure(&device, &co_keys, co, &close(cu), &mut []),
+                Err(DdiError::TborStatus(TborStatus::InvalidArg))
+            ));
+
+            // A closed session's keys are gone.
+            secure(&device, &co_keys, co, &close(co), &mut []).expect("close");
+            assert!(matches!(
+                secure(&device, &co_keys, co, &close(co), &mut []),
+                Err(DdiError::DdiError(0xCC))
+            ));
+
+            // A flushed session is gone, together with its ownership.
+            device.flush_session(cu).expect("flush");
+            assert!(matches!(
+                secure(&device, &cu_keys, cu, &close(cu), &mut []),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+
+            // CU owns 7 of the 8 slots; with all 7 active, an 8th handshake
+            // has no slot to take.
+            let active: Vec<_> = (0..7).map(|_| open_secure(&device, 1)).collect();
+            let init = TborSessionOpenInitReq {
+                psk_id: 1,
+                pk_init: SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
+                    .expect("ephemeral")
+                    .pk_init()
+                    .to_vec(),
+                ..Default::default()
+            };
+            assert!(matches!(
+                device.exec_op_tbor((2, 0), &init, None, &mut None),
+                Err(DdiError::TborStatus(TborStatus::VaultSessionLimitReached))
+            ));
+            for (id, keys) in &active {
+                secure(&device, keys, *id, &close(*id), &mut []).expect("close");
+            }
+        });
+    }
+
+    #[test]
+    fn uno_client_rejects_duo_commands() {
+        with_session_clients(|endpoint, _| {
+            let device = DdiSock::default().open_dev(&endpoint).expect("socket");
+            assert_eq!(
+                device.discover().expect("discover").model,
+                DdiDeviceModel::Uno
+            );
+            assert!(matches!(
+                device.flush_session(1),
+                Err(DdiError::UnsupportedEncoding)
+            ));
+            assert!(matches!(
+                device.exec_op_tbor_secure(1, &[0; 16], DdiTransportSeal::default(), &mut []),
+                Err(DdiError::UnsupportedEncoding)
+            ));
+        });
+    }
+}

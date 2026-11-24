@@ -38,7 +38,7 @@ pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 312;
 
 /// Max recovered public-key length (matches the firmware schema's
 /// `DARC_UNWRAP_PUB_KEY_MAX_LEN`).
-pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 136;
+pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 144;
 
 /// `KeyScope` discriminant for an ephemeral key.
 pub const KEY_SCOPE_EPHEMERAL: u8 = 0b010;
@@ -70,6 +70,7 @@ pub struct TborDarcKeyUnwrapReq {
 
     /// The masked TMK envelope from `DarcTmkImport`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`.
@@ -89,11 +90,11 @@ pub struct TborDarcKeyUnwrapResp {
     pub key_kind: u8,
 
     /// The recovered EC private key, masked under the scope's masking key.
-    #[tbor(max_len = 312)]
+    #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The recovered key's wire public key (`x ‖ y`, wire-LE).
-    #[tbor(max_len = 136)]
+    /// The recovered key's wire public key (`x ‖ y`, device byte order).
+    #[tbor(max_len = 144)]
     pub pub_key: Vec<u8>,
 }
 
@@ -115,7 +116,7 @@ mod tests {
             wrapped_key: alloc::vec![0xA5u8; 240],
         };
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.len() > MASKED_TMK_LEN + 240,
             "encoded frame must carry the masked TMK and wrapped key",

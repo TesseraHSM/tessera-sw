@@ -17,11 +17,13 @@ tsra_fw_core_crypto_x509_builder = { workspace = true }
 tsra_fw_ddi_mbor = { optional = true, workspace = true }
 tsra_fw_ddi_mbor_derive = { optional = true, workspace = true }
 tsra_fw_ddi_mbor_types = { optional = true, workspace = true }
+tsra_fw_hsm_bulk = { workspace = true }
 tsra_fw_hsm_io = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 tsra_fw_single_cell = { workspace = true }
 tsra_fw_static_init = { workspace = true }
 tsra_fw_static_ref = { workspace = true }
+tsra_fw_uno_aes_sgl = { workspace = true }
 tsra_fw_uno_cert_blob = { workspace = true }
 tsra_fw_uno_drivers_aes = { workspace = true }
 tsra_fw_uno_drivers_bcp = { workspace = true }

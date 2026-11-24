@@ -59,7 +59,7 @@ pub struct TborKeyReportReq {
 
     /// The masked-key envelope to attest. Variable length up to
     /// [`KEY_REPORT_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// Caller-supplied [`KEY_REPORT_DATA_LEN`] (128 B) report data.
@@ -97,7 +97,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The masked-key bytes must appear in the encoded frame.
         assert!(

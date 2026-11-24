@@ -561,6 +561,7 @@ impl HsmPartition {
             result.short_app_id,
             api_rev,
             self.clone(),
+            result.ddi_cookie,
             result.seed,
             result.bmk_session,
         ))
@@ -568,23 +569,35 @@ impl HsmPartition {
 
     /// Opens a session over the TBOR transport (security-domain).
     ///
-    /// Runs the two-phase `open_session_ex` HPKE handshake and wraps
+    /// Runs the two-phase `open_session_ex` handshake and wraps
     /// the result in an [`HsmSession`] (`SessionKind::Ver2`).
     ///
     /// # Arguments
     ///
     /// * `api_rev` - The negotiated API revision.
+    /// * `root_spki_thumbprint` - Required SHA-384 hash of the trusted root's
+    ///   DER SubjectPublicKeyInfo, provisioned independently of this connection.
+    ///   The PID path must reach this root and contain a non-PID certificate
+    ///   with DICE TCB Info layer zero and EKU `1.3.6.1.4.1.311.102.1.50.1`.
     /// * `psk` - PSK credential: the role slot plus an optional
     ///   caller-supplied PSK (`None` selects the partition default PSK).
-    /// * `session_type` - Channel integrity profile to pin.
+    /// * `suite` - Key-establishment suite of the handshake.
     #[instrument(skip_all, err, fields(path = self.path().as_str()))]
     pub fn open_session_ex(
         &self,
         api_rev: HsmApiRev,
+        root_spki_thumbprint: &[u8; 48],
         psk: HsmSessionPsk<'_>,
-        session_type: HsmSessionExType,
+        suite: HsmSessionSuite,
     ) -> HsmResult<HsmSession> {
-        let result = ddi::open_session_ex(self, api_rev, psk.psk_id as u8, psk.psk, session_type)?;
+        let result = ddi::open_session_ex(
+            self,
+            api_rev,
+            root_spki_thumbprint,
+            psk.psk_id as u8,
+            psk.psk,
+            suite,
+        )?;
         Ok(HsmSession::new_ex(api_rev, self.clone(), result))
     }
 
@@ -1083,19 +1096,31 @@ impl HsmPartition {
             return Err(HsmError::SessionNeedsRenegotiation);
         };
         let bmk_session = session.bmk_session();
+        // Read the cookie before entering the reopen guard: `ddi_cookie()`
+        // takes `session.inner`'s read lock, and `with_reopen_guard` below
+        // holds that same lock for writing across the closure, so calling
+        // it from inside the closure would self-deadlock the thread.
+        let ddi_cookie = session.ddi_cookie();
 
         // Hold the session write lock across the DDI call so that only
         // one thread performs the reopen for a given epoch.  Racing
         // threads block here and then observe the updated epoch.
         let reopen_result = session.with_reopen_guard(current_epoch, || {
-            self.inner()
-                .read()
-                .reopen_session(rev, sess_id, &creds, &seed, &bmk_session)
+            self.inner().read().reopen_session(
+                rev,
+                sess_id,
+                ddi_cookie,
+                &creds,
+                &seed,
+                &bmk_session,
+            )
         })?;
 
-        // If we actually performed the reopen, update the BMK on the session.
+        // If we actually performed the reopen, update the BMK and
+        // continuity cookie on the session.
         if let Some(result) = reopen_result {
             session.set_bmk_session(result.bmk_session);
+            session.set_ddi_cookie(result.ddi_cookie);
         }
 
         Ok(())
@@ -1269,11 +1294,20 @@ impl HsmPartitionInner {
         &self,
         api_rev: HsmApiRev,
         sess_id: u16,
+        ddi_cookie: Option<u64>,
         credentials: &HsmCredentials,
         seed: &[u8; 48],
         bmk_session: &[u8],
     ) -> HsmResult<ddi::ReopenSessionResult> {
-        ddi::reopen_session(&self.dev, api_rev, sess_id, credentials, seed, bmk_session)
+        ddi::reopen_session(
+            &self.dev,
+            api_rev,
+            sess_id,
+            ddi_cookie,
+            credentials,
+            seed,
+            bmk_session,
+        )
     }
 
     /// Retrieves the public key of the partition identity (PID) certificate.

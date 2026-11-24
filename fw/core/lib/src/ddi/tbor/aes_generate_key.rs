@@ -123,7 +123,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let key_label = alloc.dma_alloc(caller_label.len())?;
         key_label.copy_from_slice(caller_label);
         let len = cmd_buf.encode_response(|buf| {
-            Ok(TborAesGenerateKeyResp::encode(buf, 0, false)?
+            Ok(TborAesGenerateKeyResp::encode_for_request(buf, 0, false)?
                 .masked_key_reserve(masked_len)?
                 .finish()
                 .as_bytes()
@@ -151,7 +151,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // straight into the reserved response slot.
             let key_buf = alloc.dma_alloc(key_len)?;
             let outcome = async {
-                pal.aes_gen_key(io, key_buf).await?;
+                pal.aes_gen_key(io, key_len, Some(key_buf)).await?;
                 let written = mask(
                     pal,
                     io,

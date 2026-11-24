@@ -12,12 +12,10 @@
 use tsra_api::*;
 use tsra_api_tests_macro::*;
 
-#[cfg(feature = "session-ex-tests")]
 use crate::utils::partition_ex_helpers::*;
 
 /// Canonical `(kind, bits, key bytes)` for each HMAC SHA variant. HMAC
 /// keygen is fixed to the canonical per-variant length.
-#[cfg(feature = "session-ex-tests")]
 const HMAC_VARIANTS: [(HsmKeyKind, u32, usize); 3] = [
     (HsmKeyKind::HmacSha256, 256, 32),
     (HsmKeyKind::HmacSha384, 384, 48),
@@ -26,12 +24,10 @@ const HMAC_VARIANTS: [(HsmKeyKind, u32, usize); 3] = [
 
 /// TBOR masked HMAC-key envelope overhead: `header(8) + iv(16) + aad(192)
 /// + tag(16)`; the total blob is this plus the raw key bytes.
-#[cfg(feature = "session-ex-tests")]
 const MASKED_HMAC_OVERHEAD: usize = 8 + 16 + 192 + 16;
 
 /// Session-scoped secret HMAC key properties with sign/verify capabilities
 /// and a caller-supplied label.
-#[cfg(feature = "session-ex-tests")]
 fn hmac_props(kind: HsmKeyKind, bits: u32) -> HsmKeyProps {
     HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -125,9 +121,11 @@ fn hmac_key_gen_rejects_extra_capability(session: HsmSession) {
 /// through the device (proving the label is honored, not a fixed firmware
 /// label). Signing with the masked key is a separate (TBOR HMAC) capability
 /// and is covered elsewhere.
-#[cfg(feature = "session-ex-tests")]
 #[test]
 fn hmac_key_gen_roundtrip_generates_usable_key() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let session = crate::utils::sd_provision::finalized_co_session();
 
@@ -159,9 +157,11 @@ fn hmac_key_gen_roundtrip_generates_usable_key() {
 
 /// Successive key generations on the same session return distinct masked blobs.
 /// This comparison does not establish that the underlying key bytes differ.
-#[cfg(feature = "session-ex-tests")]
 #[test]
 fn hmac_key_gen_yields_distinct_masked_blobs() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let session = crate::utils::sd_provision::finalized_co_session();
 

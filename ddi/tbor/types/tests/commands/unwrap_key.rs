@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
 
@@ -179,11 +180,7 @@ fn unwrap_key_all_oaep_hashes() {
     let ecc_key = EccPrivateKey::from_curve(EccCurve::P256).expect("generate ECC key");
     let ecc_der = ecc_key.to_vec().expect("export ECC key");
     let (x_be, y_be) = ecc_key.coord_vec().expect("export ECC public coordinates");
-    let expected_pub: Vec<u8> = x_be
-        .into_iter()
-        .rev()
-        .chain(y_be.into_iter().rev())
-        .collect();
+    let expected_pub = [dev_rev(&x_be), dev_rev(&y_be)].concat();
     let aes_key = [0x42u8; 32];
 
     for (hash_id, hash) in [
@@ -358,6 +355,23 @@ fn unwrap_key_aes_xts_rejects_invalid_material() {
         let req = unwrap_req(&ctx, sid, class, usage, key);
         ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
     }
+}
+
+/// A maximum-size blob (6 KiB AES-KWP plaintext) passes the size checks
+/// and reaches AES-KWP: tampered, it fails the integrity check; intact, the
+/// oversized material is rejected by key decode.
+#[test]
+fn unwrap_key_max_size_blob_reaches_kwp() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
+
+    let mut req = unwrap_req(&ctx, sid, KEY_CLASS_AES, usage, &[0x5Au8; 6144]);
+    assert_eq!(req.wrapped_blob.len(), UNWRAP_WRAPPED_BLOB_MAX_LEN);
+    ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+
+    req.wrapped_blob[UNWRAP_WRAPPED_BLOB_MAX_LEN - 1] ^= 1;
+    ctx.expect_fw_reject(&req, TborStatus::RsaUnwrapAesUnwrapFailed);
 }
 
 /// An AES-XTS key is a cipher key: any usage other than encrypt+decrypt is

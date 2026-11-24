@@ -48,6 +48,14 @@ pub struct Nextest {
     /// Test name filters
     #[clap(long)]
     pub filter: Vec<String>,
+
+    /// DDI transport to test against (set as `transport` in `TSRA_TEST_ARGS`)
+    #[clap(long, value_parser = crate::common::TRANSPORTS)]
+    pub transport: Option<String>,
+
+    /// API revision for tsra_api_tests (set as `api_rev` in `TSRA_TEST_ARGS`)
+    #[clap(long, value_parser = crate::common::API_REVS)]
+    pub api_rev: Option<String>,
 }
 
 impl Xtask for Nextest {
@@ -114,6 +122,13 @@ impl Xtask for Nextest {
             command_args.push("--");
             command_args.extend(self.filter.iter().map(|s| s.as_str()));
         }
+
+        crate::common::prepare_test_env(
+            &sh,
+            &rust_toolchain,
+            self.transport.as_deref(),
+            self.api_rev.as_deref(),
+        )?;
 
         cmd!(
             sh,

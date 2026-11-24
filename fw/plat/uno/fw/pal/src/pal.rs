@@ -34,12 +34,20 @@ use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_time::Duration;
+use embassy_time::Instant;
+use tsra_fw_hsm_pal_traits::HsmApiRevision;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::UnoIo;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
 // Cargo cannot drop a dependency for a feature; the BCP is unused here.
@@ -72,14 +80,52 @@ use tsra_fw_uno_drivers_systick as systick_driver;
 use tsra_fw_uno_drivers_tcon::Tcon;
 use tsra_fw_uno_drivers_upka::UpkaDriver;
 use tsra_fw_uno_pac::Interrupt;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ICQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ICQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ISQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OCQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OCQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OSQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ICQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ICQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_CQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_CQ_STRIDE;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_META_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_COUNT;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_STRIDE;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ISQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OCQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OCQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OSQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_SQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::ICQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::ICQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_STRIDE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_CI_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_PI_OFFSET;
@@ -119,10 +165,14 @@ use crate::ipc::*;
 
 type Iic = IicDriver<IO_QUEUE_DEPTH>;
 type Oic = OicDriver<IO_QUEUE_DEPTH>;
-type Gdma = GdmaDriver<IO_QUEUE_DEPTH>;
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) type BulkIic = IicDriver<BULK_QUEUE_DEPTH>;
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) type BulkOic = OicDriver<BULK_QUEUE_DEPTH>;
+type Gdma = GdmaDriver<GDMA_RING_DEPTH, GDMA_TAGS>;
 type Ipc = IpcDriver<IPC_PAIRS>;
-type Aes = AesDriver<IO_QUEUE_DEPTH>;
-type Sha = ShaDriver<IO_QUEUE_DEPTH>;
+type Aes = AesDriver<CRYPTO_QUEUE_DEPTH>;
+type Sha = ShaDriver<CRYPTO_QUEUE_DEPTH>;
 type Upka = UpkaDriver<IO_QUEUE_DEPTH, 16>;
 
 /// Boot handshake phase — tracks PAL lifecycle state.
@@ -136,8 +186,54 @@ pub enum BootPhase {
     Running,
 }
 
-/// Queue depth for all IO queues (ISQ, ICQ, OSQ, OCQ, GDMA SQ/CQ).
+/// Queue depth for the command IO queues (ISQ, ICQ, OSQ, OCQ).
 const IO_QUEUE_DEPTH: usize = 32;
+
+/// GDMA tag count. A transfer that finds every tag taken fails rather than
+/// waits, so there is a tag for every IO slot that can hold a transfer: the
+/// host command slots (each copies one transfer at a time; a detached reply
+/// copy holds its slot's tag until the slot frees) and the bulk slots. The
+/// admin and self-test slots scrub with the CPU (`scrub_io_slot`) and take
+/// none.
+const GDMA_TAGS: usize = 64;
+const _: () =
+    assert!(GDMA_TAGS >= crate::alloc::ADMIN_IO_INDEX as usize + crate::alloc::BULK_ALLOC_SLOTS);
+
+/// GDMA SQ/CQ ring depth. A ring holds one entry fewer than its depth, so
+/// it is deeper than [`GDMA_TAGS`]: with every tag in flight and none
+/// fetched by the engine, the SQ still has room.
+const GDMA_RING_DEPTH: usize = 128;
+
+/// AES and SHA queue depth. Each queue is a software FIFO (the engine runs
+/// one command at a time), and a request that finds it full fails rather
+/// than waits, so it holds one request for every IO slot, each served by one
+/// task at a time: host command, admin, self-test and bulk.
+const CRYPTO_QUEUE_DEPTH: usize = 128;
+const _: () =
+    assert!(CRYPTO_QUEUE_DEPTH >= crate::alloc::IO_SLOTS + crate::alloc::BULK_ALLOC_SLOTS);
+
+/// Queue depth for the bulk (fast-path) IIC/OIC queues.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_QUEUE_DEPTH: usize = 32;
+
+/// Bulk slots (of `BULK_IO_SQ`) the FP2 channel posts. Admin binds only the
+/// 65th function resource's two device SQs to FP2, every other bulk SQ to
+/// FP1, so FP2 gets a small share. The channels share the bulk slot
+/// arrays; FP1 posts the slots below [`BULK_FP1_SLOTS`], FP2 the rest.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_FP2_SLOTS: u16 = 8;
+
+/// Bulk slots the FP1 channel posts, from slot 0.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) const BULK_FP1_SLOTS: u16 = BULK_IO_SQ_COUNT as u16 - BULK_FP2_SLOTS;
+
+#[cfg(not(feature = "bulk_crypto"))]
+const _: () = assert!(
+    BULK_FP2_SLOTS > 0
+        && BULK_FP1_SLOTS > 0
+        && BULK_FP1_SLOTS as usize <= BULK_QUEUE_DEPTH
+        && BULK_FP2_SLOTS as usize <= BULK_QUEUE_DEPTH
+);
 
 /// Number of IPC pairs configured for the firmware.
 const IPC_PAIRS: usize = 4;
@@ -184,6 +280,34 @@ fn wake_pka(pal: &UnoHsmPal, irq: u16) {
     pal.pka.wake_engine((irq & 0x0F) as u8);
 }
 
+/// First PKA done and error IRQs. Each block of sixteen sits inside one
+/// pending register, at the engine's index (see [`wake_pka`]).
+const PKA_DONE_IRQ: usize = Interrupt::UPKA_0_DONE as usize;
+const PKA_ERROR_IRQ: usize = Interrupt::UPKA_0_ERROR as usize;
+const _: () = assert!(
+    PKA_DONE_IRQ % 32 + 16 <= 32
+        && PKA_ERROR_IRQ % 32 + 16 <= 32
+        && Interrupt::UPKA_15_DONE as usize == PKA_DONE_IRQ + 15
+        && Interrupt::UPKA_15_ERROR as usize == PKA_ERROR_IRQ + 15
+);
+
+/// Runs `fut`, polling it from the GSRAM code region (see `gsram.x`): for
+/// work that never runs on a request path, such as the admin IPC, so that
+/// its code leaves ITCM to the request path. The caller pins `fut`, so that
+/// its state is stored once.
+async fn poll_cold<F: core::future::Future>(mut fut: core::pin::Pin<&mut F>) -> F::Output {
+    core::future::poll_fn(|cx| poll_cold_once(fut.as_mut(), cx)).await
+}
+
+#[inline(never)]
+#[unsafe(link_section = ".gsram_text.cold")]
+fn poll_cold_once<F: core::future::Future>(
+    fut: core::pin::Pin<&mut F>,
+    cx: &mut core::task::Context<'_>,
+) -> core::task::Poll<F::Output> {
+    fut.poll(cx)
+}
+
 /// `(IRQ number, wake function)` pairs registered for NVIC dispatch.
 ///
 /// Adding a new peripheral interrupt requires one entry here. The
@@ -196,8 +320,24 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     // AES and SHA each route two vectors (Done and Error) to the same
     // driver wake handler — the engine fires exactly one of them per
     // command completion.
-    (Interrupt::IIC_ICQ as u16, |pal, irq| pal.iic.wake(irq)),
+    (Interrupt::IIC_ICQ as u16, |pal, irq| pal.wake_iic(irq)),
     (Interrupt::OIC_OCQ as u16, |pal, irq| pal.oic.wake(irq)),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::IIC_ICQ_FP1 as u16, |pal, irq| {
+        pal.bulk_iic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::OIC_OCQ_FP1 as u16, |pal, irq| {
+        pal.bulk_oic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::IIC_ICQ_FP2 as u16, |pal, irq| {
+        pal.bulk_fp2_iic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::OIC_OCQ_FP2 as u16, |pal, irq| {
+        pal.bulk_fp2_oic.wake(irq)
+    }),
     (Interrupt::AES_DONE as u16, |pal, _| pal.aes.wake()),
     (Interrupt::SHA_DONE as u16, |pal, _| pal.sha.wake()),
     (Interrupt::AES_ERROR as u16, |pal, _| pal.aes.wake()),
@@ -296,6 +436,25 @@ pub struct UnoHsmPal {
     /// Outbound IO Controller — sends CQEs back to the host.
     pub oic: &'static Oic,
 
+    /// Bulk Inbound IO Controller — receives bulk SQEs from the host on
+    /// the fast-path controller's FP1 channel. Absent with `bulk_crypto`,
+    /// where the FP firmware owns that controller.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_iic: &'static BulkIic,
+
+    /// Bulk Outbound IO Controller — sends FP1 bulk CQEs back to the host.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_oic: &'static BulkOic,
+
+    /// Bulk Inbound IO Controller for the fast-path controller's FP2
+    /// channel, which carries the 65th function resource's bulk SQs.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_fp2_iic: &'static BulkIic,
+
+    /// Bulk Outbound IO Controller — sends FP2 bulk CQEs back to the host.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_fp2_oic: &'static BulkOic,
+
     /// General DMA Controller — copies data between host and device.
     pub gdma: &'static Gdma,
 
@@ -325,6 +484,11 @@ pub struct UnoHsmPal {
 
     /// Boot handshake phase (PAL lifecycle state).
     boot_phase: Cell<BootPhase>,
+
+    /// Which inbound queue [`poll_io`](tsra_fw_hsm_pal_traits::HsmIoController::poll_io)
+    /// polls first next: 0 = command, 1 = bulk FP1, 2 = bulk FP2.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) poll_turn: Cell<u8>,
 
     /// Per-IO bump allocator state (watermarks for Local + Global heaps).
     pub(crate) io_alloc: IoAllocTable,
@@ -359,11 +523,28 @@ pub struct UnoHsmPal {
     /// partitions.
     io_in_flight: Cell<u32>,
 
+    /// The bulk IOs among [`io_in_flight`](Self::io_in_flight).
+    bulk_io_in_flight: Cell<u32>,
+
+    /// Per host IO slot: what finishing a detached IO still needs.
+    pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
+
+    /// Per host IO slot: the session key blob its sealed request was opened
+    /// with, for its response to be sealed with (see
+    /// [`session_key_blob`](Self::session_key_blob)).
+    pub(crate) io_session_key: [Cell<Option<crate::vault::SessionKeyBlob>>; IO_SQ_COUNT as usize],
+
+    /// Host IO slots whose detached completion post found the OIC full.
+    pub(crate) detached_post_pending: Cell<u32>,
+
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
     /// IO starts while partition keys are being deleted and no pre-reset IO
     /// runs after the reset.
     io_paused: Cell<bool>,
+    /// Where the run loop hands each received host IO, once the app has
+    /// set it. See [`set_io_dispatch`](Self::set_io_dispatch).
+    pub(crate) io_dispatch: Cell<Option<crate::io::IoDispatch>>,
     /// Per-partition claim on the SP-published unwrapping key's pairwise
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
@@ -378,8 +559,12 @@ pub struct UnoHsmPal {
 unsafe impl Sync for UnoHsmPal {}
 
 impl Default for UnoHsmPal {
+    // Boot only: runs from the GSRAM code region (see `gsram.x`).
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn default() -> Self {
         let iic_config = IicChannelConfig {
+            controller: 0,
             channel: 3,
             isq_base: IO_GSRAM_BASE + ISQ_OFFSET,
             // IIC DMAs into IO_SQ so the firmware reads the SQE in-place.
@@ -388,17 +573,85 @@ impl Default for UnoHsmPal {
             icq_base: IO_GSRAM_BASE + ICQ_OFFSET,
             icq_tail_shadow: IO_GSRAM_BASE + ICQ_TAIL_SHADOW_OFFSET,
             io_meta_base: IO_GSRAM_BASE + IO_META_OFFSET,
+            io_first: 0,
+            io_count: IO_QUEUE_DEPTH as u16,
             interrupt: true,
+            grant_credit: true,
         };
 
         let oic_config = OicChannelConfig {
+            controller: 0,
             channel: 3,
             osq_base: IO_GSRAM_BASE + OSQ_OFFSET,
             ocq_base: IO_GSRAM_BASE + OCQ_OFFSET,
             ocq_tail_shadow: IO_GSRAM_BASE + OCQ_TAIL_SHADOW_OFFSET,
             io_cq_base: IO_GSRAM_BASE + IO_CQ_OFFSET,
+            io_cq_size: IO_CQ_STRIDE,
             io_meta_base: IO_GSRAM_BASE + IO_META_OFFSET,
             interrupt: true,
+            return_credit: false,
+        };
+
+        // Bulk queues: fast-path controller, FP1 and FP2 channels. The HSM
+        // owns the channels as it does the command channel on controller 0;
+        // Admin owns the controller-common and IRQ routing setup. Both
+        // channels receive into the one set of bulk slots, each posting its
+        // own range, so a bulk IO's slot index is the same whichever channel
+        // it arrived on.
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_iic_config = IicChannelConfig {
+            controller: 1,
+            channel: 0,
+            isq_base: IO_GSRAM_BASE + BULK_ISQ_OFFSET,
+            io_pool_base: IO_GSRAM_BASE + BULK_IO_SQ_OFFSET,
+            io_size: BULK_IO_SQ_STRIDE,
+            io_first: 0,
+            io_count: BULK_FP1_SLOTS,
+            icq_base: IO_GSRAM_BASE + BULK_ICQ_OFFSET,
+            icq_tail_shadow: IO_GSRAM_BASE + BULK_ICQ_TAIL_SHADOW_OFFSET,
+            io_meta_base: IO_GSRAM_BASE + BULK_IO_META_OFFSET,
+            interrupt: true,
+            // Credits return with completions (`return_credit` below), as
+            // the FP firmware returned them; see `ChannelConfig::grant_credit`.
+            grant_credit: false,
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_oic_config = OicChannelConfig {
+            controller: 1,
+            channel: 0,
+            osq_base: IO_GSRAM_BASE + BULK_OSQ_OFFSET,
+            ocq_base: IO_GSRAM_BASE + BULK_OCQ_OFFSET,
+            ocq_tail_shadow: IO_GSRAM_BASE + BULK_OCQ_TAIL_SHADOW_OFFSET,
+            io_cq_base: IO_GSRAM_BASE + BULK_IO_CQ_OFFSET,
+            io_cq_size: BULK_IO_CQ_STRIDE,
+            io_meta_base: IO_GSRAM_BASE + BULK_IO_META_OFFSET,
+            interrupt: true,
+            // A bulk SQ has several credits, so a firmware read-modify-write
+            // of its credit register can race the hardware's decrement on
+            // fetch and leave the count off for good, which hangs Admin's
+            // SQ drain. Return each IO's credit with its completion instead.
+            return_credit: true,
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_fp2_iic_config = IicChannelConfig {
+            channel: 1,
+            isq_base: IO_GSRAM_BASE + BULK_FP2_ISQ_OFFSET,
+            io_first: BULK_FP1_SLOTS,
+            io_count: BULK_FP2_SLOTS,
+            icq_base: IO_GSRAM_BASE + BULK_FP2_ICQ_OFFSET,
+            icq_tail_shadow: IO_GSRAM_BASE + BULK_FP2_ICQ_TAIL_SHADOW_OFFSET,
+            ..bulk_iic_config
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_fp2_oic_config = OicChannelConfig {
+            channel: 1,
+            osq_base: IO_GSRAM_BASE + BULK_FP2_OSQ_OFFSET,
+            ocq_base: IO_GSRAM_BASE + BULK_FP2_OCQ_OFFSET,
+            ocq_tail_shadow: IO_GSRAM_BASE + BULK_FP2_OCQ_TAIL_SHADOW_OFFSET,
+            ..bulk_oic_config
         };
 
         let gdma_config = GdmaChannelConfig {
@@ -495,10 +748,26 @@ impl Default for UnoHsmPal {
         };
         // SAFETY: As above.
         #[cfg(not(feature = "bulk_crypto"))]
-        let bcp = unsafe { static_init!(BcpDriver, BcpDriver::new()) };
+        let (bulk_iic, bulk_oic, bulk_fp2_iic, bulk_fp2_oic, bcp) = unsafe {
+            (
+                static_init!(BulkIic, BulkIic::new(bulk_iic_config)),
+                static_init!(BulkOic, BulkOic::new(bulk_oic_config)),
+                static_init!(BulkIic, BulkIic::new(bulk_fp2_iic_config)),
+                static_init!(BulkOic, BulkOic::new(bulk_fp2_oic_config)),
+                static_init!(BcpDriver, BcpDriver::new()),
+            )
+        };
         Self {
             iic,
             oic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_iic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_oic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_fp2_iic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_fp2_oic,
             gdma,
             aes,
             sha,
@@ -509,11 +778,18 @@ impl Default for UnoHsmPal {
             #[cfg(not(feature = "bulk_crypto"))]
             bcp,
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
+            #[cfg(not(feature = "bulk_crypto"))]
+            poll_turn: Cell::new(0),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
+            bulk_io_in_flight: Cell::new(0),
+            detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
+            io_session_key: [const { Cell::new(None) }; IO_SQ_COUNT as usize],
+            detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
+            io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
         }
     }
@@ -532,6 +808,20 @@ const PCIE_RESET_PERST: u32 = 0x54535250;
 fn is_pcie_reset_event(value: u32) -> bool {
     value == PCIE_RESET_FLR || value == PCIE_RESET_PERST
 }
+
+/// Longest the IDFU shutdown handler waits for the PKA engines to return to
+/// the pool before failing closed. A wipe takes microseconds and a periodic
+/// self-test holds an engine for a few milliseconds, so this expires only for
+/// a stuck engine (e.g. a wipe that keeps failing), and it leaves the reply
+/// well inside Admin's smallest IDFU drain budget (500 ms).
+const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
+
+/// Longest the IDFU shutdown handler waits for host IO to finish before
+/// failing closed. Admin sends the shutdown once every host credit is
+/// restored, but a detached IO grants its credit back with its completion
+/// post (see `OicDriver::send_detached`), a moment before the run loop
+/// scrubs and frees its slot: a tail of microseconds.
+const SHUTDOWN_IO_DRAIN_MS: u64 = 10;
 
 impl UnoHsmPal {
     /// Returns the current boot phase.
@@ -553,18 +843,33 @@ impl UnoHsmPal {
     /// Called by [`accept_io`](Self::accept_io) for every IO received from
     /// the IIC driver. Saturating so it can never panic across the host
     /// trust boundary.
-    pub(crate) fn io_in_flight_inc(&self) {
+    pub(crate) fn io_in_flight_inc(&self, kind: HsmIoKind) {
         self.io_in_flight
             .set(self.io_in_flight.get().saturating_add(1));
+        if kind == HsmIoKind::Bulk {
+            self.bulk_io_in_flight
+                .set(self.bulk_io_in_flight.get().saturating_add(1));
+        }
     }
 
     /// Decrement the in-flight IO count.
     ///
     /// Called by `drop_io` right after the IO slot is returned to the ISQ.
     /// Saturating so it can never panic.
-    pub(crate) fn io_in_flight_dec(&self) {
+    pub(crate) fn io_in_flight_dec(&self, kind: HsmIoKind) {
         self.io_in_flight
             .set(self.io_in_flight.get().saturating_sub(1));
+        if kind == HsmIoKind::Bulk {
+            self.bulk_io_in_flight
+                .set(self.bulk_io_in_flight.get().saturating_sub(1));
+        }
+    }
+
+    /// Current number of host command (not bulk) IOs in flight.
+    pub(crate) fn cmd_io_in_flight(&self) -> u32 {
+        self.io_in_flight
+            .get()
+            .saturating_sub(self.bulk_io_in_flight.get())
     }
 
     /// Current number of host IOs in flight.
@@ -610,11 +915,16 @@ impl UnoHsmPal {
         .await;
         match result {
             Either::First(_) => {
-                self.handle_ipc_message(IpcChannel::AdminMessage, &mut recv_msg)
-                    .await;
+                let msg = core::pin::pin!(
+                    self.handle_ipc_message(IpcChannel::AdminMessage, &mut recv_msg)
+                );
+                poll_cold(msg).await;
             }
             Either::Second(value) => {
-                self.handle_ipc_event(IpcChannel::AdminEvent, value).await;
+                poll_cold(core::pin::pin!(
+                    self.handle_ipc_event(IpcChannel::AdminEvent, value)
+                ))
+                .await;
             }
         }
     }
@@ -688,6 +998,8 @@ impl UnoHsmPal {
     /// - Moves boot phase to [`BootPhase::Running`].
     /// - Publishes `Run` to shared boot-status memory.
     /// - Optionally emits semihosting `SYS_READY` when feature-enabled.
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn on_boot_complete(&self) {
         // On an impactless (fw-update) warm reset the IIC/OIC queues were
         // programmed and enabled by the previous firmware and must survive the
@@ -698,6 +1010,13 @@ impl UnoHsmPal {
         // unconditional `GdmaController::new_with_enable`.
         self.iic.init();
         self.oic.init();
+        #[cfg(not(feature = "bulk_crypto"))]
+        {
+            self.bulk_iic.init();
+            self.bulk_oic.init();
+            self.bulk_fp2_iic.init();
+            self.bulk_fp2_oic.init();
+        }
         self.gdma.init();
         self.boot_phase.set(BootPhase::Running);
         boot_status::set(BootStatus::Run);
@@ -714,6 +1033,38 @@ impl UnoHsmPal {
         tsra_fw_uno_drivers_semihosting::sys_ready();
 
         info!("boot", "phase -> Running, status=Run");
+    }
+
+    /// Handle every PKA engine that has finished a command or a wipe, as
+    /// [`poll_once`](Self::poll_once) does for their IRQs.
+    ///
+    /// Called also where a request awaits the BCP or the PKA -- steps of
+    /// keyed requests only, so that requests that never use them pay
+    /// nothing -- since the run loop's next pass waits behind every task
+    /// ready ahead of it, and an engine whose command has finished sits
+    /// idle until it comes: twice per command, once for the command and
+    /// once for the wipe that follows. Under a stream of ECDSA P-256
+    /// signatures, which keeps all sixteen engines busy, that wait was
+    /// about a fortieth of each engine's time. With no engine in use this
+    /// is a load and a compare, inlined; the rest is out of line, to keep
+    /// the request path's code as it was.
+    #[inline(always)]
+    pub fn service_pka(&self) {
+        if self.pka.any_engine_busy() {
+            self.service_busy_pka();
+        }
+    }
+
+    #[inline(never)]
+    fn service_busy_pka(&self) {
+        let mut done = ((Nvic::pending_bits(PKA_DONE_IRQ / 32) >> (PKA_DONE_IRQ % 32))
+            | (Nvic::pending_bits(PKA_ERROR_IRQ / 32) >> (PKA_ERROR_IRQ % 32)))
+            & 0xFFFF;
+        while done != 0 {
+            let id = done.trailing_zeros() as u8;
+            done &= done - 1;
+            self.pka.wake_engine(id);
+        }
     }
 
     /// Poll the NVIC once and wake any PAL driver with a pending IRQ.
@@ -735,11 +1086,15 @@ impl UnoHsmPal {
     /// # Side Effects
     /// Invokes zero or more driver wake functions from [`WAKE_TABLE`].
     ///
-    /// This is also the entry point used by the synchronous firmware test
-    /// harness, which drives test futures to completion outside the Embassy
-    /// executor and must wake NVIC-gated drivers between polls. Production
-    /// code uses [`HsmPal::run`] instead.
+    /// The firmware's executor loop calls this after each executor pass.
+    /// So does the synchronous firmware test harness, which drives test
+    /// futures to completion outside the Embassy executor and must wake
+    /// NVIC-gated drivers between polls.
     pub fn poll_once(&self) {
+        // Start the copies and posts the tasks submitted in the executor
+        // pass.
+        self.ring_doorbells();
+
         for (reg, &mask) in ISPR_MASKS.iter().enumerate() {
             let pend = Nvic::pending_bits(reg) & mask;
             let mut bits = pend;
@@ -754,6 +1109,25 @@ impl UnoHsmPal {
         // The BCP raises no HSM interrupt; reap its completions every pass.
         #[cfg(not(feature = "bulk_crypto"))]
         self.bcp.wake();
+
+        self.finish_detached();
+
+        // Start the copies and posts this pass submitted.
+        self.ring_doorbells();
+    }
+
+    /// Rings the GDMA's and every OIC's doorbell for the copies and posts
+    /// submitted since the last call: their submissions only write the
+    /// queue entries.
+    #[inline(always)]
+    fn ring_doorbells(&self) {
+        self.gdma.ring();
+        self.oic.ring();
+        #[cfg(not(feature = "bulk_crypto"))]
+        {
+            self.bulk_oic.ring();
+            self.bulk_fp2_oic.ring();
+        }
     }
 
     /// Handle an incoming IPC message.
@@ -809,7 +1183,7 @@ impl UnoHsmPal {
                 if self.try_handle_pfn_enable(channel, buf).await {
                     return;
                 }
-                if self.try_handle_shutdown(channel, buf) {
+                if self.try_handle_shutdown(channel, buf).await {
                     return;
                 }
                 buf[0] |= 0x80;
@@ -848,9 +1222,10 @@ impl UnoHsmPal {
         // Map the IPC action onto a partition-lifecycle primitive. `Migrate`
         // drives an NSSR reset (handled by `part_migrate` below); only an
         // unknown action is rejected as unsupported. No partition lock: a
-        // partition cannot be disabled/freed while host IOs are in flight,
-        // and admin-IPC is strictly serial, so this cannot race a host
-        // command (see lock.rs).
+        // partition cannot be disabled/freed while host IOs are in flight
+        // (bar a detached IO's slot scrub, which touches no partition
+        // state), and admin-IPC is strictly serial, so this cannot race a
+        // host command (see lock.rs).
         let result = match PfnEnableDisableAction(msg.info.action) {
             PfnEnableDisableAction::Enable => self.part_enable(pid, is_pf).await,
             PfnEnableDisableAction::Disable => self.part_disable(pid).await,
@@ -916,7 +1291,8 @@ impl UnoHsmPal {
         // The ACK's owned-table count is a pure function of the mask — an
         // IPC-reply concern, computed here rather than in the partition layer.
         // No partition lock: a partition cannot be freed/allocated while host
-        // IOs are in flight, and admin-IPC is strictly serial (see lock.rs).
+        // IOs are in flight (bar a detached IO's slot scrub, which touches no
+        // partition state), and admin-IPC is strictly serial (see lock.rs).
         let result = if mask == 0 {
             self.part_free(pid).await
         } else {
@@ -938,20 +1314,29 @@ impl UnoHsmPal {
     ///
     /// Admin owns the IO drain: it sends this only after every host SQ
     /// credit has been restored, and inbound is HW-paused so no new IO can
-    /// arrive. The HSM therefore just confirms it holds no in-flight IO and
+    /// arrive. The HSM therefore just confirms it holds no resident work and
     /// replies — mirroring the reference firmware's fail-closed
     /// `scheduler.occupancy_list() != 0` guard:
     ///
-    /// - non-zero in-flight -> reply `OperationFailed`, so Admin aborts
-    ///   (rolls back) the IDFU instead of resetting with resident work;
-    /// - zero in-flight -> reply `Success`. Partition state is already
+    /// - host IO still in flight after [`SHUTDOWN_IO_DRAIN_MS`] -> reply
+    ///   `OperationFailed`, so Admin aborts (rolls back) the IDFU instead of
+    ///   resetting with resident work. The wait covers a detached IO, whose
+    ///   credit returns with its completion post, just before its slot is
+    ///   scrubbed and freed;
+    /// - PKA engines still out of the pool after [`SHUTDOWN_PKA_DRAIN_MS`]
+    ///   -> reply `OperationFailed` likewise. A request can finish while the
+    ///   wipe that follows its PKA command (or the retry of a failed wipe)
+    ///   still runs, and a reset then would lose the wipe while the rebuilt
+    ///   driver marks the engine free, so the handler first waits for the
+    ///   engines to return;
+    /// - otherwise -> reply `Success`. Partition state is already
     ///   GSRAM write-through (see [`part`](crate::part)), so there is no
     ///   separate flush to perform before the SP resets the core.
     ///
     /// Returns `true` when the message was a `Shutdown` (and thus fully
     /// handled here), `false` otherwise so the caller falls back to the
     /// default echo path.
-    fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
+    async fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
         // Only claim messages that carry the `Shutdown` opcode; anything else
         // is left for the caller's default echo path.
         let is_shutdown = IpcMessageDecoder::decode_header(&IpcMessage { data: *buf })
@@ -977,18 +1362,26 @@ impl UnoHsmPal {
         }
 
         // Admin owns the drain (see the docstring): fail closed while any host
-        // IO is still in flight, otherwise acknowledge readiness. This relies
-        // on every received IO eventually reaching `drop_io` (each
+        // IO is still in flight after a short wait for the detached tail,
+        // otherwise acknowledge readiness once the PKA has finished the
+        // cleanup host IO leaves behind. This relies on every received IO
+        // eventually reaching `drop_io` or its detached free (each
         // `handle_io` task runs to completion, or the core faults into a
         // reset); a task that hung on an `.await` would keep the count
         // non-zero and block IDFU.
-        let in_flight = self.io_in_flight();
-        let status = if in_flight != 0 {
+        let status = if !self.drain_io().await {
             error!(
                 "idfu",
                 HsmError::IoDrainInProgress,
                 "shutdown requested with {} IO in flight; failing closed",
-                in_flight
+                self.io_in_flight()
+            );
+            IpcMessageStatusCode::OperationFailed
+        } else if !self.drain_pka().await {
+            error!(
+                "idfu",
+                HsmError::IoDrainInProgress,
+                "shutdown requested with PKA cleanup pending; failing closed"
             );
             IpcMessageStatusCode::OperationFailed
         } else {
@@ -998,6 +1391,41 @@ impl UnoHsmPal {
         let reply = encode_shutdown_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
+    }
+
+    /// Wait up to [`SHUTDOWN_IO_DRAIN_MS`] for every host IO to finish: the
+    /// run loop, which this task yields to, frees a detached IO's slot once
+    /// its completion post is done.
+    async fn drain_io(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_IO_DRAIN_MS);
+        loop {
+            if self.io_in_flight() == 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            embassy_futures::yield_now().await;
+        }
+    }
+
+    /// Wait up to [`SHUTDOWN_PKA_DRAIN_MS`] for every PKA engine to return to
+    /// the pool, handling finished commands and wipes as it goes.
+    ///
+    /// Returns whether the PKA is idle.
+    async fn drain_pka(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_PKA_DRAIN_MS);
+        loop {
+            self.service_pka();
+            if !self.pka.any_engine_busy() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            // Let a task holding an engine (a periodic self-test) run.
+            embassy_futures::yield_now().await;
+        }
     }
 
     /// Handle one IPC event notification.
@@ -1068,13 +1496,21 @@ impl UnoHsmPal {
                 }
             }
             // Recycle IO still queued in the ICQ. `poll_io` only takes entries
-            // it has been woken for, so an entry left in the ICQ would be
-            // dispatched once the flag clears and could reach a partition
-            // re-enabled after the acknowledgement. Nothing awaits between
-            // finding the ICQ empty and clearing the flag.
-            while let Some(index) = self.iic.try_recv() {
-                let io = self.accept_io(index);
+            // it has been woken for, and the run loop takes none while the
+            // flag is set, so an entry left in the ICQ would be dispatched
+            // once the flag clears and could reach a partition re-enabled
+            // after the acknowledgement. Nothing awaits between finding the
+            // ICQ empty and clearing the flag.
+            while let Some(rx) = self.iic.try_recv() {
+                let io = self.accept_io(rx, HsmIoKind::Cmd);
                 self.recycle_reset_io(io).await;
+            }
+            #[cfg(not(feature = "bulk_crypto"))]
+            for bulk_iic in [self.bulk_iic, self.bulk_fp2_iic] {
+                while let Some(rx) = bulk_iic.try_recv() {
+                    let io = self.accept_io(rx, HsmIoKind::Bulk);
+                    self.recycle_reset_io(io).await;
+                }
             }
             // Resume normal IO dispatch.
             self.io_paused.set(false);
@@ -1127,6 +1563,19 @@ impl HsmCustomDispatch for UnoHsmPal {
     }
 }
 
+/// Uno: API revision 1.x, Uno IO protocol.
+impl HsmPalFeatures for UnoHsmPal {
+    type IoProtocol = UnoIo;
+    const API_REV_MIN: HsmApiRevision = HsmApiRevision::new(1, 0);
+    const API_REV_MAX: HsmApiRevision = HsmApiRevision::new(1, 1);
+}
+
+/// Uno PKA operands are little-endian (word-padded P-521 slots).
+impl HsmCryptoOrder for UnoHsmPal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
+}
+
 impl HsmPal for UnoHsmPal {
     /// Initialises the Uno platform (phase 1 only).
     ///
@@ -1148,6 +1597,8 @@ impl HsmPal for UnoHsmPal {
     /// - Initializes SysTick timing and RNG.
     /// - Initializes IPC and enables message/event channels.
     /// - Publishes boot status `Done` for host-side polling.
+    #[inline(never)]
+    #[unsafe(link_section = ".gsram_text.boot")]
     fn init(&self) {
         systick_driver::init();
         // The PQC operand slots are read back with an engine reserved, so how
@@ -1227,12 +1678,16 @@ impl HsmPal for UnoHsmPal {
             SocResetType::WarmReset | SocResetType::FwUpdateWarmReset => {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
-                // preserved as-is and only Gate 1 is re-armed.
+                // preserved as-is; only Gate 1 and the session transport
+                // epochs are advanced.
                 info!(
                     "boot",
                     "init: reset=warm/fwupdate -> keep store, rearm gate1"
                 );
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
+                // Surviving sessions keep their keys but their DTCM message
+                // counters restarted: move to a fresh sequence-number epoch.
+                tsra_fw_uno_drivers_part_store::PartStore::bump_transport_epochs();
             }
         }
         boot_status::set(BootStatus::Done);

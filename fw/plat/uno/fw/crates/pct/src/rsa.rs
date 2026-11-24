@@ -10,6 +10,7 @@
 //!
 //! In both tests, the intermediate value must also differ from the input.
 
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -62,8 +63,14 @@ pub async fn rsa_pct<P: HsmRsa + HsmHash>(
         let algo = digest_algo(key);
         let message = crate::scratch(alloc, k)?;
         message.fill(MESSAGE_BYTE);
-        pal.hash(io, algo, message, &mut input[..algo.digest_len()], false)
-            .await?;
+        pal.hash(
+            io,
+            algo,
+            message,
+            HsmDigestForm::Operand,
+            Some(&mut input[..algo.digest_len()]),
+        )
+        .await?;
     } else {
         input.fill(PLAINTEXT_BYTE);
         input[k - 1] = 0;
@@ -86,9 +93,9 @@ pub async fn rsa_pct<P: HsmRsa + HsmHash>(
                 (&*middle, &mut *output)
             };
             if private {
-                pal.mod_exp_priv(io, key, priv_key, x, y).await?;
+                pal.mod_exp_priv(io, key, priv_key, x, Some(y)).await?;
             } else {
-                pal.mod_exp_pub(io, key.pub_variant(), pub_key, x, y)
+                pal.mod_exp_pub(io, key.pub_variant(), pub_key, x, Some(y))
                     .await?;
             }
         }

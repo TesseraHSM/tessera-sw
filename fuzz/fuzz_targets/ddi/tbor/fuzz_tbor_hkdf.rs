@@ -16,6 +16,7 @@ use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_types::*;
+use tsra_fw_core_crypto_key_masking::aead;
 
 /// Fuzzed fields corresponding to the TBOR `HkdfDerive` request. The MBOR
 /// `key_id` is replaced with a masked ECDH secret, and `key_tag` maps to the
@@ -144,8 +145,10 @@ fuzz_target!(|input: FuzzInput| {
             (Ok(resp), true) => {
                 assert_eq!(
                     resp.masked_key.len(),
-                    MASKED_KEY_OVERHEAD
-                        + output_key_len(input.cmdreq_data.key_type, input.cmdreq_data.key_length,),
+                    aead::masked_blob_len(
+                        aead::AeadAlg::AesGcm256,
+                        output_key_len(input.cmdreq_data.key_type, input.cmdreq_data.key_length),
+                    ),
                     "masked derived-key envelope length must match the requested key type"
                 );
             }
@@ -158,13 +161,6 @@ fuzz_target!(|input: FuzzInput| {
             .expect("session close should succeed");
     });
 });
-
-// 8 = HEADER_LEN (fw/core/crypto/aead-envelope/src/format.rs);
-// 12 = GCM_IV_LEN (fw/core/crypto/aead-envelope/src/alg.rs);
-// 192 = TBOR_MASKED_KEY_METADATA_LEN, the AEAD AAD length
-// (api/lib/src/ddi/masked_key.rs);
-// 16 = GCM_TAG_LEN (fw/core/crypto/aead-envelope/src/alg.rs).
-const MASKED_KEY_OVERHEAD: usize = 8 + 12 + 192 + 16;
 
 fn valid_key_length(key_type: u8, key_length: u8) -> bool {
     match key_type {

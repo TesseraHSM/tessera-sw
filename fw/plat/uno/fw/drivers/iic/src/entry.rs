@@ -79,6 +79,18 @@ impl IcqEntry {
     }
 }
 
+/// A successful inbound IO as [`IicDriver::recv`](crate::IicDriver::recv)
+/// hands it out: its IO_SQ slot and the routing its ICQ entry carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Received {
+    /// IO_SQ slot index.
+    pub index: u16,
+    /// AXI bus ID of the source controller.
+    pub axi_id: u8,
+    /// Source queue identifier.
+    pub queue_id: u8,
+}
+
 // ── IO Meta Entry (8 bytes) ────────────────────────────────────────
 
 /// IO Meta entry — per-slot sidecar written by the driver during recv.

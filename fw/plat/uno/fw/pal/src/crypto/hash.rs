@@ -12,12 +12,12 @@
 //! - **Multi-step** ([`hash_begin`](HsmHash::hash_begin) /
 //!   [`hash_continue`](HsmHash::hash_continue) /
 //!   [`hash_finish`](HsmHash::hash_finish)) — data arrives incrementally and
-//!   is buffered in alloc-allocated scratch memory until full blocks can be
+//!   is buffered in caller-provided storage until full blocks can be
 //!   flushed to hardware.
 //!
 //! ## Multi-step algorithm
 //!
-//! [`HsmHashContext`] holds a single alloc-allocated buffer with layout
+//! [`HsmHashContext`] borrows caller-provided storage with layout
 //! `[state | pending]`, where the state region stores the intermediate SHA
 //! working variables and the pending region accumulates a partial block.
 //!
@@ -52,8 +52,12 @@
 //! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
 //! ML-DSA and ML-KEM are.
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -66,11 +70,24 @@ use tsra_fw_uno_drivers_sha::ShaRequest;
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
+fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<()> {
+    crate::gdma::raw_sgl_len(desc, expected_len)?;
+    let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+    let addr = u64::from_le_bytes([
+        desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
+    ]);
+    if desc[12..15].iter().any(|&byte| byte != 0) || desc[15] & 0x0F != 0 || addr == 0 {
+        return Err(HsmError::InvalidArg);
+    }
+    addr.checked_add(len as u64).ok_or(HsmError::InvalidArg)?;
+    Ok(())
+}
+
 /// Multi-step hash context for the Uno SHA hardware accelerator.
 ///
-/// Carries the algorithm selection, running byte count, and a alloc-allocated
+/// Carries the algorithm selection, running byte count, and caller-provided
 /// buffer that persists across [`hash_continue`](HsmHash::hash_continue)
-/// calls. Created by [`hash_begin`](HsmHash::hash_begin) and consumed by
+/// calls. Created by [`hash_begin`](HsmHash::hash_begin) and finalized by
 /// [`hash_finish`](HsmHash::hash_finish).
 #[derive(Debug)]
 pub struct HsmHashContext<'a> {
@@ -86,7 +103,7 @@ pub struct HsmHashContext<'a> {
     /// For SHAKE, the number of message bytes buffered in [`buf`](Self::buf).
     byte_count: u32,
 
-    /// Scope-allocated state buffer with layout `[digest(state_len) |
+    /// Caller-provided state buffer with layout `[digest(state_len) |
     /// pending(block_len)]`.
     ///
     /// The state region holds the intermediate SHA working variables between
@@ -100,6 +117,7 @@ pub struct HsmHashContext<'a> {
     /// Number of valid bytes currently stored in the pending region of
     /// [`buf`](Self::buf).
     pending_len: u8,
+    active: bool,
 }
 
 pub(crate) trait ShaDigestContext {
@@ -137,7 +155,7 @@ impl<'a> HsmHashContext<'a> {
     /// # Parameters
     ///
     /// - `algo` — hash algorithm (e.g. SHA-256, SHA-512).
-    /// - `buf` — alloc-allocated state storage for intermediate state, final
+    /// - `buf` — caller-provided state storage for intermediate state, final
     ///   digest, and pending block storage. Must be at least
     ///   [`HsmHashAlgo::hash_state_len`] bytes; for SHAKE, the message
     ///   buffer.
@@ -152,6 +170,7 @@ impl<'a> HsmHashContext<'a> {
             byte_count: 0,
             buf,
             pending_len: 0,
+            active: true,
         }
     }
 
@@ -212,15 +231,14 @@ impl HsmHash for UnoHsmPal {
     /// - `io` — I/O context for the current operation.
     /// - `algo` — hash algorithm to use.
     /// - `data` — complete input message.
-    /// - `digest` — output buffer (must be at least
-    ///   [`HsmHashAlgo::digest_len`] bytes).
-    /// - `big_endian` — if `true`, the digest is written in big-endian (NIST
-    ///   standard) byte order.  If `false`, the whole digest is reversed to
-    ///   little-endian byte order.
+    /// - `form` — [`HsmDigestForm::Standard`] writes the standard digest;
+    ///   [`HsmDigestForm::Operand`] writes its byte reversal (PKA operand).
+    /// - `digest` — `None` queries the length; an output buffer must hold at
+    ///   least [`HsmHashAlgo::digest_len`] bytes.
     ///
     /// # Returns
     ///
-    /// `Ok(())` on success, or an [`HsmError`] if `digest` is too short, the
+    /// Required size or bytes written, or an [`HsmError`] if `digest` is too short, the
     /// message length exceeds `u32::MAX` (for SHAKE, [`SHAKE_MSG_MAX`]), a
     /// SHAKE output exceeds [`SHAKE_OUT_MAX`], or the hardware submission
     /// fails.
@@ -229,11 +247,18 @@ impl HsmHash for UnoHsmPal {
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
-        digest: &mut HsmDmaBuf,
-        big_endian: bool,
-    ) -> HsmResult<()> {
+        form: HsmDigestForm,
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let _ = io;
+        self.hash_state_size(algo)?;
         let digest_len = algo.digest_len();
+        if (algo.is_xof() && data.len() > SHAKE_MSG_MAX) || u32::try_from(data.len()).is_err() {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(digest) = digest else {
+            return Ok(digest_len);
+        };
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
@@ -243,57 +268,81 @@ impl HsmHash for UnoHsmPal {
             if data.len() > SHAKE_MSG_MAX || digest_len > SHAKE_OUT_MAX {
                 return Err(HsmError::InvalidArg);
             }
-            self.pqc.shake(algo, data, digest).await?;
+            self.pqc
+                .shake(algo, data, &mut digest[..digest_len])
+                .await?;
         } else {
-            self.sha_oneshot(algo, data, digest).await?;
+            self.sha_oneshot(algo, data, &mut digest[..digest_len])
+                .await?;
         }
-        if !big_endian {
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
-        Ok(())
+        Ok(digest_len)
     }
 
-    /// Begins a multi-step hash computation.
-    ///
-    /// Allocates the combined `[state | block]` buffer from `alloc`, then
-    /// returns a fresh [`HsmHashContext`].
-    ///
-    /// # Parameters
-    ///
-    /// - `io` — I/O context for the current operation.
-    /// - `alloc` — scoped allocator used for the internal hash state buffer.
-    /// - `algo` — hash algorithm to use.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(HsmHashContext)` ready to accept data via
-    /// [`hash_continue`](HsmHash::hash_continue),
-    /// [`HsmError::UnsupportedDigestHashAlgorithm`] for an algorithm the SHA
-    /// engine cannot run (SHA-3), or SHAKE with `bulk_crypto`,
-    /// [`HsmError::InvalidArg`] for a SHAKE output
-    /// longer than [`SHAKE_OUT_MAX`], or [`HsmError::NotEnoughSpace`] if the
-    /// alloc cannot satisfy the allocation.
-    fn hash_begin<'a>(
+    #[inline(never)]
+    async fn hash_oob(
         &self,
-        _io: &UnoHsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        alloc: &'a impl HsmScopedAlloc,
-    ) -> HsmResult<Self::HashCtx<'a>>
-    where
-        Self: 'a,
-    {
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.hash_state_size(algo)?;
+        let digest_len = algo.digest_len();
+        if expected_len > 8192 || digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let root_desc = if expected_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, index).await?;
+            validate_oob_hash_desc(&desc, expected_len)?;
+            Some(desc)
+        };
+
+        self.alloc_scoped_async(io, async |scope| -> HsmResult<usize> {
+            let message = scope.dma_alloc(expected_len)?;
+            if let Some(desc) = root_desc {
+                self.copy_mem_from_host_raw(io, &desc, message, false)
+                    .await?;
+            }
+            self.hash(io, algo, message, form, Some(digest)).await
+        })
+        .await
+    }
+
+    fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
         if algo.is_xof() {
             shake_available()?;
             if algo.digest_len() > SHAKE_OUT_MAX {
                 return Err(HsmError::InvalidArg);
             }
-            let buf = alloc.dma_alloc(SHAKE_MSG_MAX)?;
-            return Ok(HsmHashContext::new(algo, buf));
+            Ok(SHAKE_MSG_MAX)
+        } else {
+            ShaMode::try_from(algo)?;
+            Ok(algo.hash_state_len())
         }
-        // Reject algorithms the SHA engine cannot run before allocating.
-        ShaMode::try_from(algo)?;
-        let buf = alloc.dma_alloc(algo.hash_state_len())?;
-        Ok(HsmHashContext::new(algo, buf))
+    }
+
+    fn hash_begin<'a>(
+        &self,
+        _io: &UnoHsmIo,
+        algo: HsmHashAlgo,
+        buf: &'a mut HsmDmaBuf,
+    ) -> HsmResult<Self::HashCtx<'a>>
+    where
+        Self: 'a,
+    {
+        let state_len = self.hash_state_size(algo)?;
+        if buf.len() < state_len || buf.as_ptr() as usize & 3 != 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        Ok(HsmHashContext::new(algo, &mut buf[..state_len]))
     }
 
     /// Feeds arbitrary-length data into a multi-step hash.
@@ -328,48 +377,54 @@ impl HsmHash for UnoHsmPal {
     /// Finalizes the multi-step hash and writes the digest to `digest`.
     ///
     /// Flushes any remaining bytes in the pending buffer with SHA auto-padding
-    /// enabled. Consumes the context so it cannot be reused.
+    /// enabled. Queries leave the context unchanged; execution marks it inactive.
     ///
     /// # Parameters
     ///
     /// - `io` — I/O context for the current operation.
-    /// - `ctx` — the [`HsmHashContext`] to finalize (consumed).
+    /// - `ctx` — the active [`HsmHashContext`] to query or finalize.
     /// - `digest` — output buffer for the final digest. Must be at least
     ///   [`HsmHashAlgo::digest_len`] bytes.
-    /// - `big_endian` — if `true`, the digest is written in big-endian (NIST
-    ///   standard) byte order. If `false`, the whole digest is reversed to
-    ///   little-endian byte order.
+    /// - `form` — [`HsmDigestForm::Standard`] writes the standard digest;
+    ///   [`HsmDigestForm::Operand`] writes its byte reversal (PKA operand).
     ///
     /// # Returns
     ///
-    /// `Ok(())` on success, or an [`HsmError`] if `digest` is too short or the
+    /// Required size or bytes written, or an [`HsmError`] if `digest` is too short or the
     /// hardware submission fails.
     async fn hash_finish(
         &self,
         io: &UnoHsmIo,
-        mut ctx: Self::HashCtx<'_>,
-        digest: &mut HsmDmaBuf,
-        big_endian: bool,
-    ) -> HsmResult<()> {
+        ctx: &mut Self::HashCtx<'_>,
+        form: HsmDigestForm,
+        digest: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let _ = io;
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
         let algo = ctx.algo;
         let digest_len = algo.digest_len();
+        let Some(digest) = digest else {
+            return Ok(digest_len);
+        };
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
 
+        ctx.active = false;
         if algo.is_xof() {
             let msg = &ctx.buf[..ctx.byte_count as usize];
-            self.pqc.shake(algo, msg, digest).await?;
+            self.pqc.shake(algo, msg, &mut digest[..digest_len]).await?;
         } else {
             let len = ctx.pending_len as usize;
-            self.sha_digest_block(&mut ctx, None, len, true).await?;
+            self.sha_digest_block(ctx, None, len, true).await?;
             digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
         }
-        if !big_endian {
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
-        Ok(())
+        Ok(digest_len)
     }
 }
 
@@ -388,11 +443,14 @@ impl UnoHsmPal {
         ctx: &mut HsmHashContext<'_>,
         data: &[u8],
     ) -> HsmResult<()> {
+        if !ctx.active {
+            return Err(HsmError::InvalidArg);
+        }
         if ctx.algo.is_xof() {
             let start = ctx.byte_count as usize;
             let end = start
                 .checked_add(data.len())
-                .filter(|&end| end <= ctx.buf.len())
+                .filter(|&end| end <= SHAKE_MSG_MAX)
                 .ok_or(HsmError::InvalidArg)?;
             ctx.buf[start..end].copy_from_slice(data);
             ctx.byte_count = end as u32;

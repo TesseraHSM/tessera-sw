@@ -11,9 +11,11 @@ use tsra_api::HsmAesEcbAlgo;
 use super::modes_common::*;
 use super::*;
 
-#[cfg(not(feature = "session-ex-tests"))]
 #[session_test]
 fn test_ecb_unsupported_without_ex_session(session: HsmSession) {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let key = mode_key_all(&session, 128);
     let data = mode_data(32);
 
@@ -27,7 +29,6 @@ fn test_ecb_unsupported_without_ex_session(session: HsmSession) {
     assert!(matches!(result, Err(HsmError::UnsupportedAlgorithm)));
 }
 
-#[cfg(feature = "session-ex-tests")]
 mod ex {
     use super::common::cbc_encrypt;
     use super::*;
@@ -52,24 +53,36 @@ mod ex {
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_128(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 128);
     }
 
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_192(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 192);
     }
 
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_256(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 256);
     }
 
     /// Identical plaintext blocks encrypt to identical ciphertext blocks.
     #[session_test]
     fn test_ecb_identical_blocks(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = [0x5Au8; 48];
         let ct = one_shot_encrypt(&mut HsmAesEcbAlgo, &key, &pt).expect("encrypt");
@@ -80,6 +93,9 @@ mod ex {
     /// Empty and non-block-aligned input is rejected.
     #[session_test]
     fn test_ecb_invalid_length(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         for len in [0, 1, 15, 17, 33] {
             let data = mode_data(len);
@@ -99,6 +115,9 @@ mod ex {
     /// Streaming with irregular chunk sizes matches single-shot output.
     #[session_test]
     fn test_ecb_streaming_matches_single_shot(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 256);
         let pt = mode_data(1104);
         let ct = one_shot_encrypt(&mut HsmAesEcbAlgo, &key, &pt).expect("encrypt");
@@ -114,6 +133,9 @@ mod ex {
     /// Streaming finish fails if the total input was not block-aligned.
     #[session_test]
     fn test_ecb_streaming_partial_block_rejected(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let result = stream_encrypt(HsmAesEcbAlgo, &key, &mode_data(20), &[7]);
         assert!(matches!(result, Err(HsmError::InvalidArgument)));
@@ -124,6 +146,9 @@ mod ex {
     /// Output buffers smaller than the input are rejected.
     #[session_test]
     fn test_ecb_buffer_too_small(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(32);
         let mut out = vec![0u8; 16];
@@ -140,6 +165,9 @@ mod ex {
     /// Keys without the matching usage are rejected.
     #[session_test]
     fn test_ecb_key_permissions(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let pt = mode_data(16);
         match mode_key(&session, 128, false, true) {
             Ok(key) => {
@@ -166,6 +194,9 @@ mod ex {
     /// A finished context rejects further use.
     #[session_test]
     fn test_ecb_context_unusable_after_finish(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(16);
         let mut out = vec![0u8; 16];

@@ -32,6 +32,7 @@ mod sd_sealing_key_gen;
 mod session;
 mod session_ex;
 mod tpm;
+mod wire_order;
 
 pub(crate) use aes::*;
 pub(crate) use aes_xts_key::*;
@@ -49,9 +50,9 @@ pub(crate) use hmac::*;
 pub(crate) use kbkdf::*;
 pub(crate) use key::*;
 pub(crate) use masked_key::*;
-/// Typed, fluent builder for [`PartPolicy`]; construct a policy with
-/// named setters instead of hand-assembling the wire image.
 pub use part_policy::PartPolicyBuilder;
+pub use part_policy::PolicyKeyFormat;
+pub use part_policy::policy_key_thumbprint;
 pub(crate) use partition::*;
 pub(crate) use partition_ex::*;
 pub(crate) use rsa::*;
@@ -93,53 +94,34 @@ pub use tsra_ddi_tbor_types::MASKED_SD_LEN;
 pub use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 /// Maximum number of certificates in a `part_final` PTA chain.
 pub use tsra_ddi_tbor_types::MAX_CERTS;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::PART_POLICY_LEN;
+/// Partition policy (CBOR) schema: maximum encoded length.
+pub use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 /// Exact length of the remote partition-owner-key backup (`SdCreate`/`SdReseal`).
 pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
+/// Partition policy (CBOR) schema: `backup_part_id` length.
 pub use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::POLICY_INFO_LEN;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
+/// Partition policy (CBOR) schema: maximum `info` length.
+pub use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+/// Partition policy (CBOR) schema: public-key thumbprint length.
+pub use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
+/// Partition policy (CBOR) schema: supported `version`.
+pub use tsra_ddi_tbor_types::POLICY_VERSION;
 /// Maximum size, in bytes, of the `part_init` `pta_csr` buffer.
 pub use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
 /// Maximum size, in bytes, of the `part_init` `pta_report` buffer.
 pub use tsra_ddi_tbor_types::PTA_REPORT_MAX_LEN;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::PartPolicy;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
+/// Partition policy (CBOR) schema: `flags` bits.
 pub use tsra_ddi_tbor_types::PolicyFlags;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::PolicyKeyKind;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::PolicyPubKey;
-/// Unified partition-provisioning policy and its typed field helpers,
-/// re-exported so callers can build a [`PartPolicy`] with named setters
-/// instead of hand-assembling the wire image.
-pub use tsra_ddi_tbor_types::PolicyVer;
+/// Partition policy (CBOR) schema: map keys.
+pub use tsra_ddi_tbor_types::PolicyKey;
+/// Partition policy (CBOR) schema: SPKI thumbprint.
+pub use tsra_ddi_tbor_types::PolicyThumbprint;
 /// Exact length of the security-domain masking-key backup envelope.
 pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 /// Wire length of a sealed DARC TMK.
 pub use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TborStatus;
+pub(crate) use wire_order::*;
 
 use super::*;
 
@@ -150,6 +132,9 @@ const _: () = assert!(crate::PSK_LEN == tsra_ddi_tbor_types::PSK_LEN);
 
 /// Minimum negotiated API revision required by TBOR operations.
 pub(crate) const TBOR_MIN_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
+
+/// API revision 2.0 (Duo): big-endian wire and no MBOR transport.
+pub(crate) const SESSION_TRANSPORT_API_REV: HsmApiRev = HsmApiRev { major: 2, minor: 0 };
 
 /// Returns `true` when `rev` supports TBOR operations.
 pub(crate) fn rev_supports_tbor(rev: HsmApiRev) -> bool {
@@ -227,6 +212,15 @@ impl From<DdiError> for HsmError {
             DdiError::TborStatus(TborStatus::SdPeerCloningNotAllowed) => {
                 HsmError::SdPeerCloningNotAllowed
             }
+            DdiError::TborStatus(TborStatus::DefaultPskMustRotate) => {
+                HsmError::DefaultPskMustRotate
+            }
+            DdiError::TborStatus(TborStatus::DefaultPskChanged) => HsmError::DefaultPskChanged,
+            DdiError::TborStatus(TborStatus::PskChangeAlreadyUsed) => {
+                HsmError::PskChangeAlreadyUsed
+            }
+            DdiError::TborStatus(TborStatus::SessionNeedsRenegotiation)
+            | DdiError::DdiError(0xCD) => HsmError::SessionNeedsRenegotiation,
             // Map the firmware's contract-level `InvalidArg` to the same
             // `InvalidArgument` the host guards return, so callers see a
             // consistent argument-rejection error across transports.
@@ -451,6 +445,19 @@ impl From<HsmKeyFlags> for DdiTargetKeyMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_errors_preserve_the_reopen_instruction() {
+        for (status, error) in [
+            (
+                TborStatus::DefaultPskMustRotate,
+                HsmError::DefaultPskMustRotate,
+            ),
+            (TborStatus::DefaultPskChanged, HsmError::DefaultPskChanged),
+        ] {
+            assert_eq!(HsmError::from(DdiError::TborStatus(status)), error);
+        }
+    }
 
     #[test]
     fn masked_key_authentication_failure_is_not_a_generic_command_failure() {

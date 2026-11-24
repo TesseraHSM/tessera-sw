@@ -38,7 +38,6 @@ fn test_aes_generate_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     key_size,
-                    None,
                     key_props,
                 )
                 .unwrap();
@@ -87,7 +86,6 @@ fn test_aes_generate_no_session_smoke() {
                 None,
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             )
             .expect_err("AesGenerateKey must be rejected without a session");

@@ -73,8 +73,9 @@ pub(crate) fn darc_unwrap_key_pair(
     };
 
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
@@ -85,7 +86,8 @@ pub(crate) fn darc_unwrap_key_pair(
         return Err(HsmError::InvalidKeyProps);
     }
 
-    let pub_key_der = ecc_wire_pub_key_to_der(recovered_curve, &resp.pub_key)?;
+    let pub_key_der =
+        ecc_wire_pub_key_to_der(WireOrder::of(session), recovered_curve, &resp.pub_key)?;
     let (priv_key_props, pub_key_props) =
         HsmMaskedKey::to_key_pair_props(&resp.masked_key, &pub_key_der)?;
 

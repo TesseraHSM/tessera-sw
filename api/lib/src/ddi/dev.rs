@@ -7,12 +7,24 @@
 //! through the DDI layer. It manages device enumeration, device handle wrapping,
 //! and device access operations.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
+use parking_lot::Mutex;
+use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
+use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_session_ex_crypto::SealedFrameReq;
+use tsra_session_ex_crypto::SealedFrameResp;
+use tsra_session_ex_crypto::SessionTransport;
+use tsra_session_ex_crypto::SessionTransportSeal;
+use zeroize::Zeroizing;
 
 use super::*;
 use crate::resiliency::HsmDdi;
@@ -46,6 +58,27 @@ static DDI: LazyLock<HsmDdi> = LazyLock::new(HsmDdi::default);
 /// - The DDI operation returns an error
 /// - The device is not responding
 pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
+    let rev = tbor_bootstrap_rev(dev)?;
+    // TBOR first; MBOR-only firmware rejects it.
+    match dev.exec_op_tbor(rev, &TborApiRevReq, None, &mut None) {
+        Ok(resp) => {
+            let rev = |major: u16, minor: u16| HsmApiRev {
+                major: major.into(),
+                minor: minor.into(),
+            };
+            return Ok((
+                rev(resp.min_major.get(), resp.min_minor.get()),
+                rev(resp.max_major.get(), resp.max_minor.get()),
+            ));
+        }
+        Err(
+            DdiError::UnsupportedEncoding
+            | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
+            | DdiError::TborStatus(TborStatus::UnsupportedCmd),
+        ) => {}
+        Err(err) => return Err(HsmError::from(err)),
+    }
+
     let req = DdiGetApiRevCmdReq {
         hdr: build_ddi_req_hdr(DdiOp::GetApiRev, None, None),
         data: DdiGetApiRevReq {},
@@ -62,7 +95,8 @@ pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
 /// Returns `false` when the backend or device does not support the command.
 /// Other device failures and invalid initialization values return an error.
 pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<bool> {
-    let resp = match dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut None) {
+    let rev = tbor_bootstrap_rev(dev)?;
+    let resp = match dev.exec_op_tbor(rev, &TborPartInfoReq::new(), None, &mut None) {
         Ok(resp) => resp,
         Err(
             DdiError::UnsupportedEncoding
@@ -100,13 +134,271 @@ impl From<HsmApiRev> for DdiApiRev {
     }
 }
 
+impl HsmApiRev {
+    pub(crate) fn tbor(self) -> DdiResult<(u16, u16)> {
+        Ok((
+            self.major
+                .try_into()
+                .map_err(|_| DdiError::InvalidApiVersion)?,
+            self.minor
+                .try_into()
+                .map_err(|_| DdiError::InvalidApiVersion)?,
+        ))
+    }
+}
+
+fn tbor_bootstrap_rev(dev: &HsmDev) -> DdiResult<HsmApiRev> {
+    Ok(match dev.discover()?.model {
+        tsra_ddi::DdiDeviceModel::Uno => HsmApiRev { major: 1, minor: 1 },
+        tsra_ddi::DdiDeviceModel::Duo => HsmApiRev { major: 2, minor: 0 },
+    })
+}
+
 /// HSM device handle wrapper.
 ///
 /// Wraps the underlying DDI device handle, providing a typed interface
 /// for HSM device operations while maintaining deref access to the
 /// underlying device.
 #[derive(Debug)]
-pub(crate) struct HsmDev(TsraDev);
+pub(crate) struct HsmDev(TsraDev, SessionTransports);
+
+/// Transport keys of the device's encrypted (API revision 2.0) sessions,
+/// by session id.
+#[derive(Default)]
+struct SessionTransports(Mutex<HashMap<u16, Arc<SessionTransport>>>);
+
+impl std::fmt::Debug for SessionTransports {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionTransports")
+    }
+}
+
+/// Upper bound on an encoded TBOR request sent over the session transport.
+const SECURE_REQ_CAP: usize = 8192;
+
+// Session-bound API operations traditionally pass `&mut None` through the
+// DDI layer. Scope the handle's backend cookie around those calls without
+// sharing it between concurrent sessions.
+//
+// The pointer refers to the slot behind a live `MutexGuard` held for the
+// entire duration of `with_session_cookie`'s `f()` call (see below), so the
+// whole read/exchange/write-back transaction is serialized by the mutex
+// itself instead of snapshot-and-release: a concurrent `with_session_cookie`
+// call on the same session's cookie blocks on the mutex until this one's
+// `f()` returns, rather than racing to read a possibly-stale cookie and
+// later clobbering a refreshed one on write-back.
+thread_local! {
+    static ACTIVE_SESSION_COOKIE: Cell<Option<NonNull<Option<DdiCookie>>>> =
+        const { Cell::new(None) };
+}
+
+pub(crate) fn with_session_cookie<R>(
+    cookie: &Mutex<Option<DdiCookie>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let mut guard = cookie.lock();
+    // SAFETY: `ptr` points into `*guard`, which stays locked (and so
+    // remains live and exclusively ours) for this entire function body.
+    // The thread-local is only ever read back out from `exec_op_mbor`/
+    // `exec_op_tbor`/`exec_op_tbor_oob` while running synchronously,
+    // on this thread, within `f()`'s dynamic extent below — i.e. before
+    // `_restore` clears it and before `guard` unlocks.
+    let ptr = NonNull::from(&mut *guard);
+    let previous = ACTIVE_SESSION_COOKIE.with(|active| active.replace(Some(ptr)));
+    struct RestoreScope(Option<NonNull<Option<DdiCookie>>>);
+    impl Drop for RestoreScope {
+        fn drop(&mut self) {
+            ACTIVE_SESSION_COOKIE.with(|active| active.set(self.0));
+        }
+    }
+    let _restore = RestoreScope(previous);
+    f()
+}
+
+impl HsmDev {
+    /// Route later in-session and close commands for `session_id` over the
+    /// session transport.
+    pub(crate) fn set_session_transport(&self, session_id: u16, transport: SessionTransport) {
+        self.1.0.lock().insert(session_id, Arc::new(transport));
+    }
+
+    /// Stop routing `session_id` over the session transport. Returns
+    /// whether it was.
+    pub(crate) fn remove_session_transport(&self, session_id: u16) -> bool {
+        self.1.0.lock().remove(&session_id).is_some()
+    }
+
+    /// The session transport for `req`, if it is an in-session or close
+    /// command of an encrypted session.
+    fn session_transport<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        req: &T,
+    ) -> Option<(u16, Arc<SessionTransport>)> {
+        if !matches!(
+            req.session_ctrl(),
+            tsra_ddi_tbor_types::SessionControlKind::InSession
+                | tsra_ddi_tbor_types::SessionControlKind::Close
+        ) {
+            return None;
+        }
+        let id = req.get_session_id()?;
+        let transport = self.1.0.lock().get(&id).cloned()?;
+        Some((id, transport))
+    }
+
+    /// Encode `req`, seal it with `transport`, execute it, and open and
+    /// decode the response.
+    ///
+    /// On Duo the IV and tag ride in the SQE and CQE; on Uno the request
+    /// and response travel as in-band sealed frames (see
+    /// [`SessionTransport::seal_frame`]).
+    #[allow(unsafe_code)]
+    pub(crate) fn exec_op_tbor_sealed<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        rev: HsmApiRev,
+        session_id: u16,
+        transport: &SessionTransport,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<T::OpResp> {
+        let mut buf = Zeroizing::new(vec![0u8; SECURE_REQ_CAP]);
+        let api_rev = rev.tbor()?;
+        let len = req.encode_request(&mut buf, api_rev)?.len();
+        buf.truncate(len);
+        let resp = if self.0.discover()?.model == DdiDeviceModel::Duo {
+            let (seal, request) = transport
+                .seal_request(session_id, &mut buf)
+                .map_err(|_| DdiError::TborEncodeError)?;
+            let seal = DdiTransportSeal {
+                iv: seal.iv,
+                tag: seal.tag,
+            };
+            let (mut resp, seal) = self
+                .0
+                .exec_op_tbor_secure(session_id, &buf, seal, oob_items)?;
+            let seal = SessionTransportSeal {
+                iv: seal.iv,
+                tag: seal.tag,
+            };
+            transport
+                .open_response(request, &seal, &mut resp)
+                .map_err(|_| DdiError::TborDecodeError)?;
+            Zeroizing::new(resp)
+        } else {
+            let (frame, request) = transport
+                .seal_frame(session_id, req.session_ctrl(), &buf)
+                .map_err(|_| DdiError::TborEncodeError)?;
+            let req = SealedFrameReq {
+                session_ctrl: req.session_ctrl(),
+                session_id,
+                frame,
+            };
+            let SealedFrameResp(mut resp) = match ACTIVE_SESSION_COOKIE.with(Cell::get) {
+                Some(mut active_cookie) => {
+                    // SAFETY: see `with_session_cookie`.
+                    let cookie = unsafe { active_cookie.as_mut() };
+                    self.0.exec_op_tbor_oob(api_rev, &req, oob_items, cookie)?
+                }
+                None => self
+                    .0
+                    .exec_op_tbor_oob(api_rev, &req, oob_items, &mut None)?,
+            };
+            transport
+                .open_frame(request, &mut resp)
+                .map_err(|_| DdiError::TborDecodeError)?;
+            Zeroizing::new(resp)
+        };
+        Ok(T::OpResp::decode_response_for_api_rev(&resp, api_rev)?)
+    }
+
+    #[allow(unsafe_code)]
+    pub(crate) fn exec_op_mbor<T: DdiOpReq>(
+        &self,
+        req: &T,
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
+            return self.0.exec_op_mbor(req, cookie);
+        };
+        // SAFETY: see `with_session_cookie`.
+        self.0.exec_op_mbor(req, unsafe { active_cookie.as_mut() })
+    }
+
+    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): session-bound TBOR
+    /// ops traditionally pass `&mut None` through the DDI layer too, so
+    /// scope them onto the active [`with_session_cookie`] handle's
+    /// backend cookie the same way, keeping V2 (TBOR) sessions'
+    /// generation-bound tokens threaded through transparently.
+    #[allow(unsafe_code)]
+    pub(crate) fn exec_op_tbor<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        rev: HsmApiRev,
+        req: &T,
+        oob_items: Option<&[&[u8]]>,
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            let mut items: Vec<_> = oob_items
+                .unwrap_or_default()
+                .iter()
+                .map(|item| TborOobItem::In(item))
+                .collect();
+            return self.exec_op_tbor_sealed(rev, id, &transport, req, &mut items);
+        }
+        let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
+            return self.0.exec_op_tbor(rev.tbor()?, req, oob_items, cookie);
+        };
+        // SAFETY: see `with_session_cookie`.
+        self.0.exec_op_tbor(rev.tbor()?, req, oob_items, unsafe {
+            active_cookie.as_mut()
+        })
+    }
+
+    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): out-of-band TBOR ops
+    /// (e.g. AES-GCM/AES-XTS) traditionally pass `&mut None` through the
+    /// DDI layer too, so scope them onto the active
+    /// [`with_session_cookie`] handle's backend cookie the same way.
+    /// Without this wrapper, callers reaching `exec_op_tbor_oob` through
+    /// `Deref` would bypass `ACTIVE_SESSION_COOKIE` entirely and always
+    /// send no cookie, even inside a `with_session_cookie` scope.
+    #[allow(unsafe_code)]
+    pub(crate) fn exec_op_tbor_oob<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        rev: HsmApiRev,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        if let Some((id, transport)) = self.session_transport(req) {
+            return self.exec_op_tbor_sealed(rev, id, &transport, req, oob_items);
+        }
+        let Some(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get) else {
+            return self.0.exec_op_tbor_oob(rev.tbor()?, req, oob_items, cookie);
+        };
+        // SAFETY: see `with_session_cookie`.
+        self.0
+            .exec_op_tbor_oob(rev.tbor()?, req, oob_items, unsafe {
+                active_cookie.as_mut()
+            })
+    }
+}
+
+/// Runs `f` with the explicit session cookie locked for the complete
+/// read/exchange/write-back transaction.
+///
+/// Mirrors [`with_session_cookie`]'s serialization guarantee for call
+/// sites that thread `ddi_cookie` through explicitly rather than via the
+/// thread-local scope (e.g. operations that only have a `&HsmPartition`,
+/// not the owning `HsmSession`): holding the mutex locked across the
+/// whole exchange means a concurrent caller on the same session's cookie
+/// blocks until `f` returns, instead of racing to snapshot a possibly
+/// stale cookie and later overwriting a refreshed one.
+pub(crate) fn with_explicit_cookie<R>(
+    cookie: &Mutex<Option<DdiCookie>>,
+    f: impl FnOnce(&mut Option<DdiCookie>) -> R,
+) -> R {
+    f(&mut cookie.lock())
+}
 
 impl Deref for HsmDev {
     type Target = TsraDev;
@@ -191,7 +483,10 @@ pub(crate) fn dev_info_by_path(path: &str) -> HsmResult<DevInfo> {
 /// - The underlying DDI operation fails
 #[tracing::instrument(skip_all, fields(path = path))]
 pub(crate) fn open_dev(path: &str) -> HsmResult<HsmDev> {
-    let dev = DDI.open_dev(path).map(HsmDev).map_err(HsmError::from)?;
+    let dev = DDI
+        .open_dev(path)
+        .map(|dev| HsmDev(dev, SessionTransports::default()))
+        .map_err(HsmError::from)?;
 
     // Probe the device with GetApiRev + GetDeviceInfo at open time so
     // that transient IO faults surface here (where the resiliency
@@ -209,6 +504,10 @@ pub(crate) fn open_dev(path: &str) -> HsmResult<HsmDev> {
 /// surface transient errors during retry-eligible operations.
 fn probe_device(dev: &HsmDev) -> HsmResult<()> {
     let (_, max_rev) = get_api_rev(dev)?;
+    // Revision 2.0 devices have no MBOR transport.
+    if max_rev >= SESSION_TRANSPORT_API_REV {
+        return Ok(());
+    }
 
     let req = DdiGetDeviceInfoCmdReq {
         hdr: build_ddi_req_hdr(DdiOp::GetDeviceInfo, Some(max_rev), None),
@@ -229,5 +528,86 @@ impl From<DdiDeviceKind> for HsmPartType {
             DdiDeviceKind::Physical => HsmPartType::Physical,
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// `with_session_cookie` must hold the cookie mutex for the complete
+    /// `f()` transaction, not just to snapshot the value at the start:
+    /// otherwise a concurrent scope on the same session can read a
+    /// cookie before a refresh and, by writing its stale snapshot back
+    /// after the refresh completes, clobber it.
+    #[test]
+    fn with_session_cookie_holds_the_lock_for_the_whole_transaction() {
+        let cookie = Arc::new(parking_lot::Mutex::new(Some(1u64)));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let cookie_a = Arc::clone(&cookie);
+        let a = thread::spawn(move || {
+            with_session_cookie(&cookie_a, || {
+                entered_tx.send(()).expect("signal entered");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release signal");
+            });
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a entered its scope");
+        // `a` is inside `f()`; a concurrent attempt to lock the same
+        // cookie must fail until `a`'s whole transaction completes.
+        assert!(
+            cookie.try_lock().is_none(),
+            "the cookie mutex must still be held mid-transaction"
+        );
+
+        release_tx.send(()).expect("release a");
+        a.join().expect("thread a");
+
+        // Once `a` has returned, the lock must be free again.
+        assert!(cookie.try_lock().is_some());
+    }
+
+    /// Mirrors the above for the explicit-cookie call sites (`erase`,
+    /// `psk_change`, the secure-domain backup helpers, etc.), which don't
+    /// go through the thread-local scope at all.
+    #[test]
+    fn with_explicit_cookie_holds_the_lock_for_the_whole_transaction() {
+        let cookie = Arc::new(parking_lot::Mutex::new(Some(1u64)));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let cookie_a = Arc::clone(&cookie);
+        let a = thread::spawn(move || {
+            with_explicit_cookie(&cookie_a, |_active| {
+                entered_tx.send(()).expect("signal entered");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release signal");
+            });
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a entered its transaction");
+        assert!(
+            cookie.try_lock().is_none(),
+            "the cookie mutex must still be held mid-transaction"
+        );
+
+        release_tx.send(()).expect("release a");
+        a.join().expect("thread a");
+
+        assert!(cookie.try_lock().is_some());
     }
 }

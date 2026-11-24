@@ -52,7 +52,6 @@ fn test_rsa_unwrap_aes_key_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             )
             .expect("rsa_unwrap should succeed");
@@ -110,7 +109,6 @@ fn test_rsa_unwrap_tampered_blob_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -170,7 +168,6 @@ fn test_rsa_unwrap_ecc_key_smoke() {
                     DdiKeyClass::Ecc,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    None,
                     helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App),
                 )
                 .expect("ecc rsa_unwrap should succeed");
@@ -278,7 +275,6 @@ fn test_rsa_unwrap_rsa_key_smoke() {
                     *key_class,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    None,
                     helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                 )
                 .expect("rsa rsa_unwrap should succeed");
@@ -349,7 +345,6 @@ fn test_rsa_unwrap_oversized_kek_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 

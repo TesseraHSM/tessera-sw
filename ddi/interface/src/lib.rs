@@ -168,6 +168,44 @@ pub enum DriverError {
     IoAborted = 0x04000002,
 }
 
+/// Device model behind a [`DdiDev`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DdiDeviceModel {
+    /// Uno: MBOR and plain TBOR over 16-dword SQEs.
+    Uno,
+    /// Duo: TBOR over 32-dword SQEs with session transport encryption.
+    Duo,
+}
+
+impl DdiDeviceModel {
+    /// Identify supported physical devices by PCI vendor and device IDs.
+    ///
+    /// Unknown identities are not assumed to be legacy Uno devices.
+    pub fn from_pci_ids(vendor: u16, device: u16) -> Option<Self> {
+        match (vendor, device) {
+            (0x1414, 0xc003) => Some(Self::Uno),
+            (0x1414, 0xc008) => Some(Self::Duo),
+            _ => None,
+        }
+    }
+}
+
+/// Result of [`DdiDev::discover`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DdiDeviceInfo {
+    /// Device model.
+    pub model: DdiDeviceModel,
+}
+
+/// AES-GCM IV and tag carried in the SQE/CQE of a Duo secure command.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DdiTransportSeal {
+    /// AES-GCM IV.
+    pub iv: [u8; 12],
+    /// AES-GCM tag.
+    pub tag: [u8; 16],
+}
+
 /// Device Trait
 pub trait DdiDev {
     /// Returns the device kind.
@@ -273,6 +311,17 @@ pub trait DdiDev {
     /// this operation, so this method does not guarantee that all sealed
     /// or stored material is discarded.
     ///
+    /// Transports with no in-band reset opcode (e.g. `ddi/sock`) may
+    /// implement this by disconnecting and reconnecting, relying on the
+    /// peer to tie a reset to connection loss. Such an implementation
+    /// must only report `Ok(())` once it has verified (not merely
+    /// assumed) that the peer actually reset on disconnect, and must
+    /// invalidate any session ids the caller obtained before the reset
+    /// so they cannot collide with ids a different client reuses
+    /// afterward - returning `DdiStatus::UnsupportedCmd` instead is
+    /// preferable to a reconnect-only implementation that cannot make
+    /// either guarantee.
+    ///
     /// # Returns
     /// * `Ok(())` - Successfully erased the device
     /// * `Err(DdiError)` - Error occurred while executing the command
@@ -310,6 +359,7 @@ pub trait DdiDev {
     /// that have been wired to emit `OP_TBOR` SQEs.
     fn exec_op_tbor<T: TborOpReq>(
         &self,
+        _api_rev: (u16, u16),
         _req: &T,
         _oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
@@ -334,6 +384,7 @@ pub trait DdiDev {
     /// map device-writable buffers.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
+        api_rev: (u16, u16),
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         cookie: &mut Option<DdiCookie>,
@@ -345,7 +396,48 @@ pub trait DdiDev {
                 TborOobItem::Out(_) => return Err(DdiError::UnsupportedEncoding),
             }
         }
-        self.exec_op_tbor(req, Some(&inputs), cookie)
+        self.exec_op_tbor(api_rev, req, Some(&inputs), cookie)
+    }
+
+    /// Identify the device model.
+    ///
+    /// # Default
+    ///
+    /// Reports [`DdiDeviceModel::Uno`].
+    fn discover(&self) -> DdiResult<DdiDeviceInfo> {
+        Ok(DdiDeviceInfo {
+            model: DdiDeviceModel::Uno,
+        })
+    }
+
+    /// Execute a session-transport-encrypted TBOR command on a Duo device.
+    ///
+    /// `payload` is the TBOR request already sealed with the session's
+    /// host-to-device key and `seal` its IV and tag. On success, returns the
+    /// response still sealed with the device-to-host key, with its seal.
+    /// `oob_items` travel outside the transport encryption, as in
+    /// [`Self::exec_op_tbor_oob`].
+    ///
+    /// # Default
+    ///
+    /// Returns [`DdiError::UnsupportedEncoding`].
+    fn exec_op_tbor_secure(
+        &self,
+        _session_id: u16,
+        _payload: &[u8],
+        _seal: DdiTransportSeal,
+        _oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
+        Err(DdiError::UnsupportedEncoding)
+    }
+
+    /// Release a Duo session slot without a TBOR close.
+    ///
+    /// # Default
+    ///
+    /// Returns [`DdiError::UnsupportedEncoding`].
+    fn flush_session(&self, _session_id: u16) -> DdiResult<()> {
+        Err(DdiError::UnsupportedEncoding)
     }
 }
 

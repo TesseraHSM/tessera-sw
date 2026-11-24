@@ -53,7 +53,26 @@ impl Copyright {
     const COPYRIGHT_LINE1: &str = "Copyright (c) Microsoft Corporation.";
     const COPYRIGHT_LINE2: &str = "Licensed under the MIT License.";
 
+    /// Files vendored from third parties, named one by one so that nothing
+    /// added next to them escapes the check. They keep the upstream copyright
+    /// header; stamping the Microsoft header over it (what --fix does) would
+    /// misattribute the original authors, so both the check and the fix skip
+    /// them.
+    const THIRD_PARTY_FILES: &[&str] = &[
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11.h",
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11f.h",
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11t.h",
+    ];
+
+    fn is_third_party(path: &Path) -> bool {
+        Self::THIRD_PARTY_FILES.iter().any(|f| path == Path::new(f))
+    }
+
     fn check_copyright(path: &Path, fix: bool) -> anyhow::Result<()> {
+        if Self::is_third_party(path) {
+            return Ok(());
+        }
+
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -211,6 +230,22 @@ mod tests {
             ext
         ));
         path
+    }
+
+    #[test]
+    fn only_the_listed_third_party_files_are_exempt() {
+        use std::path::Path;
+
+        assert!(Copyright::is_third_party(Path::new(
+            "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11.h"
+        )));
+        // A new file next to them is checked as usual.
+        assert!(!Copyright::is_third_party(Path::new(
+            "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11_extra.h"
+        )));
+        assert!(!Copyright::is_third_party(Path::new(
+            "plugins/tsra_pkcs11/src/tsra_pkcs11_module.c"
+        )));
     }
 
     #[test]

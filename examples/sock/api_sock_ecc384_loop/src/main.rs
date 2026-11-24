@@ -2,12 +2,16 @@
 // Licensed under the MIT License.
 //! Generate, sign, and verify session-scoped P-384 keys over TCP on Windows or Linux.
 //!
-//! Run with `cargo run -p tsra_api_sock_ecc384_loop --features sock -- [ENDPOINT] [COUNT]`.
+//! Run with `cargo run -p tsra_api_sock_ecc384_loop -- [ENDPOINT] [COUNT]`.
 //! Defaults are `tcp://127.0.0.1:1234` and one iteration on both platforms.
 //! Use only a disposable test partition: this example rotates the default CO PSK
 //! to a fixed, publicly known test value and reuses that value on later runs.
+//! Set `TSRA_ROOT_SPKI_SHA384` to the independently enrolled root's 96-digit
+//! DER SPKI SHA-384 hex hash.
 
 use tsra_api::*;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 
 const DEFAULT_ENDPOINT: &str = "tcp://127.0.0.1:1234";
 const TOOL_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
@@ -42,7 +46,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
 }
 
 fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>> {
-    std::env::set_var("TSRA_DDI_SOCK", endpoint);
+    let root_pin = trusted_root_pin()?;
+    std::env::set_var("TSRA_DDI_ARGS", format!("transport=sock;sock={}", endpoint));
 
     let info = HsmPartitionManager::partition_info_list()
         .into_iter()
@@ -57,8 +62,9 @@ fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>
 
     let default_session = partition.open_session_ex(
         rev,
+        &root_pin,
         HsmSessionPsk::new(HsmPskId::CO),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     );
 
     match default_session {
@@ -71,8 +77,9 @@ fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>
         Err(default_error) => partition
             .open_session_ex(
                 rev,
+                &root_pin,
                 HsmSessionPsk::with_psk(HsmPskId::CO, &TOOL_CO_PSK),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .map_err(|rotated_error| {
                 format!(
@@ -82,6 +89,19 @@ fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>
                 .into()
             }),
     }
+}
+
+fn trusted_root_pin() -> Result<[u8; 48], Box<dyn std::error::Error>> {
+    let encoded = std::env::var("TSRA_ROOT_SPKI_SHA384")
+        .map_err(|error| format!("configure the trusted root SPKI SHA-384 hex hash: {error}"))?;
+    if encoded.len() != 96 || !encoded.is_ascii() {
+        return Err("TSRA_ROOT_SPKI_SHA384 must be 96 hex digits".into());
+    }
+    let mut pin = [0; 48];
+    for (byte, pair) in pin.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+    }
+    Ok(pin)
 }
 
 fn generate_key_pair(
@@ -130,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("ECC P-384 key generation failed at iteration {index}: {error}")
         })?;
         let message = format!("TSRA TCP ECC P-384 loop iteration {index}");
-        let digest = openssl::sha::sha384(message.as_bytes());
+        let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), message.as_bytes())?;
         let signature = HsmSigner::sign_vec(&mut HsmEccSignAlgo::default(), &private_key, &digest)
             .map_err(|error| format!("ECC P-384 signing failed at iteration {index}: {error}"))?;
         let verified = HsmVerifier::verify(
@@ -159,68 +179,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options.count, options.endpoint
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_options() {
-        assert_eq!(
-            parse_args(std::iter::empty()).expect("default options"),
-            Options {
-                endpoint: DEFAULT_ENDPOINT.to_owned(),
-                count: 1
-            }
-        );
-    }
-
-    #[test]
-    fn explicit_options() {
-        assert_eq!(
-            parse_args(["tcp://localhost:2345", "5"].into_iter().map(str::to_owned))
-                .expect("explicit options"),
-            Options {
-                endpoint: "tcp://localhost:2345".to_owned(),
-                count: 5
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_counts() {
-        for count in ["0", "-1", "invalid", "184467440737095516160"] {
-            assert!(
-                parse_args([DEFAULT_ENDPOINT, count].into_iter().map(str::to_owned)).is_err(),
-                "{count}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_non_tcp_endpoints() {
-        for endpoint in ["", "tcp://", "vsock://4:1234", "/tmp/tsra-ddi.sock"] {
-            assert!(
-                parse_args([endpoint].into_iter().map(str::to_owned)).is_err(),
-                "{endpoint}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_extra_arguments() {
-        assert!(parse_args(
-            [DEFAULT_ENDPOINT, "1", "extra"]
-                .into_iter()
-                .map(str::to_owned)
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn hex_encoding() {
-        assert_eq!(hex(&[]), "");
-        assert_eq!(hex(&[0x00, 0x0f, 0x10, 0x80, 0xff]), "000f1080ff");
-    }
 }

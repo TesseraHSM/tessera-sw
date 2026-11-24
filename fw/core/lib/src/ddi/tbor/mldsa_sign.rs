@@ -31,7 +31,9 @@ use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKeyMut;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -68,10 +70,15 @@ pub(crate) async fn handle<P: HsmPal>(
             validate_active_session(pal, io, sess_id)?;
 
             let hedge = mldsa_hedge(MlDsaHedge(req.hedge))?;
+            // The decoder has already checked that the masked key is
+            // 4-aligned. This checks its position: the response `signature`
+            // is written in place at the first 4-aligned offset of the data
+            // section, so the masked key must be the first data field,
+            // preceded only by the minimal alignment padding.
             let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
             let masked_at = req.masked_key.as_ptr() as usize;
-            if masked_at.checked_sub(base) != Some(data_start) {
-                return Err(HsmError::InvalidArg);
+            if masked_at.checked_sub(base) != Some(data_start.next_multiple_of(4)) {
+                return Err(HsmError::TborNonCanonicalLayout);
             }
 
             // Resolve the envelope's tag-bound scope before unmasking.
@@ -88,7 +95,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 return Err(HsmError::InvalidPermissions);
             }
             let sig_len = param_set.sig_len();
-            let sec_len = param_set.sec_key_len();
+            let sec_len = param_set.sk_len();
             if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
                 return Err(HsmError::InvalidArg);
             }
@@ -99,20 +106,18 @@ pub(crate) async fn handle<P: HsmPal>(
             if key_end > req.masked_key.len() || key_end < sig_len {
                 return Err(HsmError::InvalidArg);
             }
+            let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::ExternalMu, 0, req.mu)?;
             pal.mldsa_sign_in_place(
                 io,
                 param_set,
-                &mut req.masked_key[..key_end],
-                HsmMlDsaMsgType::ExternalMu,
+                HsmMlDsaPrivKeyMut::Expanded(&mut req.masked_key[..key_end]),
                 hedge,
-                req.mu,
-                &req.mu[..0],
+                msg,
             )
-            .await?;
-            sig_len
+            .await?
         };
         let buffer = cmd_buf.buffer_mut();
-        let frame = TborMlDsaSignResp::encode(buffer, 0, false)?
+        let frame = TborMlDsaSignResp::encode_for_request(buffer, 0, false)?
             .signature_existing(sig_len)?
             .finish();
         Ok(frame.as_bytes().len())

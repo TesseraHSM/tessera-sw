@@ -27,3 +27,16 @@ const _: () = assert!(core::mem::offset_of!(Storage, se_pub_key) % 4 == 0);
 const _: () = assert!(core::mem::offset_of!(Storage, unwrapping_key_required) == 22);
 const _: () = assert!(core::mem::offset_of!(Storage, unwrapping_key_bk_valid) == 23);
 const _: () = assert!(core::mem::offset_of!(Storage, unwrapping_key_bk) == 24);
+
+// The `Shadow` runs: each is word-aligned, holds the fields it shadows, and
+// lies within the slot.
+const _: () = assert!(SHADOW_HEAD.is_multiple_of(4) && SHADOW_TAIL.is_multiple_of(4));
+const _: () = assert!(core::mem::offset_of!(Storage, generation) == SHADOW_HEAD + 4);
+// Shadowed 16-bit handles sit within one word each.
+const _: () = assert!((core::mem::offset_of!(Storage, id_key_id) - SHADOW_TAIL).is_multiple_of(2));
+const _: () =
+    assert!(core::mem::offset_of!(Storage, res_mask) + RES_MASK_LEN == SHADOW_HEAD + SHADOW_RUN);
+const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) + 2 <= SHADOW_TAIL + SHADOW_RUN);
+const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) < SHADOW_TAIL + SHADOW_RUN);
+const _: () = assert!(SHADOW_HEAD + SHADOW_RUN <= SHADOW_TAIL);
+const _: () = assert!(SHADOW_TAIL + SHADOW_RUN <= STORE_SIZE);

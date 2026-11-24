@@ -40,7 +40,9 @@ fn validate_masked_kex_key(masked_key: &[u8; MASKED_KEX_KEY_LEN]) -> HsmResult<(
 ///
 /// Ships the active session id and the requested key `scope`. Returns the
 /// new KEX key as a masked (AEAD-GCM-256) private-key blob plus its raw
-/// P-384 public key (`x ‖ y`, 96 bytes). The key is not stored on-device.
+/// P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate — the
+/// certificate-leaf form, independent of the device's wire order). The key
+/// is not stored on-device.
 ///
 /// # Arguments
 ///
@@ -61,13 +63,19 @@ pub(crate) fn darc_kex_key_gen(
     };
 
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 
     validate_masked_kex_key(&resp.masked_key)?;
-    Ok((resp.masked_key, resp.pub_key))
+    let order = WireOrder::of(session);
+    let mut pub_key = resp.pub_key;
+    let (x, y) = pub_key.split_at_mut(KEX_PUB_KEY_LEN / 2);
+    order.convert_in_place(x);
+    order.convert_in_place(y);
+    Ok((resp.masked_key, pub_key))
 }
 
 #[cfg(test)]

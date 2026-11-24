@@ -14,6 +14,10 @@ pub mod regs;
 pub mod schema;
 pub mod translate;
 
+/// Firmware and generator nightly; keep in sync with `.github/workflows/fw_uno.yml`.
+/// Nightly 2026-11-18 reports `uncommon_codepoints` in zerocopy-generated code.
+pub const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-11-17";
+
 /// Sanitize a description string for use in Rust comments/doc attributes.
 /// Replaces newlines with spaces and strips stray quotes.
 pub(crate) fn sanitize_desc(s: &str) -> String {
@@ -36,7 +40,7 @@ pub(crate) fn run_rustfmt(code: &str) -> String {
     let mut child = match Command::new("rustup")
         .args([
             "run",
-            "nightly",
+            NIGHTLY_TOOLCHAIN,
             "rustfmt",
             "--edition",
             "2021",

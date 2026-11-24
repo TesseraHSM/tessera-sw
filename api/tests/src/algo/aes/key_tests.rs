@@ -415,8 +415,7 @@ fn test_aes_unmask_corrupted_blob_fails(session: HsmSession) {
     HsmKeyManager::delete_key(key).unwrap();
 }
 
-#[cfg(feature = "session-ex-tests")]
-#[session_test]
+#[session_test(api_rev_at_least(1, 1))]
 fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -443,9 +442,11 @@ fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
     );
 }
 
-#[cfg(feature = "session-ex-tests")]
 #[test]
 fn test_aes_unmask_rejects_key_from_another_session() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();
     let (partition, rev, session) = crate::utils::sd_provision::finalized_co_partition();
     let props = HsmKeyPropsBuilder::default()
@@ -467,13 +468,24 @@ fn test_aes_unmask_rejects_key_from_another_session() {
     let other = other_partition
         .open_session_ex(
             rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&other_partition),
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionExType::PlainText,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open a different session");
+    let rotated_psk = [0x5A; PSK_LEN];
     other
-        .change_psk(&[0x5A; PSK_LEN])
+        .change_psk(&rotated_psk)
         .expect("rotate the target session's default CU PSK");
+    drop(other);
+    let other = other_partition
+        .open_session_ex(
+            rev,
+            &crate::utils::partition_ex_helpers::test_root_spki_sha384(&other_partition),
+            HsmSessionPsk::with_psk(HsmPskId::CU, &rotated_psk),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("reopen the target session with the rotated CU PSK");
     let target_key = HsmKeyManager::generate_key(&other, &mut HsmAesKeyGenAlgo::default(), props)
         .expect("generate a key in the target session");
     let plaintext = [0x11; 32];

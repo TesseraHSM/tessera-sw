@@ -5,10 +5,23 @@
 
 #include <tsra_api.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
+
+/// Controlled test enrollment only. Applications must provision root trust
+/// independently, not learn it from the connection being authenticated.
+struct TestRootPin
+{
+    explicit TestRootPin(tsra_handle partition);
+    TestRootPin(const TestRootPin &) = delete;
+    TestRootPin &operator=(const TestRootPin &) = delete;
+
+    std::array<uint8_t, 48> hash{};
+    tsra_buffer buffer{ hash.data(), static_cast<uint32_t>(hash.size()) };
+};
 
 // Pinned TBOR masked-blob wire lengths, mirroring the host / firmware
 // `tsra_ddi_tbor_types` constants (which are not exposed in the C
@@ -54,14 +67,15 @@ struct SdBackingContext
 {
     /// Provisioned CO session handle (`Initialized`); 0 on failure.
     tsra_handle session = 0;
-    /// Exact 484-byte backing-partition policy image.
+    /// Exact backing-partition policy CBOR document.
     std::vector<uint8_t> policy;
     /// Raw P-384 partition-identity public key (`X ‖ Y`, 96 B).
     std::vector<uint8_t> pid_pub;
-    /// SATA anchor key that roots the partition-owner evidence chain.
+    /// SATA anchor key that roots the receiver key certificate chain.
     std::shared_ptr<CaKey> sata_key;
-    /// POTA anchor key that roots the CSR -> PTA chain. Retained so a
-    /// restore target can re-provision under the same policy.
+    /// POTA anchor key that roots the CSR -> PTA chain and the
+    /// partition-owner evidence chain. Retained so a restore target can
+    /// re-provision under the same policy.
     std::shared_ptr<CaKey> pota_key;
     /// Device-local master-key (`local_mk`) backup emitted by `PartFinal`.
     std::vector<uint8_t> local_mk_backup;
@@ -188,9 +202,9 @@ class SdEvidenceHolder
 /// Build the receiver's three-chain SD attestation evidence and the
 /// receiver key certificate chain for a security-domain backup. The
 /// manufacturer and owner chains are rooted at fresh CAs and the
-/// partition-owner chain at `ctx.sata_key`; every evidence leaf certifies
+/// partition-owner chain at `ctx.pota_key`; every evidence leaf certifies
 /// `ctx.pid_pub` (the report signer). The receiver key certificate chain
-/// (spec `RcvrCertChain`) is rooted at the same `ctx.sata_key`, and its
+/// (spec `RcvrCertChain`) is rooted at `ctx.sata_key`, and its
 /// leaf certifies `rcvr_pub` — the receiver sealing key `RcvrPub` the
 /// remote backup is sealed to, and the key the report attests. Records a
 /// gtest failure and returns an empty holder on error.
@@ -211,7 +225,7 @@ struct DarcReadyContext
 {
     /// Provisioned CO security-domain (V2) session; 0 on failure.
     tsra_handle session = 0;
-    /// Exact 584-byte policy image bound at `PartInit` (DATA slot present).
+    /// Exact policy CBOR document bound at `PartInit` (DATA anchor present).
     std::vector<uint8_t> policy;
     /// Policy DATA CA — anchors the `tsra_darc_tmk_export` target chain.
     std::shared_ptr<CaKey> data_key;
@@ -220,7 +234,7 @@ struct DarcReadyContext
 };
 
 /// Provision a freshly-reset partition for the DARC key-transfer commands:
-/// rotate the CO PSK, bind a DATA+POTA-anchored 584-byte policy at
+/// rotate the CO PSK, bind a DATA+POTA-anchored policy at
 /// `PartInit`, finalize with a POTA-anchored PTA chain, then self-initialize
 /// the security domain (self `SdCreateRemoteBackup`) so a Security-Domain
 /// Master Key exists. Returns a live CO session plus the DATA/POTA anchor

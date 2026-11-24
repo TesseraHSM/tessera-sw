@@ -13,10 +13,10 @@
 //! PAL and no interrupt plumbing, so wiring the same driver here would mean
 //! porting that machinery too.
 //!
-//! Polling the pending register from an Embassy task instead costs a few
-//! milliseconds of latency on a PQC operation measured in milliseconds, and
-//! keeps this step small enough to debug on a core with no console.  It can
-//! become interrupt-driven later without changing the protocol.
+//! Polling the pending register from the main loop instead costs nothing
+//! while requests keep arriving, and keeps this step small enough to debug
+//! on a core with no console.  It can become interrupt-driven later without
+//! changing the protocol.
 //!
 //! # Descriptors
 //!
@@ -100,6 +100,13 @@ pub fn take_request(core_id: u8) -> Option<u32> {
 
         let value = read_volatile((DESC + desc * 4) as *const u32);
         write_volatile((PEND_CLR + block(core_id) * 4) as *mut u32, 1u32 << desc);
+        // Complete the clear before the caller looks at the mailboxes. A
+        // ring that lands after it stays pending, and one that lands before
+        // it was rung after its request was posted, so the look finds that
+        // request. Otherwise the look could read a mailbox ahead of the
+        // clear and miss a request whose ring the clear then swallows, now
+        // that one ring can stand for both lanes' requests.
+        cortex_m::asm::dsb();
         Some(value)
     }
 }

@@ -42,7 +42,7 @@ pub struct TborHmacReq {
 
     /// The masked HMAC key (from `HmacGenerateKey` / unwrap), an
     /// AEAD-GCM-256 envelope of 264..=360 B.
-    #[tbor(min_len = 264, max_len = 360)]
+    #[tbor(align = 4, min_len = 264, max_len = 360)]
     pub masked_key: Vec<u8>,
 
     /// The message to MAC, up to [`HMAC_MSG_MAX_LEN`] (1024) bytes.
@@ -74,7 +74,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1536];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The message bytes must appear in the encoded frame.
         assert!(

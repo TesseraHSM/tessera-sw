@@ -19,6 +19,8 @@ use super::*;
 pub(crate) struct OpenSessionResult {
     /// Device-assigned session ID.
     pub(crate) sess_id: u16,
+    /// Opaque backend token bound to this session handle, when supported.
+    pub(crate) ddi_cookie: Option<DdiCookie>,
     /// Short application ID returned by the device.
     pub(crate) short_app_id: u8,
     /// The 48-byte random seed used during credential encryption.
@@ -42,6 +44,12 @@ pub(crate) struct ReopenSessionResult {
     /// Updated backed-up session masking key from the device.
     /// Must replace the previously cached `bmk_session`.
     pub(crate) bmk_session: Vec<u8>,
+    /// Backend continuity token returned by this reopen. Replaces the
+    /// session's previously cached cookie: a backend that refreshes its
+    /// token on reopen (e.g. to bind to a new connection/generation)
+    /// would reject every later call still presenting the pre-reopen
+    /// value.
+    pub(crate) ddi_cookie: Option<DdiCookie>,
 }
 
 /// Opens a new session on an HSM partition.
@@ -96,9 +104,13 @@ pub(crate) fn open_session(
         },
         ext: None,
     };
-    let resp = dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from)?;
+    let mut ddi_cookie = None;
+    let resp = dev
+        .exec_op_mbor(&req, &mut ddi_cookie)
+        .map_err(HsmError::from)?;
     Ok(OpenSessionResult {
         sess_id: resp.data.sess_id,
+        ddi_cookie,
         short_app_id: resp.data.short_app_id,
         seed,
         bmk_session: resp.data.bmk_session.as_slice().to_vec(),
@@ -180,6 +192,7 @@ pub(crate) fn reopen_session(
     dev: &HsmDev,
     rev: HsmApiRev,
     sess_id: u16,
+    ddi_cookie: Option<DdiCookie>,
     creds: &HsmCredentials,
     seed: &[u8; 48],
     bmk_session: &[u8],
@@ -195,7 +208,10 @@ pub(crate) fn reopen_session(
         },
         ext: None,
     };
-    let resp = dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from)?;
+    let mut ddi_cookie = ddi_cookie;
+    let resp = dev
+        .exec_op_mbor(&req, &mut ddi_cookie)
+        .map_err(HsmError::from)?;
 
     // The device must confirm the same session ID we requested.
     if resp.data.sess_id != sess_id {
@@ -206,6 +222,7 @@ pub(crate) fn reopen_session(
         sess_id: resp.data.sess_id,
         short_app_id: resp.data.short_app_id,
         bmk_session: resp.data.bmk_session.as_slice().to_vec(),
+        ddi_cookie,
     })
 }
 

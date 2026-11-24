@@ -103,7 +103,7 @@ pub struct TborMlDsaGenerateKeyResp {
     /// The generated ML-DSA private key, masked under the scope's masking
     /// key.  Always 164 B: the wire is seed-only, so the plaintext is the
     /// 32-byte `xi` seed.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(max_len = 5160)]
+    #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// The ML-DSA public key bytes.
@@ -128,7 +128,7 @@ mod tests {
             key_kind: MLDSA_KEY_KIND_65_SEED,
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&MLDSA_KEY_KIND_65_SEED),
             "encoded frame must carry the key-kind discriminant",
@@ -148,7 +148,7 @@ mod tests {
                 key_kind: kind,
             };
             let mut buf = [0u8; 256];
-            let frame = req.encode_request(&mut buf).expect("encode");
+            let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
             assert!(
                 frame.contains(&kind),
                 "encoded frame must carry the key-kind discriminant",

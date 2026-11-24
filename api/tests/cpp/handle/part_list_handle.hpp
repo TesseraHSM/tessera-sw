@@ -165,7 +165,7 @@ class PartitionListHandle
      * @brief Iterates over each partition and provides a session handle to the callback.
      *
      * This method creates an `open_session` handle by default or an
-     * `open_session_ex` handle when `SESSION_EX_TESTS` is enabled, then invokes
+     * `open_session_ex` handle when `TSRA_TEST_ARGS` has `api_rev=1_1`, then invokes
      * the provided function with the session handle.
      * EX setup resets and finalizes each partition, including on hardware;
      * use only dedicated test partitions.

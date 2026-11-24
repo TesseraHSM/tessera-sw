@@ -17,7 +17,6 @@
 //! Gated **out** of the emulator rather than into it. The constraint is
 //! a property of the HSM AES engine; the emulator's software AES has no
 //! such limit, so running this there would prove nothing.
-#![cfg(not(feature = "emu"))]
 
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborHmacGenerateKeyReq;

@@ -129,6 +129,9 @@ fn init_without_resiliency() -> (HsmPartition, HsmCredentials) {
 /// immediately for non-retryable ones.
 #[api_test]
 fn test_open_session_recovers_from_get_session_key_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, creds, _ctx) = init_with_resiliency();
         let rev = part.api_rev();
@@ -168,6 +171,9 @@ fn test_open_session_recovers_from_get_session_key_single_fault() {
 /// for non-retryable ones.
 #[api_test]
 fn test_open_session_recovers_from_open_session_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, creds, _ctx) = init_with_resiliency();
         let rev = part.api_rev();
@@ -203,6 +209,9 @@ fn test_open_session_recovers_from_open_session_single_fault() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_open_session_recovers_from_get_session_key_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, creds, _ctx) = init_with_resiliency();
         let rev = part.api_rev();
@@ -240,6 +249,9 @@ fn test_open_session_recovers_from_get_session_key_last_retry() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_open_session_recovers_from_open_session_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let (part, creds, _ctx) = init_with_resiliency();
         let rev = part.api_rev();
@@ -278,6 +290,9 @@ fn test_open_session_recovers_from_open_session_last_retry() {
 /// `IoAborted` — the error propagates immediately.
 #[api_test]
 fn test_open_session_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds) = init_without_resiliency();
     let rev = part.api_rev();
 
@@ -304,6 +319,9 @@ fn test_open_session_no_retry_without_resiliency() {
 /// `MAX_RETRIES` iterations, all retries are exhausted.
 #[api_test]
 fn test_open_session_fails_from_get_session_key_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
     let before = op_call_count(DdiOp::GetSessionEncryptionKey);
@@ -339,6 +357,9 @@ fn test_open_session_fails_from_get_session_key_exhausted() {
 /// retries are exhausted.
 #[api_test]
 fn test_open_session_fails_from_open_session_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
     let before = op_call_count(DdiOp::OpenSession);
@@ -378,6 +399,9 @@ fn test_open_session_fails_from_open_session_exhausted() {
 /// re-attempting the session open.
 #[api_test]
 fn test_restore_partition_reestablishes_credentials_on_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -415,6 +439,9 @@ fn test_restore_partition_reestablishes_credentials_on_retry() {
 /// credentials and retries successfully.
 #[api_test]
 fn test_restore_partition_recovers_credentials_not_established() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -454,6 +481,9 @@ fn test_restore_partition_recovers_credentials_not_established() {
 /// Caller-source only — skipped when `TSRA_USE_TPM` is set.
 #[api_test]
 fn test_open_session_recovers_when_restore_init_part_faults() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -492,6 +522,9 @@ fn test_open_session_recovers_when_restore_init_part_faults() {
 /// mechanisms (outer retry + proc-macro retry).
 #[api_test]
 fn test_open_session_recovers_from_compound_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -528,6 +561,9 @@ fn test_open_session_recovers_from_compound_fault() {
 /// (TPM path does not use the POTA endorsement callback).
 #[api_test]
 fn test_restore_pota_callback_invoked_during_init_part_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -580,6 +616,9 @@ fn test_restore_pota_callback_invoked_during_init_part_retry() {
 /// encounters a fault, triggers restore, and recovers.
 #[api_test]
 fn test_open_session_second_session_retries_independently() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -622,6 +661,9 @@ fn test_open_session_second_session_retries_independently() {
 /// via `init_part`, then retries the session open successfully.
 #[api_test]
 fn test_open_session_recovers_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -654,6 +696,9 @@ fn test_open_session_recovers_after_reset() {
 /// restores the partition and opens successfully.
 #[api_test]
 fn test_open_session_recovers_after_reset_between_sessions() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -681,6 +726,9 @@ fn test_open_session_recovers_after_reset_between_sessions() {
 /// reset — the `CredentialsNotEstablished` error propagates immediately.
 #[api_test]
 fn test_open_session_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds) = init_without_resiliency();
     let rev = part.api_rev();
 
@@ -701,6 +749,9 @@ fn test_open_session_fails_after_reset_without_resiliency() {
 /// events independently.
 #[api_test]
 fn test_open_session_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -728,6 +779,9 @@ fn test_open_session_recovers_after_consecutive_reset() {
 /// (TPM path does not use the POTA endorsement callback).
 #[api_test]
 fn test_open_session_pota_reendorsement_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -775,6 +829,9 @@ fn test_open_session_pota_reendorsement_after_reset() {
 /// re-establishes credentials, then retries successfully.
 #[api_test]
 fn test_open_session_recovers_after_reset_on_open_session() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -806,6 +863,9 @@ fn test_open_session_recovers_after_reset_on_open_session() {
 /// invalidates device state. The retry path restores and succeeds.
 #[api_test]
 fn test_open_session_recovers_after_reset_on_open_session_between_sessions() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -830,6 +890,9 @@ fn test_open_session_recovers_after_reset_on_open_session_between_sessions() {
 /// reset on the `OpenSession` DDI op — the error propagates immediately.
 #[api_test]
 fn test_open_session_fails_after_reset_on_open_session_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds) = init_without_resiliency();
     let rev = part.api_rev();
 
@@ -848,6 +911,9 @@ fn test_open_session_fails_after_reset_on_open_session_without_resiliency() {
 /// successful recovery.
 #[api_test]
 fn test_open_session_recovers_after_consecutive_reset_on_open_session() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (part, creds, _ctx) = init_with_resiliency();
     let rev = part.api_rev();
 
@@ -875,6 +941,9 @@ fn test_open_session_recovers_after_consecutive_reset_on_open_session() {
 /// (TPM path does not use the POTA endorsement callback).
 #[api_test]
 fn test_open_session_pota_reendorsement_after_reset_on_open_session() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }

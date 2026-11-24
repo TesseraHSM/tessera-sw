@@ -64,7 +64,7 @@ Before running any commands below, ensure you have finished the initial setup st
 Use cargo-nextest (recommended):
 ```bash
 # Run tests in specific packages you are modifying against simulator
-cargo xtask nextest --features emu --package <package-name>
+cargo xtask nextest --transport sock --package <package-name>
 ```
 
 ### Test Types

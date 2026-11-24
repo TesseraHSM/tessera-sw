@@ -6,12 +6,13 @@
 #[path = "../../common.rs"]
 mod common;
 
-use tsra_ddi_tbor_test_harness::TestCtx;
-use tsra_ddi_tbor_types::*;
 use common::FuzzRole;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_types::*;
 
 /// Fuzz input for the TBOR `PskChange` handler.
 #[derive(Arbitrary, Debug)]
@@ -72,7 +73,7 @@ struct Tamper {
 fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx: &TestCtx, _path: &str| {
         let session = ctx
-            .open_session(input.role.psk_id(), input.role.session_type())
+            .open_session(input.role.psk_id(), input.role.suite())
             .expect("session open should succeed");
         let handshake = session.handshake();
 
@@ -112,7 +113,10 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id(),
             psk_envelope: envelope,
         };
-        let _ = ctx.tbor(&psk_change_req);
+        match ctx.tbor(&psk_change_req) {
+            Ok(_) | Err(DdiError::TborStatus(_)) => {}
+            Err(err) => panic!("PskChange returned an unexpected error: {err}"),
+        }
 
         session.close().expect("session close should succeed");
     });

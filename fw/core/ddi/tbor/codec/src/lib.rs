@@ -54,9 +54,19 @@ pub use toc::TocEntry;
 pub use toc::TocType;
 pub use toc::MAX_DATA_SIZE;
 pub use toc::MAX_TOC_ENTRIES;
-pub use toc::PROTOCOL_VERSION;
 pub use toc::REQ_HEADER_LEN;
 pub use toc::RESP_HEADER_LEN;
+
+/// Read the major/minor API revision from a request or response header.
+pub fn api_rev_from_header(buf: &[u8]) -> Result<(u16, u16), HsmError> {
+    if buf.len() < REQ_HEADER_LEN {
+        return Err(HsmError::TborBufferTooShort);
+    }
+    Ok((
+        u16::from_le_bytes([buf[0], buf[1]]),
+        u16::from_le_bytes([buf[2], buf[3]]),
+    ))
+}
 
 /// Trait implemented by all `#[tbor(opcode = N)]` request types.
 ///

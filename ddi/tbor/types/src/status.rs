@@ -44,6 +44,8 @@ pub enum TborStatus {
     TborMissingField = 0x08680019,
     TborDuplicateField = 0x0868001A,
     TborInvalidEnumValue = 0x0868001B,
+    TborMisalignedField = 0x08680020,
+    TborNonCanonicalLayout = 0x08680021,
     // TBOR wire-encode failures (mirror of HsmError::Tbor*).
     TborBufferTooSmall = 0x0868001C,
     TborTooManyTocEntries = 0x0868001D,
@@ -260,6 +262,13 @@ pub enum TborStatus {
     DropIoFailure = 0x087000E5,
     DefaultPskMustRotate = 0x087000E6,
     UnsupportedSessionSuite = 0x087000E7,
+
+    /// An ML-DSA key pair failed its sign/verify PCT.
+    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+
+    /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
+    PctValidationMlKemGenKeyFailed = 0x087000E9,
+    DefaultPskChanged = 0x087000EA,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,
@@ -324,6 +333,13 @@ pub enum TborStatus {
     /// `HsmError::SdPeerCloningNotAllowed`).
     SdPeerCloningNotAllowed = 0x0870010A,
 
+    /// An in-session or close command's transport frame failed to open:
+    /// it is malformed, its session has no transport keys, or its tag or
+    /// padding does not verify (mirror of `HsmError::SessionTransportError`).
+    SessionTransportError = 0x08700113,
+    /// This logical session already committed its one permitted PSK change.
+    PskChangeAlreadyUsed = 0x08700114,
+
     // -- CPT (CryptoController) errors --------------------------------
     // Mirror of `HsmError`'s CPT range, which itself mirrors tiger-collab's
     // `DeviceErrorCodes::CryptoController` range
@@ -372,6 +388,8 @@ pub enum TborStatus {
     /// an empty response on success, so this status is how an invalid
     /// signature is surfaced.
     MlDsaVerifyFailed = 0x0870010D,
+    /// An RSA signature failed verification.
+    RsaVerifyFailed = 0x0870010E,
 }
 
 impl core::fmt::Debug for TborStatus {

@@ -81,7 +81,7 @@ pub struct TborMlKemGenerateKeyResp {
     /// masking key. The plaintext contains the 64-byte `(d ‖ z)` seed
     /// followed by the expanded decapsulation key. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(max_len = 3464)]
+    #[tbor(align = 4, max_len = 3464)]
     pub masked_key: Vec<u8>,
 
     /// The ML-KEM public / encapsulation key bytes.
@@ -106,7 +106,7 @@ mod tests {
             key_kind: MLKEM_KEY_KIND_768_SEED,
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&MLKEM_KEY_KIND_768_SEED),
             "encoded frame must carry the key-kind discriminant",
@@ -126,7 +126,7 @@ mod tests {
                 key_kind: kind,
             };
             let mut buf = [0u8; 256];
-            let frame = req.encode_request(&mut buf).expect("encode");
+            let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
             assert!(
                 frame.contains(&kind),
                 "encoded frame must carry the key-kind discriminant",

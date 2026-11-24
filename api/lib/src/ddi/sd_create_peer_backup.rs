@@ -27,12 +27,13 @@ use super::*;
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The sender's masked SD-sealing key (from
 ///   `SdSealingKeyGen`), exactly [`MASKED_SEALING_KEY_LEN`] bytes.
 /// * `dst_evidence` - Destination (peer) attestation evidence (cert chains
 ///   and report), transmitted out of band.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `pok_local_backup` - The device-local partition-owner-key backup from
 ///   which BKS3 is recovered, exactly [`MASKED_SD_LEN`] bytes.
 ///
@@ -44,11 +45,13 @@ use super::*;
 /// `SdPeerCloningNotAllowed` when the policy clears `allow_peer_cloning`).
 pub(crate) fn sd_create_peer_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
     dst_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     pok_local_backup: &[u8],
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<Vec<u8>> {
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
         .try_into()
@@ -56,7 +59,7 @@ pub(crate) fn sd_create_peer_backup_ex(
     let pok_local_backup: [u8; MASKED_SD_LEN] = pok_local_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Flatten the destination evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
@@ -75,9 +78,13 @@ pub(crate) fn sd_create_peer_backup_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
+    // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
+    // cookie explicitly since this call also runs outside
+    // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    dev.exec_op_tbor(&req, oob_items, &mut cookie)
-        .map(|resp| resp.pok_peer_backup.to_vec())
-        .map_err(HsmError::from)
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
+            .map(|resp| resp.pok_peer_backup.to_vec())
+            .map_err(HsmError::from)
+    })
 }

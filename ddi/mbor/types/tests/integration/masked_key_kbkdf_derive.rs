@@ -20,7 +20,6 @@ fn test_masked_key_secret_kbkdf() {
             let label_vec = Some("label".as_bytes().to_vec());
             let context_vec = Some("context".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -30,7 +29,6 @@ fn test_masked_key_secret_kbkdf() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -48,7 +46,6 @@ fn test_masked_key_secret_kbkdf_sha1() {
             let label_vec = Some("label".as_bytes().to_vec());
             let context_vec = Some("context".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -58,7 +55,6 @@ fn test_masked_key_secret_kbkdf_sha1() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -76,7 +72,6 @@ fn test_masked_key_secret_kbkdf_no_label() {
             let label_vec = None;
             let context_vec = Some("context".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -86,7 +81,6 @@ fn test_masked_key_secret_kbkdf_no_label() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -104,7 +98,6 @@ fn test_masked_key_secret_kbkdf_no_context() {
             let label_vec = Some("label".as_bytes().to_vec());
             let context_vec = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -114,7 +107,6 @@ fn test_masked_key_secret_kbkdf_no_context() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -132,7 +124,6 @@ fn test_masked_key_secret_kbkdf_aes128() {
             let label_vec = Some("label".as_bytes().to_vec());
             let context_vec = Some("context".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes128;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -142,7 +133,6 @@ fn test_masked_key_secret_kbkdf_aes128() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -160,7 +150,6 @@ fn test_masked_key_secret_kbkdf_aes192() {
             let label_vec = Some("label".as_bytes().to_vec());
             let context_vec = Some("context".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes192;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -170,7 +159,6 @@ fn test_masked_key_secret_kbkdf_aes192() {
                 label_vec,
                 context_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -195,7 +183,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret256() {
             let label_vec = "label".as_bytes().to_vec();
             let context_vec = "context".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -207,7 +194,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret256() {
                 context_vec,
                 label_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret256,
             );
@@ -232,7 +218,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret384() {
             let label_vec = "label".as_bytes().to_vec();
             let context_vec = "context".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -244,7 +229,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret384() {
                 context_vec,
                 label_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret384,
             );
@@ -269,7 +253,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret521() {
             let label_vec = "label".as_bytes().to_vec();
             let context_vec = "context".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -281,7 +264,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret521() {
                 context_vec,
                 label_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret521,
             );
@@ -292,7 +274,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret521() {
 // Uses KbkdfCounterHmac to derive derived_key_id1 and derived_key_id2
 // from secret_key_id1 and secret_key_id2, respectively.
 // Then verifies derived keys can do an encrypt/decrypt loop
-// key_tag is only used for derived_key_id1.
 // Returns (derived_key_id1, derived_key_id2)
 #[allow(clippy::too_many_arguments)]
 fn test_secret_kbkdf_helper(
@@ -301,7 +282,6 @@ fn test_secret_kbkdf_helper(
     label: Option<Vec<u8>>,
     context: Option<Vec<u8>>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     session_id: u16,
 ) {
@@ -344,7 +324,6 @@ fn test_secret_kbkdf_helper(
         label,
         context,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -366,7 +345,6 @@ fn test_secret_kbkdf_helper(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         derived_key_id1,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -383,7 +361,6 @@ fn test_secret_kbkdf_helper(
         label,
         context,
         key_type,
-        Default::default(),
         key_properties,
         None,
     );
@@ -438,7 +415,6 @@ fn test_secret_kbkdf_aes_gcm_helper(
     context_vec: Vec<u8>,
     label_vec: Vec<u8>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     secret_key_type: DdiKeyType,
 ) {
@@ -469,7 +445,6 @@ fn test_secret_kbkdf_aes_gcm_helper(
         label,
         context,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -491,7 +466,6 @@ fn test_secret_kbkdf_aes_gcm_helper(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         derived_key_id1,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -509,7 +483,6 @@ fn test_secret_kbkdf_aes_gcm_helper(
         label,
         context,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );

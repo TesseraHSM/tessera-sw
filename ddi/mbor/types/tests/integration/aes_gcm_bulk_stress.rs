@@ -6,7 +6,6 @@
 use std::thread;
 use std::time::Instant;
 
-use chrono::Local;
 use test_with_tracing::test;
 use tsra_ddi::*;
 use tsra_ddi_mbor_types::*;
@@ -111,12 +110,8 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
 
     thread::sleep(std::time::Duration::from_secs(1));
 
-    let resp = generate_aes_bulk_256_key(
-        &dev,
-        &app_sess_id,
-        None,
-        DdiAesKeySize::AesGcmBulk256Unapproved,
-    );
+    let resp =
+        generate_aes_bulk_256_key(&dev, &app_sess_id, DdiAesKeySize::AesGcmBulk256Unapproved);
     assert!(resp.is_ok(), "resp: {:?}", resp);
     let resp = resp.unwrap();
 
@@ -129,10 +124,7 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
     let data = vec![1; 16384 - aad.len()];
     let iv = [0x3u8; 12];
 
-    // Get the current local time
-    let now = Local::now();
-    // Format the time with milliseconds
-    println!("start {}", now.format("%Y-%m-%d %H:%M:%S%.3f"));
+    println!("start");
     let mut counter: usize = 0;
     let start_time = Instant::now();
     while Instant::now().duration_since(start_time).as_secs() < NUM_SECS {
@@ -177,11 +169,9 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
         counter += 1;
     }
 
-    // Get the current local time
-    let now = Local::now();
+    let elapsed = start_time.elapsed();
     thread::sleep(std::time::Duration::from_secs(1));
-    // Format the time with milliseconds
-    println!("End {}", now.format("%Y-%m-%d %H:%M:%S%.3f"));
+    println!("End after {elapsed:?}");
 
     println!("Number of Encrypt Decrypt ops completed : {}", counter);
 

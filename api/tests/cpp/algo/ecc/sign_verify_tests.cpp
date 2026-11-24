@@ -977,7 +977,6 @@ TEST_F(tsra_ecc_sign_verify, streaming_sign_consistency_with_single_shot)
     });
 }
 
-#if !SESSION_EX_TESTS
 //! Legacy ECC key persistence tests for resiliency scenarios.
 //!
 //! These tests verify that ECC keys can be:
@@ -1185,6 +1184,10 @@ static std::vector<uint8_t> get_part_prop_bytes(tsra_handle part, tsra_part_prop
 // Persists BMK and MOBK for proper restoration.
 TEST_F(tsra_ecc_sign_verify, persist_key_and_signature)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
 
     // Clean up any stale file from a previous run
     std::string file_path = get_persistence_file_path();
@@ -1268,6 +1271,10 @@ TEST_F(tsra_ecc_sign_verify, persist_key_and_signature)
 // To run: ctest -R MANUAL_restore_key_and_verify --verbose
 TEST_F(tsra_ecc_sign_verify, DISABLED_MANUAL_restore_key_and_verify)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     // Step 1: Read persistence file
     std::string file_path = get_persistence_file_path();
     std::vector<uint8_t> bmk;
@@ -1374,7 +1381,6 @@ TEST_F(tsra_ecc_sign_verify, DISABLED_MANUAL_restore_key_and_verify)
     std::cout << std::endl;
     std::cout << "=== All verifications passed! ===" << std::endl;
 }
-#endif
 
 // Tests ECDSA signing fails when using a public key handle.
 TEST_F(tsra_ecc_sign_verify, sign_with_public_key_fails)

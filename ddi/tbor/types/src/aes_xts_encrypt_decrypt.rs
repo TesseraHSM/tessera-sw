@@ -58,7 +58,7 @@ pub struct TborAesXtsEncryptDecryptReq {
     pub tweak: alloc::vec::Vec<u8>,
 
     /// The masked XTS key.
-    #[tbor(min_len = 296, max_len = 296)]
+    #[tbor(align = 4, min_len = 296, max_len = 296)]
     pub masked_key: alloc::vec::Vec<u8>,
 }
 
@@ -90,7 +90,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 512];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame
             .windows(8)
             .any(|w| w == 0x0102_0304_0506_0708u64.to_le_bytes()));

@@ -43,37 +43,41 @@ static tsra_status generate_rsa_private_key_for_attest(
     auto_key &pub_key
 )
 {
-#if SESSION_EX_TESTS
-    auto_key wrapping_priv_key;
-    auto_key wrapping_pub_key;
-    auto err = generate_rsa_unwrapping_keypair(
-        session,
-        wrapping_priv_key.get_ptr(),
-        wrapping_pub_key.get_ptr()
-    );
-    if (err != TSRA_STATUS_SUCCESS)
+    tsra_status err;
+    if (api_rev_at_least(1, 1))
     {
-        return err;
-    }
+        auto_key wrapping_priv_key;
+        auto_key wrapping_pub_key;
+        err = generate_rsa_unwrapping_keypair(
+            session,
+            wrapping_priv_key.get_ptr(),
+            wrapping_pub_key.get_ptr()
+        );
+        if (err != TSRA_STATUS_SUCCESS)
+        {
+            return err;
+        }
 
-    key_props props = {
-        .key_kind = TSRA_KEY_KIND_RSA,
-        .key_size_bits = 2048,
-        .session_key = false,
-        .encrypt = true,
-        .decrypt = true,
-    };
-    err = import_keypair(
-        wrapping_pub_key.get(),
-        wrapping_priv_key.get(),
-        rsa_private_key_der,
-        props,
-        priv_key.get_ptr(),
-        pub_key.get_ptr()
-    );
-#else
-    auto err = generate_rsa_unwrapping_keypair(session, priv_key.get_ptr(), pub_key.get_ptr());
-#endif
+        key_props props = {
+            .key_kind = TSRA_KEY_KIND_RSA,
+            .key_size_bits = 2048,
+            .session_key = false,
+            .encrypt = true,
+            .decrypt = true,
+        };
+        err = import_keypair(
+            wrapping_pub_key.get(),
+            wrapping_priv_key.get(),
+            rsa_private_key_der,
+            props,
+            priv_key.get_ptr(),
+            pub_key.get_ptr()
+        );
+    }
+    else
+    {
+        err = generate_rsa_unwrapping_keypair(session, priv_key.get_ptr(), pub_key.get_ptr());
+    }
     if (err != TSRA_STATUS_SUCCESS)
     {
         return err;
@@ -134,9 +138,12 @@ TEST_F(tsra_rsa_keyattest, attest_rsa_2048_key)
     });
 }
 
-#if SESSION_EX_TESTS
 TEST_F(tsra_rsa_keyattest, attest_rejects_partition_unwrapping_key)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -158,6 +165,10 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_partition_unwrapping_key)
 
 TEST_F(tsra_rsa_keyattest, attest_rejects_noncanonical_report_data_lengths)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -180,7 +191,6 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_noncanonical_report_data_lengths)
         }
     });
 }
-#endif
 
 // Verifies that attestation rejects an invalid key handle.
 TEST_F(tsra_rsa_keyattest, attest_invalid_key_handle)
@@ -280,10 +290,13 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_report_data_larger_than_max)
     });
 }
 
-#if !SESSION_EX_TESTS
 // Verifies that empty report data is rejected (report data must be exactly the max size).
 TEST_F(tsra_rsa_keyattest, attest_rejects_empty_report_data)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -306,8 +319,6 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_empty_report_data)
         ASSERT_EQ(attest_err, TSRA_STATUS_DDI_CMD_FAILURE);
     });
 }
-
-#endif
 
 // Verifies that a too-small report output buffer fails and returns the required size.
 TEST_F(tsra_rsa_keyattest, attest_rejects_small_report_buffer_and_sets_required_size)
@@ -544,16 +555,11 @@ TEST_F(tsra_rsa_keyattest, attest_report_data_patterns_require_max_size)
             TSRA_STATUS_SUCCESS
         );
 
+        const bool ex = api_rev_at_least(1, 1);
         std::vector<std::vector<uint8_t>> report_data_cases = {
-#if SESSION_EX_TESTS
-            std::vector<uint8_t>(kReportDataSize, 0x00),
-            std::vector<uint8_t>(kReportDataSize, 0xFF),
-            std::vector<uint8_t>(kReportDataSize, 0xA5),
-#else
-            std::vector<uint8_t>(1, 0x00),
-            std::vector<uint8_t>(kShortReportDataSize / 2, 0xFF),
-            std::vector<uint8_t>(kShortReportDataSize, 0xA5),
-#endif
+            std::vector<uint8_t>(ex ? kReportDataSize : 1, 0x00),
+            std::vector<uint8_t>(ex ? kReportDataSize : kShortReportDataSize / 2, 0xFF),
+            std::vector<uint8_t>(ex ? kReportDataSize : kShortReportDataSize, 0xA5),
             std::vector<uint8_t>(kReportDataSize, 0x5A),
         };
 
@@ -591,10 +597,13 @@ TEST_F(tsra_rsa_keyattest, attest_report_data_patterns_require_max_size)
     });
 }
 
-#if !SESSION_EX_TESTS
 // Verifies that 127-byte report data, one less than the required max, is rejected.
 TEST_F(tsra_rsa_keyattest, attest_rejects_report_data_one_less_than_max)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto_key priv_key;
         auto_key pub_key;
@@ -620,8 +629,6 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_report_data_one_less_than_max)
         ASSERT_EQ(attest_err, TSRA_STATUS_DDI_CMD_FAILURE);
     });
 }
-
-#endif
 
 // Verifies that a public key also fails during size-query mode.
 TEST_F(tsra_rsa_keyattest, attest_public_key_size_query_fails)

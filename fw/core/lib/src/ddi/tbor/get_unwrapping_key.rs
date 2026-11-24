@@ -4,7 +4,7 @@
 //! TBOR `GetUnwrappingKey` command handler.
 //!
 //! Within an open session, return the partition's RSA-2048 **unwrapping**
-//! public key (raw wire `n_le ‖ e_le`), which the host uses to RSA-AES
+//! public key (raw wire `n ‖ e`, device byte order), which the host uses to RSA-AES
 //! key-wrap a payload for `UnwrapKey`.  The unwrapping key is a
 //! device-provisioned partition-internal key; only its public half is
 //! returned — the private half never leaves the device and `UnwrapKey`
@@ -68,7 +68,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // unwritten), then have the PAL derive the wire public key straight
     // into the reserved slot — no scratch buffer and no copy.
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborGetUnwrappingKeyResp::encode(buf, 0, false)?
+        let frame = TborGetUnwrappingKeyResp::encode_for_request(buf, 0, false)?
             .pub_key_reserve(UNWRAPPING_PUB_KEY_LEN)?
             .finish();
         Ok(frame.as_bytes().len())

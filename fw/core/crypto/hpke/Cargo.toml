@@ -22,4 +22,5 @@ default = []
 [dependencies]
 tsra_fw_core_crypto_aes_cbc_pad = { optional = true, path = "../aes-cbc-pad" }
 tsra_fw_core_crypto_gcm_buf = { path = "../gcm-buf" }
+tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }

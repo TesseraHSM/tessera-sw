@@ -20,14 +20,14 @@
 
 use tsra_ddi_tbor_types::codec::DecodeError;
 use tsra_ddi_tbor_types::codec::ResponseEncoder;
-use tsra_ddi_tbor_types::codec::PROTOCOL_VERSION;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborRsaVerifyResp;
 use tsra_ddi_tbor_types::TborSessionCloseResp;
 
 /// Builds a response envelope with the given status containing one placeholder `None` TOC entry.
 fn encode_err_envelope(status: u32, out: &mut [u8]) -> usize {
-    let bytes = ResponseEncoder::new(out, PROTOCOL_VERSION, status, false)
+    let bytes = ResponseEncoder::new(out, (1, 1), status, false)
         .none()
         .expect("encode none placeholder")
         .finish()
@@ -38,6 +38,35 @@ fn encode_err_envelope(status: u32, out: &mut [u8]) -> usize {
 
 const AEAD_ENVELOPE_AUTH_FAILED: u32 = 0x0870_00DD;
 const SESSION_NOT_FOUND: u32 = 0x0870_0004;
+const RSA_VERIFY_FAILED: u32 = 0x0870_010E;
+
+#[test]
+fn rsa_verify_failure_status_decodes() {
+    let mut buf = [0u8; 64];
+    let len = encode_err_envelope(RSA_VERIFY_FAILED, &mut buf);
+
+    assert_eq!(
+        TborRsaVerifyResp::decode_response(&buf[..len]).expect_err("invalid signature"),
+        DecodeError::FwError(RSA_VERIFY_FAILED),
+    );
+}
+
+#[test]
+fn mismatched_response_revision_is_rejected_before_body_or_status() {
+    for status in [0, SESSION_NOT_FOUND] {
+        let mut buf = [0u8; 64];
+        let len = encode_err_envelope(status, &mut buf);
+        for expected in [(2, 1), (1, 2)] {
+            assert_eq!(
+                TborSessionCloseResp::decode_response_for_api_rev(&buf[..len], expected),
+                Err(DecodeError::ApiRevisionMismatch {
+                    expected,
+                    actual: (1, 1)
+                })
+            );
+        }
+    }
+}
 
 /// Verifies that an empty response type surfaces its FW status.
 #[test]

@@ -62,13 +62,13 @@ pub struct TborDarcKeyWrapReq<'a> {
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The local masked EC private key to export, up to
     /// [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (312 B).  Unmasked on-device;
     /// its masked-key kind must be one of `Ecc{256,384,521}Private`.
-    #[tbor(buffer, max_len = 312)]
+    #[tbor(align = 4, buffer, max_len = 312)]
     pub masked_key: &'a [u8],
 }
 
@@ -95,7 +95,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let masked_tmk = [0x5Au8; MASKED_TMK_LEN];
         let masked_key = [0xA5u8; 120];
-        let frame = TborDarcKeyWrapReq::encode(&mut buf)
+        let frame = TborDarcKeyWrapReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -113,7 +113,7 @@ mod tests {
     fn response_round_trips_fields() {
         let mut buf = [0u8; 1024];
         let wrapped = [0xCDu8; 240];
-        let frame = TborDarcKeyWrapResp::encode(&mut buf, 0, false)
+        let frame = TborDarcKeyWrapResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .wrapped_key(&wrapped)
             .unwrap()

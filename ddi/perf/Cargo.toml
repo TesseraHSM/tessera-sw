@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { features = ["derive"], workspace = true }
+ddi_sock_server = { features = [
+  "autostart",
+], optional = true, workspace = true }
 rand.workspace = true
 tsra_crypto.workspace = true
 tsra_ddi.workspace = true
@@ -23,8 +26,10 @@ zeroize.workspace = true
 
 [features]
 default = []
-# Run against the in-process emulator instead of the device driver.
-emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
+# Read `TSRA_TEST_ARGS` and, with `transport=sock`, run against the in-process
+# simulated HSM (or an external server named by `sock=`) instead of the device
+# driver. Opt-in so normal workspace builds do not start a simulator.
+test-args = ["dep:ddi_sock_server"]
 
 [lints]
 workspace = true

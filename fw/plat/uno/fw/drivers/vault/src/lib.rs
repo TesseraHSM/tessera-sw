@@ -18,6 +18,9 @@
 #![no_std]
 #![allow(unsafe_code)]
 
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering::Relaxed;
+
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -29,10 +32,12 @@ use tsra_fw_uno_key_vault::ENTRIES_PER_TABLE;
 use tsra_fw_uno_key_vault::MAX_TABLE_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_SIZE;
+use tsra_fw_uno_reg_soc::io_gsram::HSM_CODE_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BITMAP_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BLOB_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BLOB_SIZE as TABLE_BLOB_SIZE;
+use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_COUNT;
 use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::ENTRY_STRIDE;
 use tsra_fw_uno_reg_soc::key_vault_table_t::KEY_VAULT_TABLE_T_BASE;
@@ -54,6 +59,26 @@ const TABLE_BASE: u32 = IO_GSRAM_BASE + KEY_VAULT_TABLE_T_BASE;
 /// table is plain GSRAM, accessed without the tock-registers overlay.
 const TABLE_STRIDE: u32 = BLOB_OFFSET + TABLE_BLOB_SIZE;
 
+// The RDL table geometry and the allocator's constants must agree, and the
+// vault must end before the executable HSM_CODE window that follows it.
+const _: () = {
+    assert!(ENTRY_COUNT as usize == ENTRIES_PER_TABLE);
+    assert!((BLOB_OFFSET - BITMAP_OFFSET) as usize == BITMAP_WORDS * 4);
+    assert!(TABLE_BLOB_SIZE as usize == BLOB_SIZE);
+    assert!(KEY_VAULT_TABLE_T_BASE + TABLE_COUNT as u32 * TABLE_STRIDE <= HSM_CODE_OFFSET);
+};
+
+/// Bumped by every mutable borrow of a vault table's entries, bitmap or
+/// blob, before the borrow is handed out: a key located at one
+/// [`VaultStorage::generation`] is where it was for as long as the
+/// generation stays the same.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Marks the vault changed; see [`GENERATION`].
+fn bump_generation() {
+    GENERATION.store(GENERATION.load(Relaxed).wrapping_add(1), Relaxed);
+}
+
 /// GSRAM-backed [`TableStorage`].
 ///
 /// Tables are addressed directly in GSRAM, so the only state this handle
@@ -62,8 +87,10 @@ const TABLE_STRIDE: u32 = BLOB_OFFSET + TABLE_BLOB_SIZE;
 /// operation from the partition's `res_mask`.
 #[derive(Debug)]
 pub struct VaultStorage {
-    /// 128-bit table-ownership mask for the calling partition.
-    res_mask: u128,
+    /// 128-bit table-ownership mask for the calling partition, a word at a
+    /// time: word `i` holds bits `32 * i..32 * i + 32`, so testing a bit
+    /// takes no 128-bit shift.
+    res_mask: [u32; 4],
 }
 
 impl VaultStorage {
@@ -80,7 +107,50 @@ impl VaultStorage {
     /// A `VaultStorage` handle scoped to the partition's owned tables.
     #[inline]
     pub fn new(res_mask: u128) -> Self {
+        Self {
+            res_mask: core::array::from_fn(|i| (res_mask >> (32 * i)) as u32),
+        }
+    }
+
+    /// The vault's generation: it changes whenever a table may have been
+    /// written, so a key located at one generation is still there while the
+    /// generation is unchanged.
+    #[inline]
+    pub fn generation() -> u32 {
+        GENERATION.load(Relaxed)
+    }
+
+    /// Builds a storage handle for a partition owning, of the tables, only
+    /// those that `bits` selects in word `word` of the resource mask (bit
+    /// `i` of `bits` selects table `32 * word + i`): enough to reach a key
+    /// in one of those tables, from one word of the mask.
+    ///
+    /// # Parameters
+    ///
+    /// - `word`: Index of the resource-mask word; past the mask's four
+    ///   words, no table is owned.
+    /// - `bits`: That word of the partition's resource mask.
+    ///
+    /// # Returns
+    ///
+    /// A `VaultStorage` handle scoped to those tables.
+    #[inline]
+    pub fn with_mask_word(word: usize, bits: u32) -> Self {
+        let mut res_mask = [0; 4];
+        if let Some(w) = res_mask.get_mut(word) {
+            *w = bits;
+        }
         Self { res_mask }
+    }
+
+    /// Whether a partition owns table `table`, `bits` being word
+    /// `table / 32` of its resource mask: as
+    /// [`with_mask_word`](Self::with_mask_word)`(table / 32, bits)` would
+    /// find it, without building the mask.
+    #[inline]
+    pub fn owns_table(table: usize, bits: u32) -> bool {
+        const { assert!(TABLE_COUNT <= 32 * 4) };
+        table < TABLE_COUNT && (bits >> (table % 32)) & 1 != 0
     }
 
     /// Absolute GSRAM address of table `table`'s entry-metadata region.
@@ -155,7 +225,11 @@ impl TableStorage for VaultStorage {
     fn is_valid_table(&self, table: usize) -> bool {
         // A table is usable only if it is addressable and owned by the
         // calling partition (its bit is set in the resource mask).
-        table < TABLE_COUNT && (self.res_mask >> table) & 1 != 0
+        table < TABLE_COUNT
+            && self
+                .res_mask
+                .get(table / 32)
+                .is_some_and(|w| (w >> (table % 32)) & 1 != 0)
     }
 
     /// Borrows a metadata entry from GSRAM.
@@ -202,6 +276,7 @@ impl TableStorage for VaultStorage {
             return Err(HsmError::InvalidArg);
         }
         let ptr = (Self::entry_addr(table) + idx * ENTRY_STRIDE as usize) as *mut Entry;
+        bump_generation();
         // SAFETY: as `entry`, with exclusive access on the single-threaded
         // executor for the duration of the `&mut self` borrow.
         Ok(unsafe { &mut *ptr })
@@ -242,6 +317,7 @@ impl TableStorage for VaultStorage {
             return Err(HsmError::InvalidArg);
         }
         let ptr = Self::bitmap_addr(table) as *mut [u32; BITMAP_WORDS];
+        bump_generation();
         // SAFETY: as `bitmap`, with exclusive access on the single-threaded
         // executor for the duration of the `&mut self` borrow.
         Ok(unsafe { &mut *ptr })
@@ -286,6 +362,7 @@ impl TableStorage for VaultStorage {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
+        bump_generation();
         // SAFETY: as `blob`, with exclusive access for the duration of the
         // `&mut self` borrow on the single-threaded executor.
         Ok(unsafe {

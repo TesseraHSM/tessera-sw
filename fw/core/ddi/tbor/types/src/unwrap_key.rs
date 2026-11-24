@@ -33,7 +33,8 @@
 //! * `masked_key` — the recovered key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
 //! * `pub_key` — the recovered key's wire public key for RSA / ECC
-//!   (`n_le ‖ e_le` / `x ‖ y`); empty for symmetric (AES / HMAC) keys.
+//!   (`n ‖ e` / `x ‖ y`, device byte order); empty for symmetric
+//!   (AES / HMAC) keys.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -45,10 +46,12 @@ use crate::key_props::KeyUsage;
 /// TBOR opcode for `UnwrapKey`.
 pub const TBOR_OP_UNWRAP_KEY: u8 = 0x14;
 
-/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`), sized for the
-/// largest supported key (RSA-4096-CRT).  Pinned into the `#[tbor(buffer,
-/// max_len = 3072)]` literal on [`TborUnwrapKeyReq::wrapped_blob`].
-pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 3072;
+/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`): the 256-byte
+/// RSA-2048 OAEP ciphertext plus the largest AES-KWP payload
+/// (`HSM_AES_KW_MAX_DATA_LEN + 8` = 6152).  Pinned into the
+/// `#[tbor(buffer, max_len = 6408)]` literal on
+/// [`TborUnwrapKeyReq::wrapped_blob`].
+pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 6408;
 
 /// Max masked recovered-key envelope length.  Pinned into the
 /// `#[tbor(buffer, max_len = 3168)]` literal on
@@ -63,7 +66,10 @@ pub const UNWRAP_PUB_KEY_MAX_LEN: usize = 520;
 // Tripwires: keep the public length constants in lock-step with the
 // `#[tbor(buffer, max_len = ...)]` literals below (the derive requires
 // integer literals, so the two cannot share a symbol).
-const _: () = assert!(UNWRAP_WRAPPED_BLOB_MAX_LEN == 3072);
+const _: () = assert!(UNWRAP_WRAPPED_BLOB_MAX_LEN == 6408);
+const _: () = assert!(
+    UNWRAP_WRAPPED_BLOB_MAX_LEN == 256 + tsra_fw_hsm_pal_traits::HSM_AES_KW_MAX_DATA_LEN + 8
+);
 const _: () = assert!(UNWRAP_MASKED_KEY_MAX_LEN == 3168);
 const _: () = assert!(UNWRAP_PUB_KEY_MAX_LEN == 520);
 
@@ -120,7 +126,7 @@ pub struct TborUnwrapKeyReq<'a> {
 
     /// The RSA-AES-wrapped key (`RSA-OAEP(KEK) ‖ AES-KWP(key)`), up to
     /// [`UNWRAP_WRAPPED_BLOB_MAX_LEN`] bytes.
-    #[tbor(buffer, max_len = 3072)]
+    #[tbor(buffer, max_len = 6408)]
     pub wrapped_blob: &'a [u8],
 
     /// Caller-supplied key label recorded in the masked blob's metadata,
@@ -143,7 +149,7 @@ pub struct TborUnwrapKeyResp<'a> {
     /// recovered key straight into it (`decode_mut`) — avoiding a separate
     /// MAX-sized scratch buffer that would otherwise coexist with the
     /// (multi-KB, for RSA) unwrap material and blow the per-IO DMA budget.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The recovered key's wire public key for RSA / ECC; empty for
@@ -169,7 +175,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let wrapped = [0x5Au8; 300];
         let key_label = b"imported-key";
-        let frame = TborUnwrapKeyReq::encode(&mut buf)
+        let frame = TborUnwrapKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -202,7 +208,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let masked = [0xABu8; 196];
         let pub_key = [0xCDu8; 96];
-        let frame = TborUnwrapKeyResp::encode(&mut buf, 0, true)
+        let frame = TborUnwrapKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .key_kind(28)
             .unwrap()

@@ -53,15 +53,8 @@ fn create_aes_key(
     availability: DdiKeyAvailability,
 ) -> u16 {
     let key_props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, availability);
-    let resp = helper_aes_generate(
-        dev,
-        Some(sess_id),
-        REV,
-        DdiAesKeySize::Aes256,
-        None,
-        key_props,
-    )
-    .expect("AES key gen must succeed");
+    let resp = helper_aes_generate(dev, Some(sess_id), REV, DdiAesKeySize::Aes256, key_props)
+        .expect("AES key gen must succeed");
     resp.data.key_id
 }
 
@@ -157,7 +150,6 @@ fn rsa_unwrap_aes_key(
         DdiKeyClass::Aes,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        None,
         key_props,
     )
     .expect("RSA unwrap must succeed");
@@ -257,17 +249,10 @@ fn create_aes_masked(
     availability: DdiKeyAvailability,
 ) -> MborByteArray<3072> {
     let key_props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, availability);
-    helper_aes_generate(
-        dev,
-        Some(sess_id),
-        REV,
-        DdiAesKeySize::Aes256,
-        None,
-        key_props,
-    )
-    .expect("AES key gen must succeed")
-    .data
-    .masked_key
+    helper_aes_generate(dev, Some(sess_id), REV, DdiAesKeySize::Aes256, key_props)
+        .expect("AES key gen must succeed")
+        .data
+        .masked_key
 }
 
 /// Try to re-import (`UnmaskKey`) a masked blob in `sess_id`.
@@ -347,7 +332,7 @@ fn create_ecc_key(
     availability: DdiKeyAvailability,
 ) -> u16 {
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, availability);
-    helper_ecc_generate_key_pair(dev, Some(sess_id), REV, DdiEccCurve::P256, None, key_props)
+    helper_ecc_generate_key_pair(dev, Some(sess_id), REV, DdiEccCurve::P256, key_props)
         .expect("ECC key gen must succeed")
         .data
         .private_key_id

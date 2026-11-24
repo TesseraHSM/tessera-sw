@@ -20,23 +20,29 @@ pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
     ctx.absorb(&[j, i]);
     ctx.finalize();
 
+    // Three little-endian words hold eight 12-bit candidates, so each one
+    // is a shift (and at most one OR) and a mask rather than byte loads.
+    let mut buf = [0u32; SHAKE128_RATE / 4];
     let mut ctr = 0;
-    let mut buf = [0u8; SHAKE128_RATE];
     while ctr < N {
-        ctx.squeeze(&mut buf);
-        let mut pos = 0;
-        while pos + 3 <= SHAKE128_RATE && ctr < N {
-            let d1 = (buf[pos] as u16) | (((buf[pos + 1] & 0x0F) as u16) << 8);
-            let d2 = ((buf[pos + 1] >> 4) as u16) | ((buf[pos + 2] as u16) << 4);
-            pos += 3;
-            if d1 < Q {
-                a[ctr] = d1 as i16;
-                ctr += 1;
-            }
-            if ctr < N && d2 < Q {
-                a[ctr] = d2 as i16;
-                ctr += 1;
-            }
+        ctx.squeeze_words(&mut buf);
+        for w in buf.as_chunks::<3>().0 {
+            let (w0, w1, w2) = (u32::from_le(w[0]), u32::from_le(w[1]), u32::from_le(w[2]));
+            let mut take = |d: u32| {
+                let d = (d & 0xFFF) as u16;
+                if d < Q && ctr < N {
+                    a[ctr] = d as i16;
+                    ctr += 1;
+                }
+            };
+            take(w0);
+            take(w0 >> 12);
+            take((w0 >> 24) | (w1 << 8));
+            take(w1 >> 4);
+            take(w1 >> 16);
+            take((w1 >> 28) | (w2 << 4));
+            take(w2 >> 8);
+            take(w2 >> 20);
         }
     }
 }

@@ -40,9 +40,13 @@ fn test_device_handle_session_no_session() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_device_handle_session_open_session_twice() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         setup,
         common_cleanup,
@@ -97,9 +101,13 @@ fn test_device_handle_session_open_session_twice() {
     );
 }
 
-#[cfg(feature = "sock")]
 #[test]
 fn test_socket_sessions_are_owned_by_connection() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(setup, common_cleanup, |dev, ddi, path, _| {
         helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
         let mut sessions = Vec::new();
@@ -133,7 +141,6 @@ fn test_socket_sessions_are_owned_by_connection() {
                 Some(session),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 props,
             )
             .expect_err("another connection cannot use this session");
@@ -146,7 +153,6 @@ fn test_socket_sessions_are_owned_by_connection() {
                 Some(session),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 props,
             )
             .expect("the owner's clone can use this session");

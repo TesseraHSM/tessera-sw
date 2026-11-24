@@ -158,12 +158,9 @@ impl VerifyOp for OsslRsaSignAlgo {
     ///
     /// # Errors
     ///
-    /// Returns an error only for setup/configuration failures before the final
-    /// OpenSSL verify step (for example context creation, `verify_init`, or
-    /// padding/hash configuration).
-    ///
-    /// Any error from the final OpenSSL `verify` call is treated as an invalid
-    /// signature and returns `Ok(false)` (fail-closed).
+    /// Returns an error for setup/configuration failures or operational errors
+    /// from the final OpenSSL verify call. OpenSSL's `0` result denotes an
+    /// invalid signature and returns `Ok(false)`.
     #[allow(unsafe_code)]
     fn verify(
         &mut self,
@@ -183,26 +180,30 @@ impl VerifyOp for OsslRsaSignAlgo {
         // SAFETY: the key's `EVP_PKEY*` outlives `ctx` (the `PkeyCtx` guard frees
         // it on drop on every path); `data`/`signature` are valid for the call;
         // `md` outlives it.
-        let valid = unsafe {
+        let result = unsafe {
             let ctx = PkeyCtx::from_pkey(key.pkey().as_ptr()).ok_or(CryptoError::RsaError)?;
             if ffi::EVP_PKEY_verify_init(ctx.as_ptr()) != OSSL_SUCCESS {
                 return Err(CryptoError::RsaVerifyError);
             }
             self.configure_ctx(ctx.as_ptr(), md.as_ref())?;
-            // After successful setup, `EVP_PKEY_verify` returns 1 for a valid
-            // signature; anything else (0 invalid, negative error, malformed
-            // signature) is treated as invalid (fail-closed), matching the prior
-            // `Err(_) => Ok(false)` behaviour.
             ffi::EVP_PKEY_verify(
                 ctx.as_ptr(),
                 signature.as_ptr(),
                 signature.len(),
                 data.as_ptr(),
                 data.len(),
-            ) == OSSL_SUCCESS
+            )
         };
 
-        Ok(valid)
+        map_verify_result(result)
+    }
+}
+
+fn map_verify_result(result: c_int) -> Result<bool, CryptoError> {
+    match result {
+        OSSL_SUCCESS => Ok(true),
+        0 => Ok(false),
+        _ => Err(CryptoError::RsaVerifyError),
     }
 }
 
@@ -427,5 +428,17 @@ impl OsslRsaSignAlgo {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_result_distinguishes_invalid_signature_from_operational_error() {
+        assert_eq!(map_verify_result(OSSL_SUCCESS), Ok(true));
+        assert_eq!(map_verify_result(0), Ok(false));
+        assert_eq!(map_verify_result(-1), Err(CryptoError::RsaVerifyError));
     }
 }

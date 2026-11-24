@@ -14,10 +14,10 @@ use std::num::NonZeroUsize;
 use tsra_crypto::HashAlgo as CryptoHashAlgo;
 use tsra_crypto::Hasher;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborHashReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA1;
@@ -42,7 +42,7 @@ const HASH_ALGOS: [u8; 4] = [
 /// Clear the CU default-PSK gate without keeping a session slot occupied.
 fn rotate_cu_psk_and_close(ctx: &TestCtx) {
     let bootstrap = ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
         .expect("rotate CU PSK");
@@ -373,7 +373,7 @@ fn hash_default_psk_cu_rejected() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .open_session(CU_PSK_ID, SessionSuite::EcdhP384)
         .expect("open default-PSK CU session");
 
     ctx.expect_fw_reject(

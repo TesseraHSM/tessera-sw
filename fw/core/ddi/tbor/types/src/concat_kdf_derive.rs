@@ -119,7 +119,7 @@ pub struct TborConcatKdfDeriveReq<'a> {
 
     /// The masked ECDH shared secret IKM (from `EcdhDerive`), an
     /// AEAD-GCM-256 envelope of 264..=312 B; unmasked in place.
-    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_secret: &'a [u8],
 
     /// Optional `SharedInfo` (X9.63) / `OtherInfo` (SP 800-56A), ≤ 256 B;
@@ -136,7 +136,7 @@ pub struct TborConcatKdfDeriveReq<'a> {
 pub struct TborConcatKdfDeriveResp<'a> {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.  248..=360 B depending on the derived key length.
-    #[tbor(buffer, max_len = 360, mutable)]
+    #[tbor(align = 4, buffer, max_len = 360, mutable)]
     pub masked_key: &'a [u8],
 }
 
@@ -153,7 +153,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let secret = [0x11u8; CONCAT_MASKED_SECRET_MIN_LEN];
         let info = [0x22u8; 16];
-        let frame = TborConcatKdfDeriveReq::encode(&mut buf)
+        let frame = TborConcatKdfDeriveReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -182,7 +182,7 @@ mod tests {
     fn response_round_trips_masked_key() {
         let mut buf = [0u8; 512];
         let masked = [0x44u8; CONCAT_MASKED_KEY_MAX_LEN];
-        let frame = TborConcatKdfDeriveResp::encode(&mut buf, 0, false)
+        let frame = TborConcatKdfDeriveResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

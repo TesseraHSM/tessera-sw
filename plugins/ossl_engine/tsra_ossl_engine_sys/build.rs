@@ -85,6 +85,7 @@ fn main() {
         .allowlist_function("RSA_free")
         .allowlist_function("RSA_set0_key")
         .allowlist_function("RSA_size")
+        .allowlist_function("RSA_get0_engine")
         .allowlist_function("EC_KEY_METHOD_.*")
         .allowlist_function("EC_KEY_.*")
         .allowlist_function("EC_POINT_.*")

@@ -262,7 +262,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let derive_and_mask = async {
             derived?;
             let len = cmd_buf.encode_response(|buf| {
-                Ok(TborConcatKdfDeriveResp::encode(buf, 0, false)?
+                Ok(TborConcatKdfDeriveResp::encode_for_request(buf, 0, false)?
                     .masked_key_reserve(masked_len)?
                     .finish()
                     .as_bytes()

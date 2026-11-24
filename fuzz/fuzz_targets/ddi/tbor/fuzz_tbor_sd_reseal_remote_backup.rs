@@ -14,8 +14,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 const CHAIN_LEAF_INDEX: usize = 1;
 const POLICY_MUTATION_MASK: u8 = 1;
@@ -94,13 +92,13 @@ fn push_chain(items: &mut Vec<Vec<u8>>, chain: &GeneratedChain) -> Vec<CertDescr
     ]
 }
 
-/// Append manufacturer, owner, and SATA-rooted partition-owner chains for
+/// Append manufacturer, owner, and POTA-rooted partition-owner chains for
 /// the PID plus a key report. Return the chain descriptors, report descriptor,
 /// and report's OOB index.
 fn push_evidence(
     items: &mut Vec<Vec<u8>>,
     pid_pub: &[u8; RAW_PUB_LEN],
-    sata_key: &CaKey,
+    pota_key: &CaKey,
     report: &[u8],
 ) -> (
     Vec<CertDescriptor>,
@@ -111,7 +109,7 @@ fn push_evidence(
 ) {
     let mfgr = push_chain(items, &make_chain(&CaKey::generate(), pid_pub));
     let owner = push_chain(items, &make_chain(&CaKey::generate(), pid_pub));
-    let part_owner = push_chain(items, &make_chain(sata_key, pid_pub));
+    let part_owner = push_chain(items, &make_chain(pota_key, pid_pub));
     let report_item = push_item(items, report);
     let report = ReportDescriptor {
         index: report_item.index,
@@ -130,16 +128,16 @@ fn push_evidence(
 /// manufacturer leaf indices for targeted certificate mutations.
 fn build_reseal_evidence(
     pid_pub: &[u8; RAW_PUB_LEN],
-    sata_key: &CaKey,
+    pota_key: &CaKey,
     src_report: &[u8],
     dest_report: &[u8],
 ) -> ResealEvidence {
     let mut oob_items = Vec::new();
     let (src_mfgr, src_owner, src_part_owner, src_report, src_report_index) =
-        push_evidence(&mut oob_items, pid_pub, sata_key, src_report);
+        push_evidence(&mut oob_items, pid_pub, pota_key, src_report);
     let src_leaf_index = usize::from(src_mfgr[CHAIN_LEAF_INDEX].index);
     let (dest_mfgr, dest_owner, dest_part_owner, dest_report, dest_report_index) =
-        push_evidence(&mut oob_items, pid_pub, sata_key, dest_report);
+        push_evidence(&mut oob_items, pid_pub, pota_key, dest_report);
     let dest_leaf_index = usize::from(dest_mfgr[CHAIN_LEAF_INDEX].index);
 
     debug_assert_eq!(src_report_index, usize::from(src_report.index));
@@ -205,19 +203,22 @@ fn sealing_key_report_and_pub(
             session_id,
             masked_key: masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("KeyReport")
         .report;
     (masked_key, report, pub_key)
 }
 
-/// Bind a policy to the partition's PID and supplied SATA key, then initialize
-/// and finalize the partition. Return the policy bytes and PID public key.
+/// Bind a policy to the partition's PID and supplied SATA and POTA keys, then
+/// initialize and finalize the partition. Return the policy bytes and PID
+/// public key.
 fn build_policy_and_finalize(
     ctx: &TestCtx,
     session: &tsra_ddi_tbor_test_harness::SessionHandshake,
     sata_key: &CaKey,
-) -> ([u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+    pota_key: &CaKey,
+) -> (Vec<u8>, [u8; RAW_PUB_LEN]) {
     let part_info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
     let pid_pub: [u8; RAW_PUB_LEN] = part_info
         .pid_pub_key
@@ -225,29 +226,13 @@ fn build_policy_and_finalize(
         .try_into()
         .expect("PartInfo public key is P-384");
 
-    let pota_key = CaKey::generate();
-    let mut policy_bytes = common::known_good_part_policy(pota_key.raw_pub());
-    let mut policy =
-        PartPolicy::try_read_from_bytes(&policy_bytes).expect("known-good policy must decode");
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata_key.raw_pub(),
-    );
-    policy.backup_part_id.copy_from_slice(&part_info.pid);
-    policy.backup_part_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, pid_pub);
-    policy_bytes.copy_from_slice(policy.as_bytes());
+    let policy_bytes =
+        common::backup_test_policy(pota_key, sata_key, &part_info.pid, &pid_pub).encode();
 
     let init = ctx
-        .part_init(
-            session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(session, &common::mach_seed(), &policy_bytes)
         .expect("PartInit");
-    let pta_chain = make_pta_chain(&pota_key, &pta_pub_from_csr(&init.pta_csr));
+    let pta_chain = make_pta_chain(pota_key, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(session, &policy_bytes, &[], &pta_chain.der_items())
         .expect("PartFinal");
 
@@ -260,7 +245,8 @@ fn build_policy_and_finalize(
 fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::KeyScope) -> Fixture {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let sata_key = CaKey::generate();
-    let (policy, pid_pub) = build_policy_and_finalize(ctx, &session, &sata_key);
+    let pota_key = CaKey::generate();
+    let (policy, pid_pub) = build_policy_and_finalize(ctx, &session, &sata_key, &pota_key);
 
     let (masked_receiver, receiver_report, receiver_pub) =
         sealing_key_report_and_pub(ctx, session.session_id, key_scope);
@@ -290,18 +276,18 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
             index: report_item.index,
             length: report_item.length,
         },
-        policy: PartPolicy::try_read_from_bytes(&policy).expect("policy image is canonical"),
+        policy: policy.clone(),
     };
     let src_remote_backup = ctx
         .tbor_oob(&request, &oob)
         .expect("create real source remote backup")
         .pok_remote_backup;
 
-    let evidence = build_reseal_evidence(&pid_pub, &sata_key, &sender_report, &destination_report);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &sender_report, &destination_report);
     let request = TborSdResealRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_receiver,
-        policy: PartPolicy::try_read_from_bytes(&policy).expect("policy image is canonical"),
+        policy: policy.clone(),
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
         src_part_owner_cert_chain: evidence.src_part_owner.clone(),
@@ -414,7 +400,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             );
         }
         Mutation::PolicyHashMismatch => {
-            fixture.request.policy.info[0] ^= POLICY_MUTATION_MASK;
+            common::mutate_policy_tail(&mut fixture.request.policy, POLICY_MUTATION_MASK);
             assert_rejected(ctx, &fixture);
         }
         Mutation::SourceReportOutOfRange => {

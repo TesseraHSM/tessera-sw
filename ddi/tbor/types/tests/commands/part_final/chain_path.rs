@@ -17,10 +17,10 @@
 //! failing for a reason that had nothing to do with the chain.
 //!
 //! Certificates travel **out of band**, and both transports now
-//! implement that: `ddi/emu` writes the metadata page directly, and
-//! `ddi/nix` hands the items to the driver's data-transfer ioctl, which
-//! DMA-maps them and builds the page in the kernel. So these run on
-//! `emu` **and hardware**.
+//! implement that: the sock server builds the metadata page from the
+//! items it receives, and `ddi/nix` hands them to the driver's
+//! data-transfer ioctl, which DMA-maps them and builds the page in the
+//! kernel. So these run on `sock` **and hardware**.
 //!
 //! Everything else about `PartFinal` — the happy path, backup restore,
 //! lifecycle and role gates — lives in [`super`], which also carries a
@@ -52,7 +52,7 @@ fn part_final_reject_unanchored_chain() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Certify the (correct) PTA key under a rogue CA that is not the
@@ -78,7 +78,7 @@ fn part_final_reject_pta_mismatch() {
 
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
-    ctx.part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+    ctx.part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Correctly anchored to POTA, but the PTA cert certifies the wrong
@@ -105,7 +105,7 @@ fn part_final_reject_pta_wrong_subject() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Correct POTA anchor and partition PTA key, but a non-conformant
@@ -131,7 +131,7 @@ fn part_final_reject_pta_wrong_skid() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     let chain = make_pta_chain_wrong_skid(&pota, &pta_pub_from_csr(&init.pta_csr));
@@ -157,7 +157,7 @@ fn part_final_reject_pta_constrained_ancestor() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Correct POTA anchor, partition PTA key, and PTA profile, but the root
@@ -186,7 +186,7 @@ fn part_final_reject_pta_key_usage_without_key_cert_sign() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     let chain = make_pta_chain_no_key_cert_sign(&pota, &pta_pub_from_csr(&init.pta_csr));
@@ -212,7 +212,7 @@ fn part_final_reject_pta_missing_key_usage() {
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
     let init = ctx
-        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     let chain = make_pta_chain_missing_key_usage(&pota, &pta_pub_from_csr(&init.pta_csr));
@@ -241,7 +241,7 @@ fn part_final_reject_duplicate_descriptor_index() {
 
     let pota = CaKey::generate();
     let policy = part_policy_with_pota(&pota.raw_pub());
-    ctx.part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+    ctx.part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Two descriptors share out-of-band index 0: a short non-terminal

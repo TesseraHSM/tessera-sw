@@ -17,9 +17,6 @@ pub const MAX_TOC_ENTRIES: usize = 32;
 /// Maximum variable-length data size (13-bit field).
 pub const MAX_DATA_SIZE: usize = 8191;
 
-/// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 0x01;
-
 /// Wire size of a single TOC entry in bytes.
 pub const TOC_ENTRY_LEN: usize = 4;
 

@@ -5,15 +5,25 @@ use core::ops::AsyncFnOnce;
 
 use embassy_sync::waitqueue::WakerRegistration;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
 
+use crate::engine::ecc_sign_cmd;
+use crate::engine::ecc_sign_in_place_cmd;
+use crate::engine::rsa_mod_exp_priv_cmd;
+use crate::engine::rsa_mod_exp_priv_in_place_cmd;
+use crate::engine::rsa_mod_exp_pub_cmd;
 use crate::engine::UpkaEngine;
+use crate::executor::EngineExecutor;
 use crate::pool::EngineSlot;
 use crate::pool::QueueSlot;
 use crate::pool::SpecificWaiter;
+use crate::pool::Ticket;
+use crate::pool::TicketState;
 use crate::pool::UpkaState;
+use crate::pool::TICKETS;
 use crate::scheduler::Scheduler;
 use crate::UpkaEccCurve;
 use crate::UpkaRsaKeyType;
@@ -59,8 +69,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Initialize the PKA engine pool.
     ///
-    /// No MMIO setup is required. Engines are always present and command status
-    /// is reported through the per-engine status registers.
+    /// Engines are always present and command status is reported through the
+    /// per-engine status registers; the only setup is writing the shared
+    /// `MEM_WIPE` descriptor in GSRAM.
     ///
     /// # Returns
     ///
@@ -81,6 +92,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
             Self::_ASSERT_ENGINE_COUNT,
         );
 
+        EngineExecutor::init_wipe_descriptor();
+
         Self {
             state: SingleCell::new(UpkaState {
                 free_mask: ((1u32 << ENGINES) - 1) as u16,
@@ -89,6 +102,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                     status: 0,
                     state: crate::EngineState::Idle,
                     completion_armed: false,
+                    wiping: false,
+                    ticket: None,
                 }),
                 specific_waiters: core::array::from_fn(|_| SpecificWaiter {
                     waker: WakerRegistration::new(),
@@ -98,9 +113,19 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                 queue_slots: core::array::from_fn(|_| QueueSlot {
                     waker: WakerRegistration::new(),
                     state: crate::QueueSlotState::Free,
+                    ticket: 0,
                 }),
                 queue_head: 0,
                 queue_tail: 0,
+                tickets: core::array::from_fn(|_| Ticket {
+                    waker: WakerRegistration::new(),
+                    state: TicketState::Free,
+                }),
+                ticket_free: if TICKETS == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << TICKETS) - 1
+                },
             }),
         }
     }
@@ -124,6 +149,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     ///   wake a waiting task.
     pub fn wake_engine(&self, id: u8) {
         self.scheduler().wake_engine(id);
+    }
+
+    /// Whether any engine is in use: running a command, wiping, or held.
+    /// Only then can an engine's completion be pending. A wipe can outlive
+    /// the request that started it, so IDFU shutdown waits for this to clear.
+    #[inline]
+    pub fn any_engine_busy(&self) -> bool {
+        self.state
+            .with(|s| s.free_mask != ((1u32 << ENGINES) - 1) as u16)
     }
 
     pub(crate) fn release_engine(&self, id: u8) {
@@ -158,11 +192,16 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Sign a digest using ECDSA.
     ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
+    ///
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts.
     /// - `priv_key`: DMA-capable private key buffer.
-    /// - `hash`: DMA-capable digest buffer.
+    /// - `input`: DMA-capable packed `k ‖ digest` operand (`k` lane unused).
     /// - `signature`: DMA-capable output buffer for `r || s`.
     ///
     /// # Returns
@@ -171,15 +210,41 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_sign(
         &self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.ecc_sign(curve, priv_key, hash, signature).await)
+        self.scheduler()
+            .run_staged(ecc_sign_cmd(curve, hash, priv_key, input, signature)?)
+            .await
+    }
+
+    /// Sign the digest in the digest lane of the packed `k ‖ digest`
+    /// operand `k_sig` using ECDSA, writing `r || s` over its start.
+    ///
+    /// Like [`Self::rsa_mod_exp_priv_in_place`], it relies on the engine
+    /// loading its operands before it writes the result. `k_sig` stays
+    /// exclusively borrowed until the command completes.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: `r || s` was written to the start of `k_sig`.
+    /// - `Err(UpkaError::CMD_ERROR)`: Buffer shape is invalid, or hardware
+    ///   rejected the command.
+    /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
+    pub async fn ecc_sign_in_place(
+        &self,
+        curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.scheduler()
+            .run_staged(ecc_sign_in_place_cmd(curve, hash, priv_key, k_sig)?)
             .await
     }
 
@@ -191,9 +256,10 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts.
     /// - `pub_key`: DMA-capable public key buffer.
-    /// - `hash`: DMA-capable digest buffer.
-    /// - `signature`: DMA-capable signature buffer.
+    /// - `input`: DMA-capable packed `r ‖ s ‖ digest` operand.
     /// - `result`: DMA-capable output buffer that receives the 4-byte
     ///   hardware status word.
     /// - `prime`: DMA-capable curve prime buffer (LE).
@@ -206,20 +272,19 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     #[allow(clippy::too_many_arguments)]
     pub async fn ecc_verify(
         &self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         result: &mut HsmDmaBuf,
         prime: &HsmDmaBuf,
         mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| {
-            eng.ecc_verify(curve, pub_key, hash, signature, result, prime, mont_result)
+            eng.ecc_verify(curve, hash, pub_key, input, result, prime, mont_result)
                 .await
         })
         .await
@@ -241,7 +306,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Output buffer is too small or hardware
     ///   rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_gen_keypair(
         &self,
         curve: UpkaEccCurve,
@@ -275,7 +339,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     #[allow(clippy::too_many_arguments)]
     pub async fn ecdh_derive(
         &self,
@@ -304,6 +367,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Run an RSA private-key modular exponentiation.
     ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
+    ///
     /// `key_type` selects both modulus size and key format (standard or CRT).
     /// Input and output buffers must match the selected modulus size.
     ///
@@ -320,7 +386,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn rsa_mod_exp_priv(
         &self,
         key_type: UpkaRsaKeyType,
@@ -328,26 +393,32 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.rsa_mod_exp_priv(key_type, key, input, output).await)
+        self.scheduler()
+            .run_staged(rsa_mod_exp_priv_cmd(key_type, key, input, output)?)
             .await
     }
 
     /// Replace the input block with the private-key result.
+    ///
+    /// Runs as a staged command, as [`rsa_mod_exp_priv`](Self::rsa_mod_exp_priv)
+    /// does: started by whichever completion frees an engine and wiped as
+    /// soon as it completes, so the engine never idles waiting for this task
+    /// to run.
     pub async fn rsa_mod_exp_priv_in_place(
         &self,
         key_type: UpkaRsaKeyType,
         key: &HsmDmaBuf,
         input_output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .rsa_mod_exp_priv_in_place(key_type, key, input_output)
-                .await
-        })
-        .await
+        self.scheduler()
+            .run_staged(rsa_mod_exp_priv_in_place_cmd(key_type, key, input_output)?)
+            .await
     }
 
     /// Run an RSA public-key modular exponentiation.
+    ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
     ///
     /// `key_type` selects modulus size. Input and output buffers must match
     /// the selected modulus size.
@@ -365,7 +436,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn rsa_mod_exp_pub(
         &self,
         key_type: UpkaRsaKeyType,
@@ -373,7 +443,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.rsa_mod_exp_pub(key_type, key, input, output).await)
+        self.scheduler()
+            .run_staged(rsa_mod_exp_pub_cmd(key_type, key, input, output)?)
             .await
     }
 
@@ -391,7 +462,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_gen_pub_key(
         &self,
         curve: UpkaEccCurve,
@@ -436,7 +506,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// Execute an async closure on any free engine.
     ///
     /// The engine is automatically wiped and released after the closure
-    /// completes, even if it returns an error.
+    /// completes, even if it returns an error. The wipe is not awaited: the
+    /// engine returns to the pool when it finishes (see
+    /// [`UpkaEngine::release_after_wipe`]).
     ///
     /// # Parameters
     ///
@@ -444,31 +516,24 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     ///
     /// # Returns
     ///
-    /// - `Ok(R)`: Closure result when operation and cleanup succeed.
-    /// - `Err(HsmError)`: Operation error, or cleanup error if operation
-    ///   succeeded but release failed.
-    ///
-    /// # Error Precedence
-    ///
-    /// If both operation and cleanup fail, the operation error is returned.
+    /// - `Ok(R)`: Closure result when the operation succeeds.
+    /// - `Err(HsmError)`: Operation error.
     pub async fn with_engine<F, R>(&self, f: F) -> HsmResult<R>
     where
         F: for<'a> AsyncFnOnce(&'a mut UpkaEngine<'_, DEPTH, ENGINES>) -> HsmResult<R>,
     {
         let mut eng = self.acquire_any().await?;
         let result = f(&mut eng).await;
-        let release_result = eng.release().await;
-        match (result, release_result) {
-            (Err(primary_err), _) => Err(primary_err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+        eng.release_after_wipe();
+        result
     }
 
     /// Execute a closure on a specific engine by ID.
     ///
     /// The engine is automatically wiped and released after the closure
-    /// completes. Use for self-test or targeted operations.
+    /// completes, without awaiting the wipe (see
+    /// [`UpkaEngine::release_after_wipe`]). Use for self-test or targeted
+    /// operations.
     ///
     /// # Parameters
     ///
@@ -477,24 +542,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     ///
     /// # Returns
     ///
-    /// - `Ok(T)`: Closure result when operation and cleanup succeed.
-    /// - `Err(HsmError)`: Operation error, or cleanup error if operation
-    ///   succeeded but release failed.
-    ///
-    /// # Error Precedence
-    ///
-    /// If both operation and cleanup fail, the operation error is returned.
+    /// - `Ok(T)`: Closure result when the operation succeeds.
+    /// - `Err(HsmError)`: Operation error.
     pub async fn with_specific_engine<F, T>(&self, id: u8, f: F) -> HsmResult<T>
     where
         F: for<'a> AsyncFnOnce(&'a mut UpkaEngine<'_, DEPTH, ENGINES>) -> HsmResult<T>,
     {
         let mut eng = self.acquire_engine(id).await?;
         let result = f(&mut eng).await;
-        let release_result = eng.release().await;
-        match (result, release_result) {
-            (Err(primary_err), _) => Err(primary_err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+        eng.release_after_wipe();
+        result
     }
 }

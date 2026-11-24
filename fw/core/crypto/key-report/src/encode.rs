@@ -16,8 +16,10 @@
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -32,7 +34,7 @@ use crate::codec::SIG_STRUCTURE_CONTEXT;
 use crate::consts::*;
 use crate::cose_key::to_cose_key;
 use crate::cose_key::AttestedPubKey;
-use crate::sig::reverse_signature_halves;
+use crate::sig::sig_halves_swap;
 
 /// Caller-supplied inputs for the attestation report.
 pub struct KeyReportParams<'a> {
@@ -208,26 +210,38 @@ where
     minicbor::encode(&sig_struct_val, as_mut_slice(sig_struct))
         .map_err(|_| HsmError::InternalError)?;
 
-    // 4. SHA-384 digest (little-endian, matching `ecc_sign`'s input).
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, sig_struct, digest, false)
-        .await?;
+    // 4. SHA-384 digest in operand order into the digest lane of
+    //    `k ‖ digest`, as `ecc_sign_in_place` consumes it.
+    let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        sig_struct,
+        HsmDigestForm::Operand,
+        Some(&mut sig[SIGNATURE_LEN / 2..]),
+    )
+    .await?;
 
-    // 5. ECDSA-P384 sign — output is `r || s` in little-endian wire form.
-    let sig_le = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest, sig_le)
-        .await?;
+    // 5. ECDSA-P384 sign in place — `r || s` in operand order.
+    pal.ecc_sign_in_place(
+        io,
+        HsmEccCurve::P384,
+        HsmHashAlgo::Sha384,
+        priv_key,
+        HsmEcdsaNonce::Generated,
+        sig,
+    )
+    .await?;
 
-    // 6. Convert the signature to big-endian per component for COSE.
-    let sig_be = alloc.dma_alloc(SIGNATURE_LEN)?;
-    reverse_signature_halves(sig_be, sig_le)?;
+    // 6. Convert the signature in place to big-endian per half for COSE.
+    sig_halves_swap(P::BYTE_ORDER, sig)?;
 
     // 7. Compose the tagged COSE_Sign1 envelope into `out`.
     let cose = CoseSign1 {
         protected_header: &PROTECTED_HEADER,
         unprotected: UnprotectedHeader {},
         payload,
-        signature: sig_be,
+        signature: sig,
     };
     let total = COSE_SIGN1_TAG_SIZE + minicbor::len(&cose);
     if out.len() < total {

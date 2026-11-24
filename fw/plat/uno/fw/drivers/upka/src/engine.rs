@@ -6,12 +6,14 @@ use core::task::Context;
 use core::task::Poll;
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_uno_error::HsmError;
 use tsra_fw_uno_error::HsmResult;
 
 use crate::api::UpkaDriver;
 use crate::executor::EngineExecutor;
 use crate::opcode::*;
+use crate::pool::StagedCmd;
 use crate::UpkaEccCurve;
 use crate::UpkaError;
 use crate::UpkaModSize;
@@ -132,16 +134,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts (see [`ecdsa_operand_at`]).
     /// - `priv_key`: DMA-capable private key buffer.
-    /// - `hash`: DMA-capable digest buffer. The engine DMA-reads a
-    ///   **word-aligned, field-width operand** — one `hsm_point_size(curve)`
-    ///   (32 / 48 / 68) — regardless of `hash.len()`. The length check below
-    ///   only enforces the digest **value** width (`hash_size`, 32 / 48 / 64),
-    ///   which is a lower bound; for P-521 the read extends past it (66-byte
-    ///   field padded to 68), so **the caller must ensure `hash` is backed to
-    ///   the operand width and zero-padded there** (the DDI `EccSign` handler
-    ///   enforces this against the full request buffer). A shorter backing
-    ///   over-reads adjacent memory and produces a wrong signature.
+    /// - `input`: DMA-capable packed `k ‖ digest` operand: a
+    ///   `hsm_point_size(curve)` lane for `k` (unused, the engine generates
+    ///   it) followed by the little-endian digest lane.
     /// - `signature`: DMA-capable output buffer for `r || s`.
     ///
     /// # Returns
@@ -152,24 +150,13 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_sign(
         &mut self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        Self::ensure_cmd_input(
-            !priv_key.is_empty()
-                && hash.len() >= hash_size(curve)
-                && signature.len() >= signature_size(curve),
-        )?;
-
-        self.execute_cmd(
-            ecc_sign_opcode(curve),
-            signature.as_mut_ptr() as u32,
-            hash.as_ptr() as u32,
-            priv_key.as_ptr() as u32,
-            0,
-        )
-        .await
+        self.execute(ecc_sign_cmd(curve, hash, priv_key, input, signature)?)
+            .await
     }
 
     /// Verify an ECDSA signature.
@@ -185,9 +172,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts (see [`ecdsa_operand_at`]).
     /// - `pub_key`: DMA-capable public key buffer.
-    /// - `hash`: DMA-capable digest buffer.
-    /// - `signature`: DMA-capable signature buffer.
+    /// - `input`: DMA-capable packed `r ‖ s ‖ digest` operand: two
+    ///   `hsm_point_size(curve)` signature lanes followed by the
+    ///   little-endian digest lane.
     /// - `result`: DMA-capable output buffer that receives the 4-byte
     ///   hardware status word.
     /// - `prime`: DMA-capable curve prime buffer (LE).
@@ -206,22 +196,21 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_verify(
         &mut self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         result: &mut HsmDmaBuf,
         prime: &HsmDmaBuf,
         mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        // pub_key (X || Y) and signature (R || S) are consumed by the PKA in
+        // pub_key (X || Y) and the R || S lanes are consumed by the PKA in
         // wire format: two coordinates each padded to `hsm_point_size` (P-521
         // = 68, not the 66-byte field width). Validate against the full wire
         // width so an undersized buffer cannot make the hardware DMA read past
         // the caller's allocation.
+        let hash_at = ecdsa_operand_at(curve, hash, 2, input.len())?;
         Self::ensure_cmd_input(
             pub_key.len() >= hsm_point_size(curve) * 2
-                && hash.len() >= hash_size(curve)
-                && signature.len() >= hsm_point_size(curve) * 2
                 && result.len() >= Self::RESULT_WORD_LEN
                 && prime.len() >= hsm_point_size(curve)
                 && mont_result.len() >= hsm_point_size(curve),
@@ -245,9 +234,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         self.execute_cmd(
             ecc_verify_opcode(curve),
             result.as_mut_ptr() as u32,
-            hash.as_ptr() as u32,
+            input.as_ptr() as u32 + hash_at as u32,
             pub_key.as_ptr() as u32,
-            signature.as_ptr() as u32,
+            input.as_ptr() as u32,
         )
         .await
     }
@@ -405,7 +394,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let (opcode, param2) = Self::rsa_private_args(
+        let (opcode, param2) = rsa_private_args(
             key_type,
             key.len(),
             input.len(),
@@ -432,7 +421,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         input_output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let key_addr = key.as_ptr() as u32;
-        let (opcode, param2) = Self::rsa_private_args(
+        let (opcode, param2) = rsa_private_args(
             key_type,
             key.len(),
             input_output.len(),
@@ -442,45 +431,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         let data_addr = input_output.as_mut_ptr() as u32;
         self.execute_cmd(opcode, data_addr, data_addr, key_addr, param2)
             .await
-    }
-
-    fn rsa_private_args(
-        key_type: UpkaRsaKeyType,
-        key_len: usize,
-        input_len: usize,
-        output_len: usize,
-        key_addr: u32,
-    ) -> HsmResult<(u32, u32)> {
-        let mod_size = rsa_mod_size(key_type);
-        let is_crt = matches!(
-            key_type,
-            UpkaRsaKeyType::Rsa2048Crt | UpkaRsaKeyType::Rsa3072Crt | UpkaRsaKeyType::Rsa4096Crt
-        );
-        // A non-CRT key is `[d ‖ n ‖ e]` (`2k+4`) passed as a single operand. A
-        // CRT key is the `[p ‖ q ‖ dp ‖ dq ‖ n ‖ n1q ‖ n2p ‖ e]` PKA operand
-        // (`5k+4`) submitted as TWO operands: `param1 = [p ‖ q ‖ dp ‖ dq]` (`2k`,
-        // at offset 0) in arg3 and `param2 = [n ‖ n1q ‖ n2p]` (`3k`, at offset
-        // `2k`) in arg4. The trailing `e` is unused by the private exponentiation.
-        let min_key_len = if is_crt {
-            5 * mod_size + 4
-        } else {
-            2 * mod_size
-        };
-        Self::ensure_cmd_input(
-            key_len >= min_key_len && input_len == mod_size && output_len == mod_size,
-        )?;
-
-        // CRT needs a non-null `param2` pointer; passing `0` (as for non-CRT)
-        // makes the PKA dereference a null operand and fault with a bus error.
-        let param2 = if is_crt {
-            key_addr
-                .checked_add((2 * mod_size) as u32)
-                .ok_or(HsmError::InvalidArg)?
-        } else {
-            0
-        };
-
-        Ok((rsa_priv_opcode(key_type), param2))
     }
 
     /// Run an RSA public-key modular exponentiation.
@@ -507,19 +457,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mod_size = rsa_mod_size(key_type);
-        Self::ensure_cmd_input(
-            !key.is_empty() && input.len() == mod_size && output.len() == mod_size,
-        )?;
-
-        self.execute_cmd(
-            rsa_pub_opcode(key_type),
-            output.as_mut_ptr() as u32,
-            input.as_ptr() as u32,
-            key.as_ptr() as u32,
-            0,
-        )
-        .await
+        self.execute(rsa_mod_exp_pub_cmd(key_type, key, input, output)?)
+            .await
     }
 
     /// Derive a public key from a private key.
@@ -925,7 +864,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// - `Ok(())`: Wipe completed successfully.
     /// - `Err(HsmError)`: Wipe command failed.
     pub async fn memory_wipe(&mut self) -> HsmResult<()> {
-        self.execute_cmd(UPKA_MEM_WIPE, 0, 0, 0, 0).await
+        self.prepare_for_command();
+        EngineExecutor::submit_wipe(self.id);
+        poll_fn(|cx| self.poll_completion(cx)).await
     }
 
     /// Wipe and release the engine back to the pool.
@@ -944,11 +885,34 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         Ok(())
     }
 
+    /// Start wiping the engine and return it to the pool once the wipe
+    /// completes, without waiting for it.
+    ///
+    /// The engine stays out of the pool until the wipe has finished: the
+    /// wipe's completion, handled when the engine's interrupt is serviced,
+    /// releases it, and a failed wipe is issued again rather than releasing
+    /// an engine that may still hold key material. Callers that must know
+    /// the wipe has finished use [`release`](Self::release).
+    pub fn release_after_wipe(mut self) {
+        self.driver.state.with(|s| {
+            let slot = &mut s.engine_slots[self.id as usize];
+            slot.arm_completion_wait();
+            slot.wiping = true;
+        });
+        EngineExecutor::submit_wipe(self.id);
+        self.released = true;
+    }
+
     fn sync_wipe_and_release(&mut self) {
         EngineExecutor::wait_until_idle(self.id);
-        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(self.id);
         EngineExecutor::wait_until_idle(self.id);
         self.driver.release_engine(self.id);
+    }
+
+    async fn execute(&mut self, cmd: StagedCmd) -> HsmResult<()> {
+        self.execute_cmd(cmd.opcode, cmd.result, cmd.arg1, cmd.arg2, cmd.arg3)
+            .await
     }
 
     async fn execute_cmd(
@@ -995,4 +959,176 @@ impl<const DEPTH: usize, const ENGINES: usize> Drop for UpkaEngine<'_, DEPTH, EN
             self.released = true;
         }
     }
+}
+
+fn ensure_input(valid: bool) -> HsmResult<()> {
+    if valid {
+        Ok(())
+    } else {
+        Err(UpkaError::CMD_ERROR)
+    }
+}
+
+/// Returns where the UPKA digest operand starts in a packed ECDSA input
+/// of `input_len` bytes whose digest lane follows `lanes` coordinate lanes.
+///
+/// The engine reads one `hsm_point_size(curve)` operand and does not
+/// truncate it. A digest longer than the field is truncated to its leftmost
+/// bits (FIPS 186-5), which in little-endian are its last bytes, so the
+/// operand starts past the excess. The operand must fit in the input.
+pub(crate) fn ecdsa_operand_at(
+    curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
+    lanes: usize,
+    input_len: usize,
+) -> HsmResult<usize> {
+    let at = lanes * hsm_point_size(curve) + hash.digest_len().saturating_sub(point_size(curve));
+    ensure_input(input_len.saturating_sub(at) >= hsm_point_size(curve))?;
+    Ok(at)
+}
+
+/// The command of [`UpkaEngine::ecc_sign`], after checking its operands.
+pub(crate) fn ecc_sign_cmd(
+    curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
+    priv_key: &HsmDmaBuf,
+    input: &HsmDmaBuf,
+    signature: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let hash_at = ecdsa_operand_at(curve, hash, 1, input.len())?;
+    ensure_input(!priv_key.is_empty() && signature.len() >= signature_size(curve))?;
+    Ok(StagedCmd {
+        opcode: ecc_sign_opcode(curve),
+        result: signature.as_mut_ptr() as u32,
+        arg1: input.as_ptr() as u32 + hash_at as u32,
+        arg2: priv_key.as_ptr() as u32,
+        arg3: 0,
+    })
+}
+
+/// The command of [`UpkaDriver::ecc_sign_in_place`], after checking its
+/// operands: the digest operand is read from the digest lane of `k_sig`
+/// and `r || s` is written over its start.
+pub(crate) fn ecc_sign_in_place_cmd(
+    curve: UpkaEccCurve,
+    hash: HsmHashAlgo,
+    priv_key: &HsmDmaBuf,
+    k_sig: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let hash_at = ecdsa_operand_at(curve, hash, 1, k_sig.len())?;
+    ensure_input(!priv_key.is_empty() && k_sig.len() >= signature_size(curve))?;
+    let data = k_sig.as_mut_ptr() as u32;
+    Ok(StagedCmd {
+        opcode: ecc_sign_opcode(curve),
+        result: data,
+        arg1: data + hash_at as u32,
+        arg2: priv_key.as_ptr() as u32,
+        arg3: 0,
+    })
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_priv`], after checking its
+/// operands.
+pub(crate) fn rsa_mod_exp_priv_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &HsmDmaBuf,
+    input: &HsmDmaBuf,
+    output: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let (opcode, param2) = rsa_private_args(
+        key_type,
+        key.len(),
+        input.len(),
+        output.len(),
+        key.as_ptr() as u32,
+    )?;
+    Ok(StagedCmd {
+        opcode,
+        result: output.as_mut_ptr() as u32,
+        arg1: input.as_ptr() as u32,
+        arg2: key.as_ptr() as u32,
+        arg3: param2,
+    })
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_priv_in_place`], after checking
+/// its operands: the result is written over the input block.
+pub(crate) fn rsa_mod_exp_priv_in_place_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &HsmDmaBuf,
+    input_output: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let (opcode, param2) = rsa_private_args(
+        key_type,
+        key.len(),
+        input_output.len(),
+        input_output.len(),
+        key.as_ptr() as u32,
+    )?;
+    let data = input_output.as_mut_ptr() as u32;
+    Ok(StagedCmd {
+        opcode,
+        result: data,
+        arg1: data,
+        arg2: key.as_ptr() as u32,
+        arg3: param2,
+    })
+}
+
+/// The opcode and second key operand of an RSA private-key operation,
+/// after checking its operands.
+fn rsa_private_args(
+    key_type: UpkaRsaKeyType,
+    key_len: usize,
+    input_len: usize,
+    output_len: usize,
+    key_addr: u32,
+) -> HsmResult<(u32, u32)> {
+    let mod_size = rsa_mod_size(key_type);
+    let is_crt = matches!(
+        key_type,
+        UpkaRsaKeyType::Rsa2048Crt | UpkaRsaKeyType::Rsa3072Crt | UpkaRsaKeyType::Rsa4096Crt
+    );
+    // A non-CRT key is `[d ‖ n ‖ e]` (`2k+4`) passed as a single operand. A
+    // CRT key is the `[p ‖ q ‖ dp ‖ dq ‖ n ‖ n1q ‖ n2p ‖ e]` PKA operand
+    // (`5k+4`) submitted as TWO operands: `param1 = [p ‖ q ‖ dp ‖ dq]` (`2k`,
+    // at offset 0) in arg3 and `param2 = [n ‖ n1q ‖ n2p]` (`3k`, at offset
+    // `2k`) in arg4. The trailing `e` is unused by the private exponentiation.
+    let min_key_len = if is_crt {
+        5 * mod_size + 4
+    } else {
+        2 * mod_size
+    };
+    ensure_input(key_len >= min_key_len && input_len == mod_size && output_len == mod_size)?;
+
+    // CRT needs a non-null `param2` pointer; passing `0` (as for non-CRT)
+    // makes the PKA dereference a null operand and fault with a bus error.
+    let param2 = if is_crt {
+        key_addr
+            .checked_add((2 * mod_size) as u32)
+            .ok_or(HsmError::InvalidArg)?
+    } else {
+        0
+    };
+
+    Ok((rsa_priv_opcode(key_type), param2))
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_pub`], after checking its
+/// operands.
+pub(crate) fn rsa_mod_exp_pub_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &HsmDmaBuf,
+    input: &HsmDmaBuf,
+    output: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let mod_size = rsa_mod_size(key_type);
+    ensure_input(!key.is_empty() && input.len() == mod_size && output.len() == mod_size)?;
+    Ok(StagedCmd {
+        opcode: rsa_pub_opcode(key_type),
+        result: output.as_mut_ptr() as u32,
+        arg1: input.as_ptr() as u32,
+        arg2: key.as_ptr() as u32,
+        arg3: 0,
+    })
 }

@@ -8,11 +8,8 @@
 //! and cleanup operations.
 
 use parking_lot::Mutex;
-#[cfg(not(feature = "session-ex-tests"))]
 use tracing::*;
 use tsra_api::*;
-#[cfg(not(feature = "session-ex-tests"))]
-use tsra_api_tests_macro::*;
 use tsra_crypto::*;
 
 /// Serializes tests that reset or initialize the shared test partition.
@@ -85,8 +82,10 @@ pub(crate) const TEST_POTA_PUBLIC_KEY_DER: [u8; 120] = [
 /// Change this single function to switch all tests between min, max,
 /// or any other supported revision.
 pub(crate) fn test_api_rev() -> HsmApiRev {
-    // Function is defined in case we want to easily switch between different revisions for testing.
-    // or to read from an environment variable in the future.
+    // Revision 2.0 devices (Duo) accept only 2.0.
+    if crate::utils::session::api_rev_at_least(2, 0) {
+        return HsmApiRev { major: 2, minor: 0 };
+    }
     SESSION_TEST_API_REV
 }
 
@@ -306,10 +305,17 @@ where
     }
 }
 
-#[cfg(not(feature = "session-ex-tests"))]
-#[partition_test]
-fn test_with_partition(partition: HsmPartition, creds: HsmCredentials) {
-    assert_eq!(creds.id(), &APP_ID, "Invalid credentials ID");
-    assert_eq!(creds.pin(), &APP_PIN, "Invalid credentials key");
-    info!("Testing with partition: {:?}", partition.path());
+#[test]
+fn test_with_partition() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    // Not `#[partition_test]`: its fixture would init the partition before
+    // this mode check, and `#[api_test]` already holds `PARTITION_LOCK`.
+    crate::utils::api::init();
+    with_partition(|partition, creds| {
+        assert_eq!(creds.id(), &APP_ID, "Invalid credentials ID");
+        assert_eq!(creds.pin(), &APP_PIN, "Invalid credentials key");
+        info!("Testing with partition: {:?}", partition.path());
+    });
 }

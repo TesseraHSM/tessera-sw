@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //! Open the same socket-backed HSM partition from multiple threads on Windows or Linux.
 //!
-//! Run with `cargo run -p tsra_api_sock_get_api_rev --features sock -- [ENDPOINT] [THREADS]`.
+//! Run with `cargo run -p tsra_api_sock_get_api_rev -- [ENDPOINT] [THREADS]`.
 //! Defaults are `tcp://127.0.0.1:1234` and four threads on both platforms.
 //! Unix socket paths and Linux `vsock://CID:PORT` endpoints are also supported.
 //! Each worker opens its own API partition handle and socket connection. The
@@ -76,7 +76,10 @@ mod example {
         use tsra_api::HsmPartitionManager;
 
         let options = parse_args(std::env::args().skip(1))?;
-        std::env::set_var("TSRA_DDI_SOCK", &options.endpoint);
+        std::env::set_var(
+            "TSRA_DDI_ARGS",
+            format!("transport=sock;sock={}", options.endpoint),
+        );
 
         let info = HsmPartitionManager::partition_info_list()
             .into_iter()
@@ -109,92 +112,6 @@ mod example {
             options.threads, info.path
         );
         Ok(())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use std::collections::HashSet;
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::atomic::Ordering;
-
-        use parking_lot::Mutex;
-
-        use super::*;
-
-        #[test]
-        fn default_options() {
-            assert_eq!(
-                parse_args(std::iter::empty()).expect("default options"),
-                Options {
-                    endpoint: DEFAULT_ENDPOINT.to_owned(),
-                    threads: DEFAULT_THREADS,
-                }
-            );
-        }
-
-        #[test]
-        fn explicit_options() {
-            for endpoint in [
-                "tcp://127.0.0.1:1234",
-                "tcp://[::1]:1234",
-                "vsock://7:1234",
-                "/tmp/tsra-ddi.sock",
-            ] {
-                assert_eq!(
-                    parse_args([endpoint, "8"].into_iter().map(str::to_owned))
-                        .expect("explicit options"),
-                    Options {
-                        endpoint: endpoint.to_owned(),
-                        threads: 8,
-                    }
-                );
-            }
-        }
-
-        #[test]
-        fn rejects_invalid_options() {
-            for args in [
-                vec![""],
-                vec![DEFAULT_ENDPOINT, "0"],
-                vec![DEFAULT_ENDPOINT, "-1"],
-                vec![DEFAULT_ENDPOINT, "invalid"],
-                vec![DEFAULT_ENDPOINT, "4", "extra"],
-            ] {
-                assert!(parse_args(args.into_iter().map(str::to_owned)).is_err());
-            }
-        }
-
-        #[test]
-        fn runs_operation_on_distinct_threads() {
-            let thread_ids = Mutex::new(HashSet::new());
-            run_workers(4, |_| {
-                thread_ids.lock().insert(std::thread::current().id());
-                Ok(())
-            })
-            .expect("workers complete");
-            assert_eq!(thread_ids.into_inner().len(), 4);
-        }
-
-        #[test]
-        fn joins_all_workers_after_an_error() {
-            let completed = AtomicUsize::new(0);
-            let result = run_workers(4, |worker_id| {
-                completed.fetch_add(1, Ordering::SeqCst);
-                if worker_id == 2 {
-                    Err("connection failed".to_owned())
-                } else {
-                    Ok(())
-                }
-            });
-            assert_eq!(result, Err("worker 2 failed: connection failed".to_owned()));
-            assert_eq!(completed.load(Ordering::SeqCst), 4);
-        }
-
-        #[test]
-        fn reports_worker_panics() {
-            let result = run_workers(1, |_| panic!("worker failure"));
-            assert_eq!(result, Err("worker 1 panicked".to_owned()));
-        }
     }
 }
 

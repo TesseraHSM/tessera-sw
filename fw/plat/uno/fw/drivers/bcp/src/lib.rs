@@ -7,13 +7,16 @@
 //! CDMA engine at `0xA0C0_0000`.
 //!
 //! The PQC build gives the FP cores to PQC, so the HSM drives this engine
-//! directly as the Uno PAL's AES-GCM. With `bulk_crypto` the FP firmware
-//! owns the engine for host bulk AES-GCM/XTS, and the HSM must not touch it.
-//! The driver programs one 8-entry submission/completion queue pair and
-//! DFL list 0 in GSRAM, and submits AES-256-GCM commands of up to two
-//! 4 KiB chunks, up to seven at a time while their chunks fit the ring;
-//! further callers wait. Each in-flight command owns the key-vault slot and
-//! DFL entry matching its command ID.
+//! directly: as the Uno PAL's AES-GCM ([`BcpDriver::gcm`], on GSRAM
+//! buffers), for host bulk AES-GCM/XTS IOs ([`BcpDriver::host`], on the
+//! host's SGLs), and for the bulk XTS self-test ([`BcpDriver::xts`], on
+//! GSRAM buffers). With `bulk_crypto` the FP firmware owns the engine
+//! for host bulk IOs, and the HSM must not touch it.
+//! The driver programs one 32-entry submission/completion queue pair and
+//! DFL list 0 in GSRAM, and submits AES-256 commands of up to four 4 KiB
+//! chunks, up to 31 at a time while their chunks fit the ring; further
+//! callers wait. Each in-flight command owns the two key-vault slots (data
+//! key, XTS tweak key) and the DFL entry matching its command ID.
 //!
 //! The engine has no interrupt routed to the HSM, so completions are
 //! reaped by [`BcpDriver::wake`], which the PAL calls from its poll loop.
@@ -36,7 +39,7 @@
 //!     unpadded_aad_len: 20,
 //!     tag: &[0; BCP_TAG_LEN],
 //!     // [padded_AAD | text] -> [padded_AAD | ciphertext]
-//!     data: GcmData::InPlace(buf),
+//!     data: BcpData::InPlace(buf),
 //! }).await?;
 //! ```
 

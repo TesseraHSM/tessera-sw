@@ -42,7 +42,6 @@ fn test_part_prov_only_once() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_properties,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);

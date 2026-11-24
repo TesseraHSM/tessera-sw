@@ -16,6 +16,7 @@
 #include "rsa_static_der.hpp"
 #include "utils/auto_key.hpp"
 #include "utils/rsa_keygen.hpp"
+#include "utils/utils.hpp"
 
 class tsra_rsa_unwrap : public ::testing::Test
 {
@@ -461,7 +462,6 @@ static void verify_unwrapped_external_rsa_roundtrip(
     });
 }
 
-#if !SESSION_EX_TESTS
 static void verify_wrong_unwrapping_key_rejected(PartitionListHandle &part_list, uint32_t bit_len)
 {
     if (part_list.count() < 2u)
@@ -535,7 +535,6 @@ static void verify_wrong_unwrapping_key_rejected(PartitionListHandle &part_list,
     ASSERT_EQ(result.private_key, 0);
     ASSERT_EQ(result.public_key, 0);
 }
-#endif
 
 // Verifies an externally generated 2048-bit RSA key pair can be unwrapped.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_2048_keypair_succeeds)
@@ -573,19 +572,25 @@ TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_3072_rejects_corrupted_blob)
     verify_corrupted_blob_rejected(part_list_, 3072u);
 }
 
-#if !SESSION_EX_TESTS
 // Verifies 2048-bit RSA unwrap rejects a wrong unwrapping key.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_2048_rejects_wrong_unwrapping_key)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     verify_wrong_unwrapping_key_rejected(part_list_, 2048u);
 }
 
 // Verifies 3072-bit RSA unwrap rejects a wrong unwrapping key.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_3072_rejects_wrong_unwrapping_key)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     verify_wrong_unwrapping_key_rejected(part_list_, 3072u);
 }
-#endif
 
 // Verifies 2048-bit RSA unwrap rejects a truncated wrapped blob.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_2048_rejects_truncated_blob)

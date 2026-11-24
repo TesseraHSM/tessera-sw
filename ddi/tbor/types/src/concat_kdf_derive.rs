@@ -63,7 +63,7 @@ pub struct TborConcatKdfDeriveReq {
     pub key_length: u8,
 
     /// The masked ECDH shared secret IKM (from `EcdhDerive`).
-    #[tbor(min_len = 264, max_len = 312)]
+    #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_secret: Vec<u8>,
 
     /// Optional `SharedInfo` / `OtherInfo`; an **empty** buffer means none.
@@ -77,7 +77,7 @@ pub struct TborConcatKdfDeriveReq {
 pub struct TborConcatKdfDeriveResp {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.
-    #[tbor(max_len = 360)]
+    #[tbor(align = 4, max_len = 360)]
     pub masked_key: Vec<u8>,
 }
 
@@ -100,7 +100,7 @@ mod tests {
             info: alloc::vec![0x22u8; 16],
         };
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&CONCAT_KDF_ALG_SP800_56A),
             "encoded frame must carry the kdf-alg discriminant",

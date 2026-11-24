@@ -57,21 +57,22 @@ leaf key. Existing three-chain evidence remains supported without a wire change.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8  | `masked_sealing_key` | `buffer` (fixed 276 B) | Sender's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `SndrPriv`. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 12 | `receiver_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Receiver key certificate-chain descriptors (spec `RcvrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `RcvrPub`. |
-| 16 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Manufacturer certificate-chain descriptors (from the `Evidence` field group). Optional (see below). |
-| 20 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Owner certificate-chain descriptors. Optional. |
-| 24 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Partition-owner certificate-chain descriptors. Optional. |
-| 28 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Receiver attestation-report (COSE_Sign1) descriptor. Optional. |
-| 32 | `policy` | `buffer` (fixed 484 B) | Caller-asserted unified `PartPolicy`. Must match the policy bound at `PartInit` (`SHA-384` re-check) and name this partition as the backing partition (`backup_part_id` = PID, `backup_part_pub_key` = PID public key). Length pinned to `PART_POLICY_LEN` (484 B). |
+| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_sealing_key` | `buffer` (fixed 276 B) | Sender's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `SndrPriv`. `MASKED_SEALING_KEY_LEN` (276 B). |
+| 24 | `receiver_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Receiver key certificate-chain descriptors (spec `RcvrCertChain`). **Always present**; validated and anchored to the policy SATA key, its leaf is `RcvrPub`. |
+| 28 | `mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Manufacturer certificate-chain descriptors (from the `Evidence` field group). Optional (see below). |
+| 32 | `owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Owner certificate-chain descriptors. Optional. |
+| 36 | `part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Partition-owner certificate-chain descriptors. Optional. |
+| 40 | `evidence` | `buffer` (single `&ReportDescriptor`, 3 B) | Receiver attestation-report (COSE_Sign1) descriptor. Optional. |
+| 44 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document. Must match the policy bound at `PartInit` (`SHA-384` re-check) and name this partition as the backing partition (`backup_part_id` = PID, `backup_part_spki_thumbprint` = SPKI thumbprint of the PID public key). |
 
 The four `mfgr_cert_chain` … `evidence` entries are spliced in by the
 shared [`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs)
@@ -89,21 +90,21 @@ empty and ignored.
 
 Carries the 276-byte `masked_sealing_key`, the packed cert-chain / report
 descriptors (the always-present `receiver_cert_chain` and the optional
-evidence group), and the 484-byte `policy` image.  The referenced
+evidence group), and the `policy` document (at most 384 B).  The referenced
 certificate-chain and report payloads travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
+Wire layout: 12-byte header, followed by the TOC entry, then the data
 section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pok_remote_backup` | `buffer` (fixed 161 B) | Remote partition-owner-key backup: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
-| 12 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup: BKS3 masked under `PartLocalMK`. `MASKED_SD_LEN` (276 B). |
-| 16 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup: `SDMK` masked under the derived `SDBMK`. `LOCAL_MK_BACKUP_LEN` (260 B). |
+| 12 | `pok_remote_backup` | `buffer` (fixed 161 B) | Remote partition-owner-key backup: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
+| 16 | `pok_local_backup` | `buffer` (fixed 276 B) | Local partition-owner-key backup: BKS3 masked under `PartLocalMK`. `MASKED_SD_LEN` (276 B). |
+| 20 | `sd_mk_backup` | `buffer` (fixed 260 B) | Security-domain masking-key backup: `SDMK` masked under the derived `SDBMK`. `LOCAL_MK_BACKUP_LEN` (260 B). |
 
 ### Data section
 
@@ -114,7 +115,7 @@ Carries the 161-byte `pok_remote_backup` seal, the 276-byte
 
 | Error | Cause |
 |---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` (276 B) or `policy` (484 B) is the wrong length (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `masked_sealing_key` (276 B) is the wrong length or `policy` exceeds 384 B (rejected at decode before the handler runs) |
 | `InvalidArg` | Not `Initialized`; missing out-of-band receiver material; the receiver certificate chain is empty or does not anchor to the policy `SATA` key; policy hash mismatch; the policy does not name this partition as the backing partition; or (when `require_trusted_sa_key` is set) the policy `SAPOTA` key is not P-384, the evidence does not anchor to it, or a report that does not attest the receiver-chain `RcvrPub` |
 | Evidence errors | The receiver certificate chain fails X.509 validation — a malformed certificate, or an invalid signature / chain linkage (for example `X509SignatureInvalid`), propagated from the chain validator; or (when `require_trusted_sa_key` is set) an evidence certificate chain fails validation or the report signature is invalid |
 | `SdAlreadyInitialized` | A security domain is already initialized on this partition incarnation (one-shot gate) |

@@ -27,15 +27,19 @@
 use core::cmp::Ordering;
 
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
-use tsra_fw_uno_drivers_upka::hash_size;
 use tsra_fw_uno_drivers_upka::hsm_point_size;
 use tsra_fw_uno_drivers_upka::mont_operand_size;
 use tsra_fw_uno_pct::ecc_pct;
@@ -192,6 +196,44 @@ fn curve_order_be(curve: HsmEccCurve) -> &'static [u8] {
     }
 }
 
+/// Checks an ECDSA input of `lanes` coordinate lanes followed by a digest
+/// lane against the trait contract.
+///
+/// # Errors
+/// * [`HsmError::UnsupportedDigestHashAlgorithm`] — `hash` is not SHA-1 or
+///   SHA-2.
+/// * [`HsmError::InvalidArg`] — `input` has the wrong length, or a byte
+///   after the digest in its lane is not zero.
+fn check_ecdsa_input(
+    curve: HsmEccCurve,
+    hash: HsmHashAlgo,
+    lanes: usize,
+    input: &[u8],
+) -> HsmResult<()> {
+    if !matches!(
+        hash,
+        HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 | HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512
+    ) {
+        return Err(HsmError::UnsupportedDigestHashAlgorithm);
+    }
+    let pad = UnoHsmPal::ECC_COORD_PAD;
+    let at = lanes * curve.wire_coord_len(pad);
+    if input.len() != at + curve.ecdsa_digest_lane_len(hash, pad)
+        || input[at + hash.digest_len()..].iter().any(|&b| b != 0)
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(())
+}
+
+/// Checks the ECDSA nonce source: the engine always generates `k`.
+fn check_nonce(nonce: HsmEcdsaNonce) -> HsmResult<()> {
+    match nonce {
+        HsmEcdsaNonce::Generated => Ok(()),
+        HsmEcdsaNonce::Supplied => Err(HsmError::CryptoUnsupportedMode),
+    }
+}
+
 // =============================================================================
 // Peer public-key range validation
 // =============================================================================
@@ -272,6 +314,88 @@ fn pub_key_in_valid_range(pub_key: &[u8], curve: UpkaEccCurve) -> bool {
 // =============================================================================
 
 impl UnoHsmPal {
+    fn generation_pct_workspace_len(curve: HsmEccCurve, pct: &HsmEccPct) -> usize {
+        let coord = curve.wire_coord_len(Self::ECC_COORD_PAD);
+        let backend = match pct {
+            HsmEccPct::None => 0,
+            HsmEccPct::SignVerify => 2 * coord + 4,
+            HsmEccPct::KeyAgreement => 4 * coord + 4,
+        };
+        tsra_fw_uno_pct::ecc_pct_workspace_len::<Self>(curve, pct) + backend
+    }
+
+    async fn ecc_verify_in_workspace(
+        &self,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+        pub_key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<bool> {
+        let pka_curve = map_ecc_curve(curve)?;
+        check_ecdsa_input(curve, hash, 2, input)?;
+        let prime_le = curve_prime_le(pka_curve);
+        if workspace.len() < 2 * prime_le.len() + 4 {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        let (prime, rest) = workspace.split_at_mut(prime_le.len());
+        prime.copy_from_slice(prime_le);
+        let (mont_result, rest) = rest.split_at_mut(prime_le.len());
+        let result = &mut rest[..4];
+        result.fill(0xFF);
+        self.pka
+            .ecc_verify(pka_curve, hash, pub_key, input, result, prime, mont_result)
+            .await?;
+        Ok(result[0] & 1 == 0)
+    }
+
+    async fn ecdh_derive_in_workspace(
+        &self,
+        curve: HsmEccCurve,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
+        workspace: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let pka_curve = map_ecc_curve(curve)?;
+        let wire = hsm_point_size(pka_curve);
+        if pub_key.len() < wire * 2 {
+            return Err(HsmError::EccDerKeyShorterThanCurve);
+        }
+        let secret_len = curve.secret_len();
+        if secret.len() < secret_len {
+            return Err(HsmError::InvalidArg);
+        }
+        if !pub_key_in_valid_range(pub_key, pka_curve) {
+            return Err(HsmError::EccPublicKeyValidationFailed);
+        }
+        if workspace.len() < 4 * wire + 4 {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        let (prime, rest) = workspace.split_at_mut(wire);
+        prime.copy_from_slice(curve_prime_le(pka_curve));
+        let (mont_result, rest) = rest.split_at_mut(wire);
+        let (point_valid, rest) = rest.split_at_mut(4);
+        let point = &mut rest[..wire * 2];
+        let result = self
+            .pka
+            .ecdh_derive(
+                pka_curve,
+                priv_key,
+                pub_key,
+                &mut *point,
+                prime,
+                mont_result,
+                point_valid,
+            )
+            .await;
+        if result.is_ok() {
+            secret[..secret_len].copy_from_slice(&point[..secret_len]);
+        }
+        point.zeroize();
+        result
+    }
+
     /// Runs the PCT that `pct` selects on a key pair this PAL just generated.
     ///
     /// A key pair that fails the test enters the FIPS error state. An
@@ -280,13 +404,44 @@ impl UnoHsmPal {
     async fn generation_pct(
         &self,
         io: &UnoHsmIo,
-        alloc: &impl HsmScopedAlloc,
+        workspace: &mut HsmDmaBuf,
         curve: HsmEccCurve,
         pct: &HsmEccPct,
         priv_key: &HsmDmaBuf,
         pub_key: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        if !ecc_pct(self, io, alloc, curve, pct, priv_key, pub_key).await? {
+        if !tsra_fw_uno_pct::ecc_pct_in_workspace(
+            self,
+            io,
+            curve,
+            pct,
+            priv_key,
+            pub_key,
+            workspace,
+            async |operation, scratch| match operation {
+                tsra_fw_uno_pct::EccPctOperation::Verify {
+                    hash,
+                    public,
+                    input,
+                    valid,
+                } => {
+                    *valid = self
+                        .ecc_verify_in_workspace(curve, hash, public, input, scratch)
+                        .await?;
+                    Ok(())
+                }
+                tsra_fw_uno_pct::EccPctOperation::Derive {
+                    private,
+                    public,
+                    secret,
+                } => {
+                    self.ecdh_derive_in_workspace(curve, private, public, secret, scratch)
+                        .await
+                }
+            },
+        )
+        .await?
+        {
             tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationEccGenKeyFailed);
         }
         Ok(())
@@ -336,7 +491,7 @@ fn embedded_public_key<'a>(key: &DecodedEcKey<'a>) -> HsmResult<&'a [u8]> {
 /// wire coordinate must be zero.
 fn is_wire_point(curve: HsmEccCurve, xy: &[u8], wire_pub: &[u8]) -> bool {
     let raw = curve.priv_key_len();
-    let coord = curve.wire_coord_len();
+    let coord = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
     xy.len() == 2 * raw
         && wire_pub.len() == 2 * coord
         && xy
@@ -369,7 +524,8 @@ impl UnoHsmPal {
         embedded: &[u8],
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-            let pub_key = tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len())?;
+            let pub_key =
+                tsra_fw_uno_pct::scratch(alloc, curve.wire_pub_key_len(UnoHsmPal::ECC_COORD_PAD))?;
             self.ecc_priv_pub_key(io, priv_key, Some(&mut *pub_key))
                 .await?;
             if !is_wire_point(curve, embedded, pub_key) {
@@ -399,7 +555,7 @@ impl HsmEcc for UnoHsmPal {
     /// # Layout
     ///
     /// The PKA driver writes `pub_key ‖ priv_key` contiguously into a
-    /// scratch buffer allocated from `alloc`. This PAL then copies the
+    /// internally scoped workspace. This PAL then copies the
     /// public and private halves into the caller's separate output
     /// buffers.
     ///
@@ -410,30 +566,27 @@ impl HsmEcc for UnoHsmPal {
     /// # Parameters
     /// * `curve` — NIST curve to use ([`HsmEccCurve::P256`],
     ///   [`HsmEccCurve::P384`], or [`HsmEccCurve::P521`]).
-    /// * `alloc` — scoped allocator used for the internal contiguous
-    ///   `pub_key ‖ priv_key` PKA scratch buffer.
-    /// * `out` — `None` to query required buffer sizes, or
-    ///   `Some((priv_key, pub_key))` to generate into caller-provided
-    ///   output buffers.
     /// * `pct` — pairwise consistency test to run on the new key pair
     ///   before it's returned. A failing pair enters the FIPS error state.
+    /// * `out` — `None` to query required buffer sizes, or
+    ///   `Some((priv_key, pub_key))` to generate. Temporary storage
+    ///   includes the contiguous PKA output and all nested PCT scratch.
     ///
     /// # Returns
-    /// * `Ok((priv_len, pub_len))` — the private and public key lengths.
+    /// * `Ok((priv_len, pub_len))` — output sizes.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if the supplied curve is not one of
     ///   P-256/P-384/P-521, or `out` is `Some` and either output buffer
     ///   is shorter than required.
     /// * Any [`HsmError`] surfaced by [`UnoHsmPal::pka.ecc_gen_keypair`],
-    ///   the scoped allocator, or an operation that the PCT runs.
+    ///   or an operation that the PCT runs.
     async fn ecc_gen_keypair(
         &self,
         io: &UnoHsmIo,
-        alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let pka_curve = map_ecc_curve(curve)?;
         let priv_len = hsm_point_size(pka_curve);
@@ -447,32 +600,30 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        // Note: `scratch` holds the generated keypair (and, on a PKA failure,
-        // possibly partial key material) when this returns. It is intentionally
-        // left dirty: per the #602 review, the wipe belongs in the per-IO
-        // teardown scrub rather than here, so a local wipe would be redundant
-        // work that has to be removed again. That teardown scrub lands in #632
-        // (`drop_io` wipes the slot via the GDMA engine); until it merges this
-        // slot is not wiped, so #632 must land before — or together with — this
-        // change.
-        let scratch = alloc.dma_alloc(pub_len + priv_len)?;
-        let total_len = self.pka.ecc_gen_keypair(pka_curve, scratch).await?;
-        let (pub_key, priv_key) = scratch[..total_len].split_at(pub_len);
+        self.alloc_scoped_async(io, async |scope| {
+            let workspace_len =
+                (priv_len + pub_len).max(Self::generation_pct_workspace_len(curve, &pct));
+            let workspace = scope.dma_alloc(workspace_len)?;
+            let scratch = &mut workspace[..pub_len + priv_len];
+            let total_len = self.pka.ecc_gen_keypair(pka_curve, scratch).await?;
+            let (pub_key, priv_key) = scratch[..total_len].split_at(pub_len);
 
-        priv_out[..priv_len].copy_from_slice(priv_key);
-        pub_out[..pub_len].copy_from_slice(pub_key);
+            priv_out[..priv_len].copy_from_slice(priv_key);
+            pub_out[..pub_len].copy_from_slice(pub_key);
 
-        self.generation_pct(
-            io,
-            alloc,
-            curve,
-            &pct,
-            &priv_out[..priv_len],
-            &pub_out[..pub_len],
-        )
-        .await?;
+            self.generation_pct(
+                io,
+                workspace,
+                curve,
+                &pct,
+                &priv_out[..priv_len],
+                &pub_out[..pub_len],
+            )
+            .await?;
 
-        Ok((priv_len, pub_len))
+            Ok((priv_len, pub_len))
+        })
+        .await
     }
 
     /// Deterministic ECC key generation from a caller-supplied
@@ -502,13 +653,13 @@ impl HsmEcc for UnoHsmPal {
     /// * `curve` — must be [`HsmEccCurve::P384`].
     /// * `root` — the 48-byte partition `PartRoot`, used as the HKDF
     ///   PRK for the per-attempt candidate derivation.
-    /// * `out` — `None` to query the required `(priv_len, pub_len)`, or
-    ///   `Some((priv_key, pub_key))` to derive into caller buffers.
     /// * `pct` — pairwise consistency test to run on the derived key pair
     ///   before it's returned. A failing pair enters the FIPS error state.
+    /// * `out` — `None` to query `(priv_len, pub_len)`, or
+    ///   `Some((priv_key, pub_key))` to derive into caller buffers.
     ///
     /// # Returns
-    /// * `Ok((priv_len, pub_len))` — the private and public key lengths.
+    /// * `Ok((priv_len, pub_len))` — output sizes.
     ///
     /// # Errors
     /// * [`HsmError::UnsupportedCmd`] if `curve` is not P-384.
@@ -519,11 +670,10 @@ impl HsmEcc for UnoHsmPal {
     async fn ecc_gen_keypair_from_root(
         &self,
         io: &UnoHsmIo,
-        alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &HsmDmaBuf,
-        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let pka_curve = map_ecc_curve(curve)?;
         // Only P-384 (the PTA / alias identity curve) is supported. Reject
@@ -552,121 +702,123 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        self.ecc_gen_keypair_deterministic(io, pka_curve, root, priv_out, pub_out)
+        self.alloc_scoped_async(io, async |scope| {
+            let workspace_len = Self::ecc_keypair_root_workspace_len()
+                .max(Self::generation_pct_workspace_len(curve, &pct));
+            let workspace = scope.dma_alloc(workspace_len)?;
+            self.ecc_gen_keypair_deterministic(io, pka_curve, root, priv_out, pub_out, workspace)
+                .await?;
+
+            self.generation_pct(
+                io,
+                workspace,
+                curve,
+                &pct,
+                &priv_out[..priv_len],
+                &pub_out[..pub_len],
+            )
             .await?;
 
-        self.generation_pct(
-            io,
-            alloc,
-            curve,
-            &pct,
-            &priv_out[..priv_len],
-            &pub_out[..pub_len],
-        )
-        .await?;
-
-        Ok((priv_len, pub_len))
+            Ok((priv_len, pub_len))
+        })
+        .await
     }
 
-    /// Raw EC sign over a pre-computed hash digest.
+    /// ECDSA sign over a pre-computed digest.
     ///
-    /// Delegates to [`UnoHsmPal::pka.ecc_sign`] after curve mapping.
-    /// The PKA driver enforces the per-curve length requirements on
-    /// `priv_key`, `hash`, and `signature`.
-    ///
-    /// # Parameters
-    /// * `curve` — NIST curve the key was generated on.
-    /// * `priv_key` — signing key in the wire format produced by
-    ///   [`Self::ecc_gen_keypair`].
-    /// * `hash` — pre-computed hash digest to sign. Caller is responsible
-    ///   for hashing the message first.
-    /// * `signature` — destination buffer for `R ‖ S`. Must be at least
-    ///   [`HsmEccCurve::sig_len`] bytes.
-    ///
-    /// # Returns
-    /// * `Ok(())` on success. `signature` contains the `R ‖ S` pair.
+    /// The PKA reads the digest operand straight from `input`.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is not one of the supported
-    ///   NIST curves.
+    ///   NIST curves, or a buffer has the wrong shape.
+    /// * [`HsmError::CryptoUnsupportedMode`] for a supplied `k`.
     /// * Any [`HsmError`] surfaced by the PKA driver.
     async fn ecc_sign(
         &self,
         _io: &UnoHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        nonce: HsmEcdsaNonce,
+        input: &mut HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let pka_curve = map_ecc_curve(curve)?;
-        self.pka
-            .ecc_sign(pka_curve, priv_key, hash, signature)
-            .await
+        check_ecdsa_input(curve, hash, 1, input)?;
+        check_nonce(nonce)?;
+        let wire_len = curve.wire_sig_len(Self::ECC_COORD_PAD);
+        if priv_key.len() != hsm_point_size(pka_curve) {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(signature) = out else {
+            return Ok(wire_len);
+        };
+        if signature.len() < wire_len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.service_pka();
+        let signed = self
+            .pka
+            .ecc_sign(pka_curve, hash, priv_key, input, &mut signature[..wire_len])
+            .await;
+        // Other engines may have finished while this one signed; see to
+        // them before the reply goes out.
+        self.service_pka();
+        signed?;
+        Ok(wire_len)
     }
 
-    /// Raw EC verify of a signature over a pre-computed hash digest.
+    /// ECDSA sign, writing `r ‖ s` over the start of `k_sig`.
     ///
-    /// Delegates to [`UnoHsmPal::pka.ecc_verify`] after curve mapping.
+    /// The PKA reads the digest operand from `k_sig` and writes the
+    /// signature back into it, so no staging copy is made.
+    async fn ecc_sign_in_place(
+        &self,
+        _io: &UnoHsmIo,
+        curve: HsmEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        nonce: HsmEcdsaNonce,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let pka_curve = map_ecc_curve(curve)?;
+        check_ecdsa_input(curve, hash, 1, k_sig)?;
+        check_nonce(nonce)?;
+        if priv_key.len() != hsm_point_size(pka_curve) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.service_pka();
+        let signed = self
+            .pka
+            .ecc_sign_in_place(pka_curve, hash, priv_key, k_sig)
+            .await;
+        self.service_pka();
+        signed?;
+        Ok(curve.wire_sig_len(Self::ECC_COORD_PAD))
+    }
+
+    /// ECDSA verify of `r ‖ s` over a pre-computed digest.
     ///
-    /// # Parameters
-    /// * `curve` — NIST curve the key was generated on.
-    /// * `pub_key` — verification key as `(X ‖ Y)` in the wire format
-    ///   produced by [`Self::ecc_gen_keypair`].
-    /// * `hash` — pre-computed hash digest that was signed.
-    /// * `signature` — `R ‖ S` signature pair to verify.
+    /// The PKA reads the signature and digest straight from `input`; DMA
+    /// status and Montgomery scratch are scoped internally.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is not one of the supported
-    ///   NIST curves.
+    ///   NIST curves, or a buffer has the wrong shape.
     /// * Any [`HsmError`] surfaced by the PKA driver (e.g. malformed
     ///   inputs, hardware fault).
     async fn ecc_verify(
         &self,
         io: &UnoHsmIo,
         curve: HsmEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
-        result: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        input: &HsmDmaBuf,
+    ) -> HsmResult<bool> {
         let pka_curve = map_ecc_curve(curve)?;
-
-        let digest_len = hash_size(pka_curve);
-        if hash.len() < digest_len {
-            return Err(HsmError::InvalidArg);
-        }
-        let prime_le = curve_prime_le(pka_curve);
-
-        // Allocate the per-call PKA scratch (curve prime + transient
-        // Montgomery-constant scratch) from a scoped heap so it is released
-        // as soon as the verify completes rather than living for the whole
-        // IO. A single IO that verifies several signatures (e.g. cert-chain
-        // validation) would otherwise accumulate this scratch and can
-        // exhaust the DMA pool.
         self.alloc_scoped_async(io, async |scope| {
-            // The digest arrives PKA-native little-endian: it is a full BE->LE
-            // byte reversal of the big-endian hash, which is what
-            // `hash(.., big_endian = false)` produces. pub_key and signature
-            // likewise arrive LE via the host DDI serde. No byte-order
-            // conversion is done below the PAL.
-
-            // Per-call Montgomery constant from the curve prime (like
-            // ecdh_derive). `mont_result` is transient scratch consumed
-            // internally by the driver's verify; it is not surfaced back.
-            let prime = scope.dma_alloc(prime_le.len())?;
-            prime.copy_from_slice(prime_le);
-            let mont_result = scope.dma_alloc(prime_le.len())?;
-
-            self.pka
-                .ecc_verify(
-                    pka_curve,
-                    pub_key,
-                    &hash[..digest_len],
-                    signature,
-                    result,
-                    prime,
-                    mont_result,
-                )
+            let workspace = scope.dma_alloc(2 * hsm_point_size(pka_curve) + 4)?;
+            self.ecc_verify_in_workspace(curve, hash, pub_key, input, workspace)
                 .await
         })
         .await
@@ -680,11 +832,11 @@ impl HsmEcc for UnoHsmPal {
     /// * `curve` — NIST curve both peers agreed on.
     /// * `priv_key` — local private key.
     /// * `pub_key` — remote party's public key as `(X ‖ Y)`.
-    /// * `secret` — destination buffer for the derived shared secret.
-    ///   Must be at least [`HsmEccCurve::secret_len`] bytes.
+    /// * `out` — `None` to query the secret length without deriving a secret;
+    ///   `Some(secret)` to write it. Any output tail is untouched.
     ///
     /// # Returns
-    /// * `Ok(())` on success. `secret` contains the shared secret.
+    /// * `Ok(len)` — required capacity in query mode; otherwise bytes written.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is not one of the supported
@@ -703,8 +855,8 @@ impl HsmEcc for UnoHsmPal {
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
         pub_key: &HsmDmaBuf,
-        secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let pka_curve = map_ecc_curve(curve)?;
 
         // Reject a peer public key that cannot even hold both wire-format
@@ -718,51 +870,24 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::EccDerKeyShorterThanCurve);
         }
         let secret_len = curve.secret_len();
-        if secret.len() < secret_len {
+        if priv_key.len() != wire {
             return Err(HsmError::InvalidArg);
         }
         if !pub_key_in_valid_range(pub_key, pka_curve) {
             return Err(HsmError::EccPublicKeyValidationFailed);
         }
+        let Some(secret) = out else {
+            return Ok(secret_len);
+        };
+        if secret.len() < secret_len {
+            return Err(HsmError::InvalidArg);
+        }
 
-        let prime_le = curve_prime_le(pka_curve);
-
-        // Scope the per-call Montgomery scratch and full point output so they
-        // do not accumulate across multiple operations in the same IO.
         self.alloc_scoped_async(io, async |scope| {
-            // The PKA point-multiply requires a per-call Montgomery constant
-            // computed from the curve prime.
-            let prime = scope.dma_alloc(prime_le.len())?;
-            prime.copy_from_slice(prime_le);
-            let mont_result = scope.dma_alloc(prime_le.len())?;
-
-            // Status word for the hardware on-curve validation that runs
-            // between the Montgomery-constant setup and the ECDH compute.
-            let point_valid = scope.dma_alloc(4)?;
-            let point = scope.dma_alloc(wire * 2)?;
-
-            let result = self
-                .pka
-                .ecdh_derive(
-                    pka_curve,
-                    priv_key,
-                    pub_key,
-                    &mut *point,
-                    prime,
-                    mont_result,
-                    point_valid,
-                )
-                .await;
-            if result.is_ok() {
-                secret[..secret_len].copy_from_slice(&point[..secret_len]);
-            }
-            point.zeroize();
-
-            // The shared secret is returned PKA-native little-endian, like
-            // pub_key and priv_key. Any byte-order conversion (e.g. LE->BE for
-            // an internal HKDF consumer that must match the host's openssl-BE
-            // secret) is the DDI handler's responsibility, not the PAL's.
-            result
+            let workspace = scope.dma_alloc(4 * wire + 4)?;
+            self.ecdh_derive_in_workspace(curve, priv_key, pub_key, secret, workspace)
+                .await?;
+            Ok(secret_len)
         })
         .await
     }
@@ -778,8 +903,8 @@ impl HsmEcc for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         der: &HsmDmaBuf,
-        out: Option<&mut HsmDmaBuf>,
         pct: HsmEccPct,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // Parse the recovered PKCS#8 ECC private key (curve from its `namedCurve`
         // OID, the raw big-endian scalar `d`, and the SEC1 optional fields).
@@ -787,7 +912,7 @@ impl HsmEcc for UnoHsmPal {
         // The key must carry a well-formed public key, whatever `pct` selects.
         let embedded = embedded_public_key(&key)?;
         let (curve, scalar) = (key.curve, key.scalar);
-        let vault_len = curve.wire_coord_len();
+        let vault_len = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         // SEC1 / RFC 5915 encodes the scalar as a fixed-width octet string for
         // the curve (P-256 32, P-384 48, P-521 66 bytes). Require exactly that
         // raw length — reject shorter (non-canonical) or overlong scalars,
@@ -831,7 +956,7 @@ impl HsmEcc for UnoHsmPal {
         if d.len() != curve.priv_key_len() {
             return Err(HsmError::InvalidArg);
         }
-        let vault_len = curve.wire_coord_len();
+        let vault_len = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         // Require the scalar in `[1, n-1]`; reject `d == 0` or `d >= n`
         // (the curve order) in constant time, mirroring the DER path.
         if !ct_in_range(d, curve_order_be(curve)) {
@@ -860,7 +985,7 @@ impl HsmEcc for UnoHsmPal {
         // The vault stores the scalar little-endian (PKA-native),
         // zero-padded to `wire_coord_len`. Recover the canonical
         // big-endian COSE `d` by reversing the low `priv_key_len` bytes.
-        if vault.len() != curve.wire_coord_len() {
+        if vault.len() != curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
         let field = curve.priv_key_len();
@@ -915,7 +1040,7 @@ impl HsmEcc for UnoHsmPal {
         if !ct_in_range_le(&priv_key[..raw_len], curve_order_be(curve)) {
             return Err(HsmError::InvalidArg);
         }
-        let wire_pub_len = curve.wire_pub_key_len();
+        let wire_pub_len = curve.wire_pub_key_len(UnoHsmPal::ECC_COORD_PAD);
         let Some(pub_out) = pub_out else {
             return Ok(wire_pub_len);
         };
@@ -923,7 +1048,7 @@ impl HsmEcc for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let pka_curve = map_ecc_curve(curve)?;
-        let field = curve.wire_coord_len();
+        let field = curve.wire_coord_len(UnoHsmPal::ECC_COORD_PAD);
         let (bx, by) = curve_base_point_le(pka_curve);
         let mont = mont_operand_size(pka_curve);
 
@@ -957,6 +1082,34 @@ impl HsmEcc for UnoHsmPal {
         .await
     }
 
+    async fn ecc_vault_pub_key(
+        &self,
+        io: &UnoHsmIo,
+        key_id: HsmKeyId,
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let len = self
+            .ecc_priv_pub_key(io, self.vault_key(io, key_id)?, None)
+            .await?;
+        let Some(pub_out) = out else {
+            return Ok(len);
+        };
+        if pub_out.len() < len {
+            return Err(HsmError::InvalidArg);
+        }
+        if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            // Snapshot vault storage before the engine operation can yield.
+            let key = self.vault_key(io, key_id)?;
+            let private = scope.dma_alloc(key.len())?;
+            private.copy_from_slice(key);
+            self.ecc_priv_pub_key(io, private, Some(pub_out)).await
+        })
+        .await
+    }
+
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
     ///
     /// Delegates to [`ecc_priv_pub_key`](Self::ecc_priv_pub_key), which
@@ -982,8 +1135,8 @@ impl HsmEcc for UnoHsmPal {
     /// * `curve` — NIST curve the private key is on.
     /// * `priv_key` — raw HSM-format private scalar
     ///   ([`HsmEccCurve::wire_priv_key_len`] bytes).
-    /// * `pub_key` — output buffer for `X ‖ Y`
-    ///   ([`HsmEccCurve::wire_pub_key_len`] bytes).
+    /// * `out` — `None` to query the public-key length without deriving a
+    ///   point; `Some(pub_key)` to write `X ‖ Y`. Any output tail is untouched.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `curve` is unsupported, a buffer is
@@ -994,8 +1147,8 @@ impl HsmEcc for UnoHsmPal {
         io: &UnoHsmIo,
         curve: HsmEccCurve,
         priv_key: &HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Validate `curve` up front rather than leaving it implicit in the
         // length check below. `ecc_priv_pub_key` re-derives the curve from
         // the scalar length, so without this an unsupported variant would
@@ -1007,15 +1160,9 @@ impl HsmEcc for UnoHsmPal {
         // `wire_priv_key_len_is_unambiguous` in the traits crate pins so a
         // colliding variant fails CI rather than mis-dispatching here.
         map_ecc_curve(curve)?;
-        let wire_pub_len = curve.wire_pub_key_len();
-        if priv_key.len() != curve.wire_priv_key_len() || pub_key.len() < wire_pub_len {
+        if priv_key.len() != curve.wire_priv_key_len(UnoHsmPal::ECC_COORD_PAD) {
             return Err(HsmError::InvalidArg);
         }
-        // Pass an exact-sized sub-view: the PKA writes a fixed number of
-        // bytes per curve and is not given a length, so an oversized caller
-        // buffer would otherwise keep stale bytes in its tail.
-        let (head, _rest) = pub_key.split_at_mut(wire_pub_len);
-        self.ecc_priv_pub_key(io, priv_key, Some(head)).await?;
-        Ok(())
+        self.ecc_priv_pub_key(io, priv_key, out).await
     }
 }

@@ -43,8 +43,7 @@ fn test_aes_xts_encrypt_decrypt() {
             let short_app_sess_id = resp.data.short_app_id;
 
             // generate AES 256 bulk key 1
-            let resp =
-                generate_aes_bulk_256_key(dev, &app_sess_id, None, DdiAesKeySize::AesXtsBulk256);
+            let resp = generate_aes_bulk_256_key(dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
             assert!(resp.is_ok(), "resp: {:?}", resp);
             let resp = resp.unwrap();
 
@@ -52,8 +51,7 @@ fn test_aes_xts_encrypt_decrypt() {
             let key_id1_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
 
             // generate AES 256 bulk key 2
-            let resp =
-                generate_aes_bulk_256_key(dev, &app_sess_id, None, DdiAesKeySize::AesXtsBulk256);
+            let resp = generate_aes_bulk_256_key(dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
             assert!(resp.is_ok(), "resp: {:?}", resp);
             let resp = resp.unwrap();
 
@@ -159,7 +157,6 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
                 buf.as_slice(),
                 DdiKeyClass::AesXtsBulk,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -176,7 +173,6 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
                 buf.as_slice(),
                 DdiKeyClass::AesXtsBulk,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -271,7 +267,6 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
                 buf.as_slice(),
                 DdiKeyClass::AesXtsBulk,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -288,7 +283,6 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
                 gcm_key_buf.as_slice(),
                 DdiKeyClass::AesGcmBulkUnapproved,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);

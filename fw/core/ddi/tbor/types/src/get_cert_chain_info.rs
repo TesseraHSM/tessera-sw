@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn request_round_trips_slot_id() {
         let mut buf = [0u8; 64];
-        let frame = TborGetCertChainInfoReq::encode(&mut buf)
+        let frame = TborGetCertChainInfoReq::encode(&mut buf, (1, 1))
             .unwrap()
             .slot_id(3)
             .unwrap()
@@ -76,7 +76,7 @@ mod tests {
     fn response_round_trips_fields() {
         let mut buf = [0u8; 128];
         let thumbprint = [0x5Au8; CERT_THUMBPRINT_LEN];
-        let frame = TborGetCertChainInfoResp::encode(&mut buf, 0, false)
+        let frame = TborGetCertChainInfoResp::encode(&mut buf, (1, 1), 0, false)
             .unwrap()
             .num_certs(4)
             .unwrap()

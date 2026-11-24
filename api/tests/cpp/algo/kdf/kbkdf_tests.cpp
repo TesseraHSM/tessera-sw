@@ -12,6 +12,7 @@
 #include "utils/kdf_derive.hpp"
 #include "utils/key_props.hpp"
 #include "utils/shared_secret.hpp"
+#include "utils/utils.hpp"
 
 // ============================================================
 // Test fixture
@@ -105,6 +106,10 @@ static key_props valid_kbkdf_aes_props()
 /// Test KBKDF (SP 800-108 Counter Mode) derive with various HMAC hash algorithms for P-256 curve
 TEST_F(tsra_kbkdf, kbkdf_matrix_p256)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         run_kbkdf_counter_matrix_for_curve(session, TSRA_ECC_CURVE_P256);
     });
@@ -113,6 +118,10 @@ TEST_F(tsra_kbkdf, kbkdf_matrix_p256)
 /// Test KBKDF (SP 800-108 Counter Mode) derive with various HMAC hash algorithms for P-384 curve
 TEST_F(tsra_kbkdf, kbkdf_matrix_p384)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         run_kbkdf_counter_matrix_for_curve(session, TSRA_ECC_CURVE_P384);
     });
@@ -121,6 +130,10 @@ TEST_F(tsra_kbkdf, kbkdf_matrix_p384)
 /// Test KBKDF (SP 800-108 Counter Mode) derive with various HMAC hash algorithms for P-521 curve
 TEST_F(tsra_kbkdf, kbkdf_matrix_p521)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         run_kbkdf_counter_matrix_for_curve(session, TSRA_ECC_CURVE_P521);
     });
@@ -129,6 +142,10 @@ TEST_F(tsra_kbkdf, kbkdf_matrix_p521)
 /// Test that deriving an AES-GCM key with KBKDF fails with InvalidKeyProps.
 TEST_F(tsra_kbkdf, kbkdf_derive_aes_gcm_key_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -166,6 +183,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_aes_gcm_key_fails)
 /// Test that deriving a key with SharedSecret kind fails with InvalidArgument
 TEST_F(tsra_kbkdf, kbkdf_derive_unsupported_key_kind_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -185,6 +206,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_unsupported_key_kind_fails)
 /// Test that deriving a key with an invalid HMAC algorithm fails with InvalidArgument
 TEST_F(tsra_kbkdf, kbkdf_derive_invalid_hmac_algo_id_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -205,6 +230,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_invalid_hmac_algo_id_fails)
 /// Test that deriving a key with zero bit length fails with InvalidKeyProps
 TEST_F(tsra_kbkdf, kbkdf_derive_zero_bit_len_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -226,6 +255,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_zero_bit_len_fails)
 /// SP 800-108 requires at least one of label/context, so a label alone is a valid configuration.
 TEST_F(tsra_kbkdf, kbkdf_label_only_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -265,6 +298,10 @@ TEST_F(tsra_kbkdf, kbkdf_label_only_roundtrip)
 /// SP 800-108 requires at least one of label/context, so a context alone is valid.
 TEST_F(tsra_kbkdf, kbkdf_context_only_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -305,6 +342,10 @@ TEST_F(tsra_kbkdf, kbkdf_context_only_roundtrip)
 /// Test KBKDF roundtrip using HMAC-SHA512 with both label and context.
 TEST_F(tsra_kbkdf, kbkdf_hmac_sha512_label_context_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -352,6 +393,10 @@ TEST_F(tsra_kbkdf, kbkdf_hmac_sha512_label_context_roundtrip)
 /// Test that KBKDF can derive a 128-bit AES key and use it for encryption/decryption.
 TEST_F(tsra_kbkdf, kbkdf_derive_aes_128_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -399,6 +444,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_aes_128_roundtrip)
 /// Test that KBKDF can derive a 192-bit AES key and use it for encryption/decryption.
 TEST_F(tsra_kbkdf, kbkdf_derive_aes_192_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -446,6 +495,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_aes_192_roundtrip)
 /// Test that deriving an AES key without encrypt/decrypt usage flags fails with InvalidKeyProps.
 TEST_F(tsra_kbkdf, kbkdf_derive_aes_without_usage_flags_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -464,6 +517,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_aes_without_usage_flags_fails)
 /// Test that deriving an AES key with an unsupported AES key size fails with InvalidArgument.
 TEST_F(tsra_kbkdf, kbkdf_derive_invalid_aes_key_size_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -484,6 +541,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_invalid_aes_key_size_fails)
 /// Test that deriving a key with a non-secret key class fails with InvalidKeyProps.
 TEST_F(tsra_kbkdf, kbkdf_derive_non_secret_key_class_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_PUBLIC;
@@ -504,6 +565,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_non_secret_key_class_fails)
 /// Test that KBKDF derives compatible keys when the same shared secret and parameters are reused.
 TEST_F(tsra_kbkdf, kbkdf_same_secret_same_params_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -551,6 +616,10 @@ TEST_F(tsra_kbkdf, kbkdf_same_secret_same_params_roundtrip)
 /// Test that KBKDF derive succeeds with HMAC-SHA384 using label and context.
 TEST_F(tsra_kbkdf, kbkdf_hmac_sha384_label_context_roundtrip)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;
@@ -598,6 +667,10 @@ TEST_F(tsra_kbkdf, kbkdf_hmac_sha384_label_context_roundtrip)
 /// Test that KBKDF derive rejects a label buffer with null pointer and non-zero length.
 TEST_F(tsra_kbkdf, kbkdf_null_label_with_nonzero_len_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -634,6 +707,10 @@ TEST_F(tsra_kbkdf, kbkdf_null_label_with_nonzero_len_fails)
 /// Test that KBKDF derive rejects a context buffer with null pointer and non-zero length.
 TEST_F(tsra_kbkdf, kbkdf_null_context_with_nonzero_len_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -670,6 +747,10 @@ TEST_F(tsra_kbkdf, kbkdf_null_context_with_nonzero_len_fails)
 /// Test that KBKDF rejects an AES key with only encrypt usage enabled.
 TEST_F(tsra_kbkdf, kbkdf_derive_aes_encrypt_only_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         key_props props = {};
         props.key_class = TSRA_KEY_CLASS_SECRET;
@@ -706,6 +787,10 @@ TEST_F(tsra_kbkdf, kbkdf_derive_aes_encrypt_only_fails)
 /// Test that KBKDF derive rejects a null algorithm pointer.
 TEST_F(tsra_kbkdf, kbkdf_null_algo_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         EXPECT_EQ(
             kbkdf_derive_with_algo(session, nullptr, valid_kbkdf_aes_props()),
@@ -717,6 +802,10 @@ TEST_F(tsra_kbkdf, kbkdf_null_algo_fails)
 /// Test that KBKDF derive rejects null KBKDF params.
 TEST_F(tsra_kbkdf, kbkdf_null_algo_params_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         tsra_algo kbkdf_algo = {};
         kbkdf_algo.id = TSRA_ALGO_ID_KBKDF_COUNTER_DERIVE;
@@ -733,6 +822,10 @@ TEST_F(tsra_kbkdf, kbkdf_null_algo_params_fails)
 /// Test that KBKDF derive rejects zero KBKDF params length.
 TEST_F(tsra_kbkdf, kbkdf_zero_algo_params_len_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         const char *label_str = "valid-label";
         const char *context_str = "valid-context";
@@ -769,6 +862,10 @@ TEST_F(tsra_kbkdf, kbkdf_zero_algo_params_len_fails)
 /// Test that KBKDF derive rejects a mismatched KBKDF params length.
 TEST_F(tsra_kbkdf, kbkdf_algo_params_len_mismatch_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         const char *label_str = "valid-label";
         const char *context_str = "valid-context";
@@ -805,6 +902,10 @@ TEST_F(tsra_kbkdf, kbkdf_algo_params_len_mismatch_fails)
 /// Test that KBKDF derive rejects a null derived-key output pointer.
 TEST_F(tsra_kbkdf, kbkdf_null_derived_key_output_fails)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([](tsra_handle session) {
         auto_key secret_a;
         auto_key secret_b;

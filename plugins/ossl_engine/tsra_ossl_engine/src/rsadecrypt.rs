@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! RSA decryption (OAEP and PKCS#1 v1.5) for engine-loaded RSA keys.
+//! RSA-OAEP decryption for engine-loaded RSA keys.
 //!
 //! Decryption takes the same route as RSA-PSS (see [`crate::rsasign`]): in 1.1.1
 //! `pkey_rsa_decrypt` does the raw private-key operation in `rsa_priv_dec` (which
@@ -13,6 +13,9 @@
 //! on a key the engine does not own is delegated to the built-in software decrypt
 //! by the core method — required so the SDK's own internal RSA decrypt during key
 //! unwrap still works when the engine is the process default.
+//!
+//! PKCS#1 v1.5 decryption is refused: the SDK's decoder has no implicit
+//! rejection, so a padding error would be an oracle (Bleichenbacher).
 //!
 //! Encryption is a public-key operation and is left on the inherited built-in
 //! slot: a loaded key carries the public modulus, so software RSA public-key
@@ -50,14 +53,18 @@ impl RsaDecryptHandler for TsraRsaDecrypt {
                 "no HSM key attached to RSA for decryption".into(),
             ));
         }
-        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData for
-        // the engine's lifetime; this callback runs while the key is live.
+        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData until
+        // the key using it is freed; this callback runs while that key is live.
         let key = unsafe { &*key_ptr };
 
         // The HSM performs the raw private-key operation; the SDK removes the
-        // OAEP/PKCS#1 v1.5 padding (OAEP MGF1 = the OAEP digest).
+        // OAEP padding (MGF1 = the OAEP digest).
         let mut algo = match padding {
-            RsaDecryptPadding::Pkcs1 => HsmRsaEncryptAlgo::with_pkcs1_padding(),
+            RsaDecryptPadding::Pkcs1 => {
+                return Err(EngineError::Other(
+                    "RSA PKCS#1 v1.5 decryption is not supported; use RSA-OAEP".into(),
+                ));
+            }
             RsaDecryptPadding::Oaep { md_nid, label } => {
                 let hash = hash_from_nid(*md_nid)?;
                 let label = if label.is_empty() {

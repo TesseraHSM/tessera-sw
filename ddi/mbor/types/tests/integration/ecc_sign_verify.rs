@@ -19,7 +19,6 @@ fn test_ecc_sign_no_session() {
             let (private_key_id, _pub_key, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );
@@ -54,7 +53,6 @@ fn test_ecc_sign_incorrect_session_id() {
             let (private_key_id, _pub_key, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );
@@ -95,7 +93,6 @@ fn test_ecc_sign_incorrect_key_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -129,7 +126,6 @@ fn test_ecc_sign_incorrect_usage() {
             let (private_key_id, _pub_key, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::Derive,
             );
@@ -160,7 +156,6 @@ fn test_ecc_sign_verify() {
             let (private_key_id, pub_key, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );

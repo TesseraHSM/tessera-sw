@@ -10,7 +10,5 @@ bench = false
 doctest = false
 test = false
 
-[dependencies]
-
 [lints]
 workspace = true

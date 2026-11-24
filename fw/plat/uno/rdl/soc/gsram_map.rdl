@@ -17,13 +17,20 @@
 //   0x0E440 - 0x0EF44  IIC queues (ISQ, ICQ, IO_SQ, ICQ tail shadow)
 //   0x0F000 - 0x11824  Reserved: Admin (CP0) GDMA rings — do not place HSM data here
 //   0x11840 - 0x11E44  OIC queues (OSQ, OCQ, IO_CQ, OCQ tail shadow)
-//   0x12840 - 0x15064  GDMA queues
-//   0x15064 - 0x1BA38  Crypto command buffers (AES, UPKA, SHA)
+//   0x12840 - 0x15048  GDMA queues (128 entries)
+//   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
+//   0x19460 - 0x1A460  Bulk crypto per-IO scratch
+//   0x1A460 - 0x1AB84  Bulk IIC/OIC rings (controller 1, channel 1)
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
-//   0xA9000 - 0xB8000  HSM self-test/test-hook code and known-answer vectors
+//   0xA9000 - 0xAAD40  Crypto command buffers (AES, UPKA, SHA)
+//   0xAB000 - 0xAD800  BCP (CDMA) rings
+//   0xAD800 - 0xADD00  PKA staged-command descriptors
+//   0xADD00 - 0xB8000  Unused (former HSM code window)
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
 //   0xBB000 - 0xEBC00  Partition store
-//   0xEBC00 - 0x200000 Key vault
+//   0xEBC00 - 0x16DC00 Key vault (65 × 8 KB tables)
+//   0x16E000 - 0x1D0000 HSM executable code (self-tests, test hooks, KAT vectors)
+//   0x1D0000 - 0x200000 Fastpath ML-DSA matrix cache
 //
 // Hardware alignment: UCD and GDMA hardware expect queue base
 // addresses to be 32-byte (0x20) aligned.
@@ -333,6 +340,68 @@ regfile io_cq_entry_t {
     io_cq_dw_t DW3 @ 0xC;
 };
 
+// -- Bulk IO SQ Entry - 128 bytes (32 DWORDs) --
+
+regfile bulk_io_sq_entry_t {
+    name = "Bulk IO SQ Entry";
+    desc = "128-byte bulk (fast-path) SQE plus aux, DMA'd from host.";
+    io_sq_dw_t DW0  @ 0x00;
+    io_sq_dw_t DW1  @ 0x04;
+    io_sq_dw_t DW2  @ 0x08;
+    io_sq_dw_t DW3  @ 0x0C;
+    io_sq_dw_t DW4  @ 0x10;
+    io_sq_dw_t DW5  @ 0x14;
+    io_sq_dw_t DW6  @ 0x18;
+    io_sq_dw_t DW7  @ 0x1C;
+    io_sq_dw_t DW8  @ 0x20;
+    io_sq_dw_t DW9  @ 0x24;
+    io_sq_dw_t DW10 @ 0x28;
+    io_sq_dw_t DW11 @ 0x2C;
+    io_sq_dw_t DW12 @ 0x30;
+    io_sq_dw_t DW13 @ 0x34;
+    io_sq_dw_t DW14 @ 0x38;
+    io_sq_dw_t DW15 @ 0x3C;
+    io_sq_dw_t DW16 @ 0x40;
+    io_sq_dw_t DW17 @ 0x44;
+    io_sq_dw_t DW18 @ 0x48;
+    io_sq_dw_t DW19 @ 0x4C;
+    io_sq_dw_t DW20 @ 0x50;
+    io_sq_dw_t DW21 @ 0x54;
+    io_sq_dw_t DW22 @ 0x58;
+    io_sq_dw_t DW23 @ 0x5C;
+    io_sq_dw_t DW24 @ 0x60;
+    io_sq_dw_t DW25 @ 0x64;
+    io_sq_dw_t DW26 @ 0x68;
+    io_sq_dw_t DW27 @ 0x6C;
+    io_sq_dw_t DW28 @ 0x70;
+    io_sq_dw_t DW29 @ 0x74;
+    io_sq_dw_t DW30 @ 0x78;
+    io_sq_dw_t DW31 @ 0x7C;
+};
+
+// -- Bulk IO CQ Entry - 64 bytes (16 DWORDs) --
+
+regfile bulk_io_cq_entry_t {
+    name = "Bulk IO CQ Entry";
+    desc = "64-byte bulk (fast-path) completion written by firmware.";
+    io_cq_dw_t DW0  @ 0x00;
+    io_cq_dw_t DW1  @ 0x04;
+    io_cq_dw_t DW2  @ 0x08;
+    io_cq_dw_t DW3  @ 0x0C;
+    io_cq_dw_t DW4  @ 0x10;
+    io_cq_dw_t DW5  @ 0x14;
+    io_cq_dw_t DW6  @ 0x18;
+    io_cq_dw_t DW7  @ 0x1C;
+    io_cq_dw_t DW8  @ 0x20;
+    io_cq_dw_t DW9  @ 0x24;
+    io_cq_dw_t DW10 @ 0x28;
+    io_cq_dw_t DW11 @ 0x2C;
+    io_cq_dw_t DW12 @ 0x30;
+    io_cq_dw_t DW13 @ 0x34;
+    io_cq_dw_t DW14 @ 0x38;
+    io_cq_dw_t DW15 @ 0x3C;
+};
+
 
 // ══════════════════════════════════════════════════════════════
 // GDMA queue structures
@@ -469,7 +538,7 @@ regfile aes_cmd_entry_t {
 
 regfile upka_cmd_entry_t {
     name = "UPKA Command Entry";
-    desc = "20-byte PKA command descriptor (per-engine slot).";
+    desc = "20-byte PKA command descriptor (per-engine or per-ticket slot).";
     io_sq_dw_t COMMAND_CODE @ 0x00;
     io_sq_dw_t RESULT_ADDR  @ 0x04;
     io_sq_dw_t ARG1_ADDR    @ 0x08;
@@ -505,10 +574,11 @@ mem sram_io_buf_t {
     memwidth = 32;
 };
 
-mem hsm_code_t {
-    desc = "Executable HSM self-test/test-hook code and known-answer vectors, loaded by 1SP.";
-    mementries = 61440; // 0xA9000..0xB8000; FP slot map begins at 0xB8000.
-    memwidth = 8;
+mem bulk_scratch_t {
+    desc = "128-byte per-bulk-IO scratch (AES blocks and the GCM tail)
+            that bulk IOs use instead of the per-IO bump allocator.";
+    mementries = 32;
+    memwidth = 32;
 };
 
 
@@ -578,12 +648,12 @@ addrmap part_store_t {
 //
 // Typed mirror of the reference firmware's per-partition key store, so
 // key IDs, sizes, and on-storage layout are interchangeable. One table
-// is TOTAL_TABLE_LEN = 14336 B and holds 256 metadata entries, a
+// is TOTAL_TABLE_LEN = 8192 B and holds 128 metadata entries, a
 // block-allocator bitmap, and a key-data blob region:
 //
-//   0x0000 - 0x0800  ENTRY[256]  (256 × 8-byte PhysicalEntry metadata)
-//   0x0800 - 0x0900  BITMAP[64]  (used-block tracker, 64 × u32)
-//   0x0900 - 0x3800  BLOB        (12032-byte key-data region)
+//   0x0000 - 0x0400  ENTRY[128]  (128 × 8-byte PhysicalEntry metadata)
+//   0x0400 - 0x0480  BITMAP[32]  (used-block tracker, 32 × u32)
+//   0x0480 - 0x2000  BLOB        (7040-byte key-data region)
 //
 // Within BLOB, each key occupies an 8-byte-aligned block laid out as
 // [32-byte attributes][key bytes]; PhysicalEntry.OFFSET is the block
@@ -621,36 +691,55 @@ reg used_block_t {
     field { sw = rw; hw = na; } BITS[31:0] = 0x0;
 };
 
-// Key-data blob region (12032 B = TOTAL_TABLE_LEN - 2304).
+// Key-data blob region (7040 B = TOTAL_TABLE_LEN - 1152).
 mem key_blob_t {
     desc = "Per-table key-data blob region.";
-    mementries = 3008;  // 12032 / 4
+    mementries = 1760;  // 7040 / 4
     memwidth = 32;
 };
 
+// ── HSM executable code ─────────────────────────────────────────
+//
+// The only executable GSRAM region. 1SP loads the HSM image's
+// `.gsram_text` (self-test/test-hook code) and `.gsram_rodata` (their
+// known-answer vectors, kept in a separate, 32 B-aligned output section)
+// here before releasing CP1, and the SP preserves it across warm resets, so
+// its bounds must match HSM_CODE_GSRAM_ADDRESS / HSM_CODE_GSRAM_SIZE in
+// manticore sp/src/dc_scm/rot_memory_map.h.
+//
+// It is the GSRAM freed when TOTAL_TABLE_LEN dropped from 14336 B to
+// 8192 B (65 × 6 KB), taken as one contiguous window from the first 4 KB
+// boundary after the vault up to FP_DSA_CACHE, so both sections can keep
+// growing in place. The previous 60 KB code window at 0xA9000 is unused.
+mem hsm_code_t {
+    desc = "Executable HSM code (self-tests, test hooks, known-answer vectors), loaded by 1SP.";
+    mementries = 401408; // 0x16E000..0x1D0000
+    memwidth = 8;
+};
+
 // Fastpath ML-DSA matrix cache (192 KB).  Carved off the tail of the key
-// vault when TOTAL_TABLE_LEN dropped to 14336 B: the vault now ends at
-// 0x1CF400 and this window runs 0x1D0000 - 0x200000, with a 0xC00 pad in
-// between for 64 KB alignment.  Declared here so the vault cannot grow
-// back over it and so the FP firmware has a generated base to reference
-// instead of a hard-coded address.  Mirrors cp/hsm's `rsvd_fp_dsa_cache`.
+// vault when TOTAL_TABLE_LEN dropped to 14336 B; it runs 0x1D0000 -
+// 0x200000 (64 KB-aligned), directly above HSM_CODE.  Declared here so
+// neither the vault nor HSM_CODE can grow over it and so the FP firmware
+// has a generated base to reference instead of a hard-coded address.
+// Mirrors cp/hsm's `rsvd_fp_dsa_cache`.
 mem fp_dsa_cache_t {
     desc = "Fastpath ML-DSA matrix spill cache (3 cores x 64 KB).";
     mementries = 49152;  // 196608 / 4
     memwidth = 32;
 };
 
-// One 14336-byte vault table.
+// One 8192-byte vault table.
 addrmap key_vault_table_t {
     name = "Key Vault Table";
-    desc = "One 14336-byte vault table: metadata + bitmap + blob.";
+    desc = "One 8192-byte vault table: metadata + bitmap + blob.";
 
     default hw = na;
     default sw = rw;
 
-    physical_entry_t ENTRY[256]  @ 0x0000 += 0x08;  // 0x0000 - 0x0800
-    used_block_t     BITMAP[64]  @ 0x0800 += 0x04;  // 0x0800 - 0x0900
-    key_blob_t       BLOB        @ 0x0900;          // 0x0900 - 0x3800
+    physical_entry_t ENTRY[128]  @ 0x0000 += 0x08;  // 0x0000 - 0x0400
+    used_block_t     BITMAP[32]  @ 0x0400 += 0x04;  // 0x0400 - 0x0480
+    key_blob_t       BLOB        @ 0x0480;          // 0x0480 - 0x2000
 };
 
 
@@ -724,23 +813,41 @@ addrmap io_gsram {
     io_cq_entry_t    IO_CQ[32]          @ 0x11C40 += 0x10;
     queue_shadow_t   OCQ_TAIL_SHADOW    @ 0x11E40;
 
-    // ─── GDMA — 0x20-aligned ───
-    gdma_sq_entry_t  GDMA_SQ[32]        @ 0x12840 += 0x40;
-    gdma_cq_entry_t  GDMA_CQ[32]        @ 0x13040 += 0x10;
-    queue_shadow_t   GDMA_CQ_TAIL_SHADOW @ 0x13240;
+    // ─── GDMA — 0x20-aligned. The SQ head shadow is the word after the CQ
+    // tail shadow. ───
+    gdma_sq_entry_t  GDMA_SQ[128]       @ 0x12840 += 0x40;
+    gdma_cq_entry_t  GDMA_CQ[128]       @ 0x14840 += 0x10;
+    queue_shadow_t   GDMA_CQ_TAIL_SHADOW @ 0x15040;
 
-    // ─── Crypto ───
-    aes_cmd_entry_t  AES_CMD[32]         @ 0x15064 += 0x18;
-    upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0x15364 += 0x14;
-    sha_cmd_entry_t  SHA_CMD[32]         @ 0x154A4 += 0x20;
+    // 0x15048 - 0x17400 is unused; the 64-entry BCP rings did not fit.
 
-    // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
-    // may master (0x0F000 - 0xB8000) ───
-    bcp_sqe_t        BCP_SQ[8]           @ 0x16000 += 0x10;   // 0x16000 - 0x16080
-    bcp_cqe_t        BCP_CQ[8]           @ 0x16100 += 0x08;   // 0x16100 - 0x16140
-    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16180;
-    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16184;
-    bcp_dfl_entry_t  BCP_DFL[8]          @ 0x16200 += 0x80;   // 0x16200 - 0x16600
+    // ─── Bulk IIC/OIC (controller 1, channel 0) — 0x20-aligned; inside
+    // the CDMA window ───
+    isq_entry_t        BULK_ISQ[32]             @ 0x17400 += 0x08;  // 0x17400 - 0x17500
+    icq_entry_t        BULK_ICQ[32]             @ 0x17500 += 0x10;  // 0x17500 - 0x17700
+    queue_shadow_t     BULK_ICQ_TAIL_SHADOW     @ 0x17700;
+    bulk_io_sq_entry_t BULK_IO_SQ[32]           @ 0x17720 += 0x80;  // 0x17720 - 0x18720
+    osq_entry_t        BULK_OSQ[32]             @ 0x18720 += 0x10;  // 0x18720 - 0x18920
+    ocq_entry_t        BULK_OCQ[32]             @ 0x18920 += 0x10;  // 0x18920 - 0x18B20
+    queue_shadow_t     BULK_OCQ_TAIL_SHADOW     @ 0x18B20;
+    bulk_io_cq_entry_t BULK_IO_CQ[32]           @ 0x18B60 += 0x40;  // 0x18B60 - 0x19360
+    io_meta_entry_t    BULK_IO_META[32]         @ 0x19360 += 0x08;  // 0x19360 - 0x19460
+
+    // ─── Bulk crypto per-IO scratch; inside the CDMA / GDMA window. Must
+    // end before 0x1AC58 (Admin heap). ───
+    bulk_scratch_t     BULK_SCRATCH[32]         @ 0x19460 += 0x80;  // 0x19460 - 0x1A460
+
+    // ─── Bulk IIC/OIC rings (controller 1, channel 1: the queues of the
+    // 65th function resource) — 0x20-aligned. The channel shares
+    // BULK_IO_SQ / BULK_IO_CQ / BULK_IO_META / BULK_SCRATCH with channel 0,
+    // each posting its own range of those slots. Must end before 0x1AC58
+    // (Admin heap). ───
+    isq_entry_t        BULK_FP2_ISQ[32]         @ 0x1A460 += 0x08;  // 0x1A460 - 0x1A560
+    icq_entry_t        BULK_FP2_ICQ[32]         @ 0x1A560 += 0x10;  // 0x1A560 - 0x1A760
+    queue_shadow_t     BULK_FP2_ICQ_TAIL_SHADOW @ 0x1A760;
+    osq_entry_t        BULK_FP2_OSQ[32]         @ 0x1A780 += 0x10;  // 0x1A780 - 0x1A980
+    ocq_entry_t        BULK_FP2_OCQ[32]         @ 0x1A980 += 0x10;  // 0x1A980 - 0x1AB80
+    queue_shadow_t     BULK_FP2_OCQ_TAIL_SHADOW @ 0x1AB80;
 
     // ─── Heap (per-IO buffers) — 34 SRAM slots: 0..31 host (IIC), 32 admin,
     //     33 self-test (CAST). IO_META stays 33: only host+admin slots carry
@@ -751,8 +858,30 @@ addrmap io_gsram {
     io_meta_entry_t  IO_META[33]         @ 0x20C58 += 0x08;
     sram_io_buf_t    SRAM_IO_BUF[34]     @ 0x20D60 += 0x4000;
 
-    // Executable code must end before the persistent FP slot map.
-    hsm_code_t       HSM_CODE            @ 0xA9000;
+    // ─── Crypto command buffers, in the former HSM code window (HSM_CODE
+    // moved above the key vault); 0xADD00 - 0xB8000 is unused. ───
+    aes_cmd_entry_t  AES_CMD[128]        @ 0xA9000 += 0x18;   // 0xA9000 - 0xA9C00
+    upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0xA9C00 += 0x14;   // 0xA9C00 - 0xA9D40
+    sha_cmd_entry_t  SHA_CMD[128]        @ 0xA9D40 += 0x20;   // 0xA9D40 - 0xAAD40
+
+    // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
+    // may master (0x0F000 - 0xB8000) ───
+    bcp_sqe_t        BCP_SQ[64]          @ 0xAB000 += 0x10;   // 0xAB000 - 0xAB400
+    bcp_cqe_t        BCP_CQ[64]          @ 0xAB400 += 0x08;   // 0xAB400 - 0xAB600
+    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0xAB600;
+    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0xAB604;
+
+    // The one PKA wipe descriptor, {MEM_WIPE, 0, 0, 0, 0}: written once,
+    // then only read, by every engine's post-command wipe. HSM-owned like
+    // the rings around it.
+    upka_cmd_entry_t UPKA_WIPE_CMD       @ 0xAB610;
+    bcp_dfl_entry_t  BCP_DFL[64]         @ 0xAB800 += 0x80;   // 0xAB800 - 0xAD800
+
+    // One PKA command descriptor per staged-command ticket (the PKA
+    // driver's TICKETS), written when the command is submitted, so that
+    // the PKA interrupt handler starts a queued command on a freed engine
+    // with one command-register write.
+    upka_cmd_entry_t UPKA_TICKET_CMD[64] @ 0xAD800 += 0x14;   // 0xAD800 - 0xADD00
 
     // ─── FP bulk-key slot map: 65 × 1-byte table bitmaps ───
     fp_slot_map_t    FP_SLOT_MAP         @ 0xB8000;   // 0xB8000 - 0xB8041
@@ -760,8 +889,11 @@ addrmap io_gsram {
     // ─── Partition persistent store (65 entries, 3072 B each) ───
     part_store_t     PART_STORE[65]      @ 0xBB000 += 0xC00;
 
-    // ─── Key vault (65 typed tables, 14336 B each) ───
-    key_vault_table_t KEY_VAULT[65]   @ 0xEBC00 += 0x3800;   // 65 × 14336 = 0xE3800
+    // ─── Key vault (65 typed tables, 8192 B each) ───
+    key_vault_table_t KEY_VAULT[65]   @ 0xEBC00 += 0x2000;   // 65 × 8192 = 0x82000 → 0x16DC00
+
+    // ─── HSM executable code (392 KB, 4 KB-aligned, up to FP_DSA_CACHE) ───
+    hsm_code_t       HSM_CODE           @ 0x16E000;          // 0x16E000 - 0x1D0000
 
     // ─── Fastpath ML-DSA matrix cache (192 KB, ends GSRAM) ───
     fp_dsa_cache_t   FP_DSA_CACHE       @ 0x1D0000;          // 0x1D0000 - 0x200000

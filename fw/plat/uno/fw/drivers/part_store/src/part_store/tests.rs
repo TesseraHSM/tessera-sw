@@ -90,7 +90,6 @@ fn preserves_provisioning_and_clears_tenant_state() {
     let psk_co = [0x11u8; PSK_LEN];
     let psk_cu = [0x22u8; PSK_LEN];
     let guid = [0x33u8; GUID_LEN];
-    let pta = [0x44u8; PUB_KEY_LEN];
 
     // Per-tenant state — must be cleared by a migrate.
     let nonce = [0x55u8; NONCE_LEN];
@@ -103,7 +102,6 @@ fn preserves_provisioning_and_clears_tenant_state() {
         p.set_psk_co(buf(&psk_co)).unwrap();
         p.set_psk_cu(buf(&psk_cu)).unwrap();
         p.set_vm_launch_guid(&guid);
-        p.set_pta_pub_key(buf(&pta)).unwrap();
         p.set_bk3_initialized(true);
 
         p.set_nonce(buf(&nonce)).unwrap();
@@ -135,32 +133,15 @@ fn preserves_provisioning_and_clears_tenant_state() {
 
     let p = Partition(pid);
 
-    // Session PSKs are reset to the well-known defaults, not preserved:
-    // an NSSR returns the partition to its just-allocated state as far as
-    // the PSKs are concerned, so the rotated values seeded above must not
-    // survive.
-    assert_eq!(
-        &p.psk_co()[..],
-        &DEFAULT_PSK_CO[..],
-        "psk_co must be re-baked to the default on migrate"
-    );
-    assert_eq!(
-        &p.psk_cu()[..],
-        &DEFAULT_PSK_CU[..],
-        "psk_cu must be re-baked to the default on migrate"
-    );
+    // Recovery must authenticate the current role PSKs, not public defaults.
+    assert_eq!(&p.psk_co()[..], &psk_co[..], "psk_co must survive migrate");
+    assert_eq!(&p.psk_cu()[..], &psk_cu[..], "psk_cu must survive migrate");
 
     // Provisioning preserved.
     assert_eq!(
         &p.vm_launch_guid()[..],
         &guid[..],
         "vm_launch_guid must survive migrate"
-    );
-    assert!(p.pta_pub_key_valid(), "pta_pub_key must survive migrate");
-    assert_eq!(
-        &p.pta_pub_key()[..],
-        &pta[..],
-        "pta_pub_key bytes must survive migrate"
     );
     assert!(p.bk3_initialized(), "bk3_initialized must survive migrate");
 
@@ -215,23 +196,25 @@ fn preserves_provisioning_and_clears_tenant_state() {
 }
 
 /// `clear_identity` must zero the 16-byte id, drop the identity key handle
-/// (dropping `partition_id_valid` with it), and zero the cached public key.
+/// (dropping `partition_id_valid` with it), and zero reserved identity bytes.
 ///
 /// The NSSR migrate path relies on this to erase the stale `id_key_id` before
 /// re-provisioning a fresh identity, so this guards that the identity fields
 /// don't linger and dangle at a deleted vault key.
 #[test]
-fn clear_identity_zeros_id_handle_and_pub_key() {
+fn clear_identity_zeros_id_handle_and_reserved_bytes() {
     let pid = 9usize;
 
     let id = [0x5Au8; ID_LEN];
-    let id_pub = [0xA5u8; PUB_KEY_LEN];
 
     {
         let mut p = Partition(pid);
         p.set_id(buf(&id)).unwrap();
         p.set_id_key_id(Some(HsmKeyId::from(0x1234u16)));
-        p.id_pub_key_mut().copy_from_slice(&id_pub);
+        p.slot_mut()
+            .partition_identifier
+            .reserved_pub_key
+            .fill(0xA5);
     }
 
     // Precondition: identity is present.
@@ -248,9 +231,9 @@ fn clear_identity_zeros_id_handle_and_pub_key() {
     assert!(p.id_key_id().is_none(), "id key handle must be cleared");
     assert_eq!(&p.id()[..], &[0u8; ID_LEN][..], "id must be zeroed");
     assert_eq!(
-        &p.id_pub_key()[..],
-        &[0u8; PUB_KEY_LEN][..],
-        "id public key must be zeroed"
+        &p.slot().partition_identifier.reserved_pub_key[..],
+        &[0u8; ID_PUB_LEN][..],
+        "reserved identity bytes must be zeroed"
     );
 }
 
@@ -322,6 +305,29 @@ fn rearm_sets_gate1_only_for_resourced_partitions() {
     assert!(!empty.unwrapping_key_required());
 }
 
+/// Warm boots advance the transport epoch, which survives everything but
+/// a power-on `reset`, and report exhaustion once it saturates.
+#[test]
+fn transport_epoch_bumps_and_saturates() {
+    let mut p = Partition(60);
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), Some(1));
+    p.clear_state(PartResetKind::Disable);
+    assert_eq!(p.transport_epoch(), Some(1));
+
+    p.slot_mut().transport_epoch = (u16::MAX - 1).to_le_bytes();
+    assert_eq!(p.transport_epoch(), Some(u16::MAX - 1));
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+    PartStore::bump_transport_epochs();
+    assert_eq!(p.transport_epoch(), None);
+
+    p.reset();
+    assert_eq!(p.transport_epoch(), Some(0));
+}
+
 /// The unwrapping-key slot's validity byte decodes to its three states, and
 /// any other byte decodes to `None`, which callers treat as not importable.
 #[test]
@@ -379,4 +385,51 @@ fn clear_state_preserves_unwrapping_key_slot() {
     assert!(!p.unwrapping_key_required());
     assert_eq!(p.unwrapping_key_slot(), Some(UnwrappingKeySlot::Empty));
     assert!(p.unwrapping_key_bk().iter().all(|&b| b == 0));
+}
+
+/// The DTCM shadow of the small fields serves repeated reads, but every
+/// setter's write shows up in the next read.
+#[test]
+fn shadowed_fields_follow_writes() {
+    let pid = 15usize;
+    let cred = [0x66u8; CREDENTIAL_LEN];
+
+    Partition(pid).reset();
+    Partition(pid).set_state(HsmPartState::Initialized);
+    Partition(pid).set_generation(7);
+    Partition(pid).set_res_mask(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
+    Partition(pid).set_mk_key_id(Some(HsmKeyId::from(0x0102u16)));
+    Partition(pid).set_sd_mk_key_id(Some(HsmKeyId::from(0x0304u16)));
+
+    // Twice each: once loading the shadow, once from it.
+    for _ in 0..2 {
+        let p = Partition(pid);
+        assert_eq!(p.state().unwrap(), HsmPartState::Initialized);
+        assert_eq!(p.generation(), 7);
+        assert_eq!(p.res_mask(), 0x0123_4567_89ab_cdef_0011_2233_4455_6677);
+        assert_eq!(p.mk_key_id(), Some(HsmKeyId::from(0x0102u16)));
+        assert_eq!(p.sd_mk_key_id(), Some(HsmKeyId::from(0x0304u16)));
+        assert_eq!(p.local_mk_key_id(), None);
+        assert!(!p.credential_valid());
+    }
+
+    Partition(pid).set_state(HsmPartState::Enabled);
+    assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
+    Partition(pid).bump_generation();
+    assert_eq!(Partition(pid).generation(), 8);
+    Partition(pid).set_res_mask(1);
+    assert_eq!(Partition(pid).res_mask(), 1);
+    Partition(pid).set_mk_key_id(None);
+    assert_eq!(Partition(pid).mk_key_id(), None);
+    Partition(pid).set_local_mk_key_id(Some(HsmKeyId::from(0x0506u16)));
+    assert_eq!(
+        Partition(pid).local_mk_key_id(),
+        Some(HsmKeyId::from(0x0506u16))
+    );
+    Partition(pid).set_credential(buf(&cred)).unwrap();
+    assert!(Partition(pid).credential_valid());
+    Partition(pid).set_sd_initialized(true);
+    assert!(Partition(pid).sd_initialized());
+    Partition(pid).set_sd_initialized(false);
+    assert!(!Partition(pid).sd_initialized());
 }

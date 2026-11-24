@@ -24,6 +24,7 @@ use super::*;
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the source backup, exactly
@@ -31,7 +32,7 @@ use super::*;
 /// * `src_evidence` - Source (sender) attestation evidence, transmitted
 ///   out of band.
 /// * `dest_evidence` - Destination (receiver) attestation evidence.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `src_remote_backup` - The source remote backup to reseal, exactly
 ///   [`POK_REMOTE_BACKUP_LEN`] bytes.
 ///
@@ -42,12 +43,14 @@ use super::*;
 /// and surfaces DDI/device failures from the round-trip.
 pub(crate) fn sd_reseal_remote_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
     src_evidence: &HsmSdEvidence<'_>,
     dest_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     src_remote_backup: &[u8],
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<Vec<u8>> {
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
         .try_into()
@@ -55,7 +58,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     let src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN] = src_remote_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Both parties' evidence share one OOB list; push the source first,
     // then the destination, so descriptor indices stay contiguous.
@@ -80,9 +83,13 @@ pub(crate) fn sd_reseal_remote_backup_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
+    // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
+    // cookie explicitly since this call also runs outside
+    // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    dev.exec_op_tbor(&req, oob_items, &mut cookie)
-        .map(|resp| resp.dst_remote_backup.to_vec())
-        .map_err(HsmError::from)
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
+            .map(|resp| resp.dst_remote_backup.to_vec())
+            .map_err(HsmError::from)
+    })
 }

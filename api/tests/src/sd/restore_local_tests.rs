@@ -21,9 +21,40 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use crate::utils::partition_ex_helpers::PARTITION_LOCK;
 use crate::utils::sd_provision::CaKey;
 use crate::utils::sd_provision::SEALING_KEY_BITS;
-use crate::utils::sd_provision::build_receiver_evidence;
+use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
+
+#[test]
+fn sd_restore_local_backup_uses_negotiated_session_revision() {
+    let _guard = PARTITION_LOCK.lock();
+    let info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("partition");
+    let range = info.api_rev_range.expect("API revision range");
+    if range.min() == range.max() {
+        return;
+    }
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata, &pota, None, None);
+    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
+    let created = evidence
+        .with_create_backup(|rcvr_chain, ev| {
+            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+        })
+        .expect("create remote backup");
+    drop(session);
+
+    let part =
+        HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, range.max());
+    assert_ne!(part.api_rev(), session.api_rev());
+    let result = session.sd_restore_local_backup(&created.pok_local_backup, &created.sd_mk_backup);
+    assert_eq!(result.err(), Some(HsmError::SdAlreadyInitialized));
+}
 
 /// Happy path: create the security domain on one incarnation, then restore
 /// it from its device-local backups on a rebooted (factory-reset, same-seed)
@@ -31,6 +62,9 @@ use crate::utils::sd_provision::provision_backing;
 /// lengths and makes the original SD-scoped sealing key usable again.
 #[test]
 fn sd_restore_local_backup_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
@@ -39,7 +73,7 @@ fn sd_restore_local_backup_roundtrip() {
     // and the local_mk backup needed to restore PartLocalMK after reboot.
     let (session1, policy, pid_pub, local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session1);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session1.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
@@ -66,7 +100,7 @@ fn sd_restore_local_backup_roundtrip() {
     let (session2, policy2, pid_pub2, _lmk2) =
         provision_backing(&sata, &pota, Some(&policy), Some(&local_mk));
     let (_receiver_masked, receiver_pub, receiver_report) = masked_key_and_report(&session2);
-    let receiver = build_receiver_evidence(&pid_pub2, &receiver_pub, &sata, &receiver_report);
+    let receiver = build_evidence(&pid_pub2, &receiver_pub, &sata, &pota, &receiver_report);
     let before_restore = receiver.with_hsm_evidence(|destination| {
         session2.sd_create_peer_backup(&policy2, &sd_masked, destination, &created.pok_local_backup)
     });
@@ -114,13 +148,16 @@ fn sd_restore_local_backup_roundtrip() {
 /// by the firmware's one-shot gate.
 #[test]
 fn sd_restore_local_backup_is_one_shot() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
 
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
             session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)

@@ -95,7 +95,7 @@ fn test_close_session_twice_smoke() {
         let err = helper_close_session(dev, Some(sess_id), Some(DdiApiRev { major: 1, minor: 0 }))
             .expect_err("second CloseSession against the same id must be rejected");
 
-        let expected = if cfg!(feature = "sock") {
+        let expected = if tsra_ddi::sock_selected() {
             DdiStatus::FileHandleSessionIdDoesNotMatch
         } else {
             DdiStatus::FileHandleNoExistingSession

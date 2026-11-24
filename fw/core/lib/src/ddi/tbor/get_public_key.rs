@@ -5,8 +5,8 @@
 //!
 //! Takes a **masked private key** (RSA / RSA-CRT / ECC), unmasks it, and
 //! returns its wire public key — the same format [`super::unwrap_key`]
-//! returns (`n_le ‖ e_le` / `x ‖ y`). This lets a host that holds only the
-//! masked blob rebuild the public half of a key pair.
+//! returns (`n ‖ e` / `x ‖ y`, device byte order). This lets a host that
+//! holds only the masked blob rebuild the public half of a key pair.
 //!
 //! Flow:
 //!
@@ -57,7 +57,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let pub_key = derive_pub_key(pal, io, alloc, view.key_kind, view.target_key).await?;
 
         cmd_buf.encode_response(|buf| {
-            let frame = TborGetPublicKeyResp::encode(buf, 0, false)?
+            let frame = TborGetPublicKeyResp::encode_for_request(buf, 0, false)?
                 .pub_key(pub_key)?
                 .finish();
             Ok(frame.as_bytes().len())

@@ -79,7 +79,7 @@ pub struct TborAesGcmEncryptDecryptReq {
 
     /// The masked AES-256 key, placed last so firmware can return
     /// `iv` / `tag` in place.
-    #[tbor(min_len = 264, max_len = 264)]
+    #[tbor(align = 4, min_len = 264, max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 
@@ -120,7 +120,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 512];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(frame.windows(12).any(|w| w == [0x33u8; 12]));
         assert!(frame.windows(16).any(|w| w == [0x44u8; 16]));
     }

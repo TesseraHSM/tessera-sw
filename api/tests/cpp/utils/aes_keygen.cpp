@@ -9,6 +9,7 @@
 #include "key_import.hpp"
 #include "rsa_keygen.hpp"
 #include "utils/auto_key.hpp"
+#include "utils/utils.hpp"
 
 // Helper to build XTS wrapped blob header
 // Format: magic (u64 LE) + version (u16 LE) + key1_len (u16 LE) + key2_len (u16 LE) + reserved (u16
@@ -50,18 +51,20 @@ std::vector<uint8_t> build_xts_wrapped_blob(
     const std::vector<uint8_t> &key2_plain
 )
 {
-#if SESSION_EX_TESTS
-    // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
-    // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).
-    std::vector<uint8_t> key_plain(key1_plain);
-    key_plain.insert(key_plain.end(), key2_plain.begin(), key2_plain.end());
-    std::vector<uint8_t> wrapped;
-    if (rsa_aes_wrap_bytes(wrapping_pub_key, key_plain, 256, wrapped) != TSRA_STATUS_SUCCESS)
+    if (api_rev_at_least(1, 1))
     {
-        return {};
+        // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
+        // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).
+        std::vector<uint8_t> key_plain(key1_plain);
+        key_plain.insert(key_plain.end(), key2_plain.begin(), key2_plain.end());
+        std::vector<uint8_t> wrapped;
+        if (rsa_aes_wrap_bytes(wrapping_pub_key, key_plain, 256, wrapped) != TSRA_STATUS_SUCCESS)
+        {
+            return {};
+        }
+        return wrapped;
     }
-    return wrapped;
-#else
+
     tsra_status err;
 
     // Wrap key1
@@ -125,7 +128,6 @@ std::vector<uint8_t> build_xts_wrapped_blob(
     blob.insert(blob.end(), key2_wrapped.begin(), key2_wrapped.end());
 
     return blob;
-#endif
 }
 
 // Helper to build OAEP params with SHA-256 for RSA AES key unwrap

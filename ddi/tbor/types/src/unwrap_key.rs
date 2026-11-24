@@ -23,8 +23,10 @@ use crate::tbor;
 /// TBOR opcode for `UnwrapKey`.
 pub const TBOR_OP_UNWRAP_KEY: u8 = 0x14;
 
-/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
-pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 3072;
+/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`): the 256-byte
+/// RSA-2048 OAEP ciphertext plus up to a 6152-byte AES-KWP payload (6 KiB of
+/// plaintext).
+pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 6408;
 /// Max masked recovered-key envelope length.
 pub const UNWRAP_MASKED_KEY_MAX_LEN: usize = 3168;
 /// Max recovered public-key length.
@@ -124,7 +126,7 @@ pub struct TborUnwrapKeyReq {
     pub oaep_hash_algo: u8,
 
     /// The RSA-AES-wrapped key (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
-    #[tbor(max_len = 3072)]
+    #[tbor(max_len = 6408)]
     pub wrapped_blob: Vec<u8>,
 
     /// Caller-supplied key label recorded in the masked blob's metadata,
@@ -141,7 +143,7 @@ pub struct TborUnwrapKeyResp {
     pub key_kind: u8,
 
     /// The recovered key, masked under the scope's masking key.
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// The recovered key's wire public key for RSA / ECC; empty for
@@ -168,7 +170,7 @@ mod tests {
             key_label: b"imported-key".to_vec(),
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&KEY_CLASS_HMAC_SHA256),
             "encoded frame must carry the key-class discriminant",

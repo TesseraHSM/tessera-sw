@@ -24,7 +24,7 @@ tracing = { optional = true, workspace = true }
 
 [dev-dependencies]
 bitflags.workspace = true
-chrono.workspace = true
+ddi_sock_server = { features = ["autostart"], workspace = true }
 minicbor.workspace = true
 parking_lot.workspace = true
 test_with_tracing.workspace = true
@@ -41,6 +41,9 @@ x509.workspace = true
 
 [lib]
 doctest = false
+
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { features = ["libloaderapi", "minwindef"], workspace = true }
 
 [[test]]
 name = "tsra_ddi_tests"
@@ -61,10 +64,8 @@ pre_encode = [
   "tsra_ddi_mbor_codec/pre_encode",
 ]
 # Forward backend selection to the tsra_ddi facade so the integration
-# test binary picks up the right backend. On emu, set
-# `TSRA_EMU_RESOURCE_COUNT` to choose the partition resource count.
-emu = ["tsra_ddi/emu"]
-sock = ["tsra_ddi/sock"]
+# test binary picks up the right backend. With `sock`, set
+# `resource_count` in `TSRA_TEST_ARGS` to choose the partition resource count.
 
 [lints]
 workspace = true

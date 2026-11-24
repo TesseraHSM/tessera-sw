@@ -16,10 +16,5 @@ tracing.workspace = true
 tsra_api.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 
-[features]
-default = []
-emu = ["tsra_api/emu"]
-sock = ["tsra_api/sock"]
-
 [lints]
 workspace = true

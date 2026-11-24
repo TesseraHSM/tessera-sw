@@ -290,3 +290,111 @@ TEST_F(ec_sign_verify, verify_fails_with_wrong_key)
         1
     ) << "Verification with wrong key should fail";
 }
+
+/// Verification accepts only the DER encoding of a signature: the same r and s
+/// with a trailing byte or a non-minimal length fail, through EVP_PKEY_verify()
+/// and EVP_DigestVerify*().
+TEST_F(ec_sign_verify, verify_rejects_non_canonical_signature)
+{
+    for (const auto &tc : kTestCases)
+    {
+        SCOPED_TRACE(tc.label);
+        auto key = generate_ec_session_key(prov_.libctx(), tc.curve);
+        ASSERT_NE(key, nullptr);
+        const unsigned char message[] = "strict DER signature";
+        EvpMdCtxPtr sign(EVP_MD_CTX_new());
+        ASSERT_NE(sign, nullptr);
+        ASSERT_EQ(
+            EVP_DigestSignInit_ex(
+                sign.get(),
+                nullptr,
+                tc.digest,
+                prov_.libctx(),
+                "provider=tsra",
+                key.get(),
+                nullptr
+            ),
+            1
+        );
+        size_t len = 0;
+        ASSERT_EQ(EVP_DigestSign(sign.get(), nullptr, &len, message, sizeof(message)), 1);
+        std::vector<unsigned char> signature(len);
+        ASSERT_EQ(EVP_DigestSign(sign.get(), signature.data(), &len, message, sizeof(message)), 1);
+        signature.resize(len);
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digest_len = 0;
+        EvpMdPtr md(EVP_MD_fetch(prov_.libctx(), tc.digest, "provider=default"));
+        ASSERT_NE(md, nullptr);
+        ASSERT_EQ(EVP_Digest(message, sizeof(message), digest, &digest_len, md.get(), nullptr), 1);
+
+        std::vector<unsigned char> suffixed(signature);
+        suffixed.push_back(0);
+        // Same r and s under a non-minimal (BER) outer length.
+        std::vector<unsigned char> ber(signature);
+        ASSERT_GT(ber.size(), 2u);
+        if (ber[1] < 0x80)
+        {
+            ber.insert(ber.begin() + 1, 0x81);
+        }
+        else
+        {
+            ASSERT_EQ(ber[1], 0x81);
+            ber[1] = 0x82;
+            ber.insert(ber.begin() + 2, 0x00);
+        }
+        struct Candidate
+        {
+            const char *name;
+            const std::vector<unsigned char> &bytes;
+            int expected;
+        };
+        const Candidate candidates[] = {
+            { "DER", signature, 1 },
+            { "trailing byte", suffixed, 0 },
+            { "BER length", ber, 0 },
+        };
+
+        for (const Candidate &candidate : candidates)
+        {
+            SCOPED_TRACE(candidate.name);
+            EvpPkeyCtxPtr pctx(
+                EVP_PKEY_CTX_new_from_pkey(prov_.libctx(), key.get(), "provider=tsra")
+            );
+            ASSERT_NE(pctx, nullptr);
+            ASSERT_EQ(EVP_PKEY_verify_init(pctx.get()), 1);
+            EXPECT_EQ(
+                EVP_PKEY_verify(
+                    pctx.get(),
+                    candidate.bytes.data(),
+                    candidate.bytes.size(),
+                    digest,
+                    digest_len
+                ),
+                candidate.expected
+            );
+            EvpMdCtxPtr streaming(EVP_MD_CTX_new());
+            ASSERT_NE(streaming, nullptr);
+            ASSERT_EQ(
+                EVP_DigestVerifyInit_ex(
+                    streaming.get(),
+                    nullptr,
+                    tc.digest,
+                    prov_.libctx(),
+                    "provider=tsra",
+                    key.get(),
+                    nullptr
+                ),
+                1
+            );
+            ASSERT_EQ(EVP_DigestVerifyUpdate(streaming.get(), message, sizeof(message)), 1);
+            EXPECT_EQ(
+                EVP_DigestVerifyFinal(
+                    streaming.get(),
+                    candidate.bytes.data(),
+                    candidate.bytes.size()
+                ),
+                candidate.expected
+            );
+        }
+    }
+}

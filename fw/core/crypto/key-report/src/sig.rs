@@ -3,24 +3,24 @@
 
 //! Signature wire-format helpers.
 
+use tsra_fw_hsm_byte_order as byte_order;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::consts::SIGNATURE_LEN;
 
-/// Convert ECDSA `r || s` between little-endian and big-endian wire
-/// forms by reversing each half independently.
+/// Convert ECDSA `r || s` in place between the PAL's operand order and
+/// the big-endian COSE form, one half at a time. The conversion is its
+/// own inverse and a no-op on big-endian PALs.
 ///
-/// Both buffers must be exactly [`SIGNATURE_LEN`] bytes.
-pub(crate) fn reverse_signature_halves(dst: &mut [u8], src: &[u8]) -> HsmResult<()> {
-    if dst.len() != SIGNATURE_LEN || src.len() != SIGNATURE_LEN {
+/// `sig` must be exactly [`SIGNATURE_LEN`] bytes.
+pub(crate) fn sig_halves_swap(order: HsmByteOrder, sig: &mut [u8]) -> HsmResult<()> {
+    if sig.len() != SIGNATURE_LEN {
         return Err(HsmError::InvalidArg);
     }
-
-    let half = SIGNATURE_LEN / 2;
-    for i in 0..half {
-        dst[i] = src[half - 1 - i];
-        dst[half + i] = src[SIGNATURE_LEN - 1 - i];
-    }
+    let (r, s) = sig.split_at_mut(SIGNATURE_LEN / 2);
+    byte_order::int_to_be(order, r);
+    byte_order::int_to_be(order, s);
     Ok(())
 }

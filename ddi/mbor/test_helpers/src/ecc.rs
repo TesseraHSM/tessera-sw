@@ -8,7 +8,6 @@ pub fn helper_ecc_generate_key_pair(
     sess_id: Option<u16>,
     rev: Option<DdiApiRev>,
     curve: DdiEccCurve,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
 ) -> Result<DdiEccGenerateKeyPairCmdResp, DdiError> {
     let req = DdiEccGenerateKeyPairCmdReq {
@@ -19,7 +18,7 @@ pub fn helper_ecc_generate_key_pair(
         },
         data: DdiEccGenerateKeyPairReq {
             curve,
-            key_tag,
+            key_tag: None,
             key_properties: key_properties
                 .try_into()
                 .map_err(|_| DdiError::InvalidParameter)?,
@@ -38,7 +37,6 @@ pub fn helper_create_ecc_key_pairs(
     sess_id: Option<u16>,
     rev: Option<DdiApiRev>,
     curve: DdiEccCurve,
-    key_tag: Option<u16>,
 ) -> (
     u16,
     [u8; DER_MAX_SIZE],
@@ -51,7 +49,7 @@ pub fn helper_create_ecc_key_pairs(
 
     let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
 
-    let resp = helper_ecc_generate_key_pair(dev, sess_id, rev, curve, key_tag, key_props);
+    let resp = helper_ecc_generate_key_pair(dev, sess_id, rev, curve, key_props);
 
     assert!(resp.is_ok(), "resp {:?}", resp);
     let resp = resp.unwrap();
@@ -66,7 +64,7 @@ pub fn helper_create_ecc_key_pairs(
 
     let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
 
-    let resp = helper_ecc_generate_key_pair(dev, sess_id, rev, curve, key_tag, key_props);
+    let resp = helper_ecc_generate_key_pair(dev, sess_id, rev, curve, key_props);
 
     assert!(resp.is_ok(), "resp {:?}", resp);
     let resp = resp.unwrap();

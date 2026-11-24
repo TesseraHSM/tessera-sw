@@ -3,7 +3,7 @@
 
 //! Generate a masked EC key blob for the engine integration tests.
 //!
-//! Opens the emu HSM from the ambient `TSRA_*` environment — the same
+//! Opens the simulated HSM from the ambient `TSRA_*` environment — the same
 //! environment the engine-loading `openssl` process uses — generates a
 //! persistent EC key on the requested curve (default P-384), and writes its
 //! masked blob to the path given as the first argument. Because both processes

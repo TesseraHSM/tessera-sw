@@ -13,7 +13,7 @@
 //!   by [`HsmPartPropId`] whose wire shape is pinned
 //!   at compile time.
 //! - The [`HsmPartState`] lifecycle enum and a small set of canonical
-//!   length constants ([`PART_POLICY_LEN`], [`BK_BOOT_LEN`],
+//!   length constants ([`PART_POLICY_MAX_LEN`], [`BK_BOOT_LEN`],
 //!   [`SEALED_BK3_MAX_LEN`], [`MASKED_BK_BOOT_LEN`]) that pin the
 //!   byte sizes shared between core, the PAL, and host-side tools.
 //!
@@ -61,12 +61,12 @@
 //!                                                        │           ▼
 //!                                                        │       Enabled
 //!                                                        ▼
-//!     PartInit binds PTA / policy / POTA thumbprint  Initializing
+//!          PartInit binds PTA key / policy hash  Initializing
 //! ```
 //!
 //! [`HsmPartState::Initializing`] is a one-shot transient: once
 //! `PartInit` has bound the Partition Trust Anchor (PTA) key, the
-//! partition policy, and the POTA thumbprint, no further `PartInit`
+//! partition policy hash, no further `PartInit`
 //! is permitted until the next alloc/free cycle.
 //!
 //! # Presence semantics
@@ -108,11 +108,11 @@ use super::*;
 /// interpret it.
 pub type HsmPartId<'a> = &'a [u8];
 
-/// Canonical byte length of a TBOR PartPolicy blob.
-pub const PART_POLICY_LEN: usize = 584;
+/// Maximum byte length of a TBOR PartPolicy document (deterministic CBOR).
+pub const PART_POLICY_MAX_LEN: usize = 384;
 
 /// Byte length of the persisted partition policy hash (SHA-384 digest of
-/// the [`PART_POLICY_LEN`]-byte PartPolicy blob).
+/// the PartPolicy document).
 pub const POLICY_HASH_LEN: usize = 48;
 
 /// Lifecycle state of a partition slot.
@@ -146,8 +146,8 @@ pub enum HsmPartState {
     Disabled = 3,
 
     /// The TBOR `PartInit` handler has bound the Partition Trust
-    /// Anchor (PTA) key, the partition policy, and the POTA
-    /// thumbprint to this incarnation, but partition finalization
+    /// Anchor (PTA) key and the partition policy hash to this
+    /// incarnation, but partition finalization
     /// has not yet run.  No further `PartInit` is permitted until
     /// the next alloc/free cycle (one-shot enforcement).
     Initializing = 4,
@@ -376,6 +376,19 @@ pub trait HsmPartitionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmPartPropId,
     ) -> HsmResult<&'a HsmDmaBuf>;
+
+    /// Whether the PSK selected by `psk_id` (`0` = crypto officer, `1` =
+    /// crypto user) still holds its well-known default, if the PAL
+    /// remembers it (see
+    /// [`part_psk_memo_default`](Self::part_psk_memo_default)).
+    fn part_psk_default_memo(&self, _io: &Self::Io, _psk_id: u8) -> Option<bool> {
+        None
+    }
+
+    /// Remember whether the PSK selected by `psk_id` holds its well-known
+    /// default, as comparing it just found. A PAL that remembers it must
+    /// forget it whenever that PSK may change.
+    fn part_psk_memo_default(&self, _io: &Self::Io, _psk_id: u8, _is_default: bool) {}
 
     /// Write a [`HsmPartPropKind::FixedBytes`] or
     /// [`HsmPartPropKind::VarBytes`] slot.
@@ -825,11 +838,6 @@ impl HsmPartPropId {
     /// scope to its live masking key.
     pub const SD_MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x001D);
 
-    /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) of the
-    /// partition identity key.  Read-only from caller perspective;
-    /// materialised by the PAL alongside [`PART_ID_ECC_KEY_ID`](Self::PART_ID_ECC_KEY_ID).
-    pub const PART_ID_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0017);
-
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
     /// session encryption key.  Read-only from caller perspective.
     pub const SESSION_ENC_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0018);
@@ -838,13 +846,6 @@ impl HsmPartPropId {
     /// one-shot establish-credential key.  Read-only from caller
     /// perspective.
     pub const ESTABLISH_CRED_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0019);
-
-    /// Raw ECC-P384 public-key coordinates (`x ‖ y`, 96 B) for the
-    /// Partition Trust Anchor.  Set together with
-    /// [`PTA_KEY_ID`](Self::PTA_KEY_ID) by `PartInit` (the host-supplied
-    /// SEC1 form is validated and its `0x04` prefix stripped at the
-    /// facade boundary before storage).
-    pub const PTA_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x001A);
 
     // ── Caller-presented secrets (0x0020..) ───────────────────────
 
@@ -885,24 +886,10 @@ impl HsmPartPropId {
     /// Read-only from caller perspective; populated by the PAL.
     pub const VM_LAUNCH_GUID: HsmPartPropId = HsmPartPropId(0x0033);
 
-    /// Partition policy hash — SHA-384 digest of the
-    /// [`PART_POLICY_LEN`](crate::PART_POLICY_LEN)-byte PartPolicy blob
+    /// Partition policy hash — SHA-384 digest of the PartPolicy document
     /// (exactly [`POLICY_HASH_LEN`](crate::POLICY_HASH_LEN) bytes). Set by
     /// `PartInit`.
     pub const POLICY_HASH: HsmPartPropId = HsmPartPropId(0x0034);
-
-    /// POTA thumbprint (48 B).  Set by `PartInit`.
-    pub const POTA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0035);
-
-    /// SATA (Sealing Authority Trust Anchor) thumbprint (48 B).  Set by
-    /// `PartInit` when configuring the partition for its security
-    /// domain.
-    pub const SATA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0037);
-
-    /// SAPOTA (Sealing Authority's POTA) thumbprint (48 B).  Optional;
-    /// set by `PartInit` only when the request carries a SAPOTA
-    /// thumbprint.
-    pub const SAPOTA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0038);
 
     /// BK3 session key (48 B).  Sensitive.  Set by EstablishCredential
     /// once per session.
@@ -987,10 +974,9 @@ impl HsmPartPropId {
             | Self::RSA_UNWRAPPING_KEY_ID => VAULT_REF_RW,
 
             // ── Public-key views (fixed P-384 sizes) ──
-            Self::PART_ID_ECC_PUB_KEY
-            | Self::SESSION_ENC_ECC_PUB_KEY
-            | Self::ESTABLISH_CRED_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Ro, Abs, false),
-            Self::PTA_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Rw, Abs, false),
+            Self::SESSION_ENC_ECC_PUB_KEY | Self::ESTABLISH_CRED_ECC_PUB_KEY => {
+                HsmPartPropMeta::fixed(96, Ro, Abs, false)
+            }
 
             // ── Caller-presented secrets ──
             Self::PSK_CO | Self::PSK_CU => HsmPartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),
@@ -1002,9 +988,6 @@ impl HsmPartPropId {
             Self::MASKED_BK_BOOT => HsmPartPropMeta::var(MASKED_BK_BOOT_LEN as u16, Rw, Abs, true),
             Self::VM_LAUNCH_GUID => HsmPartPropMeta::fixed(16, Ro, Abs, false),
             Self::POLICY_HASH => HsmPartPropMeta::fixed(POLICY_HASH_LEN as u16, Rw, Abs, false),
-            Self::POTA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
-            Self::SATA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
-            Self::SAPOTA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
             Self::BK3_SESSION => HsmPartPropMeta::fixed(48, Rw, Abs, true),
 
             _ => return None,

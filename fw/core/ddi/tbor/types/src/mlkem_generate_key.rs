@@ -130,7 +130,7 @@ pub struct TborMlKemGenerateKeyResp<'a> {
     /// under the scope's masking key.  Always 196 B: the wire is
     /// seed-only, so the plaintext is the 64-byte `(d ‖ z)` seed
     /// material.  See [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 3464, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
 
     /// The ML-KEM public / encapsulation key.  Up to 1568 B for ML-KEM-1024.
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn request_round_trips_seed_kind() {
         let mut buf = [0u8; 256];
-        let frame = TborMlKemGenerateKeyReq::encode(&mut buf)
+        let frame = TborMlKemGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -171,7 +171,7 @@ mod tests {
             MlKemKeyKind::MlKem1024Seed,
         ] {
             let mut buf = [0u8; 256];
-            let frame = TborMlKemGenerateKeyReq::encode(&mut buf)
+            let frame = TborMlKemGenerateKeyReq::encode(&mut buf, (1, 1))
                 .unwrap()
                 .session_id(SessionId(1))
                 .unwrap()
@@ -197,7 +197,7 @@ mod tests {
         let mut buf = [0u8; 8192];
         let masked = [0xABu8; MASKED_MLKEM_KEY_MAX_LEN];
         let pub_key = [0xCDu8; MLKEM_PUB_KEY_MAX_LEN];
-        let frame = TborMlKemGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborMlKemGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

@@ -38,6 +38,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_hsm_undo::UndoLog;
 
 use crate::part_state;
@@ -351,7 +352,14 @@ pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     // Vault SDMK as the partition's SecurityDomain-scope masking key, then
     // record its id so `masking_key_id_for_scope` resolves it.
     let sdmk_id = pal
-        .vault_key_create(io, sdmk, HsmVaultKeyKind::SdMasking, None, SDMK_ATTRS)
+        .vault_key_create(
+            io,
+            sdmk,
+            HsmVaultKeyKind::SdMasking,
+            None,
+            SDMK_ATTRS,
+            HsmVaultPct::None,
+        )
         .await?;
     if let Err(e) = undo.push_vault_create(sdmk_id) {
         // The key exists but could not be tracked for rollback (e.g.

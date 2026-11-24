@@ -3,12 +3,12 @@
 
 #![no_main]
 
-use tsra_ddi_tbor_codec::RequestView;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_tbor_codec::RequestView;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(view) = RequestView::parse(data) {
-        let _ = view.version();
+        let _ = view.api_rev();
         let _ = view.opcode();
         let _ = view.toc_count();
         let _ = view.data_start();

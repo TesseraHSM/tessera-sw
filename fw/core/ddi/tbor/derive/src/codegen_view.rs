@@ -49,13 +49,13 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
             /// Status code (4-byte LE unsigned integer).
             #[inline]
             pub fn status(&self) -> u32 {
-                u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+                u32::from_le_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]])
             }
 
             /// FIPS_APPROVED flag (bit 0 of flags).
             #[inline]
             pub fn fips_approved(&self) -> bool {
-                self.buf[1] & 0x01 != 0
+                self.buf[5] & 0x01 != 0
             }
         }
     } else {
@@ -78,6 +78,14 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
         }
 
         impl<'a> #view_name<'a> {
+            /// API revision carried in the message header.
+            pub fn api_rev(&self) -> (u16, u16) {
+                (
+                    u16::from_le_bytes([self.buf[0], self.buf[1]]),
+                    u16::from_le_bytes([self.buf[2], self.buf[3]]),
+                )
+            }
+
             /// Construct from a validated buffer. Not public — use
             #[doc = concat!("[`", stringify!(#name), "::decode()`] instead.")]
             fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Self {
@@ -236,7 +244,7 @@ fn gen_accessor(
 fn data_start_expr(header_len: &TokenStream, _needs_data_start: bool) -> TokenStream {
     quote! {
         {
-            let toc_count = (self.buf[2] & 0x1F) as usize + 1;
+            let toc_count = (self.buf[4] & 0x1F) as usize + 1;
             #header_len + toc_count * 4
         }
     }
@@ -271,7 +279,8 @@ fn gen_validation(schema: &Schema) -> TokenStream {
     };
 
     let type_checks = gen_type_checks(schema, &layout);
-    let padding_checks = gen_padding_checks(&layout);
+    let padding_checks = gen_padding_checks(schema, &layout);
+    let align_checks = gen_align_checks(schema, &layout);
     let len_checks = gen_len_checks(schema, &layout);
 
     // Included field groups expand the TOC dynamically, so fold their
@@ -309,6 +318,10 @@ fn gen_validation(schema: &Schema) -> TokenStream {
 
         // Validate padding entries.
         #(#padding_checks)*
+
+        // Aligned fields must start on their boundary, measured from the
+        // start of the message.
+        #(#align_checks)*
 
         // Validate each field TOC entry type at expected position.
         #(#type_checks)*
@@ -364,15 +377,41 @@ fn gen_type_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
 }
 
 /// Generate validation checks for padding TOC entries.
-fn gen_padding_checks(layout: &TocLayout) -> Vec<TokenStream> {
+fn gen_padding_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
     let padding_type_id = 9u8;
     layout
         .padding_positions
         .iter()
-        .map(|&(toc_idx, _)| {
+        .map(|&(_, field_idx)| {
+            let field_toc_idx =
+                crate::codegen_enc::effective_toc_idx(field_idx, layout, &schema.fields);
             quote! {
-                if raw.toc_entry_type(#toc_idx) != #padding_type_id {
+                if raw.toc_entry_type(#field_toc_idx - 1) != #padding_type_id {
                     return Err(tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType);
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate checks that each present `#[tbor(align = N)]` field starts at
+/// a multiple of `N` bytes from the start of the message.
+fn gen_align_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
+    schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.align > 0)
+        .map(|(i, f)| {
+            let toc_idx = crate::codegen_enc::effective_toc_idx(i, layout, &schema.fields);
+            let toc_type_id = f.toc_type_id;
+            let align = f.align;
+            quote! {
+                if raw.toc_entry_type(#toc_idx) == #toc_type_id {
+                    let off = tsra_fw_ddi_tbor::toc::raw_toc_offset(raw.toc_word(#toc_idx));
+                    if (raw.data_start() + off) % #align != 0 {
+                        return Err(tsra_fw_hsm_pal_traits::HsmError::TborMisalignedField);
+                    }
                 }
             }
         })
@@ -382,11 +421,6 @@ fn gen_padding_checks(layout: &TocLayout) -> Vec<TokenStream> {
 /// Generate length-constraint checks for buffer/sealed_key fields that
 /// have `fixed_len`, `min_len`, or `max_len` constraints.
 fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
-    let header_len_val = match schema.kind {
-        MessageKind::Request { .. } => quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
-        MessageKind::Response => quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
-        MessageKind::Fields => unreachable!(),
-    };
     schema
         .fields
         .iter()
@@ -409,7 +443,7 @@ fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
                 Some(quote! {
                     if raw.toc_entry_type(#toc_idx) != #none_type_id {
                         let len = tsra_fw_ddi_tbor::toc::raw_toc_length(
-                            tsra_fw_ddi_tbor::toc::read_toc_word(raw.as_bytes(), #header_len_val, #toc_idx)
+                            raw.toc_word(#toc_idx)
                         );
                         if !(#min_l..=#max_l).contains(&len) {
                             return Err(tsra_fw_hsm_pal_traits::HsmError::TborInvalidFixedLength);
@@ -420,7 +454,7 @@ fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
                 Some(quote! {
                     {
                         let len = tsra_fw_ddi_tbor::toc::raw_toc_length(
-                            tsra_fw_ddi_tbor::toc::read_toc_word(raw.as_bytes(), #header_len_val, #toc_idx)
+                            raw.toc_word(#toc_idx)
                         );
                         if !(#min_l..=#max_l).contains(&len) {
                             return Err(tsra_fw_hsm_pal_traits::HsmError::TborInvalidFixedLength);

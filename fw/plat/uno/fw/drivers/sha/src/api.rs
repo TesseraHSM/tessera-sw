@@ -4,7 +4,10 @@
 #![allow(unsafe_code)]
 
 use core::future::poll_fn;
+use core::future::Future;
 use core::ops::AsyncFnOnce;
+use core::pin::Pin;
+use core::task::Context;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
@@ -258,6 +261,9 @@ struct WaiterSlot {
 
     /// An exclusive command has been submitted and is awaiting completion.
     exclusive_in_flight: bool,
+
+    /// A regular command canceled while queued, before the hardware can read it.
+    cancelled: bool,
 }
 
 struct ShaState<const DEPTH: usize> {
@@ -282,7 +288,9 @@ struct ShaState<const DEPTH: usize> {
 /// # Type Parameters
 ///
 /// - `DEPTH`: Maximum number of concurrent waiters. Must be a power of 2,
-///   at most 128.
+///   at most 128. A caller that finds every slot taken fails with
+///   [`ShaError::QUEUE_FULL`] rather than waiting, so size `DEPTH` to the
+///   number of tasks that can use the engine at once.
 pub struct ShaDriver<const DEPTH: usize> {
     state: SingleCell<ShaState<DEPTH>>,
 }
@@ -328,6 +336,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                     status: 0,
                     exclusive: false,
                     exclusive_in_flight: false,
+                    cancelled: false,
                 }),
                 head: 0,
                 active: 0,
@@ -362,52 +371,11 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
         &'a self,
         req: ShaRequest<'a>,
     ) -> impl core::future::Future<Output = HsmResult<u8>> + 'a {
-        let mut slot_idx: Option<u8> = None;
-
-        poll_fn(move |cx| {
-            self.state.with(|s| {
-                if slot_idx.is_none() {
-                    if let Err(e) = validate(&req) {
-                        return Poll::Ready(Err(e));
-                    }
-                    let Ok(mode) = mode_field(req.mode) else {
-                        return Poll::Ready(Err(ShaError::INVALID_MODE));
-                    };
-                    if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return Poll::Ready(Err(ShaError::QUEUE_FULL));
-                    }
-
-                    let idx = (s.tail & Self::MASK) as usize;
-                    let was_empty = s.active == s.tail;
-                    slot_idx = Some(s.tail);
-                    s.tail = s.tail.wrapping_add(1);
-
-                    write_cmd(idx, &req, mode);
-
-                    if was_empty {
-                        submit_cmd(idx);
-                    }
-                }
-
-                let idx = (slot_idx.expect("command slot allocated above") & Self::MASK) as usize;
-                let slot = &mut s.slots[idx];
-
-                if slot.status != 0 {
-                    let status = slot.status;
-                    slot.status = 0;
-
-                    while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0
-                    {
-                        s.head = s.head.wrapping_add(1);
-                    }
-
-                    return Poll::Ready(Ok(status));
-                }
-
-                slot.waker.register(cx.waker());
-                Poll::Pending
-            })
-        })
+        ShaDigestFuture {
+            driver: self,
+            req,
+            slot_idx: None,
+        }
     }
 
     /// Wake the driver on SHA completion.
@@ -447,7 +415,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                 slot.status = flags as u8;
                 slot.waker.wake();
 
-                s.active = s.active.wrapping_add(1);
+                advance_active(s);
                 if s.active != s.tail {
                     let next = (s.active & Self::MASK) as usize;
                     if !s.slots[next].exclusive {
@@ -509,6 +477,8 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                     }
                     let idx = (s.tail & Self::MASK) as usize;
                     s.slots[idx].exclusive = true;
+                    s.slots[idx].cancelled = false;
+                    s.slots[idx].status = 0;
                     slot_idx = Some(s.tail);
                     s.tail = s.tail.wrapping_add(1);
                 }
@@ -536,10 +506,8 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
             let idx = (my & Self::MASK) as usize;
             s.slots[idx].exclusive = false;
             s.slots[idx].status = 0;
-            s.active = my.wrapping_add(1);
-            while s.head != s.active && s.slots[(s.head & Self::MASK) as usize].status == 0 {
-                s.head = s.head.wrapping_add(1);
-            }
+            advance_active(s);
+            advance_head(s);
             if s.active != s.tail {
                 let next = (s.active & Self::MASK) as usize;
                 if !s.slots[next].exclusive {
@@ -549,6 +517,109 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                 }
             }
         });
+    }
+}
+
+struct ShaDigestFuture<'a, const DEPTH: usize> {
+    driver: &'a ShaDriver<DEPTH>,
+    req: ShaRequest<'a>,
+    slot_idx: Option<u8>,
+}
+
+impl<const DEPTH: usize> Future for ShaDigestFuture<'_, DEPTH> {
+    type Output = HsmResult<u8>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.driver.state.with(|s| {
+            if this.slot_idx.is_none() {
+                if let Err(e) = validate(&this.req) {
+                    return Poll::Ready(Err(e));
+                }
+                let Ok(mode) = mode_field(this.req.mode) else {
+                    return Poll::Ready(Err(ShaError::INVALID_MODE));
+                };
+                if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
+                    return Poll::Ready(Err(ShaError::QUEUE_FULL));
+                }
+
+                let idx = (s.tail & ShaDriver::<DEPTH>::MASK) as usize;
+                let was_empty = s.active == s.tail;
+                this.slot_idx = Some(s.tail);
+                s.slots[idx].status = 0;
+                s.slots[idx].cancelled = false;
+                s.tail = s.tail.wrapping_add(1);
+                write_cmd(idx, &this.req, mode);
+                if was_empty {
+                    submit_cmd(idx);
+                }
+            }
+
+            let raw_idx = this.slot_idx.expect("command slot allocated above");
+            let idx = (raw_idx & ShaDriver::<DEPTH>::MASK) as usize;
+            let slot = &mut s.slots[idx];
+            if slot.status != 0 {
+                let status = slot.status;
+                slot.status = 0;
+                while s.head != s.active
+                    && s.slots[(s.head & ShaDriver::<DEPTH>::MASK) as usize].status == 0
+                {
+                    s.head = s.head.wrapping_add(1);
+                }
+                this.slot_idx = None;
+                return Poll::Ready(Ok(status));
+            }
+
+            slot.waker.register(cx.waker());
+            Poll::Pending
+        })
+    }
+}
+
+impl<const DEPTH: usize> Drop for ShaDigestFuture<'_, DEPTH> {
+    fn drop(&mut self) {
+        let Some(raw_idx) = self.slot_idx.take() else {
+            return;
+        };
+        let idx = (raw_idx & ShaDriver::<DEPTH>::MASK) as usize;
+        let (completed, active) = self
+            .driver
+            .state
+            .with(|s| (s.slots[idx].status != 0, s.active == raw_idx));
+        if !completed && !active {
+            self.driver.state.with(|s| {
+                s.slots[idx].cancelled = true;
+            });
+            return;
+        }
+
+        // The SHA engine may still read the request and write the digest
+        // buffer. Drain completion before the caller can reclaim either.
+        while !self.driver.state.with(|s| s.slots[idx].status != 0) {
+            self.driver.wake();
+            core::hint::spin_loop();
+        }
+        self.driver.state.with(|s| {
+            s.slots[idx].status = 0;
+            while s.head != s.active
+                && s.slots[(s.head & ShaDriver::<DEPTH>::MASK) as usize].status == 0
+            {
+                s.head = s.head.wrapping_add(1);
+            }
+        });
+    }
+}
+
+#[inline(never)]
+fn advance_active<const DEPTH: usize>(s: &mut ShaState<DEPTH>) {
+    s.active = s.active.wrapping_add(1);
+    while s.active != s.tail {
+        let idx = (s.active & ShaDriver::<DEPTH>::MASK) as usize;
+        if !s.slots[idx].cancelled {
+            break;
+        }
+        s.slots[idx].cancelled = false;
+        s.active = s.active.wrapping_add(1);
     }
 }
 
@@ -629,6 +700,14 @@ impl<const DEPTH: usize> ShaExclusive<'_, DEPTH> {
     }
 }
 
+/// Advance `head` past consecutive consumed slots.
+fn advance_head<const DEPTH: usize>(s: &mut ShaState<DEPTH>) {
+    while s.head != s.active && s.slots[(s.head as usize) & (DEPTH - 1)].status == 0 {
+        s.head = s.head.wrapping_add(1);
+    }
+}
+
+#[inline(never)]
 fn submit_cmd(slot: usize) {
     let desc_addr = IO_GSRAM_BASE + SHA_CMD_OFFSET + (slot as u32) * SHA_CMD_STRIDE;
     // Ensure the descriptor stores to GSRAM are globally visible before the
@@ -644,6 +723,7 @@ fn submit_cmd(slot: usize) {
 /// The caller must have validated the request and obtained the `mode` byte
 /// via [`mode_field`] before calling this function. The actual hardware
 /// submission happens separately via [`submit_cmd`].
+#[inline(never)]
 fn write_cmd(idx: usize, req: &ShaRequest<'_>, mode: u8) {
     let cmd = ShaCmdCode::new()
         .with_tag(0x3)
@@ -720,6 +800,7 @@ fn output_size(req: &ShaRequest<'_>) -> usize {
     }
 }
 
+#[inline(never)]
 fn validate(req: &ShaRequest<'_>) -> HsmResult<()> {
     let _ = mode_field(req.mode)?;
 

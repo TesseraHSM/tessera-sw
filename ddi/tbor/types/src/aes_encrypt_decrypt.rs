@@ -71,7 +71,7 @@ pub struct TborAesEncryptDecryptReq {
 
     /// The masked AES key, placed after the IV and message so firmware can
     /// return those fields in place without moving their payload bytes.
-    #[tbor(min_len = 248, max_len = 264)]
+    #[tbor(align = 4, min_len = 248, max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 
@@ -108,7 +108,7 @@ mod tests {
         };
 
         let mut buf = [0u8; 1536];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
         // The message bytes must appear in the encoded frame.
         assert!(

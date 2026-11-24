@@ -104,7 +104,6 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
         session_only_key_session,
         Some(DdiApiRev { major: 1, minor: 0 }),
         curve,
-        None,
         helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session),
     );
 
@@ -129,7 +128,6 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
         session_only_key_session,
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -177,13 +175,8 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
 }
 
 fn test_ecc_key_gen(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, curve: DdiEccCurve) {
-    let (private_key_id, pub_key, masked_key) = ecc_gen_key_tsra(
-        dev,
-        curve,
-        Some(1),
-        Some(session_id),
-        DdiKeyUsage::SignVerify,
-    );
+    let (private_key_id, pub_key, masked_key) =
+        ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
 
     assert!(verify_iv_not_default_from_masked_key(masked_key.as_slice()).unwrap_or(false));
 
@@ -197,7 +190,6 @@ fn test_ecc_key_gen(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, curve: Ddi
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);

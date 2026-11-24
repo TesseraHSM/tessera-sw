@@ -22,11 +22,11 @@
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcTmkGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
@@ -149,7 +149,7 @@ fn darc_tmk_gen_rejected_on_default_psk() {
     // dispatcher's default-PSK gate before the handler runs.
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let req = TborDarcTmkGenReq {
         session_id: session.session_id(),

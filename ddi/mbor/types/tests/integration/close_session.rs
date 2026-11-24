@@ -172,7 +172,7 @@ fn test_close_session_multiple() {
             );
             assert!(resp.is_err(), "resp {:?}", resp);
 
-            let expected = if cfg!(feature = "sock") {
+            let expected = if tsra_ddi::sock_selected() {
                 DdiStatus::FileHandleSessionIdDoesNotMatch
             } else {
                 DdiStatus::FileHandleNoExistingSession

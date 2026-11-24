@@ -52,7 +52,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
     /// The masked ML-KEM decapsulation key, an AEAD-GCM-256 envelope of
     /// 196 B: the wire ships seed-only keys.  See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 3464, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
 
     /// ML-KEM ciphertext.  Up to 1568 B for ML-KEM-1024.
@@ -68,7 +68,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
 pub struct TborMlKemDecapsulateResp<'a> {
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  The envelope is always 164 B.
-    #[tbor(buffer, max_len = 264, mutable)]
+    #[tbor(align = 4, buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }
 
@@ -85,7 +85,7 @@ mod tests {
         let mut buf = [0u8; 8192];
         let masked = [0x11u8; MASKED_MLKEM_KEY_MAX_LEN];
         let ciphertext = [0x22u8; MLKEM_CIPHERTEXT_MAX_LEN];
-        let frame = TborMlKemDecapsulateReq::encode(&mut buf)
+        let frame = TborMlKemDecapsulateReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -104,7 +104,7 @@ mod tests {
     fn response_round_trips_secret() {
         let mut buf = [0u8; 512];
         let secret = [0x33u8; MASKED_MLKEM_SHARED_SECRET_MAX_LEN];
-        let frame = TborMlKemDecapsulateResp::encode(&mut buf, 0, true)
+        let frame = TborMlKemDecapsulateResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_shared_secret(&secret)
             .unwrap()

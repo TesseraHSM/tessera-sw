@@ -41,9 +41,9 @@ pub enum KeyType {
 pub enum AesKind {
     /// `type=aes`: the HSM's plain AES key, used by AES-CBC.
     Cbc,
-    /// `type=aes-gcm`.
+    /// `type=aes-gcm`: used by AES-256-GCM.
     Gcm,
-    /// `type=aes-xts`: an AES-XTS key pair.
+    /// `type=aes-xts`: used by AES-256-XTS.
     Xts,
 }
 

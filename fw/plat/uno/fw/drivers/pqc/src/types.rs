@@ -3,8 +3,22 @@
 
 //! Core types for the PQC engine pool.
 
-/// Number of PQC engines — one per fastpath core (FP0, FP1, FP2).
-pub const ENGINES: usize = 3;
+/// Number of fastpath cores serving PQC requests (FP0, FP1, FP2).
+pub const CORES: usize = 3;
+
+/// Number of PQC engines: two request lanes per fastpath core.
+///
+/// Each lane is a mailbox and operand slot of its own, and a core serves
+/// its two in the order they were posted. So while it works on one lane's
+/// request the HSM can stage and post the next on the other, and the core
+/// moves straight on to it instead of idling while the HSM notices the
+/// answer, reads it back and stages another -- 7-11% of its time under a
+/// stream of ML-DSA signatures.
+///
+/// Engine `n` is lane `n / CORES` of core `n % CORES`: engines 0-2 are the
+/// lanes in PSRAM, 3-5 the ones in the cores' shares of the GSRAM window
+/// the SP fences to them (see `mailbox`).
+pub const ENGINES: usize = 2 * CORES;
 
 /// Depth of the FIFO queue of tasks waiting for a free engine.
 ///
@@ -32,7 +46,7 @@ const _: () = assert!(
      would see QUEUE_FULL instead of backpressure"
 );
 
-/// Identifies one PQC engine, i.e. one FP core.
+/// Identifies one PQC engine, i.e. one request lane of an FP core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineId(u8);
 
@@ -61,22 +75,27 @@ impl EngineId {
         self.0
     }
 
-    /// The IPC pair index carrying this engine's traffic.
+    /// The FP core this engine is a lane of.
+    pub const fn core(self) -> u8 {
+        self.0 % CORES as u8
+    }
+
+    /// The IPC pair index carrying this engine's core's traffic.
     ///
     /// Pairs 0 and 1 are the Admin↔HSM message and event channels, so the
     /// three HSM↔FP pairs follow them.
     pub const fn ipc_pair(self) -> u8 {
-        FIRST_FP_IPC_PAIR + self.0
+        FIRST_FP_IPC_PAIR + self.core()
     }
 
-    /// Descriptor the HSM rings to notify this FP core.
+    /// Descriptor the HSM rings to notify this engine's FP core.
     pub const fn outbound_desc(self) -> u8 {
-        FIRST_FP_DESC + self.0 * 2
+        FIRST_FP_DESC + self.core() * 2
     }
 
-    /// Descriptor this FP core rings to notify the HSM.
+    /// Descriptor this engine's FP core rings to notify the HSM.
     pub const fn inbound_desc(self) -> u8 {
-        FIRST_FP_DESC + self.0 * 2 + 1
+        FIRST_FP_DESC + self.core() * 2 + 1
     }
 }
 

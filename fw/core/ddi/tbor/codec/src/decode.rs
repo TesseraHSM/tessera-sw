@@ -20,61 +20,90 @@ use crate::toc::*;
 #[derive(Debug)]
 pub struct RequestView<'a> {
     buf: &'a HsmDmaBuf,
+    /// The message's first words, read with one burst by
+    /// [`parse()`](Self::parse): the header, then as many of the TOC
+    /// entries as fit ([`TOC_CACHED`]), so validating and decoding the
+    /// message reads them from here rather than from DMA memory.
+    head: [u32; HEAD_WORDS],
 }
+
+/// Words of a request's start a [`RequestView`] keeps.
+const HEAD_WORDS: usize = 8;
+
+/// TOC entries a [`RequestView`] keeps after the header: every hot request
+/// has no more.
+const TOC_CACHED: usize = HEAD_WORDS - REQ_HEADER_LEN / 4;
 
 impl<'a> RequestView<'a> {
     /// Parse and structurally validate a request message.
     ///
     /// Validates:
     /// - Minimum buffer size (header + at least 1 TOC entry)
-    /// - Protocol version
     /// - TOC count consistency with buffer length
     /// - Every known offset/length TOC entry is within the data section
     /// - Fixed-size types have correct lengths (uint32=4, uint64=8)
     ///
     /// Reserved bits are silently ignored per spec.
     pub fn parse(buf: &'a HsmDmaBuf) -> Result<Self, HsmError> {
-        // Minimum: 8-byte header + 1 TOC entry = 12 bytes.
+        // Minimum: 12-byte header + 1 TOC entry = 16 bytes.
         if buf.len() < REQ_HEADER_LEN + 4 {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
-        if version != PROTOCOL_VERSION {
-            return Err(HsmError::TborUnsupportedVersion);
-        }
-
-        let toc_count = (buf[2] & 0x1F) as usize + 1;
+        let (head, _) = buf.read_head_words();
+        let view = Self { buf, head };
+        // The words read cover every TOC entry up to `TOC_CACHED` that
+        // passes this check.
+        let toc_count = view.toc_count();
         let min_len = REQ_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
         }
 
-        let data_start = REQ_HEADER_LEN + toc_count * 4;
-        let data_size = buf.len() - data_start;
+        let data_size = buf.len() - view.data_start();
 
         // Validate all known offset/length TOC entries.
-        validate_toc_entries(buf, REQ_HEADER_LEN, toc_count, data_size)?;
+        validate_toc_entries(|i| view.toc_word(i), toc_count, data_size)?;
 
-        Ok(Self { buf })
+        Ok(view)
     }
 
-    /// Protocol version.
+    /// Header byte `i`.
     #[inline]
-    pub fn version(&self) -> u8 {
-        self.buf[0]
+    fn head_byte(&self, i: usize) -> u8 {
+        self.head[i / 4].to_ne_bytes()[i % 4]
+    }
+
+    /// API major and minor revision.
+    #[inline]
+    pub fn api_rev(&self) -> (u16, u16) {
+        (
+            u16::from_le_bytes([self.head_byte(0), self.head_byte(1)]),
+            u16::from_le_bytes([self.head_byte(2), self.head_byte(3)]),
+        )
     }
 
     /// Operation code.
     #[inline]
     pub fn opcode(&self) -> u8 {
-        self.buf[3]
+        self.head_byte(5)
     }
 
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[2] & 0x1F) as usize + 1
+        (self.head_byte(4) & 0x1F) as usize + 1
+    }
+
+    /// The raw TOC word at `index` (see
+    /// [`read_toc_word`](crate::toc::read_toc_word)), from the words
+    /// [`parse()`](Self::parse) read when it is among them.
+    #[inline]
+    pub fn toc_word(&self, index: usize) -> u32 {
+        match self.head.get(REQ_HEADER_LEN / 4 + index) {
+            Some(word) if index < TOC_CACHED => u32::from_be_bytes(word.to_ne_bytes()),
+            _ => read_toc_word(self.buf, REQ_HEADER_LEN, index),
+        }
     }
 
     /// Byte offset where the variable-length data section starts.
@@ -110,20 +139,20 @@ impl<'a> RequestView<'a> {
     /// The raw 6-bit entry type at the given TOC index.
     #[inline]
     pub fn toc_entry_type(&self, index: usize) -> u8 {
-        raw_toc_entry_type(read_toc_word(self.buf, REQ_HEADER_LEN, index))
+        raw_toc_entry_type(self.toc_word(index))
     }
 
     /// Decode a single TOC entry at the given index. Infallible after parse().
     #[inline]
     pub fn toc_entry(&self, index: usize) -> TocEntry<'a> {
-        decode_toc_entry(self.buf, REQ_HEADER_LEN, index, self.data_start())
+        decode_toc_word(self.buf, self.toc_word(index), self.data_start())
     }
 
     /// Iterate all TOC entries in wire order.
     pub fn toc_iter(&self) -> impl Iterator<Item = TocEntry<'a>> + '_ {
         let count = self.toc_count();
         let data_start = self.data_start();
-        (0..count).map(move |i| decode_toc_entry(self.buf, REQ_HEADER_LEN, i, data_start))
+        (0..count).map(move |i| decode_toc_word(self.buf, self.toc_word(i), data_start))
     }
 
     /// The raw variable-length data section.
@@ -141,6 +170,9 @@ impl<'a> RequestView<'a> {
 #[derive(Debug)]
 pub struct ResponseView<'a> {
     buf: &'a HsmDmaBuf,
+    /// The header's first two words, read
+    /// once by [`parse()`](Self::parse).
+    head: [u8; 8],
 }
 
 impl<'a> ResponseView<'a> {
@@ -148,24 +180,20 @@ impl<'a> ResponseView<'a> {
     ///
     /// Validates:
     /// - Minimum buffer size (header + at least 1 TOC entry)
-    /// - Protocol version
     /// - TOC count consistency with buffer length
     /// - Every known offset/length TOC entry is within the data section
     /// - Fixed-size types have correct lengths (uint32=4, uint64=8)
     ///
     /// Reserved bits are silently ignored per spec.
     pub fn parse(buf: &'a HsmDmaBuf) -> Result<Self, HsmError> {
-        // Minimum: 8-byte header + 1 TOC entry = 12 bytes.
+        // Minimum: 12-byte header + 1 TOC entry = 16 bytes.
         if buf.len() < RESP_HEADER_LEN + 4 {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
-        if version != PROTOCOL_VERSION {
-            return Err(HsmError::TborUnsupportedVersion);
-        }
-
-        let toc_count = (buf[2] & 0x1F) as usize + 1;
+        let mut head = [0u8; 8];
+        head.copy_from_slice(&buf[..8]);
+        let toc_count = (head[4] & 0x1F) as usize + 1;
         let min_len = RESP_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -174,39 +202,53 @@ impl<'a> ResponseView<'a> {
         let data_start = RESP_HEADER_LEN + toc_count * 4;
         let data_size = buf.len() - data_start;
 
-        validate_toc_entries(buf, RESP_HEADER_LEN, toc_count, data_size)?;
+        validate_toc_entries(
+            |i| read_toc_word(buf, RESP_HEADER_LEN, i),
+            toc_count,
+            data_size,
+        )?;
 
-        Ok(Self { buf })
+        Ok(Self { buf, head })
     }
 
-    /// Protocol version.
+    /// API major and minor revision.
     #[inline]
-    pub fn version(&self) -> u8 {
-        self.buf[0]
+    pub fn api_rev(&self) -> (u16, u16) {
+        (
+            u16::from_le_bytes([self.head[0], self.head[1]]),
+            u16::from_le_bytes([self.head[2], self.head[3]]),
+        )
     }
 
     /// Flags byte.
     #[inline]
     pub fn flags(&self) -> u8 {
-        self.buf[1]
+        self.head[5]
+    }
+
+    /// The raw TOC word at `index` (see
+    /// [`read_toc_word`](crate::toc::read_toc_word)).
+    #[inline]
+    pub fn toc_word(&self, index: usize) -> u32 {
+        read_toc_word(self.buf, RESP_HEADER_LEN, index)
     }
 
     /// FIPS_APPROVED flag (bit 0 of flags).
     #[inline]
     pub fn fips_approved(&self) -> bool {
-        self.buf[1] & 0x01 != 0
+        self.flags() & 0x01 != 0
     }
 
     /// Status code (4-byte LE unsigned integer).
     #[inline]
     pub fn status(&self) -> u32 {
-        u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+        u32::from_le_bytes(read_word_bytes(&self.buf[8..]))
     }
 
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[2] & 0x1F) as usize + 1
+        (self.head[4] & 0x1F) as usize + 1
     }
 
     /// Byte offset where the variable-length data section starts.
@@ -273,13 +315,12 @@ impl<'a> ResponseView<'a> {
 /// For fixed-size types: checks uint32 length == 4, uint64 length == 8.
 /// Unknown types (8–63) are silently skipped.
 fn validate_toc_entries(
-    buf: &[u8],
-    header_len: usize,
+    toc_word: impl Fn(usize) -> u32,
     toc_count: usize,
     data_size: usize,
 ) -> Result<(), HsmError> {
     for i in 0..toc_count {
-        let word = read_toc_word(buf, header_len, i);
+        let word = toc_word(i);
         let entry_type = raw_toc_entry_type(word);
 
         match entry_type {

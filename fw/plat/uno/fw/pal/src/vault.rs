@@ -41,7 +41,8 @@
 
 #![allow(unsafe_code)]
 
-use tsra_fw_hsm_io::Sqe;
+use core::cell::Cell;
+
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -54,6 +55,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::HsmVaultPct;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_vault::VaultStorage;
 use tsra_fw_uno_key_vault::KeyVault;
@@ -71,6 +73,33 @@ pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     KeyVault::new(VaultStorage::new(res_mask))
 }
 
+/// A [`vault`] view for reaching key `key_id` alone: of the partition's
+/// resource mask it reads only the word covering the key's table, as the
+/// part store sits in GSRAM, read uncached.
+fn vault_for_key(io: &UnoHsmIo, key_id: HsmKeyId) -> KeyVault<VaultStorage> {
+    let word = KeyVault::<VaultStorage>::key_table(key_id) / 32;
+    let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(word));
+    KeyVault::new(VaultStorage::with_mask_word(word, bits))
+}
+
+/// A session key's blob as a sealed IO found it, with the vault generation
+/// it was found at.
+#[derive(Clone, Copy)]
+pub(crate) struct SessionKeyBlob {
+    key_id: HsmKeyId,
+    generation: u32,
+    blob: &'static HsmDmaBuf,
+}
+
+/// Whether the IO's partition owns the table of key `key_id`, as
+/// [`vault_for_key`] would find it.
+#[inline(always)]
+fn owns_key_table(io: &UnoHsmIo, key_id: HsmKeyId) -> bool {
+    let table = KeyVault::<VaultStorage>::key_table(key_id);
+    let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(table / 32));
+    VaultStorage::owns_table(table, bits)
+}
+
 /// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
 ///
 /// `(table, off, len)` must come from `KeyVault::key_location` or
@@ -85,16 +114,93 @@ fn blob_ref(table: usize, off: usize, len: usize) -> &'static HsmDmaBuf {
     unsafe { HsmDmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
 }
 
+/// A bulk key's material, for a bulk IO.
+///
+/// Checks that `bulk_id` names a live key of one of the `accept` kinds and, for
+/// a session-bound key, that `session_id` (from the bulk submission entry)
+/// is the session it is bound to.
+///
+/// # Errors
+/// - [`HsmError::KeyNotFound`] — no such key.
+/// - [`HsmError::InvalidKeyType`] — wrong kind.
+/// - [`HsmError::SessionNotFound`] — session mismatch.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) fn bulk_vault_key(
+    io: &UnoHsmIo,
+    bulk_id: u32,
+    session_id: u16,
+    accept: &[HsmVaultKeyKind],
+) -> HsmResult<(&'static HsmDmaBuf, HsmVaultKeyKind)> {
+    let key_id = HsmKeyId::from(u16::try_from(bulk_id).map_err(|_| HsmError::KeyNotFound)?);
+    let v = vault(io);
+    let kind = v.key_kind(key_id)?;
+    if !accept.contains(&kind) {
+        return Err(HsmError::InvalidKeyType);
+    }
+    if v.key_session(key_id)?
+        .is_some_and(|bound| bound != session_id)
+    {
+        return Err(HsmError::SessionNotFound);
+    }
+    let (table, off, len) = v.key_location(key_id)?;
+    Ok((blob_ref(table, off, len), kind))
+}
+
 impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
     fn enforce_session_key_isolation(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
-        let Some(bound) = vault(io).key_session(key_id)? else {
+        Self::check_key_session(io, vault(io).key_session(key_id)?)
+    }
+
+    /// [`vault_key`](HsmVault::vault_key), as a `'static` view.
+    fn vault_key_static(io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&'static HsmDmaBuf> {
+        // One vault view and one entry read serve both the isolation check
+        // and the location: the vault sits in GSRAM, read uncached.
+        let ((table, off, len), session) =
+            vault_for_key(io, key_id).key_location_and_session(key_id)?;
+        Self::check_key_session(io, session)?;
+        Ok(blob_ref(table, off, len))
+    }
+
+    /// [`vault_key`](HsmVault::vault_key) for the session key that a sealed
+    /// IO's request is opened with and its response sealed with: the second
+    /// lookup takes the first's blob instead of reading the key's entry out
+    /// of GSRAM again, unless the vault has been written since or the
+    /// partition no longer owns the key's table.
+    pub(crate) fn session_key_blob(
+        &self,
+        io: &UnoHsmIo,
+        key_id: HsmKeyId,
+    ) -> HsmResult<&'static HsmDmaBuf> {
+        let generation = VaultStorage::generation();
+        let cell = self.io_session_key.get(usize::from(io.index()));
+        if let Some(found) = cell.and_then(Cell::get)
+            && found.key_id == key_id
+            && found.generation == generation
+            && owns_key_table(io, key_id)
+        {
+            return Ok(found.blob);
+        }
+        let blob = Self::vault_key_static(io, key_id)?;
+        if let Some(cell) = cell {
+            cell.set(Some(SessionKeyBlob {
+                key_id,
+                generation,
+                blob,
+            }));
+        }
+        Ok(blob)
+    }
+
+    /// The isolation check of
+    /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
+    /// on a key's already-read session binding.
+    fn check_key_session(io: &UnoHsmIo, bound: Option<u16>) -> HsmResult<()> {
+        let Some(bound) = bound else {
             return Ok(());
         };
-        let sqe = Sqe::try_from(io.sqe())?;
-        let current = sqe.session_flags().id_valid().then(|| sqe.session_id());
-        if current == Some(bound) {
+        if io.sqe().session_id() == Some(bound) {
             Ok(())
         } else {
             Err(HsmError::KeyNotFound)
@@ -110,6 +216,7 @@ impl HsmVault for UnoHsmPal {
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
+        pct: HsmVaultPct,
     ) -> HsmResult<HsmKeyId> {
         // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if is_bulk_kind(kind) {
@@ -119,9 +226,12 @@ impl HsmVault for UnoHsmPal {
         // installed by the `RawKeyImport` test hook, gets its pairwise
         // consistency test before it's stored. A key that fails sends the
         // module to the FIPS error state.
-        if crate::unwrapping_key::is_unwrapping_key(kind, attrs)
-            && !self.unwrapping_key_pct(io, key).await?
+        let unwrapping = crate::unwrapping_key::is_unwrapping_key(kind, attrs);
+        if unwrapping != (pct == HsmVaultPct::UnwrappingKey) || (unwrapping && session_id.is_some())
         {
+            return Err(HsmError::InvalidArg);
+        }
+        if pct == HsmVaultPct::UnwrappingKey && !self.unwrapping_key_pct(io, key).await? {
             tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed);
         }
         let app_id = u8::from(io.pid());
@@ -224,9 +334,7 @@ impl HsmVault for UnoHsmPal {
     }
 
     fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
-        self.enforce_session_key_isolation(io, key_id)?;
-        let (table, off, len) = vault(io).key_location(key_id)?;
-        Ok(blob_ref(table, off, len))
+        Self::vault_key_static(io, key_id)
     }
 
     fn vault_key_len(&self, _io: &UnoHsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {

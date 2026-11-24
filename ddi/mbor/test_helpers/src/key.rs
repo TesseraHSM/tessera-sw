@@ -23,26 +23,6 @@ pub fn helper_delete_key(
     dev.exec_op_mbor(&req, &mut cookie)
 }
 
-pub fn helper_open_key(
-    dev: &<TsraDdi as Ddi>::Dev,
-    sess_id: Option<u16>,
-    rev: Option<DdiApiRev>,
-    key_tag: u16,
-) -> Result<DdiOpenKeyCmdResp, DdiError> {
-    let req = DdiOpenKeyCmdReq {
-        hdr: DdiReqHdr {
-            op: DdiOp::OpenKey,
-            sess_id,
-            rev,
-        },
-        data: DdiOpenKeyReq { key_tag },
-        ext: None,
-    };
-
-    let mut cookie = None;
-    dev.exec_op_mbor(&req, &mut cookie)
-}
-
 pub fn helper_get_establish_cred_encryption_key(
     dev: &<TsraDdi as Ddi>::Dev,
     sess_id: Option<u16>,

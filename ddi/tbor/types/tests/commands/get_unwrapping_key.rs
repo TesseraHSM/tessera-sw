@@ -13,13 +13,14 @@
 //! * Stability — a second call returns the same (stable) key.
 //! * Role access — Crypto-User sessions can also fetch the key.
 
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::PSK_LEN;
@@ -74,7 +75,7 @@ fn get_unwrapping_key_available_to_cu() {
     // Rotate the CU PSK so GetUnwrappingKey reaches its handler instead of
     // being rejected by the dispatcher's default-PSK gate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -82,7 +83,7 @@ fn get_unwrapping_key_available_to_cu() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -97,7 +98,9 @@ fn get_unwrapping_key_available_to_cu() {
         "unwrapping pub key must be the pinned length",
     );
 
-    let (modulus, exponent) = pub_key.split_at(RSA_2048_MODULUS_LEN);
+    // Components arrive in device byte order; check them big-endian.
+    let modulus = dev_rev(&pub_key[..RSA_2048_MODULUS_LEN]);
+    let exponent = dev_rev(&pub_key[RSA_2048_MODULUS_LEN..]);
 
     assert!(
         modulus.iter().any(|&byte| byte != 0),
@@ -105,13 +108,21 @@ fn get_unwrapping_key_available_to_cu() {
     );
 
     assert!(
-        modulus[RSA_2048_MODULUS_LEN - 1] & 0x80 != 0,
+        modulus[0] & 0x80 != 0,
         "RSA modulus must have exactly 2048 significant bits",
     );
 
-    assert!(modulus[0] & 1 != 0, "RSA modulus must be odd");
+    assert!(
+        modulus[RSA_2048_MODULUS_LEN - 1] & 1 != 0,
+        "RSA modulus must be odd"
+    );
 
-    let exponent = u32::from_le_bytes(exponent.try_into().expect("four-byte RSA exponent"));
+    let exponent = u32::from_be_bytes(
+        exponent
+            .as_slice()
+            .try_into()
+            .expect("four-byte RSA exponent"),
+    );
 
     assert_eq!(
         exponent, RSA_PUBLIC_EXPONENT,
@@ -149,8 +160,8 @@ fn get_unwrapping_key_stable_across_co_sessions() {
         .expect("close first CO session");
 
     // Reopen CO under the PSK already rotated by finalized_co_session().
-    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
-        .with_psk(&ROTATED_CO_PSK);
+    let opts =
+        SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -185,7 +196,7 @@ fn get_unwrapping_key_same_for_co_and_cu() {
     // Rotate the CU PSK so GetUnwrappingKey reaches its handler instead
     // of being rejected by the dispatcher's default-PSK gate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -194,7 +205,7 @@ fn get_unwrapping_key_same_for_co_and_cu() {
     bootstrap.close().expect("close bootstrap CU session");
 
     // Reopen CU under the rotated PSK.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -216,7 +227,7 @@ fn get_unwrapping_key_default_cu_psk_rejected() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session under default PSK");
 
     ctx.expect_fw_reject(
@@ -235,7 +246,7 @@ fn get_unwrapping_key_unknown_session_rejected() {
     // Rotate the CU PSK so the dispatcher reaches session lookup instead of
     // rejecting the request first with DefaultPskMustRotate.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -263,7 +274,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
 
     // Rotate the CU PSK.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -272,7 +283,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
     bootstrap.close().expect("close bootstrap CU session");
 
     // First CU session.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -288,7 +299,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
         .expect("close first CU session");
 
     // Second CU session.
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -338,7 +349,7 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
 
     // Rotate away from the default CU PSK first.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -346,7 +357,7 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -360,12 +371,24 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
     ctx.psk_change(&session, &second_cu_psk)
         .expect("rotate CU PSK a second time");
 
+    ctx.session_close(session.session_id)
+        .expect("close stale CU session");
+    let pending = ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&second_cu_psk),
+        )
+        .expect("reopen with second CU PSK");
+    let session = ctx
+        .session_open_finish(pending)
+        .expect("finish new CU session");
     let after = get_unwrapping_key(&ctx, session.session_id);
 
     assert_eq!(
         before, after,
         "CU PSK rotation must not change the partition unwrapping key",
     );
+    ctx.session_close(session.session_id)
+        .expect("close CU session");
 }
 
 /// Preserves the same partition unwrapping key across CO -> CU -> CO sessions.
@@ -382,7 +405,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     // Rotate CU PSK.
     let bootstrap = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open bootstrap CU session");
 
     ctx.psk_change(bootstrap.handshake(), &ROTATED_CU_PSK)
@@ -390,7 +413,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_CU_PSK);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&ROTATED_CU_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -404,8 +427,8 @@ fn get_unwrapping_key_stable_across_role_transitions() {
         .expect("close CU session");
 
     // Reopen CO.
-    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
-        .with_psk(&ROTATED_CO_PSK);
+    let opts =
+        SessionOpenInitOptions::new(CO_PSK_ID, SessionSuite::EcdhP384).with_psk(&ROTATED_CO_PSK);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -429,19 +452,29 @@ fn assert_valid_unwrapping_pub_key(pub_key: &[u8]) {
         "unwrapping pub key must be the pinned length",
     );
 
-    let (modulus, exponent) = pub_key.split_at(RSA_2048_MODULUS_LEN);
+    // Components arrive in device byte order; check them big-endian.
+    let modulus = dev_rev(&pub_key[..RSA_2048_MODULUS_LEN]);
+    let exponent = dev_rev(&pub_key[RSA_2048_MODULUS_LEN..]);
 
     assert!(
         modulus.iter().any(|&byte| byte != 0),
         "RSA modulus must not be all zero",
     );
-    assert!(modulus[0] & 1 != 0, "RSA modulus must be odd");
     assert!(
-        modulus[RSA_2048_MODULUS_LEN - 1] & 0x80 != 0,
+        modulus[RSA_2048_MODULUS_LEN - 1] & 1 != 0,
+        "RSA modulus must be odd"
+    );
+    assert!(
+        modulus[0] & 0x80 != 0,
         "RSA modulus must have exactly 2048 significant bits",
     );
 
-    let exponent = u32::from_le_bytes(exponent.try_into().expect("four-byte RSA exponent"));
+    let exponent = u32::from_be_bytes(
+        exponent
+            .as_slice()
+            .try_into()
+            .expect("four-byte RSA exponent"),
+    );
 
     assert_eq!(
         exponent, RSA_PUBLIC_EXPONENT,

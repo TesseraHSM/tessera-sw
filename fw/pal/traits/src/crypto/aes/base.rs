@@ -119,16 +119,23 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `key` — output buffer; entirely filled with random bytes.
-    ///   Buffer length determines key size: 16 / 24 / 32 bytes for
+    /// - `key_len` — requested key length in bytes: 16 / 24 / 32 for
     ///   AES-128 / 192 / 256 respectively.
+    /// - `key` — `None` validates and queries the required length without
+    ///   allocation or RNG use. `Some` must hold at least `key_len` bytes;
+    ///   only that prefix is filled, leaving any tail unchanged.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `key` populated.
-    /// - `Err(HsmError::InvalidArg)` — `key.len()` is not 16, 24, or 32.
+    /// - `Ok(len)` — required key length or bytes written.
+    /// - `Err(HsmError::InvalidArg)` — invalid `key_len` or output too short.
     /// - `Err(HsmError)` — propagated from the CSPRNG.
-    async fn aes_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
+    async fn aes_gen_key(
+        &self,
+        io: &Self::Io,
+        key_len: usize,
+        key: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// Generic AES encrypt or decrypt in any [`HsmAesMode`].
     ///
@@ -140,7 +147,10 @@ pub trait HsmAes: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `mode` — confidentiality mode.
-    /// - `key` — AES key (16 / 24 / 32 bytes).
+    /// - `key` — AES key (16 / 24 / 32 bytes). Must start at a 4-byte
+    ///   aligned address, as the AES engine reads key material in 32-bit
+    ///   words. Buffers from the PAL allocator are 4-byte aligned; a
+    ///   sub-slice of one must start at a multiple of 4 bytes.
     /// - `input` — `[IV | data]`; see [`HsmAesMode::data_len`].
     /// - `output` — follows the query/alloc/use convention: `None`
     ///   validates the request and returns the required output length
@@ -151,8 +161,8 @@ pub trait HsmAes: HsmIoTypes {
     ///
     /// - `Ok(len)` — required (`None`) or written (`Some`) output length,
     ///   always `input.len()`; when written, `output[..len]` is populated.
-    /// - `Err(HsmError::InvalidArg)` — key, IV, alignment or buffer-size
-    ///   violation; `output` is not modified.
+    /// - `Err(HsmError::InvalidArg)` — key (length or alignment), IV or
+    ///   buffer-size violation; `output` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_enc_dec(
         &self,
@@ -169,13 +179,14 @@ pub trait HsmAes: HsmIoTypes {
     ///
     /// `buf` holds `[IV | data]` on entry and `[data | IV out]` on return,
     /// so a request buffer can be turned into a response without a second
-    /// allocation.
+    /// allocation. `key` has the same length and 4-byte alignment
+    /// requirements as in [`aes_enc_dec`](Self::aes_enc_dec).
     ///
     /// # Returns
     ///
     /// - `Ok(())` — `buf` overwritten with the result.
-    /// - `Err(HsmError::InvalidArg)` — key, IV or alignment violation;
-    ///   `buf` is not modified.
+    /// - `Err(HsmError::InvalidArg)` — key (length or alignment) or IV
+    ///   violation; `buf` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_enc_dec_in_place(
         &self,

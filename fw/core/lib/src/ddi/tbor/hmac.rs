@@ -75,7 +75,8 @@ pub(crate) async fn handle<P: HsmPal>(
             // request buffer) is used directly — no copy.
             let tag_len = algo.digest_len();
             let tag = alloc.dma_alloc(tag_len)?;
-            pal.hmac_sign(io, algo, view.target_key, msg, tag).await?;
+            pal.hmac_sign(io, algo, view.target_key, msg, Some(tag))
+                .await?;
             Ok::<_, HsmError>((tag, tag_len))
         }
         .await?;
@@ -87,7 +88,9 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `Hmac` response around the computed tag.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, tag: &[u8]) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborHmacResp::encode(buf, 0, false)?.tag(tag)?.finish();
+        let frame = TborHmacResp::encode_for_request(buf, 0, false)?
+            .tag(tag)?
+            .finish();
         Ok(frame.as_bytes().len())
     })?;
     Ok(resp)

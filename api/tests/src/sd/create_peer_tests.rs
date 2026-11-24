@@ -15,20 +15,24 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 
 use crate::utils::partition_ex_helpers::PARTITION_LOCK;
 use crate::utils::sd_provision::CaKey;
-use crate::utils::sd_provision::build_receiver_evidence;
-use crate::utils::sd_provision::finalized_backing_session;
+use crate::utils::sd_provision::build_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
+use crate::utils::sd_provision::provision_backing;
 
 /// Happy path: create the security domain, then a peer backup of it; the
 /// peer backup is a non-zero 161-byte HPKE-Auth seal.
 #[test]
 fn sd_create_peer_backup_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
-    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let pota_key = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata_key, &pota_key, &report);
 
     // Create the security domain first to obtain the device-local backup
     // that CreatePeerBackup recovers BKS3 from.
@@ -58,12 +62,16 @@ fn sd_create_peer_backup_roundtrip() {
 /// one-shot, so the second call is expected to succeed.
 #[test]
 fn sd_create_peer_backup_rerandomizes() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
-    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let pota_key = CaKey::generate();
+    let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
     let (masked, rcvr_pub, report) = masked_key_and_report(&session);
-    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata_key, &pota_key, &report);
 
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {

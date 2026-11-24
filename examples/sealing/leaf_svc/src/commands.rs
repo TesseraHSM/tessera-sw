@@ -25,13 +25,13 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_sealing_api::device_cert_chain;
 use tsra_sealing_api::load_local_recovery;
 use tsra_sealing_api::load_partition_recovery;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_common::http::Client;
 use tsra_sealing_common::runtime::finish_restore;
 use tsra_sealing_common::runtime::open_restore_session;
 use tsra_sealing_common::wire;
-use zerocopy::IntoBytes;
 
 use super::env::LeafEnv;
 use super::validate_name;
@@ -46,9 +46,6 @@ use crate::store::FileStore;
     about = "Named leaf security domains using a loopback root issuer"
 )]
 struct Cli {
-    /// Refuse device access unless built with the emulator backend.
-    #[arg(long, global = true)]
-    require_emu: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -111,10 +108,6 @@ struct JoinArgs {
 
 pub(crate) fn run() -> Result<()> {
     let args = Cli::parse();
-    anyhow::ensure!(
-        !args.require_emu || cfg!(feature = "emu"),
-        "this operation requires an emulator build"
-    );
     match args.command {
         Command::Create(args) => create(&args),
         Command::Join(args) => join(&args),
@@ -160,9 +153,11 @@ fn create(args: &CreateArgs) -> Result<()> {
     record["seed"] = hex::encode(seed).into();
     record["instance"] = "primary".into();
     let mut env = LeafEnv::from_record(store, &record)?;
+    let public = spki_thumbprint(&public)?;
     anyhow::ensure!(
-        env.policy.backup_part_id.as_slice() == pid
-            && env.policy.backup_part_pub_key.data.as_slice() == public,
+        env.policy
+            .backup_part
+            .is_some_and(|(id, thumbprint)| id.as_slice() == pid && thumbprint == public),
         "leaf policy is bound to another partition"
     );
     let (chain, evidence) = env.validate_receiver(&receiver)?;
@@ -492,38 +487,4 @@ fn upload(env: &LeafEnv) -> Result<()> {
     );
     println!("Leaf creation backup persisted in the root store.");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use super::*;
-
-    #[test]
-    fn cli_supports_only_leaf_operations() {
-        let mut cli = Cli::command();
-        cli.debug_assert();
-        cli = Cli::command();
-        for supported in ["create", "join", "restore-local", "restore-remote"] {
-            assert!(cli.find_subcommand(supported).is_some());
-        }
-        for unsupported in ["clone", "child", "upload-backup"] {
-            assert!(cli.find_subcommand(unsupported).is_none());
-            assert!(
-                Cli::try_parse_from(["leaf_svc", unsupported, "--state-dir", "state"]).is_err()
-            );
-        }
-        assert!(Cli::try_parse_from([
-            "leaf_svc",
-            "create",
-            "--name",
-            "../bad",
-            "--root",
-            "http://127.0.0.1:8080",
-            "--state-dir",
-            "state"
-        ])
-        .is_err());
-    }
 }

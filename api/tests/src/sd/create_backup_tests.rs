@@ -24,11 +24,43 @@ use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::finalized_backing_session;
 use crate::utils::sd_provision::masked_key_and_report;
 
+#[test]
+fn sd_create_remote_backup_uses_negotiated_session_revision() {
+    let _guard = PARTITION_LOCK.lock();
+    let info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("partition");
+    let range = info.api_rev_range.expect("API revision range");
+    if range.min() == range.max() {
+        return;
+    }
+    let sata_key = CaKey::generate();
+    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    drop(session);
+
+    let part =
+        HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
+    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, range.max());
+    assert_ne!(part.api_rev(), session.api_rev());
+    let result = evidence
+        .with_create_backup(|rcvr_chain, receiver| {
+            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+        })
+        .expect("create remote backup using the session revision");
+    assert_eq!(result.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+}
+
 /// Happy path: creating a security domain on a partition that names
 /// itself as the backing partition returns three non-zero backups of the
 /// pinned wire lengths.
 #[test]
 fn sd_create_remote_backup_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
@@ -70,6 +102,9 @@ fn sd_create_remote_backup_roundtrip() {
 /// partition is rejected by the firmware.
 #[test]
 fn sd_create_remote_backup_is_one_shot() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
@@ -102,6 +137,9 @@ fn sd_create_remote_backup_is_one_shot() {
 /// create the security domain — exercising the host/FFI allow-empty path.
 #[test]
 fn sd_create_remote_backup_roundtrip_empty_evidence() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);

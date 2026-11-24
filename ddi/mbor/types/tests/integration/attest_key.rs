@@ -29,7 +29,6 @@ fn test_attest_ecc_signing_key() {
             let (private_key_id, pub_key_der, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );
@@ -120,7 +119,6 @@ fn test_attest_ecc_seed_key() {
             let (private_key_id, pub_key_der, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::Derive,
             );
@@ -443,7 +441,6 @@ fn test_attest_aes_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -511,7 +508,6 @@ fn test_attest_aes_xts_bulk_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::AesXtsBulk256,
-                None,
                 key_props,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -647,7 +643,6 @@ fn test_attest_secret_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
             );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -657,7 +652,6 @@ fn test_attest_secret_key() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 key_props,
             );
@@ -789,7 +783,6 @@ fn test_attest_hkdf_derived_aes_key() {
                 None,
                 None,
                 DdiKeyType::Aes256,
-                None,
                 key_props,
                 Default::default(),
             );
@@ -827,7 +820,6 @@ fn test_attest_kbkdf_derived_aes_key() {
                 None,
                 None,
                 DdiKeyType::Aes256,
-                None,
                 key_props,
                 Default::default(),
             );
@@ -890,7 +882,6 @@ fn import_rsa_key(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) -> (u16, Vec
         DdiKeyClass::Rsa,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        None,
         key_props,
     );
 
@@ -1108,21 +1099,9 @@ fn test_attest_rsa_der_import(
     }
 
     let (_key_id_pub, key_id_priv, masked_key) = if no_crt {
-        store_rsa_keys_no_crt(
-            dev,
-            session_id,
-            DdiKeyUsage::EncryptDecrypt,
-            key_size,
-            Some(1),
-        )
+        store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, key_size)
     } else {
-        store_rsa_keys_crt(
-            dev,
-            session_id,
-            DdiKeyUsage::EncryptDecrypt,
-            key_size,
-            Some(1),
-        )
+        store_rsa_keys_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, key_size)
     };
 
     assert!(verify_iv_not_default_from_masked_key(masked_key.as_slice()).unwrap_or(false));
@@ -1158,7 +1137,6 @@ fn test_attest_rsa_der_import(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         key_id_priv,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
