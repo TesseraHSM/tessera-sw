@@ -109,6 +109,30 @@ const EPHEMERAL_MK_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
     .with_internal(true)
     .with_never_extractable(true);
 
+/// Root secret and KDF domain separation for deriving `PartLocalBMK`.
+///
+/// `PartFinal` roots the key in `UPS` with an empty context; the struct lets
+/// a command that roots it elsewhere reuse the same derivation.
+pub(super) struct LocalBmkRoot<'a> {
+    /// Key-derivation key.
+    pub(super) kdk: &'a HsmDmaBuf,
+    /// KBKDF label.
+    pub(super) label: &'a [u8],
+    /// Extra KBKDF context, appended after the device seeds.
+    pub(super) context: &'a [u8],
+}
+
+/// Masking keys provisioned by [`provision_masking_keys`].
+pub(super) struct MaskingKeys<'a> {
+    /// Plaintext `PartLocalMK` (fresh or restored).
+    pub(super) part_local_mk: &'a HsmDmaBuf,
+    /// Plaintext `EphemeralMK` (random).
+    pub(super) ephemeral_mk: &'a HsmDmaBuf,
+    /// `PartLocalMK` masked at the current `{svn, owner}` — the
+    /// `local_mk_backup` returned to the host.
+    pub(super) local_mk_backup: &'a HsmDmaBuf,
+}
+
 /// Handle a TBOR `PartFinal` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
@@ -172,33 +196,25 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 .await?;
         }
 
-        // ── PartLocalMK: fresh or restored ───────────────────────────
-        let part_local_mk = alloc.dma_alloc(kdf::PART_LOCAL_MK_LEN)?;
-        match req.prev_local_mk_backup {
-            None => {
-                pal.rng_fill_bytes(io, &mut part_local_mk[..])?;
-            }
-            Some(prev) => {
-                restore_part_local_mk(pal, io, alloc, ups, svn, prev, part_local_mk).await?;
-            }
-        }
-
-        // Always (re)mask at the current `{svn, owner}` so the returned
-        // backup advances to the current platform identity.
-        let curr_backup = alloc.dma_alloc(LOCAL_MK_BACKUP_LEN)?;
-        mask_part_local_mk(pal, io, alloc, ups, svn, owner, part_local_mk, curr_backup).await?;
-
-        // ── EphemeralMK (random) ─────────────────────────────────────
-        let ephemeral_mk = alloc.dma_alloc(kdf::EPHEMERAL_MK_LEN)?;
-        pal.rng_fill_bytes(io, &mut ephemeral_mk[..])?;
+        // ── PartLocalMK (fresh or restored) + EphemeralMK ────────────
+        // The returned backup is always (re)masked at the current
+        // `{svn, owner}` so it advances to the current platform identity.
+        let root = LocalBmkRoot {
+            kdk: ups,
+            label: kdf::PART_LOCAL_BMK_LABEL,
+            context: &[],
+        };
+        let keys =
+            provision_masking_keys(pal, io, alloc, &root, req.prev_local_mk_backup, svn, owner)
+                .await?;
 
         // ── Commit + respond ──────────────────────────────────────────
         // Stage the finalized vault keys (async, independent slots) so the
         // commit below is a single await-free, atomic guards-first block.
         let (local_id, ephemeral_id, ups_id) =
-            stage_final_keys(pal, io, ups, part_local_mk, ephemeral_mk, undo).await?;
+            stage_final_keys(pal, io, ups, keys.part_local_mk, keys.ephemeral_mk, undo).await?;
         commit_final(pal, io, ums_key_id, local_id, ephemeral_id, ups_id, undo)?;
-        encode_response(cmd_buf, curr_backup)
+        encode_response(cmd_buf, keys.local_mk_backup)
     })
     .await
 }
@@ -384,13 +400,13 @@ async fn validate_pta_chain<P: HsmPal>(
 
 /// Derives `PartLocalBMK` for `{svn, owner}` into a fresh scoped buffer.
 ///
-/// Both restore and mask paths key on the same label (`PART_LOCAL_BMK_LABEL`)
-/// and empty extra context; this helper avoids repeating that boilerplate.
+/// Both restore and mask paths key on the same root (`root`); this helper
+/// avoids repeating that boilerplate.
 async fn derive_local_bmk<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    ups: &HsmDmaBuf,
+    root: &LocalBmkRoot<'_>,
     svn: u64,
     owner: u16,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
@@ -398,9 +414,9 @@ async fn derive_local_bmk<'a, P: HsmPal>(
     derive_masking_key(
         pal,
         io,
-        ups,
-        kdf::PART_LOCAL_BMK_LABEL,
-        &[],
+        root.kdk,
+        root.label,
+        root.context,
         svn,
         owner,
         local_bmk,
@@ -447,7 +463,7 @@ async fn restore_part_local_mk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    ups: &HsmDmaBuf,
+    root: &LocalBmkRoot<'_>,
     cur_svn: u64,
     prev: &mut HsmDmaBuf,
     out_mk: &mut HsmDmaBuf,
@@ -459,7 +475,7 @@ async fn restore_part_local_mk<P: HsmPal>(
     // `unmask` succeeds.
     let (prev_svn, prev_owner) = peek_backup_svn_owner(prev)?;
 
-    let local_bmk = derive_local_bmk(pal, io, alloc, ups, prev_svn, prev_owner).await?;
+    let local_bmk = derive_local_bmk(pal, io, alloc, root, prev_svn, prev_owner).await?;
 
     // `unmask` decrypts the envelope in place in the request buffer — no
     // scratch staging copy needed.  On success it has verified the AEAD tag
@@ -495,13 +511,13 @@ async fn mask_part_local_mk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    ups: &HsmDmaBuf,
+    root: &LocalBmkRoot<'_>,
     svn: u64,
     owner: u16,
     part_local_mk: &HsmDmaBuf,
     out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let local_bmk = derive_local_bmk(pal, io, alloc, ups, svn, owner).await?;
+    let local_bmk = derive_local_bmk(pal, io, alloc, root, svn, owner).await?;
 
     let key_label = alloc.dma_alloc(kdf::PART_LOCAL_MK_ENVELOPE_LABEL.len())?;
     key_label.copy_from_slice(kdf::PART_LOCAL_MK_ENVELOPE_LABEL);
@@ -544,22 +560,68 @@ fn peek_backup_svn_owner(blob: &HsmDmaBuf) -> HsmResult<(u64, u16)> {
     Ok((meta.svn.get(), meta.owner_seed_id.get()))
 }
 
-/// Stage the three finalized vault keys — partition-local MK, ephemeral MK,
-/// and the UPS that replaces UMS in the root slot — recording each key's
-/// delete-inverse on the undo log.
+/// Provision the partition masking keys: a fresh or restored `PartLocalMK`
+/// (masked into the current `local_mk_backup`) and a random `EphemeralMK`.
 ///
-/// Done **before** [`commit_final`] so that block can be a single await-free
-/// (atomic) commit; concurrent `PartFinal`s stage their own keys
-/// independently and only race in the atomic commit, where the loser
-/// fails-fast and its just-staged keys are reaped by the recorded inverses.
-async fn stage_final_keys<'p, P: HsmPal>(
+/// Parameterized on the `PartLocalBMK` root, so a command that roots it
+/// elsewhere can reuse it; `PartFinal` is the only caller today.  A present
+/// `prev_local_mk_backup` is AEAD-unmasked in place.
+pub(super) async fn provision_masking_keys<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    ups: &HsmDmaBuf,
+    alloc: &'a impl HsmScopedAlloc,
+    root: &LocalBmkRoot<'_>,
+    prev_local_mk_backup: Option<&mut HsmDmaBuf>,
+    svn: u64,
+    owner: u16,
+) -> HsmResult<MaskingKeys<'a>> {
+    let part_local_mk = alloc.dma_alloc(kdf::PART_LOCAL_MK_LEN)?;
+    match prev_local_mk_backup {
+        None => {
+            pal.rng_fill_bytes(io, &mut part_local_mk[..])?;
+        }
+        Some(prev) => {
+            restore_part_local_mk(pal, io, alloc, root, svn, prev, part_local_mk).await?;
+        }
+    }
+
+    // Always (re)mask at the current `{svn, owner}` so the returned backup
+    // advances to the current platform identity.
+    let local_mk_backup = alloc.dma_alloc(LOCAL_MK_BACKUP_LEN)?;
+    mask_part_local_mk(
+        pal,
+        io,
+        alloc,
+        root,
+        svn,
+        owner,
+        part_local_mk,
+        local_mk_backup,
+    )
+    .await?;
+
+    let ephemeral_mk = alloc.dma_alloc(kdf::EPHEMERAL_MK_LEN)?;
+    pal.rng_fill_bytes(io, &mut ephemeral_mk[..])?;
+
+    Ok(MaskingKeys {
+        part_local_mk,
+        ephemeral_mk,
+        local_mk_backup,
+    })
+}
+
+/// Stage the partition-local and ephemeral masking-key vault entries,
+/// recording each key's delete-inverse on the undo log.
+///
+/// Done **before** the commit so that block can be a single await-free
+/// (atomic) commit.
+pub(super) async fn stage_masking_keys<'p, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
     part_local_mk: &HsmDmaBuf,
     ephemeral_mk: &HsmDmaBuf,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<(HsmKeyId, HsmKeyId, HsmKeyId)> {
+) -> HsmResult<(HsmKeyId, HsmKeyId)> {
     let local_id = pal
         .vault_key_create(
             io,
@@ -583,6 +645,28 @@ async fn stage_final_keys<'p, P: HsmPal>(
         )
         .await?;
     undo.push_vault_create(ephemeral_id)?;
+
+    Ok((local_id, ephemeral_id))
+}
+
+/// Stage the three finalized vault keys — partition-local MK, ephemeral MK,
+/// and the UPS that replaces UMS in the root slot — recording each key's
+/// delete-inverse on the undo log.
+///
+/// Done **before** [`commit_final`] so that block can be a single await-free
+/// (atomic) commit; concurrent `PartFinal`s stage their own keys
+/// independently and only race in the atomic commit, where the loser
+/// fails-fast and its just-staged keys are reaped by the recorded inverses.
+async fn stage_final_keys<'p, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    ups: &HsmDmaBuf,
+    part_local_mk: &HsmDmaBuf,
+    ephemeral_mk: &HsmDmaBuf,
+    undo: &mut UndoLog<'p>,
+) -> HsmResult<(HsmKeyId, HsmKeyId, HsmKeyId)> {
+    let (local_id, ephemeral_id) =
+        stage_masking_keys(pal, io, part_local_mk, ephemeral_mk, undo).await?;
 
     let ups_id = pal
         .vault_key_create(

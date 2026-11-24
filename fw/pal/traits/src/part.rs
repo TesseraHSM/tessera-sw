@@ -156,7 +156,9 @@ pub enum HsmPartState {
     /// the partition-local masking keys are derived and the current
     /// `local_mk` backup has been issued.  Reached once from
     /// [`Initializing`](Self::Initializing) (one-shot per alloc/free
-    /// cycle); the partition continues to serve DDI traffic.
+    /// cycle), or directly from [`Enabled`](Self::Enabled) by the TBOR
+    /// `PartInitWithObk` handler, which provisions from the owner backup key
+    /// instead; the partition continues to serve DDI traffic.
     Initialized = 5,
 
     /// The partition is **quarantined**: an undo-log rollback failed a

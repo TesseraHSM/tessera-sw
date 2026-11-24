@@ -40,6 +40,7 @@ use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
 use tsra_ddi_tbor_types::TborPartInitResp;
+use tsra_ddi_tbor_types::TborPartInitWithObkResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_session_ex_crypto::SessionSuite;
 
@@ -53,6 +54,7 @@ use crate::fixture::open_dev_with_path;
 use crate::fixture::TestDev;
 use crate::session::part_final as part_final_helper;
 use crate::session::part_init as part_init_helper;
+use crate::session::part_init_with_obk as part_init_with_obk_helper;
 use crate::session::psk_change as psk_change_helper;
 use crate::session::session_close as session_close_helper;
 use crate::session::session_open as session_open_helper;
@@ -61,6 +63,7 @@ use crate::session::session_open_finish_with_mac as session_open_finish_with_mac
 use crate::session::session_open_init as session_open_init_helper;
 use crate::session::session_open_init_with_options as session_open_init_with_options_helper;
 use crate::session::PendingHandshake;
+use crate::session::PotaEndorsement;
 use crate::session::SessionHandshake;
 use crate::session::SessionOpenInitOptions;
 
@@ -463,6 +466,34 @@ impl TestCtx {
             prev_local_mk_backup,
             descriptors,
             oob_items,
+        )
+    }
+
+    /// MBOR `InitBk3`: mask the 48-byte owner backup key `bk3` under the
+    /// partition's `BK_BOOT` and return the masked blob — the MOBK UEFI seals
+    /// with the TPM.  One-shot per partition incarnation, and Uno only (Duo
+    /// has no MBOR).
+    pub fn init_bk3(&self, bk3: &[u8; 48]) -> DdiResult<Vec<u8>> {
+        let resp = tsra_ddi_mbor_test_helpers::helper_init_bk3(&self.dev, bk3.to_vec())?;
+        Ok(resp.data.masked_bk3.as_slice().to_vec())
+    }
+
+    /// Issue `PartInitWithObk` on the CO `session`: provision the partition
+    /// from the MOBK `masked_bk3` and the POTA `endorsement` of the partition
+    /// identity, optionally restoring `prev_local_mk_backup`.
+    pub fn part_init_with_obk(
+        &self,
+        session: &SessionHandshake,
+        masked_bk3: &[u8],
+        endorsement: &PotaEndorsement,
+        prev_local_mk_backup: &[u8],
+    ) -> DdiResult<TborPartInitWithObkResp> {
+        part_init_with_obk_helper(
+            &self.dev,
+            session,
+            masked_bk3,
+            endorsement,
+            prev_local_mk_backup,
         )
     }
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cstddef>
+#include <functional>
 #include <gtest/gtest.h>
 #include <scope_guard.hpp>
 #include <string>
@@ -10,11 +11,13 @@
 #include <vector>
 
 #include "handle/part_list_handle.hpp"
+#include "utils/part_init_config.hpp"
 #include "utils/sd_provision.hpp"
 #include "utils/utils.hpp"
 
 static_assert(offsetof(tsra_sess_ex_part_init_params, part_policy) == 0);
 static_assert(offsetof(tsra_sess_ex_part_final_params, part_policy) == 0);
+static_assert(offsetof(tsra_sess_ex_part_init_with_obk_params, owner_backup_key_config) == 0);
 static_assert(offsetof(tsra_sd_create_remote_backup_params, part_policy) == 0);
 static_assert(offsetof(tsra_sd_reseal_remote_backup_params, part_policy) == 0);
 static_assert(offsetof(tsra_sd_restore_remote_backup_params, part_policy) == 0);
@@ -85,6 +88,34 @@ class tsra_sess_ex : public ::testing::Test
             return 0;
         }
         return sess_handle;
+    }
+
+    // Run `body(part_handle, sess_handle)` on each partition with a live
+    // security-domain session opened under the default CO PSK.
+    //
+    // A setup failure is recorded as a gtest failure and skips the partition.
+    // Both handles are closed after `body` returns.
+    void for_each_sd_session(const std::function<void(tsra_handle, tsra_handle)> &body)
+    {
+        part_list_.for_each_part([&body](std::vector<tsra_char> &path) {
+            tsra_handle part_handle = open_reset_partition(path);
+            if (part_handle == 0)
+            {
+                return;
+            }
+            auto part_guard =
+                scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+            tsra_handle sess_handle = open_sd_session(part_handle);
+            if (sess_handle == 0)
+            {
+                return;
+            }
+            auto sess_guard =
+                scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
+
+            body(part_handle, sess_handle);
+        });
     }
 };
 
@@ -902,6 +933,269 @@ TEST_F(tsra_sess_ex, part_final_rejects_bad_part_policy_len)
         );
     });
 }
+
+// The `tsra_sess_ex_part_init_with_obk` tests below start with the
+// ABI-boundary checks and the two-buffer size-probe contract that run *before*
+// the one-shot provisioning, so they need only structurally valid inputs.
+namespace
+{
+// Maxima that a probe reports: the masked owner backup key (`OBK_MOBK_MAX_LEN`)
+// and the `local_mk` backup envelope (`LOCAL_MK_BACKUP_LEN`).
+constexpr uint32_t kMobkMaxLen = 512;
+constexpr uint32_t kLocalMkBackupLen = 264;
+
+// Structurally valid inputs with dummy contents. The ABI boundary checks only
+// their shape, and every test that uses them is rejected before the device is
+// touched.
+struct PartInitWithObkInputs
+{
+    std::vector<uint8_t> obk = std::vector<uint8_t>(48, 0x11);
+    std::vector<uint8_t> signature = std::vector<uint8_t>(96, 0x22);
+    std::vector<uint8_t> public_key = std::vector<uint8_t>(120, 0x33);
+    tsra_buffer obk_buf{};
+    tsra_buffer signature_buf{};
+    tsra_buffer public_key_buf{};
+    tsra_owner_backup_key_config backup_config{};
+    tsra_pota_endorsement_data pota_data{};
+    tsra_pota_endorsement pota_endorsement{};
+    tsra_sess_ex_part_init_with_obk_params params{};
+
+    PartInitWithObkInputs()
+    {
+        obk_buf = { obk.data(), static_cast<uint32_t>(obk.size()) };
+        signature_buf = { signature.data(), static_cast<uint32_t>(signature.size()) };
+        public_key_buf = { public_key.data(), static_cast<uint32_t>(public_key.size()) };
+        backup_config.source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER;
+        backup_config.owner_backup_key = &obk_buf;
+        pota_data.signature = &signature_buf;
+        pota_data.public_key = &public_key_buf;
+        pota_endorsement.source = TSRA_POTA_ENDORSEMENT_SOURCE_CALLER;
+        pota_endorsement.endorsement = &pota_data;
+        params.owner_backup_key_config = &backup_config;
+        params.pota_endorsement = &pota_endorsement;
+    }
+};
+} // namespace
+
+// A NULL `params` pointer is rejected before either output buffer is touched.
+TEST_F(tsra_sess_ex, part_init_with_obk_null_params)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        uint8_t mobk_byte = 0;
+        uint8_t backup_byte = 0;
+        tsra_buffer mobk{ &mobk_byte, 1 };
+        tsra_buffer backup{ &backup_byte, 1 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, nullptr, &mobk, &backup);
+
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// A `Caller` owner-backup-key configuration must carry exactly one of the raw
+// and the masked key. It is checked before the output buffers, so a zero-length
+// probe (which a valid configuration answers with BUFFER_TOO_SMALL) is rejected.
+TEST_F(tsra_sess_ex, part_init_with_obk_rejects_a_config_without_a_key)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        PartInitWithObkInputs in;
+        in.backup_config.owner_backup_key = nullptr;
+        tsra_buffer mobk{ nullptr, 0 };
+        tsra_buffer backup{ nullptr, 0 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &in.params, &mobk, &backup);
+
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Passing the same buffer for both outputs is rejected as INVALID_ARGUMENT
+// (aliased mutable outputs are not permitted).
+TEST_F(tsra_sess_ex, part_init_with_obk_same_output_buffer)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        PartInitWithObkInputs in;
+        uint8_t byte = 0;
+        tsra_buffer shared{ &byte, 1 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &in.params, &shared, &shared);
+
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Undersized output buffers are rejected with BUFFER_TOO_SMALL before the
+// partition is provisioned, and *both* `len` fields are updated to the maximum
+// output sizes so a single probe call reports both.
+TEST_F(tsra_sess_ex, part_init_with_obk_buffer_too_small)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        PartInitWithObkInputs in;
+        uint8_t mobk_byte = 0;
+        uint8_t backup_byte = 0;
+        tsra_buffer mobk{ &mobk_byte, 1 };
+        tsra_buffer backup{ &backup_byte, 1 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &in.params, &mobk, &backup);
+
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        EXPECT_EQ(mobk.len, kMobkMaxLen);
+        EXPECT_EQ(backup.len, kLocalMkBackupLen);
+    });
+}
+
+// A NULL `ptr` with `len == 0` is a valid size probe: it returns
+// BUFFER_TOO_SMALL with both `len` fields set to the maximum output sizes.
+TEST_F(tsra_sess_ex, part_init_with_obk_null_output_probe)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        PartInitWithObkInputs in;
+        tsra_buffer mobk{ nullptr, 0 };
+        tsra_buffer backup{ nullptr, 0 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &in.params, &mobk, &backup);
+
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        EXPECT_EQ(mobk.len, kMobkMaxLen);
+        EXPECT_EQ(backup.len, kLocalMkBackupLen);
+    });
+}
+
+// A NULL `ptr` with a non-zero `len` is malformed: it is rejected with
+// INVALID_ARGUMENT even when the other buffer is only a too-small probe.
+TEST_F(tsra_sess_ex, part_init_with_obk_null_ptr_with_nonzero_len)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    for_each_sd_session([](tsra_handle, tsra_handle sess_handle) {
+        PartInitWithObkInputs in;
+        tsra_buffer mobk{ nullptr, 0 };
+        tsra_buffer backup{ nullptr, 8 };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &in.params, &mobk, &backup);
+
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// C-ABI mirror of the Rust `part_init_with_obk_provisions_the_partition` test:
+// rotate the CO PSK, reopen under it, then provision from the owner backup
+// key. The key is masked by MBOR `InitBk3`, which a 2.0 device does not have.
+TEST_F(tsra_sess_ex, part_init_with_obk_provisions_the_partition)
+{
+    if (!api_rev_at_least(1, 1) || api_rev_at_least(2, 0))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        // The device gates provisioning under the default CO PSK, so rotate it
+        // and reopen under the rotated PSK.
+        std::vector<uint8_t> new_psk(32, 0x5A);
+        tsra_buffer new_psk_buf{ new_psk.data(), static_cast<uint32_t>(new_psk.size()) };
+        {
+            tsra_handle bootstrap = open_sd_session(part_handle);
+            if (bootstrap == 0)
+            {
+                return;
+            }
+            auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &new_psk_buf);
+            tsra_sess_close(bootstrap);
+            ASSERT_EQ(rotate_err, TSRA_STATUS_SUCCESS);
+        }
+        TestRootPin root(part_handle);
+        tsra_handle sess_handle = 0;
+        tsra_session_psk psk{ 0, &new_psk_buf };
+        auto open_err = tsra_sess_ex_open(
+            part_handle,
+            &root.buffer,
+            &psk,
+            TSRA_SESSION_SUITE_ECDH_P384,
+            &sess_handle
+        );
+        ASSERT_EQ(open_err, TSRA_STATUS_SUCCESS);
+        ASSERT_NE(sess_handle, 0);
+        auto sess_guard =
+            scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
+
+        PartInitConfig config{};
+        make_part_init_config(part_handle, config);
+        tsra_sess_ex_part_init_with_obk_params params{};
+        params.owner_backup_key_config = &config.backup_config;
+        params.pota_endorsement = &config.pota_endorsement;
+
+        // Probe for the output sizes first. The probe must not consume the
+        // one-shot `InitBk3`, so the call that follows still succeeds.
+        tsra_buffer mobk_buf{ nullptr, 0 };
+        tsra_buffer backup_buf{ nullptr, 0 };
+        auto probe = tsra_sess_ex_part_init_with_obk(sess_handle, &params, &mobk_buf, &backup_buf);
+        ASSERT_EQ(probe, TSRA_STATUS_BUFFER_TOO_SMALL);
+        std::vector<uint8_t> mobk(mobk_buf.len);
+        std::vector<uint8_t> backup(backup_buf.len);
+        mobk_buf = { mobk.data(), static_cast<uint32_t>(mobk.size()) };
+        backup_buf = { backup.data(), static_cast<uint32_t>(backup.size()) };
+
+        auto err = tsra_sess_ex_part_init_with_obk(sess_handle, &params, &mobk_buf, &backup_buf);
+
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        EXPECT_GT(mobk_buf.len, 0u);
+        EXPECT_LE(mobk_buf.len, mobk.size());
+        EXPECT_EQ(backup_buf.len, kLocalMkBackupLen);
+        mobk.resize(mobk_buf.len);
+
+        // The MOBK also stays on the partition handle, so a later rejection of
+        // this one-shot call cannot lose it. Cache it for later runs as well.
+        EXPECT_EQ(query_mobk_property(part_handle), mobk);
+        save_mobk_file(get_mobk_path(), mobk);
+
+        // The partition is provisioned now, so a second call is rejected. It
+        // presents the MOBK, because the raw key is spent.
+        tsra_buffer mobk_in{ mobk.data(), static_cast<uint32_t>(mobk.size()) };
+        tsra_owner_backup_key_config mobk_config{};
+        mobk_config.source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER;
+        mobk_config.masked_owner_backup_key = &mobk_in;
+        params.owner_backup_key_config = &mobk_config;
+        std::vector<uint8_t> mobk_out(kMobkMaxLen);
+        std::vector<uint8_t> backup_out(kLocalMkBackupLen);
+        tsra_buffer mobk_out_buf{ mobk_out.data(), static_cast<uint32_t>(mobk_out.size()) };
+        tsra_buffer backup_out_buf{ backup_out.data(), static_cast<uint32_t>(backup_out.size()) };
+
+        auto again =
+            tsra_sess_ex_part_init_with_obk(sess_handle, &params, &mobk_out_buf, &backup_out_buf);
+
+        ASSERT_EQ(again, TSRA_STATUS_PARTITION_ALREADY_PROVISIONED);
+    });
+}
+
 TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
 {
     if (!api_rev_at_least(1, 1))

@@ -589,6 +589,15 @@ fn commit_partition_state<P: HsmPal>(
         return Err(HsmError::PtaKeyAlreadySet);
     }
 
+    // Only an `Enabled` partition can start `PartInit`.  An OBK-provisioned
+    // partition (`PartInitWithObk`) is `Initialized` yet has no PTA key, so the
+    // guard above does not see it.  Rejecting here, before any inverse is
+    // recorded, stops the rollback of a failed `Initializing` transition from
+    // restoring STATE to `Enabled` over it.
+    if crate::part_state::part_state(pal, io)? != HsmPartState::Enabled {
+        return Err(HsmError::PartitionAlreadyProvisioned);
+    }
+
     // Record the write-once / STATE inverses *before* applying them: the
     // fields are absent now, so "restore to absent" is valid even if a
     // setter below fails partway (the clear is then a benign no-op).

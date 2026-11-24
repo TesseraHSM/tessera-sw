@@ -311,6 +311,53 @@ impl HsmSession {
         }
     }
 
+    /// Issues TBOR `PartInitWithObk` (opcode `0x30`) on this CO session.
+    ///
+    /// Provisions the partition from the owner backup key and the partition
+    /// owner's endorsement of the partition identity, in place of
+    /// [`part_init_ex`](Self::part_init_ex) +
+    /// [`part_final_ex`](Self::part_final_ex): the v2 counterpart of the v1
+    /// partition `init`, with the session opened first.
+    ///
+    /// `obk_config` and `pota_endorsement` are resolved exactly as the v1
+    /// `init` resolves them (raw OBK or MOBK from the caller, or the
+    /// TPM-sealed BK3; caller-supplied or TPM-signed POTA endorsement).
+    /// `prev_local_mk_backup` optionally restores the partition-local masking
+    /// key from a backup an earlier call returned. Returns the MOBK and the
+    /// current `local_mk` backup, for the caller to persist.
+    ///
+    /// A raw OBK is masked by the device's one-shot `InitBk3`. The MOBK is
+    /// cached on the partition ([`HsmPartition::mobk`]) at once, so when the
+    /// device then rejects the call (for example an unrotated PSK), retry
+    /// with that MOBK instead of the raw key.
+    ///
+    /// The CO PSK must have been rotated first (the device rejects the
+    /// command under the default PSK). The session that rotated it can
+    /// provision without being reopened; a session authenticated under a PSK
+    /// that has since been rotated is rejected. Only valid on a V2 session; a
+    /// V1 session returns [`HsmError::InvalidSession`].
+    pub fn part_init_with_obk(
+        &self,
+        obk_config: &HsmOwnerBackupKeyConfig,
+        pota_endorsement: &HsmPotaEndorsement,
+        prev_local_mk_backup: Option<&[u8]>,
+    ) -> HsmResult<HsmPartInitWithObkResult> {
+        let inner = self.inner.read();
+        match &inner.kind {
+            SessionKind::Ver2 { param_key, .. } => ddi::part_init_with_obk(
+                &inner.partition,
+                inner.id,
+                inner.api_rev(),
+                param_key,
+                obk_config,
+                pota_endorsement,
+                prev_local_mk_backup,
+                &inner.ddi_cookie,
+            ),
+            SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
+        }
+    }
+
     /// Issues TBOR `SdCreateRemoteBackup` (opcode `0x0A`) on this CO
     /// session.
     ///
