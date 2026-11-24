@@ -3,9 +3,10 @@
 
 /*
  * The mechanism table (see tsra_pkcs11_mech.h). The device has no general RSA
- * key generation, no AES-ECB or CTR, no non-NIST curves and no SHA-3; the
- * other mechanisms it does have join the table with the piece that implements
- * their entry points.
+ * key generation (CKM_RSA_PKCS_KEY_PAIR_GEN hands out its one unwrapping key
+ * pair), no AES-ECB or CTR, no non-NIST curves and no SHA-3; the other
+ * mechanisms it does have join the table when their entry points are
+ * implemented.
  */
 
 #include "tsra_pkcs11_mech.h"
@@ -20,7 +21,7 @@
  * rows. */
 #define P11_IMPLEMENTED_FLAGS                                                                      \
     (CKF_ENCRYPT | CKF_DECRYPT | CKF_DIGEST | CKF_SIGN | CKF_VERIFY | CKF_GENERATE |               \
-     CKF_GENERATE_KEY_PAIR)
+     CKF_GENERATE_KEY_PAIR | CKF_UNWRAP)
 
 /* X(type, min_key, max_key, flags), one per implemented mechanism. */
 #define P11_MECHS(X)                                                                               \
@@ -40,7 +41,9 @@
     X(CKM_ECDSA_SHA1, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)     \
     X(CKM_ECDSA_SHA256, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
     X(CKM_ECDSA_SHA384, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
-    X(CKM_ECDSA_SHA512, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)
+    X(CKM_ECDSA_SHA512, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
+    X(CKM_RSA_PKCS_KEY_PAIR_GEN, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_GENERATE_KEY_PAIR)  \
+    X(CKM_RSA_AES_KEY_WRAP, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_UNWRAP)
 
 #define P11_MECH_ROW(t, lo, hi, f) { (t), (lo), (hi), (f) },
 

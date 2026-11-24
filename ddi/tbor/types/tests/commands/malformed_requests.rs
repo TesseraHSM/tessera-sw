@@ -37,6 +37,8 @@ use tsra_ddi_tbor_types::TBOR_OP_ECC_GENERATE_KEY;
 use tsra_ddi_tbor_types::TBOR_OP_ECC_SIGN;
 use tsra_ddi_tbor_types::TBOR_OP_ECC_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_ECDH_DERIVE;
+use tsra_ddi_tbor_types::TBOR_OP_ECDSA_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_ECDSA_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_GET_CERTIFICATE;
 use tsra_ddi_tbor_types::TBOR_OP_GET_CERT_CHAIN_INFO;
 use tsra_ddi_tbor_types::TBOR_OP_GET_PUBLIC_KEY;
@@ -57,6 +59,8 @@ use tsra_ddi_tbor_types::TBOR_OP_PART_INIT;
 use tsra_ddi_tbor_types::TBOR_OP_PSK_CHANGE;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_ENCRYPT_DECRYPT;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_MOD_EXP;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_PEER_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_REMOTE_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_RESEAL_REMOTE_BACKUP;
@@ -97,10 +101,14 @@ const OPCODES: &[u8] = &[
     TBOR_OP_AES_ENCRYPT_DECRYPT,
     TBOR_OP_ECC_GENERATE_KEY,
     TBOR_OP_ECC_SIGN,
+    TBOR_OP_ECDSA_SIGN,
+    TBOR_OP_ECDSA_VERIFY,
     TBOR_OP_ECC_VERIFY,
     TBOR_OP_ECDH_DERIVE,
     TBOR_OP_RSA_MOD_EXP,
     TBOR_OP_RSA_ENCRYPT_DECRYPT,
+    TBOR_OP_RSA_SIGN,
+    TBOR_OP_RSA_VERIFY,
     TBOR_OP_HASH,
     TBOR_OP_HKDF_DERIVE,
     TBOR_OP_CONCAT_KDF_DERIVE,

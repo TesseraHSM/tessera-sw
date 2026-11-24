@@ -5,14 +5,16 @@
  * Unit test for the mechanism table (src/tsra_pkcs11_mech.c) against the
  * dispatch arms that run the mechanisms: the digest table
  * (src/tsra_pkcs11_digest.c), the cipher and sign tables and the
- * key-generation template check (src/tsra_pkcs11_template.c), and the EC
- * key-pair template check (src/tsra_pkcs11_ec_template.c). No device, no
+ * key-generation template check (src/tsra_pkcs11_template.c), the EC
+ * key-pair template check (src/tsra_pkcs11_ec_template.c), and the unwrapping
+ * key pair and unwrap checks (src/tsra_pkcs11_unwrap_params.c). No device, no
  * libcrypto:
  *
  *   gcc -I ../include/pkcs11-v3.1 -I ../src mech_table_test.c \
  *       ../src/tsra_pkcs11_mech.c ../src/tsra_pkcs11_template.c \
  *       ../src/tsra_pkcs11_attr_types.c ../src/tsra_pkcs11_digest.c \
- *       ../src/tsra_pkcs11_ec_template.c -o mech_table_test && ./mech_table_test
+ *       ../src/tsra_pkcs11_ec_template.c ../src/tsra_pkcs11_unwrap_params.c \
+ *       -o mech_table_test && ./mech_table_test
  *
  * Both directions: every row advertises exactly the flags its arms implement,
  * and every mechanism an arm implements has a row. A row without its arm, or
@@ -23,6 +25,7 @@
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_mech.h"
 #include "tsra_pkcs11_template.h"
+#include "tsra_pkcs11_unwrap_params.h"
 
 #include <stdio.h>
 
@@ -76,7 +79,9 @@ static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
     tsra_pkcs11_ec_keygen kg;
     bool ec_keygen =
         tsra_pkcs11_ec_keygen_check(t, NULL, 0, NULL, 0, &kg, NULL) != CKR_MECHANISM_INVALID;
-    if (ec_keygen)
+    CK_BBOOL priv_token = CK_FALSE;
+    if (ec_keygen || (tsra_pkcs11_unwrapping_pair_check(t, NULL, 0, NULL, 0, &token, &priv_token) !=
+                      CKR_MECHANISM_INVALID))
     {
         f |= CKF_GENERATE_KEY_PAIR;
     }
@@ -84,6 +89,12 @@ static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
     if (ec_keygen || ((sm != NULL) && (sm->key_type == CKK_EC)))
     {
         f |= EC_MECH_FLAGS;
+    }
+    CK_MECHANISM m = { t, NULL, 0 };
+    tsra_pkcs11_rsa_aes_params params;
+    if (tsra_pkcs11_unwrap_params_check(&m, &params) != CKR_MECHANISM_INVALID)
+    {
+        f |= CKF_UNWRAP;
     }
     return f;
 }

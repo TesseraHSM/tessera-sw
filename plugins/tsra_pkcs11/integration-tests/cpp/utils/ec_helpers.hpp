@@ -81,27 +81,6 @@ inline CK_RV gen_p256(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE *pub, CK_OBJECT_HAND
     return gen_ec_pair(s, ec_curves()[0], true, CK_FALSE, CK_TRUE, "ec", pub, prv);
 }
 
-/// Read a variable-length attribute (two-call sizing) into `out`.
-inline CK_RV get_bytes(
-    CK_SESSION_HANDLE s,
-    CK_OBJECT_HANDLE obj,
-    CK_ATTRIBUTE_TYPE type,
-    std::vector<CK_BYTE> &out
-)
-{
-    CK_ATTRIBUTE a = { type, nullptr, 0 };
-    CK_RV rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
-    if (rv != CKR_OK)
-    {
-        return rv;
-    }
-    out.assign(a.ulValueLen, 0);
-    a.pValue = out.data();
-    rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
-    out.resize(a.ulValueLen);
-    return rv;
-}
-
 /// The uncompressed point inside a public key's CKA_EC_POINT, a DER OCTET
 /// STRING; empty when the attribute is missing or not exactly that.
 inline std::vector<CK_BYTE> ec_point(CK_SESSION_HANDLE s, CK_OBJECT_HANDLE pub)

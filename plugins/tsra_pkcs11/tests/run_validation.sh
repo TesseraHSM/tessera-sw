@@ -139,22 +139,29 @@ if [ -f "$HSMMOD" ]; then
         || { echo "   (plaintext key import was not refused)"; exit 1; }
 
     echo; echo "== emulator-backed: gtest functional suite (integration-tests/cpp) =="
-    # googletest is fetched by CMake. Cache only its SOURCE between runs and
-    # let every build tree compile it privately: a shared build directory
-    # breaks as soon as one of the trees using it goes away.
+    # googletest and Wycheproof are fetched by CMake. Cache only their SOURCE
+    # between runs and let every build tree compile privately: a shared build
+    # directory breaks as soon as one of the trees using it goes away.
     deps="${XDG_CACHE_HOME:-$HOME/.cache}/tsra-pkcs11-cpp-deps"
     src_arg=()
-    if [ -d "$deps/googletest-src" ]; then
-        src_arg=(-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$deps/googletest-src")
-    fi
+    for dep in googletest wycheproof; do
+        if [ -d "$deps/$dep-src" ]; then
+            src_arg+=(-DFETCHCONTENT_SOURCE_DIR_"${dep^^}"="$deps/$dep-src")
+        fi
+    done
     cmake -S "$PLUGIN/integration-tests/cpp" -B "$WORK/cpp-tests" \
         -DCMAKE_BUILD_TYPE=Release "${src_arg[@]}" > "$WORK/cmake.log" 2>&1 \
         || { tail -n 20 "$WORK/cmake.log"; echo "   (cmake configure failed)"; exit 1; }
-    # Seed the cache from the first run's download.
-    if [ ! -d "$deps/googletest-src" ] && [ -d "$WORK/cpp-tests/_deps/googletest-src" ]; then
-        mkdir -p "$deps"
-        cp -r "$WORK/cpp-tests/_deps/googletest-src" "$deps/googletest-src" || true
-    fi
+    # Seed the cache from the first run's downloads.
+    for dep in googletest wycheproof; do
+        if [ ! -d "$deps/$dep-src" ] && [ -d "$WORK/cpp-tests/_deps/$dep-src" ]; then
+            mkdir -p "$deps"
+            cp -r "$WORK/cpp-tests/_deps/$dep-src" "$deps/$dep-src" || {
+                echo "   (could not cache $dep; the next run fetches it again)"
+                rm -rf "$deps/$dep-src"
+            }
+        fi
+    done
     cmake --build "$WORK/cpp-tests" --parallel > "$WORK/cmake-build.log" 2>&1 \
         || { tail -n 30 "$WORK/cmake-build.log"; echo "   (cmake build failed)"; exit 1; }
     TSRA_PKCS11_MODULE="$HSMMOD" ctest --test-dir "$WORK/cpp-tests" --output-on-failure \

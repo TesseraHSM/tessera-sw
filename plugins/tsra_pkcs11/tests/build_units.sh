@@ -50,10 +50,12 @@ HARNESS=(
     "attr_types_test tsra_pkcs11_attr_types.c"
     "attr_policy_test tsra_pkcs11_attr_policy.c tsra_pkcs11_attr_types.c tsra_pkcs11_template.c"
     "mech_table_test tsra_pkcs11_mech.c tsra_pkcs11_template.c tsra_pkcs11_attr_types.c \
-tsra_pkcs11_digest.c tsra_pkcs11_ec_template.c"
+tsra_pkcs11_digest.c tsra_pkcs11_ec_template.c tsra_pkcs11_unwrap_params.c"
     "ec_template_test tsra_pkcs11_ec_template.c tsra_pkcs11_template.c tsra_pkcs11_attr_types.c"
     "config_test tsra_pkcs11_config.c tsra_pkcs11_store_io.c"
     "config_file_test tsra_pkcs11_config.c tsra_pkcs11_store_io.c"
+    "unwrap_params_test tsra_pkcs11_unwrap_params.c tsra_pkcs11_template.c \
+tsra_pkcs11_attr_types.c tsra_pkcs11_digest.c"
 )
 
 echo "unit harnesses (${SANITIZE:-ubsan}):"

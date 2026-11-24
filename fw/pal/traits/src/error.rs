@@ -471,6 +471,9 @@ pub enum HsmError {
     /// valid.  Mirrors [`EccVerifyFailed`](Self::EccVerifyFailed).
     MlDsaVerifyFailed = 0x0870010D,
 
+    /// An RSA signature did not verify.
+    RsaVerifyFailed = 0x0870010E,
+
     /// A cryptographic algorithm self-test (CAST) produced output that
     /// did not match its known-answer vector.
     SelfTestKatMismatch = 0x08700110,

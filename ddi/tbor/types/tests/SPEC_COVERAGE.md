@@ -559,6 +559,23 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | TOC entry of wrong type yields `TborDecodeError::UnexpectedTocType` | ✅ | `unexpected_toc_type::wrong_toc_entry_type_yields_unexpected_toc_type` | emu |
 | `mach_seed` AAD wire-layout encoder stability | ✅ | `part_init::success_path::mach_seed_aad_layout` | Unit test; pure host-side |
 
+## `RsaModExp` (opcode in-session, gated)
+
+Firmware integration coverage for all four raw RSA exponentiation selectors.
+The host retains padding and signature-block validation; every operation uses
+an authenticated masked RSA private key.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Encrypt matches independent host public exponentiation for every size and key layout | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_encrypt_matches_host_reference_all_sizes_and_key_classes` | RSA-2048/3072/4096; non-CRT and CRT |
+| Verify returns the independent host public-exponentiation result for every size and key layout | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_verify_matches_host_reference_all_sizes_and_key_classes` | Raw recovered block; not signature validation |
+| Device Encrypt then Decrypt recovers an admissible representative | ✅ | `rsa_mod_exp::rsa_mod_exp_encrypt_decrypt_roundtrip` |  |
+| Device Sign then Verify recovers the raw encoded block | ✅ | `rsa_mod_exp::rsa_mod_exp_sign_verify_roundtrip` |  |
+| Public operands `0`, `1`, `2`, `n-2`, `n-1` are accepted; `n`, `n+1`, and maximum are rejected | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_public_representative_boundaries` | Encrypt and Verify; model-aware device byte order |
+| Public-operation usage groups are separated | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_public_operation_permissions_separated` | Encryption group denies Sign/Verify; signing group denies Decrypt/Encrypt |
+| Unknown selectors are rejected | ✅ | `rsa_mod_exp::rsa_mod_exp_unknown_operation_rejected` |  |
+| Existing private Decrypt/Sign behavior, size checks, and key-class failures remain covered | ✅ 🔁 | `rsa_mod_exp::rsa_mod_exp_sign_roundtrip_2k`, `rsa_mod_exp::rsa_mod_exp_decrypt_roundtrip_2k`, and related size/CRT tests | Existing private representative bounds and in-place results remain unchanged |
+
 ## `HkdfDerive` (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `HkdfDerive` command.

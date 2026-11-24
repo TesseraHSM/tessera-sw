@@ -40,6 +40,10 @@ extern "C"
 #define AES_XTS_TWEAK_LEN 16
 #define AES_XTS_MAX_DATA_LEN 8192
 
+/* The size of the partition's one RSA unwrapping key, the only RSA key the
+ * device generates (api/lib HsmRsaKeyUnwrappingKeyGenAlgo). */
+#define RSA_UNWRAP_KEY_BITS 2048
+
 /*
  * The TSRA key kinds this module can bind. PKCS#11 has one CKK_AES (and
  * CKK_AES_XTS), while the device has three disjoint kinds with distinct
@@ -120,6 +124,48 @@ CK_RV tsra_pkcs11_key_aes_unmask(
 
 /* Free a device key handle obtained from generate/unmask (no-op if 0). */
 void tsra_pkcs11_key_release(uint32_t key_handle);
+
+/*
+ * Fetch the partition's RSA unwrapping key in the device session
+ * `hsm_session`. The device has exactly one, of 2048 bits, and returns the
+ * same key on every call, so this creates nothing on the device. On success
+ * *out_spki is a malloc'd copy of its public key as DER SubjectPublicKeyInfo
+ * (the caller frees it), and, when `out_priv` is non-NULL, *out_priv a handle
+ * to the private key for tsra_pkcs11_key_aes_unwrap, to be released with
+ * tsra_pkcs11_key_release. That release frees the handle only: the SDK never
+ * deletes the device's internal key. While the device is still staging the key
+ * after a reset the SDK retries with a bounded backoff, and a call that still
+ * finds it pending returns CKR_FUNCTION_FAILED.
+ */
+CK_RV tsra_pkcs11_key_unwrapping_pair(
+    uint32_t hsm_session,
+    uint32_t *out_priv,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+);
+
+/*
+ * Unwrap a CKM_RSA_AES_KEY_WRAP blob with the unwrapping key `unwrapping_key`
+ * into a new AES key of `kind` and `bit_len` bits, masked under the masking
+ * key `scope` names, and return its masked blob as tsra_pkcs11_key_aes_generate
+ * does. `oaep_hash` (CKM_SHA256, CKM_SHA384 or CKM_SHA512) is the OAEP and
+ * MGF1 hash and `aes_key_bits` the size of the AES key-encryption key, both as
+ * tsra_pkcs11_unwrap_params_check accepted them. Every failure of the unwrap
+ * itself returns CKR_WRAPPED_KEY_INVALID: a caller who can tell an OAEP
+ * failure from a key-wrap failure holds a decryption oracle.
+ */
+CK_RV tsra_pkcs11_key_aes_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+);
 
 /*
  * One-shot AES-CBC encrypt/decrypt with the 16-byte IV `iv`. Two-call sizing:

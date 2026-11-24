@@ -4,6 +4,7 @@
 use core::task::Context;
 
 use embassy_sync::waitqueue::WakerRegistration;
+use tsra_fw_uno_reg_soc::io_gsram::UPKA_TICKET_CMD_COUNT;
 
 use crate::executor::EngineExecutor;
 use crate::EngineId;
@@ -204,8 +205,10 @@ impl QueueSlot {
 /// [`UpkaState::submit_staged`]). A caller holds its ticket from submission
 /// until it collects the result, so this covers every task that can run a
 /// PKA command at once (one per IO slot, plus the admin and boot paths)
-/// with room to spare.
+/// with room to spare. Each has a descriptor slot in GSRAM.
 pub(crate) const TICKETS: usize = 64;
+
+const _: () = assert!(TICKETS == UPKA_TICKET_CMD_COUNT as usize);
 
 /// One PKA command: its opcode, result operand and argument operands.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +218,21 @@ pub(crate) struct StagedCmd {
     pub(crate) arg1: u32,
     pub(crate) arg2: u32,
     pub(crate) arg3: u32,
+}
+
+impl StagedCmd {
+    /// Write this command to ticket `t`'s descriptor slot.
+    #[inline(always)]
+    fn write_to_ticket(self, t: u8) {
+        EngineExecutor::write_ticket_command(
+            t,
+            self.opcode,
+            self.result,
+            self.arg1,
+            self.arg2,
+            self.arg3,
+        );
+    }
 }
 
 /// Where a staged command is.
@@ -231,11 +249,12 @@ pub(crate) enum TicketState {
     Abandoned,
 }
 
-/// A staged command and its caller's waker.
+/// A staged command's state and its caller's waker. The command itself is
+/// in the ticket's GSRAM descriptor slot (see
+/// [`EngineExecutor::write_ticket_command`]).
 pub(crate) struct Ticket {
     pub(crate) waker: WakerRegistration,
     pub(crate) state: TicketState,
-    pub(crate) cmd: StagedCmd,
 }
 
 /// Shared mutable state for the async PKA engine pool.
@@ -387,7 +406,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
     /// queued ahead of it, else queue it to start, in order, on an engine
     /// as it is released (see
     /// [`release_engine_and_dispatch`](Self::release_engine_and_dispatch)).
-    /// Its completion wipes the engine at once (see
+    /// Either way its descriptor is written to the ticket's slot first, so
+    /// that a release starts it with one command-register write. Its
+    /// completion wipes the engine at once (see
     /// [`finish_staged`](Self::finish_staged)).
     ///
     /// Returns the command's ticket, or `None` if no ticket or queue slot
@@ -405,13 +426,13 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         match engine {
             Some(id) => {
                 self.ticket_free &= !(1u64 << t);
-                self.tickets[t as usize].cmd = cmd;
+                cmd.write_to_ticket(t);
                 self.start_ticket(id, t);
             }
             None => {
                 let q = self.reserve_queue_slot(true)?;
                 self.ticket_free &= !(1u64 << t);
-                self.tickets[t as usize].cmd = cmd;
+                cmd.write_to_ticket(t);
                 self.tickets[t as usize].state = TicketState::Queued(q);
                 self.queue_slots[q as usize].ticket = t;
             }
@@ -419,22 +440,26 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         Some(t)
     }
 
-    /// Start ticket `t`'s command on engine `id`, which the caller holds.
+    /// Start ticket `t`'s command, already in its descriptor slot, on engine
+    /// `id`, which the caller holds.
     fn start_ticket(&mut self, id: u8, t: u8) {
-        let cmd = self.tickets[t as usize].cmd;
         self.tickets[t as usize].state = TicketState::Running;
         let slot = &mut self.engine_slots[id as usize];
         slot.arm_completion_wait();
         slot.ticket = Some(t);
-        EngineExecutor::submit_engine_command(
-            id, cmd.opcode, cmd.result, cmd.arg1, cmd.arg2, cmd.arg3,
-        );
+        EngineExecutor::submit_ticket_command(id, t);
     }
 
-    /// Engine `id` finished ticket `t`'s command with `status`: hand the
-    /// status to the ticket, waking its caller, and start wiping the
-    /// engine, whose completion releases it.
+    /// Engine `id` finished ticket `t`'s command with `status`: start wiping
+    /// the engine, whose completion releases it, then hand the status to the
+    /// ticket, waking its caller. The wipe goes first: the engine idles until
+    /// it starts, and the wake is not free.
     pub(crate) fn finish_staged(&mut self, id: u8, t: u8, status: u8) {
+        let slot = &mut self.engine_slots[id as usize];
+        slot.ticket = None;
+        slot.arm_completion_wait();
+        slot.wiping = true;
+        EngineExecutor::submit_wipe(id);
         let ticket = &mut self.tickets[t as usize];
         if ticket.state == TicketState::Abandoned {
             ticket.state = TicketState::Free;
@@ -443,11 +468,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
             ticket.state = TicketState::Done(status);
             ticket.waker.wake();
         }
-        let slot = &mut self.engine_slots[id as usize];
-        slot.ticket = None;
-        slot.arm_completion_wait();
-        slot.wiping = true;
-        EngineExecutor::submit_engine_command(id, crate::opcode::UPKA_MEM_WIPE, 0, 0, 0, 0);
     }
 
     /// Ticket `t`'s status, freeing the ticket, once its command has

@@ -596,6 +596,23 @@ int main(void)
             kb_refusals == 2 && kb_len == sizeof(kb_buf) && kb_buf[0] == 0,
         "get_key_body: a refusing check withholds the body, token and session objects alike"
     );
+    kb_len = sizeof(kb_buf);
+    CHECK(
+        (s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, NULL, &kb_len, refuse_check, &kb_refusals) ==
+         CKR_ACTION_PROHIBITED) &&
+            (s.ops->get_key_body(
+                 s.ctx,
+                 SLOT,
+                 CK_FALSE,
+                 sess,
+                 NULL,
+                 &kb_len,
+                 refuse_check,
+                 &kb_refusals
+             ) == CKR_ACTION_PROHIBITED) &&
+            (kb_refusals == 4) && (kb_len == sizeof(kb_buf)),
+        "get_key_body: the check runs on the sizing call too, which then reports no length"
+    );
 
     /* --- get_size: attribute values plus body, the same count on both backends --- */
     CK_OBJECT_HANDLE sz_tok = 0, sz_sess = 0;
