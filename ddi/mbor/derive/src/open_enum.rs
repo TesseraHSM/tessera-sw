@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(clippy::needless_continue)] // Darling emits redundant continues in derived impls.
+
 use darling::ast;
 use darling::FromDeriveInput;
 use darling::FromField;

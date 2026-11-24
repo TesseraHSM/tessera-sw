@@ -27,17 +27,17 @@ pub trait MborEncode {
     /// # Arguments
     ///
     /// * `encoder` - Encoder to use.
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError>;
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError>;
 }
 
 impl MborEncode for MborMap {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         encoder.encode(&[MAP_MARKER | (MAP_FIELD_COUNT_MASK & self.0)])
     }
 }
 
 impl MborEncode for u8 {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         // Encode marker
         encoder.encode(&[U8_MARKER])?;
 
@@ -47,7 +47,7 @@ impl MborEncode for u8 {
 }
 
 impl MborEncode for u16 {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         // Encode marker
         encoder.encode(&[U16_MARKER])?;
 
@@ -57,7 +57,7 @@ impl MborEncode for u16 {
 }
 
 impl MborEncode for u32 {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         // Encode marker
         encoder.encode(&[U32_MARKER])?;
 
@@ -67,7 +67,7 @@ impl MborEncode for u32 {
 }
 
 impl MborEncode for u64 {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         // Encode marker
         encoder.encode(&[U64_MARKER])?;
 
@@ -77,13 +77,13 @@ impl MborEncode for u64 {
 }
 
 impl MborEncode for bool {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         encoder.encode(&[BOOL_MARKER + u8::from(*self)])
     }
 }
 
 impl MborEncode for MborByteSlice<'_> {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         // Encode marker
         encoder.encode(&[BYTES_MARKER])?;
 
@@ -97,7 +97,7 @@ impl MborEncode for MborByteSlice<'_> {
 
 #[cfg(feature = "array")]
 impl<const N: usize> MborEncode for MborPaddedByteArray<'_, N> {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         if self.0.len > N {
             Err(MborEncodeError::BufferOverflow)?
         }
@@ -124,7 +124,7 @@ impl<const N: usize> MborEncode for MborPaddedByteArray<'_, N> {
 
 #[cfg(not(feature = "array"))]
 impl<const N: usize> MborEncode for MborPaddedByteArray<'_, N> {
-    fn mbor_encode(&self, encoder: &mut MborEncoder) -> Result<(), MborEncodeError> {
+    fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         if self.0.len() > N {
             Err(MborEncodeError::BufferOverflow)?
         }
@@ -209,13 +209,7 @@ impl MborEncoder<'_> {
         if value.len() + self.pos > self.buffer.len() {
             Err(MborEncodeError::BufferOverflow)?
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                value.as_ptr(),
-                self.buffer.as_mut_ptr().add(self.pos),
-                value.len(),
-            );
-        }
+        self.buffer[self.pos..self.pos + value.len()].copy_from_slice(value);
         self.pos += value.len();
         Ok(())
     }
@@ -223,6 +217,8 @@ impl MborEncoder<'_> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     extern crate alloc;
 
     use alloc::vec;

@@ -48,7 +48,7 @@ pub trait MborDecode<'b>: Sized {
 }
 
 impl MborDecode<'_> for MborMap {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let byte = decoder.byte()?;
         if byte & MAP_MARKER != MAP_MARKER {
             Err(MborDecodeError::ExpectedMap)?
@@ -59,7 +59,7 @@ impl MborDecode<'_> for MborMap {
 }
 
 impl MborDecode<'_> for u8 {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let bytes = decoder.bytes(2)?;
         // Skipping the first byte check (marker) for performance reasons.
         Ok(bytes[1])
@@ -67,7 +67,7 @@ impl MborDecode<'_> for u8 {
 }
 
 impl MborDecode<'_> for u16 {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let bytes = decoder.bytes(3)?;
         // Skipping the first byte check (marker) for performance reasons.
         Ok(u16::from_be_bytes(
@@ -77,7 +77,7 @@ impl MborDecode<'_> for u16 {
 }
 
 impl MborDecode<'_> for u32 {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let bytes = decoder.bytes(5)?;
         // Skipping the first byte check (marker) for performance reasons.
         Ok(u32::from_be_bytes(
@@ -87,7 +87,7 @@ impl MborDecode<'_> for u32 {
 }
 
 impl MborDecode<'_> for u64 {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let bytes = decoder.bytes(9)?;
         // Skipping the first byte check (marker) for performance reasons.
         Ok(u64::from_be_bytes(
@@ -97,7 +97,7 @@ impl MborDecode<'_> for u64 {
 }
 
 impl MborDecode<'_> for bool {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let byte = decoder.byte()? & !BOOL_MARKER;
         match byte {
             0 => Ok(false),
@@ -108,7 +108,7 @@ impl MborDecode<'_> for bool {
 }
 
 impl<const N: usize> MborDecode<'_> for [u8; N] {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let marker = decoder.byte()?;
         if marker & BYTES_MARKER != BYTES_MARKER {
             Err(MborDecodeError::ExpectedU8)?
@@ -138,7 +138,7 @@ impl<const N: usize> MborDecode<'_> for [u8; N] {
 
 #[cfg(feature = "array")]
 impl<const N: usize> MborDecode<'_> for MborByteArray<N> {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let marker = decoder.byte()?;
         if marker & BYTES_MARKER != BYTES_MARKER {
             Err(MborDecodeError::ExpectedU8)?
@@ -169,7 +169,7 @@ impl<const N: usize> MborDecode<'_> for MborByteArray<N> {
 
 #[cfg(not(feature = "array"))]
 impl<const N: usize> MborDecode<'_> for MborByteArray<N> {
-    fn mbor_decode(decoder: &mut MborDecoder) -> Result<Self, MborDecodeError> {
+    fn mbor_decode(decoder: &mut MborDecoder<'_>) -> Result<Self, MborDecodeError> {
         let marker = decoder.byte()?;
         if marker & BYTES_MARKER != BYTES_MARKER {
             Err(MborDecodeError::ExpectedU8)?

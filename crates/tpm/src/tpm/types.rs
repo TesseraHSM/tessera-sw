@@ -2078,7 +2078,8 @@ mod tests {
         let mut buf = Vec::new();
         point.marshal(&mut buf);
         let mut cursor = 0;
-        let parsed = TpmsEccPoint::unmarshal(&buf, &mut cursor).unwrap();
+        let parsed =
+            TpmsEccPoint::unmarshal(&buf, &mut cursor).expect("Failed to unmarshal ECC point");
         assert_eq!(cursor, buf.len());
         assert_eq!(parsed.x, point.x);
         assert_eq!(parsed.y, point.y);
@@ -2094,7 +2095,8 @@ mod tests {
         let mut buf = Vec::new();
         sig.marshal(&mut buf);
         let mut cursor = 0;
-        let parsed = TpmsSignatureEcdsa::unmarshal(&buf, &mut cursor).unwrap();
+        let parsed = TpmsSignatureEcdsa::unmarshal(&buf, &mut cursor)
+            .expect("Failed to unmarshal ECDSA signature");
         assert_eq!(cursor, buf.len());
         assert_eq!(parsed.hash_alg, sig.hash_alg);
         assert_eq!(parsed.signature_r, sig.signature_r);
@@ -2111,7 +2113,8 @@ mod tests {
         let mut buf = Vec::new();
         sig.marshal(&mut buf);
         let mut cursor = 0;
-        let parsed = TpmtSignature::unmarshal(&buf, &mut cursor).unwrap();
+        let parsed =
+            TpmtSignature::unmarshal(&buf, &mut cursor).expect("Failed to unmarshal TPM signature");
         assert_eq!(cursor, buf.len());
         match parsed {
             TpmtSignature::Ecdsa(ecdsa) => {
