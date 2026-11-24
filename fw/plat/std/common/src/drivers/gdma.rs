@@ -41,11 +41,11 @@ impl StdGdma {
     ///
     /// The caller must ensure the PRP address points to a valid,
     /// readable buffer of at least `dst.len()` bytes.
-    pub unsafe fn copy_mem_from_host(&self, src: HsmDmaAddr, dst: &mut [u8]) {
+    pub unsafe fn copy_mem_from_host(&self, src: HsmDmaAddr, dst: &mut [u8]) { unsafe {
         let ptr = addr_to_ptr(src);
         let len = dst.len();
         core::ptr::copy_nonoverlapping(ptr, dst.as_mut_ptr(), len);
-    }
+    }}
 
     /// Copy from host memory into an HSM buffer, sourced from a raw
     /// 16-byte NVMe SGL Data Block descriptor.
@@ -61,7 +61,7 @@ impl StdGdma {
     /// readable buffer of at least the descriptor's `length` bytes, and
     /// that `dst` is at least that long (the trait wrapper enforces
     /// `length == dst.len()`).
-    pub unsafe fn copy_mem_from_host_raw(&self, desc: &[u8; 16], dst: &mut [u8]) {
+    pub unsafe fn copy_mem_from_host_raw(&self, desc: &[u8; 16], dst: &mut [u8]) { unsafe {
         let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
         // A zero-length transfer is a no-op; skip so a (permitted) null
         // source address on an empty descriptor is never dereferenced.
@@ -73,7 +73,7 @@ impl StdGdma {
             hi: u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]),
         };
         core::ptr::copy_nonoverlapping(addr_to_ptr(src), dst.as_mut_ptr(), len);
-    }
+    }}
 
     /// Copy an HSM buffer to host memory described by a raw 16-byte NVMe
     /// SGL Data Block descriptor (the write-side twin of
@@ -84,7 +84,7 @@ impl StdGdma {
     /// The caller must ensure the descriptor address points to a valid,
     /// writable buffer of at least `src.len()` bytes (validate with
     /// [`validate_raw_src`] first).
-    pub unsafe fn copy_mem_to_host_raw(&self, src: &[u8], desc: &[u8; 16]) {
+    pub unsafe fn copy_mem_to_host_raw(&self, src: &[u8], desc: &[u8; 16]) { unsafe {
         if src.is_empty() {
             return;
         }
@@ -93,7 +93,7 @@ impl StdGdma {
             hi: u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]),
         };
         core::ptr::copy_nonoverlapping(src.as_ptr(), addr_to_ptr(dst), src.len());
-    }
+    }}
 
     /// Copy from an HSM buffer to host memory.
     ///
@@ -101,11 +101,11 @@ impl StdGdma {
     ///
     /// The caller must ensure the PRP address points to a valid,
     /// writable buffer of at least `src.len()` bytes.
-    pub unsafe fn copy_mem_to_host(&self, src: &[u8], dst: HsmDmaAddr) {
+    pub unsafe fn copy_mem_to_host(&self, src: &[u8], dst: HsmDmaAddr) { unsafe {
         let ptr = addr_to_ptr(dst);
         let len = src.len();
         core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, len);
-    }
+    }}
 }
 
 /// Reassemble a 64-bit PRP address into a raw pointer.
