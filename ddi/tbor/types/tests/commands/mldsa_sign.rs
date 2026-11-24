@@ -250,3 +250,303 @@ fn mldsa_sign_rejects_bad_masked_key_layout() {
         },
     );
 }
+
+/// Rejects empty, truncated, and oversized mu inputs.
+#[test]
+fn mldsa_sign_rejects_invalid_mu_lengths() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    for len in [0, 1, MLDSA_MU_LEN - 1, MLDSA_MU_LEN + 1] {
+        let result = ctx.tbor(&TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: key.masked_key.clone(),
+            mu: vec![0x5A; len],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        });
+
+        assert!(
+            result.is_err(),
+            "MlDsaSign accepted invalid mu length {len}"
+        );
+    }
+
+    // A rejected request must not prevent a subsequent valid sign.
+    let resp = ctx
+        .tbor(&TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: key.masked_key,
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        })
+        .expect("valid sign after invalid mu lengths");
+
+    assert_eq!(resp.signature.len(), ML_DSA_44.sig_len);
+}
+
+/// Rejects empty and truncated masked-key envelopes.
+#[test]
+fn mldsa_sign_rejects_truncated_masked_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    let full_len = key.masked_key.len();
+    assert!(full_len > 32);
+
+    for len in [0, 1, 4, 16, 32, full_len - 1] {
+        let result = ctx.tbor(&TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: key.masked_key[..len].to_vec(),
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        });
+
+        assert!(
+            result.is_err(),
+            "MlDsaSign accepted truncated masked key of length {len}"
+        );
+    }
+}
+
+/// Rejects corrupted AEAD envelope headers.
+#[test]
+fn mldsa_sign_rejects_corrupted_masked_key_header() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    assert_eq!(&key.masked_key[..4], b"AEAD");
+
+    for index in 0..4 {
+        let mut corrupted = key.masked_key.clone();
+        corrupted[index] ^= 0x01;
+
+        let result = ctx.tbor(&TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: corrupted,
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        });
+
+        assert!(
+            result.is_err(),
+            "MlDsaSign accepted corrupted AEAD header byte {index}"
+        );
+    }
+}
+
+/// Rejects a masked key whose authenticated payload is corrupted.
+#[test]
+fn mldsa_sign_rejects_corrupted_masked_key_payload() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    let mut corrupted = key.masked_key.clone();
+
+    // Avoid the AEAD magic and trailing authentication tag.
+    let index = corrupted.len() / 2;
+    corrupted[index] ^= 0x80;
+
+    let result = ctx.tbor(&TborMlDsaSignReq {
+        session_id: session.session_id,
+        masked_key: corrupted,
+        mu: vec![0x5A; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
+    });
+
+    assert!(
+        result.is_err(),
+        "MlDsaSign accepted corrupted masked-key payload"
+    );
+}
+
+/// Signs multiple messages with the same masked key.
+fn repeated_sign_case(p: &MlDsaParams) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: p.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    for pattern in [0x00, 0x5A, 0xFF] {
+        let resp = ctx
+            .tbor(&TborMlDsaSignReq {
+                session_id: session.session_id,
+                masked_key: key.masked_key.clone(),
+                mu: vec![pattern; MLDSA_MU_LEN],
+                hedge: MLDSA_HEDGE_PREFERRED,
+            })
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{}: repeated sign with pattern {pattern:#04x}: {e:?}",
+                    p.name
+                )
+            });
+
+        assert_eq!(
+            resp.signature.len(),
+            p.sig_len,
+            "{}: repeated signature length",
+            p.name
+        );
+
+        assert!(
+            resp.signature.iter().any(|&b| b != 0),
+            "{}: signature is all zeroes",
+            p.name
+        );
+
+        assert_not_truncated_at_page(&resp.signature, p.name);
+    }
+}
+
+/// Reuses an ML-DSA-44 key for multiple signing requests.
+#[test]
+fn mldsa_sign_repeated_signing_44() {
+    repeated_sign_case(&ML_DSA_44);
+}
+
+/// Reuses an ML-DSA-65 key for multiple signing requests.
+#[test]
+fn mldsa_sign_repeated_signing_65() {
+    repeated_sign_case(&ML_DSA_65);
+}
+
+/// Reuses an ML-DSA-87 key for multiple signing requests.
+#[test]
+fn mldsa_sign_repeated_signing_87() {
+    repeated_sign_case(&ML_DSA_87);
+}
+
+/// A rejected masked key does not invalidate the CO session.
+#[test]
+fn mldsa_sign_recovers_after_invalid_masked_key() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    for _ in 0..3 {
+        let mut corrupted = key.masked_key.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+
+        let rejected = ctx.tbor(&TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: corrupted,
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        });
+
+        assert!(
+            rejected.is_err(),
+            "corrupted masked key unexpectedly accepted"
+        );
+
+        let valid = ctx
+            .tbor(&TborMlDsaSignReq {
+                session_id: session.session_id,
+                masked_key: key.masked_key.clone(),
+                mu: vec![0x5A; MLDSA_MU_LEN],
+                hedge: MLDSA_HEDGE_PREFERRED,
+            })
+            .expect("valid sign after corrupted key");
+
+        assert_eq!(valid.signature.len(), ML_DSA_44.sig_len);
+    }
+}
+
+/// Rejects an all-zero masked key with the correct envelope length.
+#[test]
+fn mldsa_sign_rejects_zeroed_masked_key() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    let result = ctx.tbor(&TborMlDsaSignReq {
+        session_id: session.session_id,
+        masked_key: vec![0; key.masked_key.len()],
+        mu: vec![0x5A; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
+    });
+
+    assert!(result.is_err(), "MlDsaSign accepted an all-zero masked key");
+}
+/// Rejects a masked-key envelope with trailing bytes.
+#[test]
+fn mldsa_sign_rejects_oversized_masked_key() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    let mut oversized = key.masked_key;
+    oversized.extend_from_slice(&[0xAA; 16]);
+
+    let result = ctx.tbor(&TborMlDsaSignReq {
+        session_id: session.session_id,
+        masked_key: oversized,
+        mu: vec![0x5A; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
+    });
+
+    assert!(
+        result.is_err(),
+        "MlDsaSign accepted an oversized masked key"
+    );
+}

@@ -83,6 +83,30 @@ fn device_verify(
     }
 }
 
+/// Generate a host key and sign a message under the requested context.
+fn host_sign_case(
+    p: &MlDsaParams,
+    seed: [u8; 32],
+    message: &[u8],
+    context: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    let sk = MlDsaPrivateKey::from_seed(dsa_variant(p), &seed).expect("host keygen");
+
+    let mut pk = vec![0u8; p.pub_key_len];
+    sk.public_key()
+        .expect("host public key")
+        .to_bytes(Some(&mut pk))
+        .expect("encode public key");
+
+    let mut sig = vec![0u8; p.sig_len];
+    MlDsaAlgo::new(context)
+        .expect("host ML-DSA engine")
+        .sign(&sk, message, Some(&mut sig))
+        .expect("host sign");
+
+    (pk, sig)
+}
+
 /// (1) Replay NIST's vectors, then (2) flip a signature bit on the ones
 /// that should pass and replay again — a device that accepted everything
 /// would otherwise sail through (1).
@@ -241,4 +265,250 @@ fn mldsa_interop_host_to_device_65() {
 #[test]
 fn mldsa_interop_host_to_device_87() {
     dsa_host_to_device(&ML_DSA_87, 3);
+}
+
+/// Verify signatures bind to the exact message and context.
+fn dsa_message_context_binding(p: &MlDsaParams) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let message = b"ML-DSA message binding";
+    let context = b"tbor-pqc-context";
+
+    let (pk, sig) = host_sign_case(p, [0x42; 32], message, context);
+
+    // Original message and context must verify.
+    assert!(
+        device_verify(&ctx, session.session_id, &pk, message, context, &sig,),
+        "{}: valid signature rejected",
+        p.name,
+    );
+
+    // Changing one message bit must invalidate the signature.
+    let mut changed = message.to_vec();
+    changed[0] ^= 0x01;
+
+    assert!(
+        !device_verify(&ctx, session.session_id, &pk, &changed, context, &sig,),
+        "{}: modified message accepted",
+        p.name,
+    );
+
+    // The correct message with a different context must fail.
+    assert!(
+        !device_verify(
+            &ctx,
+            session.session_id,
+            &pk,
+            message,
+            b"other-context",
+            &sig,
+        ),
+        "{}: wrong context accepted",
+        p.name,
+    );
+
+    // Removing the original context must also fail.
+    assert!(
+        !device_verify(&ctx, session.session_id, &pk, message, b"", &sig,),
+        "{}: missing context accepted",
+        p.name,
+    );
+
+    // A failed verification must not corrupt session state.
+    assert!(
+        device_verify(&ctx, session.session_id, &pk, message, context, &sig,),
+        "{}: valid verification failed after rejections",
+        p.name,
+    );
+}
+
+/// Check message and context binding for ML-DSA-44.
+#[test]
+fn mldsa_message_context_binding_44() {
+    dsa_message_context_binding(&ML_DSA_44);
+}
+
+/// Check message and context binding for ML-DSA-65.
+#[test]
+fn mldsa_message_context_binding_65() {
+    dsa_message_context_binding(&ML_DSA_65);
+}
+
+/// Check message and context binding for ML-DSA-87.
+#[test]
+fn mldsa_message_context_binding_87() {
+    dsa_message_context_binding(&ML_DSA_87);
+}
+
+/// Reject valid signatures when verified under another public key.
+fn dsa_wrong_public_key(p: &MlDsaParams) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let message = b"ML-DSA public key binding";
+
+    let (pk_a, sig_a) = host_sign_case(p, [0x11; 32], message, b"");
+
+    let (pk_b, sig_b) = host_sign_case(p, [0x22; 32], message, b"");
+
+    assert_ne!(
+        pk_a, pk_b,
+        "{}: distinct seeds produced identical public keys",
+        p.name,
+    );
+
+    // Each signature must verify under its matching key.
+    assert!(
+        device_verify(&ctx, session.session_id, &pk_a, message, b"", &sig_a,),
+        "{}: signature A rejected",
+        p.name,
+    );
+
+    assert!(
+        device_verify(&ctx, session.session_id, &pk_b, message, b"", &sig_b,),
+        "{}: signature B rejected",
+        p.name,
+    );
+
+    // Swapping the keys must cause verification failure.
+    assert!(
+        !device_verify(&ctx, session.session_id, &pk_b, message, b"", &sig_a,),
+        "{}: signature A accepted under key B",
+        p.name,
+    );
+
+    assert!(
+        !device_verify(&ctx, session.session_id, &pk_a, message, b"", &sig_b,),
+        "{}: signature B accepted under key A",
+        p.name,
+    );
+
+    // Both correct pairs must remain valid after rejection.
+    for (pk, sig) in [(&pk_a, &sig_a), (&pk_b, &sig_b)] {
+        assert!(
+            device_verify(&ctx, session.session_id, pk, message, b"", sig,),
+            "{}: valid pair failed after key mismatch",
+            p.name,
+        );
+    }
+}
+
+/// Reject public-key substitution for ML-DSA-44.
+#[test]
+fn mldsa_wrong_public_key_44() {
+    dsa_wrong_public_key(&ML_DSA_44);
+}
+
+/// Reject public-key substitution for ML-DSA-65.
+#[test]
+fn mldsa_wrong_public_key_65() {
+    dsa_wrong_public_key(&ML_DSA_65);
+}
+
+/// Reject public-key substitution for ML-DSA-87.
+#[test]
+fn mldsa_wrong_public_key_87() {
+    dsa_wrong_public_key(&ML_DSA_87);
+}
+
+/// Verify empty and boundary-length messages through host/device interop.
+fn dsa_message_lengths(p: &MlDsaParams) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let lengths = [0usize, 1, 2, 31, 32, 63, 64, 65, 127, 128, 255, 256, 1024];
+
+    for (case, len) in lengths.into_iter().enumerate() {
+        let message: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(17)).collect();
+
+        let seed = [case as u8 ^ 0xA5; 32];
+
+        let (pk, sig) = host_sign_case(p, seed, &message, b"");
+
+        assert!(
+            device_verify(&ctx, session.session_id, &pk, &message, b"", &sig,),
+            "{}: verification failed for message length {len}",
+            p.name,
+        );
+
+        // Changing the message length must invalidate the signature.
+        let mut extended = message.clone();
+        extended.push(0xA5);
+
+        assert!(
+            !device_verify(&ctx, session.session_id, &pk, &extended, b"", &sig,),
+            "{}: accepted signature for extended message length {len}",
+            p.name,
+        );
+    }
+}
+
+/// Exercise empty and boundary-length messages for ML-DSA-44.
+#[test]
+fn mldsa_message_lengths_44() {
+    dsa_message_lengths(&ML_DSA_44);
+}
+
+/// Exercise empty and boundary-length messages for ML-DSA-65.
+#[test]
+fn mldsa_message_lengths_65() {
+    dsa_message_lengths(&ML_DSA_65);
+}
+
+/// Exercise empty and boundary-length messages for ML-DSA-87.
+#[test]
+fn mldsa_message_lengths_87() {
+    dsa_message_lengths(&ML_DSA_87);
+}
+
+/// Verify repeated requests and recovery after signature rejection.
+fn dsa_repeated_verification(p: &MlDsaParams) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let message = b"ML-DSA repeated verification";
+    let (pk, sig) = host_sign_case(p, [0x77; 32], message, b"");
+
+    let mut bad_sig = sig.clone();
+    let middle = bad_sig.len() / 2;
+    bad_sig[middle] ^= 0x01;
+
+    for round in 0..10 {
+        assert!(
+            device_verify(&ctx, session.session_id, &pk, message, b"", &sig,),
+            "{} round {round}: valid signature rejected",
+            p.name,
+        );
+
+        assert!(
+            !device_verify(&ctx, session.session_id, &pk, message, b"", &bad_sig,),
+            "{} round {round}: corrupted signature accepted",
+            p.name,
+        );
+
+        assert!(
+            device_verify(&ctx, session.session_id, &pk, message, b"", &sig,),
+            "{} round {round}: recovery failed",
+            p.name,
+        );
+    }
+}
+
+/// Verify repeated requests and rejection recovery for ML-DSA-44.
+#[test]
+fn mldsa_repeated_verification_44() {
+    dsa_repeated_verification(&ML_DSA_44);
+}
+
+/// Verify repeated requests and rejection recovery for ML-DSA-65.
+#[test]
+fn mldsa_repeated_verification_65() {
+    dsa_repeated_verification(&ML_DSA_65);
+}
+
+/// Verify repeated requests and rejection recovery for ML-DSA-87.
+#[test]
+fn mldsa_repeated_verification_87() {
+    dsa_repeated_verification(&ML_DSA_87);
 }
