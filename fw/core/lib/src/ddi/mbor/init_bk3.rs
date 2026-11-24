@@ -87,9 +87,10 @@ const BK3_KEY_ATTRIBUTES: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// 3. Frame the response, then AES-CBC-256 + HMAC-SHA-384 mask BK3
 ///    under `BK_BOOT` directly into the response buffer's
 ///    `masked_bk3` slot (no intermediate DMA copy).
-/// 4. Fill `vm_launch_guid` and atomically commit the one-shot gate and
-///    LegacyUnapproved classification. SecureInitBk3 shares the masking
-///    helper but commits SecureApproved after authenticating BK3.
+/// 4. Fill `vm_launch_guid`, then commit any replacement `BK_BOOT`, the
+///    one-shot gate and the `LegacyUnapproved` classification.
+///    SecureInitBk3 shares the masking helper but commits
+///    `SecureApproved` after authenticating BK3.
 ///
 /// All partition mutations happen at the end so any earlier failure
 /// leaves partition state untouched and the host can retry.
@@ -104,7 +105,7 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
 
     let _lock = pal.partition_lock(io).await?;
 
-    mask_bk3(pal, io, body.bk3, hdr, false).await
+    mask_bk3(pal, io, body.bk3, hdr, HsmFipsProvStatus::LegacyUnapproved).await
 }
 
 /// Envelope BK3 under BK_BOOT, then commit its state and classification.
@@ -114,7 +115,7 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
     io: &P::Io,
     bk3: &HsmDmaBuf,
     hdr: &DdiReqHdr,
-    secure: bool,
+    status: HsmFipsProvStatus,
 ) -> HsmResult<&'p HsmDmaBuf> {
     // Fail fast; the PAL rechecks this at commit.
     if crate::part_state::part_is_bk3_initialized(pal, io)? {
@@ -187,7 +188,7 @@ pub(super) async fn mask_bk3<'p, P: HsmPal>(
         crate::part_state::part_set_masked_bk_boot(pal, io, boot)?;
     }
     crate::part_state::part_mark_bk3_initialized(pal, io)?;
-    crate::part_state::part_set_bk3_provisioning_status(pal, io, secure)?;
+    crate::part_state::part_set_bk3_provisioning_status(pal, io, status)?;
 
     Ok(resp)
 }

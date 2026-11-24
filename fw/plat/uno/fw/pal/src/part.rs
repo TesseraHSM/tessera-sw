@@ -20,6 +20,7 @@ use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmFipsProvStatus;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartState;
@@ -813,7 +814,7 @@ impl HsmPartitionManager for UnoHsmPal {
         match id {
             HsmPartPropId::PART_STATE => Ok(part.state()? as u8),
             HsmPartPropId::PART_RES_COUNT => Ok(part.res_mask().count_ones() as u8),
-            HsmPartPropId::BK3_PROVISIONING_STATUS => Ok(part.fips_status()),
+            HsmPartPropId::BK3_PROVISIONING_STATUS => Ok(part.fips_status() as u8),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
@@ -832,10 +833,14 @@ impl HsmPartitionManager for UnoHsmPal {
             }
             // Classification only; reset happens PAL-internally.
             HsmPartPropId::BK3_PROVISIONING_STATUS => {
-                if !matches!(value, 1 | 2) {
-                    return Err(HsmError::InvalidArg);
-                }
-                part.set_fips_status(value);
+                let status = match HsmFipsProvStatus::from_u8(value) {
+                    Some(
+                        status @ (HsmFipsProvStatus::SecureApproved
+                        | HsmFipsProvStatus::LegacyUnapproved),
+                    ) => status,
+                    _ => return Err(HsmError::InvalidArg),
+                };
+                part.set_fips_status(status);
                 Ok(())
             }
             // RES_COUNT is read-only; it is derived from the resource mask.

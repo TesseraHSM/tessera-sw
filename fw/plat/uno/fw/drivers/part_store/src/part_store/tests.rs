@@ -19,14 +19,14 @@ fn clear_bk3_wipes_material_and_preserves_unrelated_partition_state() -> HsmResu
     p.set_sealed_bk3(buf(&[0x72; SEALED_BK3_DATA_LEN]))?;
     p.set_bk3_session(buf(&[0x73; 48]))?;
     p.set_bk3_initialized(true);
-    p.set_fips_status(1);
+    p.set_fips_status(HsmFipsProvStatus::SecureApproved);
     p.set_credential(buf(&[0x74; 32]))?;
     p.set_nonce(buf(&[0x75; 32]))?;
     p.set_mk_key_id(Some(HsmKeyId::from(0x1234)));
     p.set_vm_launch_guid(&[0x76; 16]);
     for _ in 0..2 {
         p.clear_bk3_info();
-        assert_eq!(p.fips_status(), 0);
+        assert_eq!(p.fips_status(), HsmFipsProvStatus::NotApproved);
         assert!(!p.bk3_initialized());
         assert!(p.masked_bk_boot().is_empty());
         assert!(p.sealed_bk3().is_empty());
@@ -47,7 +47,11 @@ fn clear_bk3_wipes_material_and_preserves_unrelated_partition_state() -> HsmResu
 #[test]
 fn migrated_bk3_is_initialized_without_uno_flag() -> HsmResult<()> {
     let p = Partition(58);
-    for status in [0, 1, 2] {
+    for status in [
+        HsmFipsProvStatus::NotApproved,
+        HsmFipsProvStatus::SecureApproved,
+        HsmFipsProvStatus::LegacyUnapproved,
+    ] {
         p.reset();
         p.set_masked_bk_boot(buf(&[0x71; 80]))?;
         assert!(
@@ -56,7 +60,7 @@ fn migrated_bk3_is_initialized_without_uno_flag() -> HsmResult<()> {
         );
         // Simulate Admin's shared-prefix restore, including a pre-1.1 source
         // that carries a sealed blob but no provisioning classification.
-        if status == 0 {
+        if status == HsmFipsProvStatus::NotApproved {
             p.set_sealed_bk3(buf(&[0x72; 64]))?;
         }
         p.set_fips_status(status);
@@ -86,15 +90,15 @@ fn bk3_schema_upgrade_preserves_version_one_partition() {
     slot.state = [0; 3];
     p.upgrade_bk3_schema();
     assert_eq!(p.state().unwrap(), HsmPartState::Enabled);
-    assert_eq!(p.fips_status(), 0);
+    assert_eq!(p.fips_status(), HsmFipsProvStatus::NotApproved);
     assert!(p.bk3_initialized());
     assert_eq!(p.ec_key_id(), Some(HsmKeyId::from(0x1234)));
     assert_eq!(&p.masked_bk_boot()[..], &[0x51; 80]);
     assert_eq!(&p.sealed_bk3()[..], &[0x52; 64]);
     // Re-entering the boot upgrade must not revoke an already classified key.
-    p.set_fips_status(1);
+    p.set_fips_status(HsmFipsProvStatus::SecureApproved);
     p.upgrade_bk3_schema();
-    assert_eq!(p.fips_status(), 1);
+    assert_eq!(p.fips_status(), HsmFipsProvStatus::SecureApproved);
 }
 
 #[test]
@@ -121,7 +125,7 @@ fn bk3_schema_upgrade_resumes_after_state_is_copied() {
 
         assert_eq!(p.slot().version, STORE_VERSION);
         assert_eq!(p.state(), Ok(state));
-        assert_eq!(p.fips_status(), 0);
+        assert_eq!(p.fips_status(), HsmFipsProvStatus::NotApproved);
         assert_eq!(p.res_mask(), res_mask);
         assert_eq!(p.id_key_id(), key_id);
     }
@@ -129,19 +133,19 @@ fn bk3_schema_upgrade_resumes_after_state_is_copied() {
 
 #[test]
 fn bk3_status_survives_migrate_and_is_revoked_on_disable() {
-    let p = Partition(61);
+    let mut p = Partition(61);
     p.reset();
     p.set_masked_bk_boot(buf(&[0x53; 80])).unwrap();
     p.set_bk3_initialized(true);
-    p.set_fips_status(1);
+    p.set_fips_status(HsmFipsProvStatus::SecureApproved);
     p.clear_state(PartResetKind::Migrate);
-    assert_eq!(p.fips_status(), 1);
+    assert_eq!(p.fips_status(), HsmFipsProvStatus::SecureApproved);
     assert!(p.bk3_initialized());
     p.clear_state(PartResetKind::Disable);
-    assert_eq!(p.fips_status(), 0);
+    assert_eq!(p.fips_status(), HsmFipsProvStatus::NotApproved);
     assert!(!p.bk3_initialized());
-    p.set_fips_status(u8::MAX);
-    assert_eq!(p.fips_status(), 0);
+    p.slot_mut().fips_status = u8::MAX;
+    assert_eq!(p.fips_status(), HsmFipsProvStatus::NotApproved);
 }
 
 #[test]
@@ -549,10 +553,10 @@ fn shadowed_fields_follow_writes() {
 
     Partition(pid).set_state(HsmPartState::Enabled);
     assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
-    Partition(pid).set_fips_status(1);
+    Partition(pid).set_fips_status(HsmFipsProvStatus::SecureApproved);
     assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
     assert!(Partition(pid).bk3_initialized());
-    Partition(pid).set_fips_status(0);
+    Partition(pid).set_fips_status(HsmFipsProvStatus::NotApproved);
     assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
     assert!(!Partition(pid).bk3_initialized());
     Partition(pid).set_bk3_initialized(true);

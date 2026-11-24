@@ -198,6 +198,49 @@ impl HsmPartState {
     }
 }
 
+/// BK3 provisioning classification of a partition.
+///
+/// Persisted through [`HsmPartPropId::BK3_PROVISIONING_STATUS`].  A
+/// partition is FIPS-approved only when BK3 was provisioned through the
+/// authenticated `SecureInitBk3` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HsmFipsProvStatus {
+    /// Not provisioned via the secure path (fail-closed default).
+    NotApproved = 0,
+
+    /// Provisioned via `SecureInitBk3`.
+    SecureApproved = 1,
+
+    /// Provisioned via the legacy plaintext `InitBk3` path (terminal).
+    LegacyUnapproved = 2,
+}
+
+impl HsmFipsProvStatus {
+    /// Decode a serialized `u8` discriminant back into a `HsmFipsProvStatus`.
+    ///
+    /// # Parameters
+    ///
+    /// - `raw` — the `#[repr(u8)]` discriminant byte, typically
+    ///   produced by an earlier read of
+    ///   [`HsmPartPropId::BK3_PROVISIONING_STATUS`] or by on-disk decoders.
+    ///
+    /// # Returns
+    ///
+    /// [`Option<Self>`] — `Some(status)` for a recognised byte, or `None`
+    /// for any other byte.  Persistent-storage readers treat `None` as
+    /// [`NotApproved`](Self::NotApproved) and fail closed.
+    #[inline]
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::NotApproved),
+            1 => Some(Self::SecureApproved),
+            2 => Some(Self::LegacyUnapproved),
+            _ => None,
+        }
+    }
+}
+
 /// Partition manager interface.
 ///
 /// PAL impls back per-partition state and expose it to core through
@@ -790,9 +833,12 @@ impl HsmPartPropId {
     pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
     /// BK3 provisioning classification.  `U8`, `RequiredPresent`,
-    /// `Rw`: `0` = unclassified, `1` = secure (`SecureInitBk3`),
-    /// `2` = legacy (`InitBk3`).  The PAL setter accepts only `1` or
-    /// `2`; reset to `0` happens PAL-internally.
+    /// `Rw`: a [`HsmFipsProvStatus`] discriminant.  The PAL
+    /// setter accepts only
+    /// [`SecureApproved`](HsmFipsProvStatus::SecureApproved) or
+    /// [`LegacyUnapproved`](HsmFipsProvStatus::LegacyUnapproved);
+    /// reset to [`NotApproved`](HsmFipsProvStatus::NotApproved)
+    /// happens PAL-internally.
     pub const BK3_PROVISIONING_STATUS: HsmPartPropId = HsmPartPropId(0x000A);
 
     // ── Vault references (0x0010..) ───────────────────────────────

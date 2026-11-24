@@ -150,5 +150,12 @@ pub(crate) async fn secure_init_bk3<'p, P: HsmPal>(
 
     // Failures after key/PIN consumption require a new provisioning
     // handshake. The init helper recreates a missing BK_BOOT.
-    super::init_bk3::mask_bk3(pal, io, encrypted.encrypted_bk3, hdr, true).await
+    super::init_bk3::mask_bk3(
+        pal,
+        io,
+        encrypted.encrypted_bk3,
+        hdr,
+        HsmFipsProvStatus::SecureApproved,
+    )
+    .await
 }

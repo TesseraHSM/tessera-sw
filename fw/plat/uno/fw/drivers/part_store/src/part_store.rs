@@ -13,6 +13,7 @@ use core::sync::atomic::Ordering::Relaxed;
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmFipsProvStatus;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -572,17 +573,14 @@ impl Partition {
     }
 
     /// Persisted provisioning classification, unknown values fail closed.
-    pub fn fips_status(self) -> u8 {
-        match self.slot().fips_status {
-            1 => 1,
-            2 => 2,
-            _ => 0,
-        }
+    pub fn fips_status(self) -> HsmFipsProvStatus {
+        HsmFipsProvStatus::from_u8(self.slot().fips_status)
+            .unwrap_or(HsmFipsProvStatus::NotApproved)
     }
 
     /// Set the provisioning classification after backing state is committed.
-    pub fn set_fips_status(mut self, status: u8) {
-        self.slot_mut().fips_status = status;
+    pub fn set_fips_status(mut self, status: HsmFipsProvStatus) {
+        self.slot_mut().fips_status = status as u8;
     }
 
     /// Raw pointer to this partition's slot in GSRAM.
@@ -804,7 +802,7 @@ impl Partition {
             self.clear_policy_hash();
             self.clear_sealed_bk3();
             self.set_bk3_initialized(false);
-            self.set_fips_status(0);
+            self.set_fips_status(HsmFipsProvStatus::NotApproved);
             let slot = self.slot_mut();
             slot.psk_co = [0u8; PSK_LEN];
             slot.psk_cu = [0u8; PSK_LEN];
@@ -1073,7 +1071,7 @@ impl Partition {
     #[cfg_attr(not(test), cfg(feature = "fips_validation_hooks"))]
     #[inline(never)]
     pub fn clear_bk3_info(self) {
-        self.set_fips_status(0);
+        self.set_fips_status(HsmFipsProvStatus::NotApproved);
         self.clear_masked_bk_boot();
         self.clear_sealed_bk3();
         self.clear_bk3_session();
@@ -1105,7 +1103,7 @@ impl Partition {
         // An unclassified, unsealed legacy restore is indistinguishable
         // from allocation; boot-key presence alone is not initialization.
         self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_BK3_INITIALIZED != 0
-            || matches!(self.fips_status(), 1 | 2)
+            || self.fips_status() != HsmFipsProvStatus::NotApproved
             || !self.sealed_bk3().is_empty()
     }
 

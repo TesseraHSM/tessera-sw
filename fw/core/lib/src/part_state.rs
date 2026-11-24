@@ -1130,15 +1130,15 @@ pub fn part_mark_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) ->
     pal.part_prop_set_bool(io, HsmPartPropId::BK3_INITIALIZED, true)
 }
 
-/// Set the BK3 provisioning classification: secure (`DdiSecureInitBk3`)
-/// or legacy (`DdiInitBk3`).
+/// Set the BK3 provisioning classification:
+/// [`HsmFipsProvStatus::SecureApproved`] (`DdiSecureInitBk3`) or
+/// [`HsmFipsProvStatus::LegacyUnapproved`] (`DdiInitBk3`).
 pub fn part_set_bk3_provisioning_status<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    secure: bool,
+    status: HsmFipsProvStatus,
 ) -> HsmResult<()> {
-    let status = if secure { 1 } else { 2 };
-    pal.part_prop_set_u8(io, HsmPartPropId::BK3_PROVISIONING_STATUS, status)
+    pal.part_prop_set_u8(io, HsmPartPropId::BK3_PROVISIONING_STATUS, status as u8)
 }
 
 /// Whether the partition has completed one-shot security-domain

@@ -256,7 +256,7 @@ pub(crate) struct PartitionEntry {
     /// Volatile secure-BK3 provisioning ID/PIN; never a login credential.
     bk3_prov_credential: [u8; 32],
     bk3_prov_credential_set: bool,
-    fips_provisioning_status: u8,
+    fips_provisioning_status: HsmFipsProvStatus,
 
     /// Security-domain initialization state for the current partition
     /// incarnation.
@@ -344,7 +344,7 @@ impl Default for PartitionEntry {
             bk3_initialized: false,
             bk3_prov_credential: [0u8; 32],
             bk3_prov_credential_set: false,
-            fips_provisioning_status: 0,
+            fips_provisioning_status: HsmFipsProvStatus::NotApproved,
             sd_initialized: false,
             credential: [0u8; 32],
             credential_set: false,
@@ -995,7 +995,7 @@ impl StdHsmPal {
         entry.sealed_bk3_len = 0;
         entry.vm_launch_guid.fill(0);
         entry.bk3_initialized = false;
-        entry.fips_provisioning_status = 0;
+        entry.fips_provisioning_status = HsmFipsProvStatus::NotApproved;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;
@@ -1257,7 +1257,9 @@ impl PartitionEntry {
             HsmPartPropId::PART_RES_COUNT => Ok(self.res_mask.count_ones()),
             HsmPartPropId::BK3_INITIALIZED => Ok(u32::from(self.bk3_initialized)),
             HsmPartPropId::SD_INITIALIZED => Ok(u32::from(self.sd_initialized)),
-            HsmPartPropId::BK3_PROVISIONING_STATUS => Ok(u32::from(self.fips_provisioning_status)),
+            HsmPartPropId::BK3_PROVISIONING_STATUS => {
+                Ok(u32::from(self.fips_provisioning_status as u8))
+            }
             HsmPartPropId::PART_ID_ECC_KEY_ID => key_id_to_u32(self.id_key_id),
             HsmPartPropId::MK_KEY_ID => key_id_to_u32(self.mk_key_id),
             HsmPartPropId::UPS_KEY_ID => key_id_to_u32(self.ups_key_id),
@@ -1356,10 +1358,14 @@ impl PartitionEntry {
             }
             HsmPartPropId::BK3_PROVISIONING_STATUS => {
                 // Classification only; reset happens PAL-internally.
-                if !matches!(value, 1 | 2) {
-                    return Err(HsmError::InvalidArg);
-                }
-                self.fips_provisioning_status = value as u8;
+                let status = match HsmFipsProvStatus::from_u8(value as u8) {
+                    Some(
+                        status @ (HsmFipsProvStatus::SecureApproved
+                        | HsmFipsProvStatus::LegacyUnapproved),
+                    ) => status,
+                    _ => return Err(HsmError::InvalidArg),
+                };
+                self.fips_provisioning_status = status;
                 Ok(())
             }
             // GEN/SVN/RES_COUNT/PART_ID_ECC_KEY_ID are Ro
@@ -1883,7 +1889,10 @@ mod tests {
         StdHsmPal::clear_enabled_state(&mut entry);
         assert_eq!(entry.bk3_prov_credential, [0; 32]);
         assert!(!entry.bk3_prov_credential_set);
-        assert_eq!(entry.fips_provisioning_status, 0);
+        assert_eq!(
+            entry.fips_provisioning_status,
+            HsmFipsProvStatus::NotApproved
+        );
     }
 
     #[tokio::test]
@@ -1902,13 +1911,13 @@ mod tests {
         let sealed = [0x72; 64];
         // Include fresh, unsealed, sealed and explicitly cleared BK3 states.
         for (initialized, status, has_boot, has_sealed) in [
-            (false, 0, true, false),
-            (true, 0, true, true),
-            (true, 2, true, false),
-            (true, 1, true, false),
-            (true, 2, true, true),
-            (true, 1, true, true),
-            (false, 0, false, false),
+            (false, HsmFipsProvStatus::NotApproved, true, false),
+            (true, HsmFipsProvStatus::NotApproved, true, true),
+            (true, HsmFipsProvStatus::LegacyUnapproved, true, false),
+            (true, HsmFipsProvStatus::SecureApproved, true, false),
+            (true, HsmFipsProvStatus::LegacyUnapproved, true, true),
+            (true, HsmFipsProvStatus::SecureApproved, true, true),
+            (false, HsmFipsProvStatus::NotApproved, false, false),
         ] {
             {
                 let entry = &mut pal.table_mut().entries[0];
@@ -2004,7 +2013,7 @@ mod tests {
                 entry.sealed_bk3[..64].fill(0x72);
                 entry.sealed_bk3_len = 64;
                 entry.bk3_initialized = true;
-                entry.fips_provisioning_status = 1;
+                entry.fips_provisioning_status = HsmFipsProvStatus::SecureApproved;
                 entry.vm_launch_guid = [0x73; VM_LAUNCH_GUID_LEN];
             }
             pal.part_free_internal(0)?;
@@ -2015,7 +2024,10 @@ mod tests {
             assert_eq!(entry.sealed_bk3, [0; SEALED_BK3_SIZE]);
             assert_eq!(entry.sealed_bk3_len, 0);
             assert!(!entry.bk3_initialized);
-            assert_eq!(entry.fips_provisioning_status, 0);
+            assert_eq!(
+                entry.fips_provisioning_status,
+                HsmFipsProvStatus::NotApproved
+            );
             assert_eq!(entry.vm_launch_guid, [0; VM_LAUNCH_GUID_LEN]);
         }
         Ok(())
