@@ -332,13 +332,11 @@ impl TestDev {
             .exec_op_tbor_oob(self.api_rev(), req, oob_items, cookie)
     }
 
-    /// Reset the device with an NSSR, dropping every session transport.
+    /// Reset the device with an NSSR. Like the SDK, this handle keeps its
+    /// session transports: the device keeps established sessions for
+    /// renegotiation, so their commands go out sealed under the stale keys
+    /// and report `SessionNeedsRenegotiation` until reopened.
     pub fn erase(&self) -> DdiResult<()> {
-        self.transports.lock().clear();
-        self.dev.erase()
-    }
-
-    pub(crate) fn migrate(&self) -> DdiResult<()> {
         self.dev.erase()
     }
 }

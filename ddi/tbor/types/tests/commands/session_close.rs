@@ -54,7 +54,7 @@ fn session_close_plaintext_after_migration_cannot_close_reused_active_slot() {
     let request = TborSessionClosePlainReq {
         session_id: original.session_id,
     };
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     ctx.tbor(&request).expect("plaintext stale close");
     let replacement = ctx
         .open_session(CU, SessionSuite::EcdhP384)

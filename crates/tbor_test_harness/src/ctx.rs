@@ -140,16 +140,12 @@ impl TestCtx {
         crate::session::fetch_leaf_cert_der(&self.dev)
     }
 
-    /// Reset the partition with an NSSR, dropping every session
-    /// transport. Used by the `commands::part_init` determinism test for
-    /// cold-restart iterations. Available on every backend.
+    /// Reset the partition with an NSSR, as a live migration in place. The
+    /// handle keeps its session transports, as the SDK does, so sessions
+    /// opened before report `SessionNeedsRenegotiation` until reopened.
+    /// Available on every backend.
     pub fn erase(&self) -> DdiResult<()> {
         self.dev.erase()
-    }
-
-    /// Simulate NSSR while keeping the host's stale channel keys.
-    pub fn migrate(&self) -> DdiResult<()> {
-        self.dev.migrate()
     }
 
     /// Complete a recovery handshake with saved masking-key material.

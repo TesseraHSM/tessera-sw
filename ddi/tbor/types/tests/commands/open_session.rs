@@ -42,7 +42,7 @@ fn session_reopen_rejects_another_slots_valid_recovery_material() {
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("other init");
     let other = ctx.session_open_finish(other).expect("other finish");
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     let opts = || SessionOpenInitOptions::new(CU, first.suite).for_reopen(first.session_id);
     let pending = ctx
         .session_open_init_with_options(opts())
@@ -81,7 +81,7 @@ fn session_reopen_and_plaintext_close_are_serialized() {
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("init");
     let original = ctx.session_open_finish(pending).expect("finish");
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     let barrier = std::sync::Barrier::new(2);
     let (close, reopen) = std::thread::scope(|scope| {
         let close = scope.spawn(|| {
@@ -149,7 +149,7 @@ fn session_reopen_after_migration_restores_masked_keys_under_default_psk_for_bot
             masked_key,
         };
         let before = ctx.tbor(&request).expect("use key before migration");
-        ctx.migrate().expect("migration");
+        ctx.erase().expect("migration");
         let error = ctx.tbor(&request).expect_err("stale channel rejected");
         assert!(
             matches!(
@@ -211,7 +211,7 @@ fn session_reopen_failed_recovery_is_retryable() {
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("init");
     let mut original = ctx.session_open_finish(pending).expect("finish");
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
     let pending = ctx
         .session_open_init_with_options(opts())
@@ -248,7 +248,7 @@ fn session_reopen_abandoned_handshake_can_be_replaced() {
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("init");
     let original = ctx.session_open_finish(pending).expect("finish");
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
     let abandoned = ctx
         .session_open_init_with_options(opts())
