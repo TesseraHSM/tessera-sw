@@ -43,7 +43,9 @@ fn sd_create_remote_backup_uses_negotiated_session_revision() {
 
     let part =
         HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
-    let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, range.max());
+    // The provisioning above rotated the CO PSK, with no reset since.
+    let session =
+        crate::utils::partition_ex_helpers::open_co_session_with_rotated_psk(&part, range.max());
     assert_ne!(part.api_rev(), session.api_rev());
     let result = evidence
         .with_create_backup(|rcvr_chain, receiver| {

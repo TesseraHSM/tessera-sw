@@ -106,7 +106,9 @@ and supplies the saved envelope inside the fresh protected Finish. Firmware
 unwraps and validates the masking key, its metadata and a retained per-slot
 128-bit SHA-384 fingerprint. It restores the original masking key rather than
 generating a new one, but installs fresh parameter and transport keys.
-The firmware-owned PSK-change-consumed bit survives recovery.
+The firmware-owned PSK-change-consumed bit survives recovery. A migration
+clears it when it returns the PSKs to their defaults, so a session recovered
+after a migration rotates its role PSK again.
 
 ## Errors
 

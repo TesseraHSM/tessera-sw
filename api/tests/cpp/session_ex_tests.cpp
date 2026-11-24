@@ -758,7 +758,7 @@ TEST_F(tsra_sess_ex, cu_rotation_rebinds_calling_session)
     });
 }
 
-TEST_F(tsra_sess_ex, migration_reopen_preserves_psk_change_allowance)
+TEST_F(tsra_sess_ex, migration_reopen_uses_default_psk_and_restores_psk_change)
 {
     if (!api_rev_at_least(1, 1))
     {
@@ -791,7 +791,11 @@ TEST_F(tsra_sess_ex, migration_reopen_preserves_psk_change_allowance)
         std::vector<uint8_t> wrong_psk(32, 0xD6);
         tsra_buffer wrong{ wrong_psk.data(), static_cast<uint32_t>(wrong_psk.size()) };
         EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &wrong), TSRA_STATUS_SUCCESS);
-        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        // The migration returned the PSKs to their defaults.
+        EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, nullptr), TSRA_STATUS_SUCCESS);
+        // It also restored the change allowance, so the role rotates again.
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &credential), TSRA_STATUS_SUCCESS);
         EXPECT_EQ(
             tsra_sess_ex_psk_change(session, &credential),
             TSRA_STATUS_PSK_CHANGE_ALREADY_USED

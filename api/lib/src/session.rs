@@ -199,11 +199,15 @@ impl HsmSession {
         }
     }
 
-    /// Recover this migrated TBOR session with the current role PSK.
+    /// Recover this migrated TBOR session with the current role PSK, which a
+    /// migration returns to the role's default (`None`) until a session
+    /// rotates it again.
     ///
     /// Uses a fresh authenticated handshake while restoring the original
-    /// masking key. Reopen does not grant another PSK change or retry the
-    /// interrupted application command. Only valid for a stale V2 session.
+    /// masking key. Reopen neither grants another PSK change nor retries the
+    /// interrupted application command; the migration restored the
+    /// session's PSK change, so a session reopened under the default PSK
+    /// rotates its role PSK. Only valid for a stale V2 session.
     pub fn reopen_ex(
         &self,
         root_spki_thumbprint: &[u8; 48],

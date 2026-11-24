@@ -325,11 +325,16 @@ successful change; further changes return `PskChangeAlreadyUsed`. Failed
 attempts do not consume it, and failed completion rolls back the credential,
 caller binding and bit together. Reopen preserves the consumed bit.
 
-Migration preserves configured CO and CU PSKs, recovery fingerprints and
-logical session reservations. Reopen authenticates with the current role PSK
-using fresh channel keys and restores the original masking key. Explicit
-plaintext close is also permitted for `NeedsRenegotiation` only. Physical
-partition disable/free retains its distinct provisioning reset policy.
+Migration (NSSR) returns the CO and CU PSKs to their defaults and clears every
+slot's consumed bit, as a live-migration target starts with the defaults; it
+preserves recovery fingerprints and logical session reservations. Reopen
+authenticates with the role's default PSK using fresh channel keys and
+restores the original masking key; the reopened session is then held by the
+default-PSK gate until it rotates its role PSK again. Explicit plaintext close
+is also permitted for `NeedsRenegotiation` only. Migration also clears the
+`PartInit` provisioning (policy hash and PTA key), so the host initializes
+the partition again. Physical partition disable/free retains its distinct
+provisioning reset policy.
 
 The gate is **safe-by-default** in code: future opcodes added to the
 dispatcher are gated unless explicitly placed on the

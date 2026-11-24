@@ -42,7 +42,9 @@ Recover a migrated security-domain session in place, keeping its original
 masking key so existing session-masked keys remain usable. The SDK retains
 the original seed securely and shares its open handshake implementation with
 reopen. Supply the trusted root's 48-byte SHA-384 SPKI fingerprint and the
-current role PSK (32 bytes), or NULL for the role's public default.
+current role PSK (32 bytes), or NULL for the role's public default. A
+migration returns the PSKs to their public defaults, so pass NULL unless a
+session has rotated the role PSK since.
 
 ```cpp
 tsra_status tsra_sess_ex_reopen(
@@ -52,10 +54,12 @@ tsra_status tsra_sess_ex_reopen(
     );
 ```
 
-Reopen establishes fresh transport and parameter keys. It neither resets
-the one-successful-PSK-change allowance nor replays an interrupted command.
-An Active session cannot be reopened. Failed recovery can be retried on the
-same handle. Rust callers use `HsmSession::reopen_ex`.
+Reopen establishes fresh transport and parameter keys and does not replay an
+interrupted command. The migration restored the session's
+one-successful-PSK-change allowance, so a session reopened under the default
+PSK rotates its role PSK before other commands. An Active session cannot be
+reopened. Failed recovery can be retried on the same handle. Rust callers use
+`HsmSession::reopen_ex`.
 
 After live migration, session commands report
 `TSRA_STATUS_SESSION_NEEDS_RENEGOTIATION` rather than a generic transport failure.

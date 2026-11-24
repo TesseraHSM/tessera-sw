@@ -367,7 +367,9 @@ impl SessionTable {
         self.region_mut()[ALLOC_MASK] = survivors;
         self.region_mut()[RENEGO_MASK] = survivors;
         self.region_mut()[PHYS_IDS..].fill(0);
-        self.0.session_recovery_mut()[128] &= survivors;
+        // Each caller (disable, NSSR) also resets the PSKs, so no survivor
+        // has used its change of the PSK it reauthenticates with.
+        self.0.session_recovery_mut()[128] = 0;
         for slot in 0..MAX_SESSIONS {
             if survivors & (1 << slot) == 0 {
                 self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].fill(0);

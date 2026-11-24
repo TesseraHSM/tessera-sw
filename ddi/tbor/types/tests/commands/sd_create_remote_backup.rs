@@ -35,7 +35,7 @@
 //! `sd_create_remote_backup_is_one_shot` asserts.
 //!
 //! The gate is cleared by `clear_state` on every partition reset kind,
-//! including the `Migrate` driven by the harness factory reset, so each
+//! including the `Migrate` driven by the harness's NSSR, so each
 //! test starts from an uninitialized security domain and the file is
 //! self-isolating on hardware. That was not always true: uno previously
 //! cleared the flag only on `Disable`, so it survived an NSSR while the
