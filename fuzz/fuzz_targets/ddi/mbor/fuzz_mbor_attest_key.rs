@@ -55,141 +55,138 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 pub fn fuzz_ddi_attest_key(input: FuzzInput) {
-    let ddi = DdiTest::default();
-    let dev_infos = ddi.dev_info_list();
-    if dev_infos.is_empty() {
-        panic!("No devices found");
-    }
+    common_fuzz_test(|dev| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-    let mut dev = ddi
-        .open_dev(&dev_infos[0].path)
-        .expect("failed to open device");
-
-    cleanup(&ddi, &dev_infos[0].path, None);
-    helper_common_establish_credential(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
-
-    let sess_id = match helper_common_open_session(&mut dev) {
-        Ok(id) => id,
-        Err(err) => {
-            check_driver_error::<()>(Err(err));
-            return;
-        }
-    };
-    let mut cmdreq_data = input.cmdreq_data;
-    let rev = Some(DdiApiRev { major: 1, minor: 0 });
-    let mut key_id = cmdreq_data.key_id;
-
-    if input.use_valid_key_id {
-        key_id = match input.key_source {
-            KeySource::EccGenerated => {
-                let key_props = helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
-                let key_resp = helper_ecc_generate_key_pair(
-                    &dev,
-                    Some(sess_id),
-                    rev,
-                    input.key_curve,
-                    key_props,
-                );
-                match key_resp {
-                    Ok(resp) => resp.data.private_key_id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
-            }
-            KeySource::BuiltInUnwrappingKey => {
-                let resp = helper_get_unwrapping_key(&dev, Some(sess_id), rev);
-                match resp {
-                    Ok(resp) => resp.data.key_id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
-            }
-            KeySource::ImportedRsaKey => {
-                match import_rsa_key(
-                    &dev,
-                    sess_id,
-                    input.key_availability,
-                    rev,
-                    input.key_size as u16,
-                    DdiKeyUsage::SignVerify,
-                ) {
-                    Ok(id) => id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
-            }
-            KeySource::GeneratedAesKey => {
-                let key_props =
-                    helper_key_properties(DdiKeyUsage::EncryptDecrypt, input.key_availability);
-                let resp =
-                    helper_aes_generate(&dev, Some(sess_id), rev, input.aes_key_size, key_props);
-                match resp {
-                    Ok(resp) => resp.data.key_id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
-            }
-            KeySource::HmacKey => {
-                match helper_create_hmac_key(
-                    &dev,
-                    sess_id,
-                    rev,
-                    input.key_availability,
-                    input.key_curve,
-                    input.hmac_key_type,
-                    input.hash_algorithm,
-                ) {
-                    Ok(id) => id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
-            }
-            KeySource::GeneratedSecretKey => {
-                match create_secret_key(&dev, sess_id, rev, input.key_curve, input.key_availability)
-                {
-                    Ok(id) => id,
-                    Err(err) => {
-                        check_driver_error::<()>(Err(err));
-                        cleanup_with_session(&dev, Some(sess_id));
-                        return;
-                    }
-                }
+        let sess_id = match helper_common_open_session(dev) {
+            Ok(id) => id,
+            Err(err) => {
+                check_driver_error::<()>(Err(err));
+                return;
             }
         };
-    }
+        let mut cmdreq_data = input.cmdreq_data;
+        let rev = Some(DdiApiRev { major: 1, minor: 0 });
+        let mut key_id = cmdreq_data.key_id;
 
-    cmdreq_data.key_id = key_id;
-    let req = DdiAttestKeyCmdReq {
-        hdr: DdiReqHdr {
-            op: DdiOp::AttestKey,
-            sess_id: Some(sess_id),
-            rev,
-        },
-        data: cmdreq_data,
-        ext: None,
-    };
-    let resp = dev.exec_op_mbor(&req, &mut None);
+        if input.use_valid_key_id {
+            key_id = match input.key_source {
+                KeySource::EccGenerated => {
+                    let key_props =
+                        helper_key_properties(DdiKeyUsage::Derive, input.key_availability);
+                    let key_resp = helper_ecc_generate_key_pair(
+                        dev,
+                        Some(sess_id),
+                        rev,
+                        input.key_curve,
+                        key_props,
+                    );
+                    match key_resp {
+                        Ok(resp) => resp.data.private_key_id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+                KeySource::BuiltInUnwrappingKey => {
+                    let resp = helper_get_unwrapping_key(dev, Some(sess_id), rev);
+                    match resp {
+                        Ok(resp) => resp.data.key_id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+                KeySource::ImportedRsaKey => {
+                    match import_rsa_key(
+                        dev,
+                        sess_id,
+                        input.key_availability,
+                        rev,
+                        input.key_size as u16,
+                        DdiKeyUsage::SignVerify,
+                    ) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+                KeySource::GeneratedAesKey => {
+                    let key_props =
+                        helper_key_properties(DdiKeyUsage::EncryptDecrypt, input.key_availability);
+                    let resp =
+                        helper_aes_generate(dev, Some(sess_id), rev, input.aes_key_size, key_props);
+                    match resp {
+                        Ok(resp) => resp.data.key_id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+                KeySource::HmacKey => {
+                    match helper_create_hmac_key(
+                        dev,
+                        sess_id,
+                        rev,
+                        input.key_availability,
+                        input.key_curve,
+                        input.hmac_key_type,
+                        input.hash_algorithm,
+                    ) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+                KeySource::GeneratedSecretKey => {
+                    match create_secret_key(
+                        dev,
+                        sess_id,
+                        rev,
+                        input.key_curve,
+                        input.key_availability,
+                    ) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            check_driver_error::<()>(Err(err));
+                            cleanup_with_session(dev, Some(sess_id));
+                            return;
+                        }
+                    }
+                }
+            };
+        }
 
-    check_driver_error(resp);
+        cmdreq_data.key_id = key_id;
+        let req = DdiAttestKeyCmdReq {
+            hdr: DdiReqHdr {
+                op: DdiOp::AttestKey,
+                sess_id: Some(sess_id),
+                rev,
+            },
+            data: cmdreq_data,
+            ext: None,
+        };
+        let resp = dev.exec_op_mbor(&req, &mut None);
 
-    if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {
-        check_driver_error(helper_delete_key(&dev, Some(sess_id), rev, key_id));
-    }
+        check_driver_error(resp);
 
-    cleanup_with_session(&dev, Some(sess_id));
+        if input.use_valid_key_id && !matches!(input.key_source, KeySource::BuiltInUnwrappingKey) {
+            check_driver_error(helper_delete_key(dev, Some(sess_id), rev, key_id));
+        }
+
+        cleanup_with_session(dev, Some(sess_id));
+    });
 }
