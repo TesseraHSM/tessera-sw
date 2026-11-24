@@ -69,7 +69,7 @@ struct Stage {
     /// Run nextest-report
     #[clap(long)]
     nextest_report: bool,
-    /// Run firmware precheck after all other stages
+    /// Run firmware precheck
     #[clap(long)]
     fw_precheck: bool,
     /// Run fuzz build
@@ -94,9 +94,10 @@ impl Stage {
         self.nextest_full = self.nextest_full || other.nextest_full;
         self.nextest_report = self.nextest_report || other.nextest_report;
         self.fw_precheck = self.fw_precheck || other.fw_precheck;
+        self.fuzz_build = self.fuzz_build || other.fuzz_build;
     }
 
-    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min and fw_precheck)
+    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min, fw_precheck, and fuzz_build)
     fn min() -> Stage {
         Stage {
             setup: false,
