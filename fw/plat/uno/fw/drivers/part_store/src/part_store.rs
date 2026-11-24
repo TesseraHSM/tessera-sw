@@ -455,13 +455,16 @@ pub struct PartStore;
 ///
 /// Both kinds clear the per-tenant runtime state (enable-time key handles,
 /// credential, BK3 session key, nonce, volatile session metadata, and PIN
-/// policy); they differ only in whether the write-once provisioning material is
-/// preserved. The persistent session table is left for the PAL to manage.
+/// policy) and the `PartInit` provisioning (policy hash and PTA public key);
+/// they differ only in whether the migrated state is kept. The persistent
+/// session table is left for the PAL to manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartResetKind {
-    /// NSSR `Migrate`: preserve the partition's provisioning material.
+    /// NSSR `Migrate`: keep the migrated state (sealed BK3 + incarnation flag
+    /// and VM launch GUID), and return the PSKs to their defaults.
     Migrate,
-    /// Partition deallocation / disable: also wipe the provisioning material.
+    /// Partition deallocation / disable: also wipe the migrated state and the
+    /// PSKs.
     Disable,
 }
 
@@ -680,23 +683,23 @@ impl Partition {
     /// provisioning vault-key handles (the vault deletions themselves are the
     /// PAL's responsibility), the cached public keys, the caller-presented
     /// credential, the derived BK3 session key, the nonce, the volatile
-    /// session metadata, and the PIN lockout policy — matching the
-    /// reference `state.disable()` / `state.migrate()`, which both reset the
-    /// policy.
+    /// session metadata, and the PIN lockout policy (which the reference
+    /// `state.disable()` / `state.migrate()` both reset), and the `PartInit`
+    /// policy hash and PTA public key, so the partition is provisioned
+    /// (`PartInit` / `PartFinal`) afresh after either kind.
     ///
-    /// [`PartResetKind::Disable`] additionally wipes the write-once
-    /// provisioning material (policy hash, sealed BK3 + incarnation flag,
-    /// rotated PSKs, and the VM
-    /// launch GUID); [`PartResetKind::Migrate`] preserves it so a host that
-    /// resets via NSSR keeps its provisioning and only re-establishes its
-    /// credential. This helper leaves the partition identity,
-    /// `Masked_BK_BOOT`, persistent session table, resource mask, generation
-    /// counter, lifecycle state, and the SP-published unwrapping-key slot
-    /// (Gate 1 + backup, wiped only when the partition is freed so a
-    /// re-enabled partition re-imports the same key) for the caller to
-    /// manage. The PAL
-    /// preserves established session reservations on disable and releases
-    /// all slots on NSSR/migrate or free.
+    /// [`PartResetKind::Disable`] additionally wipes the migrated state
+    /// (sealed BK3 + incarnation flag and the VM launch GUID) and the PSKs;
+    /// [`PartResetKind::Migrate`] keeps the migrated state and returns the
+    /// PSKs to their defaults, so a host that resets via NSSR re-establishes
+    /// its credential, rotates its PSKs and provisions the partition again.
+    /// This helper leaves the partition identity, `Masked_BK_BOOT`, persistent
+    /// session table, resource mask, generation counter, lifecycle state, and
+    /// the SP-published unwrapping-key slot (Gate 1 + backup, wiped only when
+    /// the partition is freed so a re-enabled partition re-imports the same
+    /// key) for the caller to manage. The PAL keeps established session
+    /// reservations on disable and NSSR/migrate, and releases all slots on
+    /// free.
     #[inline(never)]
     pub fn clear_state(mut self, kind: PartResetKind) {
         // ── Per-tenant runtime state (cleared for every reset kind) ──
@@ -745,21 +748,26 @@ impl Partition {
             slot.session_meta = [0u8; 2];
         }
 
-        // ── Write-once provisioning material ──
-        // Preserved by `Migrate` (NSSR keeps provisioning); wiped by `Disable`
-        // (partition disable or deallocation).
-        // Migration retains role credentials so stale TBOR sessions can
-        // reauthenticate with the current PSK rather than a public default.
+        // `PartInit`'s write-once provisioning: not migrated, so the
+        // partition is provisioned afresh.
+        self.slot_mut().reserved_pta_pub_key.fill(0);
+        self.clear_policy_hash();
 
-        if matches!(kind, PartResetKind::Disable) {
-            self.slot_mut().reserved_pta_pub_key.fill(0);
-            self.clear_policy_hash();
-            self.clear_sealed_bk3();
-            self.set_bk3_initialized(false);
-            let slot = self.slot_mut();
-            slot.psk_co = [0u8; PSK_LEN];
-            slot.psk_cu = [0u8; PSK_LEN];
-            slot.vm_launch_guid = [0u8; GUID_LEN];
+        // ── Migrated state ──
+        // Kept by `Migrate` (NSSR); wiped by `Disable` (partition disable or
+        // deallocation). The PSKs are not migrated: an NSSR returns them to
+        // their defaults, as a migration target starts with them, and each
+        // role rotates its PSK again.
+        match kind {
+            PartResetKind::Migrate => self.bake_default_psks(),
+            PartResetKind::Disable => {
+                self.clear_sealed_bk3();
+                self.set_bk3_initialized(false);
+                let slot = self.slot_mut();
+                slot.psk_co = [0u8; PSK_LEN];
+                slot.psk_cu = [0u8; PSK_LEN];
+                slot.vm_launch_guid = [0u8; GUID_LEN];
+            }
         }
     }
 

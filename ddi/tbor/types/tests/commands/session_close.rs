@@ -17,7 +17,7 @@
 //! methods so they can call close twice, close an unknown id, or
 //! close a pending-only slot.
 //!
-//! Cross-test isolation comes from `open_dev`'s factory-reset; no
+//! Cross-test isolation comes from `open_dev`'s NSSR; no
 //! per-test cleanup is required.
 
 use tsra_ddi_tbor_test_harness::SessionSuite;

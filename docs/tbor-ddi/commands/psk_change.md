@@ -26,8 +26,10 @@ PSK or close while the partition still uses that default. Once one rotation
 commits, the caller's authentication binding (including AppId) is updated to
 the new PSK. It remains usable without reopening; peer bootstrap sessions
 receive `DefaultPskChanged` except when closing. Each logical session allows
-only one successful change, for both CO and CU, including across migration
-and recovery. A further rotation requires a fresh session with the current PSK.
+only one successful change, for both CO and CU, including across recovery. A
+migration returns the PSKs to their defaults and clears that limit, so a
+session recovered after a migration rotates its role PSK again. A further
+rotation requires a fresh session with the current PSK.
 
 Uno bulk operations enforce the same credential restriction before key
 lookup. Bulk CQEs use their existing invalid-session status because the

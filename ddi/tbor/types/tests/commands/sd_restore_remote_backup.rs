@@ -12,7 +12,7 @@
 //! The **round-trip** test uses a self-backup (sender == receiver): a first
 //! device finalizes and `CreateSD`s (producing the `pok_remote_backup` /
 //! `sd_mk_backup` this command consumes, plus the `local_mk_backup`), then a
-//! second device (factory-reset, same machine seed) restores `PartLocalMK`
+//! second device (reset by NSSR, same machine seed) restores `PartLocalMK`
 //! via `PartFinal` — so it can unmask the captured sealing key — and
 //! restores the security domain from the remote backup.
 //!

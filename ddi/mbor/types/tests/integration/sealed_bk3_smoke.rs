@@ -12,26 +12,30 @@ use tsra_ddi_mbor_types::*;
 use super::common::*;
 
 /// Whether `setup` can give each case a fresh partition. Only this process's
-/// auto-started simulator qualifies: on hardware, NSSR preserves the one-shot
-/// BK3 state and sealed BK3, and `transport=sock` alone isn't enough because
-/// `sock=` may front hardware.
+/// auto-started simulator qualifies, through its factory reset: an NSSR keeps
+/// the one-shot BK3 state and sealed BK3, as a live migration does, and
+/// `transport=sock` alone isn't enough because `sock=` may front hardware.
 fn fresh_partition_available() -> bool {
     ddi_sock_server::autostarted()
 }
 
 /// Reset the partition so each case starts with fresh one-shot BK3 state.
 pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
-    let resp = ddi.open_dev(path).unwrap().erase();
+    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
     assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
 
+/// Leave the partition fresh for the cases that follow: an NSSR keeps the
+/// one-shot BK3 state these cases leave behind.
 pub fn cleanup(
     _dev: &mut <DdiTest as Ddi>::Dev,
-    _ddi: &DdiTest,
-    _path: &str,
+    ddi: &DdiTest,
+    path: &str,
     _setup_session_id: Option<u16>,
 ) {
+    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
+    assert!(resp.is_ok(), "resp {:?}", resp);
 }
 
 fn ensure_bk3_provisioned(dev: &<DdiTest as Ddi>::Dev) {

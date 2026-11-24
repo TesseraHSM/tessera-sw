@@ -639,13 +639,15 @@ impl UnoHsmPal {
     /// reference does `vault().clear()` / `KeyStore::nuke()`) so no prior
     /// tenant key survives, then clears only the per-tenant persistent state
     /// (credential, enable-time/provisioning key handles, nonce, session table,
-    /// BK3 session key, PIN policy) while PRESERVING the provisioning material
-    /// (sealed BK3 + incarnation flag, PTA public key, policy hash, PSKs, VM launch GUID, and
-    /// `Masked_BK_BOOT`). Because the vault wipe also removes the identity
-    /// private key, a fresh partition identity (keypair + id blob) is
-    /// regenerated — matching the *std* reference firmware, whose NSSR/erase
-    /// always provisions a fresh identity. Finally refreshes the nonce and regenerates
-    /// the establish-credential and session-encryption keys.
+    /// BK3 session key, PIN policy) and `PartInit`'s provisioning (policy hash
+    /// and PTA public key), while PRESERVING the migrated state (sealed BK3 +
+    /// incarnation flag, VM launch GUID, and `Masked_BK_BOOT`). The PSKs are
+    /// not migrated: they return to their defaults, and every slot's
+    /// PSK-change-consumed bit is cleared, so each role rotates its PSK again.
+    /// Because the vault wipe also removes the identity private key, a fresh
+    /// partition identity (keypair + id blob) is regenerated, as a migration
+    /// target presents its own identity. Finally refreshes the nonce and
+    /// regenerates the establish-credential and session-encryption keys.
     ///
     /// Established session slots are marked for renegotiation
     /// (`SessionTable::mark_all_needs_renego`), mirroring `state.migrate()`'s
@@ -653,9 +655,10 @@ impl UnoHsmPal {
     /// `SessionNeedsRenegotiation` until the host reopens the session, and
     /// `CloseSession` still succeeds. Pending handshakes are released.
     ///
-    /// Provisioning survives NSSR with a freshly regenerated identity, and
-    /// credentials can be re-established. A full [`part_disable`] additionally
-    /// tears down the provisioning material. This does not implement IDFU
+    /// The partition is provisioned again (`PartInit` / `PartFinal`) after
+    /// NSSR, under a freshly regenerated identity, and credentials can be
+    /// re-established. A full [`part_disable`] additionally tears down the
+    /// migrated state. This does not implement IDFU
     /// queue quiesce/resume.
     ///
     /// # Accepted states

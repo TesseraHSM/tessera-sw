@@ -73,9 +73,9 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
     assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
 }
 
-/// `clear_state(Migrate)` must wipe per-tenant runtime state while keeping the
-/// partition's provisioning material intact (mirrors the reference
-/// `state.migrate()`). This is the regression guard for that split.
+/// `clear_state(Migrate)` must wipe per-tenant runtime state and `PartInit`'s
+/// provisioning while keeping the partition's migrated state intact. This is
+/// the regression guard for that split.
 ///
 /// This helper leaves the persistent session table untouched. The Uno PAL
 /// preserves established reservations on disable and NSSR/migrate, and
@@ -86,10 +86,13 @@ fn preserves_provisioning_and_clears_tenant_state() {
     // directly; `store_base()` backs it with real memory under `cfg(test)`.
     let pid = 7usize;
 
-    // Provisioning material — must survive a migrate.
+    // Rotated PSKs — returned to their defaults by a migrate.
     let psk_co = [0x11u8; PSK_LEN];
     let psk_cu = [0x22u8; PSK_LEN];
+    // Migrated state — must survive a migrate.
     let guid = [0x33u8; GUID_LEN];
+    // `PartInit` provisioning — must be cleared by a migrate.
+    let policy_hash = [0x44u8; POLICY_HASH_LEN];
 
     // Per-tenant state — must be cleared by a migrate.
     let nonce = [0x55u8; NONCE_LEN];
@@ -103,6 +106,7 @@ fn preserves_provisioning_and_clears_tenant_state() {
         p.set_psk_cu(buf(&psk_cu)).unwrap();
         p.set_vm_launch_guid(&guid);
         p.set_bk3_initialized(true);
+        p.set_policy_hash(buf(&policy_hash)).unwrap();
 
         p.set_nonce(buf(&nonce)).unwrap();
         p.set_credential(buf(&cred)).unwrap();
@@ -133,17 +137,33 @@ fn preserves_provisioning_and_clears_tenant_state() {
 
     let p = Partition(pid);
 
-    // Recovery must authenticate the current role PSKs, not public defaults.
-    assert_eq!(&p.psk_co()[..], &psk_co[..], "psk_co must survive migrate");
-    assert_eq!(&p.psk_cu()[..], &psk_cu[..], "psk_cu must survive migrate");
+    // The PSKs are not migrated: each role rotates its PSK again.
+    assert_eq!(
+        &p.psk_co()[..],
+        &DEFAULT_PSK_CO,
+        "psk_co must reset to its default"
+    );
+    assert_eq!(
+        &p.psk_cu()[..],
+        &DEFAULT_PSK_CU,
+        "psk_cu must reset to its default"
+    );
 
-    // Provisioning preserved.
+    // Migrated state preserved.
     assert_eq!(
         &p.vm_launch_guid()[..],
         &guid[..],
         "vm_launch_guid must survive migrate"
     );
     assert!(p.bk3_initialized(), "bk3_initialized must survive migrate");
+
+    // `PartInit` provisioning cleared.
+    assert!(!p.policy_hash_valid(), "policy hash must be cleared");
+    assert_eq!(
+        &p.policy_hash()[..],
+        &[0u8; POLICY_HASH_LEN][..],
+        "policy hash bytes must be zeroed"
+    );
 
     // Per-tenant state cleared.
     assert_eq!(

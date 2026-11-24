@@ -120,7 +120,7 @@ fn session_reopen_and_plaintext_close_are_serialized() {
 }
 
 #[test]
-fn session_reopen_restores_masked_keys_and_preserves_rotation_for_both_roles() {
+fn session_reopen_after_migration_restores_masked_keys_under_default_psk_for_both_roles() {
     use tsra_crypto::ExportableKey;
     use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
     use tsra_ddi_tbor_types::*;
@@ -160,11 +160,22 @@ fn session_reopen_restores_masked_keys_and_preserves_rotation_for_both_roles() {
             ),
             "{error:?}"
         );
+        // The migration returned the PSKs to their defaults: the rotated PSK
+        // no longer authenticates a reopen.
         let pending = ctx
             .session_open_init_with_options(
                 SessionOpenInitOptions::new(role, original.suite)
                     .with_psk(&psk)
                     .for_reopen(original.session_id),
+            )
+            .expect("recovery init");
+        assert!(
+            ctx.session_reopen_finish(pending, &original).is_err(),
+            "rotated PSK rejected after migration"
+        );
+        let pending = ctx
+            .session_open_init_with_options(
+                SessionOpenInitOptions::new(role, original.suite).for_reopen(original.session_id),
             )
             .expect("recovery init");
         let recovered = ctx
@@ -176,10 +187,15 @@ fn session_reopen_restores_masked_keys_and_preserves_rotation_for_both_roles() {
                 != original.param_key.to_vec().expect("original key"),
             "fresh parameter key"
         );
+        // The default PSK gates the restored key until the role rotates again,
+        // which the migration allows once more.
+        ctx.expect_fw_reject(&request, TborStatus::DefaultPskMustRotate);
+        ctx.psk_change(&recovered, &psk)
+            .expect("rotate again after migration");
         assert_eq!(ctx.tbor(&request).expect("use original masked key"), before);
         let err = ctx
             .psk_change(&recovered, &[0xB8; PSK_LEN])
-            .expect_err("allowance retained");
+            .expect_err("one change per session");
         assert_fw_rejects(&err, TborStatus::PskChangeAlreadyUsed);
         ctx.session_close(recovered.session_id)
             .expect("close recovered");

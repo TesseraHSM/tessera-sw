@@ -821,14 +821,16 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
                         sessions.clear();
                         return init_partition(&server).await;
                     }
-                    server.hsm.part_disable(HSM_PARTITION_ID).await?;
-                    // NSSR discards Pending slots but preserves Active slots
-                    // for renegotiation, including their connection ownership.
+                    // NSSR migrates the partition in place, as a live
+                    // migration does across devices. It discards Pending
+                    // slots but preserves Active slots for renegotiation,
+                    // including their connection ownership.
+                    server.hsm.part_migrate(HSM_PARTITION_ID).await?;
                     sessions.retain(|_, owner| owner.state != SessionState::Pending);
                     for owner in sessions.values_mut() {
                         owner.state = SessionState::NeedsRenegotiation;
                     }
-                    server.hsm.part_enable(HSM_PARTITION_ID).await
+                    Ok(())
                 }
                 .await;
                 let status = match result {

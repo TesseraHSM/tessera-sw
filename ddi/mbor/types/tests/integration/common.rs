@@ -2414,6 +2414,16 @@ pub(crate) const TEST_AES_256_CKM_WRAPPED: [u8; 296] = [
 
 pub type DdiTest = TsraDdi;
 
+/// Return the partition to its factory state. Only the simulator can: an NSSR
+/// keeps what a live migration keeps (the one-shot BK3 state and sealed BK3
+/// among it), so this fails on any other transport.
+pub fn simulator_factory_reset(dev: &<DdiTest as Ddi>::Dev) -> DdiResult<()> {
+    match dev {
+        TsraDdiDev::Sock(dev) => dev.factory_reset(),
+        TsraDdiDev::Ioctl(_) => Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)),
+    }
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 pub fn ddi_dev_test(

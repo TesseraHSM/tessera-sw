@@ -11,7 +11,7 @@
 //!
 //! The **round-trip** test exercises the realistic recovery sequence: a
 //! first device finalizes and `CreateSD`s (capturing the local backups and
-//! the `local_mk_backup`), then a second device (factory-reset, same
+//! the `local_mk_backup`), then a second device (reset by NSSR, same
 //! machine seed) restores `PartLocalMK` via `PartFinal` and finally
 //! restores the security domain from the captured local backups.
 //!

@@ -13,7 +13,7 @@
 //! The **round-trip** test uses a self-peer backup (sender == receiver): a
 //! first device finalizes, `CreateSD`s, and `CreatePeerBackup`s (producing
 //! the `pok_peer_backup` / `prev_sd_mk_backup` this command consumes, plus
-//! the `local_mk_backup`), then a second device (factory-reset, same machine
+//! the `local_mk_backup`), then a second device (reset by NSSR, same machine
 //! seed) restores `PartLocalMK` via `PartFinal` — so it can unmask the
 //! captured sealing key — and restores the security domain from the peer
 //! backup.
@@ -144,7 +144,7 @@ fn restore_peer_req_with(
     }
 }
 
-/// Drive device 2 (factory-reset, same machine seed): finalize with the
+/// Drive device 2 (reset by NSSR, same machine seed): finalize with the
 /// captured policy and restore `PartLocalMK`, leaving the partition
 /// initialized but SD-uninitialized.  Returns the context and session id.
 fn restore_target(seed: &[u8], pota: &CaKey, backup: &PeerBackup) -> (TestCtx, u16) {
