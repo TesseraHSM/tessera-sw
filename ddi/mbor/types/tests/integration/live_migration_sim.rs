@@ -290,8 +290,14 @@ fn test_live_migration_sealed_bk3() {
         common_cleanup,
         |dev, _ddi, _path, _session_id| {
             // `init_bk3` is one-shot per power cycle; reuse the existing
-            // sealed BK3 if it has already been provisioned.
-            let sealed_bk3 = helper_get_or_init_bk3(dev);
+            // sealed BK3 if it has already been provisioned. With TPM-sourced
+            // keys the helper returns the unsealed BK3, so read the sealed
+            // blob back.
+            helper_get_or_init_bk3(dev);
+            let sealed_bk3 = helper_get_sealed_bk3(dev)
+                .expect("sealed BK3 before migration")
+                .data
+                .sealed_bk3;
             info!("Retrieved sealed BK3 data: {} bytes", sealed_bk3.len());
 
             let migration_result = dev.erase();

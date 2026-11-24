@@ -818,7 +818,10 @@ impl StdHsmPal {
 
     /// Enable a partition: create internal ECC-384 key pairs and nonce.
     ///
-    /// Transitions `Allocated | Disabled → Enabled`.
+    /// Transitions `Allocated | Disabled → Enabled`. BK3's one-shot
+    /// initialization is left as it is, as on the Uno PAL: a fresh or
+    /// disabled partition has it unset, and a failed migration keeps it with
+    /// the sealed BK3.
     pub async fn part_enable_internal(&self, pid: u8) -> HsmResult<()> {
         let table = self.table_mut();
         let idx = pid as usize;
@@ -833,7 +836,6 @@ impl StdHsmPal {
 
         let entry = &mut self.table_mut().entries[idx];
         entry.vm_launch_guid = STD_VM_LAUNCH_GUID;
-        entry.bk3_initialized = false;
         entry.sd_initialized = false;
 
         entry.state = HsmPartState::Enabled;
@@ -1019,8 +1021,10 @@ impl StdHsmPal {
 
     /// Free a partition: zeroize all material and release resources.
     ///
-    /// Accepts `Allocated | Enabled | Disabled → Unallocated`.
-    /// If `Enabled`, implicitly clears internal keys first.
+    /// Accepts `Allocated | Enabled | Disabled → Unallocated`. Clears the
+    /// enabled state first in every state, as the Uno PAL does: a failed
+    /// migration leaves a `Disabled` partition holding its sealed BK3 and
+    /// session reservations.
     pub fn part_free_internal(&self, pid: u8) -> HsmResult<()> {
         let table = self.table_mut();
         let idx = pid as usize;
@@ -1037,13 +1041,8 @@ impl StdHsmPal {
         // observe the partition was freed.
         entry.gen = entry.gen.wrapping_add(1);
 
-        // If enabled, clear internal keys/nonce/vault/sessions first.
-        if matches!(
-            entry.state,
-            HsmPartState::Enabled | HsmPartState::Initializing | HsmPartState::Initialized
-        ) {
-            Self::clear_enabled_state(entry);
-        }
+        // Clear internal keys/nonce/vault/sessions and the migrated state.
+        Self::clear_enabled_state(entry);
 
         // Zeroize identity material.
         entry.id.fill(0);
@@ -1905,6 +1904,54 @@ mod tests {
         let entry = &pal.table().entries[1];
         assert_eq!(entry.state, HsmPartState::Enabled);
         assert!(entry.id_key_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_migration_keeps_migrated_state_until_enable_or_free() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.part_alloc_internal(1, 1)
+            .await
+            .expect("allocate partition");
+        pal.part_enable_internal(1).await.expect("enable");
+        let entry = &mut pal.table_mut().entries[1];
+        entry.sealed_bk3[..4].copy_from_slice(&[1, 2, 3, 4]);
+        entry.sealed_bk3_len = 4;
+        entry.bk3_initialized = true;
+        let session = entry
+            .session_table
+            .create(HsmKeyId::from(1))
+            .expect("session");
+
+        // An enable completes the failed migration, keeping BK3's one-shot
+        // initialization with the sealed BK3.
+        pal.ecc_pct_fail.set(true);
+        assert!(pal.part_migrate_internal(1).await.is_err());
+        pal.ecc_pct_fail.set(false);
+        pal.part_enable_internal(1).await.expect("enable");
+        let entry = &pal.table().entries[1];
+        assert!(entry.bk3_initialized);
+        assert_eq!(entry.sealed_bk3_len, 4);
+        assert!(matches!(
+            entry.session_table.state(session),
+            HsmSessionState::NeedsRenegotiation
+        ));
+
+        // A free leaves none of it to the next allocation.
+        pal.ecc_pct_fail.set(true);
+        assert!(pal.part_migrate_internal(1).await.is_err());
+        pal.ecc_pct_fail.set(false);
+        pal.part_free_internal(1).expect("free");
+        pal.part_alloc_internal(1, 1)
+            .await
+            .expect("reallocate partition");
+        let entry = &pal.table().entries[1];
+        assert!(!entry.bk3_initialized);
+        assert_eq!(entry.sealed_bk3_len, 0);
+        assert!(matches!(
+            entry.session_table.state(session),
+            HsmSessionState::Invalid
+        ));
     }
 
     #[tokio::test]
