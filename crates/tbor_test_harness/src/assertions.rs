@@ -73,24 +73,34 @@ pub fn assert_fw_rejects(err: &DdiError, expected: TborStatus) {
     }
 }
 
-/// Assert a session rejection, including socket ownership checks that reject
-/// unknown or closed allocations before the command reaches firmware.
+/// Assert a session rejection, including host-side ownership checks that
+/// reject unknown or closed sessions before the command reaches firmware
+/// (see [`host_rejected_session`]).
 #[track_caller]
 pub fn assert_session_rejects(err: &DdiError, expected: TborStatus) {
-    if tsra_ddi::sock_selected()
-        && matches!(
-            expected,
-            TborStatus::SessionNotFound
-                | TborStatus::FileHandleSessionIdDoesNotMatch
-                | TborStatus::SessionTransportError
-                | TborStatus::InvalidSessionControlOpcode
-        )
-        && matches!(
-            err,
-            DdiError::DdiStatus(tsra_ddi_mbor_types::DdiStatus::FileHandleSessionIdDoesNotMatch)
-        )
+    if matches!(
+        expected,
+        TborStatus::SessionNotFound
+            | TborStatus::FileHandleSessionIdDoesNotMatch
+            | TborStatus::SessionTransportError
+            | TborStatus::InvalidSessionControlOpcode
+    ) && host_rejected_session(err)
     {
         return;
     }
     assert_fw_rejects(err, expected);
+}
+
+/// Whether `err` is a transport's own rejection of a command for a session
+/// the handle does not own, raised before firmware sees it: the socket
+/// allocation gate, or the device driver's per-fd session bookkeeping
+/// (`SessionNotFound` when the handle has no open session,
+/// `FileHandleSessionIdDoesNotMatch` when its session has another id).
+fn host_rejected_session(err: &DdiError) -> bool {
+    matches!(
+        err,
+        DdiError::TborStatus(
+            TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+        )
+    )
 }

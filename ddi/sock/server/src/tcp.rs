@@ -425,8 +425,8 @@ mod tests {
     fn assert_not_owned<R: TborOpReq>(device: &DdiSockDev, request: &R) {
         assert!(matches!(
             device.exec_op_tbor(revision(device), request, None, &mut None),
-            Err(DdiError::DdiStatus(
-                DdiStatus::FileHandleSessionIdDoesNotMatch
+            Err(DdiError::TborStatus(
+                TborStatus::FileHandleSessionIdDoesNotMatch
             ))
         ));
     }
@@ -1420,8 +1420,8 @@ mod tests {
             device.flush_session(cu).expect("flush");
             assert!(matches!(
                 secure(&device, &cu_keys, cu, &close(cu), &mut []),
-                Err(DdiError::DdiStatus(
-                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                Err(DdiError::TborStatus(
+                    TborStatus::FileHandleSessionIdDoesNotMatch
                 ))
             ));
 

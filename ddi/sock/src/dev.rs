@@ -102,6 +102,7 @@ use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborStatus;
 
 /// Default endpoint on Unix.
 #[cfg(unix)]
@@ -911,16 +912,18 @@ impl DdiSockDev {
 
         // ── 2. Build the SQE and exchange it over the socket.
         let (resp_buf, out_items) = match self.model()? {
-            DdiDeviceModel::Uno => {
-                self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf, oob_items)?
-            }
+            DdiDeviceModel::Uno => self
+                .submit(OP_TBOR, u8::from(session_ctrl), session_id, buf, oob_items)
+                .map_err(tbor_transport_err)?,
             DdiDeviceModel::Duo => {
                 check_oob_items(&oob_items)?;
                 let sqe = self
                     .duo_sqe(DuoOp::Tbor, session_id.unwrap_or(0), buf.len(), DST_CAP)
                     .oob_len((oob_items.len() * 16) as u32)
                     .build();
-                let (payload, out_items, _) = self.submit_duo(sqe, buf, oob_items)?;
+                let (payload, out_items, _) = self
+                    .submit_duo(sqe, buf, oob_items)
+                    .map_err(tbor_transport_err)?;
                 (payload, out_items)
             }
         };
@@ -1405,7 +1408,9 @@ impl DdiDev for DdiSockDev {
             .gcm_tag(&seal.tag)
             .iv(&seal.iv)
             .build();
-        let (payload, out_items, seal) = self.submit_duo(sqe, payload.to_vec(), items)?;
+        let (payload, out_items, seal) = self
+            .submit_duo(sqe, payload.to_vec(), items)
+            .map_err(tbor_transport_err)?;
         copy_oob_outputs(oob_items, out_items);
         Ok((payload, seal))
     }
@@ -1454,6 +1459,18 @@ fn copy_oob_outputs(items: &mut [TborOobItem<'_>], out_items: Vec<Vec<u8>>) {
     // `complete` verified one item of the requested length per output.
     for (buf, bytes) in outputs.zip(out_items) {
         buf.copy_from_slice(&bytes);
+    }
+}
+
+/// Reports the server's session-ownership rejection of a TBOR command as a
+/// [`TborStatus`], as the IOCTL backends do, so TBOR callers see a TBOR
+/// status whichever layer rejected the command.
+fn tbor_transport_err(err: DdiError) -> DdiError {
+    match err {
+        DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch) => {
+            DdiError::TborStatus(TborStatus::FileHandleSessionIdDoesNotMatch)
+        }
+        other => other,
     }
 }
 
