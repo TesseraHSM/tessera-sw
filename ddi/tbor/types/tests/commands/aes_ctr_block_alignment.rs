@@ -181,12 +181,6 @@ fn masking_sock_diagnostic() {
     let session = finalized_co_session(&ctx);
 
     for key_length in [32u8, 33, 47, 48, 49, 63, 64] {
-        let _result = ctx.tbor(&TborHmacGenerateKeyReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            hash_algo: HMAC_HASH_SHA256,
-            key_length,
-            key_label: Vec::new(),
-        });
+        assert_masking_succeeds(&ctx, session.session_id, key_length, &[]);
     }
 }

@@ -18,7 +18,10 @@
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsGenerateKeyReq;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
+use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_AES_XTS_KEY_LEN;
 
 /// Builds an `AesXtsGenerateKey` request with encrypt + decrypt usage.
@@ -98,7 +101,7 @@ mod tests {
     fn aes_xts_generate_key_rejects_invalid_usage() {
         let ctx = TestCtx::new();
         let session = finalized_co_session(&ctx);
-        for usage in [0, KEY_USAGE_ENCRYPT, KEY_USAGE_DECRYPT, 1 << 2] {
+        for usage in [0, KEY_USAGE_ENCRYPT, KEY_USAGE_DECRYPT, KEY_USAGE_SIGN] {
             let req = TborAesXtsGenerateKeyReq {
                 key_usage: usage,
                 ..generate_xts_key_req(session.session_id, SCOPE_LOCAL)
@@ -146,7 +149,7 @@ mod tests {
 
         let valid_usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
 
-        for extra_bit in [1 << 2, 1 << 3, 1 << 4] {
+        for extra_bit in [KEY_USAGE_SIGN, KEY_USAGE_VERIFY, KEY_USAGE_DERIVE] {
             let req = TborAesXtsGenerateKeyReq {
                 key_usage: valid_usage | extra_bit,
                 ..generate_xts_key_req(session.session_id, SCOPE_LOCAL)

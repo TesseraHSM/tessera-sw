@@ -708,7 +708,9 @@ fn aes_gcm_rejects_changed_aad_length() {
     let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
 
     let iv = random(GCM_IV_LEN);
-    let aad = random(20);
+    // Use zero-filled AAD to isolate length authentication
+    // from changes in the padded AAD content.
+    let aad = vec![0u8; 20];
     let pt = random(32);
 
     let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
@@ -878,12 +880,17 @@ fn aes_gcm_rejects_truncated_masked_key() {
 
     let pt = [0x55u8; 16];
     let iv = random(GCM_IV_LEN);
+    let truncation_lengths = [1, 2, 4, 8];
 
-    for removed in [1, 2, 4, 8] {
-        if key.len() <= removed {
-            continue;
-        }
+    // Ensure the key fixture supports all tested truncation lengths.
+    assert!(
+        truncation_lengths
+            .iter()
+            .all(|&removed| key.len() > removed),
+        "Masked key fixture must support all tested truncation lengths"
+    );
 
+    for removed in truncation_lengths {
         let truncated = &key[..key.len() - removed];
 
         let r = req(
