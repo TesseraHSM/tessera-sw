@@ -12,3 +12,4 @@ doctest = false
 test = false
 
 [lints]
+workspace = true

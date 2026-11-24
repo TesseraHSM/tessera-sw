@@ -32,3 +32,4 @@ vtpm-tests = ["getrandom"]
 num-bigint = { workspace = true }
 
 [lints]
+workspace = true

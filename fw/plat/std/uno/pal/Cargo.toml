@@ -30,3 +30,4 @@ hex.workspace = true
 tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }
 
 [lints]
+workspace = true

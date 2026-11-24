@@ -28,3 +28,4 @@ name = "compile_tests"
 path = "tests/compile_tests.rs"
 
 [lints]
+workspace = true
