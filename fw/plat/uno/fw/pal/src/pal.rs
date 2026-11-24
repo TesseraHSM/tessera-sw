@@ -1227,6 +1227,11 @@ impl HsmCustomDispatch for UnoHsmPal {
 }
 
 impl HsmPal for UnoHsmPal {
+    fn psk_policy_clock(&self) -> HsmResult<(u64, NonZeroU64)> {
+        let frequency = NonZeroU64::new(embassy_time::TICK_HZ).ok_or(HsmError::InternalError)?;
+        Ok((Instant::now().as_ticks(), frequency))
+    }
+
     /// Initialises the Uno platform (phase 1 only).
     ///
     /// Sets up the minimum needed for IPC communication:
@@ -1334,15 +1339,14 @@ impl HsmPal for UnoHsmPal {
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
                 // SysTick restarts on every core boot, unlike the GSRAM store.
                 // Restart retained penalties before publishing boot completion.
-                let now = Instant::now().as_ticks();
+                let clock = self.psk_policy_clock();
                 for idx in 0..NUM_PARTITIONS {
                     let result = (|| {
                         let part = tsra_fw_uno_drivers_part_store::PartStore::partition(
                             HsmPartId::from(idx as u8),
                         )?;
                         let snapshot = PskPolicySnapshot::from_bytes(part.psk_policy())?;
-                        let frequency = NonZeroU64::new(embassy_time::TICK_HZ)
-                            .ok_or(HsmError::InternalError)?;
+                        let (now, frequency) = clock?;
                         let recovered = snapshot.restart_delay(now, frequency)?;
                         part.set_psk_policy(recovered.as_bytes())
                     })();

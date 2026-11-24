@@ -33,7 +33,8 @@ use super::*;
 /// hardware- and platform-specific behavior is reached through one of
 /// the supertraits listed below; this trait itself only adds the
 /// platform-wide lifecycle hooks ([`init`](Self::init),
-/// [`run`](Self::run), [`deinit`](Self::deinit)) and the [`Default`]
+/// [`run`](Self::run), [`deinit`](Self::deinit)), the PSK policy clock
+/// ([`psk_policy_clock`](Self::psk_policy_clock)), and the [`Default`]
 /// constructibility constraint.
 ///
 /// ## Supertraits
@@ -72,6 +73,12 @@ pub trait HsmPal:
     + HsmCrypto
     + Default
 {
+    /// PSK policy time in this boot's monotonic clock domain and ticks/second.
+    ///
+    /// Retained-policy recovery must use the same clock and frequency. The
+    /// frequency is constant and nonzero; clock/conversion errors fail closed.
+    fn psk_policy_clock(&self) -> HsmResult<(u64, core::num::NonZeroU64)>;
+
     fn init(&self);
 
     /// Drives the platform's main event loop.

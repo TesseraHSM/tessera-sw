@@ -3,7 +3,8 @@
 
 //! Session-scoped helpers shared across DDI handlers.
 //!
-//! Currently this exposes [`session_app_id`], which projects the
+//! Provides partition-wide PSK admission/result accounting and session
+//! credential binding. [`session_app_id`] projects the
 //! public [`APP_ID_LEN`]-byte AppId out of the partition PSK bound
 //! to a given session.  See [`tsra_fw_hsm_pal_traits::PSK_LEN`]
 //! for the `app_id ‖ app_pin` PSK layout.
@@ -19,6 +20,37 @@ use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::APP_ID_LEN;
 use tsra_fw_hsm_pal_traits::PSK_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
+
+/// Check admission under the caller's partition lock, before handshake crypto.
+pub(crate) fn check_psk_login<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<()> {
+    let policy = crate::part_state::part_psk_policy(pal, io)?;
+    let (now, _) = pal.psk_policy_clock()?;
+    if policy.can_authenticate(now) {
+        Ok(())
+    } else {
+        Err(HsmError::LoginFailed)
+    }
+}
+
+/// Persist a credential outcome under the caller's partition lock, without undo.
+/// Backend/validation errors are not credential failures and leave policy intact.
+pub(crate) fn record_psk_auth_result<P: HsmPal, T>(
+    pal: &P,
+    io: &P::Io,
+    result: HsmResult<T>,
+) -> HsmResult<T> {
+    if !matches!(result, Ok(_) | Err(HsmError::SessionAuthFailure)) {
+        return result;
+    }
+    let mut policy = crate::part_state::part_psk_policy(pal, io)?;
+    let (now, frequency) = pal.psk_policy_clock()?;
+    match result {
+        Ok(_) => policy.record_success(now)?,
+        Err(_) => policy.record_failure(now, frequency)?,
+    }
+    crate::part_state::part_set_psk_policy(pal, io, &policy)?;
+    result
+}
 
 /// Snapshot vault-backed session identity before any asynchronous work.
 pub(crate) fn copy_auth_binding<'a, P: HsmPal>(

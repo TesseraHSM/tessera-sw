@@ -22,6 +22,7 @@
 //! sit on the async stack.
 
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
+use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::mask as mask_key;
@@ -120,6 +121,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             seed_envelope,
         } = parse_request(cmd_buf.request_mut())?;
         ensure_pending_blob_len(pal, io, sess_id)?;
+        crate::session::check_psk_login(pal, io)?;
 
         // ── Load Pending handshake state ──────────────────────────
         let HandshakeState {
@@ -159,8 +161,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         )
         .await
         {
+            let result = crate::session::record_psk_auth_result(pal, io, Err(e));
             destroy_pending_on_auth_failure(pal, io, sess_id).await;
-            return Err(e);
+            return result;
         }
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
 
@@ -180,10 +183,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let seed = match open_seed_envelope(pal, io, param_key, seed_envelope).await {
             Ok(seed) => seed,
             Err(e) => {
+                let result = crate::session::record_psk_auth_result(pal, io, Err(e));
                 destroy_pending_on_auth_failure(pal, io, sess_id).await;
-                return Err(e);
+                return result;
             }
         };
+
+        crate::session::record_psk_auth_result(pal, io, Ok(()))?;
 
         // ── Derive remaining per-session keys ─────────────────────
         let derived =
@@ -351,9 +357,9 @@ async fn verify_mac<P: HsmPal>(
 /// `param_key`.  Returns the 32-byte plaintext seed as a `&HsmDmaBuf`
 /// sub-view of the envelope buffer (which was decrypted in place).
 ///
-/// Any AEAD failure (bad magic, unsupported alg, tag mismatch) or a
-/// wrong-length plaintext is treated as a session-establishment
-/// authentication failure ([`HsmError::SessionAuthFailure`]).  The caller
+/// Invalid framing, a tag mismatch, or a wrong-length plaintext is treated
+/// as a session-establishment authentication failure. Backend errors retain
+/// their original status and are not counted as bad credentials. The caller
 /// eagerly destroys the Pending session on this error (with the undo log
 /// as backstop), so a tampered envelope cannot be re-probed against the
 /// same slot.
@@ -367,10 +373,15 @@ async fn open_seed_envelope<'a, P: HsmPal>(
     // buffer; the destructured `seed_envelope` is a `&mut HsmDmaBuf`
     // sub-view of the parent `req_buf`, so no scratch copy is
     // needed.
+    // Separate host framing rejection from backend errors such as InvalidArg.
+    aead_peek(seed_envelope).map_err(|_| HsmError::SessionAuthFailure)?;
     let result = aead_open(pal, io, param_key, seed_envelope).await;
     let view = match result {
         Ok(v) => v,
-        Err(_) => return Err(HsmError::SessionAuthFailure),
+        Err(HsmError::AesGcmDecryptTagDoesNotMatch) => {
+            return Err(HsmError::SessionAuthFailure);
+        }
+        Err(error) => return Err(error),
     };
 
     if view.payload.len() != SEED_LEN {

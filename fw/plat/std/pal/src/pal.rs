@@ -149,6 +149,8 @@ pub struct StdHsmPal {
     /// with `UnsafeCell` access to partition data.
     pub(crate) part_locks: Box<[PartMutex; NUM_PARTITIONS]>,
 
+    psk_policy_epoch: std::time::Instant,
+
     /// Tokio runtime owned by this instance when constructed via [`Default`].
     ///
     /// `None` when constructed via [`new`](Self::new) — the caller owns the
@@ -197,6 +199,7 @@ impl StdHsmPal {
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
             part_locks: Box::new(core::array::from_fn(|_| PartMutex::new(()))),
+            psk_policy_epoch: std::time::Instant::now(),
             _rt: None,
         }
     }
@@ -231,6 +234,7 @@ impl Default for StdHsmPal {
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
             part_locks: Box::new(core::array::from_fn(|_| PartMutex::new(()))),
+            psk_policy_epoch: std::time::Instant::now(),
             // Keep the runtime alive so `handle` remains valid.
             _rt: Some(rt),
         }
@@ -266,6 +270,13 @@ impl HsmCustomDispatch for StdHsmPal {
 ///   tasks, not through this method).
 /// - **`deinit`** — No-op; resources are cleaned up on drop.
 impl HsmPal for StdHsmPal {
+    fn psk_policy_clock(&self) -> HsmResult<(u64, core::num::NonZeroU64)> {
+        let ticks = u64::try_from(self.psk_policy_epoch.elapsed().as_millis())
+            .map_err(|_| HsmError::InternalError)?;
+        let frequency = core::num::NonZeroU64::new(1_000).ok_or(HsmError::InternalError)?;
+        Ok((ticks, frequency))
+    }
+
     fn init(&self) {}
 
     async fn run(&self) {

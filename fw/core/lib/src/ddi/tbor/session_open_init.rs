@@ -99,6 +99,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_init,
         } = parse_request(cmd_buf.request())?;
 
+        crate::session::check_psk_login(pal, io)?;
+
         let hpke_suite = hpke_suite_for(suite);
 
         // ── Identity + PSK material (all on the scoped allocator) ──
