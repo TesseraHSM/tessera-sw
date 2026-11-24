@@ -243,11 +243,6 @@ pub enum HsmError {
     PartitionNotProvisioned = 0x087000D5,
     Bk3AlreadyInitialized = 0x087000D6,
     SealedBk3AlreadySet = 0x087000D7,
-    Bk3PinAlreadySet = 0x087000E8,
-    Bk3PinNotSet = 0x087000E9,
-    Bk3PinTagMismatch = 0x087000EA,
-    Bk3TransportTagMismatch = 0x087000EB,
-    Bk3NotSecurelyProvisioned = 0x087000EC,
     PartitionIdKeyGenerationPctFailed = 0x087000D8,
 
     // ── AES Key Wrap errors ────────────────────────────────────────
@@ -280,6 +275,13 @@ pub enum HsmError {
     /// because no such suite is implemented (or it has been retired).
     /// See [`HsmSessionSuite`] for the registered values.
     UnsupportedSessionSuite = 0x087000E7,
+
+    // ── Secure BK3 provisioning ────────────────────────────────────
+    Bk3PinAlreadySet = 0x087000E8,
+    Bk3PinNotSet = 0x087000E9,
+    Bk3PinTagMismatch = 0x087000EA,
+    Bk3TransportTagMismatch = 0x087000EB,
+    Bk3NotSecurelyProvisioned = 0x087000EC,
 
     /// An ML-DSA key pair failed its sign/verify PCT.
     PctValidationMlDsaGenKeyFailed = 0x087000ED,

@@ -229,16 +229,15 @@ pub(crate) struct PartitionEntry {
     /// `Masked_BK_BOOT` — `BK_BOOT` enveloped with a platform-derived
     /// `BKx` masking key.
     ///
-    /// Generated at allocation, or recreated by BK3 initialization after
-    /// ClearBk3. The raw `BK_BOOT` is recovered on demand by unmasking this
-    /// blob. Preserved across disable/enable and NSSR; cleared on free or
-    /// ClearBk3.
+    /// Generated at allocation. The raw `BK_BOOT` is recovered on demand by
+    /// unmasking this blob. Preserved across disable/enable and NSSR; cleared
+    /// on free.
     masked_bk_boot: [u8; MASKED_BK_BOOT_LEN],
 
     /// Length of valid data in `masked_bk_boot` (0 = not yet
     /// populated).
     ///
-    /// Reset to 0 on free or ClearBk3, not on NSSR.
+    /// Reset to 0 on free, not on NSSR.
     masked_bk_boot_len: u32,
 
     /// VM launch GUID, set during partition enable.
@@ -251,7 +250,7 @@ pub(crate) struct PartitionEntry {
     /// BK3 initialization state for the current partition incarnation.
     ///
     /// Set through `BK3_INITIALIZED` and preserved across NSSR. Cleared on
-    /// disable, free or ClearBk3; authoritative one-shot gate for init.
+    /// disable or free; authoritative one-shot gate for init.
     bk3_initialized: bool,
 
     /// Volatile secure-BK3 provisioning ID/PIN; never a login credential.
@@ -259,7 +258,7 @@ pub(crate) struct PartitionEntry {
     bk3_prov_credential_set: bool,
 
     /// BK3 provisioning classification.  Preserved across NSSR; reset on
-    /// disable, free or ClearBk3.
+    /// disable or free.
     fips_provisioning_status: HsmFipsProvStatus,
 
     /// Security-domain initialization state for the current partition
