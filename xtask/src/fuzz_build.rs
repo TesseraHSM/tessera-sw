@@ -43,9 +43,12 @@ impl Xtask for FuzzBuild {
         // Elevate cargo build warnings to errors
         sh.set_var("CARGO_BUILD_WARNINGS", "deny");
 
-        cmd!(sh, "cargo {rust_toolchain...} fuzz build --features autostart-isolated")
-            .quiet()
-            .run()?;
+        cmd!(
+            sh,
+            "cargo {rust_toolchain...} fuzz build --features autostart-isolated"
+        )
+        .quiet()
+        .run()?;
 
         log::trace!("done fuzz build");
         Ok(())
