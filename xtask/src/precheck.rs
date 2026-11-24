@@ -19,6 +19,7 @@ use crate::copyright::Copyright;
 use crate::coverage::Coverage;
 use crate::coverage_report::CoverageReport;
 use crate::fmt::Fmt;
+use crate::fuzz_build::FuzzBuild;
 use crate::fw_precheck::FwPrecheck;
 use crate::nextest::Nextest;
 use crate::nextest_report::NextestReport;
@@ -71,6 +72,9 @@ struct Stage {
     /// Run firmware precheck after all other stages
     #[clap(long)]
     fw_precheck: bool,
+    /// Run fuzz build
+    #[clap(long)]
+    fuzz_build: bool,
 }
 
 impl Stage {
@@ -109,6 +113,7 @@ impl Stage {
             nextest_full: false,
             nextest_report: false,
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 
@@ -132,6 +137,7 @@ impl Stage {
             nextest_full: true,
             nextest_report: false, // nextest report is optional (intended only for CI)
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 
@@ -153,6 +159,7 @@ impl Stage {
             nextest_full: true,
             nextest_report: true,
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 }
@@ -414,7 +421,14 @@ impl Xtask for Precheck {
             FwPrecheck {
                 skip_audit: self.skip_audit,
             }
-            .run(ctx)?;
+            .run(ctx.clone())?;
+        }
+
+        if stage.fuzz_build {
+            FuzzBuild {
+                toolchain: Some("nightly-2026-11-17".to_string()),
+            }
+            .run(ctx.clone())?;
         }
 
         log::trace!("done precheck");
