@@ -289,6 +289,7 @@ struct TborTransport {
 #[repr(C)]
 struct TborSecureCmd {
     generic: TsraCpGenericCmd,
+    data_xfer: DataXferBuffers,
     transport: TborTransport,
 }
 
@@ -381,20 +382,6 @@ struct TsraCpDataXferCmd {
     generic_cmd: TsraCpGenericCmd,
     data_xfer: DataXferBuffers,
 }
-
-#[repr(C)]
-#[derive(Default)]
-struct TborSecureDataXferCmd {
-    data_xfer_cmd: TsraCpDataXferCmd,
-    transport: TborTransport,
-}
-
-ioctl_readwrite!(
-    tsra_tbor_secure_data_xfer_ioctl,
-    b'B',
-    0x09,
-    TborSecureDataXferCmd
-);
 
 /// IOCTL sequence for `TSRA_CTRL_PATH_DATA_XFER`.
 const TSRA_HSM_IOC_SEQ_DATA_XFER: u8 = 0x07;
@@ -928,7 +915,7 @@ impl DdiNixDev {
         payload: &[u8],
         seal: DdiTransportSeal,
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
-        self.exec_secure_ioctl_with(op, session_id, payload, seal, |cmd| {
+        self.exec_secure_ioctl_with(op, session_id, payload, seal, &[], |cmd| {
             // SAFETY: cmd and its buffers remain valid until the synchronous IOCTL completes.
             unsafe { tsra_ctrl_path_encrypt_decrypt_ioctl(self.file.read().as_raw_fd(), cmd) }
         })
@@ -940,9 +927,20 @@ impl DdiNixDev {
         session_id: u16,
         payload: &[u8],
         seal: DdiTransportSeal,
+        oob: &[OobRaw],
         submit: impl FnOnce(&mut TborSecureCmd) -> nix::Result<i32>,
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
-        if payload.len() > 8192 || (op == 1 && payload.is_empty()) {
+        if payload.len() > 8192
+            || (op == 1 && payload.is_empty())
+            || !matches!(op, 0..=2)
+            || (op != 1 && (!payload.is_empty() || !oob.is_empty()))
+            || oob.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob.iter().any(|item| {
+                item.addr.is_null()
+                    || item.len == 0
+                    || item.len > TSRA_MAX_DATA_XFER_PER_BUFFER as usize
+            })
+        {
             return Err(DdiError::InvalidParameter);
         }
         let mut response = if op == 1 { vec![0u8; 8192] } else { Vec::new() };
@@ -954,6 +952,23 @@ impl DdiNixDev {
             .with_kind(3)
             .with_session_id_is_valid(true);
         cmd.generic.in_data.session_id = session_id;
+        cmd.generic.in_data.command_set = if oob.is_empty() {
+            TsraCpCmdSet::Generic
+        } else {
+            TsraCpCmdSet::DataXfer
+        };
+        cmd.data_xfer.buffer_count = oob.len() as u32;
+        for (dst, item) in cmd.data_xfer.buffers.iter_mut().zip(oob) {
+            *dst = DataXferBuffer {
+                xfer_length: item.len as u32,
+                flags: if item.dev_write {
+                    TSRA_DATA_XFER_BUF_DEV_WRITE
+                } else {
+                    0
+                },
+                buffer_addr: item.addr,
+            };
+        }
         cmd.generic.in_data.src_length = payload.len() as u32;
         cmd.generic.in_data.dst_length = response.len() as u32;
         if !payload.is_empty() {
@@ -982,54 +997,6 @@ impl DdiNixDev {
                 tag: cmd.transport.tag,
             },
         ))
-    }
-
-    fn exec_secure_data_xfer_with(
-        &self,
-        session_id: u16,
-        payload: &[u8],
-        seal: DdiTransportSeal,
-        oob: &[OobRaw],
-        submit: impl FnOnce(&mut TborSecureDataXferCmd) -> nix::Result<i32>,
-    ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
-        if oob.is_empty()
-            || oob.len() > TSRA_MAX_DATA_XFER_BUFFERS
-            || oob.iter().any(|item| {
-                item.addr.is_null()
-                    || item.len == 0
-                    || item.len > TSRA_MAX_DATA_XFER_PER_BUFFER as usize
-            })
-        {
-            return Err(DdiError::InvalidParameter);
-        }
-        self.exec_secure_ioctl_with(1, session_id, payload, seal, |inner| {
-            let mut cmd = TborSecureDataXferCmd {
-                data_xfer_cmd: TsraCpDataXferCmd {
-                    generic_cmd: mem::take(&mut inner.generic),
-                    ..Default::default()
-                },
-                transport: mem::take(&mut inner.transport),
-            };
-            cmd.data_xfer_cmd.generic_cmd.hdr.ioctl_data_size =
-                mem::size_of::<TborSecureDataXferCmd>() as u32;
-            cmd.data_xfer_cmd.generic_cmd.in_data.command_set = TsraCpCmdSet::DataXfer;
-            cmd.data_xfer_cmd.data_xfer.buffer_count = oob.len() as u32;
-            for (dst, item) in cmd.data_xfer_cmd.data_xfer.buffers.iter_mut().zip(oob) {
-                *dst = DataXferBuffer {
-                    xfer_length: item.len as u32,
-                    flags: if item.dev_write {
-                        TSRA_DATA_XFER_BUF_DEV_WRITE
-                    } else {
-                        0
-                    },
-                    buffer_addr: item.addr,
-                };
-            }
-            let result = submit(&mut cmd);
-            inner.generic = cmd.data_xfer_cmd.generic_cmd;
-            inner.transport = cmd.transport;
-            result
-        })
     }
 
     /// Shared TBOR exec path (see [`DdiDev::exec_op_tbor`]). `oob` items
@@ -1413,9 +1380,6 @@ impl DdiDev for DdiNixDev {
         seal: DdiTransportSeal,
         oob_items: &mut [TborOobItem<'_>],
     ) -> DdiResult<(Vec<u8>, DdiTransportSeal)> {
-        if oob_items.is_empty() {
-            return self.exec_secure_ioctl(1, session_id, payload, seal);
-        }
         let oob: Vec<OobRaw> = oob_items
             .iter_mut()
             .map(|item| OobRaw {
@@ -1424,9 +1388,9 @@ impl DdiDev for DdiNixDev {
                 addr: item.dma_ptr(),
             })
             .collect();
-        self.exec_secure_data_xfer_with(session_id, payload, seal, &oob, |cmd| {
+        self.exec_secure_ioctl_with(1, session_id, payload, seal, &oob, |cmd| {
             // SAFETY: cmd and the caller's input/output slices stay valid through completion.
-            unsafe { tsra_tbor_secure_data_xfer_ioctl(self.file.read().as_raw_fd(), cmd) }
+            unsafe { tsra_ctrl_path_encrypt_decrypt_ioctl(self.file.read().as_raw_fd(), cmd) }
         })
     }
 

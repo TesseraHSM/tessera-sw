@@ -103,8 +103,9 @@ fn dev() -> DdiNixDev {
 
 #[test]
 fn secure_ioctl_round_trips_ciphertext_and_seals() {
-    assert_eq!(mem::size_of::<TborSecureCmd>(), 160);
-    assert_eq!(mem::offset_of!(TborSecureCmd, transport), 112);
+    assert_eq!(mem::size_of::<TborSecureCmd>(), 1704);
+    assert_eq!(mem::offset_of!(TborSecureCmd, data_xfer), 112);
+    assert_eq!(mem::offset_of!(TborSecureCmd, transport), 1656);
     let request_seal = DdiTransportSeal {
         iv: [0x12; 12],
         tag: [0x34; 16],
@@ -114,7 +115,13 @@ fn secure_ioctl_round_trips_ciphertext_and_seals() {
         tag: [0x78; 16],
     };
     let (response, seal) = dev()
-        .exec_secure_ioctl_with(1, 23, b"sealed request", request_seal, |cmd| {
+        .exec_secure_ioctl_with(1, 23, b"sealed request", request_seal, &[], |cmd| {
+            assert_eq!(cmd.generic.hdr.ioctl_data_size, 1704);
+            assert!(matches!(
+                cmd.generic.in_data.command_set,
+                TsraCpCmdSet::Generic
+            ));
+            assert_eq!(cmd.data_xfer.buffer_count, 0);
             assert_eq!(cmd.generic.in_data.session_id, 23);
             assert_eq!(cmd.generic.in_data.session_control_flags.into_bits(), 7);
             assert_eq!(cmd.transport.op, 1);
@@ -151,7 +158,7 @@ fn secure_ioctl_round_trips_ciphertext_and_seals() {
 fn secure_ioctl_rejects_bad_completion_lengths_and_propagates_errors() {
     let seal = DdiTransportSeal::default();
     for (status, error, count) in [(0xc8, 0, 0), (0, 1, 0), (0, 0, 8193)] {
-        let result = dev().exec_secure_ioctl_with(1, 23, b"x", seal, |cmd| {
+        let result = dev().exec_secure_ioctl_with(1, 23, b"x", seal, &[], |cmd| {
             cmd.generic.out_data.status = status;
             cmd.transport.error = error;
             cmd.generic.out_data.byte_count = count;
@@ -164,14 +171,14 @@ fn secure_ioctl_rejects_bad_completion_lengths_and_propagates_errors() {
         }
     }
     let result =
-        dev().exec_secure_ioctl_with(1, 23, b"x", seal, |_| Err(nix::errno::Errno::ENOTTY));
+        dev().exec_secure_ioctl_with(1, 23, b"x", seal, &[], |_| Err(nix::errno::Errno::ENOTTY));
     assert!(matches!(
         result,
         Err(DdiError::NixError(nix::errno::Errno::ENOTTY))
     ));
     for payload in [&[][..], &[0; 8193][..]] {
         assert!(matches!(
-            dev().exec_secure_ioctl_with(1, 23, payload, seal, |_| {
+            dev().exec_secure_ioctl_with(1, 23, payload, seal, &[], |_| {
                 panic!("invalid length must not reach ioctl")
             }),
             Err(DdiError::InvalidParameter)
@@ -183,7 +190,13 @@ fn secure_ioctl_rejects_bad_completion_lengths_and_propagates_errors() {
 fn flush_and_probe_have_no_dma_buffers_and_oob_is_not_dropped() {
     for op in [0, 2] {
         dev()
-            .exec_secure_ioctl_with(op, 23, &[], DdiTransportSeal::default(), |cmd| {
+            .exec_secure_ioctl_with(op, 23, &[], DdiTransportSeal::default(), &[], |cmd| {
+                assert_eq!(cmd.generic.hdr.ioctl_data_size, 1704);
+                assert_eq!(cmd.data_xfer.buffer_count, 0);
+                assert!(matches!(
+                    cmd.generic.in_data.command_set,
+                    TsraCpCmdSet::Generic
+                ));
                 assert_eq!(cmd.transport.op, op);
                 assert!(cmd.generic.in_data.src_buf.is_null());
                 assert!(cmd.generic.in_data.dst_buf.is_null());
@@ -207,8 +220,6 @@ fn flush_and_probe_have_no_dma_buffers_and_oob_is_not_dropped() {
 
 #[test]
 fn secure_oob_maps_directions_and_preserves_completion_and_seals() {
-    assert_eq!(mem::size_of::<TborSecureDataXferCmd>(), 1704);
-    assert_eq!(mem::offset_of!(TborSecureDataXferCmd, transport), 1656);
     let input = [0x12; 65536];
     let mut output = [0u8; 8];
     let oob = [
@@ -228,8 +239,8 @@ fn secure_oob_maps_directions_and_preserves_completion_and_seals() {
         tag: [0x56; 16],
     };
     let (response, seal) = dev()
-        .exec_secure_data_xfer_with(23, b"sealed", request_seal, &oob, |cmd| {
-            let generic = &mut cmd.data_xfer_cmd.generic_cmd;
+        .exec_secure_ioctl_with(1, 23, b"sealed", request_seal, &oob, |cmd| {
+            let generic = &mut cmd.generic;
             assert_eq!(generic.hdr.ioctl_data_size, 1704);
             assert!(matches!(
                 generic.in_data.command_set,
@@ -239,7 +250,7 @@ fn secure_oob_maps_directions_and_preserves_completion_and_seals() {
             assert_eq!(generic.in_data.session_control_flags.into_bits(), 7);
             assert_eq!(cmd.transport.tag, request_seal.tag);
             assert_eq!(cmd.transport.iv, request_seal.iv);
-            let buffers = &cmd.data_xfer_cmd.data_xfer;
+            let buffers = &cmd.data_xfer;
             assert_eq!(buffers.buffer_count, 2);
             assert_eq!(buffers.buffers[0].flags, 0);
             assert_eq!(buffers.buffers[0].xfer_length, 65536);
@@ -266,7 +277,6 @@ fn secure_oob_maps_directions_and_preserves_completion_and_seals() {
 fn secure_oob_validates_bounds_and_propagates_completion_errors() {
     let input = [0; 1];
     for (count, len, addr) in [
-        (0, 1, input.as_ptr()),
         (65, 1, input.as_ptr()),
         (1, 0, input.as_ptr()),
         (1, 65537, input.as_ptr()),
@@ -280,7 +290,8 @@ fn secure_oob_validates_bounds_and_propagates_completion_errors() {
             })
             .collect();
         assert!(matches!(
-            dev().exec_secure_data_xfer_with(
+            dev().exec_secure_ioctl_with(
+                1,
                 23,
                 b"x",
                 DdiTransportSeal::default(),
@@ -299,10 +310,10 @@ fn secure_oob_validates_bounds_and_propagates_completion_errors() {
         .collect();
     for (status, error, count) in [(0xc8, 0, 0), (0, 1, 0), (0, 0, 8193)] {
         let result =
-            dev().exec_secure_data_xfer_with(23, b"x", DdiTransportSeal::default(), &oob, |cmd| {
-                assert_eq!(cmd.data_xfer_cmd.data_xfer.buffer_count, 64);
-                cmd.data_xfer_cmd.generic_cmd.out_data.status = status;
-                cmd.data_xfer_cmd.generic_cmd.out_data.byte_count = count;
+            dev().exec_secure_ioctl_with(1, 23, b"x", DdiTransportSeal::default(), &oob, |cmd| {
+                assert_eq!(cmd.data_xfer.buffer_count, 64);
+                cmd.generic.out_data.status = status;
+                cmd.generic.out_data.byte_count = count;
                 cmd.transport.error = error;
                 Ok(0)
             });
@@ -313,11 +324,40 @@ fn secure_oob_validates_bounds_and_propagates_completion_errors() {
         }
     }
     let result =
-        dev().exec_secure_data_xfer_with(23, b"x", DdiTransportSeal::default(), &oob, |_| {
+        dev().exec_secure_ioctl_with(1, 23, b"x", DdiTransportSeal::default(), &oob, |_| {
             Err(nix::errno::Errno::EIO)
         });
     assert!(matches!(
         result,
         Err(DdiError::NixError(nix::errno::Errno::EIO))
     ));
+}
+
+#[test]
+fn secure_ioctl_rejects_oob_or_payload_on_probe_and_flush() {
+    let input = [0; 1];
+    let oob = [OobRaw {
+        addr: input.as_ptr(),
+        len: input.len(),
+        dev_write: false,
+    }];
+    for (op, payload, buffers) in [
+        (0, &[][..], &oob[..]),
+        (2, &[][..], &oob[..]),
+        (0, &input[..], &[][..]),
+        (2, &input[..], &[][..]),
+        (3, &[][..], &[][..]),
+    ] {
+        assert!(matches!(
+            dev().exec_secure_ioctl_with(
+                op,
+                23,
+                payload,
+                DdiTransportSeal::default(),
+                buffers,
+                |_| panic!("invalid transport operation must not reach IOCTL"),
+            ),
+            Err(DdiError::InvalidParameter)
+        ));
+    }
 }
