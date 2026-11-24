@@ -40,6 +40,8 @@ pub mod open_session;
 pub mod reopen_session;
 pub mod rsa_mod_exp;
 pub mod rsa_unwrap;
+pub mod secure_init_bk3;
+pub mod set_init_bk3_pin;
 pub mod set_sealed_bk3;
 pub mod sha_digest;
 pub mod unmask_key;
@@ -95,6 +97,8 @@ pub enum DdiOp {
     InitBk3 = 1111,
     GetSealedBk3 = 1112,
     SetSealedBk3 = 1113,
+    SetInitBk3Pin = 1114,
+    SecureInitBk3 = 1115,
     ShaDigest = 2006,
 }
 
@@ -265,7 +269,9 @@ impl From<DdiOp> for DdiSessionKind {
             | DdiOp::OpenSession
             | DdiOp::InitBk3
             | DdiOp::GetSealedBk3
-            | DdiOp::SetSealedBk3 => DdiSessionKind::None,
+            | DdiOp::SetSealedBk3
+            | DdiOp::SetInitBk3Pin
+            | DdiOp::SecureInitBk3 => DdiSessionKind::None,
             _ => DdiSessionKind::User,
         }
     }

@@ -276,17 +276,22 @@ pub enum HsmError {
     /// See [`HsmSessionSuite`] for the registered values.
     UnsupportedSessionSuite = 0x087000E7,
 
+    // ── Secure BK3 provisioning ────────────────────────────────────
+    Bk3PinAlreadySet = 0x087000E8,
+    Bk3PinNotSet = 0x087000E9,
+    Bk3PinTagMismatch = 0x087000EA,
+    Bk3TransportTagMismatch = 0x087000EB,
+    Bk3NotSecurelyProvisioned = 0x087000EC,
+
     /// An ML-DSA key pair failed its sign/verify PCT.
-    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+    PctValidationMlDsaGenKeyFailed = 0x087000ED,
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
-    PctValidationMlKemGenKeyFailed = 0x087000E9,
-    /// An RSA signature did not verify.
-    RsaVerifyFailed = 0x0870010E,
+    PctValidationMlKemGenKeyFailed = 0x087000EE,
 
     /// The CU session authenticated with the public default PSK, which
     /// has since been rotated. Close and reopen with the new credential.
-    DefaultPskChanged = 0x087000EA,
+    DefaultPskChanged = 0x087000EF,
 
     /// X.509 DER parsing failed (malformed structure, bad tag/length,
     /// or unsupported field encoding).
@@ -467,6 +472,9 @@ pub enum HsmError {
     /// inspect the response cannot silently treat a bad signature as
     /// valid.  Mirrors [`EccVerifyFailed`](Self::EccVerifyFailed).
     MlDsaVerifyFailed = 0x0870010D,
+
+    /// An RSA signature did not verify.
+    RsaVerifyFailed = 0x0870010E,
 
     /// A cryptographic algorithm self-test (CAST) produced output that
     /// did not match its known-answer vector.

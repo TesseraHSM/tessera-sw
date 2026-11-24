@@ -1065,6 +1065,15 @@ pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
     pal.part_prop_get_bytes(io, HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY)
 }
 
+/// Set the establish-credential public key (x ∥ y, 96 B).
+pub fn part_set_establish_cred_pub_key<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
+    data: &HsmDmaBuf,
+) -> HsmResult<()> {
+    pal.part_prop_set_bytes(io, HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY, data)
+}
+
 /// Derive the Partition Trust Anchor public key as big-endian P-384 `x || y`.
 pub async fn part_pta_pub_key<P: HsmPal>(
     pal: &P,
@@ -1116,9 +1125,20 @@ pub fn part_is_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> H
 /// Atomically commit the partition's one-shot BK3 init state to
 /// `true`.  Returns [`HsmError::Bk3AlreadyInitialized`] if the flag
 /// was already set in the current partition incarnation.  This is the
-/// authoritative race-winner gate for `DdiInitBk3`.
+/// authoritative race-winner gate for `DdiInitBk3` and `DdiSecureInitBk3`.
 pub fn part_mark_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_set_bool(io, HsmPartPropId::BK3_INITIALIZED, true)
+}
+
+/// Set the BK3 provisioning classification:
+/// [`HsmFipsProvStatus::SecureApproved`] (`DdiSecureInitBk3`) or
+/// [`HsmFipsProvStatus::LegacyUnapproved`] (`DdiInitBk3`).
+pub fn part_set_bk3_provisioning_status<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
+    status: HsmFipsProvStatus,
+) -> HsmResult<()> {
+    pal.part_prop_set_u8(io, HsmPartPropId::BK3_PROVISIONING_STATUS, status as u8)
 }
 
 /// Whether the partition has completed one-shot security-domain

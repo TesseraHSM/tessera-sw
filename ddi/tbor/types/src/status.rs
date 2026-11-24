@@ -264,11 +264,11 @@ pub enum TborStatus {
     UnsupportedSessionSuite = 0x087000E7,
 
     /// An ML-DSA key pair failed its sign/verify PCT.
-    PctValidationMlDsaGenKeyFailed = 0x087000E8,
+    PctValidationMlDsaGenKeyFailed = 0x087000ED,
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
-    PctValidationMlKemGenKeyFailed = 0x087000E9,
-    DefaultPskChanged = 0x087000EA,
+    PctValidationMlKemGenKeyFailed = 0x087000EE,
+    DefaultPskChanged = 0x087000EF,
     X509ParseError = 0x087000F0,
     X509NotSelfSigned = 0x087000F1,
     X509IssuerMismatch = 0x087000F2,

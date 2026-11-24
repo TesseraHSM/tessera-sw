@@ -198,6 +198,49 @@ impl HsmPartState {
     }
 }
 
+/// BK3 provisioning classification of a partition.
+///
+/// Persisted through [`HsmPartPropId::BK3_PROVISIONING_STATUS`].  A
+/// partition is FIPS-approved only when BK3 was provisioned through the
+/// authenticated `SecureInitBk3` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HsmFipsProvStatus {
+    /// Not provisioned via the secure path (fail-closed default).
+    NotApproved = 0,
+
+    /// Provisioned via `SecureInitBk3`.
+    SecureApproved = 1,
+
+    /// Provisioned via the legacy plaintext `InitBk3` path (terminal).
+    LegacyUnapproved = 2,
+}
+
+impl HsmFipsProvStatus {
+    /// Decode a serialized `u8` discriminant back into a `HsmFipsProvStatus`.
+    ///
+    /// # Parameters
+    ///
+    /// - `raw` — the `#[repr(u8)]` discriminant byte, typically
+    ///   produced by an earlier read of
+    ///   [`HsmPartPropId::BK3_PROVISIONING_STATUS`] or by on-disk decoders.
+    ///
+    /// # Returns
+    ///
+    /// [`Option<Self>`] — `Some(status)` for a recognised byte, or `None`
+    /// for any other byte.  Persistent-storage readers treat `None` as
+    /// [`NotApproved`](Self::NotApproved) and fail closed.
+    #[inline]
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::NotApproved),
+            1 => Some(Self::SecureApproved),
+            2 => Some(Self::LegacyUnapproved),
+            _ => None,
+        }
+    }
+}
+
 /// Partition manager interface.
 ///
 /// PAL impls back per-partition state and expose it to core through
@@ -789,6 +832,15 @@ impl HsmPartPropId {
     /// flag is also reset PAL-internally on partition free / NSSR.
     pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
+    /// BK3 provisioning classification.  `U8`, `RequiredPresent`,
+    /// `Rw`: a [`HsmFipsProvStatus`] discriminant.  The PAL
+    /// setter accepts only
+    /// [`SecureApproved`](HsmFipsProvStatus::SecureApproved) or
+    /// [`LegacyUnapproved`](HsmFipsProvStatus::LegacyUnapproved);
+    /// reset to [`NotApproved`](HsmFipsProvStatus::NotApproved)
+    /// happens PAL-internally.
+    pub const BK3_PROVISIONING_STATUS: HsmPartPropId = HsmPartPropId(0x000A);
+
     // ── Vault references (0x0010..) ───────────────────────────────
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition identity
@@ -818,7 +870,7 @@ impl HsmPartPropId {
     pub const SESSION_ENC_KEY_ID: HsmPartPropId = HsmPartPropId(0x0015);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's
-    /// one-shot establish-credential RSA-OAEP key.
+    /// one-shot P-384 establish-credential key.
     pub const ESTABLISH_CRED_KEY_ID: HsmPartPropId = HsmPartPropId(0x0016);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition-local key
@@ -843,8 +895,8 @@ impl HsmPartPropId {
     pub const SESSION_ENC_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0018);
 
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
-    /// one-shot establish-credential key.  Read-only from caller
-    /// perspective.
+    /// one-shot establish-credential key.  Written by core when it
+    /// replaces a consumed key.
     pub const ESTABLISH_CRED_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0019);
 
     // ── Caller-presented secrets (0x0020..) ───────────────────────
@@ -871,6 +923,10 @@ impl HsmPartPropId {
     /// event.  Sensitive.  Caller refreshes by writing a fresh
     /// PAL-RNG buffer via [`HsmPartitionManager::part_prop_set_bytes`].
     pub const NONCE: HsmPartPropId = HsmPartPropId(0x0023);
+
+    /// Volatile BK3 provisioning ID followed by PIN (16 + 16 bytes).
+    /// Never exported or restored with the persistent partition store.
+    pub const BK3_PROV_CREDENTIAL: HsmPartPropId = HsmPartPropId(0x0024);
 
     // ── Boot / launch-time bound material (0x0030..) ──────────────
 
@@ -960,6 +1016,8 @@ impl HsmPartPropId {
             Self::PART_RES_COUNT => HsmPartPropMeta::scalar(U8, Ro, Req, false),
             Self::BK3_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
             Self::SD_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
+            Self::BK3_PROVISIONING_STATUS => HsmPartPropMeta::scalar(U8, Rw, Req, false),
+            Self::BK3_PROV_CREDENTIAL => HsmPartPropMeta::fixed(32, Rw, Abs, true),
 
             // ── Vault refs (HsmKeyId as u16) ──
             Self::PART_ID_ECC_KEY_ID => VAULT_REF_RO,
@@ -974,9 +1032,8 @@ impl HsmPartPropId {
             | Self::RSA_UNWRAPPING_KEY_ID => VAULT_REF_RW,
 
             // ── Public-key views (fixed P-384 sizes) ──
-            Self::SESSION_ENC_ECC_PUB_KEY | Self::ESTABLISH_CRED_ECC_PUB_KEY => {
-                HsmPartPropMeta::fixed(96, Ro, Abs, false)
-            }
+            Self::SESSION_ENC_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Ro, Abs, false),
+            Self::ESTABLISH_CRED_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Rw, Abs, false),
 
             // ── Caller-presented secrets ──
             Self::PSK_CO | Self::PSK_CU => HsmPartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),

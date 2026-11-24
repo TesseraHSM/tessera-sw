@@ -82,6 +82,35 @@ fn test_set_sealed_bk3_twice_fails() {
             "expected SealedBk3AlreadySet, got {:?}",
             err
         );
+        let err = helper_set_sealed_bk3(dev, vec![0xA5; 513]).unwrap_err();
+        assert!(matches!(
+            err,
+            DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet)
+        ));
+    });
+}
+
+#[test]
+fn test_oversized_first_sealed_bk3_write_is_retryable() {
+    if !fresh_partition_available() {
+        return;
+    }
+    ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
+        ensure_bk3_provisioned(dev);
+        assert!(matches!(
+            helper_set_sealed_bk3(dev, vec![0xA5; 513]),
+            Err(DdiError::DdiStatus(DdiStatus::SealedBk3TooLarge))
+        ));
+        let blob = vec![0x51; 64];
+        helper_set_sealed_bk3(dev, blob.clone()).unwrap();
+        assert_eq!(
+            helper_get_sealed_bk3(dev)
+                .unwrap()
+                .data
+                .sealed_bk3
+                .as_slice(),
+            blob.as_slice()
+        );
     });
 }
 

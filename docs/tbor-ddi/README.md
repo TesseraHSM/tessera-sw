@@ -136,7 +136,7 @@ the generated key.
 An inconsistent generated key enters physical Uno's FIPS error state.
 The simulator returns the matching PCT error without publishing the key.
 ML-DSA and ML-KEM failures use `PctValidationMlDsaGenKeyFailed`
-(`0x087000E8`) and `PctValidationMlKemGenKeyFailed` (`0x087000E9`).
+(`0x087000ED`) and `PctValidationMlKemGenKeyFailed` (`0x087000EE`).
 Partition identity, establish-credential, and session-encryption failures
 retain their distinct statuses. An operation that cannot complete a PCT
 returns its operation error rather than treating it as a consistency failure.
@@ -305,7 +305,7 @@ Any other in-session opcode returns `DefaultPskMustRotate`
 does not rotate the CU credential. A successful rotation rebinds its caller to
 the new credential and AppId, so that session can continue normal work.
 Peer default-authenticated CU sessions receive `DefaultPskChanged`
-(`0x087000EA`) except when closing. Out-of-session opcodes (`ApiRev`,
+(`0x087000EF`) except when closing. Out-of-session opcodes (`ApiRev`,
 `SessionOpenInit`, `SessionOpenFinish`, `PartInfo`, `GetCertChainInfo`,
 `GetCertificate`) remain available. A default-authenticated Pending CU
 handshake whose credential changes before Finish is rejected with

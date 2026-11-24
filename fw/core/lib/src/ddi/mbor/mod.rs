@@ -33,6 +33,7 @@ pub(crate) mod open_session;
 pub(crate) mod reopen_session;
 pub(crate) mod rsa_mod_exp;
 pub(crate) mod rsa_unwrap;
+pub(crate) mod secure_init_bk3;
 pub(crate) mod set_sealed_bk3;
 pub(crate) mod sha_digest;
 pub(crate) mod unmask_key;
@@ -186,8 +187,10 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::RsaUnwrap => rsa_unwrap(pal, io, decoder, hdr).await,
         DdiOp::UnmaskKey => unmask_key(pal, io, decoder, hdr).await,
         DdiOp::GetSealedBk3 => get_sealed_bk3(pal, io, decoder, hdr),
-        DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr),
+        DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr).await,
         DdiOp::InitBk3 => init_bk3(pal, io, decoder, hdr).await,
+        DdiOp::SetInitBk3Pin => secure_init_bk3::set_init_bk3_pin(pal, io, decoder, hdr).await,
+        DdiOp::SecureInitBk3 => secure_init_bk3::secure_init_bk3(pal, io, decoder, hdr).await,
         DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr).await,
         DdiOp::ChangePin => change_pin(pal, io, decoder, hdr).await,
         DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,

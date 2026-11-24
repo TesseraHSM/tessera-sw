@@ -52,6 +52,8 @@ pub(crate) fn sess_ctrl_from_mbor_op(op: tsra_fw_ddi_mbor_types::DdiOp) -> HsmSe
         | DdiOp::GetSessionEncryptionKey
         | DdiOp::GetSealedBk3
         | DdiOp::InitBk3
+        | DdiOp::SetInitBk3Pin
+        | DdiOp::SecureInitBk3
         | DdiOp::SetSealedBk3
         | DdiOp::EstablishCredential => HsmSessCtrl::NoSession,
         DdiOp::OpenSession => HsmSessCtrl::Open,

@@ -5,9 +5,7 @@
 //!
 //! Masks the caller-supplied 48-byte BK3 against the partition's
 //! `BK_BOOT` using the AES-CBC-256 + HMAC-SHA-384 `MaskedKey`
-//! envelope, persists `BK_BOOT` itself as a `Masked_BK_BOOT` envelope
-//! (under the partition's `BKx` masking key) for later partition
-//! lifecycle recovery, and returns the resulting `masked_bk3`
+//! envelope and returns the resulting `masked_bk3`
 //! together with the partition's `vm_launch_guid`.
 //!
 //! `InitBk3` is a one-shot per partition incarnation: a second call
@@ -23,27 +21,17 @@
 //! [`HsmPartitionLock::partition_lock`].  Read-only / hot-path
 //! partition getters do **not** take this lock.  The PAL also
 //! re-checks the one-shot state atomically inside
-//! [`HsmPartitionManager::part_mark_bk3_initialized`] so the lock is
-//! an optimization, not the correctness barrier.
+//! [`part_mark_bk3_initialized`](crate::part_state::part_mark_bk3_initialized).
 //!
 //! ## Masking
 //!
 //! The masking transform is [`MaskingKeyAlgorithm::AesCbc256Hmac384`]:
 //! AES-CBC-256 encryption with a random IV, authenticated by an
 //! HMAC-SHA-384 tag computed over the entire blob (encrypt-then-MAC).
-//! The same envelope is used twice in this handler:
-//!
-//! 1. **BK3** (plaintext) is enveloped under **`BK_BOOT`** (a fresh
-//!    80-byte random boot key generated here).  The result —
-//!    `masked_bk3` — is returned to the host.
-//! 2. **`BK_BOOT`** (plaintext) is enveloped under **`BKx`** (the
-//!    partition's masking key produced per-call by
-//!    [`HsmPartitionManager::derive_masking_key`] from the PAL's
-//!    firmware boot seed bound to `(svn, bks2_id)`).  The result —
-//!    `Masked_BK_BOOT` — is persisted via
-//!    [`HsmPartitionManager::part_set_masked_bk_boot`] and never
-//!    crosses the wire.  The raw `BK_BOOT` is never stored; later
-//!    flows recover it on demand by unmasking `Masked_BK_BOOT`.
+//! `BK_BOOT` was generated and persisted in masked form at partition
+//! allocation. Both init paths reuse it unless ClearBk3 erased it; in that
+//! case initialization generates a new key and persists it only at commit.
+//! The plaintext boot key exists only in per-IO DMA scratch.
 //!
 //! For each envelope the 80-byte masking key is split into a 32-byte
 //! AES key (low half) and a 48-byte HMAC key (high half).  Metadata
@@ -95,19 +83,18 @@ const BK3_KEY_ATTRIBUTES: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// Pipeline:
 /// 1. Decode body, acquire the per-partition write lock, one-shot
 ///    fail-fast on `bk3_initialized`.
-/// 2. Read `BK_BOOT` and allocate a sibling slot for `BKx` from a
-///    single combined DMA buffer.
+/// 2. Recover `BK_BOOT`, or generate a replacement after ClearBk3.
 /// 3. Frame the response, then AES-CBC-256 + HMAC-SHA-384 mask BK3
 ///    under `BK_BOOT` directly into the response buffer's
 ///    `masked_bk3` slot (no intermediate DMA copy).
-/// 4. Derive `BKx` per-call from the firmware boot seed, mask
-///    `BK_BOOT` under `BKx`, and persist the result as
-///    `Masked_BK_BOOT` — firmware-internal, never on the wire.
-/// 5. Fill `vm_launch_guid` and call `part_mark_bk3_initialized` as
-///    the authoritative one-shot commit.
+/// 4. Fill `vm_launch_guid`, then commit any replacement `BK_BOOT`, the
+///    one-shot gate and the `LegacyUnapproved` classification.
+///    SecureInitBk3 shares the masking helper but commits
+///    `SecureApproved` after authenticating BK3.
 ///
 /// All partition mutations happen at the end so any earlier failure
 /// leaves partition state untouched and the host can retry.
+#[inline(never)]
 pub(crate) async fn init_bk3<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
@@ -118,7 +105,19 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
 
     let _lock = pal.partition_lock(io).await?;
 
-    // Fail-fast; the authoritative commit below re-checks atomically.
+    mask_bk3(pal, io, body.bk3, hdr, HsmFipsProvStatus::LegacyUnapproved).await
+}
+
+/// Envelope BK3 under BK_BOOT, then commit its state and classification.
+/// The caller holds the partition write lock.
+pub(super) async fn mask_bk3<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    bk3: &HsmDmaBuf,
+    hdr: &DdiReqHdr,
+    status: HsmFipsProvStatus,
+) -> HsmResult<&'p HsmDmaBuf> {
+    // Fail fast; the PAL rechecks this at commit.
     if crate::part_state::part_is_bk3_initialized(pal, io)? {
         return Err(HsmError::Bk3AlreadyInitialized);
     }
@@ -138,14 +137,24 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
         key_length: BK3_LEN as u16,
     };
 
-    // Recover BK_BOOT.  The raw boot key is never stored; it is created
-    // masked once at partition allocation and recovered here by
-    // unmasking the persisted `Masked_BK_BOOT`.
+    // Allocation normally supplies BK_BOOT. The FIPS-only ClearBk3
+    // action can remove it; initialization only recreates an absent key.
+    let new_masked_boot = match crate::part_state::part_masked_bk_boot(pal, io) {
+        Ok(_) => None,
+        Err(HsmError::PartPropNotFound) => {
+            Some(tsra_fw_core_crypto_key_derive::mask_bk_boot(pal, io).await?)
+        }
+        Err(err) => return Err(err),
+    };
     let bk_boot_dma = pal.dma_alloc(io, BK_BOOT_LEN)?;
-    crate::ddi::recover_bk_boot(pal, io, bk_boot_dma).await?;
+    if let Some(boot) = new_masked_boot.as_deref() {
+        tsra_fw_core_crypto_key_derive::unmask_bk_boot(pal, io, boot, bk_boot_dma).await?;
+    } else {
+        crate::ddi::recover_bk_boot(pal, io, bk_boot_dma).await?;
+    }
 
     // Size-only query (no crypto).
-    let masked_bk3_len = mask(pal, io, bk_boot_dma, body.bk3, &metadata, None).await?;
+    let masked_bk3_len = mask(pal, io, bk_boot_dma, bk3, &metadata, None).await?;
 
     let vm_launch_guid_len = crate::part_state::part_vm_launch_guid(pal, io)?.len();
 
@@ -153,7 +162,8 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
     // mask call below operates on the buffer materialized via
     // `from_layout`.
     let (resp, layout) = pal.dma_alloc_var_with(io, |buf| {
-        let mut encoder = super::encode_resp_hdr(&super::success_hdr(hdr, DdiOp::InitBk3), buf)?;
+        let resp_hdr = super::success_hdr(hdr, hdr.op);
+        let mut encoder = super::encode_resp_hdr(&resp_hdr, buf)?;
         let layout = DdiInitBk3Resp::reserve(&mut encoder, masked_bk3_len, vm_launch_guid_len)?;
         Ok((encoder.position(), layout))
     })?;
@@ -161,15 +171,7 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
 
     // Authenticated-encrypt BK3 directly into the reserved masked-BK3
     // slot — no intermediate DMA allocations.
-    mask(
-        pal,
-        io,
-        bk_boot_dma,
-        body.bk3,
-        &metadata,
-        Some(frame.masked_bk3),
-    )
-    .await?;
+    mask(pal, io, bk_boot_dma, bk3, &metadata, Some(frame.masked_bk3)).await?;
 
     {
         let guid = crate::part_state::part_vm_launch_guid(pal, io)?;
@@ -178,10 +180,15 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
             .copy_from_slice(&guid[..vm_launch_guid_len]);
     }
 
-    // Authoritative one-shot commit; must be the last fallible op so a
-    // failure here cannot leave the partition in `Initialized` state
-    // without the host having received the masked BK3.
+    // Authoritative one-shot commit, after the optional replacement boot
+    // key and before the classification, which the PAL also treats as
+    // initialized. Transport delivery can still fail after commit;
+    // neither init path rolls provisioning back on a lost response.
+    if let Some(boot) = new_masked_boot.as_deref() {
+        crate::part_state::part_set_masked_bk_boot(pal, io, boot)?;
+    }
     crate::part_state::part_mark_bk3_initialized(pal, io)?;
+    crate::part_state::part_set_bk3_provisioning_status(pal, io, status)?;
 
     Ok(resp)
 }
