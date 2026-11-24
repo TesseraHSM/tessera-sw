@@ -12,8 +12,44 @@
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOpContext;
 use tsra_crypto::HashStreamingOp;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use super::*;
+
+const OOB_HASH_CHUNK_LEN: usize = 1024;
+const OOB_SGL_DATA_BLOCK: u8 = 0;
+
+fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<u64> {
+    let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+    let addr = u64::from_le_bytes([
+        desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
+    ]);
+    if len != expected_len
+        || desc[12..15].iter().any(|&byte| byte != 0)
+        || desc[15] != OOB_SGL_DATA_BLOCK
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    if expected_len != 0 {
+        if addr == 0 {
+            return Err(HsmError::InvalidArg);
+        }
+        let host_addr = usize::try_from(addr).map_err(|_| HsmError::InvalidArg)?;
+        host_addr
+            .checked_add(expected_len)
+            .ok_or(HsmError::InvalidArg)?;
+    }
+    Ok(addr)
+}
+
+fn oob_hash_chunk_desc(mut desc: [u8; 16], addr: u64, len: usize) -> HsmResult<[u8; 16]> {
+    let len = u32::try_from(len).map_err(|_| HsmError::InvalidArg)?;
+    desc[..8].copy_from_slice(&addr.to_le_bytes());
+    desc[8..12].copy_from_slice(&len.to_le_bytes());
+    Ok(desc)
+}
 
 /// The OpenSSL hash for `algo`; fixed-length algorithms only, so the HMAC,
 /// KDF and RSA paths that share it reject SHAKE. SHA-3 is not supported yet.
@@ -73,6 +109,63 @@ impl HsmHash for StdHsmPal {
             digest[..digest_len].reverse();
         }
         Ok(digest_len)
+    }
+
+    async fn hash_oob(
+        &self,
+        io: &StdHsmIo,
+        algo: HsmHashAlgo,
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let state_len = self.hash_state_size(algo)?;
+        let digest_len = algo.digest_len();
+        if expected_len > 8192 || digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let root_desc = if expected_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, index).await?;
+            let addr = validate_oob_hash_desc(&desc, expected_len)?;
+            Some((desc, addr))
+        };
+
+        self.alloc_scoped_async(io, async |scope| -> HsmResult<usize> {
+            let state = scope.dma_alloc_zeroed(state_len)?;
+            let staging = scope.dma_alloc_zeroed(OOB_HASH_CHUNK_LEN)?;
+            let mut ctx = self.hash_begin(io, algo, state)?;
+            let result = async {
+                if let Some((root, base_addr)) = root_desc {
+                    let mut offset = 0usize;
+                    while offset < expected_len {
+                        let chunk_len = (expected_len - offset).min(OOB_HASH_CHUNK_LEN);
+                        let chunk_addr = base_addr
+                            .checked_add(offset as u64)
+                            .ok_or(HsmError::InvalidArg)?;
+                        let chunk_desc = oob_hash_chunk_desc(root, chunk_addr, chunk_len)?;
+                        self.copy_mem_from_host_raw(
+                            io,
+                            &chunk_desc,
+                            &mut staging[..chunk_len],
+                            false,
+                        )
+                        .await?;
+                        self.hash_continue(io, &mut ctx, &staging[..chunk_len])
+                            .await?;
+                        offset += chunk_len;
+                    }
+                }
+                self.hash_finish(io, &mut ctx, form, Some(digest)).await
+            }
+            .await;
+            drop(ctx);
+            result
+        })
+        .await
     }
 
     fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
@@ -150,8 +243,29 @@ mod tests {
     use super::*;
     use crate::drivers::hash::StdHash;
     use crate::worker::WorkerPool;
+    use crate::HsmIoRequest;
     use crate::StdHsmIo;
     use crate::StdHsmPal;
+
+    #[test]
+    fn oob_hash_descriptor_checks_length_format_and_address_range() {
+        let mut desc = [0u8; 16];
+        desc[..8].copy_from_slice(&0x1000u64.to_le_bytes());
+        desc[8..12].copy_from_slice(&8u32.to_le_bytes());
+        assert_eq!(validate_oob_hash_desc(&desc, 8), Ok(0x1000));
+
+        assert_eq!(validate_oob_hash_desc(&desc, 7), Err(HsmError::InvalidArg));
+        desc[12] = 1;
+        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
+        desc[12] = 0;
+        desc[15] = 1;
+        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
+        desc[15] = 0;
+        desc[..8].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
+        desc[..8].copy_from_slice(&(u64::MAX - 7).to_le_bytes());
+        assert_eq!(validate_oob_hash_desc(&desc, 8), Err(HsmError::InvalidArg));
+    }
 
     /// NIST FIPS 180-4 "abc" digests in big-endian (standard) byte order.
     const SHA1_ABC: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
@@ -192,6 +306,45 @@ mod tests {
         (0..200u32)
             .map(|i| i.wrapping_mul(7).wrapping_add(3) as u8)
             .collect()
+    }
+
+    fn oob_io(desc: Option<&[u8; 16]>) -> StdHsmIo {
+        let mut sqe: crate::cmd::RawSqe = [0; crate::cmd::SQE_DWORDS];
+        if let Some(desc) = desc {
+            let addr = desc.as_ptr() as usize as u64;
+            let oob_addr_index = if crate::cmd::SQE_DWORDS == 16 { 13 } else { 2 };
+            sqe[oob_addr_index] = addr as u32;
+            sqe[oob_addr_index + 1] = (addr >> 32) as u32;
+            sqe[oob_addr_index + 2] = 16;
+        }
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let request = HsmIoRequest::cmd(HsmPartId::from(0u8), 0, 0, sqe, reply_tx);
+        StdHsmIo::new(request, 0)
+    }
+
+    fn sgl_desc(message: &[u8], descriptor_len: usize) -> [u8; 16] {
+        let mut desc = [0u8; 16];
+        desc[..8].copy_from_slice(&(message.as_ptr() as usize as u64).to_le_bytes());
+        desc[8..12].copy_from_slice(&(descriptor_len as u32).to_le_bytes());
+        desc
+    }
+
+    async fn pal_hash_oob(
+        algo: HsmHashAlgo,
+        _message: &[u8],
+        message_index: usize,
+        message_len: usize,
+        desc: Option<&[u8; 16]>,
+        form: HsmDigestForm,
+    ) -> HsmResult<Vec<u8>> {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let io = oob_io(desc);
+        let digest = pal.dma_alloc(&io, algo.digest_len())?;
+        let len = pal
+            .hash_oob(&io, algo, message_len, message_index, form, digest)
+            .await?;
+        Ok(digest[..len].to_vec())
     }
 
     /// Verifies the PAL hash of `msg` equals `expected_be` in standard form
@@ -269,6 +422,95 @@ mod tests {
         let msg = multiblock_msg();
         let reference = openssl_digest(HsmHashAlgo::Sha512, &msg).await;
         verify_endianness(HsmHashAlgo::Sha512, &msg, &reference).await;
+    }
+
+    #[tokio::test]
+    async fn oob_hash_streams_boundary_lengths_in_both_digest_forms() {
+        for len in [0, 1023, 1024, 1025, 8192] {
+            let msg: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let desc = (!msg.is_empty()).then(|| sgl_desc(&msg, msg.len()));
+            for algo in [
+                HsmHashAlgo::Sha256,
+                HsmHashAlgo::Sha384,
+                HsmHashAlgo::Sha512,
+            ] {
+                let expected = openssl_digest(algo, &msg).await;
+                for form in [HsmDigestForm::Standard, HsmDigestForm::Operand] {
+                    let mut expected_form = expected.clone();
+                    if form.reversed(StdHsmPal::BYTE_ORDER) {
+                        expected_form.reverse();
+                    }
+                    assert_eq!(
+                        pal_hash_oob(algo, &msg, 0, msg.len(), desc.as_ref(), form)
+                            .await
+                            .expect("OOB hash"),
+                        expected_form,
+                        "length {len}, algorithm {algo:?}, form {form:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oob_hash_rejects_malformed_and_length_mismatched_descriptors() {
+        let msg = b"descriptor validation";
+        let valid_desc = sgl_desc(msg, msg.len());
+
+        assert_eq!(
+            pal_hash_oob(
+                HsmHashAlgo::Sha256,
+                msg,
+                0,
+                msg.len(),
+                None,
+                HsmDigestForm::Standard,
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
+
+        let mut bad_reserved = valid_desc;
+        bad_reserved[12] = 1;
+        assert_eq!(
+            pal_hash_oob(
+                HsmHashAlgo::Sha256,
+                msg,
+                0,
+                msg.len(),
+                Some(&bad_reserved),
+                HsmDigestForm::Standard,
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
+
+        let short_desc = sgl_desc(msg, msg.len() - 1);
+        assert_eq!(
+            pal_hash_oob(
+                HsmHashAlgo::Sha256,
+                msg,
+                0,
+                msg.len(),
+                Some(&short_desc),
+                HsmDigestForm::Standard,
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
+
+        assert_eq!(
+            pal_hash_oob(
+                HsmHashAlgo::Sha256,
+                msg,
+                1,
+                msg.len(),
+                Some(&valid_desc),
+                HsmDigestForm::Standard,
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
     }
 
     #[tokio::test]

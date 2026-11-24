@@ -12,7 +12,6 @@ use crate::api::UpkaDriver;
 use crate::engine::UpkaEngine;
 use crate::executor::EngineExecutor;
 use crate::opcode::map_status;
-use crate::opcode::UPKA_MEM_WIPE;
 use crate::pool::StagedCmd;
 use crate::pool::UpkaState;
 use crate::UpkaError;
@@ -226,7 +225,7 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
             let _ = s.release_engine_and_dispatch(id as u8);
         } else {
             s.engine_slots[id].arm_completion_wait();
-            EngineExecutor::submit_engine_command(id as u8, UPKA_MEM_WIPE, 0, 0, 0, 0);
+            EngineExecutor::submit_wipe(id as u8);
         }
     }
 

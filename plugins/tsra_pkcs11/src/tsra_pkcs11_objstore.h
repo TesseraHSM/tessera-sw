@@ -151,7 +151,8 @@ struct tsra_pkcs11_objstore_ops
      * length of 0 means the object carries no body. The body is internal to the
      * module and is never exposed through C_GetAttributeValue. `check`, if not
      * NULL, decides on the record the body comes from, so a key's policy and
-     * its body are read together.
+     * its body are read together. It runs on the sizing call too, which is the
+     * whole read for an object without a body.
      */
     CK_RV(*get_key_body)
     (void *ctx,

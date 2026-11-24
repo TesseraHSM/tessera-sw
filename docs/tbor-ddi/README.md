@@ -202,7 +202,7 @@ allocation. Errors overwrite the response prefix in the same storage. Every publ
 including padding or gaps, must be initialized; overlapping crypto requires an
 explicitly supported in-place PAL operation.
 
-All 44 commands encode their compact responses directly into this shared
+All commands encode their compact responses directly into this shared
 allocation; there is no legacy dispatch bridge or separately allocated encoded
 response. Existing cryptographic working buffers remain scoped independently.
 Hash consumes the input before reclaiming it for the digest.
@@ -254,7 +254,9 @@ storage is zero.
 | `0x18` | `EccSign` | InSession | [`commands/ecc_sign.md`](./commands/ecc_sign.md) |
 | `0x33` | `EccVerify` | InSession | [`commands/ecc_verify.md`](./commands/ecc_verify.md) |
 | `0x19` | `EcdhDerive` | InSession | [`commands/ecdh_derive.md`](./commands/ecdh_derive.md) |
-| `0x1A` | `RsaModExp` | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x1A` | `RsaModExp` (raw Decrypt/Sign/Encrypt/Verify) | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x35` | `RsaSign` | InSession | [`commands/rsa_sign.md`](./commands/rsa_sign.md) |
+| `0x36` | `RsaVerify` | InSession | [`commands/rsa_verify.md`](./commands/rsa_verify.md) |
 | `0x1B` | `Hash` | InSession | [`commands/hash.md`](./commands/hash.md) |
 | `0x1C` | `HkdfDerive` | InSession | [`commands/hkdf_derive.md`](./commands/hkdf_derive.md) |
 | `0x1D` | `ConcatKdfDerive` | InSession | [`commands/concat_kdf_derive.md`](./commands/concat_kdf_derive.md) |
@@ -275,9 +277,11 @@ storage is zero.
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 | `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
+| `0x37` | `EcdsaSign` | InSession | [`commands/ecdsa_sign.md`](./commands/ecdsa_sign.md) |
+| `0x38` | `EcdsaVerify` | InSession | [`commands/ecdsa_verify.md`](./commands/ecdsa_verify.md) |
 
-`0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
-the upcoming `RsaSign` and `RsaVerify` commands.
+`0x33` is assigned to `EccVerify`, `0x35` and `0x36` to `RsaSign` and
+`RsaVerify`, and `0x37` and `0x38` to `EcdsaSign` and `EcdsaVerify`.
 
 ## Default-PSK gate
 

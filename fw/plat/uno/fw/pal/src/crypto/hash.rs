@@ -52,13 +52,16 @@
 //! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
 //! ML-DSA and ML-KEM are.
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_pqc::SHAKE_MSG_MAX;
 use tsra_fw_uno_drivers_pqc::SHAKE_OUT_MAX;
 use tsra_fw_uno_drivers_sha::ShaMode;
@@ -66,6 +69,19 @@ use tsra_fw_uno_drivers_sha::ShaRequest;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+
+fn validate_oob_hash_desc(desc: &[u8; 16], expected_len: usize) -> HsmResult<()> {
+    crate::gdma::raw_sgl_len(desc, expected_len)?;
+    let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+    let addr = u64::from_le_bytes([
+        desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
+    ]);
+    if desc[12..15].iter().any(|&byte| byte != 0) || desc[15] & 0x0F != 0 || addr == 0 {
+        return Err(HsmError::InvalidArg);
+    }
+    addr.checked_add(len as u64).ok_or(HsmError::InvalidArg)?;
+    Ok(())
+}
 
 /// Multi-step hash context for the Uno SHA hardware accelerator.
 ///
@@ -263,6 +279,41 @@ impl HsmHash for UnoHsmPal {
             digest[..digest_len].reverse();
         }
         Ok(digest_len)
+    }
+
+    #[inline(never)]
+    async fn hash_oob(
+        &self,
+        io: &UnoHsmIo,
+        algo: HsmHashAlgo,
+        expected_len: usize,
+        index: usize,
+        form: HsmDigestForm,
+        digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.hash_state_size(algo)?;
+        let digest_len = algo.digest_len();
+        if expected_len > 8192 || digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let root_desc = if expected_len == 0 {
+            None
+        } else {
+            let desc = self.oob_desc(io, index).await?;
+            validate_oob_hash_desc(&desc, expected_len)?;
+            Some(desc)
+        };
+
+        self.alloc_scoped_async(io, async |scope| -> HsmResult<usize> {
+            let message = scope.dma_alloc(expected_len)?;
+            if let Some(desc) = root_desc {
+                self.copy_mem_from_host_raw(io, &desc, message, false)
+                    .await?;
+            }
+            self.hash(io, algo, message, form, Some(digest)).await
+        })
+        .await
     }
 
     fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {

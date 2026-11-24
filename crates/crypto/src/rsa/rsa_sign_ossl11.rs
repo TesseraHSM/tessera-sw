@@ -122,12 +122,8 @@ impl VerifyOp for OsslRsaSignAlgo {
     ///
     /// # Errors
     ///
-    /// Returns an error only for setup/configuration failures before the final
-    /// OpenSSL verify step (for example context creation, `verify_init`, or
-    /// padding/hash configuration).
-    ///
-    /// Any error from the final OpenSSL `verify` call is treated as an invalid
-    /// signature and returns `Ok(false)` (fail-closed).
+    /// Returns an error for setup/configuration or operational verification
+    /// failures. An invalid signature returns `Ok(false)`.
     fn verify(
         &mut self,
         key: &Self::Key,
@@ -139,16 +135,14 @@ impl VerifyOp for OsslRsaSignAlgo {
             .verify_init()
             .map_err(|_| CryptoError::RsaVerifyError)?;
         self.configure_pkey_ctx(&mut pkey_ctx)?;
-        // After successful setup, OpenSSL may report an invalid RSA signature
-        // either as Ok(false) or, in some cases/platforms, by pushing an error
-        // onto its stack. All operational failure modes (allocation, init,
-        // configuration) have already been handled above, so treat any error
-        // from the final verify step as an invalid signature (fail-closed).
-        match pkey_ctx.verify(data, signature) {
-            Ok(valid) => Ok(valid),
-            Err(_) => Ok(false),
-        }
+        map_verify_result(pkey_ctx.verify(data, signature))
     }
+}
+
+fn map_verify_result(
+    result: Result<bool, openssl::error::ErrorStack>,
+) -> Result<bool, CryptoError> {
+    result.map_err(|_| CryptoError::RsaVerifyError)
 }
 
 impl VerifyRecoverOp for OsslRsaSignAlgo {
@@ -303,5 +297,20 @@ impl OsslRsaSignAlgo {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_result_distinguishes_invalid_signature_from_operational_error() {
+        assert_eq!(map_verify_result(Ok(true)), Ok(true));
+        assert_eq!(map_verify_result(Ok(false)), Ok(false));
+        assert_eq!(
+            map_verify_result(Err(openssl::error::ErrorStack::get())),
+            Err(CryptoError::RsaVerifyError),
+        );
     }
 }

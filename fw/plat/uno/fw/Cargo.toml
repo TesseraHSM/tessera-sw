@@ -234,6 +234,14 @@ opt-level = 3
 [profile.release.package.tsra_fw_core_crypto_key_masking]
 opt-level = 3
 
+# The HSM's per-command path: the BCP driver and the PAL around it run on
+# every GCM command, three to a sealed request.
+[profile.release.package.tsra_fw_uno_drivers_bcp]
+opt-level = 3
+
+[profile.release.package.tsra_fw_uno_pal]
+opt-level = 3
+
 [profile.dev]
 codegen-units = 1
 debug = true

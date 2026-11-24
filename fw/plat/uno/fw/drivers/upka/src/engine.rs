@@ -864,7 +864,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     /// - `Ok(())`: Wipe completed successfully.
     /// - `Err(HsmError)`: Wipe command failed.
     pub async fn memory_wipe(&mut self) -> HsmResult<()> {
-        self.execute_cmd(UPKA_MEM_WIPE, 0, 0, 0, 0).await
+        self.prepare_for_command();
+        EngineExecutor::submit_wipe(self.id);
+        poll_fn(|cx| self.poll_completion(cx)).await
     }
 
     /// Wipe and release the engine back to the pool.
@@ -897,13 +899,13 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
             slot.arm_completion_wait();
             slot.wiping = true;
         });
-        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(self.id);
         self.released = true;
     }
 
     fn sync_wipe_and_release(&mut self) {
         EngineExecutor::wait_until_idle(self.id);
-        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        EngineExecutor::submit_wipe(self.id);
         EngineExecutor::wait_until_idle(self.id);
         self.driver.release_engine(self.id);
     }
@@ -1044,6 +1046,30 @@ pub(crate) fn rsa_mod_exp_priv_cmd(
         opcode,
         result: output.as_mut_ptr() as u32,
         arg1: input.as_ptr() as u32,
+        arg2: key.as_ptr() as u32,
+        arg3: param2,
+    })
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_priv_in_place`], after checking
+/// its operands: the result is written over the input block.
+pub(crate) fn rsa_mod_exp_priv_in_place_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &HsmDmaBuf,
+    input_output: &mut HsmDmaBuf,
+) -> HsmResult<StagedCmd> {
+    let (opcode, param2) = rsa_private_args(
+        key_type,
+        key.len(),
+        input_output.len(),
+        input_output.len(),
+        key.as_ptr() as u32,
+    )?;
+    let data = input_output.as_mut_ptr() as u32;
+    Ok(StagedCmd {
+        opcode,
+        result: data,
+        arg1: data,
         arg2: key.as_ptr() as u32,
         arg3: param2,
     })

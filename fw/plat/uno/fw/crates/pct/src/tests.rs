@@ -309,6 +309,18 @@ impl HsmHash for FakePal {
         Ok(algo.digest_len())
     }
 
+    async fn hash_oob(
+        &self,
+        _io: &Self::Io,
+        _algo: HsmHashAlgo,
+        _expected_len: usize,
+        _index: usize,
+        _form: HsmDigestForm,
+        _digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
     fn hash_state_size(&self, _algo: HsmHashAlgo) -> HsmResult<usize> {
         unimplemented!()
     }

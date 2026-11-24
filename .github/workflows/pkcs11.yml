@@ -198,7 +198,8 @@ jobs:
           clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
             -I"$p/include/pkcs11-v3.1" -I"$p/src" "$p/tests/template_fuzz.c" \
             "$p/src/tsra_pkcs11_attr_types.c" "$p/src/tsra_pkcs11_attr_policy.c" \
-            "$p/src/tsra_pkcs11_template.c" -o "$RUNNER_TEMP/template_fuzz"
+            "$p/src/tsra_pkcs11_template.c" "$p/src/tsra_pkcs11_unwrap_params.c" \
+            "$p/src/tsra_pkcs11_digest.c" -o "$RUNNER_TEMP/template_fuzz"
           mkdir -p "$RUNNER_TEMP/fuzz-corpus"
           cd "$RUNNER_TEMP"
           ./template_fuzz -max_total_time=60 -print_final_stats=1 fuzz-corpus

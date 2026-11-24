@@ -313,7 +313,11 @@ fn sign_coord(
 /// * `digest_le` — the wire-LE digest that was handed to `EccSign`.
 pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) -> bool {
     let (wire_coord, raw_coord) = coord_sizes(pub_le.len());
-    assert_eq!(sig_le.len(), wire_coord * 2, "signature length mismatch");
+    let signature_lane = sig_le.len() / 2;
+    assert!(
+        sig_le.len() == wire_coord * 2 || (raw_coord == 66 && signature_lane == 72),
+        "signature length mismatch"
+    );
 
     // Public key: convert each wire coordinate → big-endian
     // `hsm_point_size` coordinates (P-521 is left-padded to 68 bytes).
@@ -324,7 +328,7 @@ pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) 
 
     // Signature: reverse the meaningful `raw_coord` bytes of each component
     // → big-endian `r ‖ s`.
-    let (r_le, s_le) = sig_le.split_at(wire_coord);
+    let (r_le, s_le) = sig_le.split_at(signature_lane);
     let mut sig_be = rev(&r_le[..raw_coord]);
     sig_be.extend(rev(&s_le[..raw_coord]));
 

@@ -107,6 +107,17 @@ impl Entry {
         // transparent `u8`, so transmuting it back to its byte is sound.
         self.set_kind_byte(unsafe { core::mem::transmute::<HsmVaultKeyKind, u8>(kind) });
     }
+
+    /// Copies `entry` with one 64-bit load. The tables may sit in memory
+    /// the CPU reads uncached, where every load waits a full round trip,
+    /// and a plain copy can be split into a load per word, each placed
+    /// where its fields are first used.
+    #[inline(always)]
+    pub(crate) fn load(entry: &Entry) -> Entry {
+        // SAFETY: a reference is valid and aligned for reads of its
+        // initialized `Entry`.
+        unsafe { core::ptr::read_volatile(entry) }
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,9 @@
 //! pointers live in DTCM and are supplied via [`ChannelConfig`]; the MMIO base
 //! address comes from the generated GDMA register crate.
 //!
+//! A submitted transfer starts at the next [`GdmaDriver::ring`], which the
+//! owner's poll loop calls on every pass, as it calls [`GdmaDriver::wake`].
+//!
 //! # Example
 //!
 //! ```ignore

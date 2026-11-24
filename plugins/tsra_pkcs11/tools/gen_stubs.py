@@ -46,6 +46,7 @@ IMPLEMENTED = {
     "C_DecryptFinal", "C_SeedRandom", "C_GenerateRandom", "C_SessionCancel",
     "C_LoginUser", "C_GenerateKeyPair", "C_SignInit", "C_Sign", "C_SignUpdate",
     "C_SignFinal", "C_VerifyInit", "C_Verify", "C_VerifyUpdate", "C_VerifyFinal",
+    "C_UnwrapKey",
 }
 # Legacy parallel-function calls return CKR_FUNCTION_NOT_PARALLEL per the spec.
 NOT_PARALLEL = {"C_GetFunctionStatus", "C_CancelFunction"}
