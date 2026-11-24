@@ -69,11 +69,12 @@ impl UnoHsmPal {
     ///   this provisions the deferred enable-time keys too and leaves the
     ///   partition [`HsmPartState::Enabled`], ready for host IO.
     ///
-    /// Re-asserting the same mask on an already-provisioned partition is a
-    /// no-op (the recovery replay path). Otherwise any existing allocation is
-    /// freed first — except the PF pre-enable case, which must preserve the
-    /// enable — so `SetResource` is a declarative "set the resources to this
-    /// mask" operation.
+    /// Re-asserting the same mask on an already-provisioned partition keeps
+    /// the existing allocation and identity and only stores the request's VM
+    /// launch GUID (the recovery replay path). Otherwise any existing
+    /// allocation is freed first — except the PF pre-enable case, which must
+    /// preserve the enable — so `SetResource` is a declarative "set the
+    /// resources to this mask" operation.
     ///
     /// [`part_enable`]: Self::part_enable
     pub(crate) async fn part_alloc(
@@ -86,7 +87,8 @@ impl UnoHsmPal {
         let part = PartStore::partition(pid)?;
 
         // Re-asserting the *same* resource mask on an already-provisioned
-        // partition is a no-op. The driver replays `SetResource` verbatim
+        // partition keeps the allocation and only stores the VM launch GUID.
+        // The driver replays `SetResource` verbatim
         // during controller re-initialization (an NVMe Level-2 abort and
         // firmware-crash recovery both re-run Identify → SetResCount), and
         // `init()` deliberately preserved this partition's GSRAM state across
@@ -109,9 +111,11 @@ impl UnoHsmPal {
         // its mask and identity, so it never short-circuits: it falls through
         // to retry `part_free` and reprovision, which clears the fault.
         //
-        // Nothing is re-run on this path. Gate 1 in particular is already
-        // re-armed for every partition with a non-zero `res_mask` by
-        // `PartStore::rearm_unwrapping_key_required()` in `init()`.
+        // Apart from storing the GUID (only after the checks that can still
+        // reject the request), nothing is re-run on this path. Gate 1 in
+        // particular is already re-armed for every partition with a non-zero
+        // `res_mask` by `PartStore::rearm_unwrapping_key_required()` in
+        // `init()`.
         let state = part.state()?;
         if state != HsmPartState::Faulted && mask == part.res_mask() && part.id_valid() {
             // As in the reference `handle_set_res_cnt`, every SetResource
@@ -450,16 +454,21 @@ impl UnoHsmPal {
         Ok(())
     }
 
-    /// Re-imports the stored identity private key into the vault after a
-    /// Disable (or a warm reset, which erases the vault but keeps the store)
-    /// dropped the vault copy. The ID and key are unchanged, so the
-    /// partition keeps its identity. Generates a new identity instead if
-    /// none is stored, e.g. a partition allocated by an image that kept the
-    /// key only in the vault.
+    /// Rebuilds the vault copy of the identity key from the stored private
+    /// key, so the partition keeps its identity across Disable/Enable and warm
+    /// reset. An existing handle is deleted first, as it can be stale: an
+    /// `Allocated` partition gets no Disable after a warm reset erases the
+    /// vault. Generates a new identity if none is stored (older images).
     async fn restore_identity(&self, pid: HsmPartId) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
-        if part.id_key_id().is_some() {
-            return Ok(());
+        if let Some(key_id) = part.id_key_id() {
+            // Ignore the result: `KeyNotFound` is the normal warm-reset case;
+            // any other error is corrupted metadata a retry would not fix.
+            self.with_admin_io(pid, async |admin_io, _alloc| {
+                self.delete_key(admin_io, key_id).await;
+            })
+            .await;
+            part.set_id_key_id(None);
         }
         let stored = part.id_valid() && part.id_priv_key().iter().any(|&b| b != 0);
         if !stored {
@@ -608,9 +617,8 @@ impl UnoHsmPal {
     /// Enables partition `pid` (mirrors the reference firmware's
     /// `part_enable`). The accepted transitions depend on the PF/VF ordering:
     ///
-    /// - **VF / re-enable** (`Allocated | Disabled → Enabled`): the stored
-    ///   identity key is re-imported into the vault if a prior Disable dropped
-    ///   it, the
+    /// - **VF / re-enable** (`Allocated | Disabled → Enabled`): the vault copy
+    ///   of the identity key is rebuilt from the stored key, the
     ///   establish-credential and session-encryption ECC P-384 key pairs are
     ///   generated here with a fresh nonce and default PSKs are installed,
     ///   then host IO is accepted. Each role must rotate its PSK again.
