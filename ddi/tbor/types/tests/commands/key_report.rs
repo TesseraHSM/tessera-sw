@@ -82,16 +82,23 @@ fn rebound_caller_report(role: u8) {
     let ctx = TestCtx::new();
     let co = finalized_co_session(&ctx);
     let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
-    let caller = if role == CO_PSK_ID {
-        co
+    // The driver allows one session per handle (`TSRA_MAX_SESSIONS_PER_FD =
+    // 1`), so a CU caller opens its session on its own handle.
+    let cu_ctx: TestCtx;
+    let (caller_ctx, caller) = if role == CO_PSK_ID {
+        (&ctx, co)
     } else {
-        let pending = ctx
+        cu_ctx = TestCtx::new_with_path(ctx.path());
+        let pending = cu_ctx
             .session_open_init(role, SessionSuite::EcdhP384)
             .expect("CU init");
-        ctx.session_open_finish(pending).expect("CU finish")
+        let caller = cu_ctx.session_open_finish(pending).expect("CU finish");
+        (&cu_ctx, caller)
     };
     let new_psk = [0xD5; 32];
-    ctx.psk_change(&caller, &new_psk).expect("rotate caller");
+    caller_ctx
+        .psk_change(&caller, &new_psk)
+        .expect("rotate caller");
     let mut request = TborKeyReportReq {
         session_id: caller.session_id,
         masked_key,
@@ -100,12 +107,14 @@ fn rebound_caller_report(role: u8) {
     };
     request.auth_envelope =
         seal_key_report_auth(&caller.param_key, &request).expect("authenticate report");
-    let response = ctx
+    let response = caller_ctx
         .tbor(&request)
         .expect("same-session report after rotation");
     let decoded = verify_key_report(&ctx, &response.report, &public_key, &request.report_data);
     assert_eq!(&decoded.app_uuid[..], &new_psk[..16]);
-    ctx.session_close(caller.session_id).expect("close caller");
+    caller_ctx
+        .session_close(caller.session_id)
+        .expect("close caller");
 }
 
 #[test]
