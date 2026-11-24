@@ -424,7 +424,7 @@ impl Xtask for Precheck {
             .run(ctx.clone())?;
         }
 
-        if stage.fuzz_build {
+        if stage.fuzz_build && !cfg!(target_os = "windows") {
             FuzzBuild {
                 toolchain: Some("nightly-2026-11-17".to_string()),
             }
