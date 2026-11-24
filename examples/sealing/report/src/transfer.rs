@@ -3,7 +3,6 @@
 
 //! Host operation-report verification and explicitly software-authority signing.
 
-use anyhow::Context;
 use anyhow::Result;
 use minicbor::Decoder;
 use minicbor::Encoder;
@@ -19,18 +18,18 @@ use tsra_crypto::ImportableKey;
 use tsra_crypto::Signer;
 use tsra_crypto::VerifyOp;
 
-use crate::PROTECTED_HEADER;
-
 pub const SD_HEADER_LEN: usize = 161;
 pub const SD_ENVELOPE_LEN: usize = 322;
+pub const SD_SIGNED_ENVELOPE_LEN: usize = 431;
+const TRANSFER_PROTECTED_HEADER: &[u8] = b"\xa1\x01\x38\x22";
+const SD_EXTERNAL_AAD: &[u8; 32] = b"TSRA-SdBackup-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 const PREFIX: &[u8] = b"TSRA-XFER\x01\x02\x00\x11\x00\x02\x00\x02";
 
 pub struct SdTransferReport<'a> {
     pub source_pid_spki_thumbprint: &'a [u8],
     pub recipient_spki_thumbprint: &'a [u8],
-    pub envelope_hash: &'a [u8],
     pub policy_hash: &'a [u8],
-    payload: &'a [u8],
+    pub envelope: &'a [u8],
     signature: &'a [u8],
 }
 
@@ -81,6 +80,10 @@ pub fn validate_sd_envelope(envelope: &[u8]) -> Result<()> {
 }
 
 pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
+    anyhow::ensure!(
+        bytes.len() == SD_SIGNED_ENVELOPE_LEN,
+        "invalid signed SD envelope length"
+    );
     let mut outer = Decoder::new(bytes);
     anyhow::ensure!(
         outer.tag()? == minicbor::data::Tag::Unassigned(18),
@@ -88,7 +91,7 @@ pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
     );
     anyhow::ensure!(outer.array()? == Some(4), "invalid COSE array");
     anyhow::ensure!(
-        outer.bytes()? == PROTECTED_HEADER,
+        outer.bytes()? == TRANSFER_PROTECTED_HEADER,
         "unsupported protected header"
     );
     anyhow::ensure!(outer.map()? == Some(0), "unexpected unprotected claims");
@@ -98,55 +101,14 @@ pub fn parse_sd_transfer_report(bytes: &[u8]) -> Result<SdTransferReport<'_>> {
         signature.len() == 96 && outer.position() == bytes.len(),
         "invalid COSE signature or trailing data"
     );
-    let mut claims = Decoder::new(payload);
-    anyhow::ensure!(
-        claims.map()? == Some(6),
-        "expected SdBackup operation claims"
-    );
-    let mut seen = 0u16;
-    let mut source = None;
-    let mut recipient = None;
-    let mut envelope_hash = None;
-    let mut policy_hash = None;
-    for _ in 0..6 {
-        let label = claims.u8()?;
-        anyhow::ensure!(matches!(label, 0 | 7..=11), "unexpected operation claim");
-        anyhow::ensure!(seen & (1 << label) == 0, "duplicate operation claim");
-        seen |= 1 << label;
-        match label {
-            0 => anyhow::ensure!(claims.u16()? == 2, "operation report must be v2"),
-            7 => policy_hash = Some(claims.bytes()?),
-            8 => anyhow::ensure!(claims.u8()? == 2, "expected SdBackup report"),
-            9 => source = Some(claims.bytes()?),
-            10 => recipient = Some(claims.bytes()?),
-            11 => envelope_hash = Some(claims.bytes()?),
-            _ => anyhow::bail!("unexpected operation claim"),
-        }
-    }
-    anyhow::ensure!(
-        seen == 0xf81 && claims.position() == payload.len(),
-        "missing operation claims or trailing data"
-    );
-    let report = SdTransferReport {
-        source_pid_spki_thumbprint: source.context("missing source ID")?,
-        recipient_spki_thumbprint: recipient.context("missing recipient ID")?,
-        envelope_hash: envelope_hash.context("missing envelope hash")?,
-        policy_hash: policy_hash.context("missing SD policy hash")?,
-        payload,
+    validate_sd_envelope(payload)?;
+    Ok(SdTransferReport {
+        source_pid_spki_thumbprint: &payload[17..65],
+        recipient_spki_thumbprint: &payload[65..113],
+        policy_hash: &payload[113..161],
+        envelope: payload,
         signature,
-    };
-    anyhow::ensure!(
-        [
-            report.source_pid_spki_thumbprint,
-            report.recipient_spki_thumbprint,
-            report.envelope_hash,
-            report.policy_hash
-        ]
-        .iter()
-        .all(|field| field.len() == 48),
-        "operation digests must be SHA-384"
-    );
-    Ok(report)
+    })
 }
 
 fn signature_input(payload: &[u8]) -> Result<Vec<u8>> {
@@ -154,8 +116,8 @@ fn signature_input(payload: &[u8]) -> Result<Vec<u8>> {
     input
         .array(4)?
         .str("Signature1")?
-        .bytes(PROTECTED_HEADER)?
-        .bytes(&[])?
+        .bytes(TRANSFER_PROTECTED_HEADER)?
+        .bytes(SD_EXTERNAL_AAD)?
         .bytes(payload)?;
     Ok(input.into_writer())
 }
@@ -173,7 +135,7 @@ pub fn verify_sd_report_signature<'a>(
     anyhow::ensure!(
         EcdsaAlgo::new(HashAlgo::sha384()).verify(
             &key,
-            &signature_input(report.payload)?,
+            &signature_input(report.envelope)?,
             report.signature
         )?,
         "invalid operation report signature"
@@ -186,19 +148,12 @@ pub fn verify_sd_report_signature<'a>(
 pub fn verify_sd_transfer_report<'a>(
     bytes: &'a [u8],
     signer: &[u8],
-    envelope: &[u8],
     policy: &[u8],
     recipient: Option<&[u8]>,
 ) -> Result<SdTransferReport<'a>> {
-    validate_sd_envelope(envelope)?;
     let report = verify_sd_report_signature(bytes, signer)?;
     anyhow::ensure!(
-        report.source_pid_spki_thumbprint == &envelope[17..65]
-            && report.recipient_spki_thumbprint == &envelope[65..113],
-        "operation/header key IDs mismatch"
-    );
-    anyhow::ensure!(
-        report.policy_hash == sha384(policy)? && report.policy_hash == &envelope[113..161],
+        report.policy_hash == sha384(policy)?,
         "transferred SD policy mismatch"
     );
     if let Some(recipient) = recipient {
@@ -207,10 +162,6 @@ pub fn verify_sd_transfer_report<'a>(
             "operation recipient mismatch"
         );
     }
-    anyhow::ensure!(
-        report.envelope_hash == sha384(&[b"TSRA-XFER-HASH-v1".as_slice(), envelope].concat())?,
-        "operation envelope hash mismatch"
-    );
     Ok(report)
 }
 
@@ -227,38 +178,20 @@ pub fn sign_software_sd_transfer(
         envelope[..SD_HEADER_LEN] == sd_header(signer, recipient, policy)?,
         "software report header mismatch"
     );
-    let mut payload = Encoder::new(Vec::new());
-    payload
-        .map(6)?
-        .u8(0)?
-        .u16(2)?
-        .u8(7)?
-        .bytes(&sha384(policy)?)?
-        .u8(8)?
-        .u8(2)?
-        .u8(9)?
-        .bytes(&sd_spki_thumbprint(signer)?)?
-        .u8(10)?
-        .bytes(&sd_spki_thumbprint(recipient)?)?
-        .u8(11)?
-        .bytes(&sha384(
-            &[b"TSRA-XFER-HASH-v1".as_slice(), envelope].concat(),
-        )?)?;
-    let payload = payload.into_writer();
     let signature = Signer::sign_vec(
         &mut EcdsaAlgo::new(HashAlgo::sha384()),
         key,
-        &signature_input(&payload)?,
+        &signature_input(envelope)?,
     )?;
     let mut report = Encoder::new(Vec::new());
     report
         .tag(minicbor::data::Tag::Unassigned(18))?
         .array(4)?
-        .bytes(PROTECTED_HEADER)?
+        .bytes(TRANSFER_PROTECTED_HEADER)?
         .map(0)?
-        .bytes(&payload)?
+        .bytes(envelope)?
         .bytes(&signature)?;
     let report = report.into_writer();
-    verify_sd_transfer_report(&report, signer, envelope, policy, Some(recipient))?;
+    verify_sd_transfer_report(&report, signer, policy, Some(recipient))?;
     Ok(report)
 }

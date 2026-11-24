@@ -155,16 +155,12 @@ pub struct TsraDarcTmkExportParams {
 ///
 /// Validates the target certificate chain against the policy `data_spki_thumbprint`,
 /// then HPKE Base seals the TMK to the target's KEX key and PID-signs the
-/// operation report. Retain and transfer both outputs together.
+/// complete encrypted envelope directly as COSE_Sign1.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Export input buffers
 /// @param[in,out] sealed_tmk Output buffer for the sealed TMK
-///                (`SEALED_TMK_LEN`, 258 B)
-/// @param[in,out] report Output buffer for the PID-signed `Darc` report.
-///                Probe/fill validates the `DARC_REPORT_MAX_LEN` (896 B)
-///                upper bound before issuing the command, then returns the
-///                actual report length on success.
+///                (`SEALED_TMK_LEN`, 367 B), including the PID signature.
 ///
 /// @return `TsraStatus` indicating the result of the operation
 ///
@@ -173,14 +169,13 @@ pub struct TsraDarcTmkExportParams {
 /// - `sess_handle` must be a valid security-domain session handle.
 /// - `params` and each of its buffer pointers must be valid; the
 ///   `target_cert_chain.certs` array must hold `len` valid `tsra_buffer`s.
-/// - Both output buffers must be valid, writable, and distinct.
+/// - The output buffer must be valid and writable.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_darc_tmk_export(
     sess_handle: TsraHandle,
     params: *const TsraDarcTmkExportParams,
     sealed_tmk: *mut TsraBuffer,
-    report: *mut TsraBuffer,
 ) -> TsraStatus {
     abi_boundary(|| {
         let session = api::HsmSession::try_from(sess_handle)?;
@@ -191,17 +186,11 @@ pub unsafe extern "C" fn tsra_darc_tmk_export(
         let target_cert_chain =
             unpack_cert_chain(&params.target_cert_chain, DARC_CERT_CHAIN_MAX_CERTS)?;
 
-        validate_distinct_output_buffers(&[sealed_tmk, report])?;
         let sealed_tmk = deref_mut_ptr(sealed_tmk)?;
-        let report = deref_mut_ptr(report)?;
-        validate_output_sizes(&mut [
-            (&mut *sealed_tmk, api::SEALED_TMK_LEN),
-            (&mut *report, api::DARC_REPORT_MAX_LEN),
-        ])?;
+        validate_output_buffer(sealed_tmk, api::SEALED_TMK_LEN)?;
 
         let sealed = session.darc_tmk_export(masked_tmk, policy, &target_cert_chain)?;
         copy_to_buffer(sealed_tmk, &sealed.sealed_tmk)?;
-        copy_to_buffer(report, &sealed.report)?;
         Ok(())
     })
 }
@@ -217,10 +206,8 @@ pub struct TsraDarcTmkImportParams {
     /// `remote_cert_chain`.
     pub policy: *const TsraBuffer,
     /// Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-    /// (258 B).
+    /// (367 B), including the PID signature.
     pub sealed_tmk: *const TsraBuffer,
-    /// PID-signed `Darc` report returned with the sealed TMK.
-    pub report: *const TsraBuffer,
     /// POTA-anchored source PID certificate chain (1..=3 certs).
     pub remote_cert_chain: TsraDarcCertChain,
 }
@@ -260,20 +247,14 @@ pub unsafe extern "C" fn tsra_darc_tmk_import(
         let masked_kex_key: &[u8] = deref_ptr(params.masked_kex_key)?.try_into()?;
         let policy: &[u8] = deref_ptr(params.policy)?.try_into()?;
         let sealed_tmk: &[u8] = deref_ptr(params.sealed_tmk)?.try_into()?;
-        let report: &[u8] = deref_ptr(params.report)?.try_into()?;
         let remote_cert_chain =
             unpack_cert_chain(&params.remote_cert_chain, DARC_SOURCE_CERT_CHAIN_MAX_CERTS)?;
 
         let masked_tmk = deref_mut_ptr(masked_tmk)?;
         validate_output_buffer(masked_tmk, api::MASKED_TMK_LEN)?;
 
-        let imported = session.darc_tmk_import(
-            masked_kex_key,
-            policy,
-            sealed_tmk,
-            report,
-            &remote_cert_chain,
-        )?;
+        let imported =
+            session.darc_tmk_import(masked_kex_key, policy, sealed_tmk, &remote_cert_chain)?;
         copy_to_buffer(masked_tmk, &imported)?;
         Ok(())
     })

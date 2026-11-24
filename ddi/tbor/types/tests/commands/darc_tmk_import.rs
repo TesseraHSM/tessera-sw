@@ -12,7 +12,7 @@
 //! a partition and initializes its security domain (`SdCreateRemoteBackup`,
 //! which provisions the SDMK), mints a DARC key-exchange key
 //! (`DarcKexKeyGen`), then — entirely on the host with `tsra_crypto` —
-//! seals a TMK and independently builds a signed v2 operation-report
+//! seals a TMK and independently builds a directly signed envelope
 //! fixture under a synthetic POTA-authorized PID, then imports it.
 //!
 //! Coverage:
@@ -32,12 +32,11 @@ use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EccPublicKey;
-use tsra_crypto::EcdsaAlgo;
+use tsra_crypto::ExportableKey;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
 use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
-use tsra_crypto::SignOp;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::dev_rev_in_place;
@@ -150,92 +149,29 @@ fn sha384(bytes: &[u8]) -> [u8; 48] {
 
 fn key_id(key: &impl EccKeyOp) -> [u8; 48] {
     let (x, y) = key.coord_vec().expect("coordinates");
-    let mut input = b"TSRA-P384-KEY-v1".to_vec();
-    input.push(4);
-    input.extend_from_slice(&x);
-    input.extend_from_slice(&y);
-    sha384(&input)
+    let public = EccPublicKey::from_coordinates(EccCurve::P384, &x, &y).expect("public key");
+    sha384(&public.to_vec().expect("canonical DER SPKI"))
 }
 
-/// Independent host-side HPKE Base and canonical v2 COSE operation fixture.
-fn seal_tmk(
-    pk_r: &EccPublicKey,
-    sk_s: &EccPrivateKey,
-    tmk: &[u8],
-) -> ([u8; SEALED_TMK_LEN], Vec<u8>) {
+/// Independent host-side HPKE Base and directly signed envelope fixture.
+fn seal_tmk(pk_r: &EccPublicKey, sk_s: &EccPrivateKey, tmk: &[u8]) -> [u8; SEALED_TMK_LEN] {
     let source_id = key_id(sk_s);
     let recipient_id = key_id(pk_r);
     let mut header = b"TSRA-XFER".to_vec();
     header.extend_from_slice(&[1, 1, 0, 0x11, 0, 2, 0, 2]);
     header.extend_from_slice(&source_id);
     header.extend_from_slice(&recipient_id);
-    let cfg = HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, pk_r, &header, &header);
+    let cfg = HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, pk_r, &header, &[]);
     let sealed = seal_vec(&cfg, tmk).expect("HPKE Base seal");
     let (ex, ey) = sealed.enc.coord_vec().expect("enc coordinates");
-    let mut out = [0; SEALED_TMK_LEN];
-    out[..113].copy_from_slice(&header);
-    out[113] = 4;
-    out[114..162].copy_from_slice(&ex);
-    out[162..210].copy_from_slice(&ey);
-    out[210..].copy_from_slice(&sealed.ct);
-    let mut digest_input = b"TSRA-XFER-HASH-v1".to_vec();
-    digest_input.extend_from_slice(&out);
-    let digest = sha384(&digest_input);
-    let mut payload = minicbor::Encoder::new(Vec::new());
-    payload
-        .map(5)
-        .expect("map")
-        .u8(0)
-        .expect("version field")
-        .u8(2)
-        .expect("version")
-        .u8(8)
-        .expect("kind field")
-        .u8(1)
-        .expect("Darc")
-        .u8(9)
-        .expect("source field")
-        .bytes(&source_id)
-        .expect("source")
-        .u8(10)
-        .expect("recipient field")
-        .bytes(&recipient_id)
-        .expect("recipient")
-        .u8(11)
-        .expect("digest field")
-        .bytes(&digest)
-        .expect("digest");
-    let payload = payload.into_writer();
-    let protected = b"\xa2\x01\x38\x22\x03\x70application/cbor";
-    let mut sig_structure = minicbor::Encoder::new(Vec::new());
-    sig_structure
-        .array(4)
-        .expect("Sig_structure")
-        .str("Signature1")
-        .expect("context")
-        .bytes(protected)
-        .expect("protected")
-        .bytes(&[])
-        .expect("external AAD")
-        .bytes(&payload)
-        .expect("payload");
-    let mut signature = [0; 96];
-    EcdsaAlgo::new(HashAlgo::sha384())
-        .sign(sk_s, &sig_structure.into_writer(), Some(&mut signature))
-        .expect("sign report");
-    let mut report = minicbor::Encoder::new(vec![0xD2]);
-    report
-        .array(4)
-        .expect("COSE")
-        .bytes(protected)
-        .expect("protected")
-        .map(0)
-        .expect("unprotected")
-        .bytes(&payload)
-        .expect("payload")
-        .bytes(&signature)
-        .expect("signature");
-    (out, report.into_writer())
+    let mut payload = header;
+    payload.push(4);
+    payload.extend_from_slice(&ex);
+    payload.extend_from_slice(&ey);
+    payload.extend_from_slice(&sealed.ct);
+    crate::commands::common::sign_transfer_envelope(&payload, sk_s)
+        .try_into()
+        .expect("signed TMK length")
 }
 
 #[test]
@@ -303,8 +239,7 @@ pub(crate) fn build_valid_import(
     let chain = make_chain(anchor_ca, &sender_raw);
     let der = chain.der_items();
 
-    // Seal with HPKE Base and separately sign the operation report.
-    let (sealed_tmk, report) = seal_tmk(&pk_r, &sk_s, tmk);
+    let sealed_tmk = seal_tmk(&pk_r, &sk_s, tmk);
     let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = kex
         .masked_key
         .as_slice()
@@ -326,7 +261,6 @@ pub(crate) fn build_valid_import(
         masked_kex_key,
         policy: ready.policy.clone(),
         sealed_tmk,
-        report,
         remote_cert_chain,
     };
     (req, chain)
@@ -376,12 +310,12 @@ fn darc_tmk_import_rejects_tampered_sealed_tmk() {
 fn darc_tmk_import_rejects_report_and_recipient_substitution() {
     let ready = sd_initialized_session();
     let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
-    let last = req.report.len() - 1;
-    req.report[last] ^= 1;
+    let last = req.sealed_tmk.len() - 1;
+    req.sealed_tmk[last] ^= 1;
     ready
         .ctx
         .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
-    req.report[last] ^= 1;
+    req.sealed_tmk[last] ^= 1;
     let other = ready
         .ctx
         .tbor(&TborDarcKexKeyGenReq {
@@ -400,23 +334,21 @@ fn darc_tmk_import_rejects_report_and_recipient_substitution() {
 }
 
 #[test]
-fn darc_tmk_import_rejects_public_key_report_and_empty_report() {
+fn darc_tmk_import_rejects_public_key_report_bytes_and_zero_envelope() {
     let ready = sd_initialized_session();
     let (mut req, chain) = build_valid_import(&ready, &ready.pota, &[0x5A; TMK_LEN]);
     let (_, public_key_report, _) = masked_key_report_and_pub(&ready.ctx, ready.session.session_id);
-    req.report = public_key_report;
+    let prefix = public_key_report
+        .get(..SEALED_TMK_LEN)
+        .expect("public-key reports cannot fit the fixed transfer field");
+    req.sealed_tmk.copy_from_slice(prefix);
     ready
         .ctx
         .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
-    req.report.clear();
+    req.sealed_tmk.fill(0);
     ready
         .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::TborInvalidFixedLength);
-    req.report
-        .resize(tsra_ddi_tbor_types::DARC_REPORT_MAX_LEN + 1, 0);
-    ready
-        .ctx
-        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::TborInvalidFixedLength);
+        .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
 }
 
 /// A `policy` whose SHA-384 digest does not match the partition's bound
@@ -459,7 +391,6 @@ fn dummy_req(session_id: u16) -> TborDarcTmkImportReq {
         masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
         policy: Vec::new(),
         sealed_tmk: [0u8; SEALED_TMK_LEN],
-        report: vec![0],
         // A single (unused) descriptor so the request decodes past the FW
         // fixed-length check — these tests fail at the session/lifecycle
         // gate, which runs after decode but before any chain/crypto work.

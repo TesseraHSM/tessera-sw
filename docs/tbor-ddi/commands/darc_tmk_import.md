@@ -16,9 +16,9 @@ off-device to a DARC key-exchange key (see
 partition **security-domain masking key (SDMK)** so the caller can persist
 and later re-import it.
 
-The required `Darc` operation report authenticates the exact encrypted
+The `Darc` COSE_Sign1 directly authenticates its complete encrypted
 envelope, source PID, and recipient. Its signer is authorized by a
-POTA-anchored certificate chain. Only after report verification does
+POTA-anchored certificate chain. Only after signature verification does
 HPKE Base recover the TMK with the receiver's masked DARC key-exchange
 private key (`RcvrPriv`, recovered by unmasking `masked_kex_key`).
 
@@ -36,12 +36,12 @@ Handler flow:
    entire chain.
 3. Unmask `masked_kex_key` → `RcvrPriv` (its masked-key kind must be
    `DarcKex`) and derive `RcvrPub`.
-4. Verify the ES384 report signature, `Darc` kind, signer-derived source
-   ID, actual recipient-derived ID, report/header agreement, and digest
-   of the complete encrypted envelope. A `PublicKey` or `SdBackup`
+4. Verify the direct ES384 signature, `Darc` kind, signer-derived source
+   SPKI thumbprint, and actual recipient-derived SPKI thumbprint against
+   the signed header. A `PublicKey` or `SdBackup`
    report cannot substitute for `Darc`.
-5. HPKE Base open the envelope, using the full canonical header as both
-   HPKE `info` and AEAD AAD. Plaintext is not published on failure.
+5. HPKE Base open the envelope, using the full canonical header as
+   HPKE `info`, with empty AEAD AAD. Plaintext is not published on failure.
 6. Re-mask the TMK (AEAD-GCM-256) under the SDMK and return the masked
    envelope. IO teardown scrubs `RcvrPriv` and the TMK.
 
@@ -55,8 +55,8 @@ This command is **Crypto-Officer-only**: a Crypto-User session is
 rejected with `InvalidPermissions`.
 
 See [`KeyReport`](key_report.md#p-384-transfer-envelope-binding) for the
-canonical envelope and report formats. The import policy is the target
-partition's bound policy; DARC reports contain no policy hash. Reports
+canonical signed envelope format. The import policy is the target
+partition's bound policy; DARC envelopes contain no policy hash. Signatures
 do not by themselves provide replay protection or certificate freshness.
 
 ## Request
@@ -72,14 +72,13 @@ carrying the policy document, fixed-length key buffers and the packed cert-descr
 | 16 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 20 | `masked_kex_key` | `buffer` (280 B) | The receiver's masked `DarcKex` private key from `DarcKexKeyGen`. |
 | 24 | `policy` | `buffer` (1-384 B) | The unified `PartPolicy` whose `pota_spki_thumbprint` anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
-| 28 | `sealed_tmk` | `buffer` (258 B) | Canonical DARC header (113 B), encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 32 | `report` | `buffer` (1..=896 B) | Required PID-signed v2 `Darc` operation report accompanying `sealed_tmk`. |
-| 36 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=3]`, 3 B each) | POTA-anchored source PID chain, root first; DER bytes travel **out of band**. |
+| 28 | `sealed_tmk` | `buffer` (367 B) | Complete PID-signed DARC COSE_Sign1. |
+| 32 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=3]`, 3 B each) | POTA-anchored source PID chain, root first; DER bytes travel **out of band**. |
 
 ### Data section
 
-Carries the 280-byte `masked_kex_key`, variable-length CBOR `policy`, 258-byte
-`sealed_tmk`, `report`, and the packed cert-descriptor list. The certificate DER
+Carries the 280-byte `masked_kex_key`, variable-length CBOR `policy`, 367-byte
+`sealed_tmk`, and the packed cert-descriptor list. The certificate DER
 bytes referenced by the descriptors travel out of band.
 
 ## Response
@@ -104,7 +103,7 @@ Carries the 264-byte `masked_tmk`; the local masking format is unchanged.
 |---|---|
 | `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | Invalid partition/SD state or policy, non-POTA-anchored source chain, malformed or mismatched envelope/report, wrong report kind/signer/recipient/digest, or invalid TMK length |
+| `InvalidArg` | Invalid partition/SD state or policy, non-POTA-anchored source chain, malformed signed envelope, wrong kind/signer/recipient, or invalid TMK length |
 | `UnsupportedKeyScope` | The security-domain masking key (SDMK) is not provisioned yet |
 | `UnsupportedKeyType` | `masked_kex_key` is not a `DarcKex` masked key |
 | `DdiDecodeFailed` | Malformed request body |

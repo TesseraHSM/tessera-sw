@@ -1,11 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Canonical P-384 transfer envelopes and their operation-report bindings.
+//! Canonical P-384 transfer envelopes, signed directly as COSE payloads.
 //!
-//! Reports are separate from envelopes. The header is used verbatim as both
-//! HPKE Base `info` and AEAD AAD. SD keys use canonical SPKI thumbprints;
-//! DARC key IDs and envelope hashes use domain-separated SHA-384.
+//! The header is HPKE Base `info`; AEAD AAD is empty. Both DARC and SD
+//! identify source and recipient keys by canonical SPKI thumbprints.
 //! Signer and recipient authorization remains the
 //! responsibility of the DARC/SD command, not these crypto helpers.
 
@@ -17,11 +16,9 @@ use tsra_fw_core_crypto_x509_chain::P384_SPKI_LEN;
 use tsra_fw_hsm_byte_order::pair_from_be;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
-use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -29,19 +26,15 @@ use crate::decode::verify_signature;
 use crate::decode::CoseReportView;
 use crate::parse_report;
 use crate::ReportKind;
-use crate::ReportParams;
 use crate::ReportView;
-use crate::TransferReportParams;
 
-/// Length of a SHA-384 transfer identifier, envelope hash, or policy hash.
+/// Length of a SHA-384 key thumbprint or policy hash.
 pub const TRANSFER_HASH_LEN: usize = 48;
 /// Fixed P-384/HKDF-SHA384/AES-256-GCM suite used by transfer envelopes.
 pub const TRANSFER_SUITE: HpkeSuite = HpkeSuite::DHKemP384Sha384AesGcm256;
 
 const MAGIC: &[u8; 9] = b"TSRA-XFER";
 const VERSION: u8 = 1;
-const KEY_ID_DOMAIN: &[u8] = b"TSRA-P384-KEY-v1";
-const ENVELOPE_HASH_DOMAIN: &[u8] = b"TSRA-XFER-HASH-v1";
 const PREFIX_LEN: usize = MAGIC.len() + 1 + 1 + 6;
 const SOURCE_ID_OFFSET: usize = PREFIX_LEN;
 const RECIPIENT_ID_OFFSET: usize = SOURCE_ID_OFFSET + TRANSFER_HASH_LEN;
@@ -52,19 +45,23 @@ const P384_PUBLIC_LEN: usize = 97;
 pub const DARC_HEADER_LEN: usize = POLICY_OFFSET;
 /// Canonical security-domain header size, including its required policy hash.
 pub const SD_BACKUP_HEADER_LEN: usize = POLICY_OFFSET + TRANSFER_HASH_LEN;
-/// Encrypted DARC TMK envelope size, excluding its operation report.
+/// Inner encrypted DARC TMK envelope size, excluding COSE framing/signature.
 pub const DARC_ENVELOPE_LEN: usize = DARC_HEADER_LEN + P384_PUBLIC_LEN + 32 + 16;
-/// Encrypted BKS3 envelope size, excluding its operation report.
+/// Inner encrypted BKS3 envelope size, excluding COSE framing/signature.
 pub const SD_BACKUP_ENVELOPE_LEN: usize = SD_BACKUP_HEADER_LEN + P384_PUBLIC_LEN + 48 + 16;
+/// ES384 COSE_Sign1 containing the complete DARC envelope.
+pub const DARC_SIGNED_ENVELOPE_LEN: usize = DARC_ENVELOPE_LEN + 109;
+/// ES384 COSE_Sign1 containing the complete SD envelope.
+pub const SD_BACKUP_SIGNED_ENVELOPE_LEN: usize = SD_BACKUP_ENVELOPE_LEN + 109;
 
 /// Operation-specific header with fixed-width, canonical SHA-384 identifiers.
 pub enum TransferHeader<'a> {
     /// Transfer of a 32-byte DARC TMK.
     Darc {
-        /// Identifier of the exporting PID public key.
-        source_pid_key_id: &'a [u8; TRANSFER_HASH_LEN],
-        /// Identifier of the recipient P-384 public key.
-        recipient_key_id: &'a [u8; TRANSFER_HASH_LEN],
+        /// SHA-384 of the exporting PID's canonical DER SPKI.
+        source_pid_spki_thumbprint: &'a [u8; TRANSFER_HASH_LEN],
+        /// SHA-384 of the recipient encryption key's canonical DER SPKI.
+        recipient_spki_thumbprint: &'a [u8; TRANSFER_HASH_LEN],
     },
     /// Transfer of a 48-byte BKS3, including resealing.
     SdBackup {
@@ -94,7 +91,7 @@ impl TransferHeader<'_> {
         }
     }
 
-    /// Complete encrypted-envelope length, excluding its signed report.
+    /// Inner encrypted-envelope length, excluding COSE framing/signature.
     pub fn envelope_len(&self) -> usize {
         self.header_len() + P384_PUBLIC_LEN + self.plaintext_len() + 16
     }
@@ -111,9 +108,10 @@ impl TransferHeader<'_> {
     pub fn source_pid_key_id(&self) -> &[u8; TRANSFER_HASH_LEN] {
         match self {
             Self::Darc {
-                source_pid_key_id, ..
-            } => source_pid_key_id,
-            Self::SdBackup {
+                source_pid_spki_thumbprint,
+                ..
+            }
+            | Self::SdBackup {
                 source_pid_spki_thumbprint,
                 ..
             } => source_pid_spki_thumbprint,
@@ -124,9 +122,10 @@ impl TransferHeader<'_> {
     pub fn recipient_key_id(&self) -> &[u8; TRANSFER_HASH_LEN] {
         match self {
             Self::Darc {
-                recipient_key_id, ..
-            } => recipient_key_id,
-            Self::SdBackup {
+                recipient_spki_thumbprint,
+                ..
+            }
+            | Self::SdBackup {
                 recipient_spki_thumbprint,
                 ..
             } => recipient_spki_thumbprint,
@@ -167,7 +166,7 @@ impl TransferHeader<'_> {
 pub struct TransferEnvelopeView<'a> {
     /// Decoded operation and identifiers.
     pub header: TransferHeader<'a>,
-    /// Canonical header bytes, used as HPKE info and AAD.
+    /// Canonical header bytes, used as HPKE info with empty AAD.
     pub header_bytes: &'a [u8],
     /// SEC1 uncompressed P-384 encapsulation.
     pub enc: &'a [u8],
@@ -199,8 +198,8 @@ pub fn parse_transfer_envelope(envelope: &[u8]) -> HsmResult<TransferEnvelopeVie
         .map_err(|_| HsmError::InvalidArg)?;
     let header = match prefix[MAGIC.len() + 1] {
         1 => TransferHeader::Darc {
-            source_pid_key_id: source,
-            recipient_key_id: recipient,
+            source_pid_spki_thumbprint: source,
+            recipient_spki_thumbprint: recipient,
         },
         2 => TransferHeader::SdBackup {
             source_pid_spki_thumbprint: source,
@@ -234,23 +233,10 @@ fn check_public_key(public_key: &[u8]) -> HsmResult<()> {
     Ok(())
 }
 
-/// Compute a domain-separated SHA-384 identifier of a SEC1 P-384 public key.
+/// Compute the common SD/DARC SHA-384 thumbprint of canonical DER SPKI.
 ///
-/// Only point shape is checked. The caller must authorize and validate the
-/// key for its role. Output must be exactly 48 bytes.
-pub async fn p384_key_id<P: HsmCrypto>(
-    pal: &P,
-    io: &P::Io,
-    public_key: &[u8],
-    out: &mut HsmDmaBuf,
-    alloc: &impl HsmScopedAlloc,
-) -> HsmResult<()> {
-    check_public_key(public_key)?;
-    domain_hash(pal, io, KEY_ID_DOMAIN, public_key, out, alloc).await
-}
-
-/// Compute the SD SHA-384 thumbprint of canonical DER SPKI from a SEC1 key.
-pub async fn sd_spki_thumbprint<P: HsmCrypto>(
+/// The caller must authorize and validate the key for its role.
+pub async fn transfer_spki_thumbprint<P: HsmCrypto>(
     pal: &P,
     io: &P::Io,
     public_key: &[u8],
@@ -260,88 +246,6 @@ pub async fn sd_spki_thumbprint<P: HsmCrypto>(
     check_public_key(public_key)?;
     let scratch = alloc.dma_alloc(P384_SPKI_LEN)?;
     p384_spki_thumbprint(pal, io, scratch, &public_key[1..], out).await
-}
-
-async fn transfer_key_id<P: HsmCrypto>(
-    pal: &P,
-    io: &P::Io,
-    kind: ReportKind,
-    public_key: &[u8],
-    out: &mut HsmDmaBuf,
-    alloc: &impl HsmScopedAlloc,
-) -> HsmResult<()> {
-    match kind {
-        ReportKind::SdBackup => sd_spki_thumbprint(pal, io, public_key, out, alloc).await,
-        ReportKind::Darc => p384_key_id(pal, io, public_key, out, alloc).await,
-        ReportKind::PublicKey => Err(HsmError::InvalidArg),
-    }
-}
-
-/// Compute the SHA-384 binding of a canonical envelope, excluding its report.
-pub async fn transfer_envelope_hash<P: HsmCrypto>(
-    pal: &P,
-    io: &P::Io,
-    envelope: &HsmDmaBuf,
-    out: &mut HsmDmaBuf,
-    alloc: &impl HsmScopedAlloc,
-) -> HsmResult<()> {
-    parse_transfer_envelope(envelope)?;
-    domain_hash(pal, io, ENVELOPE_HASH_DOMAIN, envelope, out, alloc).await
-}
-
-async fn domain_hash<P: HsmCrypto>(
-    pal: &P,
-    io: &P::Io,
-    domain: &[u8],
-    bytes: &[u8],
-    out: &mut HsmDmaBuf,
-    alloc: &impl HsmScopedAlloc,
-) -> HsmResult<()> {
-    if out.len() != TRANSFER_HASH_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let input = alloc.dma_alloc(domain.len() + bytes.len())?;
-    input[..domain.len()].copy_from_slice(domain);
-    input[domain.len()..].copy_from_slice(bytes);
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        input,
-        HsmDigestForm::Standard,
-        Some(out),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Select typed report inputs from an envelope and its firmware-computed hash.
-///
-/// This validates field shape, not the supplied digest. Exporting commands
-/// must obtain `envelope_hash` from [`transfer_envelope_hash`] themselves.
-pub fn transfer_report_params<'a>(
-    envelope: &'a HsmDmaBuf,
-    envelope_hash: &'a HsmDmaBuf,
-) -> HsmResult<ReportParams<'a>> {
-    let view = parse_transfer_envelope(envelope)?;
-    if envelope_hash.len() != TRANSFER_HASH_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let transfer = TransferReportParams {
-        source_pid_key_id: &envelope[SOURCE_ID_OFFSET..RECIPIENT_ID_OFFSET],
-        recipient_key_id: &envelope[RECIPIENT_ID_OFFSET..POLICY_OFFSET],
-        envelope_hash,
-    };
-    match view.header {
-        TransferHeader::Darc { .. } => Ok(ReportParams::Darc(transfer)),
-        TransferHeader::SdBackup { .. } => Ok(ReportParams::SdBackup {
-            transfer: crate::SdBackupReportParams {
-                source_pid_spki_thumbprint: transfer.source_pid_key_id,
-                recipient_spki_thumbprint: transfer.recipient_key_id,
-                envelope_hash,
-            },
-            policy_hash: &envelope[POLICY_OFFSET..SD_BACKUP_HEADER_LEN],
-        }),
-    }
 }
 
 /// Seal a validated TMK/BKS3 into a canonical envelope using HPKE Base.
@@ -361,27 +265,14 @@ pub async fn seal_transfer<P: HsmCrypto + HsmAlloc>(
         return Err(HsmError::InvalidArg);
     }
     let recipient_id = alloc.dma_alloc(TRANSFER_HASH_LEN)?;
-    transfer_key_id(
-        pal,
-        io,
-        header.kind(),
-        recipient_public_key,
-        recipient_id,
-        alloc,
-    )
-    .await?;
+    transfer_spki_thumbprint(pal, io, recipient_public_key, recipient_id, alloc).await?;
     if &**recipient_id != header.recipient_key_id() {
         return Err(HsmError::InvalidArg);
     }
     let (header_bytes, encrypted) = out[..header.envelope_len()].split_at_mut(header.header_len());
     header.encode(header_bytes)?;
     let (enc, ciphertext) = encrypted.split_at_mut(P384_PUBLIC_LEN);
-    let cfg = HpkeSealConfig::base(
-        TRANSFER_SUITE,
-        recipient_public_key,
-        header_bytes,
-        header_bytes,
-    );
+    let cfg = HpkeSealConfig::base(TRANSFER_SUITE, recipient_public_key, header_bytes, &[]);
     let envelope_len = header.envelope_len();
     tsra_fw_core_crypto_hpke::seal(pal, io, &cfg, secret, Some(enc), Some(ciphertext), alloc)
         .await?;
@@ -397,12 +288,12 @@ pub struct TransferVerifyConfig<'a> {
     /// Actual recipient public key, SEC1 uncompressed big-endian.
     pub recipient_public_key: &'a [u8],
     /// If set, require this exact SD policy hash. If absent, authenticate the
-    /// report/header policy without comparing to the receiver's own policy.
+    /// signed header policy without comparing to the receiver's own policy.
     /// DARC configurations must leave this absent.
     pub expected_policy_hash: Option<&'a [u8; TRANSFER_HASH_LEN]>,
 }
 
-/// Authenticate a report and its exact envelope, recipient, and policy.
+/// Authenticate a directly signed envelope, its recipient, and its policy.
 ///
 /// The caller must first authorize `signer_public_key`. This function does
 /// not validate certificate chains, enforce SD cloning permissions, or
@@ -411,95 +302,50 @@ pub async fn verify_transfer<'a, P: HsmCrypto>(
     pal: &P,
     io: &P::Io,
     cfg: &TransferVerifyConfig<'_>,
-    envelope: &'a HsmDmaBuf,
-    signed_report: &HsmDmaBuf,
+    signed_envelope: &'a HsmDmaBuf,
     alloc: &impl HsmScopedAlloc,
 ) -> HsmResult<TransferEnvelopeView<'a>> {
     check_public_key(cfg.signer_public_key)?;
-    let cose = {
-        let view = parse_transfer_envelope(envelope)?;
-        if view.header.kind() != cfg.expected_kind
-            || (cfg.expected_kind == ReportKind::Darc && cfg.expected_policy_hash.is_some())
+    let parsed = parse_report(signed_envelope)?;
+    let transfer = match parsed {
+        ReportView::Transfer(transfer) => transfer,
+        ReportView::PublicKey(_) => return Err(HsmError::InvalidArg),
+    };
+    let view = parse_transfer_envelope(transfer.envelope)?;
+    if view.header.kind() != cfg.expected_kind
+        || (cfg.expected_kind == ReportKind::Darc && cfg.expected_policy_hash.is_some())
+    {
+        return Err(HsmError::InvalidArg);
+    }
+    let actual_id = alloc.dma_alloc(TRANSFER_HASH_LEN)?;
+    transfer_spki_thumbprint(pal, io, cfg.signer_public_key, actual_id, alloc).await?;
+    if &**actual_id != view.header.source_pid_key_id() {
+        return Err(HsmError::InvalidArg);
+    }
+    transfer_spki_thumbprint(pal, io, cfg.recipient_public_key, actual_id, alloc).await?;
+    if &**actual_id != view.header.recipient_key_id() {
+        return Err(HsmError::InvalidArg);
+    }
+    if let Some(header_policy) = view.header.policy_hash() {
+        if cfg
+            .expected_policy_hash
+            .is_some_and(|expected| expected != header_policy)
         {
             return Err(HsmError::InvalidArg);
         }
-        let parsed = parse_report(signed_report)?;
-        if parsed.kind() != cfg.expected_kind {
-            return Err(HsmError::InvalidArg);
-        }
-        let (transfer, policy) = match parsed {
-            ReportView::Darc(transfer) => (transfer, None),
-            ReportView::SdBackup {
-                transfer,
-                policy_hash,
-            } => (
-                crate::TransferReportView {
-                    source_pid_key_id: transfer.source_pid_spki_thumbprint,
-                    recipient_key_id: transfer.recipient_spki_thumbprint,
-                    envelope_hash: transfer.envelope_hash,
-                    protected_header: transfer.protected_header,
-                    payload: transfer.payload,
-                    signature: transfer.signature,
-                },
-                Some(policy_hash),
-            ),
-            ReportView::PublicKey(_) => return Err(HsmError::InvalidArg),
-        };
-        let actual_id = alloc.dma_alloc(TRANSFER_HASH_LEN)?;
-        transfer_key_id(
-            pal,
-            io,
-            cfg.expected_kind,
-            cfg.signer_public_key,
-            actual_id,
-            alloc,
-        )
-        .await?;
-        if &**actual_id != view.header.source_pid_key_id()
-            || &**transfer.source_pid_key_id != view.header.source_pid_key_id()
-            || &**transfer.recipient_key_id != view.header.recipient_key_id()
-        {
-            return Err(HsmError::InvalidArg);
-        }
-        transfer_key_id(
-            pal,
-            io,
-            cfg.expected_kind,
-            cfg.recipient_public_key,
-            actual_id,
-            alloc,
-        )
-        .await?;
-        if &**actual_id != view.header.recipient_key_id() {
-            return Err(HsmError::InvalidArg);
-        }
-        if let Some(header_policy) = view.header.policy_hash() {
-            let report_policy = policy.ok_or(HsmError::InvalidArg)?;
-            if &**report_policy != header_policy
-                || cfg
-                    .expected_policy_hash
-                    .is_some_and(|expected| expected != header_policy)
-            {
-                return Err(HsmError::InvalidArg);
-            }
-        }
-        transfer_envelope_hash(pal, io, envelope, actual_id, alloc).await?;
-        if **actual_id != **transfer.envelope_hash {
-            return Err(HsmError::InvalidArg);
-        }
-        CoseReportView {
-            protected_header: transfer.protected_header,
-            payload: transfer.payload,
-            signature: transfer.signature,
-        }
+    }
+    let cose = CoseReportView {
+        protected_header: transfer.protected_header,
+        payload: transfer.envelope,
+        signature: transfer.signature,
     };
     let signer = alloc.dma_alloc(P384_PUBLIC_LEN - 1)?;
     signer.copy_from_slice(&cfg.signer_public_key[1..]);
     pair_from_be::<P>(HsmEccCurve::P384, signer)?;
-    if !verify_signature(pal, io, alloc, cose, signer).await? {
+    if !verify_signature(pal, io, alloc, cose, signer, view.header.kind()).await? {
         return Err(HsmError::InvalidArg);
     }
-    parse_transfer_envelope(envelope)
+    Ok(view)
 }
 
 /// Receiver inputs for verified HPKE opening.
@@ -515,14 +361,12 @@ pub async fn open_transfer<P: HsmCrypto + HsmAlloc>(
     pal: &P,
     io: &P::Io,
     cfg: &TransferOpenConfig<'_>,
-    envelope: &HsmDmaBuf,
-    signed_report: &HsmDmaBuf,
+    signed_envelope: &HsmDmaBuf,
     out: &mut HsmDmaBuf,
     alloc: &impl HsmScopedAlloc,
 ) -> HsmResult<usize> {
     let (info, enc, ciphertext, expected_len) = {
-        let view =
-            verify_transfer(pal, io, &cfg.verification, envelope, signed_report, alloc).await?;
+        let view = verify_transfer(pal, io, &cfg.verification, signed_envelope, alloc).await?;
         (
             view.header_bytes,
             view.enc,
@@ -539,7 +383,7 @@ pub async fn open_transfer<P: HsmCrypto + HsmAlloc>(
         cfg.recipient_private_key,
         cfg.verification.recipient_public_key,
         info,
-        info,
+        &[],
     );
     let written =
         tsra_fw_core_crypto_hpke::open(pal, io, &hpke, enc, ciphertext, Some(plaintext), alloc)

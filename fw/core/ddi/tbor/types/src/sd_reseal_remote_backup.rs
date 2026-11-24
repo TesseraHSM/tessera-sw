@@ -25,24 +25,21 @@ pub struct TborSdResealRemoteBackupReq<'a> {
     /// Client SD policy shared by source report and destination evidence.
     #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
-    /// POTA-authorized PID chains and the source SdBackup report.
+    /// POTA-authorized source PID identity chains.
     #[tbor(include)]
-    pub src_evidence: Evidence<'a>,
+    pub src_evidence: IdentityEvidence<'a>,
     /// POTA-authorized destination SD-sealing PublicKey report.
     #[tbor(include)]
     pub dest_evidence: Evidence<'a>,
-    /// Source Base envelope.
-    #[tbor(buffer, len = 322)]
+    /// Source PID-signed Base envelope.
+    #[tbor(buffer, len = 431)]
     pub src_remote_backup: &'a [u8],
 }
 
-/// Fresh recipient-bound envelope and SA-PID-signed report.
+/// Fresh recipient-bound, SA-PID-signed envelope.
 #[tbor(response, pair = TborSdResealRemoteBackupReq)]
 pub struct TborSdResealRemoteBackupResp<'a> {
-    /// Destination Base envelope.
-    #[tbor(buffer, len = 322)]
+    /// Destination PID-signed Base envelope.
+    #[tbor(buffer, len = 431)]
     pub dst_remote_backup: &'a [u8],
-    /// SdBackup report binding the request's SD policy.
-    #[tbor(buffer, min_len = 1, max_len = 896)]
-    pub report: &'a [u8],
 }

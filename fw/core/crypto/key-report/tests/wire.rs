@@ -169,12 +169,20 @@ fn payload_v2(
 
 /// Inline tagged COSE_Sign1: `D2 84 <protected> <map(0)> <payload> <sig>`.
 fn cose_sign1(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    sign1_with_header(payload, signature, &PROTECTED_HEADER)
+}
+
+fn transfer_sign1(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    sign1_with_header(payload, signature, b"\xa1\x01\x38\x22")
+}
+
+fn sign1_with_header(payload: &[u8], signature: &[u8], protected: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2048);
     buf.push(COSE_SIGN1_TAG);
     let mut e = Encoder::new(&mut buf);
     e.array(4)
         .unwrap()
-        .bytes(&PROTECTED_HEADER)
+        .bytes(protected)
         .unwrap()
         .map(0)
         .unwrap()
@@ -469,41 +477,18 @@ fn parse_rejects_wrong_public_key_length() {
     assert!(parse_key_report(dma).is_err());
 }
 
-enum ReportField {
-    Integer(u8),
-    Bytes(Vec<u8>),
-}
-
-fn transfer_fields(kind: ReportKind) -> Vec<(u8, ReportField)> {
-    let mut fields = vec![
-        (0, ReportField::Integer(2)),
-        (8, ReportField::Integer(kind as u8)),
-        (9, ReportField::Bytes(vec![0x11; 48])),
-        (10, ReportField::Bytes(vec![0x22; 48])),
-        (11, ReportField::Bytes(vec![0x33; 48])),
-    ];
+fn transfer_envelope(kind: ReportKind) -> Vec<u8> {
+    let mut envelope = b"TSRA-XFER".to_vec();
+    envelope.extend_from_slice(&[1, kind as u8, 0, 0x11, 0, 2, 0, 2]);
+    envelope.extend_from_slice(&[0x11; 48]);
+    envelope.extend_from_slice(&[0x22; 48]);
     if kind == ReportKind::SdBackup {
-        fields.push((7, ReportField::Bytes(vec![0x44; POLICY_HASH_LEN])));
+        envelope.extend_from_slice(&[0x44; POLICY_HASH_LEN]);
     }
-    fields
-}
-
-fn operation_report(fields: &[(u8, ReportField)]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    let mut e = Encoder::new(&mut payload);
-    e.map(fields.len() as u64).expect("payload map");
-    for (key, value) in fields {
-        e.u8(*key).expect("field key");
-        match value {
-            ReportField::Integer(value) => {
-                e.u8(*value).expect("integer field");
-            }
-            ReportField::Bytes(value) => {
-                e.bytes(value).expect("byte field");
-            }
-        }
-    }
-    cose_sign1(&payload, &[0; SIGNATURE_LEN])
+    envelope.push(4);
+    envelope.extend_from_slice(&[0x55; 96]);
+    envelope.extend_from_slice(&vec![0x66; if kind == ReportKind::Darc { 48 } else { 64 }]);
+    envelope
 }
 
 fn dma_view(bytes: &[u8]) -> &HsmDmaBuf {
@@ -512,33 +497,37 @@ fn dma_view(bytes: &[u8]) -> &HsmDmaBuf {
 }
 
 #[test]
-fn unified_parser_distinguishes_operation_reports_and_requires_sd_policy() {
+fn transfer_signatures_contain_the_envelope_once_without_duplicate_claims() {
+    use tsra_fw_core_crypto_key_report::transfer::DARC_SIGNED_ENVELOPE_LEN;
+    use tsra_fw_core_crypto_key_report::transfer::SD_BACKUP_SIGNED_ENVELOPE_LEN;
+
     for kind in [ReportKind::Darc, ReportKind::SdBackup] {
-        let bytes = operation_report(&transfer_fields(kind));
+        let envelope = transfer_envelope(kind);
+        assert!(parse_report(dma_view(&cose_sign1(&envelope, &[0; SIGNATURE_LEN]))).is_err());
+        let bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
+        assert_eq!(
+            bytes.len(),
+            if kind == ReportKind::Darc {
+                DARC_SIGNED_ENVELOPE_LEN
+            } else {
+                SD_BACKUP_SIGNED_ENVELOPE_LEN
+            }
+        );
         let view = parse_report(dma_view(&bytes)).expect("operation report");
         assert_eq!(view.kind(), kind);
-        let (source, recipient, digest) = match view {
-            ReportView::Darc(transfer) => (
-                transfer.source_pid_key_id,
-                transfer.recipient_key_id,
-                transfer.envelope_hash,
-            ),
-            ReportView::SdBackup {
-                transfer,
-                policy_hash,
-            } => {
-                assert_eq!(&**policy_hash, &[0x44; POLICY_HASH_LEN]);
-                (
-                    transfer.source_pid_spki_thumbprint,
-                    transfer.recipient_spki_thumbprint,
-                    transfer.envelope_hash,
-                )
-            }
-            ReportView::PublicKey(_) => panic!("operation decoded as public key"),
+        let ReportView::Transfer(transfer) = view else {
+            panic!("operation decoded as public key");
         };
-        assert_eq!(&**source, &[0x11; 48]);
-        assert_eq!(&**recipient, &[0x22; 48]);
-        assert_eq!(&**digest, &[0x33; 48]);
+        assert_eq!(&**transfer.envelope, envelope);
+        assert_eq!(transfer.header.source_pid_key_id(), &[0x11; 48]);
+        assert_eq!(transfer.header.recipient_key_id(), &[0x22; 48]);
+        assert_eq!(
+            transfer.header.policy_hash().is_some(),
+            kind == ReportKind::SdBackup
+        );
+        if let Some(policy) = transfer.header.policy_hash() {
+            assert_eq!(policy, &[0x44; 48]);
+        }
         assert!(parse_key_report(dma_view(&bytes)).is_err());
     }
 }
@@ -582,63 +571,36 @@ fn unified_public_key_parser_preserves_legacy_and_accepts_signed_kind() {
 }
 
 #[test]
-fn operation_parser_rejects_missing_duplicate_and_cross_kind_fields() {
+fn transfer_parser_rejects_changed_magic_version_kind_suite_and_point_shape() {
     for kind in [ReportKind::Darc, ReportKind::SdBackup] {
-        let fields = transfer_fields(kind);
-        for missing in 0..fields.len() {
-            let mut incomplete = transfer_fields(kind);
-            incomplete.remove(missing);
-            let bytes = operation_report(&incomplete);
-            assert!(
-                parse_report(dma_view(&bytes)).is_err(),
-                "missing field {missing}"
-            );
-        }
-        for duplicate in [0, 7, 8, 9, 10, 11] {
-            let mut invalid = transfer_fields(kind);
-            invalid.push((duplicate, ReportField::Integer(0)));
-            assert!(parse_report(dma_view(&operation_report(&invalid))).is_err());
-        }
-        for foreign in [1, 6, 12] {
-            let mut invalid = transfer_fields(kind);
-            invalid.push((foreign, ReportField::Bytes(vec![0; 48])));
-            assert!(parse_report(dma_view(&operation_report(&invalid))).is_err());
+        let mut envelope = transfer_envelope(kind);
+        let header_len = if kind == ReportKind::Darc { 113 } else { 161 };
+        for offset in (0..17).chain(std::iter::once(header_len)) {
+            envelope[offset] ^= 0x80;
+            let bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
+            assert!(parse_report(dma_view(&bytes)).is_err(), "offset {offset}");
+            envelope[offset] ^= 0x80;
         }
     }
 }
 
 #[test]
-fn operation_parser_rejects_wrong_lengths_versions_and_truncated_envelopes() {
+fn transfer_parser_rejects_truncation_trailing_bytes_and_missing_signature() {
     for kind in [ReportKind::Darc, ReportKind::SdBackup] {
-        for key in [7, 9, 10, 11] {
-            if key == 7 && kind == ReportKind::Darc {
-                continue;
-            }
-            for len in [0, 47, 49] {
-                let mut fields = transfer_fields(kind);
-                for (field, value) in &mut fields {
-                    if *field == key {
-                        *value = ReportField::Bytes(vec![0; len]);
-                    }
-                }
-                assert!(parse_report(dma_view(&operation_report(&fields))).is_err());
-            }
+        let mut envelope = transfer_envelope(kind);
+        for len in 0..envelope.len() {
+            let bytes = transfer_sign1(&envelope[..len], &[0; SIGNATURE_LEN]);
+            assert!(parse_report(dma_view(&bytes)).is_err());
         }
-        for (key, value) in [(0, 1), (0, 3), (0, 4), (8, 3), (8, u8::MAX)] {
-            let mut fields = transfer_fields(kind);
-            for (field, current) in &mut fields {
-                if *field == key {
-                    *current = ReportField::Integer(value);
-                }
-            }
-            assert!(parse_report(dma_view(&operation_report(&fields))).is_err());
-        }
-        let mut bytes = operation_report(&transfer_fields(kind));
+        let mut bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
         for len in 0..bytes.len() {
             assert!(parse_report(dma_view(&bytes[..len])).is_err());
         }
         bytes.push(0);
         assert!(parse_report(dma_view(&bytes)).is_err());
+        assert!(parse_report(dma_view(&transfer_sign1(&envelope, &[]))).is_err());
+        envelope.push(0);
+        assert!(parse_report(dma_view(&transfer_sign1(&envelope, &[0; SIGNATURE_LEN]))).is_err());
     }
 }
 
@@ -663,8 +625,8 @@ fn transfer_envelopes_use_canonical_operation_specific_headers() {
     let policy = [0x33; 48];
     for header in [
         TransferHeader::Darc {
-            source_pid_key_id: &source,
-            recipient_key_id: &recipient,
+            source_pid_spki_thumbprint: &source,
+            recipient_spki_thumbprint: &recipient,
         },
         TransferHeader::SdBackup {
             source_pid_spki_thumbprint: &source,
@@ -706,8 +668,8 @@ fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
     let id = [0x55; 48];
     for header in [
         TransferHeader::Darc {
-            source_pid_key_id: &id,
-            recipient_key_id: &id,
+            source_pid_spki_thumbprint: &id,
+            recipient_spki_thumbprint: &id,
         },
         TransferHeader::SdBackup {
             source_pid_spki_thumbprint: &id,

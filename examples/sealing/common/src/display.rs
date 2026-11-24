@@ -14,6 +14,8 @@ use anyhow::Result;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
+use tsra_sealing_api::PeerBackup;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
@@ -92,6 +94,11 @@ pub fn write_peer_evidence(output: &mut impl Write, evidence: &Evidence, role: &
     write_evidence(output, evidence, role)
 }
 
+pub fn write_peer_backup(output: &mut impl Write, backup: &PeerBackup) -> Result<()> {
+    writeln!(output, "\nPeer cloning: sender identity and signed backup")?;
+    write_sender_evidence(output, &backup.sender_evidence, &backup.pok_peer_backup)
+}
+
 pub fn write_remote_creation(
     output: &mut impl Write,
     recovery: &RemoteRecovery,
@@ -133,8 +140,8 @@ pub fn write_temporary_creation(
         hex::encode(receiver_pub)
     )?;
     write_backup_summary(output, backup, state_dir)?;
-    write_sender_evidence(output, &backup.evidence)
-        .context("print sender certificate chains and attestation report")?;
+    write_sender_evidence(output, &backup.evidence, &backup.pok_remote_backup)
+        .context("print sender certificate chains and signed backup")?;
     writeln!(output, "\nReceiver attestation omitted: temporary host receiver; trusted-SA evidence is not required by this demo.")?;
     write_certificate_chain(output, receiver_chain, "Receiver", "SATA-authorized HPKE")
 }
@@ -149,11 +156,6 @@ fn write_backup_summary(
         "  pok_remote_backup:    {} bytes",
         backup.pok_remote_backup.len()
     )?;
-    writeln!(
-        output,
-        "  sender report:        {} bytes",
-        backup.evidence.report.len()
-    )?;
     writeln!(output, "  local recovery state: {}", state_dir.display())?;
     Ok(())
 }
@@ -163,9 +165,13 @@ pub fn write_validated_remote(output: &mut impl Write, recovery: &RemoteRecovery
     if !recovery.backup.evidence.mfgr_cert_chain.is_empty() {
         writeln!(
             output,
-            "Source PID chains and mandatory SdBackup operation report verified."
+            "Source PID chains and signed SdBackup envelope verified."
         )?;
-        write_sender_evidence(output, &recovery.backup.evidence)
+        write_sender_evidence(
+            output,
+            &recovery.backup.evidence,
+            &recovery.backup.pok_remote_backup,
+        )
     } else {
         writeln!(
             output,
@@ -175,8 +181,18 @@ pub fn write_validated_remote(output: &mut impl Write, recovery: &RemoteRecovery
     }
 }
 
-fn write_sender_evidence(output: &mut impl Write, evidence: &Evidence) -> Result<()> {
-    write_evidence(output, evidence, "Sender")
+fn write_sender_evidence(
+    output: &mut impl Write,
+    evidence: &IdentityEvidence,
+    backup: &[u8],
+) -> Result<()> {
+    write_identity(output, evidence, "Sender")?;
+    for chain in [&evidence.mfgr_cert_chain, &evidence.part_owner_cert_chain] {
+        if let Some(leaf) = chain.last() {
+            verify_sd_report_signature(backup, &crate::evidence::cert_public(leaf)?)?;
+        }
+    }
+    write_operation_report(output, backup)
 }
 
 fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Result<()> {
@@ -193,10 +209,10 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
         "SATA-authorized HPKE",
     )?;
     verify_sd_report_signature(
-        &remote.backup.evidence.report,
+        &remote.backup.pok_remote_backup,
         &tsra_sealing_report::p384_raw_from_spki(&remote.sender_pid_pub_key)?,
     )?;
-    write_operation_report(output, &remote.backup.evidence.report)?;
+    write_operation_report(output, &remote.backup.pok_remote_backup)?;
     writeln!(
         output,
         "  SA hardware identity: not asserted; require_trusted_sa_key = false"
@@ -206,6 +222,17 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
 
 fn write_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> Result<()> {
     let context_role = role.to_ascii_lowercase();
+    write_identity(output, &evidence.identity(), role)?;
+    writeln!(output, "\n{role} attestation report:")?;
+    if evidence.report.is_empty() {
+        writeln!(output, "  (empty)")?;
+    } else {
+        write_key_report(output, evidence, &context_role)?;
+    }
+    Ok(())
+}
+
+fn write_identity(output: &mut impl Write, evidence: &IdentityEvidence, role: &str) -> Result<()> {
     for (name, chain) in [
         ("manufacturer", &evidence.mfgr_cert_chain),
         ("owner", &evidence.owner_cert_chain),
@@ -217,30 +244,12 @@ fn write_evidence(output: &mut impl Write, evidence: &Evidence, role: &str) -> R
         }
         write_certificate_chain(output, chain, role, name)?;
     }
-    writeln!(output, "\n{role} attestation report:")?;
-    if evidence.report.is_empty() {
-        writeln!(output, "  (empty)")?;
-    } else {
-        if parse_sd_transfer_report(&evidence.report).is_ok() {
-            for chain in [&evidence.mfgr_cert_chain, &evidence.part_owner_cert_chain] {
-                if let Some(leaf) = chain.last() {
-                    verify_sd_report_signature(
-                        &evidence.report,
-                        &crate::evidence::cert_public(leaf)?,
-                    )?;
-                }
-            }
-            write_operation_report(output, &evidence.report)?;
-        } else {
-            write_key_report(output, evidence, &context_role)?;
-        }
-    }
     Ok(())
 }
 
 fn write_operation_report(output: &mut impl Write, bytes: &[u8]) -> Result<()> {
     let report = parse_sd_transfer_report(bytes)?;
-    writeln!(output, "  Format: COSE_Sign1 v2 / SdBackup / ES384")?;
+    writeln!(output, "  Format: COSE_Sign1 / signed SD envelope / ES384")?;
     writeln!(
         output,
         "  Source PID SPKI thumbprint: {}",
@@ -250,11 +259,6 @@ fn write_operation_report(output: &mut impl Write, bytes: &[u8]) -> Result<()> {
         output,
         "  Recipient SPKI thumbprint:  {}",
         hex::encode(report.recipient_spki_thumbprint)
-    )?;
-    writeln!(
-        output,
-        "  Envelope hash:     {}",
-        hex::encode(report.envelope_hash)
     )?;
     writeln!(
         output,

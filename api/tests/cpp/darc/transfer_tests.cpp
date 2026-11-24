@@ -35,8 +35,7 @@ namespace
 constexpr uint32_t kMaskedKexKeyLen = 280;
 constexpr uint32_t kKexPubKeyLen = 96;
 constexpr uint32_t kMaskedTmkLen = 264;
-constexpr uint32_t kSealedTmkLen = 258;
-constexpr uint32_t kReportMaxLen = 896;
+constexpr uint32_t kSealedTmkLen = 367;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 
 // Raw P-384 public-key width.
@@ -173,19 +172,14 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
             target_chain.get(),
         };
         std::vector<uint8_t> sealed_tmk(kSealedTmkLen);
-        std::vector<uint8_t> report(kReportMaxLen);
         tsra_buffer sealed_buf{ sealed_tmk.data(), static_cast<uint32_t>(sealed_tmk.size()) };
-        tsra_buffer report_buf{ report.data(), static_cast<uint32_t>(report.size()) };
         tsra_buffer sealed_probe{ nullptr, 0 };
-        tsra_buffer report_probe{ nullptr, 0 };
         ASSERT_EQ(
-            tsra_darc_tmk_export(ready.session, &export_params, &sealed_probe, &report_probe),
+            tsra_darc_tmk_export(ready.session, &export_params, &sealed_probe),
             TSRA_STATUS_BUFFER_TOO_SMALL
         );
         ASSERT_EQ(sealed_probe.len, kSealedTmkLen);
-        ASSERT_EQ(report_probe.len, kReportMaxLen);
-        auto export_err =
-            tsra_darc_tmk_export(ready.session, &export_params, &sealed_buf, &report_buf);
+        auto export_err = tsra_darc_tmk_export(ready.session, &export_params, &sealed_buf);
         ASSERT_EQ(export_err, TSRA_STATUS_SUCCESS);
         sealed_tmk.resize(sealed_buf.len);
         ASSERT_EQ(sealed_tmk.size(), kSealedTmkLen);
@@ -198,7 +192,10 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
                              static_cast<uint32_t>(target_kex.masked.size()) };
         tsra_buffer sealed_in{ sealed_tmk.data(), static_cast<uint32_t>(sealed_tmk.size()) };
         tsra_darc_tmk_import_params import_params{
-            &kex_buf, &policy_buf, &sealed_in, &report_buf, source_chain.get(),
+            &kex_buf,
+            &policy_buf,
+            &sealed_in,
+            source_chain.get(),
         };
         std::vector<uint8_t> imported_tmk(kMaskedTmkLen);
         tsra_buffer imported_buf{ imported_tmk.data(), static_cast<uint32_t>(imported_tmk.size()) };
@@ -207,7 +204,7 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
         imported_tmk.resize(imported_buf.len);
         ASSERT_EQ(imported_tmk.size(), kMaskedTmkLen);
         ASSERT_TRUE(any_nonzero(imported_tmk)) << "re-imported masked TMK must not be all-zero";
-        report[report_buf.len - 1] ^= 1;
+        sealed_tmk.back() ^= 1;
         std::fill(imported_tmk.begin(), imported_tmk.end(), 0xA5);
         ASSERT_EQ(
             tsra_darc_tmk_import(ready.session, &import_params, &imported_buf),
@@ -467,11 +464,8 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
             rogue_chain.get(),
         };
         std::vector<uint8_t> sealed_tmk(kSealedTmkLen);
-        std::vector<uint8_t> report(kReportMaxLen);
         tsra_buffer sealed_buf{ sealed_tmk.data(), static_cast<uint32_t>(sealed_tmk.size()) };
-        tsra_buffer report_buf{ report.data(), static_cast<uint32_t>(report.size()) };
-        auto export_err =
-            tsra_darc_tmk_export(ready.session, &export_params, &sealed_buf, &report_buf);
+        auto export_err = tsra_darc_tmk_export(ready.session, &export_params, &sealed_buf);
         ASSERT_EQ(export_err, TSRA_STATUS_INVALID_ARGUMENT)
             << "an unanchored target chain must be rejected with INVALID_ARGUMENT";
     });

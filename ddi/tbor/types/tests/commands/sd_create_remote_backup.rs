@@ -6,7 +6,7 @@
 //! `SdCreateRemoteBackup` creates a security domain: it mints a fresh
 //! BKS3 and a random security-domain masking key (`SDMK`), provisions
 //! `SDMK` in the vault as the partition's SecurityDomain-scope masking
-//! key, and returns three backups — the 322-byte HPKE Base
+//! key, and returns three backups — the 431-byte HPKE Base
 //! `pok_remote_backup`, the 280-byte `pok_local_backup` (BKS3 masked
 //! under `PartLocalMK`), and the 264-byte `sd_mk_backup` (`SDMK` masked
 //! under the derived `SDBMK`).
@@ -19,7 +19,7 @@
 //! device.
 //!
 //! Coverage:
-//! * Happy path — non-zero `pok_remote_backup` (322 B), `pok_local_backup`
+//! * Happy path — non-zero `pok_remote_backup` (431 B), `pok_local_backup`
 //!   (280 B), and `sd_mk_backup` (264 B).
 //! * One-shot: a second create on the now-initialized partition →
 //!   `SdAlreadyInitialized`.
@@ -219,8 +219,8 @@ pub(crate) fn finalized_backing_session_trusted(
 
 /// Mint an SD sealing key and attest it, returning
 /// `(masked_sealing_key, key_report_bytes)`.  In the self-backup tests
-/// this key is both the sender's authentication key and (via its report)
-/// the receiver's `RcvrPub` source; the report is signed by the PID key.
+/// this key supplies the receiver's `RcvrPub` via its PID-signed report;
+/// the source authenticates its transfer with the separate PID private key.
 pub(crate) fn masked_key_and_report(ctx: &TestCtx, session_id: u16) -> (Vec<u8>, Vec<u8>) {
     let (masked, report, _pub) = masked_key_report_and_pub(ctx, session_id);
     (masked, report)
@@ -281,12 +281,6 @@ pub(crate) struct ReceiverEvidence {
 }
 
 impl ReceiverEvidence {
-    pub(crate) fn with_report(mut self, report: &[u8]) -> Self {
-        self.oob_items[self.report.index as usize] = report.to_vec();
-        self.report.length = U16::new(report.len().try_into().expect("report fits descriptor"));
-        self
-    }
-
     /// Borrow the OOB items as the `&[&[u8]]` slice `tbor_oob` expects.
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()

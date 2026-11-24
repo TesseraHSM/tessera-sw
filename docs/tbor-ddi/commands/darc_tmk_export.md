@@ -12,9 +12,9 @@ Licensed under the MIT License.
 
 Seals a locally-masked DARC **Transfer Masking Key (TMK)** to a remote
 **target** so the target can import it with [`DarcTmkImport`](darc_tmk_import.md),
-producing a 258-byte `sealed_tmk` and a separate, required `Darc` operation
-report. Export uses P-384 HPKE Base with HKDF-SHA384 and AES-256-GCM;
-the source PID signs the report with ES384. No source KEX key is needed.
+producing one 367-byte signed `sealed_tmk`. Export uses P-384 HPKE Base
+with HKDF-SHA384 and AES-256-GCM; the source PID signs the complete binary
+envelope directly in COSE_Sign1 using ES384. No source KEX key is needed.
 
 The target is authenticated by a certificate chain anchored to the policy
 `data_spki_thumbprint`. Import separately authenticates the source PID using a
@@ -33,16 +33,15 @@ Handler flow:
 3. Unmask `masked_tmk` to the 32-byte TMK (its masked-key kind must be
    `DarcTmk` and the plaintext exactly 32 bytes).
 4. Build the canonical DARC header with source PID and recipient key IDs,
-   and HPKE Base seal to `RcvrPub`, using the entire header as both
-   HPKE `info` and AEAD AAD.
-5. Sign a v2 `Darc` report with the partition PID, binding the source PID
-   key ID, recipient key ID, and digest of the complete encrypted envelope.
-   Return both artifacts. IO teardown scrubs the plaintext TMK.
+   as SHA-384 of canonical DER SPKI, and HPKE Base seal to `RcvrPub`,
+   using the entire header as `info`, with empty AEAD AAD.
+5. Sign the complete encrypted envelope with the partition PID and return
+   the single COSE_Sign1 artifact. IO teardown scrubs the plaintext TMK.
 
-The envelope and report formats are specified in
+The signed envelope format is specified in
 [`KeyReport`](key_report.md#p-384-transfer-envelope-binding).
-The report authenticates this operation; a generic public-key report
-cannot replace it. Replay protection is not provided by the report itself.
+The signature authenticates this operation; a generic public-key report
+cannot replace it. The signed artifact does not itself provide replay protection.
 
 The command **persists nothing** (no vault write, no lifecycle advance),
 so it records no rollback on the undo log.
@@ -73,19 +72,18 @@ referenced by the descriptors travel out of band.
 
 ## Response
 
-Wire layout: 12-byte header, two TOC entries, then the encrypted envelope
-and operation report.
+The response follows the [paired TOC footprint](../README.md#paired-toc-footprint);
+unused metadata slots are `None`.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 12 | `sealed_tmk` | `buffer` (258 B) | Canonical header (113 B), SEC1 encapsulation (97 B), ciphertext (32 B), GCM tag (16 B). |
-| 16 | `report` | `buffer` (1..=896 B) | PID-signed v2 `Darc` COSE_Sign1 report over the exact envelope and recipient. |
+| 12 | `sealed_tmk` | `buffer` (367 B) | One PID-signed COSE_Sign1 containing the header (113 B), encapsulation (97 B), ciphertext (32 B), and GCM tag (16 B). |
 
 ### Data section
 
-Carries `sealed_tmk` and `report`. Persist and transport them together.
+Carries only `sealed_tmk`; no detached report is returned.
 
 ## Errors
 

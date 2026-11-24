@@ -29,7 +29,7 @@ enum Mutation {
     EmptySourceChain,
     EmptyDestinationChain,
     PolicyHashMismatch,
-    SourceReportOutOfRange,
+    SourceCertificateOutOfRange,
     DestinationReportOutOfRange,
     TamperSourceEvidence { mask: u8 },
     TamperDestinationEvidence { mask: u8 },
@@ -48,7 +48,6 @@ struct ResealEvidence {
     src_mfgr: Vec<CertDescriptor>,
     src_owner: Vec<CertDescriptor>,
     src_part_owner: Vec<CertDescriptor>,
-    src_report: ReportDescriptor,
     dest_mfgr: Vec<CertDescriptor>,
     dest_owner: Vec<CertDescriptor>,
     dest_part_owner: Vec<CertDescriptor>,
@@ -95,33 +94,19 @@ fn push_chain(items: &mut Vec<Vec<u8>>, chain: &GeneratedChain) -> Vec<CertDescr
 /// Append manufacturer, owner, and POTA-rooted partition-owner chains for
 /// the PID plus a key report. Return the chain descriptors, report descriptor,
 /// and report's OOB index.
-fn push_evidence(
+fn push_identity(
     items: &mut Vec<Vec<u8>>,
     pid_pub: &[u8; RAW_PUB_LEN],
     pota_key: &CaKey,
-    report: &[u8],
 ) -> (
     Vec<CertDescriptor>,
     Vec<CertDescriptor>,
     Vec<CertDescriptor>,
-    ReportDescriptor,
-    usize,
 ) {
     let mfgr = push_chain(items, &make_chain(&CaKey::generate(), pid_pub));
     let owner = push_chain(items, &make_chain(&CaKey::generate(), pid_pub));
     let part_owner = push_chain(items, &make_chain(pota_key, pid_pub));
-    let report_item = push_item(items, report);
-    let report = ReportDescriptor {
-        index: report_item.index,
-        length: report_item.length,
-    };
-    (
-        mfgr,
-        owner,
-        part_owner,
-        report,
-        usize::from(report_item.index),
-    )
+    (mfgr, owner, part_owner)
 }
 
 /// Build source and destination evidence in a shared OOB item list, retaining
@@ -129,26 +114,24 @@ fn push_evidence(
 fn build_reseal_evidence(
     pid_pub: &[u8; RAW_PUB_LEN],
     pota_key: &CaKey,
-    src_report: &[u8],
     dest_report: &[u8],
 ) -> ResealEvidence {
     let mut oob_items = Vec::new();
-    let (src_mfgr, src_owner, src_part_owner, src_report, src_report_index) =
-        push_evidence(&mut oob_items, pid_pub, pota_key, src_report);
+    let (src_mfgr, src_owner, src_part_owner) = push_identity(&mut oob_items, pid_pub, pota_key);
     let src_leaf_index = usize::from(src_mfgr[CHAIN_LEAF_INDEX].index);
-    let (dest_mfgr, dest_owner, dest_part_owner, dest_report, dest_report_index) =
-        push_evidence(&mut oob_items, pid_pub, pota_key, dest_report);
+    let (dest_mfgr, dest_owner, dest_part_owner) = push_identity(&mut oob_items, pid_pub, pota_key);
     let dest_leaf_index = usize::from(dest_mfgr[CHAIN_LEAF_INDEX].index);
-
-    debug_assert_eq!(src_report_index, usize::from(src_report.index));
-    debug_assert_eq!(dest_report_index, usize::from(dest_report.index));
+    let report_item = push_item(&mut oob_items, dest_report);
+    let dest_report = ReportDescriptor {
+        index: report_item.index,
+        length: report_item.length,
+    };
 
     ResealEvidence {
         oob_items,
         src_mfgr,
         src_owner,
         src_part_owner,
-        src_report,
         dest_mfgr,
         dest_owner,
         dest_part_owner,
@@ -280,7 +263,7 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
         .expect("create real source remote backup");
     let src_remote_backup = source.pok_remote_backup;
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &source.report, &destination_report);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &destination_report);
     let request = TborSdResealRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_receiver,
@@ -288,7 +271,6 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
         src_part_owner_cert_chain: evidence.src_part_owner.clone(),
-        src_report: evidence.src_report,
         dest_mfgr_cert_chain: evidence.dest_mfgr.clone(),
         dest_owner_cert_chain: evidence.dest_owner.clone(),
         dest_part_owner_cert_chain: evidence.dest_part_owner.clone(),
@@ -400,8 +382,8 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             common::mutate_policy_tail(&mut fixture.request.policy, POLICY_MUTATION_MASK);
             assert_rejected(ctx, &fixture);
         }
-        Mutation::SourceReportOutOfRange => {
-            fixture.request.src_report.index = u8::MAX;
+        Mutation::SourceCertificateOutOfRange => {
+            fixture.request.src_mfgr_cert_chain[0].index = u8::MAX;
             assert_rejected(ctx, &fixture);
         }
         Mutation::DestinationReportOutOfRange => {

@@ -46,7 +46,7 @@
 //!   another SD. Its POTA signing callback may contact an external authority.
 //! * [`SecurityDomain::create_peer_backup`] — exports the live SD to an
 //!   attested receiver, with application-supplied PID chains retaining the
-//!   firmware-produced operation report. No sender KEX key is generated.
+//!   firmware-produced signature inside the backup. No sender KEX key is generated.
 //! * [`SecurityDomain::restore_peer`] — imports the receiver-bound peer backup
 //!   and atomically saves destination-local recovery records.
 //!
@@ -71,6 +71,7 @@ pub mod store;
 pub use env::SecurityDomainEnv;
 pub use error::Error;
 pub use evidence::Evidence;
+pub use evidence::IdentityEvidence;
 pub use hsm::device_cert_chain;
 pub use hsm::mint_sealing_key;
 pub use hsm::sealing_props;

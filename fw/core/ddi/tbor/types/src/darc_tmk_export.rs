@@ -2,11 +2,10 @@
 // Licensed under the MIT License.
 
 //! Export a locally masked DARC TMK using P-384 HPKE Base and a PID-signed
-//! operation report. The target KEX key must be DATA-endorsed.
+//! signature. The target KEX key must be DATA-endorsed.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
-pub use crate::darc_tmk_import::DARC_REPORT_MAX_LEN;
 pub use crate::darc_tmk_import::MASKED_TMK_LEN;
 pub use crate::darc_tmk_import::SEALED_TMK_LEN;
 pub use crate::darc_tmk_import::TMK_LEN;
@@ -18,8 +17,7 @@ pub const TBOR_OP_DARC_TMK_EXPORT: u8 = 0x24;
 
 const _: () = assert!(MASKED_TMK_LEN == 264);
 const _: () = assert!(PART_POLICY_MAX_LEN == 384);
-const _: () = assert!(SEALED_TMK_LEN == 258);
-const _: () = assert!(DARC_REPORT_MAX_LEN == 896);
+const _: () = assert!(SEALED_TMK_LEN == 367);
 const _: () = assert!(crate::evidence::CERT_DESCRIPTOR_LEN == 3);
 const _: () = assert!(crate::evidence::CERT_DESCRIPTORS_MAX_LEN == 6);
 
@@ -43,16 +41,12 @@ pub struct TborDarcTmkExportReq<'a> {
     pub target_cert_chain: &'a [CertDescriptor],
 }
 
-/// Encrypted envelope and separate, operation-bound report.
+/// Directly signed encrypted TMK envelope.
 #[tbor(response, pair = TborDarcTmkExportReq)]
 pub struct TborDarcTmkExportResp<'a> {
-    /// `header(113) || enc(97) || ciphertext(32) || GCM tag(16)`.
-    #[tbor(buffer, len = 258)]
+    /// ES384 COSE_Sign1 of `header(113) || enc(97) || ciphertext(32) || tag(16)`.
+    #[tbor(buffer, len = 367)]
     pub sealed_tmk: &'a [u8],
-
-    /// PID-signed version-2 `Darc` report for this exact envelope/recipient.
-    #[tbor(buffer, min_len = 1, max_len = 896)]
-    pub report: &'a [u8],
 }
 
 #[cfg(test)]
@@ -91,18 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn response_round_trips_sealed_tmk_and_report() {
+    fn response_round_trips_signed_tmk() {
         let sealed = [0xCD; SEALED_TMK_LEN];
-        let report = [0xAB; 320];
         let mut buf = [0; 1024];
         let frame = TborDarcTmkExportResp::encode(&mut buf, (1, 1), 0, true)
             .expect("encode")
             .sealed_tmk(&sealed)
             .expect("envelope")
-            .report(&report)
-            .expect("report")
             .finish();
         assert_eq!(frame.sealed_tmk(), &sealed[..]);
-        assert_eq!(frame.report(), &report[..]);
     }
 }

@@ -31,13 +31,10 @@ pub struct TborSdCreatePeerBackupReq<'a> {
     pub pok_local_backup: &'a [u8],
 }
 
-/// Peer envelope and its required operation report.
+/// Directly signed peer envelope.
 #[tbor(response, pair = TborSdCreatePeerBackupReq)]
 pub struct TborSdCreatePeerBackupResp<'a> {
-    /// P-384 HPKE Base envelope.
-    #[tbor(buffer, len = 322)]
+    /// PID-signed P-384 HPKE Base envelope.
+    #[tbor(buffer, len = 431)]
     pub pok_peer_backup: &'a [u8],
-    /// PID-signed SdBackup report.
-    #[tbor(buffer, min_len = 1, max_len = 896)]
-    pub report: &'a [u8],
 }

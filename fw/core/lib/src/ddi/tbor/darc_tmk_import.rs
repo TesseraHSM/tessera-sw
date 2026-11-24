@@ -124,7 +124,7 @@ pub(crate) async fn handle<P: HsmPal>(
             recipient_private_key: view.target_key,
         };
         let tmk = alloc.dma_alloc(TMK_LEN)?;
-        open_transfer(pal, io, &cfg, req.sealed_tmk(), req.report(), tmk, alloc).await?;
+        open_transfer(pal, io, &cfg, req.sealed_tmk(), tmk, alloc).await?;
         let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
         super::darc_tmk::mask_tmk(
             pal,

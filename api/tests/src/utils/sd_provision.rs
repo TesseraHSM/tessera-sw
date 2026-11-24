@@ -662,11 +662,6 @@ impl SdEvidence {
         &self.report
     }
 
-    pub(crate) fn with_report(mut self, report: &[u8]) -> Self {
-        self.report = report.to_vec();
-        self
-    }
-
     /// Receiver key certificate chain (spec `RcvrCertChain`) as an ordered
     /// `[root, leaf]` cert list. Rooted at the policy SATA key; its leaf
     /// certifies `RcvrPub` — the key the remote backup is sealed to.
@@ -694,6 +689,13 @@ impl SdEvidence {
             part_owner_cert_chain: &part_owner,
             report: self.report(),
         })
+    }
+
+    pub(crate) fn with_hsm_identity<R>(
+        &self,
+        f: impl FnOnce(&tsra_api::HsmSdIdentityEvidence<'_>) -> R,
+    ) -> R {
+        self.with_hsm_evidence(|evidence| f(&evidence.identity()))
     }
 
     /// Build the receiver key certificate chain (spec `RcvrCertChain`)

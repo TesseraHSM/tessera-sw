@@ -185,7 +185,7 @@ fn create(args: &CreateArgs) -> Result<()> {
         version: 2, policy: hex::encode(env.policy.as_bytes()),
         pok_remote_backup: hex::encode(backup.pok_remote_backup),
         sd_mk_backup: hex::encode(state.sd_mk_backup),
-        sender: wire::encode_evidence(&backup.evidence),
+        sender: wire::encode_identity(&backup.evidence),
         receiver: receiver,
     };
     env.store

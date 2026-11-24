@@ -7,7 +7,7 @@
 //! peer-transferable backup of a security domain: it
 //! recovers BKS3 from the caller's device-local backup (`pok_local_backup`)
 //! and HPKE Base-seals it to the destination peer named by `dst_evidence`,
-//! returning the envelope and PID-signed `SdBackup` report.
+//! returning a directly PID-signed envelope.
 //! Peer cloning is gated by the security
 //! domain's `allow_peer_cloning` policy flag.
 //!
@@ -75,13 +75,10 @@ pub struct TborSdCreatePeerBackupReq {
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreatePeerBackupResp {
-    /// Peer backup: an HPKE Base seal of BKS3 (exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] = 322 B on the wire; the firmware schema is
+    /// Peer backup: a PID-signed HPKE Base seal of BKS3 (exactly
+    /// [`POK_REMOTE_BACKUP_LEN`] = 431 B on the wire; the firmware schema is
     /// the length authority).  A fixed-length `[u8; N]` field.
     pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
-    /// Required PID-signed SdBackup report.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
 }
 
 #[cfg(test)]

@@ -103,15 +103,23 @@ pub(crate) fn push_evidence<'a>(
     })
 }
 
-/// Operation reports are always sent; SA identity chains remain optional.
-pub(crate) fn push_transfer_evidence<'a>(
-    evidence: &HsmSdEvidence<'a>,
+/// Source identity descriptors; the signed backup carries the operation itself.
+pub(crate) struct IdentityDescriptors {
+    pub(crate) mfgr: Vec<CertDescriptor>,
+    pub(crate) owner: Vec<CertDescriptor>,
+    pub(crate) part_owner: Vec<CertDescriptor>,
+}
+
+/// Pack identity chains only. Firmware enforces the command's trust policy.
+pub(crate) fn push_identity_evidence<'a>(
+    evidence: &HsmSdIdentityEvidence<'a>,
     oob: &mut Vec<&'a [u8]>,
-) -> HsmResult<EvidenceDescriptors> {
-    if evidence.report.is_empty() || evidence.report.len() > SD_BACKUP_REPORT_MAX_LEN {
-        return Err(HsmError::InvalidArgument);
-    }
-    let mut result = EvidenceDescriptors::empty();
+) -> HsmResult<IdentityDescriptors> {
+    let mut result = IdentityDescriptors {
+        mfgr: Vec::new(),
+        owner: Vec::new(),
+        part_owner: Vec::new(),
+    };
     for (chain, descriptors) in [
         (evidence.mfgr_cert_chain, &mut result.mfgr),
         (evidence.owner_cert_chain, &mut result.owner),
@@ -121,6 +129,5 @@ pub(crate) fn push_transfer_evidence<'a>(
             *descriptors = push_cert_chain(chain, oob, EVIDENCE_CHAIN_MAX_CERTS)?;
         }
     }
-    result.report = push_report(evidence.report, oob)?;
     Ok(result)
 }

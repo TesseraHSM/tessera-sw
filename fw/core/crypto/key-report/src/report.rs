@@ -1,15 +1,19 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Typed inputs and views for signed public-key and operation reports.
+//! Public-key attestations and directly signed transfer envelopes.
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
+use crate::consts::DARC_EXTERNAL_AAD;
+use crate::consts::PROTECTED_HEADER;
+use crate::consts::SD_BACKUP_EXTERNAL_AAD;
+use crate::consts::TRANSFER_PROTECTED_HEADER;
+use crate::transfer::TransferHeader;
 use crate::KeyReportParams;
 use crate::KeyReportView;
 
-/// Signed report discriminator. Operation reports cannot be produced by
-/// the generic `KeyReport` command.
+/// Operation selected by the signed payload, not a second transfer discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReportKind {
@@ -21,102 +25,62 @@ pub enum ReportKind {
     SdBackup = 2,
 }
 
-/// Firmware-derived SHA-384 identifiers and digest for an encrypted transfer.
+impl ReportKind {
+    pub(crate) fn protected_header(self) -> &'static [u8] {
+        match self {
+            Self::PublicKey => &PROTECTED_HEADER,
+            Self::Darc | Self::SdBackup => &TRANSFER_PROTECTED_HEADER,
+        }
+    }
+
+    pub(crate) fn external_aad(self) -> &'static [u8] {
+        match self {
+            Self::PublicKey => &[],
+            Self::Darc => &DARC_EXTERNAL_AAD,
+            Self::SdBackup => &SD_BACKUP_EXTERNAL_AAD,
+        }
+    }
+}
+
+/// Firmware-generated inputs to COSE signing.
 ///
-/// Callers must validate the local secret and recipient authorization and
-/// compute the envelope digest inside the exporting command. These inputs
-/// must not be accepted as caller-supplied claims by a DDI signing command.
-pub struct TransferReportParams<'a> {
-    /// SHA-384 identifier of the exporting PID public key.
-    pub source_pid_key_id: &'a HsmDmaBuf,
-    /// SHA-384 identifier of the recipient public key.
-    pub recipient_key_id: &'a HsmDmaBuf,
-    /// SHA-384 digest of the complete transfer envelope, excluding the report.
-    pub envelope_hash: &'a HsmDmaBuf,
-}
-
-/// Firmware-derived canonical SPKI thumbprints for an SD transfer.
-pub struct SdBackupReportParams<'a> {
-    /// SHA-384 of the source PID's canonical DER SPKI.
-    pub source_pid_spki_thumbprint: &'a HsmDmaBuf,
-    /// SHA-384 of the recipient encryption key's canonical DER SPKI.
-    pub recipient_spki_thumbprint: &'a HsmDmaBuf,
-    /// SHA-384 digest of the complete transfer envelope.
-    pub envelope_hash: &'a HsmDmaBuf,
-}
-
-/// Inputs for the versioned, discriminated report format.
+/// Only exporting commands may sign transfer envelopes, after validating
+/// the secret and recipient. Generic `KeyReport` accepts public-key inputs only.
 pub enum ReportParams<'a> {
     /// Public-key attestation; only this variant allows caller report data.
     PublicKey(KeyReportParams<'a>),
-    /// DARC TMK export.
-    Darc(TransferReportParams<'a>),
-    /// Security-domain backup export or reseal.
-    SdBackup {
-        /// Transfer identifiers and envelope digest.
-        transfer: SdBackupReportParams<'a>,
-        /// SHA-384 policy digest enforced by the exporting command.
-        policy_hash: &'a HsmDmaBuf,
-    },
+    /// Complete canonical transfer envelope, used verbatim as the COSE payload.
+    Transfer(&'a HsmDmaBuf),
 }
 
-/// Zero-copy view of an operation report's transfer fields and signature.
+/// Zero-copy view of a directly signed transfer envelope.
 pub struct TransferReportView<'a> {
-    /// SHA-384 identifier of the exporting PID public key.
-    pub source_pid_key_id: &'a HsmDmaBuf,
-    /// SHA-384 identifier of the recipient public key.
-    pub recipient_key_id: &'a HsmDmaBuf,
-    /// SHA-384 digest of the complete transfer envelope.
-    pub envelope_hash: &'a HsmDmaBuf,
+    /// The envelope's sole operation discriminator and context fields.
+    pub header: TransferHeader<'a>,
+    /// Complete envelope: header, encapsulation, ciphertext and tag.
+    pub envelope: &'a HsmDmaBuf,
     /// Signed COSE protected header.
     pub protected_header: &'a HsmDmaBuf,
-    /// Encoded signed payload.
-    pub payload: &'a HsmDmaBuf,
     /// ES384 signature in big-endian `r || s` form.
     pub signature: &'a HsmDmaBuf,
 }
 
-/// Zero-copy SD report claims, including canonical SPKI thumbprints.
-pub struct SdBackupReportView<'a> {
-    /// SHA-384 of the exporting PID's canonical DER SPKI.
-    pub source_pid_spki_thumbprint: &'a HsmDmaBuf,
-    /// SHA-384 of the recipient encryption key's canonical DER SPKI.
-    pub recipient_spki_thumbprint: &'a HsmDmaBuf,
-    /// SHA-384 digest of the complete transfer envelope.
-    pub envelope_hash: &'a HsmDmaBuf,
-    /// Signed COSE protected header.
-    pub protected_header: &'a HsmDmaBuf,
-    /// Encoded signed payload.
-    pub payload: &'a HsmDmaBuf,
-    /// ES384 signature in big-endian `r || s` form.
-    pub signature: &'a HsmDmaBuf,
-}
-
-/// A parsed report with kind-specific required fields.
+/// Disjoint signed payloads: a public-key CBOR map or a binary transfer envelope.
 ///
-/// Parsing does not authenticate the signature, signer authorization,
-/// recipient, or envelope digest. Consumers must verify those separately.
+/// Parsing does not authenticate signatures or authorize the signer/recipient.
 pub enum ReportView<'a> {
-    /// Public-key attestation, including legacy v1/v2 reports.
+    /// Public-key attestation, including existing v1/v2 reports.
     PublicKey(KeyReportView<'a>),
-    /// DARC TMK export.
-    Darc(TransferReportView<'a>),
-    /// Security-domain backup export or reseal.
-    SdBackup {
-        /// Transfer identifiers and envelope digest.
-        transfer: SdBackupReportView<'a>,
-        /// Required SHA-384 policy digest.
-        policy_hash: &'a HsmDmaBuf,
-    },
+    /// DARC or SD envelope, distinguished by its own signed header.
+    Transfer(TransferReportView<'a>),
 }
 
 impl ReportView<'_> {
-    /// The report's kind, validated against its signed payload fields.
+    /// Operation selected by the parsed signed payload.
     pub fn kind(&self) -> ReportKind {
         match self {
             Self::PublicKey(_) => ReportKind::PublicKey,
-            Self::Darc(_) => ReportKind::Darc,
-            Self::SdBackup { .. } => ReportKind::SdBackup,
+            Self::Transfer(view) => view.header.kind(),
         }
     }
 }

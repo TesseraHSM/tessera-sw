@@ -146,7 +146,6 @@ pub(crate) fn reimport(
     ready: &ExportReady,
     receiver_masked: [u8; MASKED_KEX_KEY_LEN],
     sealed_tmk: [u8; SEALED_TMK_LEN],
-    report: Vec<u8>,
 ) -> Vec<u8> {
     let der: Vec<&[u8]> = ready.pid_chain.iter().map(Vec::as_slice).collect();
     let req = TborDarcTmkImportReq {
@@ -154,7 +153,6 @@ pub(crate) fn reimport(
         masked_kex_key: receiver_masked,
         policy: ready.policy.clone(),
         sealed_tmk,
-        report,
         remote_cert_chain: descriptors(&der),
     };
     ready
@@ -184,7 +182,6 @@ fn darc_tmk_export_lifecycle() {
         masked_kex_key: receiver.masked,
         policy: req.policy,
         sealed_tmk: export.sealed_tmk,
-        report: export.report,
         remote_cert_chain: descriptors(&pid_der),
     };
     let imported = ready
@@ -214,7 +211,6 @@ fn darc_tmk_export_yields_fresh_seal() {
         .tbor_oob(&req, &chain.der_items())
         .expect("second export");
     assert_ne!(first.sealed_tmk, second.sealed_tmk);
-    assert_ne!(first.report, second.report);
 }
 
 #[test]
@@ -238,7 +234,6 @@ fn darc_tmk_export_report_does_not_authenticate_a_sender_kex_identity() {
         masked_kex_key: receiver.masked,
         policy: req.policy,
         sealed_tmk: export.sealed_tmk,
-        report: export.report,
         remote_cert_chain: descriptors(&wrong_chain.der_items()),
     };
     ready

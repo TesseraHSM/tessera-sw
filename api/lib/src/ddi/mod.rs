@@ -70,8 +70,6 @@ pub(crate) use tpm::*;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::*;
 use tsra_ddi_mbor_types::*;
-/// Maximum PID-signed DARC export-report size.
-pub use tsra_ddi_tbor_types::DARC_REPORT_MAX_LEN;
 /// Max masked recovered-key envelope length returned by `DarcKeyUnwrap`.
 pub use tsra_ddi_tbor_types::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 /// Max recovered public-key length returned by `DarcKeyUnwrap`.
@@ -118,7 +116,6 @@ pub use tsra_ddi_tbor_types::PolicyFlags;
 pub use tsra_ddi_tbor_types::PolicyKey;
 /// Partition policy (CBOR) schema: SPKI thumbprint.
 pub use tsra_ddi_tbor_types::PolicyThumbprint;
-pub use tsra_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
 /// Exact length of the security-domain masking-key backup envelope.
 pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 /// Wire length of a sealed DARC TMK.

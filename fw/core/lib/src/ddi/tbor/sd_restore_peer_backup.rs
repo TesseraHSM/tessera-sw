@@ -5,7 +5,7 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
-use tsra_fw_core_evidence::EvidenceRefs;
+use tsra_fw_core_evidence::IdentityRefs;
 use tsra_fw_ddi_tbor_types::*;
 use tsra_fw_hsm_pal_traits::*;
 use tsra_fw_hsm_undo::UndoLog;
@@ -56,15 +56,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let pota = policy.pota_spki_thumbprint;
         let hash = sd_transfer::policy_hash(pal, io, alloc, req.policy()).await?;
         let ev = req.src_evidence();
-        let (signer, report) = sd_transfer::source(
+        let signer = sd_transfer::source(
             pal,
             io,
             alloc,
-            &EvidenceRefs {
+            &IdentityRefs {
                 mfgr_chain: ev.mfgr_cert_chain(),
                 owner_chain: ev.owner_cert_chain(),
                 part_owner_chain: ev.part_owner_cert_chain(),
-                report: ev.evidence(),
             },
             Some(pota),
             None,
@@ -83,7 +82,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             alloc,
             key.target_key,
             signer,
-            report,
             req.pok_peer_backup(),
             hash,
             bks3,

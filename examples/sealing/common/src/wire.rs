@@ -8,6 +8,7 @@ use anyhow::Context;
 use anyhow::Result;
 use jzon::JsonValue;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PeerBackup;
 use tsra_sealing_api::ResealedBackup;
 
@@ -54,6 +55,22 @@ pub fn encode_evidence(evidence: &Evidence) -> JsonValue {
     }
 }
 
+pub fn identity(value: &JsonValue) -> Result<IdentityEvidence> {
+    Ok(IdentityEvidence {
+        mfgr_cert_chain: chain(value, "manufacturer")?,
+        owner_cert_chain: chain(value, "owner")?,
+        part_owner_cert_chain: chain(value, "partition_owner")?,
+    })
+}
+
+pub fn encode_identity(evidence: &IdentityEvidence) -> JsonValue {
+    jzon::object! {
+        manufacturer: encode_chain(&evidence.mfgr_cert_chain),
+        owner: encode_chain(&evidence.owner_cert_chain),
+        partition_owner: encode_chain(&evidence.part_owner_cert_chain),
+    }
+}
+
 pub fn backup(value: &JsonValue) -> Result<PeerBackup> {
     anyhow::ensure!(
         value["version"].as_u32() == Some(2),
@@ -62,10 +79,9 @@ pub fn backup(value: &JsonValue) -> Result<PeerBackup> {
     let backup = PeerBackup {
         pok_peer_backup: blob(value, "peer_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
-        sender_evidence: evidence(&value["sender"])?,
+        sender_evidence: identity(&value["sender"])?,
     };
-    tsra_sealing_report::validate_sd_envelope(&backup.pok_peer_backup)?;
-    tsra_sealing_report::parse_sd_transfer_report(&backup.sender_evidence.report)?;
+    tsra_sealing_report::parse_sd_transfer_report(&backup.pok_peer_backup)?;
     Ok(backup)
 }
 
@@ -74,7 +90,7 @@ pub fn encode_backup(backup: &PeerBackup) -> JsonValue {
         version: 2,
         peer_backup: hex::encode(&backup.pok_peer_backup),
         sd_mk_backup: hex::encode(&backup.sd_mk_backup),
-        sender: encode_evidence(&backup.sender_evidence),
+        sender: encode_identity(&backup.sender_evidence),
     }
 }
 
@@ -87,7 +103,7 @@ pub fn resealed_backup(value: &JsonValue) -> Result<ResealedBackup> {
         pok_remote_backup: blob(value, "pok_remote_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
         sender_pid_pub_key: blob(&value["sender"], "pid_pub_key")?,
-        sender_evidence: evidence(&value["sender"]["evidence"])?,
+        sender_evidence: identity(&value["sender"]["evidence"])?,
     };
     backup.validate()?;
     Ok(backup)

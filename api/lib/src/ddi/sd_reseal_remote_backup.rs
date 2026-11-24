@@ -46,7 +46,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
-    src_evidence: &HsmSdEvidence<'_>,
+    src_evidence: &HsmSdIdentityEvidence<'_>,
     dest_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     src_remote_backup: &[u8],
@@ -63,7 +63,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     // Both parties' evidence share one OOB list; push the source first,
     // then the destination, so descriptor indices stay contiguous.
     let mut oob: Vec<&[u8]> = Vec::new();
-    let src = super::sd_evidence::push_transfer_evidence(src_evidence, &mut oob)?;
+    let src = super::sd_evidence::push_identity_evidence(src_evidence, &mut oob)?;
     let dest = push_evidence(dest_evidence, &mut oob)?;
 
     let req = TborSdResealRemoteBackupReq {
@@ -73,7 +73,6 @@ pub(crate) fn sd_reseal_remote_backup_ex(
         src_mfgr_cert_chain: src.mfgr,
         src_owner_cert_chain: src.owner,
         src_part_owner_cert_chain: src.part_owner,
-        src_report: src.report,
         dest_mfgr_cert_chain: dest.mfgr,
         dest_owner_cert_chain: dest.owner,
         dest_part_owner_cert_chain: dest.part_owner,
@@ -91,7 +90,6 @@ pub(crate) fn sd_reseal_remote_backup_ex(
         dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(|resp| HsmSdTransferResult {
                 backup: resp.dst_remote_backup.to_vec(),
-                report: resp.report,
             })
             .map_err(HsmError::from)
     })

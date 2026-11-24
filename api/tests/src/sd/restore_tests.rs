@@ -53,77 +53,49 @@ fn sd_restore_remote_backup_roundtrip() {
     // backup, then restore the security domain from the remote backup.
     let (session2, _policy2, _pid_pub2, _lmk2) =
         provision_backing(&sata, &pota, Some(&policy), Some(&local_mk));
-    let restore = |receiver: &[u8], signer: &[u8], report: &[u8], backup: &[u8]| {
+    let restore = |receiver: &[u8], signer: &[u8], backup: &[u8]| {
         session2.sd_restore_remote_backup(
             &policy,
             receiver,
             signer,
-            &HsmSdEvidence {
-                mfgr_cert_chain: &[],
-                owner_cert_chain: &[],
-                part_owner_cert_chain: &[],
-                report,
-            },
+            &HsmSdIdentityEvidence::default(),
             backup,
             &created.sd_mk_backup,
         )
     };
-    for report in [&[][..], evidence.report()] {
+    for backup in [&[][..], evidence.report()] {
         assert!(
-            restore(&masked, &sender_pid, report, &created.pok_remote_backup).is_err(),
-            "empty and generic PublicKey reports cannot authorize SD restore",
+            restore(&masked, &sender_pid, backup).is_err(),
+            "empty and generic PublicKey reports cannot replace a signed backup",
         );
     }
-    let mut tampered_report = created.report.clone();
-    *tampered_report.last_mut().expect("report signature") ^= 1;
-    assert!(
-        restore(
-            &masked,
-            &sender_pid,
-            &tampered_report,
-            &created.pok_remote_backup
-        )
-        .is_err(),
-        "optional SAPOTA does not disable operation-report signature verification",
-    );
-    let mut tampered_backup = created.pok_remote_backup.clone();
-    *tampered_backup.last_mut().expect("envelope tag") ^= 1;
-    assert!(
-        restore(&masked, &sender_pid, &created.report, &tampered_backup).is_err(),
-        "the operation report must bind the complete envelope",
-    );
+    // The ciphertext ends before the two-byte bstr header and 96-byte signature.
+    for offset in [
+        created.pok_remote_backup.len() - 1,
+        created.pok_remote_backup.len() - 99,
+    ] {
+        let mut tampered = created.pok_remote_backup.clone();
+        tampered[offset] ^= 1;
+        assert!(
+            restore(&masked, &sender_pid, &tampered).is_err(),
+            "signature-only restore must verify the complete signed backup",
+        );
+    }
     let (wrong_receiver, _, _) = masked_key_and_report(&session2);
     assert!(
-        restore(
-            &wrong_receiver,
-            &sender_pid,
-            &created.report,
-            &created.pok_remote_backup
-        )
-        .is_err(),
+        restore(&wrong_receiver, &sender_pid, &created.pok_remote_backup).is_err(),
         "a valid report cannot authorize a different recipient",
     );
     let wrong_pid = spki_pub(&CaKey::generate().raw_pub());
     assert!(
-        restore(
-            &masked,
-            &wrong_pid,
-            &created.report,
-            &created.pok_remote_backup
-        )
-        .is_err(),
+        restore(&masked, &wrong_pid, &created.pok_remote_backup).is_err(),
         "the supplied PID must verify the operation signature",
     );
     for len in [0, 96, 97, 119, 121] {
         let malformed_pid = vec![0; len];
         assert!(
             matches!(
-                restore(
-                    &masked,
-                    &malformed_pid,
-                    &created.report,
-                    &created.pok_remote_backup
-                ),
+                restore(&masked, &malformed_pid, &created.pok_remote_backup),
                 Err(HsmError::InvalidArgument)
             ),
             "the signer PID must be canonical P-384 DER SPKI",
@@ -133,34 +105,12 @@ fn sd_restore_remote_backup_roundtrip() {
         let mut malformed_pid = sender_pid.clone();
         malformed_pid[offset] ^= 1;
         assert!(matches!(
-            restore(
-                &masked,
-                &malformed_pid,
-                &created.report,
-                &created.pok_remote_backup
-            ),
+            restore(&masked, &malformed_pid, &created.pok_remote_backup),
             Err(HsmError::InvalidArgument)
         ));
     }
-    let evidence = evidence.with_report(&created.report);
-    let restored = evidence
-        .with_hsm_evidence(|ev| {
-            let ev = HsmSdEvidence {
-                mfgr_cert_chain: &[],
-                owner_cert_chain: &[],
-                part_owner_cert_chain: &[],
-                ..*ev
-            };
-            session2.sd_restore_remote_backup(
-                &policy,
-                &masked,
-                &sender_pid,
-                &ev,
-                &created.pok_remote_backup,
-                &created.sd_mk_backup,
-            )
-        })
-        .expect("restore remote backup");
+    let restored =
+        restore(&masked, &sender_pid, &created.pok_remote_backup).expect("restore remote backup");
 
     // Local backup (BKS3 re-masked under PartLocalMK), 276 B, non-zero.
     assert_eq!(restored.pok_local_backup.len(), MASKED_SD_LEN);
@@ -197,8 +147,7 @@ fn sd_restore_remote_backup_is_one_shot() {
         })
         .expect("create remote backup");
 
-    let evidence = evidence.with_report(&created.report);
-    let restored = evidence.with_hsm_evidence(|ev| {
+    let restored = evidence.with_hsm_identity(|ev| {
         session.sd_restore_remote_backup(
             &policy,
             &masked,

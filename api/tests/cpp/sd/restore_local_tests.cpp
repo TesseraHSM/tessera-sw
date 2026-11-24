@@ -28,7 +28,7 @@ namespace
 {
 // Create the security domain, capturing the 276-byte device-local backup and
 // the 260-byte masking-key backup that RestoreLocalBackup consumes. Sizes the
-// four output buffers via the probe/fill convention. Records a gtest failure
+// three output buffers via the probe/fill convention. Records a gtest failure
 // and returns false on error.
 bool create_sd_capture(
     tsra_handle session,
@@ -54,19 +54,10 @@ bool create_sd_capture(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
-    std::vector<uint8_t> report;
-    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(
-            session,
-            &params,
-            &remote_buf,
-            &local_buf,
-            &mk_buf,
-            &report_buf
-        );
+        err = tsra_sd_create_remote_backup(session, &params, &remote_buf, &local_buf, &mk_buf);
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -86,8 +77,6 @@ bool create_sd_capture(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
-        report.resize(report_buf.len);
-        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {

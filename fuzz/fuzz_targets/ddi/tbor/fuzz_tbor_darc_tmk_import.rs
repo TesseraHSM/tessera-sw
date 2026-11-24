@@ -213,7 +213,6 @@ fn dummy_request(session_id: u16) -> TborDarcTmkImportReq {
         masked_kex_key: [0; MASKED_KEX_KEY_LEN],
         policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         sealed_tmk: [0; SEALED_TMK_LEN],
-        report: vec![0],
         remote_cert_chain: vec![CertDescriptor {
             index: 0,
             length: 1u16.into(),
@@ -251,7 +250,7 @@ fn valid_import(
     sender_pub[..common::COORD_LEN].copy_from_slice(&x);
     sender_pub[common::COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let (sealed_tmk, report) = common::seal_darc_transfer(&recipient, &sender, tmk);
+    let sealed_tmk = common::seal_darc_transfer(&recipient, &sender, tmk);
     let mut items = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -264,7 +263,6 @@ fn valid_import(
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
             sealed_tmk,
-            report,
             remote_cert_chain,
         },
         items,
@@ -383,8 +381,12 @@ fn mutate(
     let req = &mut import.req;
     match input.scenario {
         Scenario::ReportFlip => {
-            flip(&mut req.report, input.offset, input.mask);
-            return if req.report == original.report {
+            flip(
+                &mut req.sealed_tmk[SEALED_TMK_LEN - 96..],
+                input.offset,
+                input.mask,
+            );
+            return if req.sealed_tmk == original.sealed_tmk {
                 Expected::Success
             } else {
                 Expected::Reject(TborStatus::InvalidArg)
@@ -397,7 +399,7 @@ fn mutate(
                     scope: input.scope,
                 })
                 .expect("public-key report fixture");
-            req.report = ctx
+            let report = ctx
                 .tbor(&TborKeyReportReq {
                     session_id: req.session_id,
                     masked_key: key.masked_key.to_vec(),
@@ -406,6 +408,11 @@ fn mutate(
                 })
                 .expect("public-key report is not an operation report")
                 .report;
+            req.sealed_tmk.copy_from_slice(
+                report
+                    .get(..SEALED_TMK_LEN)
+                    .expect("PublicKey report exceeds transfer field"),
+            );
             return Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::MaskedKeyFlip | Scenario::IvSuffix => {

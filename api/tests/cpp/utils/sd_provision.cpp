@@ -1534,6 +1534,7 @@ void SdEvidenceHolder::wire()
     ev_.owner_cert_chain = { owner_bufs_, 2 };
     ev_.part_owner_cert_chain = { po_bufs_, 2 };
     ev_.report = &report_buf_;
+    identity_ = { ev_.mfgr_cert_chain, ev_.owner_cert_chain, ev_.part_owner_cert_chain };
     rcvr_chain_ = { rcvr_bufs_, 2 };
 }
 
@@ -1769,19 +1770,11 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
-    std::vector<uint8_t> backup_report(kSdBackupReportCapacity);
-    tsra_buffer report_buf{ backup_report.data(), static_cast<uint32_t>(backup_report.size()) };
     tsra_status create_err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 4; ++attempt)
     {
-        create_err = tsra_sd_create_remote_backup(
-            session,
-            &create_params,
-            &remote_buf,
-            &local_buf,
-            &mk_buf,
-            &report_buf
-        );
+        create_err =
+            tsra_sd_create_remote_backup(session, &create_params, &remote_buf, &local_buf, &mk_buf);
         if (create_err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;

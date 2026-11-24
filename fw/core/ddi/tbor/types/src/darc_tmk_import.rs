@@ -14,10 +14,8 @@ pub use crate::policy::PART_POLICY_MAX_LEN;
 pub const TBOR_OP_DARC_TMK_IMPORT: u8 = 0x21;
 /// DARC TMK plaintext length.
 pub const TMK_LEN: usize = 32;
-/// Complete canonical P-384 DARC envelope, excluding its report.
-pub const SEALED_TMK_LEN: usize = 113 + 97 + TMK_LEN + 16;
-/// Maximum COSE_Sign1 operation-report size.
-pub const DARC_REPORT_MAX_LEN: usize = 896;
+/// ES384 COSE_Sign1 containing the canonical P-384 DARC envelope.
+pub const SEALED_TMK_LEN: usize = 367;
 /// Allow POTA -> PTA -> PID, without increasing other chain limits.
 pub const DARC_SOURCE_CERT_CHAIN_MAX_CERTS: usize = 3;
 /// Masked TMK: header, IV, metadata, ciphertext, and GCM tag.
@@ -25,11 +23,11 @@ pub const MASKED_TMK_LEN: usize = 8 + 16 + 192 + TMK_LEN + 16;
 
 const _: () = assert!(MASKED_KEX_KEY_LEN == 280);
 const _: () = assert!(PART_POLICY_MAX_LEN == 384);
-const _: () = assert!(SEALED_TMK_LEN == 258);
+const _: () = assert!(SEALED_TMK_LEN == 367);
 const _: () = assert!(MASKED_TMK_LEN == 264);
 const _: () = assert!(crate::evidence::CERT_DESCRIPTOR_LEN * DARC_SOURCE_CERT_CHAIN_MAX_CERTS == 9);
 
-/// CO-only import request. A public-key attestation cannot replace `report`.
+/// CO-only import request. A public-key attestation cannot replace the signed TMK.
 #[tbor(opcode = 0x21, pair = TborDarcTmkImportResp)]
 pub struct TborDarcTmkImportReq<'a> {
     /// Session id, cross-checked against the SQE by the dispatcher.
@@ -44,13 +42,9 @@ pub struct TborDarcTmkImportReq<'a> {
     #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 
-    /// Canonical P-384 HPKE Base DARC envelope.
-    #[tbor(buffer, len = 258)]
+    /// PID-signed P-384 HPKE Base DARC envelope.
+    #[tbor(buffer, len = 367)]
     pub sealed_tmk: &'a [u8],
-
-    /// PID-signed version-2 `Darc` report returned by `DarcTmkExport`.
-    #[tbor(buffer, min_len = 1, max_len = 896)]
-    pub report: &'a [u8],
 
     /// POTA-endorsed source PID chain, root first, carried out of band.
     /// Normally POTA -> PTA -> PID, including the slot-2 PID leaf.
@@ -78,7 +72,6 @@ mod tests {
         let masked_kex = [0; MASKED_KEX_KEY_LEN];
         let policy = [0; PART_POLICY_MAX_LEN];
         let sealed = [0xAB; SEALED_TMK_LEN];
-        let report = [0xCD; 320];
         let descs = [CertDescriptor {
             index: 0,
             length: U16::new(32),
@@ -94,14 +87,11 @@ mod tests {
             .expect("policy")
             .sealed_tmk(&sealed)
             .expect("envelope")
-            .report(&report)
-            .expect("report")
             .remote_cert_chain(&descs)
             .expect("chain")
             .finish();
         assert_eq!(frame.masked_kex_key(), &masked_kex[..]);
         assert_eq!(frame.sealed_tmk(), &sealed[..]);
-        assert_eq!(frame.report(), &report[..]);
         assert_eq!(frame.remote_cert_chain().len(), 9);
     }
 

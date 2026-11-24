@@ -701,15 +701,17 @@ pub fn sha384(bytes: &[u8]) -> [u8; 48] {
 
 pub fn darc_key_id(key: &impl EccKeyOp) -> [u8; 48] {
     let (x, y) = key.coord_vec().expect("public coordinates");
-    sha384(&[b"TSRA-P384-KEY-v1".as_slice(), &[4], &x, &y].concat())
+    let public =
+        EccPublicKey::from_coordinates(tsra_crypto::EccCurve::P384, &x, &y).expect("public key");
+    sha384(&tsra_crypto::ExportableKey::to_vec(&public).expect("canonical DER SPKI"))
 }
 
-/// Independently seal a TMK and sign its canonical v2 DARC operation report.
+/// Independently seal a TMK and directly sign the complete DARC envelope.
 pub fn seal_darc_transfer(
     recipient: &EccPublicKey,
     sender: &EccPrivateKey,
     tmk: &[u8; TMK_LEN],
-) -> ([u8; SEALED_TMK_LEN], Vec<u8>) {
+) -> [u8; SEALED_TMK_LEN] {
     let source = darc_key_id(sender);
     let destination = darc_key_id(recipient);
     let header = [
@@ -719,47 +721,14 @@ pub fn seal_darc_transfer(
     ]
     .concat();
     let sealed = seal_vec(
-        &HpkeSealConfig::base(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            recipient,
-            &header,
-            &header,
-        ),
+        &HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, recipient, &header, &[]),
         tmk,
     )
     .expect("seal TMK");
     let (x, y) = sealed.enc.coord_vec().expect("encapsulated coordinates");
-    let envelope: [u8; SEALED_TMK_LEN] = [header, vec![4], x, y, sealed.ct]
-        .concat()
-        .try_into()
-        .expect("DARC envelope length");
-    let digest = sha384(&[b"TSRA-XFER-HASH-v1".as_slice(), &envelope].concat());
-    let mut payload = minicbor::Encoder::new(Vec::new());
-    payload
-        .map(5)
-        .expect("claims")
-        .u8(0)
-        .expect("version label")
-        .u8(2)
-        .expect("version")
-        .u8(8)
-        .expect("kind label")
-        .u8(1)
-        .expect("DARC")
-        .u8(9)
-        .expect("source label")
-        .bytes(&source)
-        .expect("source")
-        .u8(10)
-        .expect("recipient label")
-        .bytes(&destination)
-        .expect("recipient")
-        .u8(11)
-        .expect("digest label")
-        .bytes(&digest)
-        .expect("digest");
-    let payload = payload.into_writer();
-    let protected = b"\xa2\x01\x38\x22\x03\x70application/cbor";
+    let payload = [header, vec![4], x, y, sealed.ct].concat();
+    let protected = b"\xa1\x01\x38\x22";
+    let external_aad: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
     let mut input = minicbor::Encoder::new(Vec::new());
     input
         .array(4)
@@ -768,7 +737,7 @@ pub fn seal_darc_transfer(
         .expect("context")
         .bytes(protected)
         .expect("protected")
-        .bytes(&[])
+        .bytes(external_aad)
         .expect("AAD")
         .bytes(&payload)
         .expect("payload");
@@ -788,7 +757,10 @@ pub fn seal_darc_transfer(
         .expect("payload")
         .bytes(&signature)
         .expect("signature");
-    (envelope, report.into_writer())
+    report
+        .into_writer()
+        .try_into()
+        .expect("signed DARC envelope length")
 }
 
 /// Import a host-known TMK through the POTA-authenticated DARC transfer flow.
@@ -817,7 +789,7 @@ pub fn import_darc_tmk(
     sender_pub[..COORD_LEN].copy_from_slice(&x);
     sender_pub[COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let (sealed_tmk, report) = seal_darc_transfer(&recipient, &sender, tmk);
+    let sealed_tmk = seal_darc_transfer(&recipient, &sender, tmk);
     let mut evidence = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -831,7 +803,6 @@ pub fn import_darc_tmk(
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
             sealed_tmk,
-            report,
             remote_cert_chain,
         },
         &oob,

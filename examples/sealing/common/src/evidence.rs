@@ -15,6 +15,7 @@ use tsra_crypto::HashOp;
 use tsra_crypto::ImportableKey;
 use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::Thumbprint;
 use tsra_sealing_api::RAW_PUB_LEN;
@@ -83,7 +84,7 @@ pub fn verify_peer(evidence: &Evidence, policy: &PartPolicy) -> Result<()> {
 
 /// Authenticate source PID chains separately from the mandatory operation signature.
 pub fn verify_transfer_source(
-    evidence: &Evidence,
+    evidence: &IdentityEvidence,
     policy: &PartPolicy,
     anchor: &Thumbprint,
     envelope: &[u8],
@@ -119,13 +120,7 @@ pub fn verify_transfer_source(
         )?)? == *anchor,
         "source PID not anchored to required authority"
     );
-    verify_sd_transfer_report(
-        &evidence.report,
-        &pid,
-        envelope,
-        policy.as_bytes(),
-        recipient,
-    )?;
+    verify_sd_transfer_report(envelope, &pid, policy.as_bytes(), recipient)?;
     Ok(pid)
 }
 

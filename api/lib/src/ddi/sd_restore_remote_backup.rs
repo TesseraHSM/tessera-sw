@@ -45,7 +45,7 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 ///   [`MASKED_SEALING_KEY_LEN`] bytes.
 /// * `sender_pid_pub_key` - DER SPKI of the report signer. Currently only
 ///   canonical uncompressed P-384 SPKI (120 bytes) is accepted.
-/// * `sender_evidence` - Required SdBackup report and optional identity chains.
+/// * `sender_evidence` - Optional source PID identity chains.
 ///   Trusted-SA policy requires SAPOTA-authorized PID chains; otherwise
 ///   verification checks integrity, not authenticated SA identity.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
@@ -66,7 +66,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
     session_id: u16,
     masked_sealing_key: &[u8],
     sender_pid_pub_key: &[u8],
-    sender_evidence: &HsmSdEvidence<'_>,
+    sender_evidence: &HsmSdIdentityEvidence<'_>,
     policy: &[u8],
     src_remote_backup: &[u8],
     prev_sd_mk_backup: &[u8],
@@ -86,9 +86,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
 
     let mut oob: Vec<&[u8]> = Vec::new();
 
-    // The report is mandatory; the device decides whether supplied identity
-    // chains must establish trusted-SA authorization.
-    let sender = super::sd_evidence::push_transfer_evidence(sender_evidence, &mut oob)?;
+    let sender = super::sd_evidence::push_identity_evidence(sender_evidence, &mut oob)?;
 
     let req = TborSdRestoreRemoteBackupReq {
         session_id,
@@ -98,7 +96,6 @@ pub(crate) fn sd_restore_remote_backup_ex(
         sender_mfgr_cert_chain: sender.mfgr,
         sender_owner_cert_chain: sender.owner,
         sender_part_owner_cert_chain: sender.part_owner,
-        sender_report: sender.report,
         src_remote_backup,
         prev_sd_mk_backup,
     };

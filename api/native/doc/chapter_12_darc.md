@@ -91,17 +91,21 @@ Seal a DARC TMK to an authenticated target.
 
 Validates `target_cert_chain` against the `data_spki_thumbprint` anchored in the
 supplied unified partition policy, then HPKE Base seals the TMK to the
-target's KEX key and signs a v2 `Darc` operation report with the source PID.
-The canonical 113-byte header binds the source PID and recipient key IDs
-and is used as both HPKE `info` and AEAD AAD. The report binds the same IDs
-and a SHA-384 digest of the entire encrypted envelope.
+target's KEX key and directly signs the complete binary `Darc` envelope
+with the source PID. The canonical 113-byte header binds source and
+recipient SHA-384 canonical-DER-SPKI thumbprints and is used as HPKE
+`info`, with empty AEAD AAD. One 367-byte COSE_Sign1 carries the 258-byte
+envelope and signature. Its protected header is `{1: -35}`; the
+unprotected map is empty. COSE external AAD is ASCII `TSRA-Darc-v1`
+followed by 20 zero bytes (32 bytes total), reconstructed by the signer
+and verifier rather than transmitted. Empty or wrong-domain transfer
+signatures are rejected; the 367-byte artifact size is unchanged.
 
 ```cpp
 tsra_status tsra_darc_tmk_export(
     tsra_handle sess_handle,
     const tsra_darc_tmk_export_params *params,
-    tsra_buffer *sealed_tmk,
-    tsra_buffer *report
+    tsra_buffer *sealed_tmk
     );
 ```
 
@@ -111,14 +115,11 @@ tsra_status tsra_darc_tmk_export(
  | ------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle)                              | security-domain session handle                       |
  | [in] params        | const [tsra_darc_tmk_export_params*](#tsra_darc_tmk_export_params) | export input buffers                        |
- | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer)                            | out: canonical encrypted TMK (`SEALED_TMK_LEN`, 258 B) |
- | [in,out] report    | [tsra_buffer*](#tsra_buffer)                            | out: required PID-signed operation report (at most 896 B) |
+ | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer) | out: signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
 
-Both outputs follow probe/fill: provide distinct `tsra_buffer` objects
-with zero-length buffers to obtain required capacities of 258 and 896
-bytes with `TSRA_STATUS_BUFFER_TOO_SMALL`, then retry. On success,
-`report.len` is the actual report size. Persist and transport the envelope
-and report together.
+The output follows probe/fill: provide a zero-length buffer to obtain the
+required capacity of 367 bytes with `TSRA_STATUS_BUFFER_TOO_SMALL`, then
+retry. Persist and transport this single artifact; there is no detached report.
 
 **Returns**
 
@@ -148,8 +149,8 @@ Import (open) a sealed DARC TMK on the target.
 
 Validates `remote_cert_chain` against the `pota_spki_thumbprint` anchored in the
 supplied unified partition policy, authorizing the terminal source PID
-public key. It verifies the `Darc` report signature, kind, source,
-actual recipient, and envelope digest before HPKE Base opening.
+public key. It verifies the direct `Darc` signature, kind, source, and
+actual recipient in the signed header before HPKE Base opening.
 It then re-masks the recovered TMK under the target partition SDMK.
 
 The normal source chain has three certificates: POTA root, PTA
@@ -187,7 +188,6 @@ struct tsra_darc_tmk_import_params {
     const tsra_buffer *masked_kex_key;
     const tsra_buffer *policy;
     const tsra_buffer *sealed_tmk;
-    const tsra_buffer *report;
     tsra_darc_cert_chain remote_cert_chain;
 };
 ```
@@ -196,8 +196,7 @@ struct tsra_darc_tmk_import_params {
  | ----------------- | --------------------------------------------------- | ------------------------------------------------------------ |
  | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (`MASKED_KEX_KEY_LEN`, 280 B)         |
  | policy            | const [tsra_buffer*](#tsra_buffer)              | unified partition policy image anchoring `pota_spki_thumbprint`        |
- | sealed_tmk        | const [tsra_buffer*](#tsra_buffer)              | canonical encrypted TMK (`SEALED_TMK_LEN`, 258 B)          |
- | report            | const [tsra_buffer*](#tsra_buffer)              | PID-signed `Darc` report returned with `sealed_tmk` (1..=896 B) |
+ | sealed_tmk        | const [tsra_buffer*](#tsra_buffer) | signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
  | remote_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)   | POTA-anchored source PID certificate chain (1..=3 certs) |
 
 ## tsra_darc_key_wrap

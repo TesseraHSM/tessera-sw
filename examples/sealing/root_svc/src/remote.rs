@@ -18,6 +18,7 @@ use tsra_crypto::ImportableKey;
 use tsra_sealing_api::mint_sealing_key;
 use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
@@ -29,9 +30,9 @@ use tsra_sealing_api::RAW_PUB_LEN;
 use tsra_sealing_common::evidence;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
 use tsra_sealing_report::parse_key_report_bytes;
+use tsra_sealing_report::parse_sd_transfer_report;
 use tsra_sealing_report::sd_header;
 use tsra_sealing_report::sign_software_sd_transfer;
-use tsra_sealing_report::validate_sd_envelope;
 use tsra_sealing_report::verify_certificate_chain;
 use tsra_sealing_report::verify_sd_transfer_report;
 use tsra_sealing_report::Curve;
@@ -95,8 +96,12 @@ pub fn create(
     );
     let receiver = mint_sealing_key(&session.session)
         .context("local recovery saved, but HSM remote receiver generation failed")?;
-    let mut receiver_evidence = created.evidence.clone();
-    receiver_evidence.report = receiver.report.clone();
+    let receiver_evidence = Evidence {
+        mfgr_cert_chain: created.evidence.mfgr_cert_chain.clone(),
+        owner_cert_chain: created.evidence.owner_cert_chain.clone(),
+        part_owner_cert_chain: created.evidence.part_owner_cert_chain.clone(),
+        report: receiver.report.clone(),
+    };
     evidence::verify_peer(&receiver_evidence, env.policy())?;
     let receiver_public = reported_public_key(&receiver.report)?;
     let (x, y) = receiver_public.coord_vec()?;
@@ -119,7 +124,7 @@ pub fn create(
         .store()
         .load_security_domain()?
         .context("saved local SD recovery state is missing after creation")?;
-    let report = sign_software_sd_transfer(
+    let signed_backup = sign_software_sd_transfer(
         &sa_key,
         &raw,
         &receiver_raw,
@@ -128,13 +133,8 @@ pub fn create(
     )?;
     let remote = RemoteRecovery {
         backup: RemoteBackup {
-            pok_remote_backup: remote_backup,
-            evidence: Evidence {
-                mfgr_cert_chain: Vec::new(),
-                owner_cert_chain: Vec::new(),
-                part_owner_cert_chain: Vec::new(),
-                report,
-            },
+            pok_remote_backup: signed_backup,
+            evidence: IdentityEvidence::default(),
         },
         masked_receiver_key: receiver.masked,
         sd_mk_backup: state.sd_mk_backup,
@@ -168,7 +168,7 @@ fn reseal(
     receiver: &EccPublicKey,
     header: &[u8],
 ) -> Result<Vec<u8>> {
-    validate_sd_envelope(original)?;
+    let original = parse_sd_transfer_report(original)?.envelope;
     let enc =
         EccPublicKey::from_coordinates(EccCurve::P384, &original[162..210], &original[210..258])?;
     let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
@@ -177,12 +177,12 @@ fn reseal(
         sa_private,
         sa_public,
         &original[..SD_HEADER_LEN],
-        &original[..SD_HEADER_LEN],
+        &[],
     );
     let mut plaintext = Zeroizing::new([0u8; 64]);
     let length = hpke::open(&open, &enc, &original[258..], Some(&mut plaintext[..]))?;
     anyhow::ensure!(length == 48, "remote backup did not contain a 48-byte BKS3");
-    let seal = HpkeSealConfig::base(suite, receiver, header, header);
+    let seal = HpkeSealConfig::base(suite, receiver, header, &[]);
     let sealed = hpke::seal_vec(&seal, &plaintext[..length])?;
     let (x, y) = sealed.enc.coord_vec()?;
     Ok([header, &[4], &x, &y, &sealed.ct].concat())
@@ -212,9 +212,8 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
                 .context("missing receiver certificate")?,
         )?;
         verify_sd_transfer_report(
-            &remote.backup.evidence.report,
-            &signer,
             &remote.backup.pok_remote_backup,
+            &signer,
             policy.as_bytes(),
             Some(&recipient),
         )?;

@@ -16,7 +16,7 @@ Manufacturer and partition-owner chains are required; the owner chain is
 optional, but all supplied chains must identify the same report-signing PID.
 
 No sender sealing key is supplied. Firmware emits a fresh P-384 HPKE Base
-envelope and signs the bound `SdBackup` report with its actual PID.
+envelope and signs that complete `SdBackup` envelope with its actual PID.
 The command is stateless and does not require an already-provisioned SD
 when the local backup's masking key is available.
 
@@ -36,10 +36,9 @@ expands to four TOC entries.
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `pok_peer_backup` | 322 B | Canonical Base envelope |
-| `report` | 1..896 B | PID-signed `SdBackup` report |
+| `pok_peer_backup` | 431 B | Complete PID-signed Base envelope |
 
-Keep both outputs together. The report binds the source PID, recipient,
+There is no detached report. The direct signature binds the source PID, recipient,
 complete envelope, and SD policy. See [transfer format](key_report.md#p-384-transfer-envelope-binding).
 Local backup authentication, ownership, SVN checks, and masking are unchanged.
 

@@ -5,8 +5,8 @@
 //!
 //! [`SecurityDomain::create`] drives a factory-reset partition through the full
 //! provisioning flow — `part_init_ex`, PTA-chain issuance, `part_final_ex`,
-//! `sd_create_remote_backup` — and returns the remote backup and PID-signed
-//! operation report. Local recovery records are persisted
+//! `sd_create_remote_backup` — and returns one PID-signed remote backup.
+//! Local recovery records are persisted
 //! separately through the environment's store.
 //!
 //! The caller supplies the receiver certificate chain (containing
@@ -24,6 +24,7 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 pub use crate::env::SecurityDomainEnv;
 use crate::error::Error;
 pub use crate::evidence::Evidence;
+use crate::evidence::IdentityEvidence;
 use crate::session::SealingSession;
 use crate::store::load_local_recovery;
 use crate::store::load_partition_recovery;
@@ -36,8 +37,8 @@ use crate::store::SecurityDomainStore;
 pub struct RemoteBackup {
     /// Remote partition-owner-key backup sealed to the supplied receiver.
     pub pok_remote_backup: Vec<u8>,
-    /// Source PID chains and mandatory v2 SdBackup operation report.
-    pub evidence: Evidence,
+    /// Source PID chains authenticating the signed backup's signer.
+    pub evidence: IdentityEvidence,
 }
 
 impl std::fmt::Debug for RemoteBackup {
@@ -52,14 +53,14 @@ impl std::fmt::Debug for RemoteBackup {
 /// Same-partition remote SD recovery data, independent of the local POK backup.
 ///
 /// The receiver key is locally masked, so restoring it still requires the
-/// original partition's local MK backup. External-SA recovery carries separate
-/// SATA-endorsed recipient certificates are retained for external-SA recovery.
-/// `backup.evidence` carries the actual resealing authority's operation report,
-/// never the original producer's report for a different envelope. The caller
+/// original partition's local MK backup. SATA-endorsed recipient certificates
+/// are retained for external-SA recovery. `backup.evidence` carries the
+/// actual resealing authority's identity chains; `backup.pok_remote_backup`
+/// contains its direct signature on the final envelope. The caller
 /// validates all material before device access. Legacy Auth backups are rejected.
 #[derive(Clone)]
 pub struct RemoteRecovery {
-    /// Restore-ready HPKE Base envelope and its source operation evidence.
+    /// Restore-ready signed HPKE Base envelope and its source identity.
     pub backup: RemoteBackup,
     /// Original locally masked receiver sealing key.
     pub masked_receiver_key: Vec<u8>,
@@ -87,22 +88,12 @@ impl RemoteRecovery {
             self.sd_mk_backup.len() == SD_MK_BACKUP_LEN,
             "invalid remote SD masking-key backup length"
         );
-        let evidence = &self.backup.evidence;
-        anyhow::ensure!(
-            !evidence.report.is_empty(),
-            "remote recovery requires an operation report"
-        );
         crate::policy::validate_pid_spki(&self.sender_pid_pub_key)?;
         Ok(())
     }
 
     pub(crate) fn validate_transfer_envelope(envelope: &[u8]) -> Result<()> {
-        anyhow::ensure!(
-            envelope.len() == POK_REMOTE_BACKUP_LEN
-                && envelope.starts_with(b"TSRA-XFER\x01\x02\x00\x11\x00\x02\x00\x02")
-                && envelope.get(161) == Some(&4),
-            "invalid P-384 HPKE Base SD envelope; legacy Auth backups are unsupported"
-        );
+        tsra_sealing_report::parse_sd_transfer_report(envelope)?;
         Ok(())
     }
 }
@@ -296,7 +287,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         );
         let partition =
             self.init_partition(session, tee_seed, Some(&previous.local_mk_backup), sign_pta)?;
-        let restored = remote.backup.evidence.with_hsm_evidence(|evidence| {
+        let restored = remote.backup.evidence.with_hsm_identity(|evidence| {
             session.session.sd_restore_remote_backup(
                 self.env.policy().as_bytes(),
                 &remote.masked_receiver_key,
@@ -407,11 +398,10 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             "sender partition-owner certificate chain is required",
         );
 
-        let sender_evidence = Evidence {
+        let sender_evidence = IdentityEvidence {
             mfgr_cert_chain: self.env.mfgr_cert_chain().to_vec(),
             owner_cert_chain: self.env.owner_cert_chain().to_vec(),
             part_owner_cert_chain,
-            report: Vec::new(),
         };
         self.seal_backup(
             session,
@@ -426,7 +416,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         session: &SealingSession,
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &Evidence,
-        sender_evidence: &Evidence,
+        sender_evidence: &IdentityEvidence,
     ) -> Result<(SecurityDomainState, RemoteBackup)> {
         let backup = receiver_evidence
             .with_hsm_evidence(|evidence| {
@@ -442,11 +432,9 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             pok_local_backup: backup.pok_local_backup,
             sd_mk_backup: backup.sd_mk_backup,
         };
-        let mut evidence = sender_evidence.clone();
-        evidence.report = backup.report;
         let remote_backup = RemoteBackup {
             pok_remote_backup: backup.pok_remote_backup,
-            evidence,
+            evidence: sender_evidence.clone(),
         };
         Ok((domain_state, remote_backup))
     }

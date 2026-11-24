@@ -28,6 +28,7 @@ use tsra_sealing_api::mint_sealing_key;
 use tsra_sealing_api::reseal_remote_backup;
 use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::PolicyFields;
 use tsra_sealing_api::RemoteBackup;
@@ -191,7 +192,7 @@ impl Registration {
             wire::chain(&record["receiver"], "chain")? == self.receiver_chain,
             "saved backup receiver does not match registration"
         );
-        let source = wire::evidence(&record["sender"])?;
+        let source = wire::identity(&record["sender"])?;
         let recipient = evidence::cert_public(
             self.receiver_chain
                 .last()
@@ -221,7 +222,7 @@ impl Registration {
     fn verify_for_reseal(
         &self,
         store: &FileStore,
-        evidence: &Evidence,
+        evidence: &IdentityEvidence,
         policy: &PartPolicy,
         binding: &JsonValue,
         envelope: Option<&[u8]>,
@@ -242,8 +243,6 @@ impl Registration {
                         .1,
                 "creation source PID mismatch"
             );
-        } else {
-            evidence::verify_peer(evidence, policy)?;
         }
         self.check_binding(store, policy.as_bytes())?;
         let pta = evidence
@@ -275,7 +274,7 @@ impl Registration {
             wire::blob(request, "policy")? == policy.as_bytes(),
             "reseal request policy mismatch"
         );
-        let original = wire::evidence(&saved["sender"])?;
+        let original = wire::identity(&saved["sender"])?;
         // Never use the target's pin to validate the original creation source.
         let original_binding = store
             .load(&filename("binding", &self.name)?)?
@@ -292,7 +291,14 @@ impl Registration {
             evidence: original,
         };
         let destination = wire::evidence(&request["receiver"])?;
-        self.verify_for_reseal(store, &destination, &policy, &target_binding, None)?;
+        evidence::verify_peer(&destination, &policy)?;
+        self.verify_for_reseal(
+            store,
+            &destination.identity(),
+            &policy,
+            &target_binding,
+            None,
+        )?;
         let resealed = reseal_remote_backup(
             session,
             &policy,
@@ -301,13 +307,12 @@ impl Registration {
             &destination,
         )?;
         let (partition, _) = load_local_recovery(domain.env().store())?;
-        let sender_evidence = Evidence {
+        let sender_evidence = IdentityEvidence {
             mfgr_cert_chain: device_cert_chain(&session.partition, 0)?,
             owner_cert_chain: Vec::new(),
             part_owner_cert_chain: domain
                 .env()
                 .part_owner_cert_chain(&session.partition, &partition.pta_cert_chain)?,
-            report: resealed.report,
         };
         let (_, recipient) =
             evidence::verify_attested_key(&destination, &policy, &policy.pota_spki_thumbprint)?;
@@ -327,7 +332,7 @@ impl Registration {
             sd_mk_backup: saved["sd_mk_backup"].clone(),
             sender: jzon::object! {
                 pid_pub_key: hex::encode(tsra_sealing_report::p384_spki_from_raw(&pid)?),
-                evidence: wire::encode_evidence(&sender_evidence),
+                evidence: wire::encode_identity(&sender_evidence),
             },
         })
     }
@@ -554,7 +559,7 @@ pub(crate) fn handle(
                 "backup policy mismatch"
             );
             let policy = &PartPolicy::from_bytes(&bound).context("invalid bound policy")?;
-            let sender = wire::evidence(&request["sender"])?;
+            let sender = wire::identity(&request["sender"])?;
             let original_binding = registration
                 .instance_binding(store, "primary")?
                 .context("missing original creation binding")?;

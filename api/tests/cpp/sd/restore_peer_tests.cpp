@@ -31,7 +31,7 @@ namespace
 // Create the security domain, capturing both the 276-byte device-local
 // backup (the input CreatePeerBackup recovers BKS3 from) and the 260-byte
 // masking-key backup (the previous SDMK backup RestorePeerBackup consumes).
-// Sizes all four output buffers via the probe/fill convention. Records a
+// Sizes all three output buffers via the probe/fill convention. Records a
 // gtest failure and returns false on error.
 bool create_sd_capture(
     tsra_handle session,
@@ -57,19 +57,10 @@ bool create_sd_capture(
     tsra_buffer remote_buf{ nullptr, 0 };
     tsra_buffer local_buf{ nullptr, 0 };
     tsra_buffer mk_buf{ nullptr, 0 };
-    std::vector<uint8_t> report;
-    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 5; ++attempt)
     {
-        err = tsra_sd_create_remote_backup(
-            session,
-            &params,
-            &remote_buf,
-            &local_buf,
-            &mk_buf,
-            &report_buf
-        );
+        err = tsra_sd_create_remote_backup(session, &params, &remote_buf, &local_buf, &mk_buf);
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -89,8 +80,6 @@ bool create_sd_capture(
         remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
         local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
         mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
-        report.resize(report_buf.len);
-        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err != TSRA_STATUS_SUCCESS)
     {
@@ -110,16 +99,14 @@ bool create_sd_capture(
 tsra_status create_peer_fill(
     tsra_handle session,
     const tsra_sd_create_peer_backup_params *params,
-    std::vector<uint8_t> &dst,
-    std::vector<uint8_t> &report
+    std::vector<uint8_t> &dst
 )
 {
     tsra_buffer dst_buf{ nullptr, 0 };
-    tsra_buffer report_buf{ nullptr, 0 };
     tsra_status err = TSRA_STATUS_BUFFER_TOO_SMALL;
     for (int attempt = 0; attempt < 4; ++attempt)
     {
-        err = tsra_sd_create_peer_backup(session, params, &dst_buf, &report_buf);
+        err = tsra_sd_create_peer_backup(session, params, &dst_buf);
         if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
         {
             break;
@@ -129,13 +116,10 @@ tsra_status create_peer_fill(
             dst.resize(dst_buf.len);
         }
         dst_buf = { dst.data(), static_cast<uint32_t>(dst.size()) };
-        report.resize(report_buf.len);
-        report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
     }
     if (err == TSRA_STATUS_SUCCESS)
     {
         dst.resize(dst_buf.len);
-        report.resize(report_buf.len);
     }
     return err;
 }
@@ -283,12 +267,7 @@ TEST_F(tsra_sd_restore_peer_backup_test, restore_peer_backup_roundtrip)
             &local_buf,
         };
         std::vector<uint8_t> peer_backup;
-        std::vector<uint8_t> source_report;
-        ASSERT_EQ(
-            create_peer_fill(dev1.session, &create_params, peer_backup, source_report),
-            TSRA_STATUS_SUCCESS
-        );
-        evidence.set_report(source_report);
+        ASSERT_EQ(create_peer_fill(dev1.session, &create_params, peer_backup), TSRA_STATUS_SUCCESS);
         ASSERT_EQ(peer_backup.size(), kPokRemoteBackupLen);
 
         // Close device 1's session before the reboot.
@@ -313,7 +292,7 @@ TEST_F(tsra_sd_restore_peer_backup_test, restore_peer_backup_roundtrip)
         tsra_buffer peer_buf{ peer_backup.data(), static_cast<uint32_t>(peer_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
         tsra_sd_restore_peer_backup_params restore_params{
-            &r_policy_buf, &r_masked_buf, &evidence.get(), &peer_buf, &prev_mk_buf,
+            &r_policy_buf, &r_masked_buf, &evidence.identity(), &peer_buf, &prev_mk_buf,
         };
 
         std::vector<uint8_t> pok_local;
@@ -414,18 +393,13 @@ TEST_F(tsra_sd_restore_peer_backup_test, restore_peer_backup_is_one_shot)
             &local_buf,
         };
         std::vector<uint8_t> peer_backup;
-        std::vector<uint8_t> source_report;
-        ASSERT_EQ(
-            create_peer_fill(ctx.session, &create_params, peer_backup, source_report),
-            TSRA_STATUS_SUCCESS
-        );
-        evidence.set_report(source_report);
+        ASSERT_EQ(create_peer_fill(ctx.session, &create_params, peer_backup), TSRA_STATUS_SUCCESS);
 
         // Restore on the same already-initialized incarnation is rejected.
         tsra_buffer peer_buf{ peer_backup.data(), static_cast<uint32_t>(peer_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
         tsra_sd_restore_peer_backup_params restore_params{
-            &policy_buf, &masked_buf, &evidence.get(), &peer_buf, &prev_mk_buf,
+            &policy_buf, &masked_buf, &evidence.identity(), &peer_buf, &prev_mk_buf,
         };
         std::vector<uint8_t> pok_local;
         std::vector<uint8_t> sd_mk;
@@ -475,7 +449,7 @@ TEST_F(tsra_sd_restore_peer_backup_test, restore_peer_backup_rejects_without_pee
         tsra_buffer peer_buf{ peer_backup.data(), static_cast<uint32_t>(peer_backup.size()) };
         tsra_buffer prev_mk_buf{ prev_sd_mk.data(), static_cast<uint32_t>(prev_sd_mk.size()) };
         tsra_sd_restore_peer_backup_params restore_params{
-            &policy_buf, &masked_buf, &evidence.get(), &peer_buf, &prev_mk_buf,
+            &policy_buf, &masked_buf, &evidence.identity(), &peer_buf, &prev_mk_buf,
         };
         std::vector<uint8_t> pok_local;
         std::vector<uint8_t> sd_mk;

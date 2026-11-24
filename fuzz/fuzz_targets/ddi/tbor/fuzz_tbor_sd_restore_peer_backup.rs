@@ -74,30 +74,6 @@ impl DescriptorMutation {
     }
 }
 
-#[derive(Arbitrary, Debug)]
-enum ReportMutation {
-    Keep,
-    InvalidIndex,
-    WrongLength { mask: u16 },
-}
-
-impl ReportMutation {
-    /// Corrupt the report's OOB index or length, returning whether it changed.
-    fn apply(&self, report: &mut ReportDescriptor) -> bool {
-        match self {
-            Self::Keep => false,
-            Self::InvalidIndex => {
-                report.index = u8::MAX;
-                true
-            }
-            Self::WrongLength { mask } => {
-                report.length = U16::new(report.length.get() ^ (*mask | 1));
-                true
-            }
-        }
-    }
-}
-
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum MutationTarget {
     Valid,
@@ -107,7 +83,7 @@ enum MutationTarget {
     ManufacturerChain,
     OwnerChain,
     PartitionOwnerChain,
-    Report,
+    Signature,
     PeerBackup,
     PreviousSdMkBackup,
     OobEvidence,
@@ -118,7 +94,6 @@ struct FuzzInput {
     target: MutationTarget,
     bytes: ByteMutation,
     descriptors: DescriptorMutation,
-    report: ReportMutation,
     key_scope: common::KeyScope,
 }
 
@@ -138,7 +113,7 @@ impl Evidence {
         self.items.iter().map(Vec::as_slice).collect()
     }
 
-    /// Collect the certificate and report OOB indices used by peer restore,
+    /// Collect the certificate OOB indices used by peer restore,
     /// excluding the receiver chain used only during remote-backup creation.
     fn referenced_indices(&self) -> Vec<u8> {
         self.manufacturer
@@ -146,7 +121,6 @@ impl Evidence {
             .chain(&self.owner)
             .chain(&self.partition_owner)
             .map(|descriptor| descriptor.index)
-            .chain(core::iter::once(self.report.index))
             .collect()
     }
 }
@@ -297,7 +271,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         .tbor_oob(&create_remote, &evidence.oob())
         .expect("SdCreateRemoteBackup should succeed");
 
-    let (peer_sealing_key, mut peer_evidence) = if key_scope == common::KeyScope::SecurityDomain {
+    let (peer_sealing_key, peer_evidence) = if key_scope == common::KeyScope::SecurityDomain {
         let sealing_key = ctx
             .tbor(&TborSdSealingKeyGenReq {
                 session_id: session.session_id,
@@ -346,10 +320,6 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
     let create_peer_response = ctx
         .tbor_oob(&create_peer, &peer_evidence.oob())
         .expect("SdCreatePeerBackup should succeed");
-    peer_evidence.report.length = u16::try_from(create_peer_response.report.len())
-        .expect("operation report length")
-        .into();
-    peer_evidence.items[usize::from(peer_evidence.report.index)] = create_peer_response.report;
 
     ctx.session_close(session.session_id)
         .expect("source session close should succeed");
@@ -400,7 +370,9 @@ fn mutate_request(
         MutationTarget::PartitionOwnerChain => {
             input.descriptors.apply(&mut req.src_part_owner_cert_chain)
         }
-        MutationTarget::Report => input.report.apply(&mut req.src_report),
+        MutationTarget::Signature => input
+            .bytes
+            .apply(&mut req.pok_peer_backup[POK_REMOTE_BACKUP_LEN - 96..]),
         MutationTarget::PeerBackup => input.bytes.apply(&mut req.pok_peer_backup),
         MutationTarget::PreviousSdMkBackup => input.bytes.apply(&mut req.prev_sd_mk_backup),
         MutationTarget::OobEvidence => {
@@ -441,7 +413,6 @@ fuzz_target!(|input: FuzzInput| {
             src_mfgr_cert_chain: evidence.manufacturer.clone(),
             src_owner_cert_chain: evidence.owner.clone(),
             src_part_owner_cert_chain: evidence.partition_owner.clone(),
-            src_report: evidence.report,
             pok_peer_backup: backup.peer_backup,
             prev_sd_mk_backup: backup.previous_sd_mk_backup,
         };

@@ -8,8 +8,8 @@ Licensed under the MIT License.
 **Handler:** `fw/core/lib/src/ddi/tbor/sd_restore_peer_backup.rs`
 **Session:** Active Crypto Officer
 
-Restores an SD from a same-policy peer's Base envelope and mandatory
-`SdBackup` operation report. The initialized partition's bound policy must
+Restores an SD from a same-policy peer's directly signed `SdBackup`
+Base envelope. The initialized partition's bound policy must
 match the request and permit peer cloning.
 
 Source evidence identifies the **PID operation signer**, not a sender
@@ -17,8 +17,8 @@ sealing key. Manufacturer and partition-owner chains are required; the
 partition-owner chain must anchor to the SD policy's POTA. The optional
 owner chain must agree on the PID leaf if supplied.
 
-Firmware verifies the signature, report kind, source PID ID, actual
-recipient ID, whole-envelope digest, and bound SD policy hash **before
+Firmware verifies the direct signature, transfer kind, source PID thumbprint,
+actual recipient thumbprint, and bound SD policy hash **before
 HPKE decapsulation** with the unmasked recipient private key. No BKS3 is
 published on validation failure.
 
@@ -29,12 +29,12 @@ published on validation failure.
 | `session_id` | Inline session ID | Active CO session |
 | `masked_sealing_key` | 280 B, aligned to 4 B | Actual recipient key |
 | `policy` | 1-384 B | Bound SD policy permitting peer cloning |
-| `src_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized source PID and `SdBackup` report |
-| `pok_peer_backup` | 322 B | Canonical Base envelope |
+| `src_evidence` | Three chain descriptor lists | POTA-authorized source PID identity |
+| `pok_peer_backup` | 431 B | Complete PID-signed Base envelope |
 | `prev_sd_mk_backup` | 264 B | Previous SDMK backup |
 
-The evidence group expands to four TOC entries. Referenced DER certificates
-and operation reports travel out of band.
+The source identity group expands to three TOC entries. Referenced DER
+certificates travel out of band; no detached report is needed.
 
 ## Response
 

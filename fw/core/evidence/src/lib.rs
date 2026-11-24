@@ -42,7 +42,7 @@
 //! and, when present, SAPOTA-anchored.
 //!
 //! Transfer consumers use [`verify_evidence_signer`] to authorize PID
-//! identity chains and verify their `SdBackup` operation report separately.
+//! identity chains and verify the direct signature inside their `SdBackup`.
 //! Remote restore has no SATA sender chain; SAPOTA is required only under
 //! trusted-SA policy. Without it, report integrity does not authenticate SA identity.
 //!
@@ -108,6 +108,16 @@ pub struct EvidenceRefs<'a> {
     pub part_owner_chain: &'a [CertDescriptor],
     /// COSE_Sign1 attestation-report descriptor.
     pub report: &'a ReportDescriptor,
+}
+
+/// Identity chains authorizing a transfer signer; no separate operation report.
+pub struct IdentityRefs<'a> {
+    /// Manufacturer certificate-chain descriptors.
+    pub mfgr_chain: &'a [CertDescriptor],
+    /// Optional device-owner certificate-chain descriptors.
+    pub owner_chain: &'a [CertDescriptor],
+    /// Partition-owner certificate-chain descriptors.
+    pub part_owner_chain: &'a [CertDescriptor],
 }
 
 /// Trust anchors the evidence must chain to, taken from the partition
@@ -213,7 +223,18 @@ where
     let coord = COORD_LEN;
 
     let mut canonical = [0u8; POINT_LEN];
-    verify_identity_chains(pal, io, refs, anchors.part_owner_anchor, &mut canonical).await?;
+    verify_identity_chains(
+        pal,
+        io,
+        &IdentityRefs {
+            mfgr_chain: refs.mfgr_chain,
+            owner_chain: refs.owner_chain,
+            part_owner_chain: refs.part_owner_chain,
+        },
+        anchors.part_owner_anchor,
+        &mut canonical,
+    )
+    .await?;
 
     // Req 5: the shared leaf key must endorse the attestation report.
     let report_index = refs.report.index as usize;
@@ -260,11 +281,11 @@ where
 }
 
 /// Validate the identity chains shared by a report signer, without interpreting
-/// the report payload. Callers must verify the operation report separately.
+/// the signed transfer payload. Callers must also verify the transfer signature.
 pub async fn verify_evidence_signer<P>(
     pal: &P,
     io: &P::Io,
-    refs: &EvidenceRefs<'_>,
+    refs: &IdentityRefs<'_>,
     part_owner_anchor: &[u8; SPKI_THUMBPRINT_LEN],
     signer: &mut [u8],
 ) -> HsmResult<()>
@@ -284,7 +305,7 @@ where
 async fn verify_identity_chains<P>(
     pal: &P,
     io: &P::Io,
-    refs: &EvidenceRefs<'_>,
+    refs: &IdentityRefs<'_>,
     part_owner_anchor: &[u8; SPKI_THUMBPRINT_LEN],
     canonical: &mut [u8; POINT_LEN],
 ) -> HsmResult<()>

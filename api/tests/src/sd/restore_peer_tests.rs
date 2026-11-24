@@ -60,22 +60,21 @@ fn sd_restore_peer_backup_roundtrip() {
     // backup, then restore the security domain from the peer backup.
     let (session2, _policy2, _pid_pub2, _lmk2) =
         provision_backing(&sata, &pota, Some(&policy), Some(&local_mk));
-    let invalid_source = evidence.with_hsm_evidence(|src| {
+    let invalid_source = evidence.with_hsm_identity(|src| {
         session2.sd_restore_peer_backup(
             &policy,
             &masked,
             src,
-            &pok_peer_backup.backup,
+            evidence.report(),
             &created.sd_mk_backup,
         )
     });
     assert!(
         invalid_source.is_err(),
-        "PublicKey evidence is not an SD operation report"
+        "a PublicKey report cannot replace a signed SD backup"
     );
-    let evidence = evidence.with_report(&pok_peer_backup.report);
-    evidence.with_hsm_evidence(|src| {
-        let src = HsmSdEvidence {
+    evidence.with_hsm_identity(|src| {
+        let src = HsmSdIdentityEvidence {
             part_owner_cert_chain: &[],
             ..*src
         };
@@ -93,7 +92,7 @@ fn sd_restore_peer_backup_roundtrip() {
         );
     });
     let restored = evidence
-        .with_hsm_evidence(|src| {
+        .with_hsm_identity(|src| {
             session2.sd_restore_peer_backup(
                 &policy,
                 &masked,
@@ -144,8 +143,7 @@ fn sd_restore_peer_backup_is_one_shot() {
         })
         .expect("create peer backup");
 
-    let evidence = evidence.with_report(&pok_peer_backup.report);
-    let restored = evidence.with_hsm_evidence(|src| {
+    let restored = evidence.with_hsm_identity(|src| {
         session.sd_restore_peer_backup(
             &policy,
             &masked,
@@ -181,7 +179,7 @@ fn sd_restore_peer_backup_rejects_without_peer_cloning() {
 
     let pok_peer_backup = [0u8; POK_REMOTE_BACKUP_LEN];
     let prev_sd_mk_backup = [0u8; SD_MK_BACKUP_LEN];
-    let restored = evidence.with_hsm_evidence(|src| {
+    let restored = evidence.with_hsm_identity(|src| {
         session.sd_restore_peer_backup(&policy, &masked, src, &pok_peer_backup, &prev_sd_mk_backup)
     });
     assert!(

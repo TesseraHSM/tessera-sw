@@ -31,9 +31,8 @@ inline constexpr uint32_t kMaskedSealingKeyLen = 280; ///< sealing priv scalar (
 inline constexpr uint32_t kMaskedSdLen = 280;         ///< masked BKS3 (48 B)
 inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 backup (48 B)
 inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
-/// SdBackup envelope: header(161) + enc(97) + ciphertext(48) + tag(16).
-inline constexpr uint32_t kPokRemoteBackupLen = 322;
-inline constexpr uint32_t kSdBackupReportCapacity = 896;
+/// COSE_Sign1 containing header(161) + enc(97) + ciphertext(48) + tag(16).
+inline constexpr uint32_t kPokRemoteBackupLen = 431;
 
 // Security-domain provisioning helper for the sealing round-trip test.
 //
@@ -163,6 +162,11 @@ class SdEvidenceHolder
         return ev_;
     }
 
+    const tsra_sd_identity_evidence &identity() const
+    {
+        return identity_;
+    }
+
     void set_report(const std::vector<uint8_t> &report)
     {
         report_ = report;
@@ -203,6 +207,7 @@ class SdEvidenceHolder
     tsra_buffer rcvr_bufs_[2]{};
     tsra_buffer report_buf_{};
     tsra_sd_evidence ev_{};
+    tsra_sd_identity_evidence identity_{};
     tsra_sd_cert_chain rcvr_chain_{};
 };
 

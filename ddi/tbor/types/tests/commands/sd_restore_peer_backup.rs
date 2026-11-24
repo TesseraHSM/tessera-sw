@@ -106,7 +106,7 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
     PeerBackup {
         pid_pub: part.pid_pub,
         masked_sealing_key: masked,
-        evidence: evidence.with_report(&peer.report),
+        evidence,
         policy: part.policy,
         pok_peer_backup: peer.pok_peer_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
@@ -137,7 +137,6 @@ fn restore_peer_req_with(
         src_mfgr_cert_chain: evidence.mfgr.clone(),
         src_owner_cert_chain: evidence.owner.clone(),
         src_part_owner_cert_chain: evidence.part_owner.clone(),
-        src_report: evidence.report,
         pok_peer_backup: backup.pok_peer_backup,
         prev_sd_mk_backup: backup.prev_sd_mk_backup,
     }
@@ -233,7 +232,7 @@ fn sd_restore_peer_backup_is_one_shot() {
     let backup = PeerBackup {
         pid_pub: part.pid_pub,
         masked_sealing_key: masked,
-        evidence: evidence.with_report(&peer.report),
+        evidence,
         policy: part.policy,
         pok_peer_backup: peer.pok_peer_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
@@ -292,7 +291,6 @@ fn sd_restore_peer_backup_rejects_before_finalize() {
         src_mfgr_cert_chain: Vec::new(),
         src_owner_cert_chain: Vec::new(),
         src_part_owner_cert_chain: Vec::new(),
-        src_report: Default::default(),
         pok_peer_backup: [0u8; POK_REMOTE_BACKUP_LEN],
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };

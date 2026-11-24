@@ -9,14 +9,14 @@ Licensed under the MIT License.
 
 This document covers **security-domain (SD) commands only**. It explains
 the move from HPKE Auth with a sender sealing key to **HPKE Base plus a
-PID-signed operation report**, including changes to authorization that
+PID-signed transfer envelope**, including changes to authorization that
 are separate from the choice of cryptographic mechanism.
 
 The comparison is between:
 
 - **Existing design:** the SD command specifications and implementations
   on `main` at
-  [`697cc5f7`](https://github.com/TesseraHSM/tessera-sw/tree/697cc5f7922d38fc2bbd3ef05ba8b466780e39de).
+  [`e10237b9`](https://github.com/TesseraHSM/tessera-sw/tree/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2).
 - **New design:** the SD refactor in `feat/sd-darc-hpke-refac`, specifically
   the handlers and schemas linked below.
 
@@ -24,6 +24,8 @@ The five changed transfer commands retain their existing opcodes and
 purposes. Local recovery and the SD key hierarchy are not redesigned.
 The per-command specifications remain the wire-contract reference;
 this document explains their rationale and security consequences.
+References to DARC below concern the shared report parser, domain separation,
+and future algorithm profiles; they are not a complete DARC protocol review.
 
 **This refactor prepares the authentication architecture for PQC; it
 does not itself make SD transfers post-quantum secure.** Its transfer
@@ -110,14 +112,14 @@ application's trust policy.
 | Aspect | Existing design on main | New design |
 |---|---|---|
 | Encryption | P-384 HPKE Auth | P-384 HPKE Base |
-| Source authentication | Possession of a sender SD-sealing private key, authenticated through HPKE | PID signature over an `SdBackup` operation report |
-| Source evidence for peer restore/reseal | PID-signed `PublicKey` attestation of the sender sealing key | PID identity chains plus the producer's `SdBackup` report |
+| Source authentication | Possession of a sender SD-sealing private key, authenticated through HPKE | PID signature directly over the complete `SdBackup` envelope |
+| Source evidence for peer restore/reseal | PID-signed `PublicKey` attestation of the sender sealing key | PID identity chains; the transfer itself contains its signature |
 | Destination evidence for peer export/reseal | `PublicKey` attestation of the recipient sealing key | Retained, including generated SD-sealing provenance and policy checks |
 | Create-remote/create-peer sender key input | Caller supplies `masked_sealing_key` | Removed; firmware selects its actual PID signer |
 | Reseal key roles | One sealing key opens the input and authenticates the output | Recipient sealing key opens the input; SA PID signs the output |
-| HPKE application context | Empty `info` and AAD in the SD transfer handlers | Canonical header used as both `info` and AAD |
-| Encrypted BKS3 artifact | `enc[97] \|\| ciphertext_and_tag[64]`: 161 bytes | Header plus the same-sized HPKE outputs: 322 bytes |
-| Producer response | Encrypted backup, plus local backups where applicable | Adds a required operation `report` |
+| HPKE application context | Empty `info` and AAD in the SD transfer handlers | Canonical header in `info`; empty AAD |
+| Encrypted BKS3 artifact | `enc[97] \|\| ciphertext_and_tag[64]`: 161 bytes | One 431-byte COSE_Sign1 containing the 322-byte encrypted envelope |
+| Producer response | Encrypted backup, plus local backups where applicable | Signed backup, plus the same local backups; no separate operation report |
 | Policy binding | Local policy checks, key-attestation policy claims, and SDBMK derivation | Those applicable checks plus an explicit transferred-policy hash bound to the exact ciphertext |
 | Remote-restore sender authorization | SATA-authorized sealing key; additional SAPOTA attestation when requested | No SATA sender chain; SAPOTA-authorized PID when requested, otherwise caller-selected PID with signature verification only |
 | Local BKS3/SDMK backup formats | Existing authenticated masking formats | Unchanged |
@@ -130,7 +132,7 @@ Some existing main command-spec tables still say 276-byte masked keys /
 local backups and 260-byte SDMK backups. The main **schemas and code
 already require 280 and 264 bytes**, respectively. These stale prose
 sizes are not protocol changes introduced by this migration. The actual
-encrypted remote/peer artifact does change from 161 to 322 bytes.
+encrypted remote/peer artifact changes from 161 to 431 bytes.
 
 ## 4. New transfer and evidence contract
 
@@ -173,7 +175,7 @@ policy_hash = SHA-384(exact validated deterministic-CBOR SD policy)
 header =
     "TSRA-XFER"                 // 9 bytes
     || version[1]              // 1
-    || report_kind[1]          // SdBackup = 2
+    || kind[1]                 // SdBackup = 2
     || kem_id_be16             // 0x0011
     || kdf_id_be16             // 0x0002
     || aead_id_be16            // 0x0002
@@ -182,13 +184,13 @@ header =
     || policy_hash[48]
 
 enc, ciphertext_and_tag = HPKE.Base.Seal(
-    recipient_public_key, info=header, aad=header, plaintext=BKS3)
+    recipient_public_key, info=header, aad=empty, plaintext=BKS3)
 
 envelope = header[161] || enc[97] || ciphertext_and_tag[64]
-envelope_hash = SHA-384("TSRA-XFER-HASH-v1" || envelope)
+backup = COSE_Sign1(payload=envelope)  // 431 bytes, including signature
 ```
 
-Both SD key thumbprints use canonical DER SubjectPublicKeyInfo, matching
+Both SD and DARC key thumbprints use canonical DER SubjectPublicKeyInfo, matching
 the policy trust-anchor fingerprint convention. For the current profile,
 SPKI encodes `id-ecPublicKey`, the `secp384r1` named curve, and an uncompressed
 `0x04 || X_be[48] || Y_be[48]` point (120 bytes total). The HPKE encapsulation
@@ -197,13 +199,14 @@ it does not confer another role's authorization or replace chain validation.
 
 The header authenticates the operation, source, recipient, policy, and
 suite selection. Binding the whole envelope also covers the KEM
-encapsulation and the GCM ciphertext/tag. The report is excluded from
-the envelope hash, avoiding a circular signature dependency.
+encapsulation and the GCM ciphertext/tag. The COSE signature covers those
+exact bytes directly; there is no separate claims map or envelope hash.
 
 RFC 9180 Section 8.1 recommends `info` for auxiliary information in
-single-shot use. This TSRA profile additionally supplies the same header
-as AEAD AAD. That redundant binding is an explicit application choice,
-not an RFC requirement or a second independent authentication factor.
+single-shot use and says single-shot-only APIs should not expose both
+`info` and `aad`. This single-shot profile follows that recommendation:
+the header is used only as `info`, which binds it through the HPKE key
+schedule. Empty AAD does not remove header authentication.
 
 The parser rejects unknown versions, unsupported suites, incorrect
 operation kinds, wrong lengths, malformed point shape, and trailing data.
@@ -212,24 +215,18 @@ parsing alone is not authentication.
 
 ### 4.3 PublicKey evidence is not export evidence
 
-An `SdBackup` report is a version-2, discriminated COSE_Sign1 report
-using ES384. Its signed payload contains:
+An `SdBackup` transfer is one tagged COSE_Sign1 using ES384, whose
+payload is exactly the binary envelope from Section 4.2. Its protected
+header is `{1: -35}` and its unprotected header is empty. Its COSE
+`external_aad` is ASCII `TSRA-SdBackup-v1` followed by 16 zero bytes.
+The binary payload does not claim `application/cbor` content type.
+There is one transfer version and kind, in the signed binary header;
+identities and policy appear once, not as duplicated COSE claims.
+The 109-byte COSE framing/signature overhead is included in the 431-byte
+backup size. DARC uses the same construction, its kind is 1, and its
+258-byte inner envelope produces a 367-byte signed artifact.
 
-| CBOR map key | Claim |
-|---|---|
-| 0 | Report version: 2 |
-| 7 | Transferred SD policy hash |
-| 8 | Report kind: `SdBackup` (2) |
-| 9 | `source_pid_spki_thumbprint`: SHA-384 of the source PID's canonical DER SPKI |
-| 10 | `recipient_spki_thumbprint`: SHA-384 of the recipient encryption key's canonical DER SPKI |
-| 11 | Complete envelope hash |
-
-The new report format has not been deployed, so the existing revision 2
-is retained. The signed kind, rather than a new revision, distinguishes
-operation claims from public-key claims. Legacy v1 public-key reports
-remain supported.
-
-The exporting command computes these claims internally after validating
+The exporting command constructs the entire envelope internally after validating
 the secret and recipient. `seal_backup` derives the source public key
 from the partition's actual vaulted PID private key; the caller cannot
 select a different source identity or submit a digest for arbitrary
@@ -246,20 +243,49 @@ key's attributes. Producer commands still require destination
 `PublicKey` evidence wherever their trust contract requires it.
 Kind separation prevents substituting one proof for the other.
 
+All kinds use ES384. Public-key attestations retain empty COSE
+`external_aad`; transfers use fixed, distinct 32-byte signature domains:
+ASCII `TSRA-Darc-v1` plus 20 zero bytes, or ASCII `TSRA-SdBackup-v1` plus
+16 zero bytes. Standard COSE
+[`Sig_structure` (RFC 9052 Section 4.4)](https://www.rfc-editor.org/rfc/rfc9052.html#section-4.4)
+includes that external AAD between the protected header and payload.
+It is reconstructed locally, not transmitted; artifact sizes are unchanged.
+The padding is a TSRA profile choice, not an AES/HPKE or COSE requirement.
+HPKE AAD remains empty.
+
+Public-key attestations
+retain their existing protected header, including `application/cbor`;
+binary transfers require the algorithm-only header above. The decoder
+requires the correct protected header and disjoint payload language:
+
+| Kind | Accepted payload and discriminator |
+|---|---|
+| Legacy `PublicKey` v1 | Exactly keys 0-6; no kind or policy field |
+| `PublicKey` v2 | Keys 0-6, plus policy key 7 and/or kind key 8; an explicit kind must be 0 |
+| `Darc` | Canonical binary transfer envelope; version 1, kind 1 |
+| `SdBackup` | Canonical binary transfer envelope; version 1, kind 2 |
+
+Duplicate keys, unknown keys, inconsistent versions, and trailing data are
+rejected. Caller-controlled `report_data` is a byte string under key 5,
+not an injected transfer payload. Consequently, obtaining a `PublicKey` or
+`Darc` signature does not produce a payload accepted as `SdBackup`.
+This invariant must be preserved across both legacy and future report
+versions. Per-kind external AAD additionally separates the signed messages
+cryptographically, rather than relying solely on payload encodings.
+Empty, unpadded, or wrong-kind transfer domains have no verification fallback.
+
 ### 4.4 Receiver acceptance invariant
 
 Before decapsulation, an opening command must establish all of:
 
 ```text
 authorized source PID, or explicitly selected signature-only SA mode
-AND valid PID signature on an SdBackup report
-AND report.kind == envelope.kind == SdBackup
+AND valid PID signature directly on the complete encrypted envelope
+AND envelope.kind == SdBackup
 AND spki_thumbprint(actual signer PID) == header.source_pid_spki_thumbprint
-AND report.source_pid_spki_thumbprint == header.source_pid_spki_thumbprint
 AND spki_thumbprint(public key derived from actual recipient private key)
-      == header.recipient_spki_thumbprint == report.recipient_spki_thumbprint
-AND recomputed_hash(complete envelope) == report.envelope_hash
-AND SHA-384(requested SD policy) == header.policy_hash == report.policy_hash
+      == header.recipient_spki_thumbprint
+AND SHA-384(requested SD policy) == header.policy_hash
 ```
 
 The command also checks the bound local policy where applicable.
@@ -300,8 +326,8 @@ Key scope is not a partition-local-custody claim in a public-key report.
 | Item | Existing | New |
 |---|---|---|
 | Request | `masked_sealing_key`, `receiver_cert_chain`, `receiver_evidence`, `policy` | Removes the sender `masked_sealing_key`; other inputs retain their roles |
-| Source authentication | HPKE Auth with the unmasked sender sealing key | Firmware PID signs the new `SdBackup` report |
-| Response | `pok_remote_backup`, `pok_local_backup`, `sd_mk_backup` | Same three logical backups plus required `report`; remote envelope is 322 bytes |
+| Source authentication | HPKE Auth with the unmasked sender sealing key | Firmware PID directly signs the `SdBackup` envelope |
+| Response | `pok_remote_backup`, `pok_local_backup`, `sd_mk_backup` | Same three backups; `pok_remote_backup` is the complete 431-byte signed artifact |
 
 Preserved checks: active CO session, finalized partition, uninitialized
 SD, equality with the bound policy, and backing partition ID/PID SPKI
@@ -322,13 +348,13 @@ A PID report is not permission to send BKS3 to an uncertified recipient.
 | Item | Existing | New |
 |---|---|---|
 | `masked_sealing_key` | Opens input and authenticates output as HPKE sender | Opens input only |
-| `src_evidence` | Source sender's `PublicKey` report attesting its sealing key | Source PID chains plus its `SdBackup` operation report |
+| `src_evidence` | Source sender's `PublicKey` report attesting its sealing key | Source PID identity chains only |
 | `dest_evidence` | Destination sealing-key `PublicKey` report | Retained |
-| Response | `dst_remote_backup` | Fresh 322-byte envelope plus SA-PID-signed `report` |
+| Response | `dst_remote_backup` | One fresh 431-byte SA-PID-signed envelope |
 
 The SA authorizes the source PID under the **request SD policy's POTA**,
-verifies that PID's **signature on the source `SdBackup` operation
-report**, and checks the report against the exact input, actual recipient,
+verifies that PID's **signature on the source `SdBackup` envelope**,
+and checks its signed header against the actual recipient,
 and requested SD policy. It separately authorizes the destination PID under
 that POTA and verifies the **destination PID's signature on its `PublicKey`
 attestation report**. Destination evidence must prove Generated, not
@@ -356,9 +382,9 @@ a signed history of every prior hop.
 | Item | Existing | New |
 |---|---|---|
 | Sender key input | Required SATA-anchored `sender_cert_chain` yielding the sealing key | Removes that chain; adds `sender_pid_pub_key` as DER SPKI |
-| `sender_evidence` report | Optional sealing-key `PublicKey` attestation; required under trusted-SA policy | **Mandatory `SdBackup` operation report**, in both policy modes |
+| `sender_evidence` | Optional sealing-key `PublicKey` attestation; required under trusted-SA policy | Source PID identity chains only; the input backup always contains its mandatory signature |
 | Source identity checks | SATA always, plus SAPOTA when trusted-SA is set | SAPOTA PID chains only when trusted-SA is set; no SATA sender check |
-| Encrypted input | 161-byte Auth artifact | 322-byte Base envelope |
+| Encrypted input | 161-byte Auth artifact | 431-byte signed Base envelope |
 | Response | Refreshed local BKS3 and SDMK backups | Unchanged logical outputs and formats |
 
 When `require_trusted_sa_key` is **set**, the source identity chains must
@@ -376,7 +402,7 @@ This does not itself enable PQ signatures. The actual key is required to
 verify the signature; its thumbprint binds that key to the report and header.
 
 When the flag is **clear**, source certificate chains are ignored, but
-the report is **not optional**. Firmware checks the supplied key's
+the embedded signature is **not optional**. Firmware checks the supplied key's
 signature and all transfer bindings. Because the caller supplies that
 key without an anchored identity check, this provides integrity under a
 selected key, **not authenticated SA identity or trusted HSM provenance**.
@@ -405,7 +431,7 @@ policy-derived SDBMK, platform lineage, and one-shot behavior are unchanged.
 | Request | Sender `masked_sealing_key`, `policy`, `dst_evidence`, `pok_local_backup` | Removes the sender `masked_sealing_key` |
 | Secret recovery | Authenticate/unmask local BKS3 backup | Retained |
 | Source authentication | HPKE Auth with sender sealing key | Actual exporting PID signs `SdBackup` |
-| Response | `pok_peer_backup` | 322-byte peer envelope plus required `report` |
+| Response | `pok_peer_backup` | One complete 431-byte signed peer envelope |
 
 The bound policy must still allow peer cloning. Destination `PublicKey`
 evidence must be POTA-authorized, attest a Generated/not Imported SD
@@ -425,13 +451,13 @@ sender sealing key.
 
 | Item | Existing | New |
 |---|---|---|
-| `src_evidence` | POTA-authorized `PublicKey` report of sender sealing key | POTA-authorized source PID plus mandatory `SdBackup` report |
+| `src_evidence` | POTA-authorized `PublicKey` report of sender sealing key | POTA-authorized source PID identity chains |
 | Recipient key | `masked_sealing_key` unmasked as `SdSealing` | Retained; derive its public key for the signed recipient-ID check |
-| Encrypted input | 161-byte Auth peer artifact | 322-byte Base peer envelope |
+| Encrypted input | 161-byte Auth peer artifact | 431-byte signed Base peer envelope |
 | Restore outputs | Local BKS3 and SDMK backups | Unchanged |
 
 The command still verifies equality with the bound SD policy and requires
-`allow_peer_cloning`. The source's operation report must carry that policy
+`allow_peer_cloning`. The source's signed header must carry that policy
 and the exact envelope bindings before decapsulation. Source sealing-key
 provenance is no longer the proof being consumed; source PID authorization
 and a firmware-generated export report replace it. A different key's
@@ -455,21 +481,195 @@ legacy MBOR behavior are part of this design.
 
 ## 6. Security properties and maintained invariants
 
-This analysis assumes uncompromised authorized PID signers and relevant
-recipient keys, sound RNG/KDF/AEAD/signature implementations, collision
-resistance of SHA-384, and trustworthy execution of the producing and
-consuming commands. Signature-only remote restore intentionally weakens
-the authorized-signer assumption as described above.
+Under the assumptions below, Base plus the identity-bound operation
+signature is a suitable replacement for Auth's **single-shot transfer
+authentication** in the anchored SD flows. It is not an unconditional
+equivalence: remote-restore authorization, deniability, metadata exposure,
+and sensitivity to bad encapsulation randomness differ.
+
+The adversary may control the transport, obtain other kinds of PID reports,
+and corrupt other SAs or recipients. Producing and consuming firmware,
+device seeds and provisioned trust anchors are trusted. Confidentiality
+requires an uncompromised intended recipient; attribution requires an
+uncompromised authorized PID signer. Cryptographic assumptions include
+the selected HPKE profile's confidentiality/integrity properties, signature
+unforgeability, SHA-384 collision resistance, and the context-binding
+properties of the HPKE key schedule.
+Leaking BKS3 itself, or a key that opens another saved copy of that same
+BKS3, is outside the confidentiality guarantee. Signing a resealed
+envelope cannot restore secrecy already lost at another authorized hop.
+
+### 6.1 Usage assumptions
+
+**C1 - Authentic verification key and explicit authorization policy.**
+Anchored commands must validate the appropriate POTA/SAPOTA chain and bind
+the verified PID key to the header and report. In signature-only remote
+restore, the application must authenticate or pin `sender_pid_pub_key`
+through its own trusted mechanism if it needs source identity. A valid
+signature under a caller-selected key is not equivalent to the old SATA
+authorization. This branch deliberately exposes that different contract;
+whether a deployment may accept it is a separate policy decision, not a
+consequence of switching KEMs. Require trusted-SA mode or an explicit
+authorization change if the selected-key contract is unacceptable.
+
+An attacker-chosen BKS3 must still authenticate the supplied
+`prev_sd_mk_backup` under the SDBMK derived from that BKS3, bound policy,
+and versioned device/owner lineage. This is a separate restore check,
+**not a substitute for source authorization**. The specific regression
+where an attacker signs a correctly bound envelope containing a different
+BKS3 but pairs it with a genuine SDMK backup is covered by the explicit
+regression in Section 9; corrupted-backup tests alone would not prove that case.
+
+**C2 - Disjoint PID-signature domains.** Signers and verifiers must use
+the exact per-kind external-AAD bytes in Section 4.3, retaining empty
+external AAD for PublicKey v1/v2. Strict payload parsing and protected-header
+checks remain mandatory. Only exporting commands may construct transfer payloads, after
+checking the secret and recipient. Giving callers an arbitrary
+`SdBackup` signing oracle would invalidate the provenance argument even
+if every signature and ciphertext were cryptographically valid.
+
+**C3 - Fresh, unpredictable encapsulation randomness.** For the present
+DHKEM profile, knowledge of ephemeral `skE` and public `pkR` reveals the
+Base shared secret and hence BKS3. The PID signature does not repair
+that confidentiality failure. Auth also mixes in the static sender DH
+contribution, so its failure behavior is different. Reusing encapsulation
+randomness can additionally reuse an AEAD key/nonce pair; neither mode
+should be considered safe under that failure. Future ML-KEM profiles
+need the corresponding fresh encapsulation-seed guarantee.
+
+**C4 - Public policy identities.** The cleartext policy hash permits
+testing candidate policies; hashing does not hide a small policy
+dictionary. Deployments must accept that disclosure and the correlation
+enabled by stable key identifiers. This profile does not provide policy
+or identity-metadata confidentiality.
+
+### 6.2 What authenticates each input
+
+An implicit HPKE binding means that the parties must use consistent
+inputs for decryption to succeed; it does not, in Base mode, identify a
+sender. The operation signature additionally gives public attribution
+to the PID whose verification key was authorized.
+
+| Value | Auth baseline: implicit binding | New profile: implicit binding | New profile: signed binding |
+|---|---|---|---|
+| Suite and mode | KEM/key schedule | KEM/key schedule | Header suite IDs; accepted version fixes Base mode |
+| Encapsulation `enc` | KEM context | KEM context | Directly signed as part of the complete envelope |
+| Recipient key | KEM context | KEM context | SPKI thumbprint, checked against the actual recipient key |
+| Source | Static sender KEM key in the Auth KEM context | PID thumbprint in `info`; not sender authentication by itself | PID thumbprint must match the authorized verifying key |
+| Operation and policy | Application checks; transfer `info`/AAD are empty | Header in `info`, empty AAD | Header is part of the directly signed envelope |
+| BKS3 | AEAD ciphertext | AEAD ciphertext | Ciphertext is signed directly; its plaintext is fixed only given the matching recipient key and context |
+
+### 6.3 Why the source identity must be an HPKE input
+
+Signing a source identifier beside an otherwise unbound Base ciphertext
+is insufficient. An authorized but different PID Q could copy P's
+`enc || ciphertext`, replace the cleartext source ID with Q's, and sign
+the resulting envelope, falsely rebinding the old encryption to Q.
+
+Here, changing the source ID changes `info` and therefore the HPKE key
+schedule. The old ciphertext no
+longer opens under that changed context. This is the application identity
+binding recommended by RFC 9180 Section 5.1.3, rather than a property
+provided by a signature on an unbound name. The argument assumes the
+attacker cannot recover the plaintext or recipient secret; it does not
+prevent a party already holding BKS3 from making a fresh authorized export.
+
+The scope of the signature also matters:
+
+| Design | Signature covers | Consequence |
+|---|---|---|
+| A: implemented | The complete header, `enc`, and ciphertext/tag directly | Authenticates the exact encrypted operation, including against a compromised recipient key when the PID remains uncompromised |
+| B: possible context-authentication design | Header and `enc` only | A recipient-key holder can derive the AEAD key and replace the ciphertext, as in Auth's KCI limitation |
+| Header only | Neither `enc` nor ciphertext | Insufficient: anyone knowing `pkR` can Base-encrypt a different seed under the same signed header |
+
+For one 48-byte BKS3, A's extra signed coverage is only the 64-byte
+ciphertext/tag. There is no reason to surrender its stronger exact-export
+attribution merely to sign before encryption. B is a separate option for
+multi-message contexts, not a permitted interpretation of this profile.
+
+### 6.4 Conditional proof outline, not a completed protocol proof
+
+The following is a reviewable decomposition in the multi-user
+signcryption setting discussed by [An, Dodis and Rabin][adr02] and the
+[HPKE analyses summarized by RFC 9180][rfc9180-analysis]. It is not a
+new theorem, a concrete security bound, or a mechanized verification.
+
+Model honest PIDs as signature key pairs and recipients as KEM key pairs.
+An abstract `Seal(P, R, policy, m)` oracle constructs the canonical header,
+encrypts, and signs; `Open(R, P, policy, signed_E)` performs the complete
+acceptance checks. Returning plaintext from this model's `Open` is more
+powerful than the real command, which never publishes BKS3. The model
+must also represent other report-signing operations, key corruption,
+authorization, and canonical encodings.
+
+1. **Confidentiality with corrupt PID signers.** Challenge messages have
+   equal length and the intended recipient remains honest. The adversary
+   may know PID signing keys, so secrecy must come from HPKE Base, not
+   the signature. Exclude opening the challenge envelope under *any*
+   signature encoding, accounting for ECDSA signature malleability.
+   A reduction must handle the complete header as HPKE context and
+   discharge the labeled, multi-user HPKE assumptions; citing a bare
+   KEM/DEM composition theorem is not a proof of this application.
+2. **Exact-envelope attribution with corrupt recipients.** Fix an
+   uncompromised, authorized PID P. A win is accepting an envelope E
+   that P's export oracle never produced, not obtaining another
+   signature on an old E. Use C2 to exclude signatures from other report kinds. An accepted
+   new E then requires a new signed transfer payload under P, reducing
+   to signature unforgeability. Ordinary existential unforgeability
+   under chosen-message attack (EUF-CMA), not strong unforgeability,
+   suffices for this new-envelope goal. Chain authorization adds its
+   own certificate-signature and trust-anchor assumptions.
+3. **No source-identity rebinding of an existing encryption.** Changing
+   P's source ID to another signer's ID changes the HPKE context. Under
+   the required KDF/context-binding and AEAD integrity assumptions,
+   that does not rescue the original ciphertext. This is a separate
+   obligation from forging P's signature, since Q may legitimately
+   sign its own payload. A mechanized argument must model cross-context
+   queries explicitly rather than assume independent keys without proof.
+
+For an honest recipient, correctness connects an accepted exact envelope
+to the plaintext sealed for that recipient and policy. A future KEM
+with nonzero decapsulation-failure probability must include its
+correctness error in that statement.
+
+The classical HPKE results rely on the selected DHKEM, KDF and AEAD
+assumptions described in RFC 9180 Section 9.1.2. Section 9.1.3 explicitly
+warns against treating those classical analyses as a complete PQ proof.
+The PQ draft's KEM/composition analysis is relevant to a future profile,
+but does not by itself prove the TSRA signature layer, authorization
+rules, cross-protocol separation, or command implementation secure.
+
+Potential follow-up verification would extend a computational model,
+for example in CryptoVerif, with these signing and corruption oracles
+and concrete bounds. A symbolic correspondence model in ProVerif or
+Tamarin could separately check that acceptance implies an authorized
+export across reseal hops. Neither kind of model has been established
+by the tests cited here.
+
+### 6.5 RFC review checklist
+
+| RFC 9180 consideration | Assessment for this profile |
+|---|---|
+| Section 5.1.3: application identity binding | Source PID ID is an HPKE input and must equal the authorized signature key's ID |
+| Section 8.1: single-shot context placement | Header in `info` only, with empty AAD, follows the single-shot recommendation |
+| Sections 9.1 and 9.1.1: Base authentication and KCI | Base alone has no sender authentication; the signature covers both `enc` and ciphertext |
+| Sections 9.1.2-9.1.3: analysis limits | Conditional classical argument, not an end-to-end PQ proof |
+| Section 9.2.3: KEM randomness and cross-mode reuse | Fresh encapsulation is required; any cross-mode reuse of sealing keys needs separate analysis, not an assumption of this document |
+| Sections 9.7.2-9.7.4: downgrade, replay and forward secrecy | Fixed suite today; future policy minimum required; replay and recipient-compromise limits remain |
+| Section 9.7.5: bad randomness | C3 is essential; a signature cannot repair Base confidentiality |
+| Sections 9.7.6 and 9.9: length and metadata | BKS3 length is fixed, not hidden; source/recipient IDs and policy hashes remain public |
+
+### 6.6 Command invariants
 
 | Property / invariant | How it is maintained; limits |
 |---|---|
 | BKS3 confidentiality in transit | Base HPKE encrypts the 48-byte seed to an authorized recipient. Only ciphertext and public bindings leave the producer. This branch's P-384 KEM provides classical, not PQ, confidentiality. An authorized SA necessarily sees BKS3 inside its HSM while resealing. |
 | Ciphertext integrity | GCM authenticates BKS3 and the header; a separate PID signature binds the whole envelope, including encapsulation and tag. Neither layer is optional. |
 | Source operation provenance | In anchored flows, the report verifies under the authorized source PID and is constructed only by the command that actually sealed the secret. This replaces sender-KEM-key possession; it does not claim that both statements are identical. |
-| Recipient substitution resistance | Recipient ID is derived from the exact recipient public key during sealing and from the actual unmasked private key during opening; header and report must agree. |
-| Source identity substitution resistance | The verifying PID's derived ID must equal the header/report source ID, in addition to the command's chain authorization. A claimed ID alone is not trusted. |
-| Policy isolation | Request/bound-policy checks remain where applicable; every SD envelope/report binds the transferred policy. Peer destination reports must match it. SDBMK derivation still binds the provisioned SD policy. |
-| Report/envelope mix-and-match resistance | The verifier recomputes the domain-separated hash of the complete envelope. A valid report for another ciphertext, encapsulation, recipient, source, or policy fails. |
+| Recipient substitution resistance | Recipient SPKI thumbprint is derived from the exact recipient public key during sealing and from the actual unmasked private key during opening; it must match the signed header. |
+| Source identity substitution resistance | The verifying PID's derived SPKI thumbprint must equal the signed header's source ID, in addition to the command's chain authorization. A claimed ID alone is not trusted. |
+| Policy isolation | Request/bound-policy checks remain where applicable; every signed SD envelope binds the transferred policy. Peer destination reports must match it. SDBMK derivation still binds the provisioned SD policy. |
+| Signature/envelope mix-and-match resistance | The COSE payload is the entire encrypted envelope. A signature for another ciphertext, encapsulation, recipient, source, or policy fails directly; there is no detached report to pair with it. |
 | Report-kind / protocol separation | `SdBackup` is a signed discriminator. A `PublicKey` report, caller-controlled report data, another report kind, unknown envelope version, or unsupported suite cannot stand in for it. |
 | Recipient authorization | SATA checks remain on remote creation; POTA-attested recipient key/provenance/policy checks remain on peer creation and reseal. Remote-restore source authorization changes separately. |
 | Clone permission | Peer create and peer restore still require `allow_peer_cloning`. Operation reports do not bypass the command gate. Reseal retains its separate POTA/client-policy contract. |
@@ -482,8 +682,7 @@ the authorized-signer assumption as described above.
 The signature also addresses a weakness of DHKEM Auth:
 [RFC 9180, Section 9.1.1][rfc9180-kci] describes recipient-key-compromise
 impersonation and suggests signing the encapsulation and ciphertext as
-a mitigation. Here the signature covers them through the complete
-envelope hash. Compromising a recipient KEM key alone does not create a
+a mitigation. Here the signature covers them directly. Compromising a recipient KEM key alone does not create a
 valid report under another uncompromised, authorized PID. It **does**
 compromise confidentiality to that recipient, and does not prevent
 replay of already signed transfers.
@@ -497,8 +696,9 @@ replay of already signed transfers.
 | Always-on SATA authorization of a remote-restore sender | **Lost.** Trusted mode uses SAPOTA PID authorization instead; non-trusted mode has no anchored SA identity at all. Enabling trusted-SA policy restores an anchored identity requirement, but not the old SATA gate. This is a separate policy decision, not a cryptographic necessity of Base mode. |
 | Proof of the source sealing key's possession / attributes | **Replaced**, not preserved verbatim. The sender no longer supplies that key. The receiver relies on the authorized PID's signature over a real export operation, not an attested source sealing-key object. Destination-key provenance checks remain. |
 | DHKEM Auth's recipient-forgeability / repudiability | **Not retained.** A PID signature creates publicly verifiable evidence of the signed operation, unlike the Auth relationship where recipient-key compromise permits impersonation. This is useful for audit but changes the deniability/privacy model; it is not a claim of legal non-repudiation. |
+| Behavior under bad encapsulation randomness | **Not equivalent to Auth.** Predictable ephemeral secrets can completely expose Base plaintext; the PID signature does not compensate. Both modes also need protection against encapsulation and AEAD key/nonce reuse; see C3. |
 | Minimal public transfer metadata | The new cleartext header/report exposes stable source/recipient key IDs and an SD policy hash alongside ciphertext. These authenticate context, but also enable correlation and policy guessing when candidate policies are known. They do not hide identity or policy metadata. |
-| Single-artifact recoverability and old wire compatibility | The encrypted artifact is larger and the operation report must be saved with it. An old 161-byte Auth artifact cannot be restored by the migrated commands; a missing report cannot be reconstructed by calling generic `KeyReport`. This is a recovery/availability and migration cost. |
+| Artifact size and wire compatibility | The encrypted artifact grows to 431 bytes, but remains a single self-contained signed object. No detached report needs separate persistence. The unreleased transfer format is replaced directly: old Auth or envelope-plus-report inputs are not accepted. |
 
 Applications that relied on SATA-authorized **senders** must explicitly
 review the remote-restore delta. The existing policy bit must not be
@@ -543,24 +743,42 @@ described as preserving that exact old trust contract.
 These are protocol boundaries, not a statement that all possible
 implementation vulnerabilities have been exhaustively reviewed.
 
+### 7.3 Single-shot scope: no authenticated session or exporter
+
+One envelope encrypts exactly one 48-byte BKS3. Its report does not
+authenticate later HPKE messages or an exported secret
+([RFC 9180 Sections 5.2-5.3][rfc9180-contexts]). The parser and verifier
+must not be reused as though signing one ciphertext authenticated an
+entire long-running HPKE context.
+
+For a future multi-message profile, design B in Section 6.3 could sign
+the setup header and encapsulation, leaving individual messages to AEAD.
+That would deliberately accept recipient forgeability, require a
+separate exporter-authentication analysis, and leave ordering/loss rules
+to the application. Retaining A instead would need signatures per
+message or a final transcript signature before releasing authenticated
+plaintext. None of these alternatives is implemented or justified by
+the current single-shot report.
+
 ## 8. Migration and future PQC requirements
 
-Applications must update host and firmware schemas together; remove
-sender sealing-key arguments from producer calls, obtain the producer's
-operation report, and pass that report rather than a sender `PublicKey`
-report on restore/reseal. Native producer APIs need an additional report
-output buffer; reserve the specified 896-byte maximum before a one-shot
-operation and persist the actual returned length. The
+Applications must update host and firmware schemas together. Producer calls
+return one signed backup: 431 bytes for SD, 367 bytes for DARC. Remove
+detached transfer-report outputs and inputs. Source identity evidence contains
+only the three certificate-chain lists; recipient evidence retains its
+`PublicKey` report. Native callers reserve the fixed signed-backup size
+before a one-shot operation and use distinct output buffers where multiple
+local backups are returned. The
 [native SD API documentation](../../api/native/doc/chapter_09_sd.md)
 describes the output-capacity and distinct-buffer contracts.
 
-Store the encrypted backup and report as one logical record, together
+Store the single signed backup together
 with the relevant SDMK backup, policy and certificate material. Preserve
 the actual recipient masked key and its masking-key recovery material;
 generating a replacement key cannot decrypt an old backup. Keep an
-explicit legacy recovery/migration plan before abandoning Auth-format
-backups. The implementation does not provide an automatic compatibility
-or unsigned fallback.
+matching host/firmware deployment. This transfer format is unreleased:
+there are no legacy transfer parsers, compatibility shims, or unsigned
+fallbacks. Existing PublicKey v1/v2 attestation formats are unchanged.
 
 The architectural invariant for a future ML-KEM or hybrid SD profile is:
 **changing the KEM must not remove source signature verification,
@@ -586,13 +804,67 @@ Completing that migration also requires:
    [PQ HPKE Section 7.1][pq-hybrid-security] explains the conditional
    security benefit of PQ/traditional hybrids.
 
+### 8.1 Concrete PQ profile candidate and migration order
+
+The PAL exposes ML-KEM-512/768/1024 and ML-DSA-44/65/87 interfaces,
+including ML-DSA context and hedged-signing inputs. Its hash interface
+also names SHA-3 and SHAKE algorithms. These are useful building blocks,
+not evidence that the HPKE wrapper, every backend, COSE verifier, or
+certificate path already supports a PQ transfer profile.
+
+A candidate for evaluation is the pinned draft's `MLKEM1024-P384`
+hybrid, KEM ID `0x0051`, with HKDF-SHA384 and AES-256-GCM. Its
+encapsulation is **1,665 bytes**, rather than 97 bytes; this requires
+changes to parsing, storage, key generation/masking and attestation,
+not just new suite bytes. The current report verifier pins ES384 and
+P-384 signing keys despite COSE's general algorithm field. PQ
+authentication would additionally require a specified ML-DSA-87 or
+reviewed composite signature profile and compatible PID/POTA/SAPOTA/SATA
+identity chains. Report/signature-size caps and native output capacities
+must grow accordingly. Neither that candidate nor its policy is selected
+by this refactor.
+
+Prioritize PQ **confidentiality** because an observer can collect today's
+classically encrypted envelopes for future decryption. Retaining ES384
+temporarily is a separate, explicitly classical authentication choice,
+not a way to make P-384 ciphertext PQ-safe. Reports and identity roots
+must migrate before verifiers could accept quantum-forgeable signatures;
+long-lived backups may be restored well after their creation. A creation
+date alone does not preserve the authenticity of an old ES384 report.
+
+### 8.2 Implemented simplifications and signature-domain hardening
+
+The three simplifications apply to both SD and DARC:
+
+| Simplification | Implemented contract | Preserved invariant |
+|---|---|---|
+| S1: sign the envelope directly | `COSE_Sign1(payload=E)` replaces the envelope/report pair, duplicate claims, and envelope hash | Exact-envelope authentication, command-controlled signing, and verify-before-open |
+| S2: header in `info` only | HPKE receives `info=header, aad=empty` | Identity, recipient, policy, and suite remain bound through the key schedule |
+| S3: one transfer discriminator and shared key identities | Version/kind occur once in the binary header; both protocols use SHA-384 of canonical DER SPKI; binary transfers omit the CBOR content-type claim | Disjoint PublicKey/SD/DARC payloads and strict suite/encoding validation |
+
+The C2 hardening is also implemented: each transfer kind has the exact
+32-byte COSE `external_aad` domain specified in Section 4.3. PublicKey
+v1/v2 remains unchanged. Firmware, host software authorities/verifiers,
+and independent test/fuzz fixtures use the same domain contract.
+This makes cross-protocol signature separation explicit in addition to
+the strict parser rules. The serialized layout and sizes are unchanged,
+**but the signed bytes and verification contract change**. The unreleased
+profile is replaced directly: old empty-external-AAD transfer signatures
+are rejected, not retried under another domain.
+
+Suite and recipient bindings must survive any simplification even where
+HPKE already binds them internally: they permit early rejection,
+auditability and enforcement of signed suite policy. The implemented
+simplifications are reflected in the acceptance invariant and conditional
+argument above, including the per-kind signature domains.
+
 ## 9. Implementation and regression evidence
 
 | Area | Source and what to inspect |
 |---|---|
 | Actual PID selection and SD-only policy binding | [`sd_transfer.rs`](../../fw/core/lib/src/ddi/tbor/sd_transfer.rs): `seal_backup`, `source`, `open_backup` |
 | Envelope encoding and verify-before-open | [`transfer.rs`](../../fw/core/crypto/key-report/src/transfer.rs): `TransferHeader`, `parse_transfer_envelope`, `seal_transfer`, `verify_transfer`, `open_transfer` |
-| Report kinds and signed claims | [`report.rs`](../../fw/core/crypto/key-report/src/report.rs), [`encode.rs`](../../fw/core/crypto/key-report/src/encode.rs), [`decode.rs`](../../fw/core/crypto/key-report/src/decode.rs) |
+| PublicKey/transfer payload separation and direct signatures | [`report.rs`](../../fw/core/crypto/key-report/src/report.rs), [`encode.rs`](../../fw/core/crypto/key-report/src/encode.rs), [`decode.rs`](../../fw/core/crypto/key-report/src/decode.rs) |
 | Anchored PID versus destination-key evidence | [`evidence/src/lib.rs`](../../fw/core/evidence/src/lib.rs): `verify_evidence`, `verify_evidence_signer`, `verify_identity_chains` |
 | Retained masking, derivation and commit | [`sd_backup.rs`](../../fw/core/lib/src/ddi/tbor/sd_backup.rs): local BKS3 recovery, `derive_sdbmk`, `reprovision_sd_from_bks3`, `commit_sd_to_vault` |
 | Main's actual size authority | [Main SD schemas][main-schema] and [main sealing-key schema][main-key-schema], rather than historical prose constants |
@@ -606,16 +878,30 @@ formal proof or an assertion of a test run by this document:
 - [`key_report_credentials.rs`](../../fw/plat/std/uno/lib/tests/key_report_credentials.rs),
   test `p384_transfer_reports_bind_encryption_identity_kind_and_policy`,
   exercises the SD case for changed encapsulation/ciphertext/tag,
-  identity, recipient, policy, kind and signed-claim mismatches. It also
-  checks that failure does not publish plaintext and that re-signing a
-  changed header cannot rescue ciphertext sealed under the old header.
+  identity, recipient, policy, and kind mismatches. It independently opens
+  with header-only `info` and rejects duplicated header AAD. It also
+  checks that failure does not publish plaintext, and that re-signing a
+  changed policy or replacing the source identity and re-signing under
+  that different PID cannot rescue ciphertext sealed under the old header.
+  Independent host signatures and verification cover both transfer kinds:
+  the exact padded domain succeeds, while empty, other-kind, and unpadded
+  domains fail without publishing plaintext.
 - The [shared SD command tests](../../ddi/tbor/types/tests/commands/)
   exercise SATA recipient checks, peer/reseal policy and evidence checks,
-  actual recipient mismatches, mandatory source operation reports,
-  authorized PID matching, and retry after rejected restore inputs.
+  actual recipient mismatches, mandatory transfer signatures, authorized
+  PID matching, and retry after rejected restore inputs. The explicit
+  `sd_restore_remote_backup_rejects_chosen_bks3_with_genuine_sdmk_backup`
+  regression reaches SDMK authentication with a correctly signed/sealed,
+  attacker-chosen BKS3, rejects the genuine SDMK backup, and then restores
+  successfully with the original valid transfer.
 - [`require_trusted_sa_tests.rs`](../../api/tests/src/sd/require_trusted_sa_tests.rs)
   covers SDK trusted-SA flows, including an SA with a different local
   policy and rejection of unauthorized/mismatched PID evidence.
+
+Future report kinds and versions must preserve domain separation and
+v1/v2/cross-kind signature-substitution coverage (C2). A production decision
+on cross-mode use of recipient keys still needs documentation. These
+regressions do not constitute a completed protocol proof.
 
 ## 10. Standards references
 
@@ -642,17 +928,32 @@ formal proof or an assertion of a test run by this document:
   [Section 4.4](https://www.rfc-editor.org/rfc/rfc9052.html#section-4.4)
   specifies signing and verification. The SD operation claims and trust
   rules are TSRA-specific, not supplied by COSE.
+- **Analysis references, not proofs of this application:**
+  [An, Dodis and Rabin, *On the Security of Joint Signature and
+  Encryption* (EUROCRYPT 2002)][adr02];
+  [Lipp, *An Analysis of Hybrid Public Key Encryption*][hpke-analysis];
+  [Alwen et al., *Analysing the HPKE Standard*][abhklr20];
+  [Cramer and Shoup, *Design and Analysis of Practical Public-Key
+  Encryption Schemes Secure against Adaptive Chosen Ciphertext
+  Attack*][cs01]. RFC 9180 Section 9.1.2 explains the applicability and
+  limits of the HPKE composition results.
 
 [rfc9180-modes]: https://www.rfc-editor.org/rfc/rfc9180.html#section-4
 [rfc9180-auth]: https://www.rfc-editor.org/rfc/rfc9180.html#section-5.1.3
 [rfc9180-security]: https://www.rfc-editor.org/rfc/rfc9180.html#section-9.1
 [rfc9180-kci]: https://www.rfc-editor.org/rfc/rfc9180.html#section-9.1.1
+[rfc9180-analysis]: https://www.rfc-editor.org/rfc/rfc9180.html#section-9.1.2
+[rfc9180-contexts]: https://www.rfc-editor.org/rfc/rfc9180.html#section-5.2
+[adr02]: https://eprint.iacr.org/2002/046
+[hpke-analysis]: https://eprint.iacr.org/2020/243
+[abhklr20]: https://eprint.iacr.org/2020/1499
+[cs01]: https://eprint.iacr.org/2001/108
 [pq-auth]: https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.html#section-7.2
 [pq-hybrid-security]: https://www.ietf.org/archive/id/draft-ietf-hpke-pq-05.html#section-7.1
-[main-create-remote]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/docs/tbor-ddi/commands/sd_create_remote_backup.md
-[main-reseal]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/docs/tbor-ddi/commands/sd_reseal_remote_backup.md
-[main-restore-remote]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/docs/tbor-ddi/commands/sd_restore_remote_backup.md
-[main-create-peer]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/docs/tbor-ddi/commands/sd_create_peer_backup.md
-[main-restore-peer]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/docs/tbor-ddi/commands/sd_restore_peer_backup.md
-[main-schema]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/fw/core/ddi/tbor/types/src/sd_create_remote_backup.rs
-[main-key-schema]: https://github.com/TesseraHSM/tessera-sw/blob/697cc5f7922d38fc2bbd3ef05ba8b466780e39de/fw/core/ddi/tbor/types/src/sd_sealing_key_gen.rs
+[main-create-remote]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/docs/tbor-ddi/commands/sd_create_remote_backup.md
+[main-reseal]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/docs/tbor-ddi/commands/sd_reseal_remote_backup.md
+[main-restore-remote]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/docs/tbor-ddi/commands/sd_restore_remote_backup.md
+[main-create-peer]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/docs/tbor-ddi/commands/sd_create_peer_backup.md
+[main-restore-peer]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/docs/tbor-ddi/commands/sd_restore_peer_backup.md
+[main-schema]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/fw/core/ddi/tbor/types/src/sd_create_remote_backup.rs
+[main-key-schema]: https://github.com/TesseraHSM/tessera-sw/blob/e10237b9e7cd10a529ddd2a72d1125cc2b5982e2/fw/core/ddi/tbor/types/src/sd_sealing_key_gen.rs

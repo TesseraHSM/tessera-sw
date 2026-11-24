@@ -31,8 +31,19 @@ pub struct TsraSdEvidence {
     pub owner_cert_chain: TsraSdCertChain,
     /// Partition-owner certificate chain.
     pub part_owner_cert_chain: TsraSdCertChain,
-    /// COSE_Sign1 report: PublicKey for recipients, SdBackup for sources.
+    /// Recipient-key PublicKey attestation report.
     pub report: *const TsraBuffer,
+}
+
+/// Identity chains authorizing a signed SD backup's source PID.
+#[repr(C)]
+pub struct TsraSdIdentityEvidence {
+    /// Manufacturer certificate chain.
+    pub mfgr_cert_chain: TsraSdCertChain,
+    /// Optional device-owner certificate chain.
+    pub owner_cert_chain: TsraSdCertChain,
+    /// Partition-owner certificate chain.
+    pub part_owner_cert_chain: TsraSdCertChain,
 }
 
 /// Input buffers for [`tsra_sd_create_remote_backup`].
@@ -98,6 +109,34 @@ struct SdEvidence<'a> {
     report: &'a [u8],
 }
 
+struct SdIdentityEvidence<'a> {
+    mfgr: Vec<api::HsmCert<'a>>,
+    owner: Vec<api::HsmCert<'a>>,
+    part_owner: Vec<api::HsmCert<'a>>,
+}
+
+impl<'a> TryFrom<&'a TsraSdIdentityEvidence> for SdIdentityEvidence<'a> {
+    type Error = TsraStatus;
+
+    fn try_from(ev: &'a TsraSdIdentityEvidence) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mfgr: unpack_cert_chain_allow_empty(&ev.mfgr_cert_chain)?,
+            owner: unpack_cert_chain_allow_empty(&ev.owner_cert_chain)?,
+            part_owner: unpack_cert_chain_allow_empty(&ev.part_owner_cert_chain)?,
+        })
+    }
+}
+
+impl<'a: 'b, 'b> From<&'b SdIdentityEvidence<'a>> for api::HsmSdIdentityEvidence<'b> {
+    fn from(ev: &'b SdIdentityEvidence<'a>) -> Self {
+        Self {
+            mfgr_cert_chain: &ev.mfgr,
+            owner_cert_chain: &ev.owner,
+            part_owner_cert_chain: &ev.part_owner,
+        }
+    }
+}
+
 impl<'a> SdEvidence<'a> {
     /// Decode allowing a fully-empty evidence party: empty cert chains and
     /// a null or zero-length report.
@@ -154,20 +193,19 @@ impl<'a: 'b, 'b> From<&'b SdEvidence<'a>> for api::HsmSdEvidence<'b> {
 /// recipient key is recovered from the authoritative
 /// `params.receiver_cert_chain` (always required, anchored to the policy
 /// SATA key); the `params.receiver_evidence` is optional and verified only
-/// when the policy sets `require_trusted_sa_key`. Returns the Base envelope,
-/// PID-signed `SdBackup` report, and unchanged local backups.
+/// when the policy sets `require_trusted_sa_key`. Returns the directly
+/// PID-signed Base envelope and unchanged local backups.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Create-backup input buffers
 /// @param[in,out] pok_remote_backup Output buffer for the remote
-///                partition-owner-key backup (322 B).
+///                partition-owner-key backup (431 B), including its PID signature.
 /// @param[in,out] pok_local_backup Output buffer for the local
 ///                partition-owner-key backup (280 B).
 /// @param[in,out] sd_mk_backup Output buffer for the security-domain
 ///                masking-key backup (264 B).
-/// @param[in,out] report Required PID-signed operation report; reserve 896 B.
 ///
-/// All four distinct output buffers follow the probe/fill convention and are
+/// All three distinct output buffers follow the probe/fill convention and are
 /// validated **before** the domain is created, so the one-shot command is
 /// not consumed when a buffer is too small.
 ///
@@ -188,7 +226,6 @@ pub unsafe extern "C" fn tsra_sd_create_remote_backup(
     pok_remote_backup: *mut TsraBuffer,
     pok_local_backup: *mut TsraBuffer,
     sd_mk_backup: *mut TsraBuffer,
-    report: *mut TsraBuffer,
 ) -> TsraStatus {
     abi_boundary(|| {
         let session = api::HsmSession::try_from(sess_handle)?;
@@ -209,21 +246,14 @@ pub unsafe extern "C" fn tsra_sd_create_remote_backup(
 
         // Validate all outputs up-front (aliasing on raw pointers, then
         // sizes) so one probe advertises every length before the backup runs.
-        validate_distinct_output_buffers(&[
-            pok_remote_backup,
-            pok_local_backup,
-            sd_mk_backup,
-            report,
-        ])?;
+        validate_distinct_output_buffers(&[pok_remote_backup, pok_local_backup, sd_mk_backup])?;
         let pok_remote_backup = deref_mut_ptr(pok_remote_backup)?;
         let pok_local_backup = deref_mut_ptr(pok_local_backup)?;
         let sd_mk_backup = deref_mut_ptr(sd_mk_backup)?;
-        let report = deref_mut_ptr(report)?;
         validate_output_sizes(&mut [
             (&mut *pok_remote_backup, api::POK_REMOTE_BACKUP_LEN),
             (&mut *pok_local_backup, api::MASKED_SD_LEN),
             (&mut *sd_mk_backup, api::SD_MK_BACKUP_LEN),
-            (&mut *report, api::SD_BACKUP_REPORT_MAX_LEN),
         ])?;
 
         let result =
@@ -232,7 +262,6 @@ pub unsafe extern "C" fn tsra_sd_create_remote_backup(
         copy_to_buffer(pok_remote_backup, &result.pok_remote_backup)?;
         copy_to_buffer(pok_local_backup, &result.pok_local_backup)?;
         copy_to_buffer(sd_mk_backup, &result.sd_mk_backup)?;
-        copy_to_buffer(report, &result.report)?;
 
         Ok(())
     })
@@ -246,12 +275,12 @@ pub struct TsraSdResealRemoteBackupParams {
     /// Receiver's masked SD-sealing key (from `tsra_key_gen`) that
     /// unseals the source backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
     pub masked_sealing_key: *const TsraBuffer,
-    /// POTA-authorized source PID chains and mandatory SdBackup report.
-    pub src_evidence: *const TsraSdEvidence,
+    /// POTA-authorized source PID identity chains.
+    pub src_evidence: *const TsraSdIdentityEvidence,
     /// Destination (receiver) attestation evidence.
     pub dest_evidence: *const TsraSdEvidence,
     /// Source remote backup to reseal, exactly `POK_REMOTE_BACKUP_LEN`
-    /// (322 B).
+    /// (431 B), including its PID signature.
     pub src_remote_backup: *const TsraBuffer,
 }
 
@@ -260,15 +289,14 @@ pub struct TsraSdResealRemoteBackupParams {
 /// Verifies the source PID's POTA-authorized SdBackup report before
 /// Base-opening with the actual recipient key and resealing to the authorized
 /// destination. Both reports bind the request SD policy, which may differ
-/// from the SA-local policy. Returns the envelope and SA-PID-signed report.
+/// from the SA-local policy. Returns one directly SA-PID-signed envelope.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Reseal-backup input buffers
 /// @param[in,out] dst_remote_backup Output buffer for the resealed remote
-///                partition-owner-key backup (322 B).
-/// @param[in,out] report Required SA-PID-signed operation report; reserve 896 B.
+///                partition-owner-key backup (431 B), including its PID signature.
 ///
-/// Both distinct output buffers follow the probe/fill convention and are validated
+/// The output buffer follows the probe/fill convention and is validated
 /// **before** the reseal is performed.
 ///
 /// @return `TsraStatus` indicating the result of the operation
@@ -286,7 +314,6 @@ pub unsafe extern "C" fn tsra_sd_reseal_remote_backup(
     sess_handle: TsraHandle,
     params: *const TsraSdResealRemoteBackupParams,
     dst_remote_backup: *mut TsraBuffer,
-    report: *mut TsraBuffer,
 ) -> TsraStatus {
     abi_boundary(|| {
         let session = api::HsmSession::try_from(sess_handle)?;
@@ -298,19 +325,14 @@ pub unsafe extern "C" fn tsra_sd_reseal_remote_backup(
 
         let src_evidence = deref_ptr(params.src_evidence)?;
         let dest_evidence = deref_ptr(params.dest_evidence)?;
-        let src_evidence = SdEvidence::try_from(src_evidence)?;
+        let src_evidence = SdIdentityEvidence::try_from(src_evidence)?;
         let dest_evidence = SdEvidence::try_from(dest_evidence)?;
-        let src_evidence = api::HsmSdEvidence::from(&src_evidence);
+        let src_evidence = api::HsmSdIdentityEvidence::from(&src_evidence);
         let dest_evidence = api::HsmSdEvidence::from(&dest_evidence);
 
         // Validate the output buffer before resealing.
-        validate_distinct_output_buffers(&[dst_remote_backup, report])?;
         let dst_remote_backup = deref_mut_ptr(dst_remote_backup)?;
-        let report = deref_mut_ptr(report)?;
-        validate_output_sizes(&mut [
-            (&mut *dst_remote_backup, api::POK_REMOTE_BACKUP_LEN),
-            (&mut *report, api::SD_BACKUP_REPORT_MAX_LEN),
-        ])?;
+        validate_output_buffer(dst_remote_backup, api::POK_REMOTE_BACKUP_LEN)?;
 
         let result = session.sd_reseal_remote_backup(
             part_policy,
@@ -321,7 +343,6 @@ pub unsafe extern "C" fn tsra_sd_reseal_remote_backup(
         )?;
 
         copy_to_buffer(dst_remote_backup, &result.backup)?;
-        copy_to_buffer(report, &result.report)?;
 
         Ok(())
     })
@@ -338,11 +359,10 @@ pub struct TsraSdRestoreRemoteBackupParams {
     /// Report signer PID public key as DER SPKI. Currently only canonical
     /// uncompressed P-384 SPKI (120 bytes) is supported.
     pub sender_pid_pub_key: *const TsraBuffer,
-    /// Mandatory source SdBackup report. Identity chains are required only
-    /// for trusted-SA policy, where SAPOTA must authorize this same PID.
-    /// Otherwise chains may be empty; signature integrity is still checked.
-    pub sender_evidence: *const TsraSdEvidence,
-    /// Remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (322 B).
+    /// Source PID identity chains, required only under trusted-SA policy.
+    /// Otherwise chains may be empty; the backup signature is still checked.
+    pub sender_evidence: *const TsraSdIdentityEvidence,
+    /// Signed remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
     pub src_remote_backup: *const TsraBuffer,
     /// Previous security-domain masking-key backup, exactly
     /// `SD_MK_BACKUP_LEN` (264 B).
@@ -351,7 +371,7 @@ pub struct TsraSdRestoreRemoteBackupParams {
 
 /// @brief Restore a security domain from a remote backup
 ///
-/// Verifies the operation report, actual recipient, envelope and target SD
+/// Verifies the direct signature, actual recipient, envelope and target SD
 /// policy before Base-opening with the receiver's masked key. SAPOTA is
 /// optional; without trusted-SA policy this does not authenticate SA identity.
 /// Recovers the security-domain masking key
@@ -396,10 +416,9 @@ pub unsafe extern "C" fn tsra_sd_restore_remote_backup(
 
         let sender_pid_pub_key: &[u8] = deref_ptr(params.sender_pid_pub_key)?.try_into()?;
 
-        // Identity chains are optional, but the SDK always requires the report.
         let sender = deref_ptr(params.sender_evidence)?;
-        let sender = SdEvidence::try_from_optional(sender)?;
-        let sender = api::HsmSdEvidence::from(&sender);
+        let sender = SdIdentityEvidence::try_from(sender)?;
+        let sender = api::HsmSdIdentityEvidence::from(&sender);
 
         // Validate all outputs up-front (aliasing on raw pointers, then
         // sizes) so one probe advertises every length before the restore runs.
@@ -443,16 +462,15 @@ pub struct TsraSdCreatePeerBackupParams {
 ///
 /// Recovers BKS3 from `params.pok_local_backup` and Base-seals it to the
 /// POTA-authorized same-policy destination in `params.dst_evidence`,
-/// returning the envelope and PID-signed SdBackup report. Gated by
+/// returning the directly PID-signed envelope. Gated by
 /// the security domain's `allow_peer_cloning` policy flag.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Create-peer-backup input buffers
 /// @param[in,out] pok_peer_backup Output buffer for the peer
-///                partition-owner-key backup (322 B).
-/// @param[in,out] report Required PID-signed operation report; reserve 896 B.
+///                partition-owner-key backup (431 B), including its PID signature.
 ///
-/// Both distinct output buffers follow the probe/fill convention and are validated
+/// The output buffer follows the probe/fill convention and is validated
 /// **before** the peer backup is created.
 ///
 /// @return `TsraStatus` indicating the result of the operation
@@ -470,7 +488,6 @@ pub unsafe extern "C" fn tsra_sd_create_peer_backup(
     sess_handle: TsraHandle,
     params: *const TsraSdCreatePeerBackupParams,
     pok_peer_backup: *mut TsraBuffer,
-    report: *mut TsraBuffer,
 ) -> TsraStatus {
     abi_boundary(|| {
         let session = api::HsmSession::try_from(sess_handle)?;
@@ -484,18 +501,12 @@ pub unsafe extern "C" fn tsra_sd_create_peer_backup(
         let dst = api::HsmSdEvidence::from(&dst);
 
         // Validate the output buffer before creating the peer backup.
-        validate_distinct_output_buffers(&[pok_peer_backup, report])?;
         let pok_peer_backup = deref_mut_ptr(pok_peer_backup)?;
-        let report = deref_mut_ptr(report)?;
-        validate_output_sizes(&mut [
-            (&mut *pok_peer_backup, api::POK_REMOTE_BACKUP_LEN),
-            (&mut *report, api::SD_BACKUP_REPORT_MAX_LEN),
-        ])?;
+        validate_output_buffer(pok_peer_backup, api::POK_REMOTE_BACKUP_LEN)?;
 
         let result = session.sd_create_peer_backup(part_policy, &dst, pok_local_backup)?;
 
         copy_to_buffer(pok_peer_backup, &result.backup)?;
-        copy_to_buffer(report, &result.report)?;
 
         Ok(())
     })
@@ -509,9 +520,9 @@ pub struct TsraSdRestorePeerBackupParams {
     /// Receiver's masked SD-sealing key (from `tsra_key_gen`) that
     /// unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
     pub masked_sealing_key: *const TsraBuffer,
-    /// Source (peer) attestation evidence.
-    pub src_evidence: *const TsraSdEvidence,
-    /// Peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (322 B).
+    /// POTA-authorized source PID identity chains.
+    pub src_evidence: *const TsraSdIdentityEvidence,
+    /// Signed peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
     pub pok_peer_backup: *const TsraBuffer,
     /// Previous security-domain masking-key backup, exactly
     /// `SD_MK_BACKUP_LEN` (264 B).
@@ -562,8 +573,8 @@ pub unsafe extern "C" fn tsra_sd_restore_peer_backup(
         let prev_sd_mk_backup: &[u8] = deref_ptr(params.prev_sd_mk_backup)?.try_into()?;
 
         let src = deref_ptr(params.src_evidence)?;
-        let src = SdEvidence::try_from(src)?;
-        let src = api::HsmSdEvidence::from(&src);
+        let src = SdIdentityEvidence::try_from(src)?;
+        let src = api::HsmSdIdentityEvidence::from(&src);
 
         // Validate all outputs up-front (aliasing on raw pointers, then
         // sizes) so one probe advertises every length before the restore runs.

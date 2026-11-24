@@ -112,12 +112,11 @@ pub fn serve(
             ("POST", "/v1/sd/clone") => {
                 let receiver = wire::evidence(request)?;
                 evidence::verify_peer(&receiver, env.policy())?;
-                let backup = domain.create_peer_backup(&session, &receiver, |report| {
-                    Ok(Evidence {
+                let backup = domain.create_peer_backup(&session, &receiver, || {
+                    Ok(tsra_sealing_api::IdentityEvidence {
                         mfgr_cert_chain: manufacturer.clone(),
                         owner_cert_chain: Vec::new(),
                         part_owner_cert_chain: pid_chain.clone(),
-                        report: report.to_vec(),
                     })
                 })?;
                 Ok(wire::encode_backup(&backup))
@@ -182,11 +181,7 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
         &backup.pok_peer_backup,
         Some(&public),
     )?;
-    display::write_peer_evidence(
-        &mut std::io::stdout().lock(),
-        &backup.sender_evidence,
-        "Sender",
-    )?;
+    display::write_peer_backup(&mut std::io::stdout().lock(), &backup)?;
     domain.restore_peer(&session, &prepared, &backup)?;
     let keys = key_check::generate(&session.session)?;
     env.store.save_ecc_keys(&keys)?;

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Version 3 recovery records require HPKE Base and a signed operation report.
+//! Recovery records carry a single signed HPKE Base envelope.
 
 use anyhow::Result;
 use jzon::JsonValue;
@@ -19,7 +19,7 @@ pub fn encode(remote: &RemoteRecovery) -> Result<JsonValue> {
         sd_mk_backup: hex::encode(&remote.sd_mk_backup),
         sender_pid_pub_key: hex::encode(&remote.sender_pid_pub_key),
         receiver_cert_chain: wire::encode_chain(&remote.receiver_cert_chain),
-        sender: wire::encode_evidence(&remote.backup.evidence),
+        sender: wire::encode_identity(&remote.backup.evidence),
     })
 }
 
@@ -35,7 +35,7 @@ pub fn decode(record: &JsonValue) -> Result<RemoteRecovery> {
         receiver_cert_chain: wire::chain(record, "receiver_cert_chain")?,
         backup: RemoteBackup {
             pok_remote_backup: wire::blob(record, "pok_remote_backup")?,
-            evidence: wire::evidence(&record["sender"])?,
+            evidence: wire::identity(&record["sender"])?,
         },
     };
     remote.validate()?;

@@ -34,13 +34,10 @@ pub const TBOR_OP_SD_CREATE_REMOTE_BACKUP: u8 = 0x0A;
 pub const MASKED_SD_LEN: usize = 280;
 
 /// Exact on-the-wire length of the remote partition-owner-key backup (an
-/// HPKE Base seal of BKS3: `header(161) || enc(97) || ct(48) || tag(16)`). Mirrors
+/// ES384 COSE_Sign1 containing `header(161) || enc(97) || ct(48) || tag(16)`). Mirrors
 /// `tsra_fw_ddi_tbor_types::sd_create_remote_backup::
 /// POK_REMOTE_BACKUP_LEN`; the firmware schema is the length authority.
-pub const POK_REMOTE_BACKUP_LEN: usize = 322;
-
-/// Maximum PID-signed SD operation report length.
-pub const SD_BACKUP_REPORT_MAX_LEN: usize = 896;
+pub const POK_REMOTE_BACKUP_LEN: usize = 431;
 
 /// Exact on-the-wire length of the security-domain masking-key backup
 /// envelope (`SDMK` masked under `SDBMK`).  Mirrors the firmware
@@ -90,8 +87,8 @@ pub struct TborSdCreateRemoteBackupReq {
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreateRemoteBackupResp {
-    /// Remote partition-owner-key backup: an HPKE Base seal of BKS3
-    /// (exactly [`POK_REMOTE_BACKUP_LEN`] = 322 B on the wire; the
+    /// Remote partition-owner-key backup: a PID-signed HPKE Base seal of BKS3
+    /// (exactly [`POK_REMOTE_BACKUP_LEN`] = 431 B on the wire; the
     /// firmware schema is the length authority).  A fixed-length `[u8; N]`
     /// field so host decode enforces the exact length — rejecting any
     /// malformed frame — instead of allocating from the encoded length.
@@ -109,10 +106,6 @@ pub struct TborSdCreateRemoteBackupResp {
     /// 264 B on the wire).  Persisted by the host and replayed on restore.
     #[tbor(align = 4)]
     pub sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
-
-    /// Required PID-signed SdBackup report accompanying the Base envelope.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
 }
 
 #[cfg(test)]

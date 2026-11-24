@@ -22,7 +22,6 @@ impl From<TborSdCreateRemoteBackupResp> for HsmSdRemoteBackupResult {
     fn from(resp: TborSdCreateRemoteBackupResp) -> Self {
         Self {
             pok_remote_backup: resp.pok_remote_backup.to_vec(),
-            report: resp.report,
             pok_local_backup: resp.pok_local_backup.to_vec(),
             sd_mk_backup: resp.sd_mk_backup.to_vec(),
         }

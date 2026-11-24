@@ -8,7 +8,7 @@
 //! When the backing-partition policy sets `require_trusted_sa_key`, the
 //! firmware validates the SATA recipient certificate chain on create and
 //! SAPOTA-authorized PID chains on restore. Restore always consumes the
-//! producer's v2 SdBackup operation report, bound to the supplied signer PID.
+//! producer's directly signed SdBackup envelope, bound to the supplied signer PID.
 //! The sealing authority may have a different policy from the restored SD.
 //! These tests cover both happy paths and fail-closed rejections.
 
@@ -130,14 +130,13 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
         })
         .expect("create remote backup under trusted-SA policy");
     drop(session1);
-    let evidence = evidence.with_report(&created.report);
 
     // Device 2 (reboot, same seed, same trusted policy): restore the
     // security domain from the remote backup.
     let (session2, _policy2, _pid_pub2, _lmk2) =
         provision_backing_trusted(&sata, &sapota, &pota, Some(&policy), Some(&local_mk));
     let restored = evidence
-        .with_hsm_evidence(|ev| {
+        .with_hsm_identity(|ev| {
             session2.sd_restore_remote_backup(
                 &policy,
                 &masked,
@@ -181,11 +180,10 @@ fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
     let created = evidence
         .with_create_backup(|chain, ev| session.sd_create_remote_backup(&policy, chain, ev))
         .expect("create source operation report");
-    let evidence = evidence.with_report(&created.report);
     drop(session);
     let (session, _, _, _) =
         provision_backing_trusted(&sata, &sapota, &pota, Some(&policy), Some(&local_mk));
-    let outcome = evidence.with_hsm_evidence(|ev| {
+    let outcome = evidence.with_hsm_identity(|ev| {
         session.sd_restore_remote_backup(
             &policy,
             &masked,
@@ -241,7 +239,7 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
             source.sd_create_remote_backup(&policy, chain, &evidence)
         })
         .expect("seal the SD backup to the external authority");
-    let source_evidence = build_evidence(&source_pid, &source_pub, &sata, &pota, &created.report);
+    let source_evidence = build_evidence(&source_pid, &source_pub, &sata, &pota, &[]);
     let destination_evidence =
         build_evidence(&source_pid, &source_pub, &sata, &pota, &source_report);
     drop(source);
@@ -253,8 +251,8 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
         Some(&authority_mk),
     );
     let resealed = source_evidence
-        .with_hsm_evidence(|evidence| {
-            let evidence = HsmSdEvidence {
+        .with_hsm_identity(|evidence| {
+            let evidence = HsmSdIdentityEvidence {
                 owner_cert_chain: &[],
                 ..*evidence
             };
@@ -279,8 +277,8 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
         provision_backing_trusted(&sata, &sapota, &pota, Some(&policy), Some(&source_mk));
     assert_eq!(restored_policy, policy);
     let authority_pid = reseal_pid;
-    let restore = |policy, evidence: &HsmSdEvidence<'_>| {
-        let evidence = HsmSdEvidence {
+    let restore = |policy, evidence: &HsmSdIdentityEvidence<'_>, backup: &[u8]| {
+        let evidence = HsmSdIdentityEvidence {
             owner_cert_chain: &[],
             ..*evidence
         };
@@ -289,19 +287,14 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
             &source_key,
             &spki_pub(&authority_pid),
             &evidence,
-            &resealed.backup,
+            backup,
             &created.sd_mk_backup,
         )
     };
-    let authority_evidence = build_receiver_evidence_trusted(
-        &authority_pid,
-        &authority_pub,
-        &sata,
-        &sapota,
-        &resealed.report,
-    );
-    let wrong_policy =
-        authority_evidence.with_hsm_evidence(|evidence| restore(&authority_policy, evidence));
+    let authority_evidence =
+        build_receiver_evidence_trusted(&authority_pid, &authority_pub, &sata, &sapota, &[]);
+    let wrong_policy = authority_evidence
+        .with_hsm_identity(|evidence| restore(&authority_policy, evidence, &resealed.backup));
     assert!(
         matches!(wrong_policy, Err(HsmError::InvalidArgument)),
         "the restore request must match the destination's bound policy",
@@ -311,31 +304,24 @@ fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
         &authority_pub,
         &sata,
         &CaKey::generate(),
-        &resealed.report,
+        &[],
     );
     assert!(
         unauthorized
-            .with_hsm_evidence(|evidence| restore(&policy, evidence))
+            .with_hsm_identity(|evidence| restore(&policy, evidence, &resealed.backup))
             .is_err(),
         "SAPOTA authorization remains required",
     );
-    let mut tampered_report = resealed.report;
-    *tampered_report.last_mut().expect("report signature") ^= 1;
-    let tampered = build_receiver_evidence_trusted(
-        &authority_pid,
-        &authority_pub,
-        &sata,
-        &sapota,
-        &tampered_report,
-    );
+    let mut tampered = resealed.backup.clone();
+    *tampered.last_mut().expect("envelope signature") ^= 1;
     assert!(
-        tampered
-            .with_hsm_evidence(|evidence| restore(&policy, evidence))
+        authority_evidence
+            .with_hsm_identity(|evidence| restore(&policy, evidence, &tampered))
             .is_err(),
-        "a modified attestation report must be rejected",
+        "a modified signed envelope must be rejected",
     );
     let restored = authority_evidence
-        .with_hsm_evidence(|evidence| restore(&policy, evidence))
+        .with_hsm_identity(|evidence| restore(&policy, evidence, &resealed.backup))
         .expect("restore the same SD from a distinct-policy sealing authority");
     assert_eq!(restored.pok_local_backup.len(), MASKED_SD_LEN);
     assert_eq!(restored.sd_mk_backup.len(), SD_MK_BACKUP_LEN);

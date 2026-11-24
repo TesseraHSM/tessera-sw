@@ -21,8 +21,8 @@ be empty. The optional owner chain, if supplied, must share the PID leaf
 with the required manufacturer and partition-owner chains.
 
 There is no sender sealing-key input. Firmware encrypts BKS3 in P-384 HPKE
-**Base** mode and signs an `SdBackup` operation report with its actual PID.
-The report binds the source PID ID, recipient ID, complete envelope digest,
+**Base** mode and directly signs the complete envelope with its actual PID.
+The one COSE_Sign1 binds the source/recipient SPKI thumbprints, ciphertext,
 and transferred SD policy hash. See [transfer format](key_report.md#p-384-transfer-envelope-binding).
 
 ## Request fields, in wire order
@@ -41,12 +41,11 @@ reports are fetched out of band using their descriptors.
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `pok_remote_backup` | 322 B | Canonical Base envelope of BKS3 |
+| `pok_remote_backup` | 431 B | Complete PID-signed Base envelope of BKS3 |
 | `pok_local_backup` | 280 B, aligned to 4 B | Unchanged local BKS3 backup |
 | `sd_mk_backup` | 264 B, aligned to 4 B | Unchanged local SDMK backup |
-| `report` | 1..896 B | PID-signed `SdBackup` operation report |
 
-Persist the operation report with the remote envelope and SDMK backup.
+Persist the signed backup with the SDMK backup; there is no detached report.
 Legacy 161-byte Auth envelopes are not accepted by migrated transfer
 commands. Local masking, derivation, ownership, SVN, and recovery formats
 are unchanged.

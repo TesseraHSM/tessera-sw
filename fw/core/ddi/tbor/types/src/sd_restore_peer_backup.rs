@@ -27,11 +27,11 @@ pub struct TborSdRestorePeerBackupReq<'a> {
     /// Bound SD policy.
     #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
-    /// Source PID chains and its mandatory SdBackup operation report.
+    /// POTA-authorized source PID identity chains.
     #[tbor(include)]
-    pub src_evidence: Evidence<'a>,
-    /// Canonical peer envelope.
-    #[tbor(buffer, len = 322)]
+    pub src_evidence: IdentityEvidence<'a>,
+    /// PID-signed canonical peer envelope.
+    #[tbor(buffer, len = 431)]
     pub pok_peer_backup: &'a [u8],
     /// Existing SDMK backup.
     #[tbor(buffer, len = 264)]

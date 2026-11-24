@@ -21,7 +21,6 @@
 
 use alloc::vec::Vec;
 
-use crate::evidence::ReportDescriptor;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
@@ -57,7 +56,7 @@ pub struct TborSdRestoreRemoteBackupReq {
     pub sender_pid_pub_key: Vec<u8>,
 
     /// Sender manufacturer certificate-chain descriptors.  Flattened from
-    /// the firmware `sender_evidence` field group (first of its four TOC
+    /// the firmware `sender_evidence` field group (first of its three TOC
     /// entries); the DER bytes travel out of band.
     #[tbor(max_len = 8)]
     pub sender_mfgr_cert_chain: Vec<CertDescriptor>,
@@ -70,11 +69,8 @@ pub struct TborSdRestoreRemoteBackupReq {
     #[tbor(max_len = 8)]
     pub sender_part_owner_cert_chain: Vec<CertDescriptor>,
 
-    /// Mandatory SdBackup operation-report (COSE_Sign1) descriptor.
-    pub sender_report: ReportDescriptor,
-
     /// Remote backup to restore: an HPKE Base seal of BKS3, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  The firmware schema is the length
+    /// [`POK_REMOTE_BACKUP_LEN`] (431 B), including its PID signature. The firmware schema is the length
     /// authority.
     pub src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
 
@@ -116,7 +112,6 @@ mod tests {
             sender_mfgr_cert_chain: Vec::new(),
             sender_owner_cert_chain: Vec::new(),
             sender_part_owner_cert_chain: Vec::new(),
-            sender_report: ReportDescriptor::default(),
             src_remote_backup: [0xABu8; POK_REMOTE_BACKUP_LEN],
             prev_sd_mk_backup: [0xCDu8; SD_MK_BACKUP_LEN],
         };

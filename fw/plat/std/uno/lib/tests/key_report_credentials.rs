@@ -462,14 +462,15 @@ fn typed_reports_sign_verify_and_reject_wrong_kind_or_tampering() {
 async fn check_typed_reports() {
     use tsra_fw_core_crypto_key_report::parse_report;
     use tsra_fw_core_crypto_key_report::report;
+    use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
     use tsra_fw_core_crypto_key_report::verify_report;
     use tsra_fw_core_crypto_key_report::AttestedPubKey;
     use tsra_fw_core_crypto_key_report::KeyReportParams;
     use tsra_fw_core_crypto_key_report::ReportKind;
     use tsra_fw_core_crypto_key_report::ReportParams;
     use tsra_fw_core_crypto_key_report::ReportView;
-    use tsra_fw_core_crypto_key_report::TransferReportParams;
     use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
+    use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
     let (tx, rx) = async_channel::bounded(1);
     let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
@@ -502,11 +503,23 @@ async fn check_typed_reports() {
         ReportKind::SdBackup,
     ] {
         pal.alloc_scoped_async(&io, async |alloc| {
-            let transfer = TransferReportParams {
-                source_pid_key_id: &fields[..48],
-                recipient_key_id: &fields[48..96],
-                envelope_hash: &fields[96..144],
+            let id: &[u8; 48] = fields[..48].as_ref().try_into().expect("fixed thumbprint");
+            let header = if kind == ReportKind::Darc {
+                TransferHeader::Darc {
+                    source_pid_spki_thumbprint: id,
+                    recipient_spki_thumbprint: id,
+                }
+            } else {
+                TransferHeader::SdBackup {
+                    source_pid_spki_thumbprint: id,
+                    recipient_spki_thumbprint: id,
+                    policy_hash: id,
+                }
             };
+            let envelope = alloc.dma_alloc(header.envelope_len())?;
+            envelope.fill(0x55);
+            header.encode(envelope)?;
+            envelope[header.header_len()] = 4;
             let params = match kind {
                 ReportKind::PublicKey => ReportParams::PublicKey(KeyReportParams {
                     key: AttestedPubKey::Ecc {
@@ -520,15 +533,7 @@ async fn check_typed_reports() {
                     vm_launch_id: &fields[336..352],
                     policy_hash: Some(&fields[144..192]),
                 }),
-                ReportKind::Darc => ReportParams::Darc(transfer),
-                ReportKind::SdBackup => ReportParams::SdBackup {
-                    transfer: tsra_fw_core_crypto_key_report::SdBackupReportParams {
-                        source_pid_spki_thumbprint: transfer.source_pid_key_id,
-                        recipient_spki_thumbprint: transfer.recipient_key_id,
-                        envelope_hash: transfer.envelope_hash,
-                    },
-                    policy_hash: &fields[144..192],
-                },
+                ReportKind::Darc | ReportKind::SdBackup => ReportParams::Transfer(envelope),
             };
             let size = report(&pal, &io, alloc, &params, private, None)
                 .await
@@ -554,18 +559,11 @@ async fn check_typed_reports() {
             let base = encoded.as_ptr() as usize;
             let offsets = match parse_report(&encoded[..size]).expect("parse signed fields") {
                 ReportView::PublicKey(view) => vec![view.report_data.as_ptr() as usize - base],
-                ReportView::Darc(view) => vec![
-                    view.source_pid_key_id.as_ptr() as usize - base,
-                    view.recipient_key_id.as_ptr() as usize - base,
-                    view.envelope_hash.as_ptr() as usize - base,
-                ],
-                ReportView::SdBackup {
-                    transfer,
-                    policy_hash,
-                } => vec![
-                    transfer.envelope_hash.as_ptr() as usize - base,
-                    policy_hash.as_ptr() as usize - base,
-                ],
+                ReportView::Transfer(view) => {
+                    assert_eq!(&**view.envelope, &**envelope);
+                    let start = view.envelope.as_ptr() as usize - base;
+                    vec![start + 17, start + 65, start + view.envelope.len() - 1]
+                }
             };
             for offset in offsets {
                 encoded[offset] ^= 1;
@@ -600,14 +598,7 @@ async fn check_typed_reports() {
     }
 
     pal.alloc_scoped_async(&io, async |alloc| {
-        let params = ReportParams::SdBackup {
-            transfer: tsra_fw_core_crypto_key_report::SdBackupReportParams {
-                source_pid_spki_thumbprint: &fields[..48],
-                recipient_spki_thumbprint: &fields[48..96],
-                envelope_hash: &fields[96..144],
-            },
-            policy_hash: &fields[144..191],
-        };
+        let params = ReportParams::Transfer(&fields[..47]);
         assert!(report(&pal, &io, alloc, &params, private, None)
             .await
             .is_err());
@@ -641,24 +632,26 @@ async fn check_transfer_bindings() {
     use tsra_crypto::HashAlgo;
     use tsra_crypto::HashOpContext;
     use tsra_crypto::Hasher;
+    use tsra_crypto::SignOp;
+    use tsra_crypto::VerifyOp;
+    use tsra_fw_core_crypto_key_report::parse_report;
     use tsra_fw_core_crypto_key_report::report;
     use tsra_fw_core_crypto_key_report::transfer::open_transfer;
-    use tsra_fw_core_crypto_key_report::transfer::p384_key_id;
     use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
-    use tsra_fw_core_crypto_key_report::transfer::sd_spki_thumbprint;
     use tsra_fw_core_crypto_key_report::transfer::seal_transfer;
-    use tsra_fw_core_crypto_key_report::transfer::transfer_envelope_hash;
-    use tsra_fw_core_crypto_key_report::transfer::transfer_report_params;
+    use tsra_fw_core_crypto_key_report::transfer::transfer_spki_thumbprint;
     use tsra_fw_core_crypto_key_report::transfer::verify_transfer;
     use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
     use tsra_fw_core_crypto_key_report::transfer::TransferOpenConfig;
     use tsra_fw_core_crypto_key_report::transfer::TransferVerifyConfig;
     use tsra_fw_core_crypto_key_report::ReportKind;
     use tsra_fw_core_crypto_key_report::ReportParams;
+    use tsra_fw_core_crypto_key_report::ReportView;
     use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
     use tsra_fw_hsm_byte_order::pair_to_be;
     use tsra_fw_hsm_pal_traits::HsmDmaBuf;
     use tsra_fw_hsm_pal_traits::HsmEccPct;
+    use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
     let (tx, rx) = async_channel::bounded(1);
     let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
@@ -699,86 +692,54 @@ async fn check_transfer_bindings() {
     let wrong_public = &keys[338..435];
     let ids = pal.dma_alloc(&io, 96).expect("key identifiers");
     let (source_id_out, recipient_id_out) = ids.split_at_mut(48);
-    for (public, id) in [
+    for (public, thumbprint) in [
         (source_public, source_id_out),
         (recipient_public, recipient_id_out),
     ] {
         pal.alloc_scoped_async(&io, async |alloc| {
-            p384_key_id(&pal, &io, public, id, alloc).await
+            transfer_spki_thumbprint(&pal, &io, public, thumbprint, alloc).await
         })
         .await
-        .expect("derive key identifier");
-        let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent hash");
-        hash.update(b"TSRA-P384-KEY-v1").expect("key domain");
-        hash.update(public).expect("public key");
-        let mut expected = [0; 48];
-        hash.finish(Some(&mut expected)).expect("key ID hash");
-        assert_eq!(&**id, expected);
-    }
-    let source_id: &[u8; 48] = ids[..48].as_ref().try_into().expect("source ID");
-    let recipient_id: &[u8; 48] = ids[48..].as_ref().try_into().expect("recipient ID");
-    let sd_ids = pal.dma_alloc(&io, 96).expect("SD SPKI thumbprints");
-    let (sd_source, sd_recipient) = sd_ids.split_at_mut(48);
-    for (public, thumbprint) in [(source_public, sd_source), (recipient_public, sd_recipient)] {
-        pal.alloc_scoped_async(&io, async |alloc| {
-            sd_spki_thumbprint(&pal, &io, public, thumbprint, alloc).await
-        })
-        .await
-        .expect("derive SD SPKI thumbprint");
+        .expect("derive common SD/DARC SPKI thumbprint");
         let spki = EccPublicKey::from_coordinates(EccCurve::P384, &public[1..49], &public[49..])
             .expect("public key")
             .to_vec()
             .expect("DER SPKI");
         let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent SPKI hash");
         hash.update(&spki).expect("SPKI bytes");
-        let mut expected = [0; 48];
-        hash.finish(Some(&mut expected)).expect("SPKI thumbprint");
-        assert_eq!(&**thumbprint, expected);
+        let expected = pal.dma_alloc(&io, 48).expect("independent SPKI thumbprint");
+        hash.finish(Some(expected)).expect("SPKI thumbprint");
+        assert_eq!(&**thumbprint, &**expected);
     }
-    assert_ne!(&**ids, &**sd_ids);
+    let source_id: &[u8; 48] = ids[..48].as_ref().try_into().expect("source ID");
+    let recipient_id: &[u8; 48] = ids[48..].as_ref().try_into().expect("recipient ID");
     let policy = [0x55; 48];
     let wrong_policy = [0x66; 48];
     let encoded_report = pal.dma_alloc(&io, KEY_REPORT_MAX_LEN).expect("report");
 
     let sign = async |envelope: &HsmDmaBuf, output: &mut HsmDmaBuf| {
         pal.alloc_scoped_async(&io, async |alloc| {
-            use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-            let digest = alloc.dma_alloc(48)?;
-            transfer_envelope_hash(&pal, &io, envelope, digest, alloc).await?;
-            let mut hash = Hasher::hash_init(HashAlgo::sha384()).expect("independent hash");
-            hash.update(b"TSRA-XFER-HASH-v1").expect("envelope domain");
-            hash.update(envelope).expect("envelope bytes");
-            let mut expected = [0; 48];
-            hash.finish(Some(&mut expected)).expect("envelope hash");
-            assert_eq!(&**digest, expected);
-            let params = transfer_report_params(envelope, digest)?;
+            let params = ReportParams::Transfer(envelope);
             report(&pal, &io, alloc, &params, source_private, Some(output)).await
         })
         .await
     };
-    let verify =
-        async |cfg: &TransferVerifyConfig<'_>, envelope: &HsmDmaBuf, report: &HsmDmaBuf| {
-            pal.alloc_scoped_async(&io, async |alloc| {
-                verify_transfer(&pal, &io, cfg, envelope, report, alloc)
-                    .await
-                    .map(|_| ())
-            })
-            .await
-        };
+    let verify = async |cfg: &TransferVerifyConfig<'_>, report: &HsmDmaBuf| {
+        pal.alloc_scoped_async(&io, async |alloc| {
+            verify_transfer(&pal, &io, cfg, report, alloc)
+                .await
+                .map(|_| ())
+        })
+        .await
+    };
     for header in [
         TransferHeader::Darc {
-            source_pid_key_id: source_id,
-            recipient_key_id: recipient_id,
+            source_pid_spki_thumbprint: source_id,
+            recipient_spki_thumbprint: recipient_id,
         },
         TransferHeader::SdBackup {
-            source_pid_spki_thumbprint: sd_ids[..48]
-                .as_ref()
-                .try_into()
-                .expect("source SPKI thumbprint"),
-            recipient_spki_thumbprint: sd_ids[48..]
-                .as_ref()
-                .try_into()
-                .expect("recipient SPKI thumbprint"),
+            source_pid_spki_thumbprint: source_id,
+            recipient_spki_thumbprint: recipient_id,
             policy_hash: &policy,
         },
     ] {
@@ -806,7 +767,7 @@ async fn check_transfer_bindings() {
             recipient_public_key: recipient_public,
             expected_policy_hash: header.policy_hash(),
         };
-        verify(&cfg, envelope, &encoded_report[..report_len])
+        verify(&cfg, &encoded_report[..report_len])
             .await
             .expect("verify transfer");
         let plaintext = pal.dma_alloc(&io, secret.len()).expect("plaintext");
@@ -821,7 +782,6 @@ async fn check_transfer_bindings() {
                     &pal,
                     &io,
                     &open_cfg,
-                    envelope,
                     &encoded_report[..report_len],
                     plaintext,
                     alloc,
@@ -838,15 +798,150 @@ async fn check_transfer_bindings() {
             .expect("view")
             .header_bytes
             .len();
+        let view = parse_transfer_envelope(envelope).expect("raw envelope");
+        let recipient_secret = tsra_crypto::EccPrivateKey::from_hsm_bytes(recipient_private)
+            .expect("independent recipient key");
+        let recipient_key = tsra_crypto::EccPublicKey::from_coordinates(
+            tsra_crypto::EccCurve::P384,
+            &recipient_public[1..49],
+            &recipient_public[49..97],
+        )
+        .expect("independent recipient public key");
+        let enc = tsra_crypto::EccPublicKey::from_coordinates(
+            tsra_crypto::EccCurve::P384,
+            &view.enc[1..49],
+            &view.enc[49..97],
+        )
+        .expect("independent HPKE encapsulation");
+        let independent = tsra_crypto::HpkeOpenConfig::base(
+            tsra_crypto::HpkeSuite::DHKemP384Sha384AesGcm256,
+            &recipient_secret,
+            &recipient_key,
+            view.header_bytes,
+            &[],
+        );
+        let duplicated_aad = tsra_crypto::HpkeOpenConfig::base(
+            tsra_crypto::HpkeSuite::DHKemP384Sha384AesGcm256,
+            &recipient_secret,
+            &recipient_key,
+            view.header_bytes,
+            view.header_bytes,
+        );
+        pal.alloc_scoped(&io, |alloc| {
+            let independent_plaintext = alloc.dma_alloc(view.ciphertext.len())?;
+            let independent_len = tsra_crypto::open(
+                &independent,
+                &enc,
+                view.ciphertext,
+                Some(independent_plaintext),
+            )
+            .expect("interoperate with header as info and empty AAD");
+            assert_eq!(&independent_plaintext[..independent_len], &**secret);
+            assert!(tsra_crypto::open(
+                &duplicated_aad,
+                &enc,
+                view.ciphertext,
+                Some(independent_plaintext),
+            )
+            .is_err());
+            Ok::<(), tsra_fw_hsm_pal_traits::HsmError>(())
+        })
+        .expect("independent HPKE context check");
+        let ReportView::Transfer(signed) =
+            parse_report(&encoded_report[..report_len]).expect("signed envelope")
+        else {
+            panic!("expected transfer");
+        };
+        assert_eq!(&**signed.envelope, &**envelope);
+        let darc_domain: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let sd_domain: &[u8; 32] = b"TSRA-SdBackup-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let (expected_domain, other_domain) = if header.kind() == ReportKind::Darc {
+            (darc_domain, sd_domain)
+        } else {
+            (sd_domain, darc_domain)
+        };
+        let unpadded_len = expected_domain
+            .iter()
+            .position(|byte| *byte == 0)
+            .expect("padding");
+        let source_key = tsra_crypto::EccPrivateKey::from_hsm_bytes(source_private)
+            .expect("independent source key");
+        let source_public_key = EccPublicKey::from_coordinates(
+            EccCurve::P384,
+            &source_public[1..49],
+            &source_public[49..],
+        )
+        .expect("independent source public key");
+        for domain in [
+            expected_domain.as_slice(),
+            other_domain,
+            &[],
+            &expected_domain[..unpadded_len],
+        ] {
+            pal.alloc_scoped_async(&io, async |alloc| {
+                // Independent CBOR fixture in exact-size DMA scratch.
+                let prefix = b"\x84\x6aSignature1\x44\xa1\x01\x38\x22";
+                let domain_prefix_len = if domain.len() < 24 { 1 } else { 2 };
+                let payload_offset = prefix.len() + domain_prefix_len + domain.len();
+                let structure = alloc.dma_alloc(payload_offset + 3 + envelope.len())?;
+                structure[..prefix.len()].copy_from_slice(prefix);
+                let domain_len = u8::try_from(domain.len()).expect("domain length");
+                if domain_prefix_len == 1 {
+                    structure[prefix.len()] = 0x40 | domain_len;
+                } else {
+                    structure[prefix.len()] = 0x58;
+                    structure[prefix.len() + 1] = domain_len;
+                }
+                structure[prefix.len() + domain_prefix_len..payload_offset].copy_from_slice(domain);
+                structure[payload_offset] = 0x59;
+                structure[payload_offset + 1..payload_offset + 3].copy_from_slice(
+                    &u16::try_from(envelope.len())
+                        .expect("envelope length")
+                        .to_be_bytes(),
+                );
+                structure[payload_offset + 3..].copy_from_slice(envelope);
+                let expected = domain == expected_domain;
+                assert_eq!(
+                    tsra_crypto::EcdsaAlgo::new(HashAlgo::sha384())
+                        .verify(&source_public_key, structure, signed.signature)
+                        .expect("independent signature verification"),
+                    expected,
+                );
+                let signature = alloc.dma_alloc(96)?;
+                tsra_crypto::EcdsaAlgo::new(HashAlgo::sha384())
+                    .sign(&source_key, structure, Some(signature))
+                    .expect("independent signature");
+                let resigned = alloc.dma_alloc(report_len)?;
+                resigned.copy_from_slice(&encoded_report[..report_len]);
+                resigned[report_len - 96..].copy_from_slice(signature);
+                assert_eq!(
+                    verify_transfer(&pal, &io, &cfg, resigned, alloc)
+                        .await
+                        .is_ok(),
+                    expected,
+                );
+                if !expected {
+                    plaintext.fill(0xCC);
+                    assert!(
+                        open_transfer(&pal, &io, &open_cfg, resigned, plaintext, alloc)
+                            .await
+                            .is_err()
+                    );
+                    assert!(plaintext.iter().all(|byte| *byte == 0xCC));
+                }
+                Ok::<(), HsmError>(())
+            })
+            .await
+            .expect("independent COSE domain separation");
+        }
+        let payload_offset = signed.envelope.as_ptr() as usize - encoded_report.as_ptr() as usize;
         let mut offsets = vec![17, 65, header_len + 1, header_len + 97, envelope.len() - 1];
         if header.kind() == ReportKind::SdBackup {
             offsets.push(113);
         }
         for offset in offsets {
-            envelope[offset] ^= 1;
-            assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-                .await
-                .is_err());
+            encoded_report[payload_offset + offset] ^= 1;
+            assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
             plaintext.fill(0xCC);
             assert!(pal
                 .alloc_scoped_async(&io, async |alloc| {
@@ -854,7 +949,6 @@ async fn check_transfer_bindings() {
                         &pal,
                         &io,
                         &open_cfg,
-                        envelope,
                         &encoded_report[..report_len],
                         plaintext,
                         alloc,
@@ -864,22 +958,16 @@ async fn check_transfer_bindings() {
                 .await
                 .is_err());
             assert!(plaintext.iter().all(|byte| *byte == 0xCC));
-            envelope[offset] ^= 1;
+            encoded_report[payload_offset + offset] ^= 1;
         }
         encoded_report[report_len - 1] ^= 1;
-        assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-            .await
-            .is_err());
+        assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
         encoded_report[report_len - 1] ^= 1;
         cfg.recipient_public_key = wrong_public;
-        assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-            .await
-            .is_err());
+        assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
         cfg.recipient_public_key = recipient_public;
         cfg.signer_public_key = wrong_public;
-        assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-            .await
-            .is_err());
+        assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
         cfg.signer_public_key = source_public;
         for wrong_kind in [
             ReportKind::PublicKey,
@@ -890,80 +978,82 @@ async fn check_transfer_bindings() {
             },
         ] {
             cfg.expected_kind = wrong_kind;
-            assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-                .await
-                .is_err());
+            assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
         }
         cfg.expected_kind = header.kind();
         cfg.expected_policy_hash = Some(&wrong_policy);
-        assert!(verify(&cfg, envelope, &encoded_report[..report_len])
-            .await
-            .is_err());
+        assert!(verify(&cfg, &encoded_report[..report_len]).await.is_err());
         cfg.expected_policy_hash = None;
-        verify(&cfg, envelope, &encoded_report[..report_len])
+        verify(&cfg, &encoded_report[..report_len])
             .await
             .expect("no receiver-policy equality requirement");
 
-        // Even correctly signed reports must agree with the envelope fields.
-        for bad_claim in 0..if header.kind() == ReportKind::Darc {
-            3
-        } else {
-            4
-        } {
-            let bad_len = pal
-                .alloc_scoped_async(&io, async |alloc| {
-                    use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-                    let digest = alloc.dma_alloc(48)?;
-                    transfer_envelope_hash(&pal, &io, envelope, digest, alloc).await?;
-                    let mut params = transfer_report_params(envelope, digest)?;
-                    match &mut params {
-                        ReportParams::Darc(transfer) => match bad_claim {
-                            0 => transfer.source_pid_key_id = &ids[48..],
-                            1 => transfer.recipient_key_id = &ids[..48],
-                            2 => transfer.envelope_hash = &ids[..48],
-                            _ => {}
-                        },
-                        ReportParams::SdBackup {
-                            transfer,
-                            policy_hash,
-                        } => {
-                            if bad_claim == 3 {
-                                *policy_hash = &ids[..48];
-                            }
-                            match bad_claim {
-                                0 => transfer.source_pid_spki_thumbprint = &sd_ids[48..],
-                                1 => transfer.recipient_spki_thumbprint = &sd_ids[..48],
-                                2 => transfer.envelope_hash = &sd_ids[..48],
-                                _ => {}
-                            }
-                        }
-                        ReportParams::PublicKey(_) => unreachable!("operation envelope"),
-                    }
-                    report(
-                        &pal,
-                        &io,
-                        alloc,
-                        &params,
-                        source_private,
-                        Some(encoded_report),
-                    )
-                    .await
-                })
+        // A valid signature cannot authorize metadata that names other keys.
+        for offset in [17, 65] {
+            envelope[offset] ^= 1;
+            let bad_len = sign(envelope, encoded_report)
                 .await
-                .expect("sign mismatched claim");
-            assert!(verify(&cfg, envelope, &encoded_report[..bad_len])
-                .await
-                .is_err());
+                .expect("sign changed identity");
+            assert!(verify(&cfg, &encoded_report[..bad_len]).await.is_err());
+            envelope[offset] ^= 1;
         }
 
-        // A newly signed digest cannot rescue ciphertext sealed with an old
-        // header: HPKE info/AAD must authenticate the header independently.
+        // A different signer cannot reattribute old ciphertext by replacing
+        // the source identity and producing a valid signature of its own.
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let other_id = alloc.dma_alloc(48)?;
+            transfer_spki_thumbprint(&pal, &io, wrong_public, other_id, alloc).await?;
+            envelope[17..65].copy_from_slice(other_id);
+            let params = ReportParams::Transfer(envelope);
+            let len = report(
+                &pal,
+                &io,
+                alloc,
+                &params,
+                &keys[290..338],
+                Some(encoded_report),
+            )
+            .await?;
+            let other_cfg = TransferOpenConfig {
+                verification: TransferVerifyConfig {
+                    signer_public_key: wrong_public,
+                    ..cfg
+                },
+                recipient_private_key: recipient_private,
+            };
+            verify_transfer(
+                &pal,
+                &io,
+                &other_cfg.verification,
+                &encoded_report[..len],
+                alloc,
+            )
+            .await?;
+            plaintext.fill(0xCC);
+            assert!(open_transfer(
+                &pal,
+                &io,
+                &other_cfg,
+                &encoded_report[..len],
+                plaintext,
+                alloc
+            )
+            .await
+            .is_err());
+            assert!(plaintext.iter().all(|byte| *byte == 0xCC));
+            envelope[17..65].copy_from_slice(source_id);
+            Ok::<(), HsmError>(())
+        })
+        .await
+        .expect("reject ciphertext reattribution");
+
+        // A fresh signature cannot rescue ciphertext under an old info context.
         if header.kind() == ReportKind::SdBackup {
             envelope[113] ^= 1;
             let resigned_len = sign(envelope, encoded_report)
                 .await
                 .expect("sign changed policy");
-            verify(&cfg, envelope, &encoded_report[..resigned_len])
+            verify(&cfg, &encoded_report[..resigned_len])
                 .await
                 .expect("valid new signature/bindings");
             let changed_cfg = TransferOpenConfig {
@@ -977,7 +1067,6 @@ async fn check_transfer_bindings() {
                         &pal,
                         &io,
                         &changed_cfg,
-                        envelope,
                         &encoded_report[..resigned_len],
                         plaintext,
                         alloc,

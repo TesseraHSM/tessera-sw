@@ -16,8 +16,8 @@
 //! * [`key_report`] — build a signed report (query/copy convention).
 //! * [`parse_key_report`] — zero-copy decode into a [`KeyReportView`].
 //! * [`verify_key_report`] — check a report's ES384 signature.
-//! * [`report`] / [`parse_report`] / [`verify_report`] — versioned reports
-//!   with signed `PublicKey`, `Darc`, and `SdBackup` discriminators.
+//! * [`report`] / [`parse_report`] / [`verify_report`] — public-key
+//!   attestations and directly signed DARC/SD transfer envelopes.
 
 #![no_std]
 
@@ -55,7 +55,4 @@ pub use encode::KeyReportParams;
 pub use report::ReportKind;
 pub use report::ReportParams;
 pub use report::ReportView;
-pub use report::SdBackupReportParams;
-pub use report::SdBackupReportView;
-pub use report::TransferReportParams;
 pub use report::TransferReportView;

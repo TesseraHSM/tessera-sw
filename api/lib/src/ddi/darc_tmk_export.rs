@@ -73,6 +73,5 @@ pub(crate) fn darc_tmk_export(
 
     Ok(HsmDarcTmkExportResult {
         sealed_tmk: resp.sealed_tmk.to_vec(),
-        report: resp.report,
     })
 }

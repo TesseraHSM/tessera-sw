@@ -8,7 +8,7 @@
 //! recipient to a destination recipient: it HPKE-unseals the caller-supplied
 //! `src_remote_backup` with the masked receiver key (recovering the BKS3)
 //! and HPKE-reseals that BKS3 to the destination receiver, returning
-//! `dst_remote_backup` and the local PID's `SdBackup` operation report.
+//! one directly signed `dst_remote_backup` under the local PID.
 //! The source report and destination PublicKey report bind the client SD
 //! policy, which may differ from the SA-local policy.
 //!
@@ -53,7 +53,7 @@ pub struct TborSdResealRemoteBackupReq {
     pub policy: Vec<u8>,
 
     /// Source manufacturer certificate-chain descriptors.  Flattened from
-    /// the firmware `src_evidence` field group (its four TOC entries); the
+    /// the firmware `src_evidence` field group (its three TOC entries); the
     /// DER bytes travel out of band.
     #[tbor(max_len = 8)]
     pub src_mfgr_cert_chain: Vec<CertDescriptor>,
@@ -65,9 +65,6 @@ pub struct TborSdResealRemoteBackupReq {
     /// Source partition-owner certificate-chain descriptors.
     #[tbor(max_len = 8)]
     pub src_part_owner_cert_chain: Vec<CertDescriptor>,
-
-    /// Source attestation-report (COSE_Sign1) descriptor.
-    pub src_report: ReportDescriptor,
 
     /// Destination manufacturer certificate-chain descriptors.  Flattened
     /// from the firmware `dest_evidence` field group (its four TOC
@@ -87,7 +84,7 @@ pub struct TborSdResealRemoteBackupReq {
     pub dest_report: ReportDescriptor,
 
     /// Source remote backup to reseal: an HPKE Base seal, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (322 B).  A fixed-length `[u8; N]` field
+    /// [`POK_REMOTE_BACKUP_LEN`] (431 B), including its PID signature. A fixed-length `[u8; N]` field
     /// (the host derive's exact-length form; the firmware schema is the
     /// length authority).
     pub src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
@@ -98,13 +95,10 @@ pub struct TborSdResealRemoteBackupReq {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdResealRemoteBackupResp {
     /// Resealed remote backup: an HPKE Base seal of the same BKS3 to the
-    /// destination receiver, exactly [`POK_REMOTE_BACKUP_LEN`] (322 B).  A
+    /// destination receiver, exactly [`POK_REMOTE_BACKUP_LEN`] (431 B), including its PID signature. A
     /// fixed-length `[u8; N]` field so host decode enforces the exact
     /// length — the firmware schema is the length authority.
     pub dst_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
-    /// Required SA PID-signed SdBackup report.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -122,7 +116,6 @@ mod tests {
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
-            src_report: ReportDescriptor::default(),
             dest_mfgr_cert_chain: Vec::new(),
             dest_owner_cert_chain: Vec::new(),
             dest_part_owner_cert_chain: Vec::new(),
@@ -133,7 +126,7 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The crate::policy::PART_POLICY_MAX_LEN-byte policy image plus the 322-byte src_remote_backup must
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy image plus the 431-byte src_remote_backup must
         // be carried in the data section.
         assert!(
             frame.len() > crate::policy::PART_POLICY_MAX_LEN + POK_REMOTE_BACKUP_LEN,

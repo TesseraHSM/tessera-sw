@@ -5,7 +5,6 @@
 
 use alloc::vec::Vec;
 
-use crate::darc_tmk_import::DARC_REPORT_MAX_LEN;
 use crate::darc_tmk_import::MASKED_TMK_LEN;
 use crate::darc_tmk_import::SEALED_TMK_LEN;
 use crate::tbor;
@@ -32,18 +31,13 @@ pub struct TborDarcTmkExportReq {
     pub target_cert_chain: Vec<CertDescriptor>,
 }
 
-/// Canonical encrypted TMK and separate PID-signed operation report.
+/// Directly PID-signed encrypted TMK.
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborDarcTmkExportResp {
-    /// `header(113) || enc(97) || ciphertext(32) || tag(16)`.
+    /// ES384 COSE_Sign1 of `header(113) || enc(97) || ciphertext(32) || tag(16)`.
     pub sealed_tmk: [u8; SEALED_TMK_LEN],
-    /// Version-2 `Darc` report binding this envelope and its recipient.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
 }
-
-const _: () = assert!(DARC_REPORT_MAX_LEN == 896);
 
 #[cfg(test)]
 mod tests {

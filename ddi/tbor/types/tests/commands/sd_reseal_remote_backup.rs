@@ -17,7 +17,7 @@
 //! bindings before recovering BKS3.
 //!
 //! Coverage:
-//! * Happy path — a 322-byte, non-zero `dst_remote_backup`.
+//! * Happy path — a 431-byte, non-zero `dst_remote_backup`.
 //! * Re-randomization — two reseals of the same source differ (fresh HPKE
 //!   ephemeral each call).
 //! * Tampered `src_remote_backup` → the open's AEAD auth fails → reject.
@@ -45,15 +45,12 @@ use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 /// Both attestation evidences (source sender, destination receiver) laid
 /// out in a single OOB page, with descriptors indexing into it.
 struct ResealEvidence {
-    /// OOB items in index order: the source evidence's `[mfgr root, mfgr
-    /// leaf, owner root, owner leaf, part-owner root, part-owner leaf,
-    /// report]` (indices 0..=6) followed by the destination evidence's
-    /// (indices 7..=13).
+    /// Source identity chains followed by destination chains and its
+    /// PublicKey report.
     oob_items: Vec<Vec<u8>>,
     src_mfgr: Vec<CertDescriptor>,
     src_owner: Vec<CertDescriptor>,
     src_part_owner: Vec<CertDescriptor>,
-    src_report: ReportDescriptor,
     dest_mfgr: Vec<CertDescriptor>,
     dest_owner: Vec<CertDescriptor>,
     dest_part_owner: Vec<CertDescriptor>,
@@ -83,12 +80,12 @@ fn push_evidence(
     mfgr: &GeneratedChain,
     owner: &GeneratedChain,
     part_owner: &GeneratedChain,
-    report: &[u8],
+    report: Option<&[u8]>,
 ) -> (
     Vec<CertDescriptor>,
     Vec<CertDescriptor>,
     Vec<CertDescriptor>,
-    ReportDescriptor,
+    Option<ReportDescriptor>,
 ) {
     let m = vec![
         push_item(items, &mfgr.root_der),
@@ -102,16 +99,14 @@ fn push_evidence(
         push_item(items, &part_owner.root_der),
         push_item(items, &part_owner.leaf_der),
     ];
-    let r = push_item(items, report);
-    (
-        m,
-        o,
-        p,
+    let r = report.map(|report| {
+        let r = push_item(items, report);
         ReportDescriptor {
             index: r.index,
             length: r.length,
-        },
-    )
+        }
+    });
+    (m, o, p, r)
 }
 
 /// Build the combined source + destination evidence.  Each side's three
@@ -122,34 +117,32 @@ fn build_reseal_evidence(
     pid_pub: &[u8; RAW_PUB_LEN],
     src_anchor: &CaKey,
     dest_anchor: &CaKey,
-    src_report: &[u8],
     dest_report: &[u8],
 ) -> ResealEvidence {
     let mut items = Vec::new();
-    let (src_mfgr, src_owner, src_part_owner, src_report_desc) = push_evidence(
+    let (src_mfgr, src_owner, src_part_owner, _) = push_evidence(
         &mut items,
         &make_chain(&CaKey::generate(), pid_pub),
         &make_chain(&CaKey::generate(), pid_pub),
         &make_chain(src_anchor, pid_pub),
-        src_report,
+        None,
     );
     let (dest_mfgr, dest_owner, dest_part_owner, dest_report_desc) = push_evidence(
         &mut items,
         &make_chain(&CaKey::generate(), pid_pub),
         &make_chain(&CaKey::generate(), pid_pub),
         &make_chain(dest_anchor, pid_pub),
-        dest_report,
+        Some(dest_report),
     );
     ResealEvidence {
         oob_items: items,
         src_mfgr,
         src_owner,
         src_part_owner,
-        src_report: src_report_desc,
         dest_mfgr,
         dest_owner,
         dest_part_owner,
-        dest_report: dest_report_desc,
+        dest_report: dest_report_desc.expect("destination PublicKey report"),
     }
 }
 
@@ -171,7 +164,6 @@ fn reseal_request(
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
         src_part_owner_cert_chain: evidence.src_part_owner.clone(),
-        src_report: evidence.src_report,
         dest_mfgr_cert_chain: evidence.dest_mfgr.clone(),
         dest_owner_cert_chain: evidence.dest_owner.clone(),
         dest_part_owner_cert_chain: evidence.dest_part_owner.clone(),
@@ -191,13 +183,13 @@ fn create_source_backup(
     sata_key: &CaKey,
     receiver_report: &[u8],
     policy: &[u8],
-) -> ([u8; POK_REMOTE_BACKUP_LEN], Vec<u8>) {
+) -> [u8; POK_REMOTE_BACKUP_LEN] {
     let rcvr_ev = build_receiver_evidence(pid_pub, receiver_pub, sata_key, receiver_report);
     let req = backup_request(session_id, &rcvr_ev, policy);
     let response = ctx
         .tbor_oob(&req, &rcvr_ev.oob())
         .expect("SdCreateRemoteBackup source backup");
-    (response.pok_remote_backup, response.report)
+    response.pok_remote_backup
 }
 
 /// Build a valid reseal request with source and destination evidence.
@@ -213,7 +205,7 @@ fn valid_reseal_fixture() -> (TestCtx, TborSdResealRemoteBackupReq, ResealEviden
 
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let (src_backup, report_sndr) = create_source_backup(
+    let src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -223,7 +215,7 @@ fn valid_reseal_fixture() -> (TestCtx, TborSdResealRemoteBackupReq, ResealEviden
         &policy,
     );
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
 
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
 
@@ -246,7 +238,7 @@ fn sd_reseal_remote_backup_roundtrip() {
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
     // Source backup: BKS3 sealed to the receiver by the sender.
-    let (src_backup, report_sndr) = create_source_backup(
+    let src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -258,13 +250,13 @@ fn sd_reseal_remote_backup_roundtrip() {
 
     // Reseal: open with the receiver key (auth = sender), reseal to the
     // destination receiver.
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdResealRemoteBackup roundtrip");
 
-    // A successful HPKE open→seal yields a 322-byte, non-zero backup.
+    // A successful HPKE open→seal yields a 431-byte, non-zero backup.
     assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
         resp.dst_remote_backup.iter().any(|&b| b != 0),
@@ -291,7 +283,7 @@ fn sd_reseal_remote_backup_rerandomizes() {
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let (src_backup, report_sndr) = create_source_backup(
+    let src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -301,7 +293,7 @@ fn sd_reseal_remote_backup_rerandomizes() {
         &policy,
     );
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
 
     let first = ctx.tbor_oob(&req, &evidence.oob()).expect("first reseal");
@@ -327,7 +319,7 @@ fn sd_reseal_remote_backup_rejects_tampered_src() {
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let (mut src_backup, report_sndr) = create_source_backup(
+    let mut src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -339,7 +331,7 @@ fn sd_reseal_remote_backup_rejects_tampered_src() {
     // Flip a byte in the ciphertext region so the HPKE Base open fails.
     src_backup[POK_REMOTE_BACKUP_LEN - 1] ^= 0xFF;
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
 
     // The evidence still validates, but the unseal's AEAD tag check fails.
@@ -360,7 +352,7 @@ fn sd_reseal_remote_backup_rejects_missing_oob() {
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
 
-    let (src_backup, report_sndr) = create_source_backup(
+    let src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -372,7 +364,7 @@ fn sd_reseal_remote_backup_rejects_missing_oob() {
 
     // The evidence descriptors reference OOB items, but no OOB page is
     // supplied → the handler rejects before any crypto.
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_sndr, &report_dst);
+    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
@@ -448,15 +440,15 @@ fn sd_reseal_remote_backup_missing_dest_mfgr_chain_rejected() {
         .expect_err("missing destination manufacturer chain must be rejected");
 }
 
-/// Reject a source attestation report referencing a nonexistent OOB item.
+/// Reject a source identity chain referencing a nonexistent OOB item.
 #[test]
-fn sd_reseal_remote_backup_invalid_src_report_index_rejected() {
+fn sd_reseal_remote_backup_invalid_src_certificate_index_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    req.src_report.index = u8::MAX;
+    req.src_mfgr_cert_chain[0].index = u8::MAX;
 
     ctx.tbor_oob(&req, &evidence.oob())
-        .expect_err("invalid source report index must be rejected");
+        .expect_err("invalid source certificate index must be rejected");
 }
 
 /// Reject source evidence that authenticates a different sender.
@@ -464,15 +456,12 @@ fn sd_reseal_remote_backup_invalid_src_report_index_rejected() {
 fn sd_reseal_remote_backup_wrong_sender_evidence_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    // Generate another sender key and use its attestation report.
-    let (_masked_other_sender, other_sender_report) = masked_key_and_report(&ctx, req.session_id);
-
-    // Replace the source sender report in the OOB evidence.
+    let chain = make_chain(&CaKey::generate(), &CaKey::generate().raw_pub());
     let mut evidence = evidence;
-    evidence.oob_items[req.src_report.index as usize] = other_sender_report;
-
-    req.src_report.length =
-        U16::new(evidence.oob_items[req.src_report.index as usize].len() as u16);
+    for (descriptor, certificate) in req.src_mfgr_cert_chain.iter_mut().zip(chain.der_items()) {
+        evidence.oob_items[descriptor.index as usize] = certificate.to_vec();
+        descriptor.length = U16::new(certificate.len() as u16);
+    }
 
     ctx.tbor_oob(&req, &evidence.oob())
         .expect_err("wrong source sender evidence must be rejected");
@@ -491,7 +480,7 @@ fn expect_reseal_rejects_sata_anchor(src_sata: bool, dest_sata: bool) {
 
     let (masked_rcvr, report_rcvr, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let (_masked_dst, report_dst) = masked_key_and_report(&ctx, sid);
-    let (src_backup, report_sndr) = create_source_backup(
+    let src_backup = create_source_backup(
         &ctx,
         sid,
         &pid_pub,
@@ -502,13 +491,8 @@ fn expect_reseal_rejects_sata_anchor(src_sata: bool, dest_sata: bool) {
     );
 
     let anchor = |sata: bool| if sata { &sata_key } else { &pota_key };
-    let evidence = build_reseal_evidence(
-        &pid_pub,
-        anchor(src_sata),
-        anchor(dest_sata),
-        &report_sndr,
-        &report_dst,
-    );
+    let evidence =
+        build_reseal_evidence(&pid_pub, anchor(src_sata), anchor(dest_sata), &report_dst);
     let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
     ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
@@ -555,19 +539,14 @@ fn sd_reseal_remote_backup_invalid_dest_report_rejected() {
         .expect_err("invalid destination report must be rejected");
 }
 
-/// Reject a source report whose attestation bytes have been corrupted.
+/// Reject a source envelope whose signature bytes have been corrupted.
 #[test]
-fn sd_reseal_remote_backup_corrupted_src_report_rejected() {
-    let (ctx, req, mut evidence) = valid_reseal_fixture();
-
-    let report = &mut evidence.oob_items[req.src_report.index as usize];
-
-    assert!(!report.is_empty(), "source report must not be empty");
-    let last = report.len() - 1;
-    report[last] ^= 0xFF;
+fn sd_reseal_remote_backup_corrupted_src_signature_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+    req.src_remote_backup[POK_REMOTE_BACKUP_LEN - 1] ^= 0xFF;
 
     ctx.tbor_oob(&req, &evidence.oob())
-        .expect_err("corrupted source report must be rejected");
+        .expect_err("corrupted source signature must be rejected");
 }
 
 /// Reject a destination report whose attestation bytes have been corrupted.
@@ -607,15 +586,15 @@ fn sd_reseal_remote_backup_missing_dest_part_owner_chain_rejected() {
         .expect_err("missing destination partition-owner chain must be rejected");
 }
 
-/// Reject source evidence with an invalid attestation report length.
+/// Reject source evidence with an invalid certificate length.
 #[test]
-fn sd_reseal_remote_backup_invalid_src_report_length_rejected() {
+fn sd_reseal_remote_backup_invalid_src_certificate_length_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    req.src_report.length = U16::new(0);
+    req.src_mfgr_cert_chain[0].length = U16::new(0);
 
     ctx.tbor_oob(&req, &evidence.oob())
-        .expect_err("invalid source report length must be rejected");
+        .expect_err("invalid source certificate length must be rejected");
 }
 
 /// Reject destination evidence with an invalid attestation report length.

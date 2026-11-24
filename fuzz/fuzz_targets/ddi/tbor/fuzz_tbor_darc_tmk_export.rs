@@ -342,40 +342,26 @@ fn assert_success(
     known_tmk: Option<&[u8; TMK_LEN]>,
 ) -> Vec<u8> {
     assert_eq!(resp.sealed_tmk.len(), SEALED_TMK_LEN);
-    let header = &resp.sealed_tmk[..113];
-    assert_eq!(&header[..17], b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02");
-    assert_eq!(&header[17..65], &common::darc_key_id(sender_pub));
-    let receiver_pub = receiver.public_key().expect("receiver public key");
-    assert_eq!(&header[65..113], &common::darc_key_id(&receiver_pub));
-    let mut outer = minicbor::Decoder::new(&resp.report);
+    let mut outer = minicbor::Decoder::new(&resp.sealed_tmk);
     assert_eq!(
         outer.tag().expect("COSE tag"),
         minicbor::data::Tag::Unassigned(18)
     );
     assert_eq!(outer.array().expect("COSE array"), Some(4));
     let protected = outer.bytes().expect("protected header");
-    assert_eq!(protected, b"\xa2\x01\x38\x22\x03\x70application/cbor");
+    assert_eq!(protected, b"\xa1\x01\x38\x22");
     assert_eq!(outer.map().expect("unprotected claims"), Some(0));
-    let payload = outer.bytes().expect("operation claims");
+    let payload = outer.bytes().expect("complete encrypted envelope");
     let signature = outer.bytes().expect("operation signature");
-    assert_eq!(outer.position(), resp.report.len());
-    let mut claims = minicbor::Decoder::new(payload);
-    assert_eq!(claims.map().expect("claims"), Some(5));
-    assert_eq!(claims.u8().expect("version label"), 0);
-    assert_eq!(claims.u8().expect("version"), 2);
-    assert_eq!(claims.u8().expect("kind label"), 8);
-    assert_eq!(claims.u8().expect("DARC kind"), 1);
-    for (label, expected) in [(9, &header[17..65]), (10, &header[65..113])] {
-        assert_eq!(claims.u8().expect("key ID label"), label);
-        assert_eq!(claims.bytes().expect("key ID"), expected);
-    }
-    assert_eq!(claims.u8().expect("hash label"), 11);
-    assert_eq!(
-        claims.bytes().expect("envelope hash"),
-        common::sha384(&[b"TSRA-XFER-HASH-v1".as_slice(), &resp.sealed_tmk].concat()),
-    );
-    assert_eq!(claims.position(), payload.len());
+    assert_eq!(outer.position(), resp.sealed_tmk.len());
+    assert_eq!(payload.len(), 258);
+    let header = &payload[..113];
+    assert_eq!(&header[..17], b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02");
+    assert_eq!(&header[17..65], &common::darc_key_id(sender_pub));
+    let receiver_pub = receiver.public_key().expect("receiver public key");
+    assert_eq!(&header[65..113], &common::darc_key_id(&receiver_pub));
     let mut input = minicbor::Encoder::new(Vec::new());
+    let external_aad: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
     input
         .array(4)
         .expect("Sig_structure")
@@ -383,7 +369,7 @@ fn assert_success(
         .expect("context")
         .bytes(protected)
         .expect("protected")
-        .bytes(&[])
+        .bytes(external_aad)
         .expect("AAD")
         .bytes(payload)
         .expect("payload");
@@ -393,8 +379,8 @@ fn assert_success(
             .expect("verify operation signature"),
         "operation report must be signed by the real PID",
     );
-    assert_eq!(resp.sealed_tmk[113], 4, "SEC1 uncompressed point");
-    let enc_raw = &resp.sealed_tmk[114..210];
+    assert_eq!(payload[113], 4, "SEC1 uncompressed point");
+    let enc_raw = &payload[114..210];
     let (x, y) = enc_raw.split_at(common::COORD_LEN);
     assert!(
         EccPublicKey::is_on_curve(EccCurve::P384, x, y).expect("point validation"),
@@ -407,10 +393,10 @@ fn assert_success(
             receiver,
             &receiver_pub,
             header,
-            header,
+            &[],
         ),
         &enc,
-        &resp.sealed_tmk[210..],
+        &payload[210..],
     )
     .expect("exported TMK must authenticate");
     assert_eq!(plain.len(), TMK_LEN);

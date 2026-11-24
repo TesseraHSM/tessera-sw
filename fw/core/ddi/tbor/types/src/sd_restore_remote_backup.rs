@@ -32,12 +32,11 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     /// only canonical uncompressed P-384 SPKI (120 bytes).
     #[tbor(buffer, max_len = 120)]
     pub sender_pid_pub_key: &'a [u8],
-    /// Always-required SdBackup report; identity chains are SAPOTA-checked
-    /// only when the policy requires trusted SA identity.
+    /// Source identity chains, SAPOTA-checked only under trusted-SA policy.
     #[tbor(include)]
-    pub sender_evidence: Evidence<'a>,
-    /// Canonical Base envelope.
-    #[tbor(buffer, len = 322)]
+    pub sender_evidence: IdentityEvidence<'a>,
+    /// PID-signed canonical Base envelope.
+    #[tbor(buffer, len = 431)]
     pub src_remote_backup: &'a [u8],
     /// Existing SDMK backup, authenticated by the recovered BKS3 derivation.
     #[tbor(buffer, len = 264)]

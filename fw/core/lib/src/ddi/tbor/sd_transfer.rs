@@ -6,11 +6,11 @@
 use tsra_fw_core_crypto_key_report::report;
 use tsra_fw_core_crypto_key_report::transfer::*;
 use tsra_fw_core_crypto_key_report::ReportKind;
-use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
+use tsra_fw_core_crypto_key_report::ReportParams;
 use tsra_fw_core_crypto_x509_chain::p384_point_from_spki;
 use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_core_evidence::verify_evidence_signer;
-use tsra_fw_core_evidence::EvidenceRefs;
+use tsra_fw_core_evidence::IdentityRefs;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::*;
 
@@ -42,9 +42,8 @@ pub(super) async fn seal_backup<P: HsmPal>(
     policy_hash: &HsmDmaBuf,
     recipient: &HsmDmaBuf,
     bks3: &HsmDmaBuf,
-    envelope: &mut HsmDmaBuf,
-    signed_report: &mut HsmDmaBuf,
-) -> HsmResult<usize> {
+    signed_envelope: &mut HsmDmaBuf,
+) -> HsmResult<()> {
     let private = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
     let public = alloc.dma_alloc(97)?;
     public[0] = 4;
@@ -53,8 +52,8 @@ pub(super) async fn seal_backup<P: HsmPal>(
     byte_order::pair_to_be::<P>(HsmEccCurve::P384, &mut public[1..])?;
     let ids = alloc.dma_alloc(96)?;
     let (source, destination) = ids.split_at_mut(48);
-    sd_spki_thumbprint(pal, io, public, source, alloc).await?;
-    sd_spki_thumbprint(pal, io, recipient, destination, alloc).await?;
+    transfer_spki_thumbprint(pal, io, public, source, alloc).await?;
+    transfer_spki_thumbprint(pal, io, recipient, destination, alloc).await?;
     let source: &[u8] = source;
     let destination: &[u8] = destination;
     let hash: &[u8] = policy_hash;
@@ -65,11 +64,21 @@ pub(super) async fn seal_backup<P: HsmPal>(
             .map_err(|_| HsmError::InternalError)?,
         policy_hash: hash.try_into().map_err(|_| HsmError::InternalError)?,
     };
+    let envelope = alloc.dma_alloc(SD_BACKUP_ENVELOPE_LEN)?;
     seal_transfer(pal, io, &header, recipient, bks3, envelope, alloc).await?;
-    let digest = alloc.dma_alloc(48)?;
-    transfer_envelope_hash(pal, io, envelope, digest, alloc).await?;
-    let params = transfer_report_params(envelope, digest)?;
-    report(pal, io, alloc, &params, private, Some(signed_report)).await
+    let len = report(
+        pal,
+        io,
+        alloc,
+        &ReportParams::Transfer(envelope),
+        private,
+        Some(signed_envelope),
+    )
+    .await?;
+    if len != SD_BACKUP_SIGNED_ENVELOPE_LEN {
+        return Err(HsmError::InternalError);
+    }
+    Ok(())
 }
 
 /// An absent anchor is intentional signature-only SA operation verification.
@@ -78,10 +87,10 @@ pub(super) async fn source<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    evidence: &EvidenceRefs<'_>,
+    evidence: &IdentityRefs<'_>,
     anchor: Option<&[u8; SPKI_THUMBPRINT_LEN]>,
     pid_public: Option<&[u8]>,
-) -> HsmResult<(&'a HsmDmaBuf, &'a HsmDmaBuf)> {
+) -> HsmResult<&'a HsmDmaBuf> {
     let signer = alloc.dma_alloc(97)?;
     if let Some(anchor) = anchor {
         verify_evidence_signer(pal, io, evidence, anchor, signer).await?;
@@ -96,14 +105,7 @@ pub(super) async fn source<'a, P: HsmPal>(
         signer[0] = 4;
         signer[1..].copy_from_slice(p384_point_from_spki(public)?);
     }
-    let len = evidence.report.length.get() as usize;
-    if len == 0 || len > KEY_REPORT_MAX_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    let report = alloc.dma_alloc(len)?;
-    pal.recv_oob(io, evidence.report.index as usize, report)
-        .await?;
-    Ok((signer, report))
+    Ok(signer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -113,8 +115,7 @@ pub(super) async fn open_backup<P: HsmPal>(
     alloc: &impl HsmScopedAlloc,
     private: &HsmDmaBuf,
     signer: &HsmDmaBuf,
-    report: &HsmDmaBuf,
-    envelope: &HsmDmaBuf,
+    signed_envelope: &HsmDmaBuf,
     policy_hash: &HsmDmaBuf,
     bks3: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
@@ -133,7 +134,7 @@ pub(super) async fn open_backup<P: HsmPal>(
         },
         recipient_private_key: private,
     };
-    let len = open_transfer(pal, io, &config, envelope, report, bks3, alloc).await?;
+    let len = open_transfer(pal, io, &config, signed_envelope, bks3, alloc).await?;
     if len != 48 {
         return Err(HsmError::InvalidArg);
     }

@@ -28,12 +28,9 @@ pub const TBOR_OP_DARC_TMK_IMPORT: u8 = 0x21;
 /// Plaintext length of a DARC Transfer Masking Key (256-bit key).
 pub const TMK_LEN: usize = 32;
 
-/// On-the-wire length: `header(113) || enc(97) || ct(TMK 32 + tag 16)`
+/// On-the-wire length of ES384 COSE_Sign1 containing the complete DARC envelope
 /// (matches the firmware schema's `SEALED_TMK_LEN`).
-pub const SEALED_TMK_LEN: usize = 258;
-
-/// Maximum PID-signed DARC operation-report length.
-pub const DARC_REPORT_MAX_LEN: usize = 896;
+pub const SEALED_TMK_LEN: usize = 367;
 /// Maximum source-chain depth, including POTA -> PTA -> PID.
 pub const DARC_SOURCE_CERT_CHAIN_MAX_CERTS: usize = 3;
 
@@ -65,12 +62,8 @@ pub struct TborDarcTmkImportReq {
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
-    /// Canonical HPKE Base envelope of the 32-byte TMK, exactly 258 bytes.
+    /// PID-signed HPKE Base envelope of the 32-byte TMK, exactly 367 bytes.
     pub sealed_tmk: [u8; SEALED_TMK_LEN],
-
-    /// PID-signed version-2 `Darc` report binding this envelope.
-    #[tbor(min_len = 1, max_len = 896)]
-    pub report: Vec<u8>,
 
     /// Sender certificate-chain descriptors `(index, length)` referencing
     /// the out-of-band SGL Data Blocks; carries 1..=3 entries. The chain
@@ -107,7 +100,6 @@ mod tests {
             masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
             policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             sealed_tmk: [0xABu8; SEALED_TMK_LEN],
-            report: alloc::vec![0xCD; 320],
             remote_cert_chain: alloc::vec![
                 CertDescriptor {
                     index: 0,
@@ -123,10 +115,10 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The 584-byte policy plus the masked key and sealed TMK must be
+        // The policy plus the masked key and sealed TMK must be
         // carried in the data section.
         assert!(
-            frame.len() > 584 + MASKED_KEX_KEY_LEN + SEALED_TMK_LEN,
+            frame.len() > crate::policy::PART_POLICY_MAX_LEN + MASKED_KEX_KEY_LEN + SEALED_TMK_LEN,
             "encoded frame must carry the policy, masked key, and sealed TMK",
         );
     }

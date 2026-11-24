@@ -169,13 +169,12 @@ fn run_darc_peer() {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let sealed = read_peer(&mut input);
-    let report = read_peer(&mut input);
     let chain: Vec<Vec<u8>> = (0..3).map(|_| read_peer(&mut input)).collect();
     let chain: Vec<HsmCert<'_>> = chain.iter().map(|cert| HsmCert { cert }).collect();
     let wrapped = read_peer(&mut input);
     let imported = target
         .session
-        .darc_tmk_import(&recipient.masked, &target.policy, &sealed, &report, &chain)
+        .darc_tmk_import(&recipient.masked, &target.policy, &sealed, &chain)
         .expect("import on independent target");
     let tmk = HsmDarcTmk::new(target.session.clone(), imported);
     let (recovered, _) = HsmKeyManager::unwrap_key_pair(
@@ -246,7 +245,6 @@ fn darc_transfer_tmk_export_import_roundtrip() {
             &target_kex.masked,
             &ready.policy,
             &sealed_tmk.sealed_tmk,
-            &sealed_tmk.report,
             &source_chain,
         )
         .expect("darc_tmk_import");
@@ -280,7 +278,6 @@ fn darc_transfer_between_distinct_partitions() {
         .darc_tmk_export(&masked_tmk, &source.policy, &chain.certs())
         .expect("export");
     peer.send(&transfer.sealed_tmk);
-    peer.send(&transfer.report);
     for cert in &source.pid_chain {
         peer.send(cert);
     }

@@ -120,44 +120,38 @@ Carries the variable-length COSE_Sign1 `report`.
 | `UnsupportedKeyType` | The attested key kind cannot be attested (symmetric or a non-attestable internal kind) |
 | `DdiDecodeFailed` | Malformed request body |
 
-## Discriminated report schema
+## Public-key report schema
 
 Report version 2 supports a signed `report_kind` discriminator. Existing
 `KeyReport` commands continue to emit public-key reports without that
-discriminator. Operation reports use version 2 with an explicit kind;
-there is no report-version bump. The COSE_Sign1 wrapper and ES384 signature
-format are unchanged.
+discriminator. Public-key v1/v2 encoding, the protected header
+`{1: -35, 3: "application/cbor"}`, and ES384 signatures are unchanged.
 
 For public-key reports without a discriminator, v1 omits the policy hash
 and v2 requires it. With an explicit `PublicKey` discriminator, v2 permits
-the policy hash to be absent. Operation reports require their discriminator
-and exact kind-specific fields; a public-key report cannot substitute for one.
+the policy hash to be absent. A public-key report cannot substitute for a
+directly signed transfer envelope.
 
 The signed payload is a definite-length CBOR map with these integer keys:
 
 | Map key | Field | Required kinds |
 |---|---|---|
-| 0 | `version` (2) | All |
+| 0 | `version` (1 or 2) | All |
 | 1 | Fixed-width encoded public key | `PublicKey` |
 | 2 | Encoded public-key length | `PublicKey` |
 | 3 | Key capability/provenance flags | `PublicKey` |
 | 4 | Application UUID | `PublicKey` |
 | 5 | Caller-supplied report data | `PublicKey` |
 | 6 | VM launch ID | `PublicKey` |
-| 7 | SHA-384 policy hash | Required for `SdBackup`; optional for `PublicKey` |
-| 8 | `report_kind`: `PublicKey` (0), `Darc` (1), `SdBackup` (2) | All |
-| 9 | `source_pid_key_id` for `Darc`; `source_pid_spki_thumbprint` for `SdBackup` | `Darc`, `SdBackup` |
-| 10 | `recipient_key_id` for `Darc`; `recipient_spki_thumbprint` for `SdBackup` | `Darc`, `SdBackup` |
-| 11 | SHA-384 transfer-envelope hash | `Darc`, `SdBackup` |
+| 7 | SHA-384 policy hash | `PublicKey` v2, as above |
+| 8 | Optional `report_kind`: `PublicKey` (0) | `PublicKey` v2 |
 
 Unknown, duplicate, missing, wrong-kind, or incorrectly sized fields are
-rejected. Operation reports carry no public-key fields or caller report data.
-The `SdBackup` policy hash identifies the transferred SD policy, including
-when the sealing authority's local policy differs from it.
+rejected. Binary transfer payloads are not public-key report maps.
 
-Only exporting command handlers may construct `Darc` or `SdBackup` claims
-after validating the secret and recipient and computing the envelope hash
-on-device. A generic key report containing caller-supplied envelope bytes
+Only exporting command handlers may construct and sign `Darc` or `SdBackup`
+envelopes after validating the secret and recipient on-device.
+A generic key report containing caller-supplied envelope bytes
 or a digest does not prove export provenance. Signature verification also
 does not replace signer authorization, recipient/envelope binding checks,
 or replay policy.
@@ -165,12 +159,33 @@ or replay policy.
 ### P-384 transfer-envelope binding
 
 The DARC and SD export, reseal, and import/restore commands use this
-envelope with HPKE Base and PID-signed operation reports.
+envelope with HPKE Base and a direct PID signature.
 Only P-384 is supported; there are no PQ or hybrid selectors.
 
-The envelope is `header || enc || ciphertext || tag`. The report is a separate
-COSE_Sign1 value, excluded from the envelope hash. All integer fields below
+The single artifact is tagged `COSE_Sign1(payload=envelope)`, where
+`envelope = header || enc || ciphertext || tag`. The protected header is
+exactly `{1: -35}` (ES384), the unprotected map is empty, and the 96-byte
+signature is `r || s` in big-endian order.
+The binary payload has no CBOR content-type claim, duplicate claims map,
+or envelope hash. All integer fields below
 are unsigned; suite IDs use network byte order.
+
+COSE signature domains use standard
+[`external_aad` (RFC 9052 Sections 4.3-4.4)](https://www.rfc-editor.org/rfc/rfc9052.html#section-4.4):
+
+| Kind | Exact COSE `external_aad` bytes |
+|---|---|
+| `Darc` | ASCII `TSRA-Darc-v1` followed by 20 zero bytes (32 bytes total) |
+| `SdBackup` | ASCII `TSRA-SdBackup-v1` followed by 16 zero bytes (32 bytes total) |
+| `PublicKey` v1/v2 | Empty byte string, unchanged |
+
+Signers and verifiers select the domain from the validated kind; callers
+cannot override it. The signature covers the CBOR-encoded
+`["Signature1", protected_header, external_aad, envelope]`. External AAD
+is not serialized in COSE_Sign1, so signed artifacts remain 367 and
+431 bytes. Empty, unpadded, or wrong-kind transfer domains are not accepted.
+The 32-byte label size is a TSRA profile choice, not a COSE requirement.
+This is separate from HPKE AAD, which remains empty.
 
 | Offset | Header field | Length |
 |---|---|---|
@@ -180,51 +195,45 @@ are unsigned; suite IDs use network byte order.
 | 11 | DHKEM(P-384, HKDF-SHA384) ID (`0x0011`) | 2 |
 | 13 | HKDF-SHA384 ID (`0x0002`) | 2 |
 | 15 | AES-256-GCM ID (`0x0002`) | 2 |
-| 17 | Source PID key ID | 48 |
-| 65 | Recipient key ID | 48 |
+| 17 | `source_pid_spki_thumbprint` | 48 |
+| 65 | `recipient_spki_thumbprint` | 48 |
 | 113 | Transferred SD policy hash, `SdBackup` only | 48 |
 
-For `Darc`, both identifiers remain
-`SHA-384(ASCII("TSRA-P384-KEY-v1") || SEC1_public_key)`.
-For `SdBackup`, the fields at offsets 17 and 65 are
+For both `Darc` and `SdBackup`, the fields at offsets 17 and 65 are
 `source_pid_spki_thumbprint` and `recipient_spki_thumbprint`, respectively.
 Each is `SHA-384(canonical_DER_SPKI(public_key))`, using the same canonical
 SPKI representation as policy trust-anchor thumbprints. The source is the
 PID signing key; the recipient is the HPKE encryption key, not its PID.
-CBOR labels, header offsets, and 48-byte field lengths are unchanged.
-This SD-only convention does not change DARC identifiers or APIs.
 
 The SEC1 public key and encapsulation are exactly 97 bytes:
 `0x04 || X_be[48] || Y_be[48]`.
-For DARC, the curve-specific domain identifies the key algorithm. For SD,
-canonical SPKI encodes `id-ecPublicKey` and `secp384r1` with that uncompressed
-point (120 bytes total). Header/report fields identify source or recipient
+Canonical SPKI encodes `id-ecPublicKey` and `secp384r1` with that uncompressed
+point (120 bytes total). Header fields identify source or recipient
 roles; a matching thumbprint alone does not grant authorization.
 
 HPKE uses **Base** mode with the fixed suite above. The complete canonical
-header is passed verbatim as both HPKE `info` and AEAD AAD. DARC encrypts
+header is passed verbatim as HPKE `info`, with empty AEAD AAD. DARC encrypts
 exactly 32 bytes of TMK; SD encrypts exactly 48 bytes of BKS3. Their headers
 are 113 and 161 bytes respectively, and their complete encrypted envelopes
-are 258 and 322 bytes respectively, including the 16-byte GCM tag.
+are 258 and 322 bytes respectively, including the 16-byte GCM tag. The
+complete signed artifacts are 367 bytes for DARC and 431 bytes for SD.
 Unknown versions/kinds/suites, malformed SEC1 encodings, missing fields,
 wrong secret/ciphertext sizes, and trailing bytes are rejected.
 
-The signed envelope hash is
-`SHA-384(ASCII("TSRA-XFER-HASH-v1") || header || enc || ciphertext || tag)`.
-Exporting commands must derive this digest and all report claims internally.
-They must authorize the recipient before sealing; the seal helper additionally
-checks the recipient key ID. A public-key report is never an operation report.
+Exporting commands construct the complete payload internally and authorize
+the recipient before sealing; the seal helper additionally checks its SPKI
+thumbprint. No separate transfer report is produced or accepted.
 
 Before opening, the receiver must authorize the reporting PID using the
 operation's trust contract. The binding helper verifies ES384 and the required
-report kind, derives the source/recipient identifiers from the actual keys,
-requires report/header agreement, and recomputes the envelope hash.
-For SD, the report and header must always agree on the policy hash. A caller
-may additionally require equality with an expected policy (for example peer
-cloning); remote-SA flows may authenticate a different source policy.
+transfer kind, derives the source/recipient thumbprints from the actual keys,
+and requires equality with the signed header. For SD, the signed policy
+hash must equal the requested transferred SD policy. A sealing authority's
+local policy may differ from that policy.
 This does not bypass cloning permissions, trusted-SA evidence requirements,
 rollback checks, or freshness rules. Plaintext is published only after both
-report verification and HPKE authentication succeed.
+signature verification and HPKE authentication succeed. The unreleased
+transfer format has no old claims-map, detached-report, or Auth fallback.
 
 ## See also
 

@@ -15,6 +15,7 @@ use crate::load_partition_recovery;
 use crate::mint_sealing_key;
 use crate::Error;
 use crate::Evidence;
+use crate::IdentityEvidence;
 use crate::PartPolicy;
 use crate::PartitionState;
 use crate::RemoteBackup;
@@ -43,8 +44,8 @@ pub struct ResealedBackup {
     pub sd_mk_backup: Vec<u8>,
     /// Actual authority PID report signer as DER SPKI (currently P-384).
     pub sender_pid_pub_key: Vec<u8>,
-    /// Authority PID chains and mandatory outgoing SdBackup operation report.
-    pub sender_evidence: Evidence,
+    /// Authority PID chains; the signed backup contains the operation signature.
+    pub sender_evidence: IdentityEvidence,
 }
 
 impl ResealedBackup {
@@ -61,8 +62,16 @@ impl ResealedBackup {
             "invalid remote SDMK backup length"
         );
         crate::policy::validate_pid_spki(&self.sender_pid_pub_key)?;
-        require_evidence(&self.sender_evidence)
+        require_identity(&self.sender_evidence)
     }
+}
+
+fn require_identity(evidence: &IdentityEvidence) -> Result<()> {
+    anyhow::ensure!(
+        !evidence.mfgr_cert_chain.is_empty() && !evidence.part_owner_cert_chain.is_empty(),
+        "remote resealing requires complete source identity chains"
+    );
+    Ok(())
 }
 
 fn require_evidence(evidence: &Evidence) -> Result<()> {
@@ -77,9 +86,9 @@ fn require_evidence(evidence: &Evidence) -> Result<()> {
 
 /// Open a source backup and reseal it inside the authority's HSM.
 ///
-/// Source PID chains and operation report must be POTA-authorized. Destination
+/// Source PID chains must POTA-authorize the signed backup's signer. Destination
 /// evidence must attest an HSM-generated SdSealing key and the requested policy.
-/// The outgoing report is signed by the authority's local PID and binds the
+/// The outgoing backup is signed by the authority's local PID and binds the
 /// requested policy, which need not be the authority's local policy.
 pub fn reseal_remote_backup(
     session: &SealingSession,
@@ -96,11 +105,11 @@ pub fn reseal_remote_backup(
         source.pok_remote_backup.len() == POK_REMOTE_BACKUP_LEN,
         "invalid source backup length"
     );
-    require_evidence(&source.evidence)?;
+    require_identity(&source.evidence)?;
     require_evidence(destination)?;
     source
         .evidence
-        .with_hsm_evidence(|src| {
+        .with_hsm_identity(|src| {
             destination.with_hsm_evidence(|dst| {
                 session.session.sd_reseal_remote_backup(
                     policy.as_bytes(),
@@ -191,8 +200,8 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// Restore the SD on an already-prepared partition using the authority's
     /// resealed backup, then atomically persist refreshed local recovery.
     ///
-    /// Applications validate the operation report, recipient and response first.
-    /// Firmware always verifies the report against the supplied raw PID signer.
+    /// Applications validate the signed backup, recipient and response first.
+    /// Firmware always verifies the signature against the supplied PID signer.
     /// With trusted-SA enabled it additionally authenticates source PID chains
     /// under SAPOTA; signature-only mode does not establish trusted SA identity.
     pub fn restore_resealed(
@@ -210,7 +219,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             prepared.receiver.masked.len() == MASKED_SEALING_KEY_LEN,
             "invalid prepared receiver length"
         );
-        let result = backup.sender_evidence.with_hsm_evidence(|evidence| {
+        let result = backup.sender_evidence.with_hsm_identity(|evidence| {
             session.session.sd_restore_remote_backup(
                 self.env().policy().as_bytes(),
                 &prepared.receiver.masked,

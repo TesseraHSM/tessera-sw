@@ -59,7 +59,7 @@ struct RemoteBackup {
     pid_pub: [u8; RAW_PUB_LEN],
     /// The receiver's masked SD-sealing key (used to open the backup).
     masked_sealing_key: Vec<u8>,
-    /// Source PID identity chains and the create command's operation report.
+    /// Source PID identity chains; the signature is inside `src_remote_backup`.
     evidence: ReceiverEvidence,
     /// The 584-byte `PartPolicy` image.
     policy: Vec<u8>,
@@ -104,7 +104,7 @@ fn create_remote_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> RemoteBackup
     RemoteBackup {
         pid_pub,
         masked_sealing_key: masked,
-        evidence: evidence.with_report(&resp.report),
+        evidence,
         policy,
         src_remote_backup: resp.pok_remote_backup,
         prev_sd_mk_backup: resp.sd_mk_backup,
@@ -159,7 +159,7 @@ fn create_remote_backup_trusted(sata: &CaKey, sapota: &CaKey, pota: &CaKey) -> R
     RemoteBackup {
         pid_pub,
         masked_sealing_key: masked,
-        evidence: evidence.with_report(&resp.report),
+        evidence,
         policy,
         src_remote_backup: resp.pok_remote_backup,
         prev_sd_mk_backup: resp.sd_mk_backup,
@@ -189,7 +189,6 @@ fn restore_remote_req(session_id: u16, backup: &RemoteBackup) -> TborSdRestoreRe
         sender_mfgr_cert_chain: backup.evidence.mfgr.clone(),
         sender_owner_cert_chain: backup.evidence.owner.clone(),
         sender_part_owner_cert_chain: backup.evidence.part_owner.clone(),
-        sender_report: backup.evidence.report,
         src_remote_backup: backup.src_remote_backup,
         prev_sd_mk_backup: backup.prev_sd_mk_backup,
     }
@@ -239,6 +238,75 @@ fn sd_restore_remote_backup_roundtrip() {
         resp.sd_mk_backup.iter().any(|&b| b != 0),
         "sd_mk_backup must not be all-zero",
     );
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_chosen_bks3_with_genuine_sdmk_backup() {
+    use tsra_crypto::EccKeyOp;
+    use tsra_crypto::EccPrivateKey;
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::HashOp;
+    use tsra_crypto::HpkeSealConfig;
+    use tsra_crypto::HpkeSuite;
+
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+    let (masked_receiver, _, recipient_raw) = masked_key_report_and_pub(&ctx, session_id);
+    let recipient =
+        EccPublicKey::from_coordinates(EccCurve::P384, &recipient_raw[..48], &recipient_raw[48..])
+            .expect("fresh recipient");
+    let signer = EccPrivateKey::from_curve(EccCurve::P384).expect("software PID");
+    let (x, y) = signer.coord_vec().expect("software PID coordinates");
+    let signer_spki = EccPublicKey::from_coordinates(EccCurve::P384, &x, &y)
+        .expect("software PID public key")
+        .to_vec()
+        .expect("software PID SPKI");
+    let recipient_spki = recipient.to_vec().expect("recipient SPKI");
+    let mut envelope = b"TSRA-XFER".to_vec();
+    envelope.extend_from_slice(&[1, 2, 0, 0x11, 0, 2, 0, 2]);
+    for input in [&signer_spki, &recipient_spki, &backup.policy] {
+        let mut digest = [0; 48];
+        HashAlgo::sha384()
+            .hash(input, Some(&mut digest))
+            .expect("SHA384");
+        envelope.extend_from_slice(&digest);
+    }
+    let config = HpkeSealConfig::base(
+        HpkeSuite::DHKemP384Sha384AesGcm256,
+        &recipient,
+        &envelope,
+        &[],
+    );
+    let sealed = tsra_crypto::seal_vec(&config, &[0xA5; 48]).expect("seal chosen BKS3");
+    let (x, y) = sealed.enc.coord_vec().expect("encapsulation");
+    envelope.push(4);
+    envelope.extend_from_slice(&x);
+    envelope.extend_from_slice(&y);
+    envelope.extend_from_slice(&sealed.ct);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.masked_sealing_key = masked_receiver.try_into().expect("masked recipient size");
+    req.sender_pid_pub_key = signer_spki;
+    req.sender_mfgr_cert_chain.clear();
+    req.sender_owner_cert_chain.clear();
+    req.sender_part_owner_cert_chain.clear();
+    req.src_remote_backup = crate::commands::common::sign_transfer_envelope(&envelope, &signer)
+        .try_into()
+        .expect("signed SD backup size");
+
+    // This status is from opening the genuine SDMK backup, after signature
+    // verification and successful HPKE opening of the attacker-chosen BKS3.
+    ctx.expect_fw_reject(&req, TborStatus::AesGcmDecryptTagDoesNotMatch);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    ctx.tbor_oob(
+        &restore_remote_req(session_id, &backup),
+        &backup.evidence.oob(),
+    )
+    .expect("valid restore still succeeds after rejected chosen BKS3");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }
 
 #[test]
@@ -317,7 +385,7 @@ fn sd_restore_remote_backup_is_one_shot() {
     let backup = RemoteBackup {
         pid_pub,
         masked_sealing_key: masked,
-        evidence: evidence.with_report(&created.report),
+        evidence,
         policy,
         src_remote_backup: created.pok_remote_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
@@ -345,7 +413,6 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
         sender_mfgr_cert_chain: Vec::new(),
         sender_owner_cert_chain: Vec::new(),
         sender_part_owner_cert_chain: Vec::new(),
-        sender_report: Default::default(),
         src_remote_backup: [0u8; POK_REMOTE_BACKUP_LEN],
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };
@@ -654,16 +721,14 @@ fn sd_restore_remote_backup_signature_only_requires_bound_operation_report_and_a
     valid.sender_owner_cert_chain.clear();
     valid.sender_part_owner_cert_chain.clear();
 
-    let original = backup.evidence.oob()[valid.sender_report.index as usize].to_vec();
-    let mut corrupt = original.clone();
+    let original = valid.src_remote_backup;
+    let mut corrupt = original;
     let last = corrupt.len() - 1;
     corrupt[last] ^= 1;
-    let (_, public_key_report, _) = masked_key_report_and_pub(&ctx, sid);
-    for report in [Vec::new(), corrupt, public_key_report] {
-        let evidence = backup.evidence.clone().with_report(&report);
+    for envelope in [[0; POK_REMOTE_BACKUP_LEN], corrupt] {
         let mut req = valid.clone();
-        req.sender_report = evidence.report;
-        assert!(ctx.tbor_oob(&req, &evidence.oob()).is_err());
+        req.src_remote_backup = envelope;
+        assert!(ctx.tbor_oob(&req, &backup.evidence.oob()).is_err());
         assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
     }
 

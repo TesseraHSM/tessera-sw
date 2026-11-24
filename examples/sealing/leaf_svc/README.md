@@ -4,20 +4,23 @@ The `sock` feature runs the existing root and leaf sealing workflows against
 host-native firmware in `ddi_sock_server`. TBOR OOB certificate/report bytes are
 serialized in index order and reconstructed as server-owned SGL descriptors.
 SD transfers use P-384 HPKE Base (KEM `0x0011`, KDF `0x0002`, AEAD `0x0002`)
-with a 322-byte envelope and a mandatory v2 COSE_Sign1/ES384 SdBackup report.
-The 161-byte header is both HPKE info and AAD; reports bind source PID,
-recipient, complete envelope hash and transferred SD policy hash. Source
-evidence carries PID chains and the operation report, not a sealing-key
+with one 431-byte COSE_Sign1/ES384 signed SdBackup envelope.
+The 161-byte binary header is HPKE info, with empty AAD. The signature
+directly binds the entire header, encapsulation, ciphertext, and tag.
+Source and recipient IDs are SHA-384 canonical-DER-SPKI thumbprints.
+COSE external AAD is `TSRA-SdBackup-v1` followed by 16 zero bytes.
+It is signed but not transmitted; it is distinct from the empty HPKE AAD.
+Source evidence carries only PID chains, not a report or sealing-key
 attestation. Recipient evidence remains an HSM-generated SdSealing attestation.
 Creation retains SATA recipient authorization; SATA sender authorization is removed.
 Resealing signs the requested leaf policy using the actual root-local PID.
 
 Peer and leaf backup/reseal wire records are version 2; root remote-recovery
-records are version 3. Old HPKE Auth records and missing reports are rejected;
+records are version 3. Old HPKE Auth or detached-report transfers are rejected;
 there is no success fallback or automatic conversion of old recovery files.
 `root_svc create --remote-restorable` still opens and reseals through a
-software authority, using HPKE Base and its actual software report signer.
-This flow requires `require_trusted_sa_key=false`: its signature-only report
+software authority, using HPKE Base and its actual software PID signer.
+This flow requires `require_trusted_sa_key=false`: its signature-only backup
 asserts neither trusted authority identity nor hardware provenance. Trusted-SA
 leaf restore additionally authenticates the supplied DER-SPKI root PID through SAPOTA.
 

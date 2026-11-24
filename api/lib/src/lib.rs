@@ -12,7 +12,6 @@ mod shared_types;
 pub mod traits;
 
 pub use algo::*;
-pub use ddi::DARC_REPORT_MAX_LEN;
 pub use ddi::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 pub use ddi::DARC_UNWRAP_PUB_KEY_MAX_LEN;
 pub use ddi::DARC_UNWRAP_WRAPPED_KEY_MAX_LEN;
@@ -38,7 +37,6 @@ pub use ddi::PolicyFlags;
 pub use ddi::PolicyKey;
 pub use ddi::PolicyKeyFormat;
 pub use ddi::PolicyThumbprint;
-pub use ddi::SD_BACKUP_REPORT_MAX_LEN;
 pub use ddi::SD_MK_BACKUP_LEN;
 pub use ddi::SEALED_TMK_LEN;
 pub use ddi::policy_key_thumbprint;

@@ -283,7 +283,6 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
         &ready,
         target_kex.masked,
         export.sealed_tmk.as_slice().try_into().expect("sealed TMK"),
-        export.report,
     );
     let imported_tmk = tmk_array(&imported_tmk);
 

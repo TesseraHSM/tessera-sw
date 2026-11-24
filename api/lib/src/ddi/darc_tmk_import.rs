@@ -33,7 +33,6 @@ use super::*;
 /// * `sealed_tmk` - The sealed TMK from
 ///   [`darc_tmk_export`](super::darc_tmk_export), exactly
 ///   [`SEALED_TMK_LEN`] bytes.
-/// * `report` - The PID-signed `Darc` report returned with `sealed_tmk`.
 /// * `remote_cert_chain` - POTA-anchored source PID certificate chain
 ///   (1..=3 certs, normally POTA -> PTA -> PID); DER carried out of band.
 ///
@@ -47,7 +46,6 @@ pub(crate) fn darc_tmk_import(
     masked_kex_key: &[u8],
     policy: &[u8],
     sealed_tmk: &[u8],
-    report: &[u8],
     remote_cert_chain: &[HsmCert<'_>],
 ) -> HsmResult<Vec<u8>> {
     let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = masked_kex_key
@@ -57,9 +55,6 @@ pub(crate) fn darc_tmk_import(
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
-    if report.is_empty() || report.len() > DARC_REPORT_MAX_LEN {
-        return Err(HsmError::InvalidArgument);
-    }
 
     let mut oob: Vec<&[u8]> = Vec::new();
     let remote_cert_chain = push_cert_chain(
@@ -73,7 +68,6 @@ pub(crate) fn darc_tmk_import(
         masked_kex_key,
         policy,
         sealed_tmk,
-        report: report.to_vec(),
         remote_cert_chain,
     };
 

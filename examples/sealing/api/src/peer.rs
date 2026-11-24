@@ -14,6 +14,7 @@ use crate::hsm::mint_sealing_key;
 use crate::hsm::SealingKey;
 use crate::Error;
 use crate::Evidence;
+use crate::IdentityEvidence;
 use crate::PartitionState;
 use crate::SealingSession;
 use crate::SecurityDomain;
@@ -28,8 +29,8 @@ pub struct PeerBackup {
     pub pok_peer_backup: Vec<u8>,
     /// The source's associated SD masking-key backup.
     pub sd_mk_backup: Vec<u8>,
-    /// Source PID certificate chains and its SdBackup operation report.
-    pub sender_evidence: Evidence,
+    /// Source PID certificate chains; the backup contains its signature.
+    pub sender_evidence: IdentityEvidence,
 }
 
 /// A finalized destination partition and its locally masked receiver key.
@@ -72,7 +73,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
 
     /// Export the live SD to an attested receiver. Firmware verifies receiver
     /// evidence against POTA and the bound policy. `attest` must return the
-    /// complete source PID evidence retaining the supplied operation report.
+    /// complete source PID certificate chains.
     pub fn create_peer_backup<Attest>(
         &self,
         session: &SealingSession,
@@ -80,7 +81,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         attest: Attest,
     ) -> Result<PeerBackup>
     where
-        Attest: FnOnce(&[u8]) -> Result<Evidence>,
+        Attest: FnOnce() -> Result<IdentityEvidence>,
     {
         anyhow::ensure!(
             self.env().policy().flags.allow_peer_cloning(),
@@ -100,11 +101,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
                 )
             })
             .context("sd_create_peer_backup")?;
-        let sender_evidence = attest(&transfer.report)?;
-        anyhow::ensure!(
-            sender_evidence.report == transfer.report,
-            "source evidence must retain the operation report"
-        );
+        let sender_evidence = attest()?;
         Ok(PeerBackup {
             pok_peer_backup: transfer.backup,
             sd_mk_backup: state.sd_mk_backup,
@@ -142,7 +139,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         );
         let restored = backup
             .sender_evidence
-            .with_hsm_evidence(|evidence| {
+            .with_hsm_identity(|evidence| {
                 session.session.sd_restore_peer_backup(
                     self.env().policy().as_bytes(),
                     &prepared.receiver.masked,

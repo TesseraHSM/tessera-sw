@@ -28,14 +28,14 @@ enum MutationTarget {
     SenderMfgrCertChain,
     SenderOwnerCertChain,
     SenderPartOwnerCertChain,
-    SenderReport,
+    Signature,
     SrcRemoteBackup,
     PrevSdMkBackup,
     SenderPidCoordinates,
     SenderMfgrCertOob,
     SenderOwnerCertOob,
     SenderPartOwnerCertOob,
-    SenderReportOob,
+    Header,
     SenderPidInvalidDer,
     SenderMfgrCertInvalidDer,
     SenderOwnerCertInvalidDer,
@@ -223,47 +223,42 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
         .tbor_oob(&create_req, &evidence.oob())
         .expect("SdCreateRemoteBackup should succeed");
 
-    let (restore_sealing_key, mut restore_evidence) =
-        if key_scope == common::KeyScope::SecurityDomain {
-            let sealing_key = ctx
-                .tbor(&TborSdSealingKeyGenReq {
-                    session_id: source_session.session_id,
-                    scope: key_scope.to_tbor(),
-                })
-                .expect("SecurityDomain-scope key generation should succeed after SD creation");
-            let report = ctx
-                .tbor(&TborKeyReportReq {
-                    session_id: source_session.session_id,
-                    masked_key: sealing_key.masked_key.to_vec(),
-                    report_data: [0u8; KEY_REPORT_DATA_LEN],
-                    auth_envelope: Vec::new(),
-                })
-                .expect("SecurityDomain-scope KeyReport should succeed")
-                .report;
-            let mut public_key = [0u8; RAW_PUB_LEN];
-            for (dst, src) in public_key[..COORD_LEN]
-                .iter_mut()
-                .zip(sealing_key.pub_key[..COORD_LEN].iter().rev())
-            {
-                *dst = *src;
-            }
-            for (dst, src) in public_key[COORD_LEN..]
-                .iter_mut()
-                .zip(sealing_key.pub_key[COORD_LEN..].iter().rev())
-            {
-                *dst = *src;
-            }
-            (
-                sealing_key,
-                build_sender_evidence(&pid_pub, &public_key, &sata, &sapota, &report),
-            )
-        } else {
-            (sealing_key, evidence)
-        };
-    restore_evidence.report.length = u16::try_from(created.report.len())
-        .expect("operation report length")
-        .into();
-    restore_evidence.items[usize::from(restore_evidence.report.index)] = created.report;
+    let (restore_sealing_key, restore_evidence) = if key_scope == common::KeyScope::SecurityDomain {
+        let sealing_key = ctx
+            .tbor(&TborSdSealingKeyGenReq {
+                session_id: source_session.session_id,
+                scope: key_scope.to_tbor(),
+            })
+            .expect("SecurityDomain-scope key generation should succeed after SD creation");
+        let report = ctx
+            .tbor(&TborKeyReportReq {
+                session_id: source_session.session_id,
+                masked_key: sealing_key.masked_key.to_vec(),
+                report_data: [0u8; KEY_REPORT_DATA_LEN],
+                auth_envelope: Vec::new(),
+            })
+            .expect("SecurityDomain-scope KeyReport should succeed")
+            .report;
+        let mut public_key = [0u8; RAW_PUB_LEN];
+        for (dst, src) in public_key[..COORD_LEN]
+            .iter_mut()
+            .zip(sealing_key.pub_key[..COORD_LEN].iter().rev())
+        {
+            *dst = *src;
+        }
+        for (dst, src) in public_key[COORD_LEN..]
+            .iter_mut()
+            .zip(sealing_key.pub_key[COORD_LEN..].iter().rev())
+        {
+            *dst = *src;
+        }
+        (
+            sealing_key,
+            build_sender_evidence(&pid_pub, &public_key, &sata, &sapota, &report),
+        )
+    } else {
+        (sealing_key, evidence)
+    };
 
     ctx.session_close(source_session.session_id)
         .expect("source session close should succeed");
@@ -322,15 +317,6 @@ fn invalidate_descriptor(descriptors: &mut [CertDescriptor], input: &FuzzInput) 
     true
 }
 
-/// Corrupt the report's OOB index or length according to the fuzzed mask.
-fn invalidate_report(report: &mut ReportDescriptor, input: &FuzzInput) {
-    if input.mask & 1 == 0 {
-        report.index = u8::MAX;
-    } else {
-        report.length = U16::new(report.length.get() ^ (u16::from(input.mask) | 1));
-    }
-}
-
 /// Flip the byte at `byte_offset` in an OOB item selected through the supplied
 /// descriptors, returning whether a referenced, nonempty item was changed.
 /// Use offset zero to invalidate a certificate's required DER SEQUENCE tag.
@@ -378,10 +364,11 @@ fn mutate_request(
         MutationTarget::SenderPartOwnerCertChain => {
             invalidate_descriptor(&mut req.sender_part_owner_cert_chain, input)
         }
-        MutationTarget::SenderReport => {
-            invalidate_report(&mut req.sender_report, input);
-            true
-        }
+        MutationTarget::Signature => flip(
+            &mut req.src_remote_backup[POK_REMOTE_BACKUP_LEN - 96..],
+            input.offset,
+            input.mask,
+        ),
         MutationTarget::SrcRemoteBackup => {
             flip(&mut req.src_remote_backup, input.offset, input.mask)
         }
@@ -409,14 +396,11 @@ fn mutate_request(
             input,
             input.offset,
         ),
-        MutationTarget::SenderReportOob => {
-            let report = [fixture.evidence.report.index];
-            let descriptors = [CertDescriptor {
-                index: report[0],
-                length: fixture.evidence.report.length,
-            }];
-            mutate_oob_item(evidence, &descriptors, input, input.offset)
-        }
+        MutationTarget::Header => flip(
+            &mut req.src_remote_backup[11..172],
+            input.offset,
+            input.mask,
+        ),
         MutationTarget::SenderPidInvalidDer => flip(&mut req.sender_pid_pub_key, 0, input.mask),
         MutationTarget::SenderMfgrCertInvalidDer => {
             mutate_oob_item(evidence, &fixture.evidence.mfgr_cert_chain, input, 0)
@@ -454,7 +438,6 @@ fn validate_response(
         MutationTarget::SenderMfgrCertOob
             | MutationTarget::SenderOwnerCertOob
             | MutationTarget::SenderPartOwnerCertOob
-            | MutationTarget::SenderReportOob
     );
     let must_fail = input.key_scope != common::KeyScope::Local || (changed && !arbitrary_oob);
     let must_succeed = input.key_scope == common::KeyScope::Local && !changed;
@@ -500,7 +483,6 @@ fuzz_target!(|input: FuzzInput| {
             sender_mfgr_cert_chain: evidence.mfgr_cert_chain.clone(),
             sender_owner_cert_chain: evidence.owner_cert_chain.clone(),
             sender_part_owner_cert_chain: evidence.part_owner_cert_chain.clone(),
-            sender_report: evidence.report,
             src_remote_backup: fixture.src_remote_backup,
             prev_sd_mk_backup: fixture.prev_sd_mk_backup,
         };

@@ -33,7 +33,7 @@ pub(crate) struct SigStructure<'a> {
     #[n(1)]
     #[cbor(with = "minicbor::bytes")]
     pub body_protected: &'a [u8],
-    /// External AAD; always empty for this report.
+    /// Application signature domain; empty only for PublicKey attestations.
     #[n(2)]
     #[cbor(with = "minicbor::bytes")]
     pub external_aad: &'a [u8],
@@ -109,28 +109,6 @@ pub(crate) struct KeyReportPayload<'a> {
     /// Signed discriminator (v2 only); absent in legacy key reports.
     #[n(8)]
     pub report_kind: Option<u8>,
-}
-
-/// Operation payload. Public-key fields are deliberately absent.
-#[derive(Encode, CborLen)]
-#[cbor(map)]
-pub(crate) struct TransferReportPayload<'a> {
-    #[n(0)]
-    pub version: u16,
-    #[n(7)]
-    #[cbor(with = "minicbor::bytes")]
-    pub policy_hash: Option<&'a [u8]>,
-    #[n(8)]
-    pub report_kind: u8,
-    #[n(9)]
-    #[cbor(with = "minicbor::bytes")]
-    pub source_pid_key_id: &'a [u8],
-    #[n(10)]
-    #[cbor(with = "minicbor::bytes")]
-    pub recipient_key_id: &'a [u8],
-    #[n(11)]
-    #[cbor(with = "minicbor::bytes")]
-    pub envelope_hash: &'a [u8],
 }
 
 /// The `Sig_structure` context literal (`"Signature1"`).

@@ -7,7 +7,7 @@
 //! Creates a peer-transferable backup of a security domain: recovers BKS3
 //! from the caller's device-local backup (`pok_local_backup`) and
 //! Base-seals it to the destination peer named by `dst_evidence`, returning
-//! the envelope and PID-signed SdBackup report. Peer cloning is gated by the security
+//! one PID-signed SdBackup envelope. Peer cloning is gated by the security
 //! domain's `allow_peer_cloning` policy flag. Runs **inside an already-open
 //! session**; the request carries the active session id, which the firmware
 //! dispatcher cross-checks against the SQE-carried session id. Attestation
@@ -20,7 +20,7 @@ use super::*;
 /// Issue `SdCreatePeerBackup` (opcode `0x0E`) on the active session.
 ///
 /// Recovers BKS3 from `pok_local_backup` and Base-seals it to the authorized
-/// same-policy peer, returning the envelope and PID-signed operation report.
+/// same-policy peer, returning one directly PID-signed envelope.
 ///
 /// # Arguments
 ///
@@ -77,7 +77,6 @@ pub(crate) fn sd_create_peer_backup_ex(
         dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(|resp| HsmSdTransferResult {
                 backup: resp.pok_peer_backup.to_vec(),
-                report: resp.report,
             })
             .map_err(HsmError::from)
     })

@@ -63,7 +63,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
-    src_evidence: &HsmSdEvidence<'_>,
+    src_evidence: &HsmSdIdentityEvidence<'_>,
     policy: &[u8],
     pok_peer_backup: &[u8],
     prev_sd_mk_backup: &[u8],
@@ -82,7 +82,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
 
     // Flatten the source evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
-    let src = super::sd_evidence::push_transfer_evidence(src_evidence, &mut oob)?;
+    let src = super::sd_evidence::push_identity_evidence(src_evidence, &mut oob)?;
 
     let req = TborSdRestorePeerBackupReq {
         session_id,
@@ -91,7 +91,6 @@ pub(crate) fn sd_restore_peer_backup_ex(
         src_mfgr_cert_chain: src.mfgr,
         src_owner_cert_chain: src.owner,
         src_part_owner_cert_chain: src.part_owner,
-        src_report: src.report,
         pok_peer_backup,
         prev_sd_mk_backup,
     };
