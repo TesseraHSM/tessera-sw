@@ -125,9 +125,19 @@ impl UnoHsmPal {
         ) {
             return;
         }
-        if part.unwrapping_key_slot() != Some(UnwrappingKeySlot::PendingPct)
-            || part.unwrapping_key_id().is_some()
-        {
+        let slot = part.unwrapping_key_slot();
+        let pct_due =
+            slot == Some(UnwrappingKeySlot::PendingPct) && part.unwrapping_key_id().is_none();
+        // Negative-PCT test builds can also ask for a staged key to be tested
+        // again, even one that already passed or was imported.
+        #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+        let pct_due = pct_due
+            || (self.neg_pct_retest(pid)
+                && matches!(
+                    slot,
+                    Some(UnwrappingKeySlot::PendingPct | UnwrappingKeySlot::PctPassed)
+                ));
+        if !pct_due {
             return;
         }
         let Some(_reservation) = PctReservation::acquire(self, pid) else {
@@ -141,15 +151,23 @@ impl UnoHsmPal {
                 return;
             };
             key.copy_from_slice(part.unwrapping_key_bk());
+            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+            let result = self.neg_pct_unwrapping_key_pct(io, key).await;
+            #[cfg(not(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks")))]
             let result = self.unwrapping_key_pct(io, key).await;
 
             // Nothing below awaits, so no teardown can run before the slot is
             // marked or discarded, and the SP doesn't write an occupied slot.
-            let same = part.unwrapping_key_slot() == Some(UnwrappingKeySlot::PendingPct)
-                && ct_eq(part.unwrapping_key_bk(), key);
+            let same = part.unwrapping_key_slot() == slot && ct_eq(part.unwrapping_key_bk(), key);
             wipe(key);
             match result {
-                Ok(true) if same => part.mark_unwrapping_key_pct_passed(),
+                Ok(true) if same => {
+                    if slot == Some(UnwrappingKeySlot::PendingPct) {
+                        part.mark_unwrapping_key_pct_passed();
+                    }
+                    #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+                    self.set_neg_pct_retest(pid, false);
+                }
                 Ok(false) => {
                     // Discard the failed key before entering the error
                     // state. A slot that now holds a different key is left

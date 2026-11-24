@@ -611,6 +611,15 @@ impl HsmEcc for UnoHsmPal {
             priv_out[..priv_len].copy_from_slice(priv_key);
             pub_out[..pub_len].copy_from_slice(pub_key);
 
+            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+            self.neg_pct_ecc_gen(
+                io.pid(),
+                crate::test_hooks::neg_pct::NegPctKind::EccKeyGen,
+                curve,
+                &pct,
+                &mut pub_out[..pub_len],
+            );
+
             self.generation_pct(
                 io,
                 workspace,
@@ -708,6 +717,15 @@ impl HsmEcc for UnoHsmPal {
             let workspace = scope.dma_alloc(workspace_len)?;
             self.ecc_gen_keypair_deterministic(io, pka_curve, root, priv_out, pub_out, workspace)
                 .await?;
+
+            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+            self.neg_pct_ecc_gen(
+                io.pid(),
+                crate::test_hooks::neg_pct::NegPctKind::EccKeyGen,
+                curve,
+                &pct,
+                &mut pub_out[..pub_len],
+            );
 
             self.generation_pct(
                 io,

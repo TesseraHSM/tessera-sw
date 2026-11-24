@@ -337,6 +337,19 @@ impl UnoHsmPal {
                     Some((priv_buf, pub_buf)),
                 )
                 .await?;
+
+            // The PCT below is this partition key's only PCT: the keygen above
+            // ran with `HsmEccPct::None`, so the skip count is consumed here
+            // exactly once.
+            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+            self.neg_pct_ecc_gen(
+                pid,
+                crate::test_hooks::neg_pct::NegPctKind::partition_key(kind),
+                HsmEccCurve::P384,
+                &pct,
+                pub_buf,
+            );
+
             if !tsra_fw_uno_pct::ecc_pct(
                 self,
                 admin_io,
@@ -832,6 +845,13 @@ impl HsmPartitionManager for UnoHsmPal {
         // afterwards means the HSP has not published yet, which the handler
         // surfaces as `PendingKeyGeneration`.
         if id == HsmPartPropId::RSA_UNWRAPPING_KEY_ID {
+            // Negative-PCT test builds don't release a key whose PCT is due to
+            // run again: the read reports it pending until the check before
+            // the next IO has tested it.
+            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+            if self.neg_pct_retest(io.pid()) {
+                return Err(HsmError::PartPropNotFound);
+            }
             self.ensure_unwrapping_key_imported(io)?;
         }
         let part = PartStore::partition(io.pid())?;

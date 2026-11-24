@@ -28,7 +28,7 @@ pub enum TestActionRequest {
     ForcePkaInstance(Option<u8>),
     TriggerRngHwFailure,
     ToggleFipsApprovedState,
-    TriggerNegativePctFailure(u8),
+    TriggerNegativePctFailure(DdiTestActionNegativePctFailureReqInfo),
     TriggerEccError(DdiTestActionEccErrorInfo),
     TriggerTdispInterrupt(DdiTestActionInterruptSimulationType),
     ClearUserCredentials,
@@ -106,11 +106,7 @@ impl TryFrom<TestActionRequest> for DdiTestActionReq {
             }
             TestActionRequest::TriggerNegativePctFailure(value) => (
                 DdiTestAction::TriggerNegativePctFailure,
-                Some(encode_test_action_payload(
-                    &DdiTestActionNegativePctFailureReqInfo {
-                        neg_pct_skip_cnt: value,
-                    },
-                )?),
+                Some(encode_test_action_payload(&value)?),
             ),
             TestActionRequest::TriggerEccError(value) => (
                 DdiTestAction::TriggerEccError,
@@ -204,7 +200,10 @@ mod tests {
                 lockout_delay: None,
             }),
             TestActionRequest::ForcePkaInstance(Some(1)),
-            TestActionRequest::TriggerNegativePctFailure(1),
+            TestActionRequest::TriggerNegativePctFailure(DdiTestActionNegativePctFailureReqInfo {
+                neg_pct_skip_cnt: 1,
+                pct_kind: DdiTestActionNegativePctKind::UnwrappingKey,
+            }),
             TestActionRequest::TriggerEccError(DdiTestActionEccErrorInfo {
                 ecc_error_type: DdiTestActionEccErrorType::DtcmDoubleBit,
                 cpu_id: DdiTestActionSocCpuId::Hsm,
@@ -224,6 +223,25 @@ mod tests {
             let mut decoder = MborDecoder::new(wire.payload.as_slice(), false);
             MborMap::mbor_decode(&mut decoder).expect("payload must start with an MBOR map");
         }
+    }
+
+    #[test]
+    fn negative_pct_payload_carries_kind_and_skip() {
+        let wire = DdiTestActionReq::try_from(TestActionRequest::TriggerNegativePctFailure(
+            DdiTestActionNegativePctFailureReqInfo {
+                neg_pct_skip_cnt: 2,
+                pct_kind: DdiTestActionNegativePctKind::SessionEncKey,
+            },
+        ))
+        .expect("payload must encode");
+        assert_eq!(wire.action, DdiTestAction::TriggerNegativePctFailure);
+
+        let mut decoder = MborDecoder::new(wire.payload.as_slice(), false);
+        let info = DdiTestActionNegativePctFailureReqInfo::mbor_decode(&mut decoder)
+            .expect("payload must decode");
+        assert_eq!(info.pct_kind, DdiTestActionNegativePctKind::SessionEncKey);
+        assert_eq!(info.neg_pct_skip_cnt, 2);
+        assert_eq!(decoder.position(), wire.payload.as_slice().len());
     }
 
     #[test]

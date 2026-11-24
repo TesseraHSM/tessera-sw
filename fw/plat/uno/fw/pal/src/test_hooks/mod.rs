@@ -27,6 +27,8 @@
 //! - [`test_action`] — the `TestAction` (`DdiOp` 2004) handler.
 //! - [`get_priv_key`] / [`raw_key_import`] — FIPS-validation action handlers.
 //! - [`get_rng`] — the `GetRng` FIPS-validation action handler.
+//! - [`neg_pct`] — `TriggerNegativePctFailure` support; requires both
+//!   `tsra_test_hooks` and `fips_validation_hooks`.
 //!
 //! # Test hooks are in-session commands
 //!
@@ -52,6 +54,10 @@
 //! and 27, respectively, enabled only by `fips_validation_hooks`. Their legacy
 //! standalone opcodes 2005, 2008, and 2007 are not accepted. The host package
 //! and firmware must use the same action selectors and payload schemas.
+//!
+//! `TriggerNegativePctFailure` uses TestAction value 15 with the payload
+//! `{1: neg_pct_skip_cnt: u8, 2: pct_kind: u32}`, both required, and requires
+//! both `tsra_test_hooks` and `fips_validation_hooks`; see [`neg_pct`].
 
 use core::future::Future;
 use core::pin::Pin;
@@ -65,6 +71,8 @@ mod common;
 mod get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
 mod get_rng;
+#[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+pub(crate) mod neg_pct;
 #[cfg(feature = "fips_validation_hooks")]
 mod raw_key_import;
 #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]

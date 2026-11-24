@@ -31,6 +31,8 @@ use super::common::success_hdr;
 use super::get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_rng;
+#[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+use super::neg_pct;
 #[cfg(feature = "fips_validation_hooks")]
 use super::raw_key_import;
 #[cfg(feature = "tsra_test_hooks")]
@@ -64,6 +66,9 @@ enum SupportedTestAction {
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
+    /// Arm a negative pairwise consistency test failure.
+    #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+    TriggerNegativePctFailure = 15,
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
@@ -94,6 +99,10 @@ impl TryFrom<u32> for SupportedTestAction {
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::TriggerCrash as u32 {
             return Ok(Self::TriggerCrash);
+        }
+        #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+        if value == Self::TriggerNegativePctFailure as u32 {
+            return Ok(Self::TriggerNegativePctFailure);
         }
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::ClearUserCredentials as u32 {
@@ -144,6 +153,15 @@ pub(super) async fn dispatch<'p>(
                 .await
                 .map(|never| match never {})
         }
+        #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+        SupportedTestAction::TriggerNegativePctFailure => neg_pct::dispatch(
+            pal,
+            io,
+            hdr,
+            decoder,
+            selector.request_field_count,
+            request_len,
+        ),
         #[cfg(feature = "fips_validation_hooks")]
         SupportedTestAction::GetPrivKey => {
             let payload = decode_payload_bytes(decoder, selector.request_field_count, request_len)?;
