@@ -16,7 +16,7 @@ use crate::XtaskCtx;
 #[derive(Parser)]
 #[clap(about = "Run fuzz build")]
 pub struct FuzzBuild {
-    /// Override toolchain to use for fuzz build
+    /// Override toolchain to use for fuzz build (defaults to RUST_TOOLCHAIN or nightly-2026-11-17)
     #[clap(long)]
     pub toolchain: Option<String>,
 }
@@ -26,10 +26,8 @@ impl Xtask for FuzzBuild {
         log::trace!("running fuzz build");
 
         let sh = xshell::Shell::new()?;
-        let rust_toolchain = self
-            .toolchain
-            .or_else(|| sh.var("RUST_TOOLCHAIN").ok())
-            .map(|s| format!("+{s}"));
+        let rust_toolchain = resolve_toolchain(self.toolchain, sh.var("RUST_TOOLCHAIN").ok());
+        let rust_toolchain = format!("+{rust_toolchain}");
 
         // Elevate warnings to errors, but do not clobber existing RUSTFLAGS (e.g., custom linker)
         let existing = sh.var("RUSTFLAGS").unwrap_or_default();
@@ -45,7 +43,7 @@ impl Xtask for FuzzBuild {
 
         cmd!(
             sh,
-            "cargo {rust_toolchain...} fuzz build --features autostart-isolated"
+            "cargo {rust_toolchain} fuzz build --features autostart-isolated"
         )
         .quiet()
         .run()?;
@@ -53,4 +51,10 @@ impl Xtask for FuzzBuild {
         log::trace!("done fuzz build");
         Ok(())
     }
+}
+
+fn resolve_toolchain(explicit: Option<String>, environment: Option<String>) -> String {
+    explicit
+        .or(environment)
+        .unwrap_or_else(|| "nightly-2026-11-17".to_string())
 }
