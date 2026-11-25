@@ -10,7 +10,6 @@ use common::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_ddi::*;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
 use tsra_ddi_mbor_test_helpers::helper_ecc_sign;
@@ -27,7 +26,7 @@ pub struct FuzzInput {
     // Selects the elliptic curve to be used for ECC key generation
     pub curve: DdiEccCurve,
     // A fuzzed `DdiEccSignReq` structure that provides the base for request parameters for the ECC sign operation
-    pub cmdreq_data: DdiEccSignReq,
+    pub cmdreq_data: Bounded<DdiEccSignReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -45,7 +44,7 @@ pub fn fuzz_ddi_ecc_sign(input: FuzzInput) {
             }
         };
 
-        let cmdreq_data = input.cmdreq_data;
+        let cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 
@@ -74,9 +73,7 @@ pub fn fuzz_ddi_ecc_sign(input: FuzzInput) {
             cmdreq_data.digest_algo,
         );
 
-        if let Err(err @ DdiError::DriverError(_)) = &resp {
-            panic!("Crash Detected: {err}");
-        }
+        check_driver_error(resp);
 
         if input.use_valid_key_id {
             helper_delete_key(dev, Some(sess_id), rev, key_id).expect("Could not delete key");

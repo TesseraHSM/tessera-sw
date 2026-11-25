@@ -16,7 +16,7 @@ use rand::rngs::StdRng;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::RsaPrivateKey;
-use tsra_ddi::*;
+use tsra_ddi::DdiError;
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_get_unwrapping_key;
@@ -40,7 +40,7 @@ pub struct FuzzInput {
     /// Size of the RSA key to generate
     pub key_size: RsaKeySize,
     /// A fuzzed `DdiRsaUnwrapReq` structure that provides the base for request parameters for the RSA unwrap operation
-    pub cmdreq_data: DdiRsaUnwrapReq,
+    pub cmdreq_data: Bounded<DdiRsaUnwrapReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -58,13 +58,19 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
             }
         };
 
-        let mut cmdreq_data = input.cmdreq_data;
+        let mut cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 
         if input.use_valid_key_id || input.use_valid_wrapped_blob {
-            let unwrapping_resp = helper_get_unwrapping_key(dev, Some(sess_id), rev)
-                .expect("Could not get unwrapping key");
+            let unwrapping_resp = match helper_get_unwrapping_key(dev, Some(sess_id), rev) {
+                Ok(resp) => resp,
+                Err(DdiError::DdiStatus(DdiStatus::PendingKeyGeneration)) => {
+                    cleanup_with_session(dev, Some(sess_id));
+                    return;
+                }
+                Err(err) => panic!("Could not get unwrapping key: {err:?}"),
+            };
 
             if input.use_valid_key_id {
                 key_id = unwrapping_resp.data.key_id;
@@ -119,8 +125,8 @@ pub fn fuzz_ddi_rsa_unwrap(input: FuzzInput) {
             // Clean up the unwrapped key if it was created successfully
             helper_delete_key(dev, Some(sess_id), rev, rsa_unwrapped_key_id)
                 .expect("Could not delete unwrapped key");
-        } else if let Err(err @ DdiError::DriverError(_)) = &resp {
-            panic!("Crash Detected: {err}");
+        } else {
+            check_driver_error(resp);
         }
 
         cleanup_with_session(dev, Some(sess_id));

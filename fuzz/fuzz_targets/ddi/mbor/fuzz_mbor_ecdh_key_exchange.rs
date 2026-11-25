@@ -13,7 +13,6 @@ use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_delete_key;
 use tsra_ddi_mbor_test_helpers::helper_ecc_generate_key_pair;
@@ -35,7 +34,7 @@ pub struct FuzzInput {
     //Selects the elliptic curve to be used for ECC key generation
     pub curve: DdiEccCurve,
     // A fuzzed `DdiEcdhKeyExchangeReq` structure that provides the base for request parameters for the ECDH operation
-    pub cmdreq_data: DdiEcdhKeyExchangeReq,
+    pub cmdreq_data: Bounded<DdiEcdhKeyExchangeReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -53,7 +52,7 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
             }
         };
 
-        let mut cmdreq_data = input.cmdreq_data;
+        let mut cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut priv_key_id = cmdreq_data.priv_key_id;
 
@@ -119,9 +118,7 @@ pub fn fuzz_ddi_ecdh_key_exchange(input: FuzzInput) {
             key_props,
         );
 
-        if let Err(err @ DdiError::DriverError(_)) = &resp {
-            panic!("Crash Detected: {err}");
-        }
+        check_driver_error(resp);
 
         if input.use_valid_key_id {
             helper_delete_key(dev, Some(sess_id), rev, priv_key_id).expect("Could not delete key");

@@ -45,7 +45,7 @@ pub struct FuzzInput {
     /// Specifies the RSA key size to be used when importing an RSA key
     pub key_size: RsaKeySize,
     /// A fuzzed `DdiAttestKeyReq` structure that provides the base for request parameters for the Attest Key operation
-    pub cmdreq_data: DdiAttestKeyReq,
+    pub cmdreq_data: Bounded<DdiAttestKeyReq>,
     /// Specifies the AES key size to be used when generating an AES key for testing (used only if `key_source` is `GeneratedAesKey`)
     pub aes_key_size: DdiAesKeySize,
 }
@@ -65,7 +65,7 @@ pub fn fuzz_ddi_attest_key(input: FuzzInput) {
                 return;
             }
         };
-        let mut cmdreq_data = input.cmdreq_data;
+        let mut cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 

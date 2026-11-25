@@ -26,7 +26,7 @@ pub struct FuzzInput {
     // Specifies the size of the AES key to be generated
     pub key_size: DdiAesKeySize,
     // A fuzzed `DdiAesEncryptDecryptReq` structure that provides the base for request parameters for the AES operation
-    pub cmdreq_data: DdiAesEncryptDecryptReq,
+    pub cmdreq_data: Bounded<DdiAesEncryptDecryptReq>,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -44,7 +44,7 @@ pub fn fuzz_ddi_aes_encrypt_decrypt(input: FuzzInput) {
             }
         };
 
-        let cmdreq_data = input.cmdreq_data;
+        let cmdreq_data = input.cmdreq_data.0;
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
         let mut key_id = cmdreq_data.key_id;
 
