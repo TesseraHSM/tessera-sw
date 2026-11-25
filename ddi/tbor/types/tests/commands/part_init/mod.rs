@@ -6,7 +6,7 @@
 //! `PartInit` is mainline-supported on both `emu` and hardware. Tests
 //! run on both backends by default.
 //!
-//! Cross-test isolation comes from [`TestCtx::new`] (factory-reset +
+//! Cross-test isolation comes from [`TestCtx::new`] (NSSR +
 //! process-global lock held for the ctx's lifetime, see
 //! [`tsra_ddi_tbor_test_harness::fixture`]) so each test starts from a pristine
 //! `Enabled` partition with the canonical default PSKs.

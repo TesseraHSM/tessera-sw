@@ -38,6 +38,15 @@ const P384_SPKI_PREFIX: [u8; 24] = [
     0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04,
 ];
 
+pub(crate) fn validate_pid_spki(spki: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        spki.strip_prefix(&P384_SPKI_PREFIX)
+            .is_some_and(|point| point.len() == RAW_PUB_LEN),
+        "sender PID must be canonical P-384 DER SPKI"
+    );
+    Ok(())
+}
+
 /// SHA-384 thumbprint of a raw P-384 `X ‖ Y` public key, taken over its
 /// canonical SubjectPublicKeyInfo DER — the form firmware rebuilds from a
 /// certificate key before comparing it with a policy thumbprint.

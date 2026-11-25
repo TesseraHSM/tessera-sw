@@ -3,7 +3,7 @@
 
 //! TBOR `MlKemGenerateKey` wire schema.
 //!
-//! `MlKemGenerateKey` is (temporarily) an out-of-session command that generates a fresh
+//! `MlKemGenerateKey` is an in-session command that generates a fresh
 //! ML-KEM (FIPS 203) keypair for the requested PQC key kind and returns
 //! the decapsulation key as a **masked** blob plus the encapsulation
 //! public key.  The private key is **not** stored on the device: the
@@ -12,18 +12,7 @@
 //! is the TBOR analogue of MBOR `MlkemGenerateKey`, but without a vault
 //! `private_key_id`.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -35,20 +24,13 @@ pub const TBOR_OP_MLKEM_GENERATE_KEY: u8 = 0x29;
 
 /// Maximum masked ML-KEM decapsulation-key envelope length.
 ///
-/// The TBOR wire ships **seed-only** ML-KEM decapsulation keys (see
-/// [`MlKemKeyKind`]), so the masked plaintext is always the 64-byte
-/// `(d ‖ z)` seed material: `header(8) ‖ iv(16) ‖ aad(96) ‖ pt(64) ‖
-/// tag(16)` = 196 bytes.  The 232-byte constant part is the
-/// AEAD-GCM-256 masked-envelope overhead.
+/// The plaintext is the 64-byte `(d, z)` seed pair followed by the
+/// expanded decapsulation key. ML-KEM-1024 needs
+/// `64 + 3168 + 232 = 3464` bytes including the AEAD-GCM-256 envelope:
+/// header 8 + IV 16 + AAD 192 + tag 16. Masked lengths are
+/// 1928 / 2696 / 3464 bytes for ML-KEM-512 / -768 / -1024.
 ///
-/// If an expanded (`Private`) kind is ever added to [`MlKemKeyKind`], the
-/// worst-case plaintext becomes the 3168-byte ML-KEM-1024 decapsulation
-/// key and this constant — together with the `max_len` literals on
-/// [`TborMlKemGenerateKeyResp::masked_key`] and
-/// [`TborMlKemDecapsulateReq`](crate::mlkem_decapsulate::TborMlKemDecapsulateReq)`::masked_key`
-/// — must be raised to `3168 + 232 = 3396`.
-///
-/// Pinned into the `#[tbor(buffer, max_len = 292)]` literal on
+/// Pinned into the `#[tbor(buffer, max_len = 3464)]` literal on
 /// [`TborMlKemGenerateKeyResp::masked_key`].
 pub const MASKED_MLKEM_KEY_MAX_LEN: usize = 8 + 16 + 192 + 64 + 3168 + 16;
 
@@ -62,7 +44,7 @@ pub const MLKEM_PUB_KEY_MAX_LEN: usize = 1568;
 pub const MLKEM_CIPHERTEXT_MAX_LEN: usize = 1568;
 
 /// Maximum masked shared-secret length.  ML-KEM shared secrets are 32
-/// bytes for all parameter sets, carried as `header(8) ‖ iv(16) ‖ aad(96)
+/// bytes for all parameter sets, carried as `header(8) ‖ iv(16) ‖ aad(192)
 /// ‖ pt(32) ‖ tag(16)`.
 pub const MASKED_MLKEM_SHARED_SECRET_MAX_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
@@ -76,17 +58,11 @@ pub const MASKED_MLKEM_SHARED_SECRET_MAX_LEN: usize = 8 + 16 + 192 + 32 + 16;
 /// taxonomy where each algorithm/variant/format pair is its own kind (the
 /// same way fixed- and variable-length HMAC keys are distinct kinds).
 ///
-/// **Seed-only on the wire.**  This enum deliberately exposes only the
-/// three `Seed` kinds (53–55): a seed kind stores the 64-byte `(d ‖ z)`
-/// seed material and is re-expanded on each use.  The matching expanded
-/// (`Private`) kinds `MlKem512Private = 56` … `MlKem1024Private = 58` do
-/// exist in `HsmVaultKeyKind` and remain fully supported by the vault;
-/// they are simply not offered on the TBOR wire yet.  Adding them later
-/// is a purely additive change to this enum — but it also requires
-/// raising the `masked_key` `max_len` literals (and
-/// [`MASKED_MLKEM_KEY_MAX_LEN`]) from 196 to 3300, because an expanded
-/// ML-KEM-1024 decapsulation key is 3168 bytes instead of 64 bytes of
-/// seed material.
+/// Only the three `Seed` kinds (55-57) are accepted. Their masked blobs
+/// contain the 64-byte `(d, z)` seed pair followed by the expanded
+/// decapsulation key. The seeds support public-key regeneration;
+/// decapsulation uses the expanded key directly. Separate `Private`
+/// kinds are not exposed by this wire enum.
 ///
 /// Kept as an [`open_enum`] so an unrecognized discriminant round-trips as
 /// `MlKemKeyKind(x)` and is rejected on-device rather than failing to
@@ -127,9 +103,9 @@ pub struct TborMlKemGenerateKeyReq {
 #[tbor(response, pair = TborMlKemGenerateKeyReq)]
 pub struct TborMlKemGenerateKeyResp<'a> {
     /// The generated ML-KEM decapsulation key, masked (AEAD-GCM-256)
-    /// under the scope's masking key.  Always 196 B: the wire is
-    /// seed-only, so the plaintext is the 64-byte `(d ‖ z)` seed
-    /// material.  See [`MASKED_MLKEM_KEY_MAX_LEN`].
+    /// under the scope's masking key. The plaintext is the 64-byte seed
+    /// pair followed by the expanded decapsulation key. See
+    /// [`MASKED_MLKEM_KEY_MAX_LEN`].
     #[tbor(align = 4, buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
 

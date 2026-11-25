@@ -352,6 +352,9 @@ async fn ipc_task(rx: async_channel::Receiver<PartCommand>, tracker: Arc<Shutdow
             PartCommand::Enable { pid, reply } => {
                 let _ = reply.send(pal.part_enable_internal(pid).await);
             }
+            PartCommand::Migrate { pid, reply } => {
+                let _ = reply.send(pal.part_migrate_internal(pid).await);
+            }
             PartCommand::Disable { pid, reply } => {
                 let _ = reply.send(pal.part_disable_internal(pid));
             }
@@ -744,6 +747,24 @@ impl StdHsm {
     pub async fn part_enable(&self, pid: u8) -> HsmResult<()> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let cmd = PartCommand::Enable {
+            pid,
+            reply: reply_tx,
+        };
+        self.ipc_tx.send(cmd).await.expect("Embassy thread stopped");
+        reply_rx.await.expect("partition command reply dropped")
+    }
+
+    /// Migrate a partition in place, as an NSSR does: on one device, what a
+    /// live migration does from a source device to a target.
+    ///
+    /// Keeps the migrated state (sealed BK3, `Masked_BK_BOOT`, VM launch GUID)
+    /// and the established sessions, marked for renegotiation; wipes the
+    /// vault, the per-tenant state and `PartInit`'s provisioning, returns the
+    /// PSKs to their defaults, and regenerates the partition identity and
+    /// enable-time keys, leaving the partition `Enabled`.
+    pub async fn part_migrate(&self, pid: u8) -> HsmResult<()> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = PartCommand::Migrate {
             pid,
             reply: reply_tx,
         };

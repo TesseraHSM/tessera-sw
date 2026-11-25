@@ -14,7 +14,7 @@ use tsra_api::*;
 use crate::utils::partition_ex_helpers::*;
 
 #[test]
-fn session_ex_migration_reopen_preserves_psk_change_allowance() {
+fn session_ex_migration_reopen_uses_default_psk_and_restores_psk_change() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -38,11 +38,18 @@ fn session_ex_migration_reopen_preserves_psk_change_allowance() {
     );
     assert!(
         session.reopen_ex(&root, Some(&[0xD6; PSK_LEN])).is_err(),
-        "wrong current PSK"
+        "wrong PSK"
+    );
+    // The migration returned the PSKs to their defaults.
+    assert!(
+        session.reopen_ex(&root, Some(&psk)).is_err(),
+        "rotated PSK after migration"
     );
     session
-        .reopen_ex(&root, Some(&psk))
-        .expect("retry with current PSK");
+        .reopen_ex(&root, None)
+        .expect("retry with the default PSK");
+    // It also restored the change allowance, so the role rotates again.
+    session.change_psk(&psk).expect("rotate after migration");
     assert_eq!(
         session.change_psk(&[0xC5; PSK_LEN]),
         Err(HsmError::PskChangeAlreadyUsed)

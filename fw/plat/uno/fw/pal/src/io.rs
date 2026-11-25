@@ -22,7 +22,8 @@
 //!
 //! The IIC controller DMAs incoming SQE data directly into `IO_SQ[index]`
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
-//! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
+//! and writes the CQE, built in DTCM, into `IO_CQ[index]` for OIC to
+//! transmit.
 //!
 //! Bulk (fast-path) IOs arrive on the fast-path controller's FP1 and FP2
 //! IIC/OIC channel pairs and use their own `BULK_IO_SQ` (128B),
@@ -84,6 +85,7 @@ use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_STRIDE;
 use tsra_fw_uno_reg_soc::io_gsram::BulkIoCqEntry;
 #[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_reg_soc::io_gsram::BulkIoSqEntry;
+use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
@@ -156,6 +158,53 @@ fn copy_sqe(index: usize) {
     }
 }
 
+/// Each host IO slot's CQE, built here while its IO runs and written out to
+/// `IO_CQ` whole, with one burst, by [`publish_cqe`] just before the OIC
+/// posts it.
+///
+/// The CQE is filled in field by field (status, lengths, session fields,
+/// queue id), and IO GSRAM is read uncached: in place, each update would
+/// first read its word back over the interconnect.
+struct CqeCopies(UnsafeCell<[CqeEntry; IO_CQ_COUNT as usize]>);
+
+// SAFETY: single-core firmware with cooperative scheduling; a slot's copy
+// is touched only by its IO, or by the platform finishing it once detached.
+unsafe impl Sync for CqeCopies {}
+
+static CQE_COPIES: CqeCopies = CqeCopies(UnsafeCell::new([CqeEntry([0; 4]); IO_CQ_COUNT as usize]));
+
+/// Writes host slot `index`'s CQE out to `IO_CQ`, where the OIC reads it.
+/// The OIC orders its descriptor writes, and so this one, ahead of its
+/// doorbell.
+fn publish_cqe(index: u16) {
+    const { assert!(mem::size_of::<IoCqEntry>() == 16 && mem::size_of::<RawCqe>() == 16) };
+    // SAFETY: indexing checks `index` is a host slot; only a pointer is
+    // formed, no reference to the copy (see `CqeCopies`).
+    let src = unsafe { (*CQE_COPIES.0.get())[index as usize].0.as_ptr() };
+    let dst = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut u32;
+    #[cfg(target_arch = "arm")]
+    // SAFETY: both are 16-byte, word-aligned CQEs: the DTCM copy and its
+    // IO_CQ entry, which only this slot's completion uses.
+    unsafe {
+        core::arch::asm!(
+            "ldm {s}, {{r2, r3, r4, r5}}",
+            "stm {d}, {{r2, r3, r4, r5}}",
+            s = in(reg) src,
+            d = in(reg) dst,
+            out("r2") _,
+            out("r3") _,
+            out("r4") _,
+            out("r5") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, 4);
+    }
+}
+
 /// An in-flight IO identified by its queue kind and slot index.
 ///
 /// Holds the slot index for the lifetime of a single IO operation.
@@ -180,6 +229,11 @@ pub struct UnoHsmIo {
     queue_id: u16,
     transport_binding: Cell<Option<sealed::SessionTransportBinding>>,
 }
+
+/// Takes a command IO the run loop received (see
+/// [`UnoHsmPal::set_io_dispatch`]) to the task that serves its slot. It runs
+/// inside the run loop's pass, so it must hand the IO on without waiting.
+pub type IoDispatch = fn(UnoHsmIo);
 
 impl UnoHsmIo {
     /// Returns the platform-private resource slot for this IO.
@@ -381,7 +435,9 @@ impl HsmIo for UnoHsmIo {
         self.cmd_sqe()
     }
 
-    /// Returns the IO's CQE, at `IO_CQ[index]` or `BULK_IO_CQ[index]`.
+    /// Returns the IO's CQE: a command IO's DTCM copy, written out to
+    /// `IO_CQ[index]` when the completion is posted (see [`CqeCopies`]), or
+    /// `BULK_IO_CQ[index]`.
     ///
     /// The HSM core writes completion status here; the OIC driver
     /// reads it when sending the completion back to the host.
@@ -556,6 +612,7 @@ impl HsmIoController for UnoHsmPal {
         match io.kind {
             HsmIoKind::Cmd => {
                 slot_cqe(io.index).view().set_sq_id(queue_id);
+                publish_cqe(io.index);
                 self.oic.send(io.index, queue_id as u8)?.await
             }
             #[cfg(not(feature = "bulk_crypto"))]
@@ -668,18 +725,14 @@ impl DetachedIo {
     pub(crate) const NONE: Self = Self { queue_id: 0 };
 }
 
-/// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it.
+/// The CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it: its DTCM copy
+/// (see [`CqeCopies`]), which goes out to `IO_CQ[index]` when the
+/// completion is posted.
 fn slot_cqe(index: u16) -> &'static mut CqeEntry {
-    const _ASSERT_CQE_SIZE: () = assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<RawCqe>());
-    const _ASSERT_CQE_ALIGN: () =
-        assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<RawCqe>());
-    // SAFETY: the queue entry and RawCqe (and so the transparent CqeEntry)
-    // share the asserted layout, and only the slot's owner -- its IO, or
-    // the platform finishing a detached IO -- touches it.
-    unsafe {
-        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut CqeEntry;
-        &mut *ptr
-    }
+    // SAFETY: indexing checks `index` is a host slot, and only the slot's
+    // owner -- its IO, or the platform finishing a detached IO -- touches
+    // its copy (see `CqeCopies`).
+    unsafe { &mut (*CQE_COPIES.0.get())[index as usize] }
 }
 
 /// The SQE of bulk slot `index`.
@@ -782,17 +835,20 @@ impl UnoHsmPal {
         while let Some((index, _)) = self.oic.take_detached() {
             // As `drop_io`: wipe the slot's scratch before the slot can be
             // reused. A failed post is dropped like a failed `complete_io`.
+            // The post granted the IO's queue credit back (see
+            // `OicDriver::send_detached`), so only the buffer returns here.
             self.scrub_io_slot_cpu(index);
-            self.iic
-                .free_io(index, self.detached[index as usize].get().queue_id);
+            self.iic.release_io(index);
             self.io_in_flight_dec(HsmIoKind::Cmd);
         }
     }
 
     /// Posts slot `index`'s completion, or leaves it for the next pass if
     /// the OIC has no room.
+    #[inline]
     fn post_detached(&self, index: u16) {
         let queue_id = self.detached[index as usize].get().queue_id as u8;
+        publish_cqe(index);
         if self.oic.send_detached(index, queue_id).is_err() {
             self.detached_post_pending
                 .set(self.detached_post_pending.get() | 1 << index);
@@ -803,6 +859,7 @@ impl UnoHsmPal {
     /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io)),
     /// and resets a command slot's scratch allocator and copies its SQE, or
     /// marks a bulk slot busy.
+    #[inline]
     pub(crate) fn accept_io(&self, rx: Received, kind: HsmIoKind) -> UnoHsmIo {
         let index = rx.index;
         self.io_in_flight_inc(kind);
@@ -812,6 +869,7 @@ impl UnoHsmPal {
                 // The slot's MBOR undo records belong to its previous IO.
                 crate::mbor_ledger::clear_slot(index);
                 if (index as u32) < IO_SQ_COUNT {
+                    self.io_session_key[index as usize].set(None);
                     copy_sqe(index as usize);
                     // SAFETY: as in `HsmIo::sqe`; `copy_sqe` just filled the copy.
                     let sqe = unsafe { &(*SQE_COPIES.0.get())[index as usize] };
@@ -833,6 +891,30 @@ impl UnoHsmPal {
         // The routing comes with the IO, as the IIC driver read it from the
         // ICQ entry, rather than back out of IO_META.
         UnoHsmIo::from_routing(index, kind, rx.axi_id, u16::from(rx.queue_id))
+    }
+
+    /// Has the run loop hand each command IO it receives to `dispatch`,
+    /// rather than wake [`poll_io`](HsmIoController::poll_io) to receive it,
+    /// so an IO reaches the task that serves it without a pass through a
+    /// receive task. `poll_io` still receives bulk IOs, and the command IO
+    /// that comes while host IO is paused for a PCIe reset.
+    pub fn set_io_dispatch(&self, dispatch: IoDispatch) {
+        self.io_dispatch.set(Some(dispatch));
+    }
+
+    /// Run-loop wake for the command IIC's ICQ interrupt: takes every IO
+    /// waiting in the ICQ and hands it to the [`IoDispatch`] set, or, with
+    /// none set or while host IO is paused, wakes `poll_io`'s receive.
+    pub(crate) fn wake_iic(&self, irq: u16) {
+        match self.io_dispatch.get() {
+            Some(dispatch) if !self.io_paused() => {
+                tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+                while let Some(rx) = self.iic.try_recv() {
+                    dispatch(self.accept_io(rx, HsmIoKind::Cmd));
+                }
+            }
+            _ => self.iic.wake(irq),
+        }
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:

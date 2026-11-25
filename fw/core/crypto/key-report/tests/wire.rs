@@ -17,6 +17,9 @@
 
 use minicbor::Encoder;
 use tsra_fw_core_crypto_key_report::parse_key_report;
+use tsra_fw_core_crypto_key_report::parse_report;
+use tsra_fw_core_crypto_key_report::ReportKind;
+use tsra_fw_core_crypto_key_report::ReportView;
 use tsra_fw_core_crypto_key_report::APP_UUID_LEN;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
 use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
@@ -166,12 +169,20 @@ fn payload_v2(
 
 /// Inline tagged COSE_Sign1: `D2 84 <protected> <map(0)> <payload> <sig>`.
 fn cose_sign1(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    sign1_with_header(payload, signature, &PROTECTED_HEADER)
+}
+
+fn transfer_sign1(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    sign1_with_header(payload, signature, b"\xa1\x01\x38\x22")
+}
+
+fn sign1_with_header(payload: &[u8], signature: &[u8], protected: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2048);
     buf.push(COSE_SIGN1_TAG);
     let mut e = Encoder::new(&mut buf);
     e.array(4)
         .unwrap()
-        .bytes(&PROTECTED_HEADER)
+        .bytes(protected)
         .unwrap()
         .map(0)
         .unwrap()
@@ -466,6 +477,133 @@ fn parse_rejects_wrong_public_key_length() {
     assert!(parse_key_report(dma).is_err());
 }
 
+fn transfer_envelope(kind: ReportKind) -> Vec<u8> {
+    let mut envelope = b"TSRA-XFER".to_vec();
+    envelope.extend_from_slice(&[1, kind as u8, 0, 0x11, 0, 2, 0, 2]);
+    envelope.extend_from_slice(&[0x11; 48]);
+    envelope.extend_from_slice(&[0x22; 48]);
+    if kind == ReportKind::SdBackup {
+        envelope.extend_from_slice(&[0x44; POLICY_HASH_LEN]);
+    }
+    envelope.push(4);
+    envelope.extend_from_slice(&[0x55; 96]);
+    envelope.extend_from_slice(&vec![0x66; if kind == ReportKind::Darc { 48 } else { 64 }]);
+    envelope
+}
+
+fn dma_view(bytes: &[u8]) -> &HsmDmaBuf {
+    // SAFETY: test buffers are ordinary process memory, not hardware DMA.
+    unsafe { HsmDmaBuf::from_raw(bytes) }
+}
+
+#[test]
+fn transfer_signatures_contain_the_envelope_once_without_duplicate_claims() {
+    use tsra_fw_core_crypto_key_report::transfer::DARC_SIGNED_ENVELOPE_LEN;
+    use tsra_fw_core_crypto_key_report::transfer::SD_BACKUP_SIGNED_ENVELOPE_LEN;
+
+    for kind in [ReportKind::Darc, ReportKind::SdBackup] {
+        let envelope = transfer_envelope(kind);
+        assert!(parse_report(dma_view(&cose_sign1(&envelope, &[0; SIGNATURE_LEN]))).is_err());
+        let bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
+        assert_eq!(
+            bytes.len(),
+            if kind == ReportKind::Darc {
+                DARC_SIGNED_ENVELOPE_LEN
+            } else {
+                SD_BACKUP_SIGNED_ENVELOPE_LEN
+            }
+        );
+        let view = parse_report(dma_view(&bytes)).expect("operation report");
+        assert_eq!(view.kind(), kind);
+        let ReportView::Transfer(transfer) = view else {
+            panic!("operation decoded as public key");
+        };
+        assert_eq!(&**transfer.envelope, envelope);
+        assert_eq!(transfer.header.source_pid_key_id(), &[0x11; 48]);
+        assert_eq!(transfer.header.recipient_key_id(), &[0x22; 48]);
+        assert_eq!(
+            transfer.header.policy_hash().is_some(),
+            kind == ReportKind::SdBackup
+        );
+        if let Some(policy) = transfer.header.policy_hash() {
+            assert_eq!(policy, &[0x44; 48]);
+        }
+        assert!(parse_key_report(dma_view(&bytes)).is_err());
+    }
+}
+
+#[test]
+fn unified_public_key_parser_preserves_legacy_and_accepts_signed_kind() {
+    for bytes in [build_report(4).0, build_report_v2(&[0x44; POLICY_HASH_LEN])] {
+        assert!(matches!(
+            parse_report(dma_view(&bytes)).expect("legacy report"),
+            ReportView::PublicKey(_)
+        ));
+    }
+    let public_key = vec![0; PUBLIC_KEY_MAX_SIZE];
+    let mut pl = payload(
+        &public_key,
+        0,
+        4,
+        &[0; APP_UUID_LEN],
+        &[0; REPORT_DATA_LEN],
+        &[0; VM_LAUNCH_ID_LEN],
+    );
+    // The independent fixture adds the v2 discriminator to a v1 payload.
+    pl[0] = 0xa8;
+    pl[2] = 2;
+    pl.extend_from_slice(&[8, 0]);
+    let bytes = cose_sign1(&pl, &[0; SIGNATURE_LEN]);
+    let ReportView::PublicKey(view) = parse_report(dma_view(&bytes)).expect("v2 public-key report")
+    else {
+        panic!("wrong report kind");
+    };
+    assert_eq!(view.version, 2);
+    assert_eq!(view.flags, 4);
+
+    pl[2] = 3;
+    assert!(parse_report(dma_view(&cose_sign1(&pl, &[0; SIGNATURE_LEN]))).is_err());
+    pl[2] = 2;
+    *pl.last_mut().expect("report kind") = ReportKind::Darc as u8;
+    let wrong_kind = cose_sign1(&pl, &[0; SIGNATURE_LEN]);
+    assert!(parse_report(dma_view(&wrong_kind)).is_err());
+    assert!(parse_key_report(dma_view(&wrong_kind)).is_err());
+}
+
+#[test]
+fn transfer_parser_rejects_changed_magic_version_kind_suite_and_point_shape() {
+    for kind in [ReportKind::Darc, ReportKind::SdBackup] {
+        let mut envelope = transfer_envelope(kind);
+        let header_len = if kind == ReportKind::Darc { 113 } else { 161 };
+        for offset in (0..17).chain(std::iter::once(header_len)) {
+            envelope[offset] ^= 0x80;
+            let bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
+            assert!(parse_report(dma_view(&bytes)).is_err(), "offset {offset}");
+            envelope[offset] ^= 0x80;
+        }
+    }
+}
+
+#[test]
+fn transfer_parser_rejects_truncation_trailing_bytes_and_missing_signature() {
+    for kind in [ReportKind::Darc, ReportKind::SdBackup] {
+        let mut envelope = transfer_envelope(kind);
+        for len in 0..envelope.len() {
+            let bytes = transfer_sign1(&envelope[..len], &[0; SIGNATURE_LEN]);
+            assert!(parse_report(dma_view(&bytes)).is_err());
+        }
+        let mut bytes = transfer_sign1(&envelope, &[0; SIGNATURE_LEN]);
+        for len in 0..bytes.len() {
+            assert!(parse_report(dma_view(&bytes[..len])).is_err());
+        }
+        bytes.push(0);
+        assert!(parse_report(dma_view(&bytes)).is_err());
+        assert!(parse_report(dma_view(&transfer_sign1(&envelope, &[]))).is_err());
+        envelope.push(0);
+        assert!(parse_report(dma_view(&transfer_sign1(&envelope, &[0; SIGNATURE_LEN]))).is_err());
+    }
+}
+
 #[test]
 fn parse_rejects_incomplete_payload_map() {
     // Only 6 entries — vm_launch_id (key 6) missing.
@@ -475,4 +613,94 @@ fn parse_rejects_incomplete_payload_map() {
     // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
     let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
+}
+
+#[test]
+fn transfer_envelopes_use_canonical_operation_specific_headers() {
+    use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
+    use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
+
+    let source = [0x11; 48];
+    let recipient = [0x22; 48];
+    let policy = [0x33; 48];
+    for header in [
+        TransferHeader::Darc {
+            source_pid_spki_thumbprint: &source,
+            recipient_spki_thumbprint: &recipient,
+        },
+        TransferHeader::SdBackup {
+            source_pid_spki_thumbprint: &source,
+            recipient_spki_thumbprint: &recipient,
+            policy_hash: &policy,
+        },
+    ] {
+        // Independent wire fixture: network-order IANA suite IDs.
+        let mut expected = b"TSRA-XFER".to_vec();
+        expected.extend_from_slice(&[1, header.kind() as u8, 0, 0x11, 0, 2, 0, 2]);
+        expected.extend_from_slice(&source);
+        expected.extend_from_slice(&recipient);
+        if header.kind() == ReportKind::SdBackup {
+            expected.extend_from_slice(&policy);
+        }
+        let mut bytes = vec![0x55; header.envelope_len()];
+        assert_eq!(header.encode(&mut bytes).expect("encode"), expected.len());
+        assert_eq!(&bytes[..expected.len()], expected);
+        bytes[expected.len()] = 4;
+        let view = parse_transfer_envelope(&bytes).expect("parse envelope");
+        assert_eq!(view.header.kind(), header.kind());
+        assert_eq!(view.header.source_pid_key_id(), &source);
+        assert_eq!(view.header.recipient_key_id(), &recipient);
+        assert_eq!(view.header.policy_hash(), header.policy_hash());
+        assert_eq!(view.header_bytes, expected);
+        assert_eq!(view.enc.len(), 97);
+        assert_eq!(view.ciphertext.len(), header.plaintext_len() + 16);
+        let mut short = vec![0xA5; expected.len() - 1];
+        assert!(header.encode(&mut short).is_err());
+        assert!(short.iter().all(|byte| *byte == 0xA5));
+    }
+}
+
+#[test]
+fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
+    use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
+    use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
+
+    let id = [0x55; 48];
+    for header in [
+        TransferHeader::Darc {
+            source_pid_spki_thumbprint: &id,
+            recipient_spki_thumbprint: &id,
+        },
+        TransferHeader::SdBackup {
+            source_pid_spki_thumbprint: &id,
+            recipient_spki_thumbprint: &id,
+            policy_hash: &id,
+        },
+    ] {
+        let mut bytes = vec![0; header.envelope_len()];
+        header.encode(&mut bytes).expect("encode header");
+        bytes[header.header_len()] = 4;
+        for len in 0..bytes.len() {
+            assert!(parse_transfer_envelope(&bytes[..len]).is_err());
+        }
+        for offset in (0..17).chain(std::iter::once(header.header_len())) {
+            bytes[offset] ^= 0x80;
+            assert!(
+                parse_transfer_envelope(&bytes).is_err(),
+                "accepted changed header/SEC1 byte at {offset}"
+            );
+            bytes[offset] ^= 0x80;
+        }
+        bytes[10] = ReportKind::PublicKey as u8;
+        assert!(parse_transfer_envelope(&bytes).is_err());
+        bytes[10] = if header.kind() == ReportKind::Darc {
+            2
+        } else {
+            1
+        };
+        assert!(parse_transfer_envelope(&bytes).is_err());
+        bytes[10] = header.kind() as u8;
+        bytes.push(0);
+        assert!(parse_transfer_envelope(&bytes).is_err());
+    }
 }

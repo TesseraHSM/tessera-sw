@@ -30,6 +30,7 @@ use tsra_fw_uno_reg_soc::bcp::SQ_CFG;
 use tsra_fw_uno_reg_soc::bcp::SQ_PI;
 use tsra_fw_uno_reg_soc::bcp::STATUS;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
+use tsra_fw_uno_reg_soc::io_gsram::BcpCqe;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_PI_SHADOW_OFFSET;
@@ -83,20 +84,25 @@ const IDS: usize = SQE_BUDGET;
 const ID_WAITERS: usize = 32;
 
 /// `free` bitmap with every command ID free.
-const ALL_FREE: u32 = ((1u64 << IDS) - 1) as u32;
+const ALL_FREE: u64 = (1 << IDS) - 1;
 
 /// Command deadline. One chunk takes microseconds; past this the engine is
 /// presumed stuck, reset, and the commands in flight fail. Well inside the
-/// host's 6 s command timeout.
+/// host's 6 s command timeout. Counted from the first deadline check that
+/// finds the command in flight, at most [`DEADLINE_CHECK_PASSES`] passes
+/// after its submission.
 const CMD_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Bound on the wait for a soft reset to complete and the engine to stop.
 const RESET_SPIN: u32 = 100_000;
 
+/// [`BcpDriver::wake`] passes between checks of the command deadlines.
+const DEADLINE_CHECK_PASSES: u16 = 64;
+
 /// Driver-internal status for a command abandoned by a reset.
 const STATUS_STALLED: u8 = 0xFF;
 
-const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 32);
+const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 64);
 const _: () = assert!(BCP_CQ_COUNT as usize == DEPTH && BCP_DFL_COUNT as usize == DEPTH);
 
 /// AES-256 key length; the engine has no other key size.
@@ -440,6 +446,9 @@ struct Slot {
     status: u8,
     tag: [u8; BCP_TAG_LEN],
     err: [u32; 2],
+    /// Stamped by the first deadline check that finds the command in
+    /// flight, [`Instant::MAX`] until then: submitting a command reads no
+    /// timer.
     deadline: Instant,
     /// SQEs reserved against [`SQE_BUDGET`] until the command completes.
     chunks: u8,
@@ -458,13 +467,22 @@ struct BcpState {
     /// Next completion ring index.
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
-    free: u32,
+    free: u64,
     /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
     reserved: usize,
+    /// [`BcpDriver::wake`] passes with commands in flight, counted to space
+    /// out the deadline checks.
+    passes: u16,
+    /// SQEs were written since the doorbell last rang: the next
+    /// [`BcpDriver::wake`] rings it once for all of them.
+    bell: bool,
     /// Tasks waiting for a free command ID.
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; IDS],
+    /// The DFL element [`write_dfl`] builds before writing it out: words it
+    /// does not set stay zero, so a command need not clear it first.
+    dfl: [u32; DFL_DWORDS],
 }
 
 /// Async BCP driver.
@@ -495,6 +513,8 @@ impl BcpDriver {
                 cq_ci: 0,
                 free: ALL_FREE,
                 reserved: 0,
+                passes: 0,
+                bell: false,
                 id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
@@ -506,6 +526,7 @@ impl BcpDriver {
                     deadline: Instant::from_ticks(0),
                     chunks: 0,
                 }),
+                dfl: [0; DFL_DWORDS],
             }),
         }
     }
@@ -564,7 +585,8 @@ impl BcpDriver {
         }
     }
 
-    /// Reap completions and wake their awaiters; reset the engine if a
+    /// Ring the doorbell for the commands submitted since the last call,
+    /// reap completions and wake their awaiters; reset the engine if a
     /// command is past its deadline.
     ///
     /// The engine raises no HSM interrupt, so the PAL calls this from its
@@ -576,19 +598,36 @@ impl BcpDriver {
             if !s.up || s.free == ALL_FREE {
                 return;
             }
-            let pi = (GSRAM.bcp_cq_pi_shadow.get() as u16) & MASK;
+            if s.bell {
+                doorbell(s);
+            }
+            let shadow = GSRAM.bcp_cq_pi_shadow.get();
+            let pi = (shadow as u16) & MASK;
             if pi != s.cq_ci {
-                reap(s, pi);
+                reap(s, pi, shadow);
             }
             // Checked after reaping as well, so that other commands
             // completing on every pass cannot hold off the reset of one
-            // that is stuck.
+            // that is stuck; but only every few passes, since deadlines
+            // are seconds away and the check reads the timer and every
+            // command's slot.
+            s.passes = s.passes.wrapping_add(1);
+            if !s.passes.is_multiple_of(DEADLINE_CHECK_PASSES) {
+                return;
+            }
             let now = Instant::now();
-            let late = s
-                .slots
-                .iter()
-                .enumerate()
-                .any(|(i, slot)| s.free & (1 << i) == 0 && !slot.done && now > slot.deadline);
+            let free = s.free;
+            let mut late = false;
+            for (i, slot) in s.slots.iter_mut().enumerate() {
+                if free & (1 << i) != 0 || slot.done {
+                    continue;
+                }
+                if slot.deadline == Instant::MAX {
+                    slot.deadline = now + CMD_TIMEOUT;
+                } else if now > slot.deadline {
+                    late = true;
+                }
+            }
             if late {
                 recover(s);
             }
@@ -804,7 +843,7 @@ impl Future for CmdFuture<'_> {
                     s.free &= !(1 << id);
                     s.slots[id].done = false;
                     s.slots[id].aborting = false;
-                    s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
+                    s.slots[id].deadline = Instant::MAX;
                     s.slots[id].chunks = chunks as u8;
                     s.reserved += chunks;
                     this.id = Some(id);
@@ -813,7 +852,7 @@ impl Future for CmdFuture<'_> {
                     if let Some(key2) = cmd.key2 {
                         load_key(key_slot(id, 1), key2);
                     }
-                    write_dfl(id, cmd);
+                    write_dfl(&mut s.dfl, id, cmd);
                     submit(s, id, cmd);
                     id
                 }
@@ -854,6 +893,7 @@ impl Drop for CmdFuture<'_> {
 
 /// Release the completed command `id`: free its ID and SQE reservation,
 /// wipe its key, and return its completion.
+#[inline]
 fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
     let slot = &mut s.slots[id];
     slot.done = false;
@@ -881,19 +921,25 @@ fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
 /// ring the doorbell.
 fn ring(s: &mut BcpState) {
     s.sq_pi = (s.sq_pi + 1) & MASK;
+    doorbell(s);
+}
+
+/// Hand the engine every SQE written before `sq_pi`.
+fn doorbell(s: &mut BcpState) {
+    s.bell = false;
     // The descriptors must be visible before the doorbell starts the
     // engine's fetch.
     cortex_m::asm::dmb();
     BCP.sq_pi.write(SQ_PI::INDEX.val(s.sq_pi.into()));
 }
 
-/// Consume completions up to `pi`.
-fn reap(s: &mut BcpState, pi: u16) {
+/// Consume completions up to `pi`, read from the index shadow as `shadow`.
+fn reap(s: &mut BcpState, pi: u16, shadow: u32) {
     // Read the entries only after the index that published them.
-    cortex_m::asm::dmb();
+    let cq = cq_ring_after(shadow);
 
     while s.cq_ci != pi {
-        let (dw0, dw1) = read_cqe(s.cq_ci as usize);
+        let (dw0, dw1) = read_cqe(cq, s.cq_ci as usize);
         s.cq_ci = (s.cq_ci + 1) & MASK;
 
         let id = dw0.cmd_id() as usize;
@@ -948,6 +994,9 @@ fn reap(s: &mut BcpState, pi: u16) {
 /// is not, they stay in flight, new commands fail, and the next pass tries
 /// again. The next command brings the engine back up.
 fn recover(s: &mut BcpState) {
+    // SQEs not handed over yet must not start on the engine being reset;
+    // their commands fail with the others once the reset is confirmed.
+    s.bell = false;
     if !reset() {
         if !s.stalled {
             s.stalled = true;
@@ -1142,25 +1191,90 @@ fn dfl_ptr(id: usize) -> *mut u32 {
     (IO_GSRAM_BASE + BCP_DFL_OFFSET + id as u32 * BCP_DFL_STRIDE) as *mut u32
 }
 
-/// Pack bytes into little-endian words at `dw[start..]`.
+/// Read `N` (2 to 4) words at `src` with one LDM burst: out of memory the
+/// CPU reads uncached (DMA memory, the GSRAM rings), a burst costs about as
+/// much as a single load.
 ///
-/// Word-aligned bytes are read a word at a time: they may sit in DMA memory
-/// (an IV in a masked blob), which the CPU reads uncached, a load per word
-/// rather than per byte.
-fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
-    if bytes.as_ptr().align_offset(4) == 0 {
-        let (words, rest) = bytes.as_chunks::<4>();
-        for (i, word) in words.iter().enumerate() {
-            // SAFETY: `word` is four readable bytes at a 4-aligned address.
-            dw[start + i] = unsafe { word.as_ptr().cast::<u32>().read() };
+/// # Safety
+///
+/// `src` must be word-aligned and valid for reads of `N` words.
+#[inline(always)]
+unsafe fn burst_read<const N: usize>(src: *const u32) -> [u32; N] {
+    const { assert!(N >= 2 && N <= 4) };
+    let (a, b, c, d): (u32, u32, u32, u32);
+    #[cfg(target_arch = "arm")]
+    // SAFETY: per the function contract, for the words loaded.
+    unsafe {
+        match N {
+            2 => {
+                core::arch::asm!(
+                    "ldm {s}, {{r2, r3}}",
+                    s = in(reg) src,
+                    out("r2") a,
+                    out("r3") b,
+                    options(nostack, preserves_flags, readonly),
+                );
+                (c, d) = (0, 0);
+            }
+            3 => {
+                core::arch::asm!(
+                    "ldm {s}, {{r2, r3, r4}}",
+                    s = in(reg) src,
+                    out("r2") a,
+                    out("r3") b,
+                    out("r4") c,
+                    options(nostack, preserves_flags, readonly),
+                );
+                d = 0;
+            }
+            _ => core::arch::asm!(
+                "ldm {s}, {{r2, r3, r4, r5}}",
+                s = in(reg) src,
+                out("r2") a,
+                out("r3") b,
+                out("r4") c,
+                out("r5") d,
+                options(nostack, preserves_flags, readonly),
+            ),
         }
-        if !rest.is_empty() {
-            let mut word = [0u8; 4];
-            word[..rest.len()].copy_from_slice(rest);
-            dw[start + words.len()] = u32::from_le_bytes(word);
-        }
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract, for the words loaded.
+    unsafe {
+        let word = |i: usize| if i < N { src.add(i).read_volatile() } else { 0 };
+        (a, b, c, d) = (word(0), word(1), word(2), word(3));
+    }
+    let words = [a, b, c, d];
+    core::array::from_fn(|i| words[i])
+}
+
+/// Pack a 12-byte IV, or a 16-byte tag, tweak or SGL descriptor, into
+/// little-endian words at `dw[start..]`.
+///
+/// Inlined at its call sites, where `N` and `start` are constants.
+/// Word-aligned bytes are read with one burst: they may sit in DMA memory
+/// (a frame's trailer, a masked blob), which the CPU reads uncached.
+#[inline(always)]
+fn put_bytes<const N: usize>(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8; N]) {
+    const { assert!(N == BCP_IV_LEN || N == BCP_TAG_LEN) };
+    if bytes.as_ptr().align_offset(4) != 0 {
+        put_unaligned(dw, start, bytes);
         return;
     }
+    if N == BCP_IV_LEN {
+        // SAFETY: `bytes` is 12 readable bytes at a 4-aligned address.
+        let words: [u32; 3] = unsafe { burst_read(bytes.as_ptr().cast()) };
+        dw[start..start + 3].copy_from_slice(&words);
+    } else {
+        // SAFETY: `bytes` is 16 readable bytes at a 4-aligned address.
+        let words: [u32; 4] = unsafe { burst_read(bytes.as_ptr().cast()) };
+        dw[start..start + 4].copy_from_slice(&words);
+    }
+}
+
+/// [`put_bytes`] for bytes that are not word-aligned.
+#[inline(never)]
+fn put_unaligned(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
     for (i, chunk) in bytes.chunks(4).enumerate() {
         let mut word = [0u8; 4];
         word[..chunk.len()].copy_from_slice(chunk);
@@ -1174,17 +1288,19 @@ fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
 /// input: for GCM the key slot, unpadded AAD length, expected tag, IV and
 /// padded AAD length; for XTS the tweak.
 ///
+/// The element is built in `dw`, whose other words are zero, and then
+/// written out: every word set here is set on every command.
+///
 /// The destination is as long as the source: for GCM the engine writes
 /// the padded AAD through ahead of the text, as the host fast path
 /// expected.
-fn write_dfl(id: usize, cmd: &Cmd<'_>) {
-    let mut dw = [0u32; DFL_DWORDS];
+fn write_dfl(dw: &mut [u32; DFL_DWORDS], id: usize, cmd: &Cmd<'_>) {
     let len = cmd.len as u32;
 
     dw[6] = len;
-    put_bytes(&mut dw, 7, &cmd.src);
+    put_bytes(dw, 7, &cmd.src);
     dw[11] = len;
-    put_bytes(&mut dw, 12, &cmd.dst);
+    put_bytes(dw, 12, &cmd.dst);
 
     match cmd.aux {
         Aux::Gcm {
@@ -1195,13 +1311,18 @@ fn write_dfl(id: usize, cmd: &Cmd<'_>) {
         } => {
             dw[17] = key_slot(id, 0) as u32;
             dw[18] = unpadded_aad_len as u32;
-            if let Some(tag) = tag {
-                put_bytes(&mut dw, 19, tag);
+            match tag {
+                Some(tag) => put_bytes(dw, 19, tag),
+                None => dw[19..23].fill(0),
             }
-            put_bytes(&mut dw, 23, iv);
+            put_bytes(dw, 23, iv);
             dw[26] = aad_len as u32;
         }
-        Aux::Xts { tweak } => put_bytes(&mut dw, DFL_CRYPTO_IN_DW as usize, tweak),
+        Aux::Xts { tweak } => {
+            dw[17..19].fill(0);
+            put_bytes(dw, DFL_CRYPTO_IN_DW as usize, tweak);
+            dw[23..27].fill(0);
+        }
     }
 
     // Burst-write the element: the ring sits in memory the CPU writes
@@ -1210,23 +1331,55 @@ fn write_dfl(id: usize, cmd: &Cmd<'_>) {
     // SAFETY: `dfl_ptr(id)` is DFL element `id` of the GSRAM ring
     // (`id < DEPTH`), `DFL_DWORDS` words long and word-aligned, and only
     // this command uses it.
-    let dst = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
-    tsra_fw_bulk_copy::copy_slice(dst, &dw);
+    let out = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
+    tsra_fw_bulk_copy::copy_slice(out, dw);
 }
 
-/// Read the completion-ring entry at `ci`.
-fn read_cqe(ci: usize) -> (CqeDw0, CqeDw1) {
-    let entry = &GSRAM.bcp_cq[ci];
-    (CqeDw0::from(entry.dw0.get()), CqeDw1::from(entry.dw1.get()))
+/// The completion ring, at an address computed from `loaded`, a value just
+/// loaded: entries read through it are read after that load. The address
+/// dependency orders the loads without a barrier, which would also wait for
+/// every store before it to complete.
+#[inline(always)]
+fn cq_ring_after(loaded: u32) -> *const BcpCqe {
+    let zero: usize;
+    #[cfg(target_arch = "arm")]
+    // SAFETY: computes `loaded ^ loaded` in a register; touches no memory.
+    unsafe {
+        core::arch::asm!(
+            "eor {z}, {v}, {v}",
+            z = lateout(reg) zero,
+            v = in(reg) loaded,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let _ = loaded;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        zero = 0;
+    }
+    GSRAM.bcp_cq.as_ptr().wrapping_byte_add(zero)
 }
 
-/// Read the tag the engine wrote back into the DFL element of command `id`.
+/// Read the completion-ring entry at `ci` of `ring` (see
+/// [`cq_ring_after`]), with one burst.
+fn read_cqe(ring: *const BcpCqe, ci: usize) -> (CqeDw0, CqeDw1) {
+    let entry = ring.wrapping_add(ci).cast::<u32>();
+    // SAFETY: the entry is two words of the GSRAM ring (`ci` is masked to
+    // its length), 8-byte aligned.
+    let [dw0, dw1] = unsafe { burst_read::<2>(entry) };
+    (CqeDw0::from(dw0), CqeDw1::from(dw1))
+}
+
+/// Read the tag the engine wrote back into the DFL element of command `id`,
+/// with one burst.
 fn read_tag(id: usize) -> [u8; BCP_TAG_LEN] {
+    // SAFETY: see `write_dfl`; DW1-4 lie within the element, and the
+    // engine finished writing them before the CQE that got us here.
+    let words = unsafe { burst_read::<4>(dfl_ptr(id).add(DFL_CRYPTO_OUT_DW)) };
     let mut tag = [0u8; BCP_TAG_LEN];
-    for (i, word) in tag.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        // SAFETY: see `write_dfl`; DW1-4 lie within the element, and the
-        // engine finished writing them before the CQE that got us here.
-        *word = unsafe { dfl_ptr(id).add(DFL_CRYPTO_OUT_DW + i).read_volatile() }.to_le_bytes();
+    for (bytes, word) in tag.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *bytes = word.to_le_bytes();
     }
     tag
 }
@@ -1239,11 +1392,38 @@ fn write_abort(sq_idx: usize, id: usize) {
         .with_opcode(OPCODE_ABORT)
         .with_dfl_idx(id as u16)
         .with_dfl_num(0);
-    let e = &GSRAM.bcp_sq[sq_idx];
-    e.dw0.set(dw0.into());
-    e.dw1.set(0);
-    e.dw2.set(0);
-    e.dw3.set(0);
+    write_sqe(sq_idx, [dw0.into(), 0, 0, 0]);
+}
+
+/// Write the submission-ring entry at `idx` with one store-multiple: the
+/// ring sits in memory the CPU writes uncached, one bus transaction per
+/// store, and the doorbell's barrier waits for all of them.
+fn write_sqe(idx: usize, dw: [u32; 4]) {
+    let e = &GSRAM.bcp_sq[idx];
+    #[cfg(target_arch = "arm")]
+    {
+        let dst: *const _ = e;
+        // SAFETY: `dst` is the four word-aligned words of ring entry `idx`,
+        // which is the driver's until the doorbell hands it to the engine.
+        unsafe {
+            core::arch::asm!(
+                "stm {dst}, {{r2, r3, r4, r5}}",
+                dst = in(reg) dst,
+                in("r2") dw[0],
+                in("r3") dw[1],
+                in("r4") dw[2],
+                in("r5") dw[3],
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        e.dw0.set(dw[0]);
+        e.dw1.set(dw[1]);
+        e.dw2.set(dw[2]);
+        e.dw3.set(dw[3]);
+    }
 }
 
 /// Queue command `id`: one SQE per [`BCP_CHUNK_LEN`] chunk of its
@@ -1285,11 +1465,10 @@ fn submit(s: &mut BcpState, id: usize, cmd: &Cmd<'_>) {
             .with_key1_idx(key_slot(id, 0) as u16)
             .with_key2_idx(key_slot(id, 1) as u16);
 
-        let e = &GSRAM.bcp_sq[s.sq_pi as usize];
-        e.dw0.set(dw0.into());
-        e.dw1.set(dw1.into());
-        e.dw2.set(dw2.into());
-        e.dw3.set(dw3);
-        ring(s);
+        write_sqe(s.sq_pi as usize, [dw0.into(), dw1.into(), dw2.into(), dw3]);
+        s.sq_pi = (s.sq_pi + 1) & MASK;
     }
+    // Rung by the next `wake`, at the end of this executor pass, once for
+    // every command submitted in it rather than with a barrier each.
+    s.bell = true;
 }

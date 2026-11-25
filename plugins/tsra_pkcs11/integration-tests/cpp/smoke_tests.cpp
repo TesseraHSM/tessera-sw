@@ -17,6 +17,7 @@
 #include "utils/aes_helpers.hpp"
 #include "utils/ec_helpers.hpp"
 #include "utils/module.hpp"
+#include "utils/unwrap_helpers.hpp"
 
 class smoke : public PublicSession
 {
@@ -166,7 +167,7 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
     gcm_params.ulTagBits = AES_GCM_TAG_LEN * 8;
 
     const CK_FLAGS driven = CKF_DIGEST | CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_ENCRYPT |
-                            CKF_DECRYPT | CKF_SIGN | CKF_VERIFY;
+                            CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_UNWRAP;
     for (CK_MECHANISM_TYPE m : mechs)
     {
         SCOPED_TRACE(::testing::Message() << "mechanism 0x" << std::hex << m);
@@ -197,10 +198,34 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
             case CKM_EC_KEY_PAIR_GEN:
                 EXPECT_CKR_OK(gen_p256(s_, &pub, &priv));
                 break;
+            case CKM_RSA_PKCS_KEY_PAIR_GEN:
+                EXPECT_CKR_OK(gen_unwrapping_pair(s_, &pub, &priv));
+                break;
             default:
                 ADD_FAILURE() << "no template for this key-pair mechanism";
                 break;
             }
+        }
+        if ((info.flags & CKF_UNWRAP) != 0)
+        {
+            ASSERT_EQ(CKM_RSA_AES_KEY_WRAP, m) << "no blob for this unwrap mechanism";
+            CK_OBJECT_HANDLE pub = 0, priv = 0;
+            ASSERT_CKR_OK(gen_unwrapping_pair(s_, &pub, &priv));
+            std::vector<CK_BYTE> n;
+            std::vector<CK_BYTE> e;
+            ASSERT_CKR_OK(get_bytes(s_, pub, CKA_MODULUS, n));
+            ASSERT_CKR_OK(get_bytes(s_, pub, CKA_PUBLIC_EXPONENT, e));
+            host::Pkey host_pub = host::rsa_public(n, e);
+            RsaAesMechanism wrap;
+            CK_OBJECT_HANDLE key = 0;
+            EXPECT_CKR_OK(unwrap_key(
+                s_,
+                priv,
+                &wrap.mech,
+                host::rsa_aes_key_wrap(host_pub.get(), "SHA256", host::Bytes(32, 0x01)),
+                CKM_AES_CBC,
+                &key
+            ));
         }
         if ((info.flags & (CKF_SIGN | CKF_VERIFY)) != 0)
         {

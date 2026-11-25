@@ -33,7 +33,7 @@ pub(crate) struct SigStructure<'a> {
     #[n(1)]
     #[cbor(with = "minicbor::bytes")]
     pub body_protected: &'a [u8],
-    /// External AAD; always empty for this report.
+    /// Application signature domain; empty only for PublicKey attestations.
     #[n(2)]
     #[cbor(with = "minicbor::bytes")]
     pub external_aad: &'a [u8],
@@ -70,10 +70,8 @@ pub(crate) struct CoseSign1<'a> {
     pub signature: &'a [u8],
 }
 
-/// Key-attestation report payload: an integer-keyed CBOR map. v1 reports
-/// carry 7 entries (keys 0–6); v2 reports add an 8th entry (key 7) with the
-/// `policy_hash`. `policy_hash` is `Option`: minicbor omits the entry when
-/// `None`, so a v1 report's map is byte-identical to before.
+/// Public-key payload. v2 permits the signed `PublicKey` discriminator at
+/// key 8; reports without it retain their original wire format.
 #[derive(Encode, CborLen)]
 #[cbor(map)]
 pub(crate) struct KeyReportPayload<'a> {
@@ -104,10 +102,13 @@ pub(crate) struct KeyReportPayload<'a> {
     #[cbor(with = "minicbor::bytes")]
     pub vm_launch_id: &'a [u8],
     /// Optional SHA-384 digest of the PartPolicy (v2 only; map key 7).
-    /// Present iff the report is v2; omitted from the wire map when `None`.
+    /// Required for v2 public-key reports without a discriminator.
     #[n(7)]
     #[cbor(with = "minicbor::bytes")]
     pub policy_hash: Option<&'a [u8]>,
+    /// Signed discriminator (v2 only); absent in legacy key reports.
+    #[n(8)]
+    pub report_kind: Option<u8>,
 }
 
 /// The `Sig_structure` context literal (`"Signature1"`).

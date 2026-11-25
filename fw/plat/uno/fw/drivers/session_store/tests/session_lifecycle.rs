@@ -58,7 +58,10 @@ fn tbor_recovery_retains_identity_and_cannot_be_evicted() {
         table.recovery_binding(id).expect("fingerprint"),
         &[0xA5; 16]
     );
-    assert!(table.psk_changed(id).expect("consumed"));
+    // The NSSR returned the PSKs to their defaults, so the change is
+    // available again.
+    assert!(!table.psk_changed(id).expect("allowance restored"));
+    table.set_psk_changed(id, true).expect("consumed");
     table
         .reopen_pending(id, HsmKeyId::from(4u16))
         .expect("retry");

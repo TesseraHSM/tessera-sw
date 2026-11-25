@@ -3,8 +3,9 @@
 
 /*
  * Key-backed operations: C_GenerateKey (CKM_AES_KEY_GEN, CKM_AES_XTS_KEY_GEN),
- * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN) and AES-CBC / AES-CBC-PAD / AES-GCM /
- * AES-XTS encrypt/decrypt, one-shot and multi-part. Sign and verify are in
+ * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN here, the RSA unwrapping key pair in
+ * tsra_pkcs11_unwrap.c) and AES-CBC / AES-CBC-PAD / AES-GCM / AES-XTS
+ * encrypt/decrypt, one-shot and multi-part. Sign and verify are in
  * tsra_pkcs11_sign.c.
  *
  * The TSRA device holds keys only as session-scoped handles; the durable form
@@ -90,13 +91,7 @@ void tsra_pkcs11_cipher_op_free(void *op_ctx)
     free(op);
 }
 
-/*
- * Store one generated key object: the object from `full`, its masked body, and
- * for a session object its place on the session's owned list. On failure
- * nothing remains: a key object without its masked body, or one the session
- * cannot track, is not handed out.
- */
-static CK_RV store_key(
+CK_RV tsra_pkcs11_store_key(
     tsra_pkcs11_session_t *s,
     const CK_ATTRIBUTE *full,
     CK_ULONG n,
@@ -106,6 +101,10 @@ static CK_RV store_key(
     CK_OBJECT_HANDLE *out
 )
 {
+    if ((s == NULL) || (out == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
     CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
     CK_RV rv =
         g_tsra_pkcs11.store.ops->create(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, full, n, &h);
@@ -113,8 +112,11 @@ static CK_RV store_key(
     {
         return rv;
     }
-    rv = g_tsra_pkcs11.store.ops
-             ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
+    if (blob != NULL)
+    {
+        rv = g_tsra_pkcs11.store.ops
+                 ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
+    }
     if ((rv == CKR_OK) && !token)
     {
         /* A session object dies with this session (the C_CloseSession rule). */
@@ -236,14 +238,14 @@ CK_RV C_GenerateKey(
     }
     tsra_pkcs11_keygen_fill fill;
     CK_ULONG n = 0;
-    rv = tsra_pkcs11_keygen_build_template(policy, pTemplate, ulCount, &fill, full, &n);
+    rv = tsra_pkcs11_keygen_build_template(policy, pTemplate, ulCount, true, &fill, full, &n);
     if (rv != CKR_OK)
     {
         goto cleanup;
     }
 
     CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
-    rv = store_key(s, full, n, token, blob, blob_len, &h);
+    rv = tsra_pkcs11_store_key(s, full, n, token, blob, blob_len, &h);
     if (rv != CKR_OK)
     {
         goto cleanup;
@@ -272,9 +274,7 @@ cleanup:
 /* C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN)                                   */
 /* ========================================================================= */
 
-/* Destroy a key object this call created (one half of a pair whose other half
- * failed), and take it off the session's owned list. */
-static void discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h)
+void tsra_pkcs11_discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h)
 {
     tsra_pkcs11_session_disown_object(s->slot, h);
     (void
@@ -404,15 +404,15 @@ static CK_RV ec_generate_pair(
 
     /* Both objects carry the pair's masked blob: the SDK verifies only with
      * a device handle, which only unmasking the pair gives. */
-    rv = store_key(s, pub_full, pub_n, kg.pub_token, blob, blob_len, &pub_handle);
+    rv = tsra_pkcs11_store_key(s, pub_full, pub_n, kg.pub_token, blob, blob_len, &pub_handle);
     if (rv != CKR_OK)
     {
         goto cleanup;
     }
-    rv = store_key(s, priv_full, priv_n, kg.priv_token, blob, blob_len, h_priv);
+    rv = tsra_pkcs11_store_key(s, priv_full, priv_n, kg.priv_token, blob, blob_len, h_priv);
     if (rv != CKR_OK)
     {
-        discard_key(s, pub_handle);
+        tsra_pkcs11_discard_key(s, pub_handle);
         goto cleanup;
     }
     *h_pub = pub_handle;
@@ -444,6 +444,8 @@ static keypair_fn keypair_generator(CK_MECHANISM_TYPE mech)
     {
     case CKM_EC_KEY_PAIR_GEN:
         return ec_generate_pair;
+    case CKM_RSA_PKCS_KEY_PAIR_GEN:
+        return tsra_pkcs11_unwrapping_pair_generate;
     default:
         return NULL;
     }

@@ -5,7 +5,7 @@
 //!
 //! Backend is selected at compile time by
 //! [`tsra_ddi::TsraDdi::default`]; cross-test isolation comes
-//! from the factory-reset performed by [`TestCtx::new`], and live
+//! from the NSSR performed by [`TestCtx::new`], and live
 //! sessions close on `Drop` via [`SessionGuard`].
 //!
 //! Coverage:

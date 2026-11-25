@@ -187,7 +187,9 @@ impl SessionTable {
         self.pending_seqs = [0u64; MAX_SESSIONS];
         self.next_init_seq = 0;
         self.m2h_seqs = [0u64; MAX_SESSIONS];
-        self.psk_changed &= mask;
+        // Each caller (disable, NSSR) also resets the PSKs, so no survivor
+        // has used its change of the PSK it reauthenticates with.
+        self.psk_changed = 0;
         for (slot, binding) in self.recovery_bindings.iter_mut().enumerate() {
             if mask & (1 << slot) == 0 {
                 binding.fill(0);
@@ -537,7 +539,10 @@ mod tests {
             table.recovery_binding(id).expect("fingerprint"),
             &[0xA5; 16]
         );
-        assert!(table.psk_changed(id).expect("rotation retained"));
+        // The reset returned the PSKs to their defaults, so the change is
+        // available again.
+        assert!(!table.psk_changed(id).expect("allowance restored"));
+        table.set_psk_changed(id, true).expect("rotation");
         table.reopen_pending(id, b"retry").expect("retry");
         table.rollback_recreation(id).expect("rollback");
         assert!(table.psk_changed(id).expect("rollback retained rotation"));

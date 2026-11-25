@@ -22,6 +22,7 @@
 #include "tsra_pkcs11_key.h"
 #include "tsra_pkcs11_store_record.h"
 #include "utils/aes_helpers.hpp"
+#include "utils/bytes.hpp"
 #include "utils/module.hpp"
 #include "utils/sock_server.hpp"
 #include "utils/store_dir.hpp"
@@ -118,26 +119,6 @@ const CK_BYTE kRecordMagic[] = { 'P', '1', '1', 'O' };
 constexpr size_t kRecordHeaderLen =
     sizeof(kRecordMagic) + (2 * sizeof(uint16_t)) + (3 * sizeof(uint32_t));
 constexpr size_t kRecordKeyAt = kRecordHeaderLen + sizeof(uint32_t);
-
-/// Append `v` to `out` little-endian in `n` bytes, as the record codec does.
-void put_le(std::vector<CK_BYTE> &out, uint64_t v, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-    {
-        out.push_back(static_cast<CK_BYTE>(v >> (i * CHAR_BIT)));
-    }
-}
-
-/// The `n` bytes of `in` at `at` as a little-endian value, as put_le writes it.
-uint64_t get_le(const std::vector<CK_BYTE> &in, size_t at, size_t n)
-{
-    uint64_t v = 0;
-    for (size_t i = 0; i < n; i++)
-    {
-        v |= static_cast<uint64_t>(in[at + i]) << (i * CHAR_BIT);
-    }
-    return v;
-}
 
 /// The bytes of a fixed-size attribute value, as the module stores them.
 template <typename T> std::vector<CK_BYTE> raw(const T &v)

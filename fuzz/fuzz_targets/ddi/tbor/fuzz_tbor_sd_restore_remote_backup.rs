@@ -10,6 +10,8 @@ use common::COORD_LEN;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_crypto::EccPublicKey;
+use tsra_crypto::ExportableKey;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
@@ -22,19 +24,19 @@ enum MutationTarget {
     SessionId,
     MaskedSealingKey,
     Policy,
-    SenderCertChain,
+    SenderPidKey,
     SenderMfgrCertChain,
     SenderOwnerCertChain,
     SenderPartOwnerCertChain,
-    SenderReport,
+    Signature,
     SrcRemoteBackup,
     PrevSdMkBackup,
-    SenderCertOob,
+    SenderPidCoordinates,
     SenderMfgrCertOob,
     SenderOwnerCertOob,
     SenderPartOwnerCertOob,
-    SenderReportOob,
-    SenderCertInvalidDer,
+    Header,
+    SenderPidInvalidDer,
     SenderMfgrCertInvalidDer,
     SenderOwnerCertInvalidDer,
     SenderPartOwnerCertInvalidDer,
@@ -69,6 +71,7 @@ struct RestoreFixture {
     session_id: u16,
     masked_sealing_key: [u8; tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN],
     policy: Vec<u8>,
+    sender_pid_pub_key: Vec<u8>,
     evidence: SenderEvidence,
     src_remote_backup: [u8; tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN],
     prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
@@ -209,7 +212,6 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
 
     let create_req = TborSdCreateRemoteBackupReq {
         session_id: source_session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain: evidence.sender_cert_chain.clone(),
         receiver_mfgr_cert_chain: evidence.mfgr_cert_chain.clone(),
         receiver_owner_cert_chain: evidence.owner_cert_chain.clone(),
@@ -279,6 +281,10 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
         session_id: restore_session.session_id,
         masked_sealing_key: restore_sealing_key.masked_key,
         policy,
+        sender_pid_pub_key: EccPublicKey::from_hsm_bytes(&pid_pub)
+            .expect("PID key")
+            .to_vec()
+            .expect("PID SPKI"),
         evidence: restore_evidence,
         src_remote_backup: created.pok_remote_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
@@ -309,15 +315,6 @@ fn invalidate_descriptor(descriptors: &mut [CertDescriptor], input: &FuzzInput) 
         descriptor.length = U16::new(descriptor.length.get() ^ (u16::from(input.mask) | 1));
     }
     true
-}
-
-/// Corrupt the report's OOB index or length according to the fuzzed mask.
-fn invalidate_report(report: &mut ReportDescriptor, input: &FuzzInput) {
-    if input.mask & 1 == 0 {
-        report.index = u8::MAX;
-    } else {
-        report.length = U16::new(report.length.get() ^ (u16::from(input.mask) | 1));
-    }
 }
 
 /// Flip the byte at `byte_offset` in an OOB item selected through the supplied
@@ -357,7 +354,7 @@ fn mutate_request(
             flip(&mut req.masked_sealing_key, input.offset, input.mask)
         }
         MutationTarget::Policy => flip(&mut req.policy, input.offset, input.mask),
-        MutationTarget::SenderCertChain => invalidate_descriptor(&mut req.sender_cert_chain, input),
+        MutationTarget::SenderPidKey => flip(&mut req.sender_pid_pub_key, input.offset, input.mask),
         MutationTarget::SenderMfgrCertChain => {
             invalidate_descriptor(&mut req.sender_mfgr_cert_chain, input)
         }
@@ -367,22 +364,20 @@ fn mutate_request(
         MutationTarget::SenderPartOwnerCertChain => {
             invalidate_descriptor(&mut req.sender_part_owner_cert_chain, input)
         }
-        MutationTarget::SenderReport => {
-            invalidate_report(&mut req.sender_report, input);
-            true
-        }
+        MutationTarget::Signature => flip(
+            &mut req.src_remote_backup[POK_REMOTE_BACKUP_LEN - 96..],
+            input.offset,
+            input.mask,
+        ),
         MutationTarget::SrcRemoteBackup => {
             flip(&mut req.src_remote_backup, input.offset, input.mask)
         }
         MutationTarget::PrevSdMkBackup => {
             flip(&mut req.prev_sd_mk_backup, input.offset, input.mask)
         }
-        MutationTarget::SenderCertOob => mutate_oob_item(
-            evidence,
-            &fixture.evidence.sender_cert_chain,
-            input,
-            input.offset,
-        ),
+        MutationTarget::SenderPidCoordinates => {
+            flip(&mut req.sender_pid_pub_key[24..], input.offset, input.mask)
+        }
         MutationTarget::SenderMfgrCertOob => mutate_oob_item(
             evidence,
             &fixture.evidence.mfgr_cert_chain,
@@ -401,17 +396,12 @@ fn mutate_request(
             input,
             input.offset,
         ),
-        MutationTarget::SenderReportOob => {
-            let report = [fixture.evidence.report.index];
-            let descriptors = [CertDescriptor {
-                index: report[0],
-                length: fixture.evidence.report.length,
-            }];
-            mutate_oob_item(evidence, &descriptors, input, input.offset)
-        }
-        MutationTarget::SenderCertInvalidDer => {
-            mutate_oob_item(evidence, &fixture.evidence.sender_cert_chain, input, 0)
-        }
+        MutationTarget::Header => flip(
+            &mut req.src_remote_backup[11..172],
+            input.offset,
+            input.mask,
+        ),
+        MutationTarget::SenderPidInvalidDer => flip(&mut req.sender_pid_pub_key, 0, input.mask),
         MutationTarget::SenderMfgrCertInvalidDer => {
             mutate_oob_item(evidence, &fixture.evidence.mfgr_cert_chain, input, 0)
         }
@@ -445,11 +435,9 @@ fn validate_response(
     // authenticated data. Descriptor and DER-tag corruptions must fail.
     let arbitrary_oob = matches!(
         input.target,
-        MutationTarget::SenderCertOob
-            | MutationTarget::SenderMfgrCertOob
+        MutationTarget::SenderMfgrCertOob
             | MutationTarget::SenderOwnerCertOob
             | MutationTarget::SenderPartOwnerCertOob
-            | MutationTarget::SenderReportOob
     );
     let must_fail = input.key_scope != common::KeyScope::Local || (changed && !arbitrary_oob);
     let must_succeed = input.key_scope == common::KeyScope::Local && !changed;
@@ -491,11 +479,10 @@ fuzz_target!(|input: FuzzInput| {
             session_id: fixture.session_id,
             masked_sealing_key: fixture.masked_sealing_key,
             policy: fixture.policy.clone(),
-            sender_cert_chain: evidence.sender_cert_chain.clone(),
+            sender_pid_pub_key: fixture.sender_pid_pub_key.clone(),
             sender_mfgr_cert_chain: evidence.mfgr_cert_chain.clone(),
             sender_owner_cert_chain: evidence.owner_cert_chain.clone(),
             sender_part_owner_cert_chain: evidence.part_owner_cert_chain.clone(),
-            sender_report: evidence.report,
             src_remote_backup: fixture.src_remote_backup,
             prev_sd_mk_backup: fixture.prev_sd_mk_backup,
         };

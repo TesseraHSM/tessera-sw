@@ -6,7 +6,7 @@
 //
 // Drives the source->target hand-off on a single partition (acting as both
 // endpoints) through the `tsra_darc_*` functions: mint a Transfer Masking
-// Key (TMK), mint source and target key-exchange keys, seal the TMK to the
+// Key (TMK), mint a target recipient key, seal and PID-sign the TMK to the
 // target (`export`), and re-open it (`import`) — proving the TMK survives the
 // export->import round trip. The wrap/unwrap surface is exercised as a full
 // happy path — mint an ECC signing key, wrap it under the TMK, unwrap it
@@ -35,7 +35,7 @@ namespace
 constexpr uint32_t kMaskedKexKeyLen = 280;
 constexpr uint32_t kKexPubKeyLen = 96;
 constexpr uint32_t kMaskedTmkLen = 264;
-constexpr uint32_t kSealedTmkLen = 145;
+constexpr uint32_t kSealedTmkLen = 367;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 
 // Raw P-384 public-key width.
@@ -45,7 +45,7 @@ constexpr size_t kRawPubLen = 96;
 constexpr uint8_t kKeyScopeLocal = 0b011;
 
 /// A minted DARC key-exchange key: its masked blob (the HPKE identity the
-/// device unmasks on export/import) and its public key as raw big-endian
+/// device unmasks on import) and its public key as raw big-endian
 /// `X ‖ Y` — the certificate-leaf format the cert chains carry.
 struct KexKey
 {
@@ -125,10 +125,10 @@ class tsra_darc_transfer_test : public ::testing::Test
     }
 };
 
-// Full DARC TMK transfer: create a TMK on the source, mint the source and
-// target key-exchange identities, seal the TMK to the target
+// Full DARC TMK transfer: create a TMK on the source, mint the
+// target recipient key, seal the TMK to the target
 // (DATA-anchored target chain), then re-open it on the target
-// (POTA-anchored sender chain) — the export->import hand-off that ships a
+// (POTA-anchored PID chain) — the export->import hand-off that ships a
 // TMK from one endpoint to another.
 TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 {
@@ -157,27 +157,28 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
         std::vector<uint8_t> masked_tmk = mint_tmk(ready.session);
         ASSERT_EQ(masked_tmk.size(), kMaskedTmkLen);
 
-        // (2) Mint the source and target key-exchange identities.
-        KexKey source_kex = mint_kex(ready.session);
+        // (2) Mint the target recipient key.
         KexKey target_kex = mint_kex(ready.session);
-        ASSERT_EQ(source_kex.masked.size(), kMaskedKexKeyLen);
         ASSERT_EQ(target_kex.masked.size(), kMaskedKexKeyLen);
 
         // (3) Seal the TMK to the target, anchoring the target chain to the
         // policy DATA CA.
         DarcCertChainHolder target_chain = darc_make_chain(ready.data_key, target_kex.pub_raw);
-        tsra_buffer sender_buf{ source_kex.masked.data(),
-                                static_cast<uint32_t>(source_kex.masked.size()) };
         tsra_buffer tmk_buf{ masked_tmk.data(), static_cast<uint32_t>(masked_tmk.size()) };
         tsra_buffer policy_buf{ ready.policy.data(), static_cast<uint32_t>(ready.policy.size()) };
         tsra_darc_tmk_export_params export_params{
-            &sender_buf,
             &tmk_buf,
             &policy_buf,
             target_chain.get(),
         };
         std::vector<uint8_t> sealed_tmk(kSealedTmkLen);
         tsra_buffer sealed_buf{ sealed_tmk.data(), static_cast<uint32_t>(sealed_tmk.size()) };
+        tsra_buffer sealed_probe{ nullptr, 0 };
+        ASSERT_EQ(
+            tsra_darc_tmk_export(ready.session, &export_params, &sealed_probe),
+            TSRA_STATUS_BUFFER_TOO_SMALL
+        );
+        ASSERT_EQ(sealed_probe.len, kSealedTmkLen);
         auto export_err = tsra_darc_tmk_export(ready.session, &export_params, &sealed_buf);
         ASSERT_EQ(export_err, TSRA_STATUS_SUCCESS);
         sealed_tmk.resize(sealed_buf.len);
@@ -185,9 +186,8 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
         ASSERT_TRUE(any_nonzero(sealed_tmk)) << "sealed TMK must not be all-zero";
 
         // (4) Re-open the sealed TMK on the target: the target key is the
-        // receiver, the source key the sender (attested by a POTA-anchored
-        // chain). A non-zero masked TMK proves the hand-off succeeded.
-        DarcCertChainHolder source_chain = darc_make_chain(ready.pota_key, source_kex.pub_raw);
+        // receiver, and the source PID signs the report (POTA-authorized).
+        DarcCertChainHolder source_chain = darc_make_chain(ready.pota_key, ready.pid_pub);
         tsra_buffer kex_buf{ target_kex.masked.data(),
                              static_cast<uint32_t>(target_kex.masked.size()) };
         tsra_buffer sealed_in{ sealed_tmk.data(), static_cast<uint32_t>(sealed_tmk.size()) };
@@ -204,6 +204,15 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
         imported_tmk.resize(imported_buf.len);
         ASSERT_EQ(imported_tmk.size(), kMaskedTmkLen);
         ASSERT_TRUE(any_nonzero(imported_tmk)) << "re-imported masked TMK must not be all-zero";
+        sealed_tmk.back() ^= 1;
+        std::fill(imported_tmk.begin(), imported_tmk.end(), 0xA5);
+        ASSERT_EQ(
+            tsra_darc_tmk_import(ready.session, &import_params, &imported_buf),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_TRUE(std::all_of(imported_tmk.begin(), imported_tmk.end(), [](uint8_t value) {
+            return value == 0xA5;
+        }));
     });
 }
 
@@ -438,9 +447,7 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
 
         std::vector<uint8_t> masked_tmk = mint_tmk(ready.session);
         ASSERT_EQ(masked_tmk.size(), kMaskedTmkLen);
-        KexKey source_kex = mint_kex(ready.session);
         KexKey target_kex = mint_kex(ready.session);
-        ASSERT_EQ(source_kex.masked.size(), kMaskedKexKeyLen);
         ASSERT_EQ(target_kex.masked.size(), kMaskedKexKeyLen);
 
         // Anchor the target chain to an unrelated CA while the bound
@@ -449,12 +456,9 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
         ASSERT_TRUE(rogue_ca != nullptr);
         DarcCertChainHolder rogue_chain = darc_make_chain(rogue_ca, target_kex.pub_raw);
 
-        tsra_buffer sender_buf{ source_kex.masked.data(),
-                                static_cast<uint32_t>(source_kex.masked.size()) };
         tsra_buffer tmk_buf{ masked_tmk.data(), static_cast<uint32_t>(masked_tmk.size()) };
         tsra_buffer policy_buf{ ready.policy.data(), static_cast<uint32_t>(ready.policy.size()) };
         tsra_darc_tmk_export_params export_params{
-            &sender_buf,
             &tmk_buf,
             &policy_buf,
             rogue_chain.get(),

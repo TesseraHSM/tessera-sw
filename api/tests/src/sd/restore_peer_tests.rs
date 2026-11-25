@@ -12,8 +12,7 @@
 //! `PartLocalMK` via `part_final` (so the captured sealing key unmasks) and
 //! restores the security domain from the peer backup. A successful restore
 //! is itself the correctness check: the HPKE open only succeeds if the
-//! receiver key and attested source-peer key match those that sealed the
-//! backup.
+//! receiver key and PID-signed operation report bind the same backup.
 
 use tsra_api::*;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
@@ -47,28 +46,58 @@ fn sd_restore_peer_backup_roundtrip() {
     let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session1.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session1.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
     // Self-peer backup: seal to our own attested identity as destination.
     let pok_peer_backup = evidence
         .with_hsm_evidence(|dst| {
-            session1.sd_create_peer_backup(&policy, &masked, dst, &created.pok_local_backup)
+            session1.sd_create_peer_backup(&policy, dst, &created.pok_local_backup)
         })
         .expect("create peer backup");
     drop(session1);
-
     // Device 2 (reboot, same seed): restore PartLocalMK from device 1's
     // backup, then restore the security domain from the peer backup.
     let (session2, _policy2, _pid_pub2, _lmk2) =
         provision_backing(&sata, &pota, Some(&policy), Some(&local_mk));
+    let invalid_source = evidence.with_hsm_identity(|src| {
+        session2.sd_restore_peer_backup(
+            &policy,
+            &masked,
+            src,
+            evidence.report(),
+            &created.sd_mk_backup,
+        )
+    });
+    assert!(
+        invalid_source.is_err(),
+        "a PublicKey report cannot replace a signed SD backup"
+    );
+    evidence.with_hsm_identity(|src| {
+        let src = HsmSdIdentityEvidence {
+            part_owner_cert_chain: &[],
+            ..*src
+        };
+        assert!(
+            session2
+                .sd_restore_peer_backup(
+                    &policy,
+                    &masked,
+                    &src,
+                    &pok_peer_backup.backup,
+                    &created.sd_mk_backup,
+                )
+                .is_err(),
+            "peer restore still requires POTA-authorized source identity",
+        );
+    });
     let restored = evidence
-        .with_hsm_evidence(|src| {
+        .with_hsm_identity(|src| {
             session2.sd_restore_peer_backup(
                 &policy,
                 &masked,
                 src,
-                &pok_peer_backup,
+                &pok_peer_backup.backup,
                 &created.sd_mk_backup,
             )
         })
@@ -105,21 +134,21 @@ fn sd_restore_peer_backup_is_one_shot() {
     let evidence = build_evidence(&pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
     let pok_peer_backup = evidence
         .with_hsm_evidence(|dst| {
-            session.sd_create_peer_backup(&policy, &masked, dst, &created.pok_local_backup)
+            session.sd_create_peer_backup(&policy, dst, &created.pok_local_backup)
         })
         .expect("create peer backup");
 
-    let restored = evidence.with_hsm_evidence(|src| {
+    let restored = evidence.with_hsm_identity(|src| {
         session.sd_restore_peer_backup(
             &policy,
             &masked,
             src,
-            &pok_peer_backup,
+            &pok_peer_backup.backup,
             &created.sd_mk_backup,
         )
     });
@@ -150,7 +179,7 @@ fn sd_restore_peer_backup_rejects_without_peer_cloning() {
 
     let pok_peer_backup = [0u8; POK_REMOTE_BACKUP_LEN];
     let prev_sd_mk_backup = [0u8; SD_MK_BACKUP_LEN];
-    let restored = evidence.with_hsm_evidence(|src| {
+    let restored = evidence.with_hsm_identity(|src| {
         session.sd_restore_peer_backup(&policy, &masked, src, &pok_peer_backup, &prev_sd_mk_backup)
     });
     assert!(
