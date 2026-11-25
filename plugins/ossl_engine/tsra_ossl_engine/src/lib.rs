@@ -41,6 +41,9 @@ mod keyload;
 mod rsaload;
 
 #[cfg(all(target_os = "linux", feature = "engine"))]
+mod import;
+
+#[cfg(all(target_os = "linux", feature = "engine"))]
 mod rsaimport;
 
 #[cfg(all(target_os = "linux", feature = "engine"))]

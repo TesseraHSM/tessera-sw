@@ -78,6 +78,12 @@ fn create_ec_key_via_engine() {
 
 #[test]
 #[serial]
+fn import_ec_key_via_engine() {
+    run_cli_suite("ec_import", "testfiles/ec_import");
+}
+
+#[test]
+#[serial]
 fn sign_ec_key_via_engine() {
     run_cli_suite("sign", "testfiles/sign");
 }
