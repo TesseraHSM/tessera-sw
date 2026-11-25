@@ -353,6 +353,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
     fn session_param_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
@@ -367,6 +368,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw(key_bytes) })
     }
 
+    #[allow(unsafe_code)]
     fn session_masking_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
@@ -388,6 +390,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw(key_bytes) })
     }
 
+    #[allow(unsafe_code)]
     fn session_auth_binding(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
@@ -402,6 +405,7 @@ impl HsmSessionManager for StdHsmPal {
 
     /// Borrows a directional transport key and salt: from a Pending
     /// slot's handshake blob tail, or an Active session's `SessionEx` blob.
+    #[allow(unsafe_code)]
     fn session_transport_key(
         &self,
         io: &StdHsmIo,
@@ -452,6 +456,7 @@ mod session_reopen_tests {
     use super::*;
     use crate::drivers::vault::KeyVault;
 
+    #[allow(unsafe_code)]
     fn dma(bytes: &[u8]) -> &HsmDmaBuf {
         // SAFETY: host test memory is DMA-reachable and retains the input borrow.
         unsafe { HsmDmaBuf::from_raw(bytes) }

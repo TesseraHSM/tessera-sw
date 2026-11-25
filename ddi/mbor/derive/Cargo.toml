@@ -26,3 +26,6 @@ tsra_ddi_mbor_codec.workspace = true
 [[test]]
 name = "compile_tests"
 path = "tests/compile_tests.rs"
+
+[lints]
+workspace = true

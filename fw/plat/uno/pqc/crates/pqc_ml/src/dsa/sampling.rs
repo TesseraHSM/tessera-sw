@@ -147,6 +147,7 @@ pub fn expand_mask_bytes(out: &mut [u8], seed: &[u8], nonce: u16) {
 
 /// ExpandMask, second half: unpack the stream into coefficients in
 /// [-(gamma1-1), gamma1].
+#[allow(unsafe_code)]
 pub fn unpack_gamma1(a: &mut Poly, buf: &[u8], gamma1: u32) {
     // 18 bits a coefficient for gamma1 = 2^17, 20 for 2^19, each field f
     // standing for gamma1 - f.
@@ -177,6 +178,7 @@ pub fn unpack_gamma1(a: &mut Poly, buf: &[u8], gamma1: u32) {
 
 /// SampleInBall: generate the challenge polynomial c with exactly tau nonzero
 /// coefficients in {-1, +1} from seed ctilde.
+#[allow(unsafe_code)]
 pub fn poly_challenge(c: &mut Poly, ctilde: &[u8], tau: u8) {
     // SampleInBall sets only tau positions, so the rest has to start at
     // zero. Cleared eight words at a time rather than through the loop the

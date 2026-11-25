@@ -626,7 +626,12 @@ mod tests {
     /// expressions; tests only.
     fn msg(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmMlDsaMsg<'static> {
         let data = dma(Vec::leak([ctx, message].concat()));
-        HsmMlDsaMsg::new(msg_type, u8::try_from(ctx.len()).unwrap(), data).unwrap()
+        HsmMlDsaMsg::new(
+            msg_type,
+            u8::try_from(ctx.len()).expect("conversion to u8 should succeed"),
+            data,
+        )
+        .expect("HSM ML-DSA msg construction should succeed")
     }
 
     #[tokio::test]
@@ -644,8 +649,10 @@ mod tests {
                 Some((dma_mut(&mut sk), dma_mut(&mut pk))),
             )
             .await
-            .unwrap();
-            let storage = pal.dma_alloc(&io, sk_len + 17).unwrap();
+            .expect("ML-DSA key pair generation should succeed");
+            let storage = pal
+                .dma_alloc(&io, sk_len + 17)
+                .expect("DMA buffer allocation should succeed");
             for prefix in [0, 17] {
                 let buffer = &mut storage[..sk_len + prefix];
                 buffer.fill(0xA5);
@@ -658,7 +665,7 @@ mod tests {
                     msg(HsmMlDsaMsgType::Pure, b"m", b"ctx"),
                 )
                 .await
-                .unwrap();
+                .expect("in-place ML-DSA signing should succeed");
                 assert!(pal
                     .mldsa_verify(
                         &io,
@@ -668,7 +675,7 @@ mod tests {
                         &buffer[..sig_len]
                     )
                     .await
-                    .unwrap());
+                    .expect("ML-DSA signature verification should succeed"));
             }
         }
 
@@ -677,9 +684,11 @@ mod tests {
             let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
             mlkem_gen_keypair(&pal, &io, param_set, &mut seed, &mut keys)
                 .await
-                .unwrap();
+                .expect("ML-KEM key pair generation should succeed");
             let (pk, sk) = keys.split_at(pk_len);
-            let buffer = pal.dma_alloc(&io, pk_len.max(ct_len)).unwrap();
+            let buffer = pal
+                .dma_alloc(&io, pk_len.max(ct_len))
+                .expect("DMA buffer allocation should succeed");
             buffer[..pk_len].copy_from_slice(dma(pk));
             let mut ss = [0u8; SS_LEN];
             pal.mlkem_encaps_in_place(
@@ -689,7 +698,7 @@ mod tests {
                 dma_mut(&mut ss),
             )
             .await
-            .unwrap();
+            .expect("in-place ML-KEM encapsulation should succeed");
             let mut decaps = [0u8; SS_LEN];
             pal.mlkem_decaps(
                 &io,
@@ -699,7 +708,7 @@ mod tests {
                 Some(dma_mut(&mut decaps)),
             )
             .await
-            .unwrap();
+            .expect("ML-KEM decapsulation should succeed");
             assert_eq!(ss, decaps);
         }
     }
@@ -707,7 +716,9 @@ mod tests {
     #[tokio::test]
     async fn in_place_pqc_rejects_bad_buffer_lengths_without_writing() {
         let (pal, io) = pal_and_io();
-        let buffer = pal.dma_alloc(&io, 5000).unwrap();
+        let buffer = pal
+            .dma_alloc(&io, 5000)
+            .expect("DMA buffer allocation should succeed");
         buffer.fill(0x5a);
         for key_len in [0, 2559] {
             assert_eq!(
@@ -1283,11 +1294,14 @@ mod tests {
                 .and_then(|mut algo| Hasher::hash_vec(&mut algo, b"message"))
                 .expect("host mu");
             let expected = Signer::sign_vec(
-                &mut MlDsaAlgo::new(b"ctx").unwrap().deterministic(),
-                &MlDsaPrivateKey::from_bytes(&sk).unwrap(),
+                &mut MlDsaAlgo::new(b"ctx")
+                    .expect("ML-DSA algorithm construction should succeed")
+                    .deterministic(),
+                &MlDsaPrivateKey::from_bytes(&sk)
+                    .expect("ML-DSA private key construction from bytes should succeed"),
                 b"message",
             )
-            .unwrap();
+            .expect("signature generation should succeed");
 
             let inputs: [(HsmMlDsaMsgType, &[u8], &[u8]); 3] = [
                 (HsmMlDsaMsgType::Pure, b"message", b"ctx"),
@@ -1309,7 +1323,9 @@ mod tests {
                 assert_eq!(sig, expected, "{param_set:?}: {msg_type:?} signature");
             }
 
-            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            let buffer = pal
+                .dma_alloc(&io, sk_len)
+                .expect("DMA buffer allocation should succeed");
             buffer.copy_from_slice(&sk);
             pal.mldsa_sign_in_place(
                 &io,
@@ -1465,7 +1481,9 @@ mod tests {
                 "{param_set:?}: pure signature failed verification over mu"
             );
 
-            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            let buffer = pal
+                .dma_alloc(&io, sk_len)
+                .expect("DMA buffer allocation should succeed");
             buffer.copy_from_slice(&sk);
             pal.mldsa_sign_in_place(
                 &io,
@@ -1498,7 +1516,10 @@ mod tests {
     #[test]
     fn mldsa_msg_rejects_malformed_input() {
         let mu = [7u8; 65];
-        let mut phm = HsmHashAlgo::Sha256.mldsa_oid().unwrap().to_vec();
+        let mut phm = HsmHashAlgo::Sha256
+            .mldsa_oid()
+            .expect("mldsa OID operation should succeed")
+            .to_vec();
         phm.extend_from_slice(&[0u8; 32]);
         let cases: [(HsmMlDsaMsgType, u8, &[u8]); 7] = [
             (HsmMlDsaMsgType::ExternalMu, 0, &mu[..63]),
@@ -1517,7 +1538,8 @@ mod tests {
                 data.len()
             );
         }
-        let ok = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 3, dma(b"ctxmessage")).unwrap();
+        let ok = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 3, dma(b"ctxmessage"))
+            .expect("HSM ML-DSA msg construction should succeed");
         assert_eq!(
             (&**ok.ctx(), &**ok.message()),
             (&b"ctx"[..], &b"message"[..])
@@ -1544,7 +1566,10 @@ mod tests {
         .expect("gen_key");
 
         let algo = HsmHashAlgo::Sha256;
-        let mut phm = algo.mldsa_oid().unwrap().to_vec();
+        let mut phm = algo
+            .mldsa_oid()
+            .expect("mldsa OID operation should succeed")
+            .to_vec();
         phm.extend_from_slice(&[0u8; 32]);
         let mut sig = vec![0u8; sig_len];
         for input in [
@@ -1579,7 +1604,9 @@ mod tests {
                 Err(HsmError::UnsupportedCmd),
                 "{msg_type:?} verify"
             );
-            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            let buffer = pal
+                .dma_alloc(&io, sk_len)
+                .expect("DMA buffer allocation should succeed");
             buffer.copy_from_slice(&sk);
             assert_eq!(
                 pal.mldsa_sign_in_place(
@@ -1732,7 +1759,7 @@ mod tests {
                     dma(&sig[..sig_len])
                 )
                 .await
-                .unwrap());
+                .expect("ML-DSA signature verification should succeed"));
         }
     }
 

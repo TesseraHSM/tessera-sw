@@ -21,7 +21,7 @@ fn test_get_unwrapping_key_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -40,7 +40,7 @@ fn test_get_unwrapping_key_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -87,7 +87,7 @@ fn test_get_unwrapping_key_multi_threaded_stress() {
 
             let mut first_pub_key_der: Option<Vec<u8>> = None;
             for thread in threads {
-                let pub_key_der = thread.join().unwrap();
+                let pub_key_der = thread.join().expect("worker join should succeed");
                 if let Some(der) = &first_pub_key_der {
                     assert_eq!(&pub_key_der, der);
                 } else {
@@ -104,7 +104,9 @@ fn test_get_unwrapping_key_thread_fn(
     max_attempts: usize,
 ) -> Vec<u8> {
     let ddi = DdiTest::default();
-    let mut dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let mut dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
 
     let mut app_sess_id = None;
 
@@ -126,7 +128,8 @@ fn test_get_unwrapping_key_thread_fn(
 
         if resp.as_ref().is_err() {
             if matches!(
-                resp.as_ref().unwrap_err(),
+                resp.as_ref()
+                    .expect_err("referenced value lookup should fail"),
                 DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ) {
                 continue;
@@ -135,7 +138,7 @@ fn test_get_unwrapping_key_thread_fn(
 
         assert!(resp.is_ok(), "resp {:?}", resp);
 
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         assert!(resp.hdr.sess_id.is_some());
         assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -146,7 +149,7 @@ fn test_get_unwrapping_key_thread_fn(
         break;
     }
 
-    let app_sess_id = app_sess_id.unwrap();
+    let app_sess_id = app_sess_id.expect("app session ID should be available");
 
     let (_, pub_key_der, _) = get_unwrapping_key(&mut dev, app_sess_id);
     pub_key_der

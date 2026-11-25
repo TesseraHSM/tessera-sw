@@ -306,7 +306,7 @@ fn test_open_session_no_retry_without_resiliency() {
     clear_faults();
 
     assert_eq!(
-        result.unwrap_err(),
+        result.expect_err("test open session no retry without resiliency result should fail"),
         HsmError::IoAborted,
         "open_session without resiliency should propagate IoAborted immediately"
     );

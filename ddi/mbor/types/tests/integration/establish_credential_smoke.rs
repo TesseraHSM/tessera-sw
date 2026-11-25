@@ -66,7 +66,8 @@ fn test_establish_credential_smoke() {
         let (encrypted_credential, pub_key) =
             encrypt_userid_pin_for_establish_cred(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
-        let resp = helper_smoke_establish_credential(dev, encrypted_credential, pub_key).unwrap();
+        let resp = helper_smoke_establish_credential(dev, encrypted_credential, pub_key)
+            .expect("DDI smoke establish credential should succeed");
 
         assert!(resp.hdr.sess_id.is_none());
         assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);

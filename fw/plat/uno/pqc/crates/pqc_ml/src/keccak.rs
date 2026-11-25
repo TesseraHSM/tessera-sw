@@ -37,6 +37,7 @@ extern "C" {
 impl KeccakState {
     // A hardware sponge state has no meaningful `Default`; `new` zeroes it
     // explicitly for the callers that want a fresh sponge.
+    #[allow(unsafe_code)]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         // `KeccakF1600_Initialize` is `bx lr` in this port -- the zeroing was
@@ -53,6 +54,7 @@ impl KeccakState {
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn xor_bytes(&mut self, data: &[u8], offset: usize) {
         if data.is_empty() {
             return;
@@ -67,6 +69,7 @@ impl KeccakState {
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn extract_bytes(&self, out: &mut [u8], offset: usize) {
         if out.is_empty() {
             return;
@@ -81,6 +84,7 @@ impl KeccakState {
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn permute(&mut self) {
         unsafe { KeccakF1600_StatePermute(self.state.as_mut_ptr()) };
     }
@@ -267,6 +271,7 @@ impl ShakeCtx {
     /// [`squeeze`](Self::squeeze) into words, the output bytes in order: on
     /// a little-endian target each word holds the next four bytes, so a
     /// sampler can pick fields out with shifts rather than byte loads.
+    #[allow(unsafe_code)]
     pub fn squeeze_words(&mut self, out: &mut [u32]) {
         // SAFETY: the bytes of an initialised `u32` slice are a valid,
         // initialised `u8` slice four times as long, and nothing else

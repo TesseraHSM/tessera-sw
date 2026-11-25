@@ -282,11 +282,17 @@ mod tests {
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
 
         let digest_len = algo.digest_len();
-        let data = pal.dma_alloc(&io, msg.len()).unwrap();
+        let data = pal
+            .dma_alloc(&io, msg.len())
+            .expect("DMA buffer allocation should succeed");
         data.copy_from_slice(msg);
-        let digest = pal.dma_alloc(&io, digest_len).unwrap();
+        let digest = pal
+            .dma_alloc(&io, digest_len)
+            .expect("DMA buffer allocation should succeed");
 
-        pal.hash(&io, algo, data, form, Some(digest)).await.unwrap();
+        pal.hash(&io, algo, data, form, Some(digest))
+            .await
+            .expect("hash computation should succeed");
         digest[..digest_len].to_vec()
     }
 
@@ -295,9 +301,13 @@ mod tests {
         let driver = StdHash::new(WorkerPool::new(Handle::current()));
         let mut digest = vec![0u8; algo.digest_len()];
         driver
-            .hash(to_hash_algo(algo).unwrap(), msg, &mut digest)
+            .hash(
+                to_hash_algo(algo).expect("hash algorithm conversion should succeed"),
+                msg,
+                &mut digest,
+            )
             .await
-            .unwrap();
+            .expect("hash computation should succeed");
         digest
     }
 
@@ -363,7 +373,12 @@ mod tests {
 
     #[tokio::test]
     async fn sha1_validate_nist() {
-        verify_endianness(HsmHashAlgo::Sha1, b"abc", &hex::decode(SHA1_ABC).unwrap()).await;
+        verify_endianness(
+            HsmHashAlgo::Sha1,
+            b"abc",
+            &hex::decode(SHA1_ABC).expect("hex decoding should succeed"),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -371,7 +386,7 @@ mod tests {
         verify_endianness(
             HsmHashAlgo::Sha256,
             b"abc",
-            &hex::decode(SHA256_ABC).unwrap(),
+            &hex::decode(SHA256_ABC).expect("hex decoding should succeed"),
         )
         .await;
     }
@@ -381,7 +396,7 @@ mod tests {
         verify_endianness(
             HsmHashAlgo::Sha384,
             b"abc",
-            &hex::decode(SHA384_ABC).unwrap(),
+            &hex::decode(SHA384_ABC).expect("hex decoding should succeed"),
         )
         .await;
     }
@@ -391,7 +406,7 @@ mod tests {
         verify_endianness(
             HsmHashAlgo::Sha512,
             b"abc",
-            &hex::decode(SHA512_ABC).unwrap(),
+            &hex::decode(SHA512_ABC).expect("hex decoding should succeed"),
         )
         .await;
     }
@@ -1075,8 +1090,12 @@ mod tests {
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
         let msg = multiblock_msg();
-        let data = pal.dma_alloc(&io, msg.len()).unwrap();
-        let digest = pal.dma_alloc(&io, 68).unwrap();
+        let data = pal
+            .dma_alloc(&io, msg.len())
+            .expect("DMA buffer allocation should succeed");
+        let digest = pal
+            .dma_alloc(&io, 68)
+            .expect("DMA buffer allocation should succeed");
         for algo in [
             HsmHashAlgo::Sha1,
             HsmHashAlgo::Sha256,
@@ -1106,7 +1125,7 @@ mod tests {
                     pal.hash_finish(&io, &mut ctx, form, Some(digest)).await
                 })
                 .await
-                .unwrap();
+                .expect("async scoped allocation should succeed");
                 assert_eq!(&digest[..expected.len()], &expected[..]);
                 assert!(digest[expected.len()..].iter().all(|&b| b == 0xA5));
             }
@@ -1130,23 +1149,29 @@ mod tests {
     }
 
     fn shake128(len: u16) -> HsmHashAlgo {
-        HsmHashAlgo::Shake128(NonZeroU16::new(len).unwrap())
+        HsmHashAlgo::Shake128(
+            NonZeroU16::new(len).expect("nonzero integer conversion should succeed"),
+        )
     }
 
     fn shake256(len: u16) -> HsmHashAlgo {
-        HsmHashAlgo::Shake256(NonZeroU16::new(len).unwrap())
+        HsmHashAlgo::Shake256(
+            NonZeroU16::new(len).expect("nonzero integer conversion should succeed"),
+        )
     }
 
     /// Reference SHAKE output computed directly with `tsra_crypto`.
     fn shake_reference(algo: HsmHashAlgo, msg: &[u8]) -> Vec<u8> {
-        let len = NonZeroUsize::new(algo.digest_len()).unwrap();
+        let len = NonZeroUsize::new(algo.digest_len())
+            .expect("nonzero integer conversion should succeed");
         let mut hash = match algo {
             HsmHashAlgo::Shake128(_) => HashAlgo::shake128(len),
             HsmHashAlgo::Shake256(_) => HashAlgo::shake256(len),
             _ => unreachable!("not a SHAKE algorithm"),
         };
         let mut out = vec![0u8; len.get()];
-        tsra_crypto::HashOp::hash(&mut hash, msg, Some(&mut out)).unwrap();
+        tsra_crypto::HashOp::hash(&mut hash, msg, Some(&mut out))
+            .expect("hash computation should succeed");
         out
     }
 
@@ -1157,9 +1182,13 @@ mod tests {
         let pal = StdHsmPal::new(rx, Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
-        let data = pal.dma_alloc(&io, msg.len()).unwrap();
+        let data = pal
+            .dma_alloc(&io, msg.len())
+            .expect("DMA buffer allocation should succeed");
         data.copy_from_slice(msg);
-        let digest = pal.dma_alloc(&io, algo.digest_len() + 4).unwrap();
+        let digest = pal
+            .dma_alloc(&io, algo.digest_len() + 4)
+            .expect("DMA buffer allocation should succeed");
         digest.fill(0xA5);
         pal.alloc_scoped_async(&io, async |alloc| {
             let state_len = pal.hash_state_size(algo)?;
@@ -1171,7 +1200,7 @@ mod tests {
             pal.hash_finish(&io, &mut ctx, form, Some(digest)).await
         })
         .await
-        .unwrap();
+        .expect("async scoped allocation should succeed");
         digest.to_vec()
     }
 
@@ -1197,7 +1226,7 @@ mod tests {
     #[tokio::test]
     async fn shake_validate_nist() {
         for (algo, expected) in [(shake128(32), SHAKE128_ABC), (shake256(64), SHAKE256_ABC)] {
-            let expected = hex::decode(expected).unwrap();
+            let expected = hex::decode(expected).expect("hex decoding should succeed");
             verify_endianness(algo, b"abc", &expected).await;
             verify_streaming(algo, b"abc", &expected).await;
         }
@@ -1224,9 +1253,13 @@ mod tests {
         let pal = StdHsmPal::new(rx, Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
-        let data = pal.dma_alloc(&io, 3).unwrap();
+        let data = pal
+            .dma_alloc(&io, 3)
+            .expect("DMA buffer allocation should succeed");
         data.copy_from_slice(b"abc");
-        let digest = pal.dma_alloc(&io, 64).unwrap();
+        let digest = pal
+            .dma_alloc(&io, 64)
+            .expect("DMA buffer allocation should succeed");
         for algo in [
             HsmHashAlgo::Sha3_256,
             HsmHashAlgo::Sha3_384,

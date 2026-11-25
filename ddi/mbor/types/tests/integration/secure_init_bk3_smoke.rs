@@ -89,7 +89,7 @@ fn test_secure_init_bk3_requires_pin() {
         // having set the provisioning PIN: it must be rejected as Bk3PinNotSet.
         let payload = build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
         assert!(payload.is_ok(), "payload {payload:?}");
-        let (eb, pk) = payload.unwrap();
+        let (eb, pk) = payload.expect("payload should be available");
         let result = helper_secure_init_bk3(dev, eb, pk);
         assert!(
             matches!(result, Err(DdiError::DdiStatus(DdiStatus::Bk3PinNotSet))),

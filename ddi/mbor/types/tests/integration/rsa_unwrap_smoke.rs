@@ -119,7 +119,7 @@ fn test_rsa_unwrap_tampered_blob_smoke() {
             // as the unwrap-specific `RsaUnwrapAesUnwrapFailed`.
             assert!(
                 matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::RsaUnwrapAesUnwrapFailed)
                 ),
                 "tampered blob should surface as RsaUnwrapAesUnwrapFailed",
@@ -352,7 +352,7 @@ fn test_rsa_unwrap_oversized_kek_smoke() {
 
             assert!(
                 matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::RsaUnwrapInvalidKek)
                 ),
                 "oversized KEK should surface as RsaUnwrapInvalidKek on firmware",

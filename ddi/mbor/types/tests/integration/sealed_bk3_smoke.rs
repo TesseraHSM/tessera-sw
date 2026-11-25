@@ -21,7 +21,7 @@ fn fresh_partition_available() -> bool {
 
 /// Reset the partition so each case starts with fresh one-shot BK3 state.
 pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
-    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
+    let resp = simulator_factory_reset(&ddi.open_dev(path).expect("device opening should succeed"));
     assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
@@ -34,7 +34,7 @@ pub fn cleanup(
     path: &str,
     _setup_session_id: Option<u16>,
 ) {
-    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
+    let resp = simulator_factory_reset(&ddi.open_dev(path).expect("device opening should succeed"));
     assert!(resp.is_ok(), "resp {:?}", resp);
 }
 
@@ -54,11 +54,12 @@ fn test_set_then_get_sealed_bk3() {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
 
-        let set_resp = helper_set_sealed_bk3(dev, blob.clone()).unwrap();
+        let set_resp =
+            helper_set_sealed_bk3(dev, blob.clone()).expect("DDI set sealed BK3 should succeed");
         assert_eq!(set_resp.hdr.op, DdiOp::SetSealedBk3);
         assert_eq!(set_resp.hdr.status, DdiStatus::Success);
 
-        let get_resp = helper_get_sealed_bk3(dev).unwrap();
+        let get_resp = helper_get_sealed_bk3(dev).expect("DDI get sealed BK3 should succeed");
         assert_eq!(get_resp.hdr.op, DdiOp::GetSealedBk3);
         assert_eq!(get_resp.data.sealed_bk3.as_slice(), blob.as_slice());
     });
@@ -73,10 +74,11 @@ fn test_set_sealed_bk3_twice_fails() {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
 
-        let set_resp = helper_set_sealed_bk3(dev, blob.clone()).unwrap();
+        let set_resp =
+            helper_set_sealed_bk3(dev, blob.clone()).expect("DDI set sealed BK3 should succeed");
         assert_eq!(set_resp.hdr.status, DdiStatus::Success);
 
-        let err = helper_set_sealed_bk3(dev, blob).unwrap_err();
+        let err = helper_set_sealed_bk3(dev, blob).expect_err("DDI set sealed BK3 should fail");
         assert!(
             matches!(err, DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet)),
             "expected SealedBk3AlreadySet, got {:?}",
@@ -92,7 +94,7 @@ fn test_get_sealed_bk3_before_set_fails() {
     }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
-        let err = helper_get_sealed_bk3(dev).unwrap_err();
+        let err = helper_get_sealed_bk3(dev).expect_err("DDI get sealed BK3 should fail");
         assert!(matches!(
             err,
             DdiError::DdiStatus(DdiStatus::SealedBk3NotPresent)

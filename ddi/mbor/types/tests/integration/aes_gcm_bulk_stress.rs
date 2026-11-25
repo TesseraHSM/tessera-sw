@@ -50,7 +50,7 @@ fn test_aes_gcm_encrypt_decrypt_multi_threaded_stress() {
             }
 
             for thread in threads {
-                thread.join().unwrap();
+                thread.join().expect("worker join should succeed");
             }
         },
     );
@@ -62,7 +62,9 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
     max_attempts: usize,
 ) {
     let ddi = DdiTest::default();
-    let dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
     let mut app_sess_id = None;
     let mut short_app_id = None;
 
@@ -83,7 +85,8 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
         );
         if resp.as_ref().is_err() {
             if matches!(
-                resp.as_ref().unwrap_err(),
+                resp.as_ref()
+                    .expect_err("referenced value lookup should fail"),
                 DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ) {
                 continue;
@@ -92,7 +95,7 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
 
         assert!(resp.is_ok(), "resp {:?}", resp);
 
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         assert!(resp.hdr.sess_id.is_some());
         assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -104,16 +107,16 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
         break;
     }
 
-    let app_sess_id = app_sess_id.unwrap();
+    let app_sess_id = app_sess_id.expect("app session ID should be available");
 
-    let short_app_sess_id = short_app_id.unwrap();
+    let short_app_sess_id = short_app_id.expect("short app ID should be available");
 
     thread::sleep(std::time::Duration::from_secs(1));
 
     let resp =
         generate_aes_bulk_256_key(&dev, &app_sess_id, DdiAesKeySize::AesGcmBulk256Unapproved);
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_aes_bulk_256 = resp.data.bulk_key_id;
     assert!(key_id_aes_bulk_256.is_some());
@@ -130,7 +133,7 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
     while Instant::now().duration_since(start_time).as_secs() < NUM_SECS {
         // setup params for encrypt operation
         let mut tsra_fp_gcm_params: DdiAesGcmParams = DdiAesGcmParams {
-            key_id: key_id_aes_bulk_256.unwrap() as u32,
+            key_id: key_id_aes_bulk_256.expect("key ID AES bulk 256 should be available") as u32,
             iv,
             aad: Some(aad.to_vec()),
             tag: None, // tag is not needed for encryption
@@ -142,7 +145,7 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
         let resp = dev.exec_op_fp_gcm(DdiAesOp::Encrypt, tsra_fp_gcm_params.clone(), data.clone());
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let encrypted_resp = resp.unwrap();
+        let encrypted_resp = resp.expect("DDI response should succeed");
 
         // ensure encrypted data length is the same as the original data
         // ensure encrypted data is different from original data
@@ -159,7 +162,7 @@ fn test_aes_gcm_encrypt_decrypt_thread_fn(
         );
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let decrypted_resp = resp.unwrap();
+        let decrypted_resp = resp.expect("DDI response should succeed");
 
         assert_eq!(decrypted_resp.data.len(), data.len());
         assert_eq!(decrypted_resp.data, data);

@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 // Fail: passing bare value to optional field should not compile.
 // Optional fields require Option<T>.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x05)]

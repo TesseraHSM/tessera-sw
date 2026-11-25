@@ -25,7 +25,7 @@ fn test_lm_context_save_and_restore() {
                 return;
             }
 
-            let cwd = std::env::current_dir().unwrap();
+            let cwd = std::env::current_dir().expect("working directory lookup should succeed");
             let test_start_file = cwd.join("lm_context_test");
             if !test_start_file.exists() {
                 tracing::debug!(
@@ -83,7 +83,7 @@ fn test_lm_context_save_and_restore() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
             assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
             assert_eq!(resp.hdr.status, DdiStatus::Success);
@@ -92,7 +92,7 @@ fn test_lm_context_save_and_restore() {
             let resp = helper_get_sealed_bk3(dev);
             assert!(resp.is_ok(), "Get sealed bk3: {:?}", resp.err());
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert_eq!(resp.hdr.op, DdiOp::GetSealedBk3);
             assert!(resp.hdr.rev.is_some());
             assert!(resp.hdr.sess_id.is_none());

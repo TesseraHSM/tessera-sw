@@ -136,7 +136,7 @@ fn generate_masked_key(ctx: &TestCtx, session_id: u16, input: &FuzzInput) -> (Ve
                 })
                 .expect("ECC key generation should succeed");
             let expected = Expected::Report {
-                pub_key: resp.pub_key.to_vec(),
+                pub_key: resp.pub_key.clone(),
                 coord_len: curve.coord_len(),
             };
             (resp.masked_key, expected)

@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 // Fail: wrong type for a field should not compile.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x04)]

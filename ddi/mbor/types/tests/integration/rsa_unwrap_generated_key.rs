@@ -47,7 +47,7 @@ fn test_rsa_unwrap_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -90,7 +90,7 @@ fn test_rsa_unwrap_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -167,7 +167,7 @@ fn test_rsa_unwrap_incorrect_key_num_entry() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -339,11 +339,11 @@ fn test_rsa_unwrap_incorrect_input_key_usage() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp_data = resp.unwrap().data;
+            let resp_data = resp.expect("DDI response should succeed").data;
             assert_eq!(resp_data.kind, DdiKeyType::Rsa2kPrivate);
 
             let bad_unwrap_key_id = resp_data.key_id;
-            let ddi_der_public_key = resp_data.pub_key.unwrap();
+            let ddi_der_public_key = resp_data.pub_key.expect("public key should be available");
             let bad_unwrap_key_der =
                 ddi_der_public_key.der.data()[..ddi_der_public_key.der.len()].to_vec();
 
@@ -413,7 +413,7 @@ fn test_rsa_unwrap_rsa_key_sizes() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert_eq!(resp.data.kind, *expected_key_type);
             }
         },
@@ -452,7 +452,7 @@ fn test_rsa_unwrap_rsa_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let unwrapped_key_id = resp.data.key_id;
             assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivate);
 
@@ -483,7 +483,7 @@ fn test_rsa_unwrap_rsa_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let mut padded_data = [0u8; 512];
             padded_data[..resp.data.x.len()]
@@ -497,7 +497,8 @@ fn test_rsa_unwrap_rsa_key() {
                 crypto_sha256,
             );
             assert!(unpadded_data_result.is_ok());
-            let unpadded_data = unpadded_data_result.unwrap();
+            let unpadded_data =
+                unpadded_data_result.expect("unpadded data result should be available");
 
             assert_eq!(orig_x[..data_len_to_test], unpadded_data);
         },
@@ -536,7 +537,7 @@ fn test_rsa_unwrap_rsa_crt_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let unwrapped_key_id = resp.data.key_id;
             assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivateCrt);
 
@@ -567,7 +568,7 @@ fn test_rsa_unwrap_rsa_crt_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let mut padded_data = [0u8; 512];
             padded_data[..resp.data.x.len()]
@@ -581,7 +582,8 @@ fn test_rsa_unwrap_rsa_crt_key() {
                 crypto_sha256,
             );
             assert!(unpadded_data_result.is_ok());
-            let unpadded_data = unpadded_data_result.unwrap();
+            let unpadded_data =
+                unpadded_data_result.expect("unpadded data result should be available");
 
             assert_eq!(orig_x[..data_len_to_test], unpadded_data);
         },
@@ -619,7 +621,7 @@ fn test_rsa_unwrap_aes_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert_eq!(resp.data.kind, DdiKeyType::Aes256);
             assert!(resp.data.pub_key.is_none());
             let unwrapped_key_id = resp.data.key_id;

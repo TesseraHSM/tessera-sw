@@ -48,7 +48,9 @@ fn migrate_sim(dev: &<DdiTest as Ddi>::Dev) {
 fn fips_approved(dev: &<DdiTest as Ddi>::Dev) -> bool {
     let resp = helper_get_device_info(dev, None, Some(API_REV));
     assert!(resp.is_ok(), "GetDeviceInfo {resp:?}");
-    resp.unwrap().data.fips_approved
+    resp.expect("DDI response should succeed")
+        .data
+        .fips_approved
 }
 
 /// Assert that `err` is the pin-not-set status.
@@ -107,7 +109,7 @@ fn test_secure_provision_lm_midflow_restart() {
         migrate_sim(dev);
         let payload = build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
         assert!(payload.is_ok(), "payload {payload:?}");
-        let (eb, pk) = payload.unwrap();
+        let (eb, pk) = payload.expect("payload should be available");
         let result = helper_secure_init_bk3(dev, eb, pk);
         assert!(
             matches!(result, Err(DdiError::DdiStatus(DdiStatus::Bk3PinNotSet))),
@@ -122,10 +124,13 @@ fn test_secure_provision_lm_midflow_restart() {
         migrate_sim(dev);
         let payload = build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
         assert!(payload.is_ok(), "payload {payload:?}");
-        let (eb, pk) = payload.unwrap();
+        let (eb, pk) = payload.expect("payload should be available");
         let result = helper_secure_init_bk3(dev, eb, pk);
         assert!(result.is_err(), "setpin-then-migrate: {result:?}");
-        assert_pin_not_set(&result.unwrap_err(), "setpin-then-migrate");
+        assert_pin_not_set(
+            &result.expect_err("test secure provision lm midflow restart result should fail"),
+            "setpin-then-migrate",
+        );
 
         // prebuild-then-migrate: re-set the volatile PIN, pre-build an
         // encrypted-BK3 payload over a second tunnel, THEN migrate so both the
@@ -137,7 +142,7 @@ fn test_secure_provision_lm_midflow_restart() {
         assert!(pin_resp.is_ok(), "pin_resp {pin_resp:?}");
         let payload = build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
         assert!(payload.is_ok(), "payload {payload:?}");
-        let (eb, pk) = payload.unwrap();
+        let (eb, pk) = payload.expect("payload should be available");
         migrate_sim(dev);
         let result = helper_secure_init_bk3(dev, eb, pk);
         assert!(
@@ -158,7 +163,8 @@ fn test_secure_provision_lm_midflow_restart() {
         // Recovery: a clean full flow provisions and seals end to end.
         let result = secure_bk3_provision_and_seal(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
         assert!(result.is_ok(), "provision + seal {result:?}");
-        let sealed_before = result.unwrap();
+        let sealed_before =
+            result.expect("test secure provision lm midflow restart result should succeed");
 
         // `fips_approved` reflects the module's FIPS provisioning status:
         // firmware ties it to the power-on image measurement (so it stays false
@@ -170,7 +176,12 @@ fn test_secure_provision_lm_midflow_restart() {
         migrate_sim(dev);
         let sealed_after = helper_get_sealed_bk3(dev);
         assert!(sealed_after.is_ok(), "sealed_after {sealed_after:?}");
-        let sealed_after = sealed_after.unwrap().data.sealed_bk3.as_slice().to_vec();
+        let sealed_after = sealed_after
+            .expect("sealed after should be available")
+            .data
+            .sealed_bk3
+            .as_slice()
+            .to_vec();
         assert_eq!(
             sealed_after, sealed_before,
             "persist-identical: sealed_bk3 changed"
@@ -231,7 +242,7 @@ fn test_secure_provision_lm_completed_survives() {
                 assert!(rng.is_ok(), "rand_bytes failed: {rng:?}");
                 let result = secure_bk3_provision_and_seal(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
                 assert!(result.is_ok(), "provision + seal {result:?}");
-                result.unwrap()
+                result.expect("test secure provision lm completed survives result should succeed")
             }
             // Provisioned-but-unsealed or unsupported: can't recover here.
             Bk3State::Unsealed | Bk3State::Unsupported => {
@@ -246,7 +257,12 @@ fn test_secure_provision_lm_completed_survives() {
         // persist-identical: the persistent store survives the migration byte-identical.
         let sealed_after = helper_get_sealed_bk3(dev);
         assert!(sealed_after.is_ok(), "sealed_after {sealed_after:?}");
-        let sealed_after = sealed_after.unwrap().data.sealed_bk3.as_slice().to_vec();
+        let sealed_after = sealed_after
+            .expect("sealed after should be available")
+            .data
+            .sealed_bk3
+            .as_slice()
+            .to_vec();
         assert_eq!(
             sealed_after, sealed_before,
             "persist-identical: sealed_bk3 changed"

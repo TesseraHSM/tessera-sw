@@ -26,7 +26,8 @@ pub fn cleanup(
 #[test]
 fn test_get_api_rev() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
-        let resp = helper_get_api_rev(dev, None, None).unwrap();
+        let resp =
+            helper_get_api_rev(dev, None, None).expect("DDI get api revision should succeed");
 
         assert_eq!(resp.hdr.op, DdiOp::GetApiRev);
         assert!(resp.hdr.rev.is_none());
@@ -54,7 +55,7 @@ fn test_get_api_rev_with_invalid_session() {
         assert!(resp.is_err(), "resp {:?}", resp);
 
         assert!(matches!(
-            resp.unwrap_err(),
+            resp.expect_err("DDI response should fail"),
             DdiError::DdiStatus(DdiStatus::InvalidArg)
         ));
     });
@@ -68,7 +69,7 @@ fn test_get_api_rev_with_invalid_rev() {
         assert!(resp.is_err(), "resp {:?}", resp);
 
         assert!(matches!(
-            resp.unwrap_err(),
+            resp.expect_err("DDI response should fail"),
             DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
         ));
     });

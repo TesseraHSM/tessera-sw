@@ -403,3 +403,6 @@ doc = false
 name = "fuzz_tbor_rsa_encrypt_decrypt"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_encrypt_decrypt.rs"
 test = false
+
+[lints]
+workspace = true

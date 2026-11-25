@@ -182,6 +182,7 @@ impl core::fmt::Debug for StdHsmPal {
 // scheduling model — sync trait methods create temporary borrows that are
 // dropped before the next yield point, and mutation only occurs in a
 // separate Embassy task between yield points.
+#[allow(unsafe_code)]
 unsafe impl Sync for StdHsmPal {}
 
 impl StdHsmPal {
@@ -235,7 +236,7 @@ impl Default for StdHsmPal {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
-            .unwrap();
+            .expect("builder construction should succeed");
         let handle = rt.handle().clone();
         Self {
             iic: StdIic::new(rx),

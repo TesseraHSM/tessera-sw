@@ -121,7 +121,7 @@ fn test_establish_credential_success_prov_failure_bad_masked_bk3() {
                 },
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_none());
             assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -150,7 +150,7 @@ fn test_establish_credential_with_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -177,7 +177,7 @@ fn test_establish_credential_without_revision() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
             ));
         },
@@ -203,7 +203,7 @@ fn test_establish_credential() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_none());
             assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -325,7 +325,7 @@ fn test_establish_credential_multiple() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_none());
                 assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -367,7 +367,7 @@ fn test_establish_credential_multiple_get_key() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_none());
                 assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -416,7 +416,7 @@ fn test_establish_credential_tamper_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -445,7 +445,7 @@ fn test_establish_credential_tamper_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -474,7 +474,7 @@ fn test_establish_credential_tamper_iv() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -501,7 +501,7 @@ fn test_establish_credential_tamper_nonce() {
             );
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ));
         },
@@ -530,7 +530,7 @@ fn test_establish_credential_tamper_tag() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -599,7 +599,7 @@ fn test_establish_credential_tamper_signed_pid() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::EccVerifyFailed)
             ));
         },
@@ -701,7 +701,7 @@ fn test_establish_credential_null_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -728,7 +728,7 @@ fn test_establish_credential_null_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -773,7 +773,7 @@ fn test_establish_credential_multi_threaded_single_winner() {
             let thread_count = 16;
 
             let mut bk3 = vec![0u8; 48];
-            Rng::rand_bytes(&mut bk3).unwrap();
+            Rng::rand_bytes(&mut bk3).expect("random byte generation should succeed");
             let masked_bk3_result = helper_get_or_init_bk3(dev);
 
             let (encrypted_credential, pub_key) =
@@ -840,7 +840,9 @@ fn test_thread_fn(
     pota_pub_key: Vec<u8>,
 ) -> DdiResult<()> {
     let ddi = DdiTest::default();
-    let dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
 
     helper_establish_credential(
         &dev,
@@ -885,7 +887,7 @@ fn test_establish_credential_null_id_then_proper_id() {
                 assert!(resp.is_err(), "resp {:?}", resp);
 
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
                 ));
             }
@@ -895,7 +897,7 @@ fn test_establish_credential_null_id_then_proper_id() {
                     encrypt_userid_pin_for_establish_cred(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
                 assert_ne!(
-                    old_nonce.unwrap(),
+                    old_nonce.expect("old nonce should be available"),
                     encrypted_credential.nonce,
                     "Nonce is expected to be different now since crypto portion was successful previously"
                 );
@@ -910,7 +912,7 @@ fn test_establish_credential_null_id_then_proper_id() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_none());
                 assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -1089,7 +1091,7 @@ fn test_establish_credential_with_reset_in_middle() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_none());
                 assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);
@@ -1113,7 +1115,7 @@ fn test_establish_credential_with_reset_in_middle() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_none());
                 assert_eq!(resp.hdr.op, DdiOp::EstablishCredential);

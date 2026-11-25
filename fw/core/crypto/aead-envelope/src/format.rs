@@ -142,9 +142,9 @@ mod tests {
     #[test]
     fn round_trip_header() {
         let mut buf = [0u8; HEADER_LEN];
-        write_header(&mut buf, AeadAlg::AesGcm256, 64).unwrap();
+        write_header(&mut buf, AeadAlg::AesGcm256, 64).expect("header writing should succeed");
         assert_eq!(buf, *b"AEAD\x03\x00\x00\x40");
-        let h = read_header(&buf).unwrap();
+        let h = read_header(&buf).expect("header reading should succeed");
         assert_eq!(h.alg, AeadAlg::AesGcm256);
         assert_eq!(h.aad_len, 64);
     }

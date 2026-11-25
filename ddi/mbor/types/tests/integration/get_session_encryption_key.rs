@@ -55,7 +55,7 @@ fn test_get_session_encryption_key_with_session() {
         assert!(resp.is_err(), "resp {:?}", resp);
 
         assert!(matches!(
-            resp.unwrap_err(),
+            resp.expect_err("DDI response should fail"),
             DdiError::DdiStatus(DdiStatus::InvalidArg)
         ));
     });
@@ -82,7 +82,7 @@ fn test_get_session_encryption_key_twice() {
             helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }));
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp_data = resp.unwrap().data;
+        let resp_data = resp.expect("DDI response should succeed").data;
         let session_encrypt_pub_key = resp_data.pub_key;
         let session_encrypt_nonce = resp_data.nonce;
 
@@ -91,7 +91,7 @@ fn test_get_session_encryption_key_twice() {
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
 
-        let resp_data = resp.unwrap().data;
+        let resp_data = resp.expect("DDI response should succeed").data;
         let session_encrypt_pub_key2 = resp_data.pub_key;
         let session_encrypt_nonce2 = resp_data.nonce;
 
@@ -120,7 +120,7 @@ fn test_get_session_encryption_key_multi_threaded_stress() {
 
         let mut first_pub_key_der_nonce: Option<(Vec<u8>, [u8; 32])> = None;
         for thread in threads {
-            let (pub_key_der, nonce) = thread.join().unwrap();
+            let (pub_key_der, nonce) = thread.join().expect("worker join should succeed");
             if let Some((first_der, first_nonce)) = &first_pub_key_der_nonce {
                 assert_eq!(&pub_key_der, first_der);
                 assert_eq!(&nonce, first_nonce);
@@ -136,7 +136,9 @@ fn test_get_session_encryption_key_thread_fn(
     device_path: String,
 ) -> (Vec<u8>, [u8; 32]) {
     let ddi = DdiTest::default();
-    let mut dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let mut dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
 
     let resp = helper_get_session_encryption_key_with_sig_verify(
         &mut dev,
@@ -145,7 +147,7 @@ fn test_get_session_encryption_key_thread_fn(
     );
 
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     (resp.data.pub_key.der.data().to_vec(), resp.data.nonce)
 }
 
@@ -158,7 +160,7 @@ fn test_get_session_encryption_key_changes_after_reset() {
             helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }));
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         let old_nonce = resp.data.nonce;
         let old_pub_key = resp.data.pub_key;
@@ -171,7 +173,7 @@ fn test_get_session_encryption_key_changes_after_reset() {
             helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }));
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         assert_ne!(
             old_pub_key, resp.data.pub_key,
@@ -194,7 +196,7 @@ fn test_get_session_encryption_key_without_establish_cred() {
 
         if get_device_kind(dev) == DdiDeviceKind::Virtual {
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished)
             ));
         }
@@ -213,7 +215,7 @@ fn test_get_session_encryption_key_with_session_with_sig_verify() {
         assert!(resp.is_err(), "resp {:?}", resp);
 
         assert!(matches!(
-            resp.unwrap_err(),
+            resp.expect_err("DDI response should fail"),
             DdiError::DdiStatus(DdiStatus::InvalidArg)
         ));
     });
@@ -246,7 +248,7 @@ fn test_get_session_encryption_key_twice_with_sig_verify() {
         );
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp_data = resp.unwrap().data;
+        let resp_data = resp.expect("DDI response should succeed").data;
         let session_encrypt_pub_key = resp_data.pub_key;
         let session_encrypt_nonce = resp_data.nonce;
 
@@ -258,7 +260,7 @@ fn test_get_session_encryption_key_twice_with_sig_verify() {
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
 
-        let resp_data = resp.unwrap().data;
+        let resp_data = resp.expect("DDI response should succeed").data;
         let session_encrypt_pub_key2 = resp_data.pub_key;
         let session_encrypt_nonce2 = resp_data.nonce;
 
@@ -279,7 +281,7 @@ fn test_get_session_encryption_key_changes_after_reset_with_sig_verify() {
         );
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         let old_nonce = resp.data.nonce;
         let old_pub_key = resp.data.pub_key;
@@ -295,7 +297,7 @@ fn test_get_session_encryption_key_changes_after_reset_with_sig_verify() {
         );
 
         assert!(resp.is_ok(), "resp: {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         assert_ne!(
             old_pub_key, resp.data.pub_key,
@@ -321,7 +323,7 @@ fn test_get_session_encryption_key_without_establish_cred_with_sig_verify() {
 
         if get_device_kind(dev) == DdiDeviceKind::Virtual {
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished)
             ));
         }

@@ -25,7 +25,7 @@ fn test_aes_generate_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -43,7 +43,7 @@ fn test_aes_generate_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -70,7 +70,7 @@ fn test_aes_generate_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -96,7 +96,7 @@ fn test_aes_generate_invalid_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -193,7 +193,7 @@ fn test_aes_generate_and_unmask() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
 
             let original_key_id = data.key_id;
 
@@ -217,7 +217,7 @@ fn test_aes_generate_and_unmask() {
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
             let unmasked_key_id = data.key_id;
             assert_ne!(unmasked_key_id, original_key_id);
 
@@ -238,7 +238,7 @@ fn test_aes_generate_and_unmask() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let resp = helper_aes_encrypt_decrypt(
                 dev,
@@ -252,7 +252,7 @@ fn test_aes_generate_and_unmask() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.msg.data_take(), msg);
             assert_eq!(resp.data.msg.len(), msg_len);
@@ -284,7 +284,7 @@ fn test_aes_generate_and_unmask_tampered() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
 
             // Tamper
             {
@@ -302,7 +302,7 @@ fn test_aes_generate_and_unmask_tampered() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -324,7 +324,7 @@ fn test_aes_generate_and_unmask_tampered() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }

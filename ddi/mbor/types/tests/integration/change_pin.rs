@@ -31,7 +31,7 @@ fn test_change_pin() {
 
             // Try to login with original credential should fail
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -55,7 +55,7 @@ fn test_change_pin() {
 
             // Try to login with new ALT credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -115,7 +115,7 @@ fn test_change_pin_tampered_pin() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -161,7 +161,7 @@ fn test_change_pin_tampered_iv() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -207,7 +207,7 @@ fn test_change_pin_tampered_nonce() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -254,7 +254,7 @@ fn test_change_pin_tampered_tag() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -301,7 +301,7 @@ fn test_change_pin_tampered_pub_key() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -346,7 +346,7 @@ fn test_change_pin_null_pin() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -467,7 +467,7 @@ fn test_change_pin_same_pin() {
 
             // Try to login with original credential should succeed
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -490,7 +490,7 @@ fn test_change_pin_same_pin() {
 
             // Try to login with new ALT credential should fail
             {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 // Set Device Kind
 
@@ -579,7 +579,7 @@ fn test_change_pin_multi_threaded_single_winner() {
             let mut dev_list = Vec::new();
             for _ in 0..thread_count {
                 let ddi = DdiTest::default();
-                let dev_item = ddi.open_dev(path).unwrap();
+                let dev_item = ddi.open_dev(path).expect("device opening should succeed");
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &dev_item,
                     TEST_CRED_ID,
@@ -593,7 +593,7 @@ fn test_change_pin_multi_threaded_single_winner() {
                     encrypted_credential.clone(),
                     pub_key.clone(),
                 )
-                .unwrap();
+                .expect("DDI open session should succeed");
                 dev_list.push((dev_item, resp.data.sess_id));
             }
 
@@ -603,7 +603,8 @@ fn test_change_pin_multi_threaded_single_winner() {
             for i in 0..thread_count {
                 let thread_id = i as u8;
 
-                let (dev_item, dev_session_id) = dev_list.pop().unwrap();
+                let (dev_item, dev_session_id) =
+                    dev_list.pop().expect("last queued value should be present");
                 let new_pin_value = new_pin.clone();
                 let change_pin_pub_key_value = change_pin_pub_key.clone();
 

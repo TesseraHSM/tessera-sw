@@ -86,9 +86,12 @@ mod tests {
     #[tokio::test]
     async fn key_mask_roundtrip_preserves_layout_and_matches_standard_gcm() {
         let (pal, io) = fixture();
-        let key = pal.dma_alloc(&io, 32).unwrap();
+        let key = pal
+            .dma_alloc(&io, 32)
+            .expect("DMA buffer allocation should succeed");
         key.fill(0x35);
-        let aes_key = AesKey::from_bytes(key).unwrap();
+        let aes_key =
+            AesKey::from_bytes(key).expect("AES key construction from bytes should succeed");
 
         for (aad_len, payload_len) in [
             (0, 0),
@@ -100,10 +103,14 @@ mod tests {
             (64, 68),
             (192, 48),
         ] {
-            let (len, pad) = pal.key_mask_len(aad_len, payload_len).unwrap();
+            let (len, pad) = pal
+                .key_mask_len(aad_len, payload_len)
+                .expect("masked key length calculation should succeed");
             assert_eq!(pad as usize, (16 - payload_len % 16) % 16);
             assert_eq!(len, 32 + aad_len + payload_len + pad as usize);
-            let data = pal.dma_alloc(&io, len).unwrap();
+            let data = pal
+                .dma_alloc(&io, len)
+                .expect("DMA buffer allocation should succeed");
             data.fill(0);
             data[16..16 + aad_len].fill(0xa5);
             data[16 + aad_len..16 + aad_len + payload_len].fill(0x42);
@@ -112,27 +119,27 @@ mod tests {
 
             pal.key_mask_in_place(&io, key, aad_len, data)
                 .await
-                .unwrap();
+                .expect("in-place key masking should succeed");
             assert_eq!(&data[12..16], &[0, 0, 0, 1]);
             assert!(data[16..16 + aad_len].iter().all(|&b| b == 0xa5));
             let nonce = data[..12].to_vec();
             let tag = data[len - 16..].to_vec();
             let mut reference = vec![0; expected.len()];
-            let mut decrypt =
-                AesGcmAlgo::for_decrypt(&nonce, &tag, Some(&data[16..16 + aad_len])).unwrap();
+            let mut decrypt = AesGcmAlgo::for_decrypt(&nonce, &tag, Some(&data[16..16 + aad_len]))
+                .expect("AES GCM algorithm construction for decrypt should succeed");
             decrypt
                 .decrypt(
                     &aes_key,
                     &data[16 + aad_len..len - 16],
                     Some(&mut reference),
                 )
-                .unwrap();
+                .expect("decryption should succeed");
             assert_eq!(reference, expected);
 
             data[12..16].fill(0xff);
             pal.key_unmask_in_place(&io, key, aad_len, data)
                 .await
-                .unwrap();
+                .expect("in-place key unmasking should succeed");
             assert_eq!(&data[..12], nonce.as_slice());
             assert!(data[12..16].iter().all(|&b| b == 0xff));
             assert!(data[16..16 + aad_len].iter().all(|&b| b == 0xa5));
@@ -144,15 +151,21 @@ mod tests {
     #[tokio::test]
     async fn key_mask_rejects_tampering_and_wrong_key() {
         let (pal, io) = fixture();
-        let key = pal.dma_alloc(&io, 32).unwrap();
+        let key = pal
+            .dma_alloc(&io, 32)
+            .expect("DMA buffer allocation should succeed");
         key.fill(0x35);
         let aad_len = 32;
-        let (len, _) = pal.key_mask_len(aad_len, 24).unwrap();
-        let data = pal.dma_alloc(&io, len).unwrap();
+        let (len, _) = pal
+            .key_mask_len(aad_len, 24)
+            .expect("masked key length calculation should succeed");
+        let data = pal
+            .dma_alloc(&io, len)
+            .expect("DMA buffer allocation should succeed");
         data.fill(0x42);
         pal.key_mask_in_place(&io, key, aad_len, data)
             .await
-            .unwrap();
+            .expect("in-place key masking should succeed");
         let masked = data.to_vec();
 
         for at in [0, 16, 16 + aad_len, len - 1] {
@@ -174,9 +187,13 @@ mod tests {
     #[tokio::test]
     async fn key_mask_rejects_invalid_lengths_before_mutation() {
         let (pal, io) = fixture();
-        let key = pal.dma_alloc(&io, 32).unwrap();
+        let key = pal
+            .dma_alloc(&io, 32)
+            .expect("DMA buffer allocation should succeed");
         key.fill(0x35);
-        let data = pal.dma_alloc(&io, 96).unwrap();
+        let data = pal
+            .dma_alloc(&io, 96)
+            .expect("DMA buffer allocation should succeed");
         for (len, aad_len) in [
             (0, 0),
             (11, 0),

@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 // Fail: calling fields out of order should not compile.
 // Field `b` must come after `a` in the typestate chain.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x01)]

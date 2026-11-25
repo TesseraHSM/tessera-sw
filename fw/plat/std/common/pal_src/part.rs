@@ -542,14 +542,20 @@ impl StdHsmPal {
     /// Borrow the `PartitionTable` through the `UnsafeCell`.  Safe
     /// because the std PAL runs on a single-threaded Embassy executor
     /// (see the module-level architecture note).
+    #[allow(unsafe_code)]
     #[allow(clippy::mut_from_ref)]
     #[inline]
     fn table_mut(&self) -> &mut PartitionTable {
+        // SAFETY: callers follow the module's single-threaded Embassy borrowing
+        // model, excluding overlapping table borrows during mutation.
         unsafe { &mut *self.part_table.get() }
     }
 
+    #[allow(unsafe_code)]
     #[inline]
     fn table(&self) -> &PartitionTable {
+        // SAFETY: callers follow the module's single-threaded Embassy borrowing
+        // model, excluding table mutation while the shared borrow is live.
         unsafe { &*self.part_table.get() }
     }
 
@@ -1330,6 +1336,7 @@ impl ExpectedKind {
 /// Brand a borrowed byte slice from the partition table as a
 /// `&HsmDmaBuf`.  Safe on the std PAL because the partition table is
 /// host-heap-resident; no real DMA constraints apply.
+#[allow(unsafe_code)]
 #[inline(always)]
 fn dma(buf: &[u8]) -> &HsmDmaBuf {
     // SAFETY: std PAL has no DMA-region constraint.
@@ -1866,20 +1873,33 @@ mod tests {
             .expect("allocate partition");
         let pid = HsmPartId::from(1u8);
         pal.provision_unwrapping_key(pid).expect("generate");
-        let published = pal.active_part(pid).unwrap().unwrapping_key_bk.clone();
+        let published = pal
+            .active_part(pid)
+            .expect("active partition")
+            .unwrapping_key_bk
+            .clone();
         assert!(published.is_some());
 
         pal.part_migrate_internal(1).await.expect("migrate");
-        assert!(pal.active_part(pid).unwrap().unwrapping_key_id.is_none());
+        assert!(pal
+            .active_part(pid)
+            .expect("active partition after migration")
+            .unwrapping_key_id
+            .is_none());
         pal.provision_unwrapping_key(pid).expect("re-import");
-        let entry = pal.active_part(pid).unwrap();
+        let entry = pal
+            .active_part(pid)
+            .expect("active partition after re-import");
         let kid = entry.unwrapping_key_id.expect("imported");
         assert_eq!(
-            entry.vault.key(kid).unwrap(),
-            published.as_ref().unwrap().as_slice()
+            entry.vault.key(kid).expect("re-imported unwrapping key"),
+            published
+                .as_ref()
+                .expect("published unwrapping key")
+                .as_slice()
         );
 
-        pal.part_free_internal(1).unwrap();
+        pal.part_free_internal(1).expect("free partition");
         assert!(pal.table().entries[1].unwrapping_key_bk.is_none());
     }
 
@@ -1989,7 +2009,7 @@ mod tests {
                     &mut public,
                 )
                 .await
-                .unwrap_err(),
+                .expect_err("internal ECC-384 key creation should fail"),
                 error
             );
         }
@@ -2096,12 +2116,15 @@ mod tests {
             e.prop_get_scalar(HsmPartPropId::MK_KEY_ID),
             Err(HsmError::PartPropNotFound)
         ));
-        e.prop_set_scalar(HsmPartPropId::MK_KEY_ID, 0x4242).unwrap();
+        e.prop_set_scalar(HsmPartPropId::MK_KEY_ID, 0x4242)
+            .expect("scalar property update should succeed");
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::MK_KEY_ID).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::MK_KEY_ID)
+                .expect("scalar property retrieval should succeed"),
             0x4242u32
         );
-        e.prop_clear(HsmPartPropId::MK_KEY_ID).unwrap();
+        e.prop_clear(HsmPartPropId::MK_KEY_ID)
+            .expect("property removal should succeed");
         assert!(matches!(
             e.prop_get_scalar(HsmPartPropId::MK_KEY_ID),
             Err(HsmError::PartPropNotFound)
@@ -2111,14 +2134,19 @@ mod tests {
     #[test]
     fn scalar_state_round_trip() {
         let mut e = fresh_entry();
-        assert_eq!(e.prop_get_scalar(HsmPartPropId::PART_STATE).unwrap(), 0); // Unallocated
-                                                                              // The generic prop setter is a raw mechanism: any valid state byte
-                                                                              // is written directly (transition policy lives in
-                                                                              // `part_state::part_set_state`, exercised by the PartInit emu tests).
-        e.prop_set_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
-            .unwrap();
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::PART_STATE).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::PART_STATE)
+                .expect("scalar property retrieval should succeed"),
+            0
+        ); // Unallocated
+           // The generic prop setter is a raw mechanism: any valid state byte
+           // is written directly (transition policy lives in
+           // `part_state::part_set_state`, exercised by the PartInit emu tests).
+        e.prop_set_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
+            .expect("scalar property update should succeed");
+        assert_eq!(
+            e.prop_get_scalar(HsmPartPropId::PART_STATE)
+                .expect("scalar property retrieval should succeed"),
             HsmPartState::Enabled as u32
         );
         // An invalid state byte is still rejected.
@@ -2136,9 +2164,10 @@ mod tests {
         // four provisioning fields — the gate moved to the upper-layer
         // `part_state::part_set_state` (covered by the PartInit emu tests).
         e.prop_set_scalar(HsmPartPropId::PART_STATE, HsmPartState::Initializing as u32)
-            .unwrap();
+            .expect("scalar property update should succeed");
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::PART_STATE).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::PART_STATE)
+                .expect("scalar property retrieval should succeed"),
             HsmPartState::Initializing as u32
         );
     }
@@ -2151,13 +2180,14 @@ mod tests {
         // enforced above the PAL); the undo log relies on this to restore a
         // prior state on rollback.
         e.prop_set_scalar(HsmPartPropId::PART_STATE, HsmPartState::Disabled as u32)
-            .unwrap();
+            .expect("scalar property update should succeed");
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::PART_STATE).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::PART_STATE)
+                .expect("scalar property retrieval should succeed"),
             HsmPartState::Disabled as u32
         );
         e.prop_set_scalar(HsmPartPropId::PART_STATE, HsmPartState::Allocated as u32)
-            .unwrap();
+            .expect("scalar property update should succeed");
     }
 
     #[test]
@@ -2169,12 +2199,14 @@ mod tests {
         ));
         let payload = [0xABu8; POLICY_HASH_LEN];
         e.prop_set_bytes(HsmPartPropId::POLICY_HASH, &payload)
-            .unwrap();
+            .expect("byte property update should succeed");
         assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::POLICY_HASH).unwrap(),
+            e.prop_get_bytes(HsmPartPropId::POLICY_HASH)
+                .expect("byte property retrieval should succeed"),
             &payload[..]
         );
-        e.prop_clear(HsmPartPropId::POLICY_HASH).unwrap();
+        e.prop_clear(HsmPartPropId::POLICY_HASH)
+            .expect("property removal should succeed");
         assert!(matches!(
             e.prop_get_bytes(HsmPartPropId::POLICY_HASH),
             Err(HsmError::PartPropNotFound)
@@ -2186,12 +2218,14 @@ mod tests {
         let mut e = fresh_entry();
         let payload = [0x12u8; 40];
         e.prop_set_bytes(HsmPartPropId::SEALED_BK3, &payload)
-            .unwrap();
+            .expect("byte property update should succeed");
         assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::SEALED_BK3).unwrap(),
+            e.prop_get_bytes(HsmPartPropId::SEALED_BK3)
+                .expect("byte property retrieval should succeed"),
             &payload[..]
         );
-        e.prop_clear(HsmPartPropId::SEALED_BK3).unwrap();
+        e.prop_clear(HsmPartPropId::SEALED_BK3)
+            .expect("property removal should succeed");
         assert!(matches!(
             e.prop_get_bytes(HsmPartPropId::SEALED_BK3),
             Err(HsmError::PartPropNotFound)
@@ -2211,14 +2245,18 @@ mod tests {
             *b = (i as u8) | 0x80;
         }
         e.prop_set_bytes(HsmPartPropId::CREDENTIAL, &payload_a)
-            .unwrap();
-        e.prop_clear(HsmPartPropId::CREDENTIAL).unwrap();
+            .expect("byte property update should succeed");
+        e.prop_clear(HsmPartPropId::CREDENTIAL)
+            .expect("property removal should succeed");
         e.prop_set_bytes(HsmPartPropId::CREDENTIAL, &payload_b)
-            .unwrap();
-        let stored = e.prop_get_bytes(HsmPartPropId::CREDENTIAL).unwrap();
+            .expect("byte property update should succeed");
+        let stored = e
+            .prop_get_bytes(HsmPartPropId::CREDENTIAL)
+            .expect("byte property retrieval should succeed");
         assert_eq!(stored, &payload_b[..]);
         // Clear zeroes the full 32 B blob.
-        e.prop_clear(HsmPartPropId::CREDENTIAL).unwrap();
+        e.prop_clear(HsmPartPropId::CREDENTIAL)
+            .expect("property removal should succeed");
         assert!(matches!(
             e.prop_get_bytes(HsmPartPropId::CREDENTIAL),
             Err(HsmError::PartPropNotFound)
@@ -2231,7 +2269,7 @@ mod tests {
         let mut e = fresh_entry();
         let payload = [0x5Au8; 32];
         e.prop_set_bytes(HsmPartPropId::CREDENTIAL, &payload)
-            .unwrap();
+            .expect("byte property update should succeed");
         // Second set without an intervening clear is rejected.
         assert!(matches!(
             e.prop_set_bytes(HsmPartPropId::CREDENTIAL, &payload),
@@ -2267,11 +2305,13 @@ mod tests {
     fn psk_get_returns_default_when_absent() {
         let e = fresh_entry();
         assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::PSK_CO).unwrap(),
+            e.prop_get_bytes(HsmPartPropId::PSK_CO)
+                .expect("byte property retrieval should succeed"),
             DEFAULT_PSK_CO.as_slice()
         );
         assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::PSK_CU).unwrap(),
+            e.prop_get_bytes(HsmPartPropId::PSK_CU)
+                .expect("byte property retrieval should succeed"),
             DEFAULT_PSK_CU.as_slice()
         );
     }
@@ -2284,34 +2324,45 @@ mod tests {
         entry.state = HsmPartState::Allocated;
         entry.res_mask = 1;
         entry.vault = KeyVault::new(1);
-        pal.part_enable_internal(0).await.unwrap();
+        pal.part_enable_internal(0)
+            .await
+            .expect("internal partition enabling should succeed");
 
         for round in 0..2u8 {
             let entry = &mut pal.table_mut().entries[0];
             entry
                 .prop_set_bytes(HsmPartPropId::PSK_CO, &[0xA1 + round; PSK_LEN])
-                .unwrap();
+                .expect("byte property update should succeed");
             entry
                 .prop_set_bytes(HsmPartPropId::PSK_CU, &[0xB1 + round; PSK_LEN])
-                .unwrap();
+                .expect("byte property update should succeed");
 
             // The PSKs are not migrated, and a disable drops them too: an NSSR
             // or a disable and re-enable returns them to their defaults, as on
             // the Uno PAL.
             if round == 0 {
-                pal.part_migrate_internal(0).await.unwrap();
+                pal.part_migrate_internal(0)
+                    .await
+                    .expect("internal partition migration should succeed");
             } else {
-                pal.part_disable_internal(0).unwrap();
-                pal.part_enable_internal(0).await.unwrap();
+                pal.part_disable_internal(0)
+                    .expect("internal partition disabling should succeed");
+                pal.part_enable_internal(0)
+                    .await
+                    .expect("internal partition enabling should succeed");
             }
             let entry = &pal.table().entries[0];
             assert_eq!(entry.state, HsmPartState::Enabled);
             assert_eq!(
-                entry.prop_get_bytes(HsmPartPropId::PSK_CO).unwrap(),
+                entry
+                    .prop_get_bytes(HsmPartPropId::PSK_CO)
+                    .expect("byte property retrieval should succeed"),
                 DEFAULT_PSK_CO.as_slice()
             );
             assert_eq!(
-                entry.prop_get_bytes(HsmPartPropId::PSK_CU).unwrap(),
+                entry
+                    .prop_get_bytes(HsmPartPropId::PSK_CU)
+                    .expect("byte property retrieval should succeed"),
                 DEFAULT_PSK_CU.as_slice()
             );
         }
@@ -2319,11 +2370,12 @@ mod tests {
         let entry = &mut pal.table_mut().entries[0];
         entry
             .prop_set_bytes(HsmPartPropId::PSK_CO, &[0xA3; PSK_LEN])
-            .unwrap();
+            .expect("byte property update should succeed");
         entry
             .prop_set_bytes(HsmPartPropId::PSK_CU, &[0xB3; PSK_LEN])
-            .unwrap();
-        pal.part_free_internal(0).unwrap();
+            .expect("byte property update should succeed");
+        pal.part_free_internal(0)
+            .expect("internal partition release should succeed");
         let entry = &pal.table().entries[0];
         assert_eq!(entry.state, HsmPartState::Unallocated);
         assert!(entry.psk_co.is_none());
@@ -2338,7 +2390,7 @@ mod tests {
         entry.state = HsmPartState::Allocated;
         entry.res_mask = 1;
         entry.vault = KeyVault::new(1);
-        pal.part_enable_internal(0).await.unwrap();
+        pal.part_enable_internal(0).await.expect("enable partition");
 
         let entry = &mut pal.table_mut().entries[0];
         entry.sealed_bk3[..4].copy_from_slice(&[1, 2, 3, 4]);
@@ -2348,10 +2400,12 @@ mod tests {
         entry.policy_hash = Some([0x5A; POLICY_HASH_LEN]);
         entry
             .prop_set_bytes(HsmPartPropId::CREDENTIAL, &[0x5A; 32])
-            .unwrap();
+            .expect("set credential");
         let (id, ec_pub, nonce) = (entry.id, entry.establish_cred_pub_key, entry.nonce);
 
-        pal.part_migrate_internal(0).await.unwrap();
+        pal.part_migrate_internal(0)
+            .await
+            .expect("migrate partition");
 
         let entry = &pal.table().entries[0];
         assert_eq!(entry.state, HsmPartState::Enabled);
@@ -2380,14 +2434,16 @@ mod tests {
         let mut e = fresh_entry();
         // Reads via scalar widening (Bool maps to 0/1 in prop_get_scalar).
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::BK3_INITIALIZED).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::BK3_INITIALIZED)
+                .expect("scalar property retrieval should succeed"),
             0
         );
         // First true write succeeds.
         e.prop_set_scalar(HsmPartPropId::BK3_INITIALIZED, 1)
-            .unwrap();
+            .expect("scalar property update should succeed");
         assert_eq!(
-            e.prop_get_scalar(HsmPartPropId::BK3_INITIALIZED).unwrap(),
+            e.prop_get_scalar(HsmPartPropId::BK3_INITIALIZED)
+                .expect("scalar property retrieval should succeed"),
             1
         );
         assert!(e.bk3_initialized);
@@ -2406,9 +2462,14 @@ mod tests {
     #[test]
     fn sd_initialized_one_shot_claim_and_undo_clear() {
         let mut e = fresh_entry();
-        assert_eq!(e.prop_get_scalar(HsmPartPropId::SD_INITIALIZED).unwrap(), 0);
+        assert_eq!(
+            e.prop_get_scalar(HsmPartPropId::SD_INITIALIZED)
+                .expect("scalar property retrieval should succeed"),
+            0
+        );
         // First true write (the atomic claim) succeeds.
-        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 1).unwrap();
+        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 1)
+            .expect("scalar property update should succeed");
         assert!(e.sd_initialized);
         // Re-asserting true fails the one-shot race.
         assert!(matches!(
@@ -2417,10 +2478,12 @@ mod tests {
         ));
         // Unlike BK3, clearing to false IS permitted so the TBOR undo log
         // can roll the claim back on a failed command.
-        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 0).unwrap();
+        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 0)
+            .expect("scalar property update should succeed");
         assert!(!e.sd_initialized);
         // After a rollback the claim can be re-made.
-        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 1).unwrap();
+        e.prop_set_scalar(HsmPartPropId::SD_INITIALIZED, 1)
+            .expect("scalar property update should succeed");
         assert!(e.sd_initialized);
     }
 
@@ -2442,7 +2505,7 @@ mod tests {
         e.session_enc_pub_key[1] = 0x5A;
         let got = e
             .prop_get_bytes(HsmPartPropId::SESSION_ENC_ECC_PUB_KEY)
-            .unwrap();
+            .expect("byte property retrieval should succeed");
         assert_eq!(got.len(), 96);
         assert_eq!(got[1], 0x5A);
     }
@@ -2453,7 +2516,7 @@ mod tests {
         e.establish_cred_pub_key[95] = 0x77;
         let got = e
             .prop_get_bytes(HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY)
-            .unwrap();
+            .expect("byte property retrieval should succeed");
         assert_eq!(got.len(), 96);
         assert_eq!(got[95], 0x77);
     }
@@ -2467,12 +2530,14 @@ mod tests {
         ));
         let payload = [0x9Eu8; 48];
         e.prop_set_bytes(HsmPartPropId::BK3_SESSION, &payload)
-            .unwrap();
+            .expect("byte property update should succeed");
         assert_eq!(
-            e.prop_get_bytes(HsmPartPropId::BK3_SESSION).unwrap(),
+            e.prop_get_bytes(HsmPartPropId::BK3_SESSION)
+                .expect("byte property retrieval should succeed"),
             &payload[..]
         );
-        e.prop_clear(HsmPartPropId::BK3_SESSION).unwrap();
+        e.prop_clear(HsmPartPropId::BK3_SESSION)
+            .expect("property removal should succeed");
         assert!(matches!(
             e.prop_get_bytes(HsmPartPropId::BK3_SESSION),
             Err(HsmError::PartPropNotFound)
@@ -2483,7 +2548,9 @@ mod tests {
 
     #[test]
     fn bk3_session_marked_sensitive_in_catalogue() {
-        let meta = HsmPartPropId::BK3_SESSION.meta().unwrap();
+        let meta = HsmPartPropId::BK3_SESSION
+            .meta()
+            .expect("metadata lookup should succeed");
         assert!(meta.sensitive);
     }
 }

@@ -29,3 +29,6 @@ trace-io = []
 hex.workspace = true
 tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }
 tsra_fw_hsm_undo.workspace = true
+
+[lints]
+workspace = true

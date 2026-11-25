@@ -510,6 +510,7 @@ fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

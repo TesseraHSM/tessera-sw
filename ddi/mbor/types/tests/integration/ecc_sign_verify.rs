@@ -37,7 +37,7 @@ fn test_ecc_sign_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -72,7 +72,7 @@ fn test_ecc_sign_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -98,7 +98,7 @@ fn test_ecc_sign_incorrect_key_type() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let digest = [1u8; 96];
             let digest_len = 20;
@@ -173,7 +173,7 @@ fn test_ecc_sign_verify() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let signature_len = resp.data.signature.len();
 

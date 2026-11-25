@@ -38,25 +38,31 @@ fn test_aes_xts_encrypt_decrypt() {
                 pub_key,
             );
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let app_sess_id = resp.data.sess_id;
             let short_app_sess_id = resp.data.short_app_id;
 
             // generate AES 256 bulk key 1
             let resp = generate_aes_bulk_256_key(dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id1_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id1_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             // generate AES 256 bulk key 2
             let resp = generate_aes_bulk_256_key(dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id2_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id2_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             // set up requests for the xts encrypt operations
             // A bulk IO carries at most 16 KiB.
@@ -79,7 +85,7 @@ fn test_aes_xts_encrypt_decrypt() {
                 dev.exec_op_fp_xts(DdiAesOp::Encrypt, tsra_fp_xts_params.clone(), data.clone());
 
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let encrypted_resp = resp.unwrap();
+            let encrypted_resp = resp.expect("DDI response should succeed");
 
             // ensure encrypted data length is the same as the original data
             // ensure encrypted data is different from original data
@@ -94,7 +100,7 @@ fn test_aes_xts_encrypt_decrypt() {
             );
 
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let decrypted_resp = resp.unwrap();
+            let decrypted_resp = resp.expect("DDI response should succeed");
 
             assert_eq!(decrypted_resp.data.len(), data.len());
             assert_eq!(decrypted_resp.data, data);
@@ -138,7 +144,7 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
                 pub_key,
             );
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let app_sess_id = resp.data.sess_id;
             let short_app_sess_id = resp.data.short_app_id;
@@ -161,9 +167,12 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id1_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id1_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             // import key 2
             let resp = rsa_secure_import_key(
@@ -177,9 +186,12 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id2_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id2_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             assert_ne!(key_id1_aes_bulk_256, key_id2_aes_bulk_256);
 
@@ -244,7 +256,7 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
                 pub_key,
             );
             assert!(resp.is_ok(), "resp: {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let app_sess_id = resp.data.sess_id;
             let short_app_sess_id = resp.data.short_app_id;
@@ -271,9 +283,12 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id1_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id1_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             // import key 2
             let resp = rsa_secure_import_key(
@@ -287,9 +302,12 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.data.bulk_key_id.is_some());
-            let key_id2_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
+            let key_id2_aes_bulk_256 =
+                resp.data
+                    .bulk_key_id
+                    .expect("bulk key ID should be available") as u32;
 
             assert_ne!(key_id1_aes_bulk_256, key_id2_aes_bulk_256);
 

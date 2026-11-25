@@ -36,7 +36,7 @@ fn test_get_session_encryption_key_smoke() {
 
         let resp =
             helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-                .unwrap();
+                .expect("DDI get session encryption key should succeed");
 
         assert!(resp.hdr.sess_id.is_none());
         assert_eq!(resp.hdr.op, DdiOp::GetSessionEncryptionKey);

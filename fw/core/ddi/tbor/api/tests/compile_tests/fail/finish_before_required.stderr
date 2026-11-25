@@ -1,12 +1,12 @@
 error[E0599]: no method named `finish` found for struct `EarlyFinishEnc<'_, EarlyFinishS0>` in the current scope
-  --> tests/compile_tests/fail/finish_before_required.rs:16:10
+  --> tests/compile_tests/fail/finish_before_required.rs:19:10
    |
- 6 |   #[tbor(opcode = 0x03)]
+ 9 |   #[tbor(opcode = 0x03)]
    |   ---------------------- method `finish` not found for this struct
 ...
-15 |       let _ = EarlyFinish::encode(&mut buf, (1, 1)).unwrap()
+18 |       let _ = EarlyFinish::encode(&mut buf, (1, 1)).unwrap()
    |  _____________-
-16 | |         .finish();
+19 | |         .finish();
    | |         -^^^^^^ method not found in `EarlyFinishEnc<'_, EarlyFinishS0>`
    | |_________|
    |

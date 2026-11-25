@@ -39,7 +39,7 @@ fn fresh_partition_available() -> bool {
 
 /// Reset the partition so each case starts with fresh one-shot BK3 state.
 pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
-    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
+    let resp = simulator_factory_reset(&ddi.open_dev(path).expect("device opening should succeed"));
     assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
@@ -52,7 +52,7 @@ pub fn cleanup(
     path: &str,
     _setup_session_id: Option<u16>,
 ) {
-    let resp = simulator_factory_reset(&ddi.open_dev(path).unwrap());
+    let resp = simulator_factory_reset(&ddi.open_dev(path).expect("device opening should succeed"));
     assert!(resp.is_ok(), "resp {:?}", resp);
 }
 
@@ -64,7 +64,7 @@ fn test_init_bk3_smoke() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0xABu8; 48];
 
-        let resp = helper_init_bk3(dev, bk3).unwrap();
+        let resp = helper_init_bk3(dev, bk3).expect("DDI init BK3 should succeed");
         assert_eq!(resp.hdr.op, DdiOp::InitBk3);
         assert_eq!(resp.hdr.status, DdiStatus::Success);
         // Envelope layout has 164 fixed bytes (4 + 48 + 16 + 48 + 48)
@@ -89,10 +89,10 @@ fn test_init_bk3_twice_fails() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x11u8; 48];
 
-        let first = helper_init_bk3(dev, bk3.clone()).unwrap();
+        let first = helper_init_bk3(dev, bk3.clone()).expect("DDI init BK3 should succeed");
         assert_eq!(first.hdr.status, DdiStatus::Success);
 
-        let err = helper_init_bk3(dev, bk3).unwrap_err();
+        let err = helper_init_bk3(dev, bk3).expect_err("DDI init BK3 should fail");
         assert!(
             matches!(err, DdiError::DdiStatus(DdiStatus::Bk3AlreadyInitialized)),
             "expected Bk3AlreadyInitialized, got {:?}",
@@ -109,12 +109,12 @@ fn test_init_bk3_does_not_persist_sealed_bk3() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x22u8; 48];
 
-        let init = helper_init_bk3(dev, bk3).unwrap();
+        let init = helper_init_bk3(dev, bk3).expect("DDI init BK3 should succeed");
         assert_eq!(init.hdr.status, DdiStatus::Success);
 
         // InitBk3 only produces masked_bk3; sealing happens outside
         // the device — GetSealedBk3 must still report not-present.
-        let err = helper_get_sealed_bk3(dev).unwrap_err();
+        let err = helper_get_sealed_bk3(dev).expect_err("DDI get sealed BK3 should fail");
         assert!(
             matches!(err, DdiError::DdiStatus(DdiStatus::SealedBk3NotPresent)),
             "expected SealedBk3NotPresent, got {:?}",
@@ -129,13 +129,15 @@ fn test_init_bk3_then_set_get_sealed_bk3() {
         return;
     }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
-        let init = helper_init_bk3(dev, HARD_CODED_BK3.to_vec()).unwrap();
+        let init =
+            helper_init_bk3(dev, HARD_CODED_BK3.to_vec()).expect("DDI init BK3 should succeed");
         let masked_bk3 = init.data.masked_bk3.as_slice().to_vec();
 
-        let set_resp = helper_set_sealed_bk3(dev, masked_bk3.clone()).unwrap();
+        let set_resp = helper_set_sealed_bk3(dev, masked_bk3.clone())
+            .expect("DDI set sealed BK3 should succeed");
         assert_eq!(set_resp.hdr.status, DdiStatus::Success);
 
-        let get_resp = helper_get_sealed_bk3(dev).unwrap();
+        let get_resp = helper_get_sealed_bk3(dev).expect("DDI get sealed BK3 should succeed");
         assert_eq!(get_resp.hdr.op, DdiOp::GetSealedBk3);
         assert_eq!(get_resp.data.sealed_bk3.as_slice(), masked_bk3.as_slice());
     });

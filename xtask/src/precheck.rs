@@ -19,6 +19,7 @@ use crate::copyright::Copyright;
 use crate::coverage::Coverage;
 use crate::coverage_report::CoverageReport;
 use crate::fmt::Fmt;
+use crate::fuzz_build::FuzzBuild;
 use crate::fw_precheck::FwPrecheck;
 use crate::nextest::Nextest;
 use crate::nextest_report::NextestReport;
@@ -68,9 +69,12 @@ struct Stage {
     /// Run nextest-report
     #[clap(long)]
     nextest_report: bool,
-    /// Run firmware precheck after all other stages
+    /// Run firmware precheck
     #[clap(long)]
     fw_precheck: bool,
+    /// Run fuzz build
+    #[clap(long)]
+    fuzz_build: bool,
 }
 
 impl Stage {
@@ -90,9 +94,10 @@ impl Stage {
         self.nextest_full = self.nextest_full || other.nextest_full;
         self.nextest_report = self.nextest_report || other.nextest_report;
         self.fw_precheck = self.fw_precheck || other.fw_precheck;
+        self.fuzz_build = self.fuzz_build || other.fuzz_build;
     }
 
-    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min and fw_precheck)
+    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min, fw_precheck, and fuzz_build)
     fn min() -> Stage {
         Stage {
             setup: false,
@@ -109,6 +114,7 @@ impl Stage {
             nextest_full: false,
             nextest_report: false,
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 
@@ -132,6 +138,7 @@ impl Stage {
             nextest_full: true,
             nextest_report: false, // nextest report is optional (intended only for CI)
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 
@@ -153,6 +160,7 @@ impl Stage {
             nextest_full: true,
             nextest_report: true,
             fw_precheck: true,
+            fuzz_build: true,
         }
     }
 }
@@ -414,7 +422,14 @@ impl Xtask for Precheck {
             FwPrecheck {
                 skip_audit: self.skip_audit,
             }
-            .run(ctx)?;
+            .run(ctx.clone())?;
+        }
+
+        if stage.fuzz_build && !cfg!(target_os = "windows") {
+            FuzzBuild {
+                toolchain: Some("nightly-2026-11-17".to_string()),
+            }
+            .run(ctx.clone())?;
         }
 
         log::trace!("done precheck");

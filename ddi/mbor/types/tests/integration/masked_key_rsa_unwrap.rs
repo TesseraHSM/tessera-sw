@@ -38,7 +38,7 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let unwrapped_key_id = resp.data.key_id;
             let masked_key = resp.data.masked_key;
             assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivate);
@@ -58,7 +58,7 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let (new_key_id, _, _) = resp.unwrap();
+            let (new_key_id, _, _) = resp.expect("DDI response should succeed");
 
             // Try encrypting and decrypting with new_key_id
             // to confirm unwrapped key is correct
@@ -87,7 +87,7 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let mut padded_data = [0u8; 512];
             padded_data[..resp.data.x.len()]
@@ -101,7 +101,8 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
                 crypto_sha256,
             );
             assert!(unpadded_data_result.is_ok());
-            let unpadded_data = unpadded_data_result.unwrap();
+            let unpadded_data =
+                unpadded_data_result.expect("unpadded data result should be available");
 
             assert_eq!(orig_x[..data_len_to_test], unpadded_data);
         },
@@ -137,7 +138,7 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let unwrapped_key_id = resp.data.key_id;
             let masked_key = resp.data.masked_key;
             assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivateCrt);
@@ -157,7 +158,7 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let (new_key_id, _, _) = resp.unwrap();
+            let (new_key_id, _, _) = resp.expect("DDI response should succeed");
 
             // Try encrypting and decrypting with new_key_id
             // to confirm unwrapped key is correct
@@ -186,7 +187,7 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let mut padded_data = [0u8; 512];
             padded_data[..resp.data.x.len()]
@@ -200,7 +201,8 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
                 crypto_sha256,
             );
             assert!(unpadded_data_result.is_ok());
-            let unpadded_data = unpadded_data_result.unwrap();
+            let unpadded_data =
+                unpadded_data_result.expect("unpadded data result should be available");
 
             assert_eq!(orig_x[..data_len_to_test], unpadded_data);
         },
@@ -251,7 +253,7 @@ fn test_masked_key_rsa_unwrap_ecc_key() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert_eq!(resp.data.kind, *expected_key_type);
                 let unwrapped_key_id = resp.data.key_id;
                 let masked_key = resp.data.masked_key;
@@ -280,7 +282,10 @@ fn test_masked_key_rsa_unwrap_ecc_key() {
                     masked_key,
                 );
                 assert!(resp.is_ok(), "unmask {:?}", resp);
-                assert_eq!(resp.unwrap().data.kind, *expected_key_type);
+                assert_eq!(
+                    resp.expect("DDI response should succeed").data.kind,
+                    *expected_key_type
+                );
             }
         },
     );
@@ -314,7 +319,7 @@ fn test_masked_key_rsa_unwrap_aes_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert_eq!(resp.data.kind, DdiKeyType::Aes256);
             let unwrapped_key_id = resp.data.key_id;
             assert!(resp.data.pub_key.is_none());
@@ -342,7 +347,10 @@ fn test_masked_key_rsa_unwrap_aes_key() {
                 masked_key,
             );
             assert!(resp.is_ok(), "unmask {:?}", resp);
-            assert_eq!(resp.unwrap().data.kind, DdiKeyType::Aes256);
+            assert_eq!(
+                resp.expect("DDI response should succeed").data.kind,
+                DdiKeyType::Aes256
+            );
         },
     );
 }
@@ -378,7 +386,7 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert_eq!(resp.data.kind, DdiKeyType::AesGcmBulk256Unapproved);
             let unwrapped_key_id = resp.data.key_id;
             assert!(resp.data.pub_key.is_none());
@@ -406,7 +414,10 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            assert_eq!(resp.unwrap().data.kind, DdiKeyType::AesGcmBulk256Unapproved);
+            assert_eq!(
+                resp.expect("DDI response should succeed").data.kind,
+                DdiKeyType::AesGcmBulk256Unapproved
+            );
         },
     );
 }

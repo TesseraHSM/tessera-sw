@@ -45,3 +45,6 @@ tsra_fw_hsm_bulk.workspace = true
 tsra_fw_hsm_byte_order.workspace = true
 tsra_fw_hsm_undo.workspace = true
 x509.workspace = true
+
+[lints]
+workspace = true

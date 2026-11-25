@@ -106,6 +106,7 @@ struct CertContext {
 /// Drop implementation for `CertContext`, which allows allocated `*mut
 /// CERT_CONTEXT` objects to be auto-freed when a Rust function returns.
 impl Drop for CertContext {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             let _free_result = unsafe { CertFreeCertificateContext(Some(self.ptr)) };
@@ -132,6 +133,7 @@ impl CertChain {
 /// Drop implementation for `CertChain`, which allows allocated `*mut
 /// CERT_CHAIN_CONTEXT` objects to be auto-freed when a Rust function returns.
 impl Drop for CertChain {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe { CertFreeCertificateChain(self.ptr) };
@@ -149,6 +151,7 @@ struct CertStore {
 #[cfg(target_os = "windows")]
 /// Drop implementation for `CertStore`, which allows allocated `HCERTSTORE` objects to be auto-freed when a Rust function returns.
 impl Drop for CertStore {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         let _free_result = unsafe { CertCloseStore(Some(self.store), 0) };
     }
@@ -180,6 +183,7 @@ impl X509Certificate {
     /// Verify this certificate's signature with the supplied issuer's public key.
     ///
     /// Does not check validity dates, CA constraints, or trust.
+    #[allow(unsafe_code)]
     #[cfg(target_os = "windows")]
     pub fn verify_signature(&self, issuer: &Self) -> Result<bool, X509CertificateError> {
         let certificate = self.create_cert_context()?;
@@ -202,6 +206,7 @@ impl X509Certificate {
 
     /// Private helper function for Windows that allocates and returns a pointer
     /// to a CNG `CERT_CONTEXT` object representing the certificate.
+    #[allow(unsafe_code)]
     #[cfg(target_os = "windows")]
     fn create_cert_context(&self) -> Result<CertContext, X509CertificateError> {
         // Retrieve the object's DER encodngina and pass it into
@@ -233,6 +238,7 @@ impl X509Certificate {
 #[cfg(target_os = "windows")]
 impl X509CertificateOp for X509Certificate {
     /// Create a new `X509Certificate` from a PEM encoding.
+    #[allow(unsafe_code)]
     fn from_pem(pem_bytes: &[u8]) -> Result<Self, X509CertificateError> {
         // Call `CryptStringToBinaryA` once to determine how many bytes we need
         // to store the binary data.
@@ -292,6 +298,7 @@ impl X509CertificateOp for X509Certificate {
 
     /// Parses the public key DER blob from the certificates and returns it in a
     /// vector.
+    #[allow(unsafe_code)]
     fn get_public_key_der(&self) -> Result<Vec<u8>, X509CertificateError> {
         // In order to get the public key blob, we need to create a CNG
         // certificate context from the DER-encoded certificate.
@@ -376,6 +383,7 @@ impl X509CertificateOp for X509Certificate {
 
     /// Validate the chain of certificates from the leaf (self) up to but not
     /// including the root (last certificate in chain slice). This aligns with the openssl implementation.
+    #[allow(unsafe_code)]
     fn verified_chain(
         &self,
         chain: &[X509Certificate],
@@ -724,6 +732,7 @@ struct LocalAllocBuf {
 
 #[cfg(target_os = "windows")]
 impl Drop for LocalAllocBuf {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
@@ -739,6 +748,7 @@ impl Drop for LocalAllocBuf {
 /// `CryptDecodeObjectEx` with `CRYPT_DECODE_ALLOC_FLAG`; on success
 /// returns the owning buffer plus a typed pointer into it (valid
 /// until the buffer is dropped).
+#[allow(unsafe_code)]
 #[cfg(target_os = "windows")]
 fn decode_alloc<T>(
     struct_type: windows::core::PCSTR,
@@ -777,6 +787,7 @@ impl X509CsrOp for X509Csr {
     /// `X509_CERT_REQUEST_TO_BE_SIGNED` structure types); the decoded
     /// blobs are freed before returning and re-decoded lazily by the
     /// other methods.
+    #[allow(unsafe_code)]
     fn from_der(der_bytes: &[u8]) -> Result<Self, X509CertificateError> {
         let (signed_buf, signed_ptr) = decode_alloc::<CERT_SIGNED_CONTENT_INFO>(
             X509_CERT,
@@ -798,6 +809,7 @@ impl X509CsrOp for X509Csr {
     }
 
     /// Return the SubjectPublicKeyInfo of the CSR in DER form.
+    #[allow(unsafe_code)]
     fn get_public_key_der(&self) -> Result<Vec<u8>, X509CertificateError> {
         let (signed_buf, signed_ptr) = decode_alloc::<CERT_SIGNED_CONTENT_INFO>(
             X509_CERT,
@@ -862,6 +874,7 @@ impl X509CsrOp for X509Csr {
     /// Returns `Ok(true)` for a valid self-signature, `Ok(false)`
     /// when CNG reports `NTE_BAD_SIGNATURE`, and
     /// [`X509CertificateError::CsrVerifyError`] for any other failure.
+    #[allow(unsafe_code)]
     fn verify(&self) -> Result<bool, X509CertificateError> {
         let (signed_buf, signed_ptr) = decode_alloc::<CERT_SIGNED_CONTENT_INFO>(
             X509_CERT,
@@ -1384,19 +1397,31 @@ mod csr_tests {
 
     /// Build a self-signed ECDSA-P384 CSR for testing.
     fn build_p384_csr() -> Vec<u8> {
-        let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
-        let ec_key = EcKey::generate(&group).unwrap();
-        let pkey = PKey::from_ec_key(ec_key).unwrap();
+        let group = EcGroup::from_curve_name(Nid::SECP384R1)
+            .expect("EC group construction from curve name should succeed");
+        let ec_key = EcKey::generate(&group).expect("key generation should succeed");
+        let pkey =
+            PKey::from_ec_key(ec_key).expect("p key construction from EC key should succeed");
 
-        let mut name = X509Name::builder().unwrap();
-        name.append_entry_by_text("CN", "test-csr").unwrap();
+        let mut name = X509Name::builder().expect("X509 name construction should succeed");
+        name.append_entry_by_text("CN", "test-csr")
+            .expect("append entry by text operation should succeed");
         let name = name.build();
 
-        let mut builder = X509ReqBuilder::new().unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_pubkey(&pkey).unwrap();
-        builder.sign(&pkey, MessageDigest::sha384()).unwrap();
-        builder.build().to_der().unwrap()
+        let mut builder = X509ReqBuilder::new().expect("X509 request construction should succeed");
+        builder
+            .set_subject_name(&name)
+            .expect("set subject name operation should succeed");
+        builder
+            .set_pubkey(&pkey)
+            .expect("set pubkey operation should succeed");
+        builder
+            .sign(&pkey, MessageDigest::sha384())
+            .expect("signature generation should succeed");
+        builder
+            .build()
+            .to_der()
+            .expect("DER encoding should succeed")
     }
 
     #[test]

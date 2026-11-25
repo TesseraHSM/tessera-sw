@@ -98,7 +98,7 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
         .part_final(&session, &policy, &[], &pta_chain.der_items())
         .expect("PartFinal")
         .local_mk_backup
-        .to_vec();
+        .clone();
 
     let sealing_key = ctx
         .tbor(&TborSdSealingKeyGenReq {

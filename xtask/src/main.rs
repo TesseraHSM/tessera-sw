@@ -27,6 +27,7 @@ mod copyright;
 mod coverage;
 mod coverage_report;
 mod fmt;
+mod fuzz_build;
 mod fw_precheck;
 mod host_openssl;
 mod install;
@@ -82,6 +83,7 @@ enum Commands {
     Setup(setup::Setup),
     Install(install::Install),
     RustupComponentAdd(rustup_component_add::RustupComponentAdd),
+    FuzzBuild(fuzz_build::FuzzBuild),
     ValidateMembers(validate_members::ValidateMembers),
 }
 
@@ -126,6 +128,7 @@ fn try_main() -> anyhow::Result<()> {
         Commands::Setup(task) => task.run(ctx),
         Commands::Install(task) => task.run(ctx),
         Commands::RustupComponentAdd(task) => task.run(ctx),
+        Commands::FuzzBuild(task) => task.run(ctx),
         Commands::ValidateMembers(task) => task.run(ctx),
     }
 }

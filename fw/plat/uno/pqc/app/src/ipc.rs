@@ -71,6 +71,7 @@ pub fn response_desc(core_id: u8) -> usize {
 }
 
 /// Allow this core's request descriptor to raise its pending bit.
+#[allow(unsafe_code)]
 pub fn init(core_id: u8) {
     // SAFETY: INTC is a device register block at a fixed address, reachable
     // from every CPU including FP — the legacy fastpath drove the same
@@ -88,6 +89,7 @@ pub fn init(core_id: u8) {
 ///
 /// Clears the pending bit so the next ring is distinguishable from this
 /// one, and returns the value the HSM left in the descriptor.
+#[allow(unsafe_code)]
 pub fn take_request(core_id: u8) -> Option<u32> {
     let desc = request_desc(core_id);
 
@@ -112,6 +114,7 @@ pub fn take_request(core_id: u8) -> Option<u32> {
 }
 
 /// Ring the HSM, leaving `value` in this core's response descriptor.
+#[allow(unsafe_code)]
 pub fn ring_response(core_id: u8, value: u32) {
     // SAFETY: as above.
     unsafe {

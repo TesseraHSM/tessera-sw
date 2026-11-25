@@ -35,8 +35,14 @@ fn test_kbkdf_aes_derive_smoke() {
         |dev, _ddi, _path, session_id| {
             let (secret1, secret2) = create_ecdh_secrets(session_id, dev, DdiKeyType::Secret256);
             let rev = Some(DdiApiRev { major: 1, minor: 0 });
-            let label = Some(MborByteArray::from_slice("label".as_bytes()).unwrap());
-            let context = Some(MborByteArray::from_slice("context".as_bytes()).unwrap());
+            let label = Some(
+                MborByteArray::from_slice("label".as_bytes())
+                    .expect("byte slice conversion should succeed"),
+            );
+            let context = Some(
+                MborByteArray::from_slice("context".as_bytes())
+                    .expect("byte slice conversion should succeed"),
+            );
             let key_props =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -83,14 +89,16 @@ fn test_kbkdf_aes_derive_smoke() {
             // Encrypt with key1, decrypt with key2 — recovers the input
             // iff both derivations produced the same usable AES key.
             let plaintext = [0xABu8; 32];
-            let iv = MborByteArray::from_slice(&[0u8; 16]).unwrap();
+            let iv = MborByteArray::from_slice(&[0u8; 16])
+                .expect("byte slice conversion should succeed");
             let enc = helper_aes_encrypt_decrypt(
                 dev,
                 Some(session_id),
                 rev,
                 key1,
                 DdiAesOp::Encrypt,
-                MborByteArray::from_slice(&plaintext).unwrap(),
+                MborByteArray::from_slice(&plaintext)
+                    .expect("byte slice conversion should succeed"),
                 iv,
             )
             .expect("encrypt with derived AES key");
@@ -129,8 +137,14 @@ fn kbkdf_hmac_derive(
         Some(DdiApiRev { major: 1, minor: 0 }),
         secret_key_id,
         DdiHashAlgorithm::Sha256,
-        Some(MborByteArray::from_slice("label".as_bytes()).unwrap()),
-        Some(MborByteArray::from_slice("context".as_bytes()).unwrap()),
+        Some(
+            MborByteArray::from_slice("label".as_bytes())
+                .expect("byte slice conversion should succeed"),
+        ),
+        Some(
+            MborByteArray::from_slice("context".as_bytes())
+                .expect("byte slice conversion should succeed"),
+        ),
         key_type,
         key_props,
         key_length,
@@ -154,7 +168,7 @@ fn test_kbkdf_hmac_derive_smoke() {
             ] {
                 let resp = kbkdf_hmac_derive(dev, session_id, key_type, None);
                 assert!(resp.is_ok(), "KBKDF {key_type:?} should derive: {resp:?}");
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert_eq!(resp.hdr.op, DdiOp::KbkdfCounterHmacDerive);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);
                 assert!(
@@ -199,7 +213,7 @@ fn test_kbkdf_var_hmac_derive_smoke() {
                     resp.is_ok(),
                     "KBKDF {key_type:?} len {key_len} should derive: {resp:?}"
                 );
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert_eq!(resp.hdr.op, DdiOp::KbkdfCounterHmacDerive);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);
                 assert!(

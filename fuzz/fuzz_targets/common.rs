@@ -375,7 +375,7 @@ pub const FUZZ_REQ_BUF_SIZE: usize =
 pub const FUZZ_RESP_BUF_SIZE: usize =
     RESP_HEADER_LEN + MAX_TOC_ENTRIES * TOC_ENTRY_LEN + MAX_DATA_SIZE;
 
-static mut DEVICE_DISPLAY: bool = false;
+static DEVICE_DISPLAY: std::sync::Once = std::sync::Once::new();
 
 pub fn common_fuzz_test(test: &dyn Fn(&TestCtx, &str)) {
     let ddi = DdiTest::default();
@@ -386,20 +386,21 @@ pub fn common_fuzz_test(test: &dyn Fn(&TestCtx, &str)) {
 
     let path = match std::env::var("FUZZ_DEVICE") {
         Ok(path) => path,
-        Err(_) => dev_infos.first().unwrap().path.clone(),
+        Err(_) => dev_infos
+            .first()
+            .expect("first entry should be present")
+            .path
+            .clone(),
     };
 
     // Display all device paths and the selected device path if it hasn't been
     // displayed yet.
-    unsafe {
-        if !DEVICE_DISPLAY {
-            for dev_info in &dev_infos {
-                println!("Found device: {}", dev_info.path);
-            }
-            println!("Selected device: {}", path);
-            DEVICE_DISPLAY = true;
+    DEVICE_DISPLAY.call_once(|| {
+        for dev_info in &dev_infos {
+            println!("Found device: {}", dev_info.path);
         }
-    }
+        println!("Selected device: {}", path);
+    });
 
     let ctx = TestCtx::new_primary_with_path(&path);
 

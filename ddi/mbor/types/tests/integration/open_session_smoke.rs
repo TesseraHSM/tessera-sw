@@ -51,7 +51,7 @@ fn test_open_session_smoke() {
             encrypted_credential,
             pub_key,
         )
-        .unwrap();
+        .expect("DDI open session should succeed");
 
         assert_eq!(resp.hdr.op, DdiOp::OpenSession);
         assert_eq!(resp.hdr.status, DdiStatus::Success);
@@ -162,7 +162,7 @@ fn test_open_session_limit_reached_smoke() {
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
 
         let open_on_new_handle = |ddi: &DdiTest| {
-            let handle = ddi.open_dev(path).unwrap();
+            let handle = ddi.open_dev(path).expect("device opening should succeed");
             let (cred, pub_key) = encrypt_userid_pin_for_open_session(
                 &handle,
                 TEST_CRED_ID,
@@ -196,7 +196,7 @@ fn test_open_session_limit_reached_smoke() {
         );
 
         // Closing a session frees its slot; the next OpenSession succeeds.
-        let (freed_handle, freed_id) = sessions.pop().unwrap();
+        let (freed_handle, freed_id) = sessions.pop().expect("last queued value should be present");
         helper_close_session(&freed_handle, Some(freed_id), rev)
             .expect("CloseSession must succeed");
         let (cred, pub_key) = encrypt_userid_pin_for_open_session(
@@ -225,7 +225,7 @@ fn test_open_session_freed_by_handle_drop_smoke() {
         let rev = Some(DdiApiRev { major: 1, minor: 0 });
 
         let open_on_new_handle = |ddi: &DdiTest| {
-            let handle = ddi.open_dev(path).unwrap();
+            let handle = ddi.open_dev(path).expect("device opening should succeed");
             let (cred, pub_key) = encrypt_userid_pin_for_open_session(
                 &handle,
                 TEST_CRED_ID,
@@ -257,7 +257,7 @@ fn test_open_session_freed_by_handle_drop_smoke() {
 
         // Dropping a session handle closes its session on Drop, which
         // frees the slot -- no explicit CloseSession required.
-        let dropped_handle = sessions.pop().unwrap();
+        let dropped_handle = sessions.pop().expect("last queued value should be present");
         drop(dropped_handle);
 
         // The freed slot now admits a new session.
@@ -284,10 +284,13 @@ fn test_open_session_freed_by_handle_drop_smoke() {
 /// and any future format change updates both at once.
 fn build_placeholder_open_session_inputs() -> (DdiEncryptedSessionCredential, DdiDerPublicKey) {
     let encrypted_credential = DdiEncryptedSessionCredential {
-        encrypted_id: MborByteArray::from_slice(&[0u8; 16]).unwrap(),
-        encrypted_pin: MborByteArray::from_slice(&[0u8; 16]).unwrap(),
-        encrypted_seed: MborByteArray::from_slice(&[0u8; 48]).unwrap(),
-        iv: MborByteArray::from_slice(&[0u8; 16]).unwrap(),
+        encrypted_id: MborByteArray::from_slice(&[0u8; 16])
+            .expect("byte slice conversion should succeed"),
+        encrypted_pin: MborByteArray::from_slice(&[0u8; 16])
+            .expect("byte slice conversion should succeed"),
+        encrypted_seed: MborByteArray::from_slice(&[0u8; 48])
+            .expect("byte slice conversion should succeed"),
+        iv: MborByteArray::from_slice(&[0u8; 16]).expect("byte slice conversion should succeed"),
         nonce: [0u8; 32],
         tag: [0u8; 48],
     };

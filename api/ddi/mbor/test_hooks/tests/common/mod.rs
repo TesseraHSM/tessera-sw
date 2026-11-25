@@ -131,7 +131,9 @@ pub fn ddi_dev_test(
     }
 
     for dev_info in dev_infos.iter() {
-        let mut dev = ddi.open_dev(&dev_info.path).unwrap();
+        let mut dev = ddi
+            .open_dev(&dev_info.path)
+            .expect("device opening should succeed");
 
         let setup_session_id = setup(&mut dev, &ddi, &dev_info.path);
         let test_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -149,7 +151,7 @@ pub fn ddi_dev_test(
 pub fn common_setup(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
     common_cleanup(dev, ddi, path, None);
 
-    let mut setup_dev = ddi.open_dev(path).unwrap();
+    let mut setup_dev = ddi.open_dev(path).expect("device opening should succeed");
 
     helper_common_establish_credential_no_unwrap(&mut setup_dev, TEST_CRED_ID, TEST_CRED_PIN)
         .expect("establish test credential");
@@ -170,9 +172,9 @@ pub fn common_setup(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) 
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     assert!(resp.hdr.sess_id.is_some());
-    resp.hdr.sess_id.unwrap()
+    resp.hdr.sess_id.expect("session ID should be available")
 }
 
 /// Close the session (if any) and erase the device.
@@ -190,7 +192,7 @@ pub fn common_cleanup(
         );
     }
 
-    let cleanup_dev = ddi.open_dev(path).unwrap();
+    let cleanup_dev = ddi.open_dev(path).expect("device opening should succeed");
     let resp = cleanup_dev.erase();
     assert!(resp.is_ok(), "resp {:?}", resp);
 }
@@ -198,19 +200,27 @@ pub fn common_cleanup(
 /// Sign the device's attestation public key with the test POTA key to
 /// produce the POTA endorsement `(signature, pota_pub_key)` pair.
 pub fn helper_get_pota_endorsement(dev: &<DdiTest as Ddi>::Dev) -> (Vec<u8>, Vec<u8>) {
-    let get_cert_chain_info = helper_get_cert_chain_info(dev).unwrap();
-    let cert_resp = helper_get_certificate(dev, get_cert_chain_info.data.num_certs - 1).unwrap();
+    let get_cert_chain_info =
+        helper_get_cert_chain_info(dev).expect("DDI get certificate chain info should succeed");
+    let cert_resp = helper_get_certificate(dev, get_cert_chain_info.data.num_certs - 1)
+        .expect("DDI get certificate should succeed");
     let cert = cert_resp.data.certificate.as_slice();
-    let cert = X509Certificate::from_der(cert).unwrap();
-    let cert_pub_key_der = cert.get_public_key_der().unwrap();
-    let cert_pub_key_obj = DerEccPublicKey::from_der(&cert_pub_key_der).unwrap();
+    let cert = X509Certificate::from_der(cert)
+        .expect("X509 certificate construction from DER should succeed");
+    let cert_pub_key_der = cert
+        .get_public_key_der()
+        .expect("public key DER extraction should succeed");
+    let cert_pub_key_obj = DerEccPublicKey::from_der(&cert_pub_key_der)
+        .expect("DER ECC public key construction from DER should succeed");
     let mut cert_pub_uncomp = vec![0x04u8];
     cert_pub_uncomp.extend_from_slice(cert_pub_key_obj.x());
     cert_pub_uncomp.extend_from_slice(cert_pub_key_obj.y());
     let hash_algo = HashAlgo::sha384();
     let mut ecdsa_algo = EcdsaAlgo::new(hash_algo);
-    let pota_priv_key = EccPrivateKey::from_bytes(&TEST_POTA_ECC_PRIVATE_KEY).unwrap();
-    let sig_len = Signer::sign(&mut ecdsa_algo, &pota_priv_key, &cert_pub_uncomp, None).unwrap();
+    let pota_priv_key = EccPrivateKey::from_bytes(&TEST_POTA_ECC_PRIVATE_KEY)
+        .expect("ECC private key construction from bytes should succeed");
+    let sig_len = Signer::sign(&mut ecdsa_algo, &pota_priv_key, &cert_pub_uncomp, None)
+        .expect("signature generation should succeed");
     let mut signature = vec![0u8; sig_len];
     let _ = Signer::sign(
         &mut ecdsa_algo,
@@ -218,7 +228,7 @@ pub fn helper_get_pota_endorsement(dev: &<DdiTest as Ddi>::Dev) -> (Vec<u8>, Vec
         &cert_pub_uncomp,
         Some(&mut signature),
     )
-    .unwrap();
+    .expect("signature generation should succeed");
 
     (signature, TEST_POTA_ECC_PUB_KEY.to_vec())
 }
@@ -237,13 +247,14 @@ pub fn helper_common_establish_credential_no_unwrap(
     )?;
 
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     let masked_bk3 = helper_get_or_init_bk3(dev);
     let (signature, pota_pub_key) = helper_get_pota_endorsement(dev);
@@ -277,15 +288,16 @@ pub fn encrypt_userid_pin_for_open_session(
     seed: [u8; 48],
 ) -> (DdiEncryptedSessionCredential, DdiDerPublicKey) {
     let resp = helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-        .unwrap();
+        .expect("DDI get session encryption key should succeed");
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_session_credential(id, pin, seed, nonce)
-        .unwrap();
+        .expect("session credential encryption should succeed");
 
     (ddi_encrypted_credential, ddi_public_key)
 }
@@ -293,7 +305,8 @@ pub fn encrypt_userid_pin_for_open_session(
 /// Query the device kind (Virtual vs Physical). The FIPS-validation
 /// hooks only run on physical hardware.
 pub fn get_device_kind(dev: &mut <DdiTest as Ddi>::Dev) -> DdiDeviceKind {
-    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 })).unwrap();
+    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
+        .expect("DDI get device info should succeed");
     resp.data.kind
 }
 

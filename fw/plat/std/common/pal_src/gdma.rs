@@ -36,6 +36,7 @@ impl HsmGdmaController for StdHsmPal {
     /// contiguous process allocation, so there is no second page to stitch
     /// on and no 4 KiB boundary to cross. This is why the truncation bug
     /// that PRP2 fixes was invisible under the std simulator.
+    #[allow(unsafe_code)]
     async fn copy_mem_from_host(
         &self,
         _io: &Self::Io,
@@ -55,6 +56,7 @@ impl HsmGdmaController for StdHsmPal {
     /// Copy from host memory into an HSM buffer, sourced from a raw
     /// 16-byte NVMe SGL Data Block descriptor (first dword = host
     /// pointer, `length` field = transfer size).
+    #[allow(unsafe_code)]
     async fn copy_mem_from_host_raw(
         &self,
         _io: &Self::Io,
@@ -84,6 +86,7 @@ impl HsmGdmaController for StdHsmPal {
     /// Interprets the PRP address as a raw host pointer.
     ///
     /// `_dst2` is ignored — see [`Self::copy_mem_from_host`].
+    #[allow(unsafe_code)]
     async fn copy_mem_to_host(
         &self,
         _io: &Self::Io,

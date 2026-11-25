@@ -153,7 +153,7 @@ fn test_live_migration_full_table_reopen_smoke() {
             // whole table is occupied when the migration happens.
             let mut extra_handles = Vec::new();
             for _ in 0..(MAX_SESSIONS - 1) {
-                let handle = ddi.open_dev(path).unwrap();
+                let handle = ddi.open_dev(path).expect("device opening should succeed");
                 let (cred, pub_key) = encrypt_userid_pin_for_open_session(
                     &handle,
                     TEST_CRED_ID,
@@ -185,7 +185,7 @@ fn test_live_migration_full_table_reopen_smoke() {
             // A fresh OpenSession must NOT reclaim a renegotiation-pending
             // slot: with the whole table migrated, the device is out of
             // sessions.
-            let spare = ddi.open_dev(path).unwrap();
+            let spare = ddi.open_dev(path).expect("device opening should succeed");
             let (cred, pub_key) = encrypt_userid_pin_for_open_session(
                 &spare,
                 TEST_CRED_ID,

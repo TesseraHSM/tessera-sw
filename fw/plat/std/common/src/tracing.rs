@@ -14,6 +14,9 @@
 //! - `TARGET` — module name (left-padded to 8 chars)
 //! - `TASKID` — active Embassy task pointer (hex), or `--------` if idle
 
+// Linker symbols are required by the core tracing facade and Embassy executor.
+#![allow(unsafe_code)]
+
 use std::cell::Cell;
 use std::fmt;
 use std::fmt::Write;

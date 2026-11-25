@@ -61,7 +61,7 @@ fn test_masked_key_aes_gen(
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let key_id = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -87,7 +87,7 @@ fn test_masked_key_aes_gen(
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     assert_eq!(resp.data.msg.len(), RAW_MSG.len());
     assert_ne!(RAW_MSG, resp.data.msg.as_slice());
 
@@ -101,7 +101,7 @@ fn test_masked_key_aes_gen(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_key_id, _, _) = resp.unwrap();
+    let (new_key_id, _, _) = resp.expect("DDI response should succeed");
 
     // Decrypt the plain text
     let resp = helper_aes_encrypt_decrypt(
@@ -115,7 +115,7 @@ fn test_masked_key_aes_gen(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     // Verify the plain text
     assert_eq!(resp.data.msg.as_slice(), RAW_MSG);
@@ -143,7 +143,7 @@ fn test_unmask_session_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
 
             let key_id = data.key_id;
 
@@ -170,7 +170,7 @@ fn test_unmask_session_key() {
                     masked_key,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let data = resp.unwrap().data;
+                let data = resp.expect("DDI response should succeed").data;
                 data.key_id
             };
 
@@ -200,7 +200,7 @@ fn test_unmask_session_key() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -254,7 +254,7 @@ fn test_unmask_session_key_different_session() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
 
             let key_id = data.key_id;
 
@@ -299,7 +299,7 @@ fn test_unmask_session_key_different_session() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -344,7 +344,7 @@ fn unmask_bulk_key_and_verify_attributes(
         key_props,
     );
     assert!(resp.is_ok(), "Failed to generate key: {:?}", resp);
-    let data = resp.unwrap().data;
+    let data = resp.expect("DDI response should succeed").data;
 
     let key_id = data.key_id;
     let original_masked_key = data.masked_key;
@@ -373,7 +373,7 @@ fn unmask_bulk_key_and_verify_attributes(
         original_masked_key,
     );
     assert!(resp.is_ok(), "Failed to unmask key: {:?}", resp);
-    let unmasked_data = resp.unwrap().data;
+    let unmasked_data = resp.expect("DDI response should succeed").data;
 
     // Extract metadata from unmasked key's masked blob
     let unmasked_masked_key = unmasked_data.masked_key;

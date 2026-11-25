@@ -22,7 +22,8 @@ fn test_api_rev() {
         setup,
         common_cleanup,
         |dev, _ddi, _path, _incorrect_session_id| {
-            let resp = helper_get_api_rev(dev, None, None).unwrap();
+            let resp =
+                helper_get_api_rev(dev, None, None).expect("DDI get api revision should succeed");
 
             assert_eq!(resp.hdr.op, DdiOp::GetApiRev);
             assert!(resp.hdr.rev.is_none());
@@ -58,7 +59,7 @@ fn test_api_rev_with_session() {
                 TEST_SESSION_SEED,
             );
 
-            let app_dev = ddi.open_dev(path).unwrap();
+            let app_dev = ddi.open_dev(path).expect("device opening should succeed");
             let resp = helper_open_session(
                 &app_dev,
                 None,
@@ -69,14 +70,14 @@ fn test_api_rev_with_session() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let resp = helper_get_api_rev(dev, Some(resp.data.sess_id), None);
 
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -94,7 +95,7 @@ fn test_api_rev_with_invalid_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -112,7 +113,7 @@ fn test_api_rev_with_invalid_rev() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
             ));
         },

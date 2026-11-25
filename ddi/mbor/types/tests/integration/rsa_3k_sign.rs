@@ -34,7 +34,7 @@ fn test_rsa_3k_sign_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
 
@@ -50,7 +50,7 @@ fn test_rsa_3k_sign_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -81,7 +81,7 @@ fn test_rsa_3k_sign_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
 
@@ -97,7 +97,7 @@ fn test_rsa_3k_sign_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -142,7 +142,7 @@ fn test_rsa_3k_sign_incorrect_key_num_entry() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -175,7 +175,7 @@ fn test_rsa_3k_sign_incorrect_key_type() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidKeyType)
             ));
         },
@@ -199,7 +199,7 @@ fn test_rsa_3k_sign_incorrect_permission() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let resp = helper_rsa_mod_exp(
                 dev,
@@ -212,7 +212,7 @@ fn test_rsa_3k_sign_incorrect_permission() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
             ));
         },
@@ -257,7 +257,7 @@ fn test_rsa_3k_sign_message_data_below_lower_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
 
@@ -274,7 +274,7 @@ fn test_rsa_3k_sign_message_data_below_lower_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -315,7 +315,7 @@ fn test_rsa_3k_sign_message_data_above_upper_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
 
@@ -332,7 +332,7 @@ fn test_rsa_3k_sign_message_data_above_upper_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -351,8 +351,8 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha1() {
                 store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 3);
 
             let hash = [0x1; 20];
-            let padded_hash =
-                RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha1).unwrap();
+            let padded_hash = RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha1)
+                .expect("PKCS#1 v1.5 encoding should succeed");
 
             let mut y = [0u8; 512];
             y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -366,7 +366,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha1() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -425,7 +425,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha1() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -446,8 +446,8 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha256() {
                 store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 3);
 
             let hash = [0x1; 32];
-            let padded_hash =
-                RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha256).unwrap();
+            let padded_hash = RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha256)
+                .expect("PKCS#1 v1.5 encoding should succeed");
 
             let mut y = [0u8; 512];
             y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -461,7 +461,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha256() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -520,7 +520,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha256() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -541,8 +541,8 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha384() {
                 store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 3);
 
             let hash = [0x1; 48];
-            let padded_hash =
-                RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha384).unwrap();
+            let padded_hash = RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha384)
+                .expect("PKCS#1 v1.5 encoding should succeed");
 
             let mut y = [0u8; 512];
             y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -556,7 +556,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha384() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -615,7 +615,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha384() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -636,8 +636,8 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha512() {
                 store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 3);
 
             let hash = [0x1; 64];
-            let padded_hash =
-                RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha512).unwrap();
+            let padded_hash = RsaEncoding::encode_pkcs_v15(&hash, 3072 / 8, RsaDigestKind::Sha512)
+                .expect("PKCS#1 v1.5 encoding should succeed");
 
             let mut y = [0u8; 512];
             y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -651,7 +651,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha512() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -710,7 +710,7 @@ fn test_rsa_3k_sign_and_verify_pkcs15_sha512() {
                 DdiRsaOpType::Sign,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -741,7 +741,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha1() {
                     0,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -755,7 +755,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha1() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -816,7 +816,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha1() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -832,7 +832,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha1() {
                     20,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -846,7 +846,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha1() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let result = rsa_verify_local_openssl(
                     &TEST_RSA_3K_PUBLIC_KEY,
@@ -884,7 +884,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha256() {
                     0,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -898,7 +898,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha256() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -959,7 +959,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha256() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -975,7 +975,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha256() {
                     32,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -989,7 +989,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha256() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let result = rsa_verify_local_openssl(
                     &TEST_RSA_3K_PUBLIC_KEY,
@@ -1027,7 +1027,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha384() {
                     0,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -1041,7 +1041,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha384() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -1102,7 +1102,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha384() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -1118,7 +1118,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha384() {
                     48,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -1132,7 +1132,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha384() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let result = rsa_verify_local_openssl(
                     &TEST_RSA_3K_PUBLIC_KEY,
@@ -1170,7 +1170,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha512() {
                     0,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -1184,7 +1184,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha512() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_no_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -1245,7 +1245,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha512() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let sig_crt_key = &resp.data.x.data()[..resp.data.x.len()];
 
@@ -1261,7 +1261,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha512() {
                     64,
                     |buf| Rng::rand_bytes(buf).map_err(|_| ()),
                 )
-                .unwrap();
+                .expect("RSA-PSS encoding should succeed");
 
                 let mut y = [0u8; 512];
                 y[..padded_hash.len()].copy_from_slice(&padded_hash);
@@ -1275,7 +1275,7 @@ fn test_rsa_3k_sign_and_verify_pss_sha512() {
                     DdiRsaOpType::Sign,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let result = rsa_verify_local_openssl(
                     &TEST_RSA_3K_PUBLIC_KEY,

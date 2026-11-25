@@ -32,7 +32,7 @@ fn test_rsa_mod_exp_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -61,7 +61,7 @@ fn test_rsa_mod_exp_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -106,7 +106,7 @@ fn test_rsa_mod_exp_incorrect_key_num_entry() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -134,7 +134,7 @@ fn test_rsa_mod_exp_incorrect_key_type() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidKeyType)
             ));
         },
@@ -162,7 +162,7 @@ fn test_rsa_mod_exp_incorrect_permissions() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
             ));
         },
@@ -223,7 +223,7 @@ fn test_rsa_mod_exp_encrypt_and_decrypt() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(
                 orig_x[..data_len_to_test],

@@ -30,6 +30,7 @@
 mod crash;
 mod ipc;
 mod mailbox;
+#[allow(unsafe_code)]
 mod mem;
 mod shared_status;
 
@@ -76,6 +77,7 @@ struct FpIdentity {
 /// `#[used]` and `#[no_mangle]` keep it in the binary: nothing references
 /// it at link time, so it would otherwise be dropped, and the patch step
 /// would find no magic.
+#[allow(unsafe_code)]
 #[used]
 #[no_mangle]
 static FP_IDENTITY: FpIdentity = FpIdentity {
@@ -97,6 +99,7 @@ extern "C" {
 /// -- but without a PAC cortex-m-rt reserves all 240 entries, 960 bytes of
 /// a 32 KB iTCM. With its `device` feature it leaves the table to the app,
 /// and its link script insists on at least one entry.
+#[allow(unsafe_code)]
 #[used]
 #[no_mangle]
 #[link_section = ".vector_table.interrupts"]
@@ -104,6 +107,7 @@ static __INTERRUPTS: [unsafe extern "C" fn(); 1] = [DefaultHandler];
 
 /// Read the patched core id, or `None` if the image was never patched or
 /// carries a nonsensical value.
+#[allow(unsafe_code)]
 fn read_core_id() -> Option<u8> {
     // Volatile: `FP_IDENTITY` is an immutable static, so a plain read would
     // be constant-folded to the pre-patch value and the patch ignored.
@@ -163,6 +167,7 @@ static TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// Cycles since the counter [`mailbox::cyc_init`] started; wraps every
 /// 5.7 s, so only differences of less than that mean anything.
+#[allow(unsafe_code)]
 fn cycles() -> u32 {
     // SAFETY: DWT_CYCCNT, a read-only use of a core peripheral register.
     unsafe { core::ptr::read_volatile(0xE000_1004 as *const u32) }
@@ -181,6 +186,7 @@ fn cycles() -> u32 {
 /// The heartbeat is written between requests, so it tracks the loop's
 /// forward progress rather than any single workload; no request comes
 /// close to the SP's one-second poll.
+#[allow(unsafe_code)]
 fn serve(core_id: u8) -> ! {
     // Publish a marker immediately so a core that never gets here is
     // distinguishable from one that does but sees nothing.
@@ -295,6 +301,7 @@ fn service(lane: u8, req: &mailbox::Request) {
 /// The two 32-byte seed fields carry `d` and `z`. The decapsulation key
 /// travels back to the HSM, which masks it alongside the seeds so
 /// decapsulation never has to re-derive it.
+#[allow(unsafe_code)]
 #[inline(never)]
 fn service_mlkem_keygen(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let ek_len = variant.pk_size();
@@ -567,6 +574,7 @@ const SHAKE_STACK_SCRUB: usize = 2048;
 /// stack pointer without clearing them, and spilled registers can hold
 /// message-derived values. Called from the frame that called
 /// [`service_shake`], so this frame spans the same stack.
+#[allow(unsafe_code)]
 #[inline(never)]
 fn scrub_shake_stack() {
     let mut scratch = core::mem::MaybeUninit::<[u32; SHAKE_STACK_SCRUB / 4]>::uninit();
@@ -592,6 +600,7 @@ fn scrub_shake_stack() {
 ///
 /// # Safety
 /// `p` must be valid for `n` writes and word aligned.
+#[allow(unsafe_code)]
 unsafe fn fast_zero(p: *mut u8, n: usize) {
     let mut q = p;
     let mut left = n;
@@ -637,6 +646,7 @@ fn mlkem_variant(key_kind: u32) -> Option<pqc_ml::MlKemVariant> {
 }
 
 /// Derive a key pair from the supplied seed, publishing the public key.
+#[allow(unsafe_code)]
 #[inline(never)]
 fn service_keygen(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
@@ -731,6 +741,7 @@ fn dsa_input<'a>(
 /// because signing already needs a buffer of exactly that shape to hold the
 /// mask stream between the commitment and z passes. The key is then read
 /// where it lies, and this core never takes a copy of it to wipe.
+#[allow(unsafe_code)]
 #[inline(never)]
 fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
@@ -810,6 +821,7 @@ fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant)
 /// turns into `MlDsaVerifyFailed`. It is an ordinary outcome, not a fault:
 /// the distinction matters because a caller who ignored the result must not
 /// be able to treat an invalid signature as valid.
+#[allow(unsafe_code)]
 #[inline(never)]
 fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
@@ -957,6 +969,7 @@ fn mldsa_variant(key_kind: u32) -> Option<pqc_ml::MlDsaVariant> {
     }
 }
 
+#[allow(unsafe_code)]
 #[cortex_m_rt::entry]
 fn main() -> ! {
     // Establish identity before anything else. A core that cannot -- an

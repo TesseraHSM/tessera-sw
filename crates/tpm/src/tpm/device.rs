@@ -165,6 +165,7 @@ mod unix {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 mod windows {
     use std::io;
 
@@ -183,7 +184,7 @@ mod windows {
             };
 
             let mut handle: u32 = 0;
-            // SAFETY: Make an FFI call.
+            // SAFETY: Both pointers reference live, correctly sized values for the call.
             let rc = unsafe {
                 win_ffi::Tbsi_Context_Create(
                     std::ptr::from_ref(&params2),
@@ -218,7 +219,8 @@ mod windows {
             let _g = self.lock.lock();
             let mut buf = vec![0u8; 8192];
             let mut out_len: u32 = buf.len() as u32;
-            // SAFETY: Make an FFI call.
+            // SAFETY: The context is live and locked; the buffers remain valid for the call,
+            // and their lengths describe the available input and output storage.
             let rc = unsafe {
                 win_ffi::Tbsip_Submit_Command(
                     self.handle,
@@ -260,7 +262,7 @@ mod windows {
 
     impl Drop for Tpm {
         fn drop(&mut self) {
-            // SAFETY: Make an FFI call.
+            // SAFETY: This handle was created successfully and is closed once on drop.
             unsafe { win_ffi::Tbsip_Context_Close(self.handle) };
         }
     }

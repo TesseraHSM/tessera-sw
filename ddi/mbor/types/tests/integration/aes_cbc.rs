@@ -24,7 +24,7 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_aes_128 = resp.data.key_id;
 
@@ -38,7 +38,7 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_aes_192 = resp.data.key_id;
 
@@ -51,7 +51,7 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_aes_256 = resp.data.key_id;
 
@@ -79,7 +79,7 @@ fn test_aes_cbc_encrypt_decrypt_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
 
@@ -92,7 +92,7 @@ fn test_aes_cbc_encrypt_decrypt_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -110,7 +110,7 @@ fn test_aes_cbc_encrypt_decrypt_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
 
@@ -126,7 +126,7 @@ fn test_aes_cbc_encrypt_decrypt_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -159,7 +159,7 @@ fn test_aes_cbc_encrypt_decrypt_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
 
@@ -175,7 +175,7 @@ fn test_aes_cbc_encrypt_decrypt_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -239,7 +239,7 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_key_type() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let imported_ecc_key = resp.data.private_key_id;
 
@@ -333,7 +333,7 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_key_id() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::KeyNotFound)
                 ));
 
@@ -349,7 +349,7 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_key_id() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::KeyNotFound)
                 ));
             }
@@ -383,7 +383,7 @@ fn test_aes_cbc_encrypt_decrypt_128() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -397,7 +397,7 @@ fn test_aes_cbc_encrypt_decrypt_128() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -416,7 +416,7 @@ fn test_aes_cbc_encrypt_decrypt_128() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -430,7 +430,7 @@ fn test_aes_cbc_encrypt_decrypt_128() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -465,7 +465,7 @@ fn test_aes_cbc_encrypt_decrypt_192() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -478,7 +478,7 @@ fn test_aes_cbc_encrypt_decrypt_192() {
                     MborByteArray::new([0x0; 16], 16).expect("failed to create byte array"),
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -497,7 +497,7 @@ fn test_aes_cbc_encrypt_decrypt_192() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -511,7 +511,7 @@ fn test_aes_cbc_encrypt_decrypt_192() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -545,7 +545,7 @@ fn test_aes_cbc_encrypt_decrypt_256() {
                     MborByteArray::new([0x0; 16], 16).expect("failed to create byte array"),
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -558,7 +558,7 @@ fn test_aes_cbc_encrypt_decrypt_256() {
                     MborByteArray::new([0x0; 16], 16).expect("failed to create byte array"),
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -577,7 +577,7 @@ fn test_aes_cbc_encrypt_decrypt_256() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 let resp = helper_aes_encrypt_decrypt(
                     dev,
@@ -590,7 +590,7 @@ fn test_aes_cbc_encrypt_decrypt_256() {
                     MborByteArray::new([0x8; 16], 16).expect("failed to create byte array"),
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.data.msg.data_take(), msg);
                 assert_eq!(resp.data.msg.len(), msg_len);
@@ -631,7 +631,7 @@ fn test_aes_cbc_iv_chaining_encrypt_then_decrypt() {
                 MborByteArray::new(input_iv, 16).expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let first_encrypt_resp = resp.unwrap();
+            let first_encrypt_resp = resp.expect("DDI response should succeed");
 
             // Encrypt the next 16 bytes using output IV from Step above
             let resp = helper_aes_encrypt_decrypt(
@@ -645,7 +645,7 @@ fn test_aes_cbc_iv_chaining_encrypt_then_decrypt() {
                     .expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let second_encrypt_resp = resp.unwrap();
+            let second_encrypt_resp = resp.expect("DDI response should succeed");
 
             let mut combined_encrypted = [0u8; 1024];
             let first_len = first_encrypt_resp.data.msg.len();
@@ -670,7 +670,7 @@ fn test_aes_cbc_iv_chaining_encrypt_then_decrypt() {
                 MborByteArray::new(input_iv, 16).expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let decrypt_resp = resp.unwrap();
+            let decrypt_resp = resp.expect("DDI response should succeed");
 
             // Verify
             assert_eq!(decrypt_resp.data.msg.data_take(), msg_data);
@@ -705,7 +705,7 @@ fn test_aes_cbc_encrypt_then_iv_chaining_decrypt() {
                 MborByteArray::new(input_iv, 16).expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let encrypt_resp = resp.unwrap();
+            let encrypt_resp = resp.expect("DDI response should succeed");
 
             let mut resp_data1 = [0u8; 1024];
             resp_data1[..16].copy_from_slice(&encrypt_resp.data.msg.data()[0..16]);
@@ -723,7 +723,7 @@ fn test_aes_cbc_encrypt_then_iv_chaining_decrypt() {
                 MborByteArray::new(input_iv, 16).expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let first_decrypt_resp = resp.unwrap();
+            let first_decrypt_resp = resp.expect("DDI response should succeed");
 
             // Decrypt the next 16 bytes using output IV from Step above
             let resp = helper_aes_encrypt_decrypt(
@@ -737,7 +737,7 @@ fn test_aes_cbc_encrypt_then_iv_chaining_decrypt() {
                     .expect("failed to create byte array"),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let second_decrypt_resp = resp.unwrap();
+            let second_decrypt_resp = resp.expect("DDI response should succeed");
 
             println!("second_decrypt_resp{:?}", second_decrypt_resp);
 

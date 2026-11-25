@@ -18,21 +18,31 @@ struct AlignedBuf {
 }
 
 // SAFETY: AlignedBuf owns its allocation exclusively.
+#[allow(unsafe_code)]
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
+    #[allow(unsafe_code)]
     fn new(len: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
+        let layout = std::alloc::Layout::from_size_align(len, 4096)
+            .expect("from size align operation should succeed");
+        // SAFETY: layout is valid and all test callers request a nonzero size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null());
         Self { ptr, len }
     }
 
+    #[allow(unsafe_code)]
     fn as_slice(&self) -> &[u8] {
+        // SAFETY: self owns a non-null allocation of len initialized bytes,
+        // valid for this borrow; &self prevents mutation through this buffer.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
+    #[allow(unsafe_code)]
     fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: self owns a non-null allocation of len initialized bytes,
+        // and &mut self grants exclusive access for the returned slice's lifetime.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
@@ -43,8 +53,12 @@ impl AlignedBuf {
 }
 
 impl Drop for AlignedBuf {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        let layout = std::alloc::Layout::from_size_align(self.len, 4096).unwrap();
+        let layout = std::alloc::Layout::from_size_align(self.len, 4096)
+            .expect("from size align operation should succeed");
+        // SAFETY: ptr is the live allocation owned by self, and layout matches
+        // the layout used to allocate it. Drop deallocates it exactly once.
         unsafe { std::alloc::dealloc(self.ptr, layout) };
     }
 }
@@ -150,7 +164,7 @@ async fn concurrent_ios() {
         }));
     }
     for h in handles {
-        h.await.unwrap();
+        h.await.expect("h should be available");
     }
 }
 
@@ -166,7 +180,7 @@ async fn fifty_concurrent_ios() {
         }));
     }
     for h in handles {
-        h.await.unwrap();
+        h.await.expect("h should be available");
     }
 }
 
@@ -1162,7 +1176,12 @@ async fn get_establish_cred_encryption_key_verify_signature() {
         "signature verification failed: {:?}",
         result
     );
-    assert!(result.unwrap(), "signature over public key is invalid");
+    assert!(
+        result.expect(
+            "get establish credential encryption key verify signature result should succeed"
+        ),
+        "signature over public key is invalid"
+    );
 }
 
 #[tokio::test]

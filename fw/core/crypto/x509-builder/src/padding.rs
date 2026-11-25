@@ -51,14 +51,14 @@ mod tests {
     #[test]
     fn pad_cn_to_short_string_pads_with_spaces() {
         let mut out = [0u8; 8];
-        pad_cn_to("hi", &mut out).unwrap();
+        pad_cn_to("hi", &mut out).expect("common name padding should succeed");
         assert_eq!(&out, b"hi      ");
     }
 
     #[test]
     fn pad_cn_to_exact_length_fills_buffer() {
         let mut out = [0u8; 4];
-        pad_cn_to("abcd", &mut out).unwrap();
+        pad_cn_to("abcd", &mut out).expect("common name padding should succeed");
         assert_eq!(&out, b"abcd");
     }
 
@@ -77,14 +77,14 @@ mod tests {
     #[test]
     fn pad_sn_to_short_string_pads_with_zero_char() {
         let mut out = [0u8; 8];
-        pad_sn_to("ab", &mut out).unwrap();
+        pad_sn_to("ab", &mut out).expect("serial number padding should succeed");
         assert_eq!(&out, b"ab000000");
     }
 
     #[test]
     fn pad_sn_to_exact_length_fills_buffer() {
         let mut out = [0u8; 4];
-        pad_sn_to("DEAD", &mut out).unwrap();
+        pad_sn_to("DEAD", &mut out).expect("serial number padding should succeed");
         assert_eq!(&out, b"DEAD");
     }
 

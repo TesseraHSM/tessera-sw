@@ -39,7 +39,7 @@ fn test_masked_key_get_unwrapping_without_lm() {
             assert!(
                 resp.is_err(),
                 "Unmask key should fail: {:?}",
-                resp.unwrap_err()
+                resp.expect_err("DDI response should fail")
             );
         },
     )
@@ -99,7 +99,7 @@ fn test_masked_key_get_unwrapping_with_lm() {
                 "Reopen session should succeed: {:?}",
                 reopen_resp
             );
-            let reopened_session = reopen_resp.unwrap();
+            let reopened_session = reopen_resp.expect("DDI reopen response should succeed");
             assert_eq!(
                 reopened_session.data.sess_id, setup_res.session_id,
                 "Reopened session should have same ID"
@@ -119,7 +119,7 @@ fn test_masked_key_get_unwrapping_with_lm() {
             assert!(
                 resp.is_err(),
                 "Unmask key should fail: {:?}",
-                resp.unwrap_err()
+                resp.expect_err("DDI response should fail")
             );
 
             let (_, second_pub_key_der, _) = get_unwrapping_key(dev, setup_res.session_id);

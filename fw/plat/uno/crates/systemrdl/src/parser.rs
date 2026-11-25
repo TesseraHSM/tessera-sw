@@ -1717,7 +1717,7 @@ mod test {
         let tokens = tokens
             .parse("1'b1 & 4'h2")
             .map_err(|e| anyhow::format_err!("{e}"))
-            .unwrap();
+            .expect("mapped error result should succeed");
         println!("tokens: {:?}", tokens);
         let tokens = Tokens::new(&tokens);
         let result = constant_expr
@@ -1726,7 +1726,7 @@ mod test {
                 let t = &e.input()[0];
                 anyhow::format_err!("Error parsing input at: `{}` token: {:?}", t.raw, t.kind)
             })
-            .unwrap();
+            .expect("mapped error result should succeed");
 
         println!("{:?}", result);
     }
@@ -1740,7 +1740,7 @@ mod test {
         } mcu;"#,
         );
         println!("{:?}", result);
-        result.unwrap();
+        result.expect("test addr map result should succeed");
     }
 
     #[test]
@@ -1755,7 +1755,7 @@ mod test {
           "#,
         );
         println!("{:?}", result);
-        result.unwrap();
+        result.expect("test mcu map result should succeed");
     }
 
     #[test]
@@ -1788,7 +1788,7 @@ mod test {
                     field {encode=mode_t;} MODE = 4'hf;
                 } MODE @0x1000;
             } my_addrmap;"#;
-        let result = parse(input).unwrap();
+        let result = parse(input).expect("message parsing should succeed");
         println!("{:?}", result);
     }
 }

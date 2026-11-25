@@ -68,8 +68,8 @@ fn test_establish_credential_after_lm() {
             encrypted_credential,
             pub_key,
             masked_bk3,
-            MborByteArray::from_slice(&[]).unwrap(),
-            MborByteArray::from_slice(&[]).unwrap(),
+            MborByteArray::from_slice(&[]).expect("byte slice conversion should succeed"),
+            MborByteArray::from_slice(&[]).expect("byte slice conversion should succeed"),
             MborByteArray::from_slice(&signature).expect("Failed to create signed PID"),
             DdiDerPublicKey {
                 der: MborByteArray::from_slice(&pota_pub_key)
@@ -82,7 +82,8 @@ fn test_establish_credential_after_lm() {
 
         assert!(
             matches!(
-                resp.as_ref().unwrap_err(),
+                resp.as_ref()
+                    .expect_err("referenced value lookup should fail"),
                 DdiError::DdiStatus(DdiStatus::EccVerifyFailed)
                     | DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ),
@@ -117,7 +118,8 @@ fn test_get_session_encryption_key_after_lm() {
 
             assert!(
                 matches!(
-                    resp.as_ref().unwrap_err(),
+                    resp.as_ref()
+                        .expect_err("referenced value lookup should fail"),
                     DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished)
                 ),
                 "resp {:?}",
@@ -168,7 +170,8 @@ fn test_open_session_after_lm() {
 
             assert!(
                 matches!(
-                    resp.as_ref().unwrap_err(),
+                    resp.as_ref()
+                        .expect_err("referenced value lookup should fail"),
                     DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished)
                 ),
                 "resp {:?}",
@@ -212,7 +215,8 @@ fn test_reopen_session_after_lm() {
 
             assert!(
                 matches!(
-                    resp.as_ref().unwrap_err(),
+                    resp.as_ref()
+                        .expect_err("referenced value lookup should fail"),
                     DdiError::DdiStatus(DdiStatus::PartitionNotProvisioned)
                 ),
                 "resp {:?}",
@@ -242,7 +246,8 @@ fn test_get_cert_info_after_lm() {
 #[test]
 fn test_get_cert_after_lm() {
     ddi_dev_test(setup, common_cleanup, |dev, _ddi, _path, _session_id| {
-        let cert_info = helper_get_cert_chain_info(dev).unwrap();
+        let cert_info =
+            helper_get_cert_chain_info(dev).expect("DDI get certificate chain info should succeed");
 
         // Execute NSSR to simulate live migration
         let result = dev.erase();
@@ -261,7 +266,7 @@ fn test_get_cert_after_lm() {
 #[test]
 fn test_establish_credential_before_after_lm() {
     ddi_dev_test(setup, common_cleanup, |_dev, ddi, path, _session_id| {
-        let mut test_dev = ddi.open_dev(path).unwrap();
+        let mut test_dev = ddi.open_dev(path).expect("device opening should succeed");
 
         // Set Device Kind
 

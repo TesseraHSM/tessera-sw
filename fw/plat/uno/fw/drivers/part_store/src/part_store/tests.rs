@@ -44,8 +44,10 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
     for round in 0..2u8 {
         let psk_co = [0xA1 + round; PSK_LEN];
         let psk_cu = [0xB1 + round; PSK_LEN];
-        p.set_psk_co(buf(&psk_co)).unwrap();
-        p.set_psk_cu(buf(&psk_cu)).unwrap();
+        p.set_psk_co(buf(&psk_co))
+            .expect("owner PSK update should succeed");
+        p.set_psk_cu(buf(&psk_cu))
+            .expect("user PSK update should succeed");
         assert_eq!(&p.psk_co()[..], &psk_co);
         assert_eq!(&p.psk_cu()[..], &psk_cu);
 
@@ -57,10 +59,12 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
         assert_eq!(&p.psk_co()[..], &DEFAULT_PSK_CO);
         assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
 
-        p.set_psk_co(buf(&psk_co)).unwrap();
+        p.set_psk_co(buf(&psk_co))
+            .expect("owner PSK update should succeed");
         assert_eq!(&p.psk_co()[..], &psk_co);
         assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
-        p.set_psk_cu(buf(&psk_cu)).unwrap();
+        p.set_psk_cu(buf(&psk_cu))
+            .expect("user PSK update should succeed");
         assert_eq!(&p.psk_co()[..], &psk_co);
         assert_eq!(&p.psk_cu()[..], &psk_cu);
     }
@@ -102,15 +106,20 @@ fn preserves_provisioning_and_clears_tenant_state() {
     // Seed both sets of fields.
     {
         let p = Partition(pid);
-        p.set_psk_co(buf(&psk_co)).unwrap();
-        p.set_psk_cu(buf(&psk_cu)).unwrap();
+        p.set_psk_co(buf(&psk_co))
+            .expect("owner PSK update should succeed");
+        p.set_psk_cu(buf(&psk_cu))
+            .expect("user PSK update should succeed");
         p.set_vm_launch_guid(&guid);
         p.set_bk3_initialized(true);
         p.set_policy_hash(buf(&policy_hash)).unwrap();
 
-        p.set_nonce(buf(&nonce)).unwrap();
-        p.set_credential(buf(&cred)).unwrap();
-        p.set_bk3_session(buf(&bk3)).unwrap();
+        p.set_nonce(buf(&nonce))
+            .expect("nonce update should succeed");
+        p.set_credential(buf(&cred))
+            .expect("credential update should succeed");
+        p.set_bk3_session(buf(&bk3))
+            .expect("BK3 session update should succeed");
         p.set_ec_key_id(Some(HsmKeyId::from(0x0102u16)));
         p.set_se_key_id(Some(HsmKeyId::from(0x0304u16)));
         p.set_mk_key_id(Some(HsmKeyId::from(0x0506u16)));
@@ -229,7 +238,7 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
 
     {
         let mut p = Partition(pid);
-        p.set_id(buf(&id)).unwrap();
+        p.set_id(buf(&id)).expect("ID update should succeed");
         p.set_id_key_id(Some(HsmKeyId::from(0x1234u16)));
         p.slot_mut()
             .partition_identifier
@@ -264,14 +273,17 @@ fn sealed_bk3_raw_setter_overwrites_and_bounds_length() {
     let replacement = [0x5Au8; 16];
     let oversized = [0u8; SEALED_BK3_DATA_LEN + 1];
 
-    p.set_sealed_bk3(buf(&[])).unwrap();
-    p.set_sealed_bk3(buf(&sealed)).unwrap();
+    p.set_sealed_bk3(buf(&[]))
+        .expect("sealed BK3 update should succeed");
+    p.set_sealed_bk3(buf(&sealed))
+        .expect("sealed BK3 update should succeed");
     assert_eq!(&p.sealed_bk3()[..], &sealed);
 
     // The low-level setter is a raw store: write-once enforcement now lives in
     // the PAL property layer, so repeated writes overwrite rather than
     // returning `SealedBk3AlreadySet`.
-    p.set_sealed_bk3(buf(&replacement)).unwrap();
+    p.set_sealed_bk3(buf(&replacement))
+        .expect("sealed BK3 update should succeed");
     assert_eq!(&p.sealed_bk3()[..], &replacement);
 
     // Oversized blobs are still rejected, leaving the prior value intact.
@@ -280,7 +292,8 @@ fn sealed_bk3_raw_setter_overwrites_and_bounds_length() {
 
     p.clear_sealed_bk3();
     assert!(p.sealed_bk3().is_empty());
-    p.set_sealed_bk3(buf(&sealed)).unwrap();
+    p.set_sealed_bk3(buf(&sealed))
+        .expect("sealed BK3 update should succeed");
     assert_eq!(&p.sealed_bk3()[..], &sealed);
 }
 
@@ -290,7 +303,8 @@ fn sealed_bk3_survives_migrate_and_clears_on_disable() {
     let sealed = [0xA5u8; 64];
     let replacement = [0x5Au8; 16];
 
-    p.set_sealed_bk3(buf(&sealed)).unwrap();
+    p.set_sealed_bk3(buf(&sealed))
+        .expect("sealed BK3 update should succeed");
 
     // Sealed BK3 is write-once provisioning material: preserved across a
     // migrate (NSSR) alongside the rest of the provisioning state.
@@ -298,7 +312,8 @@ fn sealed_bk3_survives_migrate_and_clears_on_disable() {
     assert_eq!(&p.sealed_bk3()[..], &sealed);
 
     // The driver setter overwrites (write-once enforcement is in the PAL).
-    p.set_sealed_bk3(buf(&replacement)).unwrap();
+    p.set_sealed_bk3(buf(&replacement))
+        .expect("sealed BK3 update should succeed");
     assert_eq!(&p.sealed_bk3()[..], &replacement);
 
     // A `Disable` reset deallocates the slot, wiping the sealed blob.
@@ -424,7 +439,10 @@ fn shadowed_fields_follow_writes() {
     // Twice each: once loading the shadow, once from it.
     for _ in 0..2 {
         let p = Partition(pid);
-        assert_eq!(p.state().unwrap(), HsmPartState::Initialized);
+        assert_eq!(
+            p.state().expect("state lookup should succeed"),
+            HsmPartState::Initialized
+        );
         assert_eq!(p.generation(), 7);
         assert_eq!(p.res_mask(), 0x0123_4567_89ab_cdef_0011_2233_4455_6677);
         assert_eq!(p.mk_key_id(), Some(HsmKeyId::from(0x0102u16)));
@@ -434,7 +452,10 @@ fn shadowed_fields_follow_writes() {
     }
 
     Partition(pid).set_state(HsmPartState::Enabled);
-    assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
+    assert_eq!(
+        Partition(pid).state().expect("state lookup should succeed"),
+        HsmPartState::Enabled
+    );
     Partition(pid).bump_generation();
     assert_eq!(Partition(pid).generation(), 8);
     Partition(pid).set_res_mask(1);
@@ -446,7 +467,9 @@ fn shadowed_fields_follow_writes() {
         Partition(pid).local_mk_key_id(),
         Some(HsmKeyId::from(0x0506u16))
     );
-    Partition(pid).set_credential(buf(&cred)).unwrap();
+    Partition(pid)
+        .set_credential(buf(&cred))
+        .expect("credential update should succeed");
     assert!(Partition(pid).credential_valid());
     Partition(pid).set_sd_initialized(true);
     assert!(Partition(pid).sd_initialized());

@@ -77,6 +77,7 @@ extern "C" {
 
 /// Forward NTT (in-place). Input coefficients in normal order,
 /// output in bit-reversed order. Coefficients are in Montgomery domain.
+#[allow(unsafe_code)]
 pub fn ntt(a: &mut [i32; N]) {
     #[cfg(target_arch = "arm")]
     {
@@ -109,6 +110,7 @@ pub fn ntt(a: &mut [i32; N]) {
 
 /// Inverse NTT (in-place). Input in bit-reversed order,
 /// output in normal order, multiplied by Montgomery factor.
+#[allow(unsafe_code)]
 pub fn invntt(a: &mut [i32; N]) {
     // pqm4's merged-layer inverse as scheduled for the M7 by SLOTHY, final
     // scaling included (asm/dilithium_intt.S).
@@ -161,6 +163,7 @@ pub fn invntt(a: &mut [i32; N]) {
 /// The matrix product assigns on its first column and accumulates on the
 /// rest, so this runs k times per attempt and is worth the same treatment
 /// as the accumulate.
+#[allow(unsafe_code)]
 pub fn poly_pointwise_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]
     {
@@ -211,6 +214,7 @@ pub fn poly_pointwise_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
 /// Paired for the same reason as the butterflies: the reduction was already
 /// optimal, but half the instructions were address arithmetic and loop
 /// control.
+#[allow(unsafe_code)]
 pub fn poly_pointwise_montgomery_inplace(a: &mut [i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]
     {
@@ -266,6 +270,7 @@ pub fn poly_pointwise_montgomery_inplace(a: &mut [i32; N], b: &[i32; N]) {
 ///
 /// # Panics
 /// If `a` holds fewer than `N * 3 / 4` words.
+#[allow(unsafe_code)]
 pub fn poly_pointwise_acc_montgomery_packed(c: &mut [i32; N], a: &[i32], b: &[i32; N]) {
     let a = &a[..N * 3 / 4];
 
@@ -293,6 +298,7 @@ pub fn poly_pointwise_acc_montgomery_packed(c: &mut [i32; N], a: &[i32], b: &[i3
 }
 
 /// Pointwise Montgomery multiply-accumulate: c += a * b.
+#[allow(unsafe_code)]
 pub fn poly_pointwise_acc_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]
     {

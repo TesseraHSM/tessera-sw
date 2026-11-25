@@ -30,7 +30,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: fuzz
+        working-directory: .
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,9 +38,12 @@ jobs:
       id: ubuntu-setup
     - run: rustup toolchain install "$FUZZ_NIGHTLY_TOOLCHAIN"
 
-    - run: cargo "+$FUZZ_NIGHTLY_TOOLCHAIN" fuzz build --features autostart-isolated
+    - run: cargo xtask fuzz-build --toolchain "$FUZZ_NIGHTLY_TOOLCHAIN"
     - name: Run fuzz smoke tests (10s each)
       run: |
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings"
+        export CARGO_BUILD_WARNINGS=deny
+
         TARGETS=$(cargo "+$FUZZ_NIGHTLY_TOOLCHAIN" fuzz list)
 
         echo "Found fuzz targets:"
