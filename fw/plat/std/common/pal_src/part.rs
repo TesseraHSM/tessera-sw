@@ -1873,20 +1873,33 @@ mod tests {
             .expect("allocate partition");
         let pid = HsmPartId::from(1u8);
         pal.provision_unwrapping_key(pid).expect("generate");
-        let published = pal.active_part(pid).unwrap().unwrapping_key_bk.clone();
+        let published = pal
+            .active_part(pid)
+            .expect("active partition")
+            .unwrapping_key_bk
+            .clone();
         assert!(published.is_some());
 
         pal.part_migrate_internal(1).await.expect("migrate");
-        assert!(pal.active_part(pid).unwrap().unwrapping_key_id.is_none());
+        assert!(pal
+            .active_part(pid)
+            .expect("active partition after migration")
+            .unwrapping_key_id
+            .is_none());
         pal.provision_unwrapping_key(pid).expect("re-import");
-        let entry = pal.active_part(pid).unwrap();
+        let entry = pal
+            .active_part(pid)
+            .expect("active partition after re-import");
         let kid = entry.unwrapping_key_id.expect("imported");
         assert_eq!(
-            entry.vault.key(kid).unwrap(),
-            published.as_ref().unwrap().as_slice()
+            entry.vault.key(kid).expect("re-imported unwrapping key"),
+            published
+                .as_ref()
+                .expect("published unwrapping key")
+                .as_slice()
         );
 
-        pal.part_free_internal(1).unwrap();
+        pal.part_free_internal(1).expect("free partition");
         assert!(pal.table().entries[1].unwrapping_key_bk.is_none());
     }
 
@@ -2377,7 +2390,7 @@ mod tests {
         entry.state = HsmPartState::Allocated;
         entry.res_mask = 1;
         entry.vault = KeyVault::new(1);
-        pal.part_enable_internal(0).await.unwrap();
+        pal.part_enable_internal(0).await.expect("enable partition");
 
         let entry = &mut pal.table_mut().entries[0];
         entry.sealed_bk3[..4].copy_from_slice(&[1, 2, 3, 4]);
@@ -2387,10 +2400,12 @@ mod tests {
         entry.policy_hash = Some([0x5A; POLICY_HASH_LEN]);
         entry
             .prop_set_bytes(HsmPartPropId::CREDENTIAL, &[0x5A; 32])
-            .unwrap();
+            .expect("set credential");
         let (id, ec_pub, nonce) = (entry.id, entry.establish_cred_pub_key, entry.nonce);
 
-        pal.part_migrate_internal(0).await.unwrap();
+        pal.part_migrate_internal(0)
+            .await
+            .expect("migrate partition");
 
         let entry = &pal.table().entries[0];
         assert_eq!(entry.state, HsmPartState::Enabled);
