@@ -41,16 +41,15 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 /// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
-///   `SdSealingKeyGen`) that unseals the backup, exactly
-///   [`MASKED_SEALING_KEY_LEN`] bytes.
-/// * `sender_pid_pub_key` - DER SPKI of the report signer. Currently only
-///   canonical uncompressed P-384 SPKI (120 bytes) is accepted.
+///   `SdSealingKeyGen`) that unseals the backup:
+///   a P-384, ML-KEM-1024 or MLKEM1024-P384 masked sealing key.
+/// * `sender_pid_pub_key` - Canonical P-384 or ML-DSA-87 DER SPKI of the signer.
 /// * `sender_evidence` - Optional source PID identity chains.
 ///   Trusted-SA policy requires SAPOTA-authorized PID chains; otherwise
 ///   verification checks integrity, not authenticated SA identity.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
-/// * `src_remote_backup` - The remote backup to restore, exactly
-///   [`POK_REMOTE_BACKUP_LEN`] bytes.
+/// * `src_remote_backup` - The remote backup to restore:
+///   one complete PID-signed SD envelope.
 /// * `prev_sd_mk_backup` - The previous security-domain masking-key backup,
 ///   exactly [`SD_MK_BACKUP_LEN`] bytes.
 ///
@@ -72,21 +71,23 @@ pub(crate) fn sd_restore_remote_backup_ex(
     prev_sd_mk_backup: &[u8],
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmSdRestoreResult> {
-    let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    let src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN] = src_remote_backup
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
+    let masked_sealing_key = masked_sealing_key_wire(masked_sealing_key)?;
+    let src_remote_backup = remote_backup_wire(src_remote_backup)?;
     let prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN] = prev_sd_mk_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
-    super::part_policy::p384_spki_point(sender_pid_pub_key)?;
+    if ![SENDER_PID_P384_LEN, SENDER_PID_MLDSA87_LEN].contains(&sender_pid_pub_key.len()) {
+        return Err(HsmError::InvalidArgument);
+    }
+    if sender_pid_pub_key.len() == SENDER_PID_P384_LEN {
+        super::part_policy::p384_spki_point(sender_pid_pub_key)?;
+    }
 
     let mut oob: Vec<&[u8]> = Vec::new();
 
     let sender = super::sd_evidence::push_identity_evidence(sender_evidence, &mut oob)?;
+    let src_remote_backup = push_report(&src_remote_backup, &mut oob)?;
 
     let req = TborSdRestoreRemoteBackupReq {
         session_id,

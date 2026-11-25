@@ -619,40 +619,68 @@ fn parse_rejects_incomplete_payload_map() {
 fn transfer_envelopes_use_canonical_operation_specific_headers() {
     use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
     use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
+    use tsra_fw_core_crypto_key_report::transfer::TransferKem;
 
     let source = [0x11; 48];
     let recipient = [0x22; 48];
     let policy = [0x33; 48];
-    for header in [
-        TransferHeader::Darc {
-            source_pid_spki_thumbprint: &source,
-            recipient_spki_thumbprint: &recipient,
-        },
-        TransferHeader::SdBackup {
-            source_pid_spki_thumbprint: &source,
-            recipient_spki_thumbprint: &recipient,
-            policy_hash: &policy,
-        },
-    ] {
-        // Independent wire fixture: network-order IANA suite IDs.
+    let sd = |kem| TransferHeader::SdBackup {
+        source_pid_spki_thumbprint: &source,
+        recipient_spki_thumbprint: &recipient,
+        policy_hash: &policy,
+        kem,
+    };
+    let darc = |kem| TransferHeader::Darc {
+        source_pid_spki_thumbprint: &source,
+        recipient_spki_thumbprint: &recipient,
+        kem,
+    };
+    // Independent wire fixture: network-order IANA suite IDs, encapsulation
+    // length and SEC1 tag offset within the encapsulation.
+    let kems = [
+        (TransferKem::P384, [0, 0x11, 0, 2, 0, 2], 97, Some(0)),
+        (TransferKem::MlKem1024, [0, 0x42, 0, 0x11, 0, 2], 1568, None),
+        (
+            TransferKem::MlKem1024P384,
+            [0, 0x51, 0, 0x11, 0, 2],
+            1665,
+            Some(1568),
+        ),
+    ];
+    let rows = kems.into_iter().flat_map(|(kem, suite, enc_len, tag_at)| {
+        [
+            (darc(kem), suite, enc_len, tag_at),
+            (sd(kem), suite, enc_len, tag_at),
+        ]
+    });
+    for (header, suite, enc_len, tag_at) in rows {
         let mut expected = b"TSRA-XFER".to_vec();
-        expected.extend_from_slice(&[1, header.kind() as u8, 0, 0x11, 0, 2, 0, 2]);
+        expected.extend_from_slice(&[1, header.kind() as u8]);
+        expected.extend_from_slice(&suite);
         expected.extend_from_slice(&source);
         expected.extend_from_slice(&recipient);
         if header.kind() == ReportKind::SdBackup {
             expected.extend_from_slice(&policy);
         }
         let mut bytes = vec![0x55; header.envelope_len()];
+        assert_eq!(
+            bytes.len(),
+            expected.len() + enc_len + header.plaintext_len() + 16
+        );
         assert_eq!(header.encode(&mut bytes).expect("encode"), expected.len());
         assert_eq!(&bytes[..expected.len()], expected);
-        bytes[expected.len()] = 4;
+        if let Some(at) = tag_at {
+            assert!(parse_transfer_envelope(&bytes).is_err());
+            bytes[expected.len() + at] = 4;
+        }
         let view = parse_transfer_envelope(&bytes).expect("parse envelope");
+        assert_eq!(view.header, header);
         assert_eq!(view.header.kind(), header.kind());
         assert_eq!(view.header.source_pid_key_id(), &source);
         assert_eq!(view.header.recipient_key_id(), &recipient);
         assert_eq!(view.header.policy_hash(), header.policy_hash());
         assert_eq!(view.header_bytes, expected);
-        assert_eq!(view.enc.len(), 97);
+        assert_eq!(view.enc.len(), enc_len);
         assert_eq!(view.ciphertext.len(), header.plaintext_len() + 16);
         let mut short = vec![0xA5; expected.len() - 1];
         assert!(header.encode(&mut short).is_err());
@@ -664,26 +692,39 @@ fn transfer_envelopes_use_canonical_operation_specific_headers() {
 fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
     use tsra_fw_core_crypto_key_report::transfer::parse_transfer_envelope;
     use tsra_fw_core_crypto_key_report::transfer::TransferHeader;
+    use tsra_fw_core_crypto_key_report::transfer::TransferKem;
 
     let id = [0x55; 48];
-    for header in [
-        TransferHeader::Darc {
-            source_pid_spki_thumbprint: &id,
-            recipient_spki_thumbprint: &id,
-        },
-        TransferHeader::SdBackup {
-            source_pid_spki_thumbprint: &id,
-            recipient_spki_thumbprint: &id,
-            policy_hash: &id,
-        },
+    let sd = |kem| TransferHeader::SdBackup {
+        source_pid_spki_thumbprint: &id,
+        recipient_spki_thumbprint: &id,
+        policy_hash: &id,
+        kem,
+    };
+    let darc = |kem| TransferHeader::Darc {
+        source_pid_spki_thumbprint: &id,
+        recipient_spki_thumbprint: &id,
+        kem,
+    };
+    for (header, tag_at) in [
+        (darc(TransferKem::P384), Some(0)),
+        (darc(TransferKem::MlKem1024), None),
+        (darc(TransferKem::MlKem1024P384), Some(1568)),
+        (sd(TransferKem::P384), Some(0)),
+        (sd(TransferKem::MlKem1024), None),
+        (sd(TransferKem::MlKem1024P384), Some(1568)),
     ] {
         let mut bytes = vec![0; header.envelope_len()];
         header.encode(&mut bytes).expect("encode header");
-        bytes[header.header_len()] = 4;
+        let tag = tag_at.map(|at| header.header_len() + at);
+        if let Some(at) = tag {
+            bytes[at] = 4;
+        }
+        parse_transfer_envelope(&bytes).expect("parse canonical envelope");
         for len in 0..bytes.len() {
             assert!(parse_transfer_envelope(&bytes[..len]).is_err());
         }
-        for offset in (0..17).chain(std::iter::once(header.header_len())) {
+        for offset in (0..17).chain(tag) {
             bytes[offset] ^= 0x80;
             assert!(
                 parse_transfer_envelope(&bytes).is_err(),
@@ -703,4 +744,239 @@ fn transfer_envelopes_reject_bad_headers_lengths_and_encodings() {
         bytes.push(0);
         assert!(parse_transfer_envelope(&bytes).is_err());
     }
+}
+
+#[test]
+fn transfer_kem_identifies_public_key_shape() {
+    use tsra_fw_core_crypto_key_report::transfer::TransferKem;
+
+    let key = |len: usize, tag_at: Option<usize>| {
+        let mut key = vec![0x5A; len];
+        if let Some(at) = tag_at {
+            key[at] = 4;
+        }
+        key
+    };
+    for (kem, len, tag_at) in [
+        (TransferKem::P384, 97, Some(0)),
+        (TransferKem::MlKem1024, 1568, None),
+        (TransferKem::MlKem1024P384, 1665, Some(1568)),
+    ] {
+        assert_eq!(kem.public_key_len(), len);
+        let good = key(len, tag_at);
+        assert_eq!(TransferKem::from_public_key(&good), Ok(kem));
+        kem.check_public_key(&good).expect("matching KEM");
+        if tag_at.is_some() {
+            assert!(TransferKem::from_public_key(&key(len, None)).is_err());
+        }
+        for other in [len - 1, len + 1] {
+            assert!(TransferKem::from_public_key(&key(other, tag_at)).is_err());
+        }
+    }
+    assert!(TransferKem::MlKem1024
+        .check_public_key(&key(97, Some(0)))
+        .is_err());
+}
+
+const PROTECTED_HEADER_MLDSA87: [u8; 22] = [
+    0xa2, 0x01, 0x38, 0x31, 0x03, 0x70, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2f, 0x63, 0x62, 0x6f, 0x72,
+];
+
+/// Tagged COSE_Sign1 under an explicit protected header.
+fn cose_sign1_with(header: &[u8], payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    let mut buf = vec![COSE_SIGN1_TAG];
+    let mut e = Encoder::new(&mut buf);
+    e.array(4)
+        .unwrap()
+        .bytes(header)
+        .unwrap()
+        .map(0)
+        .unwrap()
+        .bytes(payload)
+        .unwrap()
+        .bytes(signature)
+        .unwrap();
+    buf
+}
+
+/// AKP ML-DSA-87 COSE_Key `{1: 7, 3: -50, -1: pk}`.
+fn mldsa_cose_key(pk: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut e = Encoder::new(&mut buf);
+    e.map(3)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .u8(7)
+        .unwrap()
+        .u8(3)
+        .unwrap()
+        .i8(-50)
+        .unwrap()
+        .i8(-1)
+        .unwrap()
+        .bytes(pk)
+        .unwrap();
+    buf
+}
+
+/// v2 public-key payload with an arbitrary `public_key` field.
+fn payload_v2_vec(public_key: &[u8], public_key_size: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut e = Encoder::new(&mut buf);
+    e.map(8)
+        .unwrap()
+        .u8(0)
+        .unwrap()
+        .u16(2)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .bytes(public_key)
+        .unwrap()
+        .u8(2)
+        .unwrap()
+        .u16(public_key_size)
+        .unwrap()
+        .u8(3)
+        .unwrap()
+        .u32(0)
+        .unwrap()
+        .u8(4)
+        .unwrap()
+        .bytes(&[0xA1; APP_UUID_LEN])
+        .unwrap()
+        .u8(5)
+        .unwrap()
+        .bytes(&[0xB2; REPORT_DATA_LEN])
+        .unwrap()
+        .u8(6)
+        .unwrap()
+        .bytes(&[0xC3; VM_LAUNCH_ID_LEN])
+        .unwrap()
+        .u8(7)
+        .unwrap()
+        .bytes(&[0xD4; POLICY_HASH_LEN])
+        .unwrap();
+    buf
+}
+
+#[test]
+fn parse_decodes_mldsa_signed_report_attesting_mldsa_key() {
+    use tsra_fw_core_crypto_key_report::ReportAlg;
+    use tsra_fw_core_crypto_key_report::MLDSA87_COSE_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLDSA87_PUB_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLDSA87_SIGNATURE_LEN;
+    use tsra_fw_core_crypto_key_report::REPORT_MAX_LEN;
+
+    let ck = mldsa_cose_key(&[0x5A; MLDSA87_PUB_KEY_LEN]);
+    assert_eq!(ck.len(), MLDSA87_COSE_KEY_LEN);
+    let pl = payload_v2_vec(&ck, ck.len() as u16);
+    let sig = vec![0x77; MLDSA87_SIGNATURE_LEN];
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(report.len() <= REPORT_MAX_LEN);
+
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::MlDsa87);
+    assert_eq!(view.public_key, &ck[..]);
+    assert_eq!(view.signature, &sig[..]);
+
+    // A short AKP field size or padding is not a valid ML-DSA field.
+    let pl = payload_v2_vec(&ck, ck.len() as u16 - 1);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
+    let mut padded = ck.clone();
+    padded.push(0);
+    let pl = payload_v2_vec(&padded, ck.len() as u16);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
+}
+
+#[test]
+fn parse_decodes_es384_report_attesting_kem_keys() {
+    use tsra_fw_core_crypto_key_report::parse_akp_cose_key;
+    use tsra_fw_core_crypto_key_report::ReportAlg;
+    use tsra_fw_core_crypto_key_report::KEM_KEY_REPORT_MAX_LEN;
+    use tsra_fw_core_crypto_key_report::MLKEM1024P384_COSE_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLKEM1024P384_PUB_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLKEM1024_COSE_KEY_LEN;
+    use tsra_fw_core_crypto_key_report::MLKEM1024_PUB_KEY_LEN;
+
+    for (alg, pk_len, cose_len) in [
+        (-65537, MLKEM1024_PUB_KEY_LEN, MLKEM1024_COSE_KEY_LEN),
+        (
+            -65538,
+            MLKEM1024P384_PUB_KEY_LEN,
+            MLKEM1024P384_COSE_KEY_LEN,
+        ),
+    ] {
+        let pk = vec![0x5A; pk_len];
+        let mut ck = Vec::new();
+        Encoder::new(&mut ck)
+            .map(3)
+            .expect("map")
+            .u8(1)
+            .expect("kty")
+            .u8(7)
+            .expect("akp")
+            .u8(3)
+            .expect("alg label")
+            .i32(alg)
+            .expect("alg")
+            .i8(-1)
+            .expect("pub label")
+            .bytes(&pk)
+            .expect("pub");
+        assert_eq!(ck.len(), cose_len);
+        let (got_alg, got_pk) = parse_akp_cose_key(dma_view(&ck)).expect("parse AKP key");
+        assert_eq!(got_alg, alg);
+        assert_eq!(got_pk, &pk[..]);
+        let mut trailing = ck.clone();
+        trailing.push(0);
+        assert!(parse_akp_cose_key(dma_view(&trailing)).is_err());
+
+        let pl = payload_v2_vec(&ck, ck.len() as u16);
+        let report = cose_sign1(&pl, &[0x77; SIGNATURE_LEN]);
+        assert!(report.len() <= KEM_KEY_REPORT_MAX_LEN);
+        let view = parse_key_report(dma_view(&report)).expect("parse KEM report");
+        assert_eq!(view.alg, ReportAlg::Es384);
+        assert_eq!(view.public_key, &ck[..]);
+
+        let pl = payload_v2_vec(&ck, ck.len() as u16 - 1);
+        let report = cose_sign1(&pl, &[0x77; SIGNATURE_LEN]);
+        assert!(parse_key_report(dma_view(&report)).is_err());
+    }
+}
+
+#[test]
+fn parse_binds_signature_length_to_protected_header_alg() {
+    use tsra_fw_core_crypto_key_report::ReportAlg;
+    use tsra_fw_core_crypto_key_report::MLDSA87_SIGNATURE_LEN;
+
+    let pk = vec![0u8; PUBLIC_KEY_MAX_SIZE];
+    let pl = payload_v2_vec(&pk, 0);
+    let es_sig = [0x11; SIGNATURE_LEN];
+    let ml_sig = vec![0x22; MLDSA87_SIGNATURE_LEN];
+
+    let report = cose_sign1_with(&PROTECTED_HEADER, &pl, &es_sig);
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::Es384);
+    let report = cose_sign1_with(&PROTECTED_HEADER_MLDSA87, &pl, &ml_sig);
+    let view = parse_key_report(dma_view(&report)).unwrap();
+    assert_eq!(view.alg, ReportAlg::MlDsa87);
+
+    for (header, sig) in [
+        (&PROTECTED_HEADER, &ml_sig[..]),
+        (&PROTECTED_HEADER_MLDSA87, &es_sig[..]),
+    ] {
+        let report = cose_sign1_with(header, &pl, sig);
+        assert!(parse_key_report(dma_view(&report)).is_err());
+    }
+
+    // Any other algorithm (here ML-DSA-65, -49) is rejected.
+    let mut header = PROTECTED_HEADER_MLDSA87;
+    header[3] = 0x30;
+    let report = cose_sign1_with(&header, &pl, &ml_sig);
+    assert!(parse_key_report(dma_view(&report)).is_err());
 }

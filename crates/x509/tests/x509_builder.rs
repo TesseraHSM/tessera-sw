@@ -877,3 +877,203 @@ fn test_sn_too_long_rejected() {
     let mut out = [0u8; 1024];
     assert!(cert_builder::build_root_cert(&params, &r, &s, &mut out).is_none());
 }
+
+// =================== ML-DSA-87 Tests ===================
+
+#[cfg(target_os = "linux")]
+mod mldsa {
+    use openssl::pkey::KeyType;
+    use openssl::pkey::PKey;
+    use openssl::pkey::Public;
+    use openssl::x509::X509;
+    use openssl::x509::X509Req;
+    use tsra_crypto::ExportableKey;
+    use tsra_crypto::MlDsaAlgo;
+    use tsra_crypto::MlDsaPrivateKey;
+    use tsra_crypto::MlDsaVariant;
+    use tsra_crypto::PrivateKey;
+    use tsra_crypto::x509_builder::der_helpers::MLDSA87_PUBLIC_KEY_LEN;
+    use tsra_crypto::x509_builder::der_helpers::MLDSA87_SIGNATURE_LEN;
+    use tsra_crypto::x509_builder::retarget::KeyAlg;
+    use tsra_crypto::x509_builder::retarget::SigAlg;
+    use tsra_crypto::x509_builder::retarget::SubjectKey;
+    use tsra_crypto::x509_builder::retarget::TbsKind;
+    use tsra_crypto::x509_builder::retarget::retarget_len;
+    use tsra_crypto::x509_builder::retarget::retarget_tbs;
+
+    use super::*;
+
+    struct MlKey {
+        key: MlDsaPrivateKey,
+        pk: [u8; MLDSA87_PUBLIC_KEY_LEN],
+    }
+
+    impl MlKey {
+        fn new(fill: u8) -> Self {
+            let key = MlDsaPrivateKey::from_seed(MlDsaVariant::MlDsa87, &[fill; 32]).unwrap();
+            let pk = key
+                .public_key()
+                .unwrap()
+                .to_vec()
+                .unwrap()
+                .try_into()
+                .unwrap();
+            Self { key, pk }
+        }
+
+        fn ski(&self) -> [u8; 20] {
+            let mut result = [0u8; 20];
+            HashAlgo::sha1().hash(&self.pk, Some(&mut result)).unwrap();
+            result
+        }
+
+        fn pkey(&self) -> PKey<Public> {
+            PKey::public_key_from_raw_bytes_ex(None, KeyType::ML_DSA_87, None, &self.pk).unwrap()
+        }
+
+        fn sign(&self, tbs: &[u8]) -> [u8; MLDSA87_SIGNATURE_LEN] {
+            let mut sig = [0u8; MLDSA87_SIGNATURE_LEN];
+            let mut algo = MlDsaAlgo::new(&[]).unwrap().deterministic();
+            assert_eq!(
+                algo.sign(&self.key, tbs, Some(&mut sig)).unwrap(),
+                sig.len()
+            );
+            sig
+        }
+    }
+
+    /// Retarget `tbs` to `issuer` and an ML-DSA-87 subject key, then sign it
+    /// with `sign` and assemble the certificate (ML-DSA-87 or ECDSA).
+    fn certify(
+        tbs: &[u8],
+        issuer: SigAlg,
+        subject: &MlKey,
+        sign: impl FnOnce(&[u8]) -> Vec<u8>,
+    ) -> X509 {
+        let len = retarget_len(tbs, TbsKind::Certificate, issuer, KeyAlg::MlDsa87).unwrap();
+        let mut ml_tbs = vec![0u8; len];
+        let written = retarget_tbs(
+            tbs,
+            TbsKind::Certificate,
+            issuer,
+            SubjectKey::MlDsa87(&subject.pk),
+            &mut ml_tbs,
+        )
+        .unwrap();
+        assert_eq!(written, len);
+        X509::from_der(&sign(&ml_tbs)).unwrap()
+    }
+
+    fn mldsa_signed(issuer: &MlKey) -> impl FnOnce(&[u8]) -> Vec<u8> + '_ {
+        |tbs| {
+            let mut out = vec![0u8; cert_builder::mldsa_cert_len(tbs.len())];
+            let len = cert_builder::assemble_cert_mldsa(tbs, &issuer.sign(tbs), &mut out).unwrap();
+            assert_eq!(len, out.len());
+            out
+        }
+    }
+
+    fn root(key: &MlKey) -> X509 {
+        let tbs = cert_builder::root_cert_tbs(&RootCertParams {
+            public_key: &[0x04; 97],
+            serial_number: &test_serial(),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: ROOT_CN,
+            subject_sn: "ROOTCA01",
+            subject_key_id: &key.ski(),
+        })
+        .unwrap();
+        certify(&tbs, SigAlg::MlDsa87, key, mldsa_signed(key))
+    }
+
+    fn intermediate_params<'a>(ski: &'a [u8; 20], aki: &'a [u8; 20]) -> IntermediateCertParams<'a> {
+        IntermediateCertParams {
+            public_key: &[0x04; 97],
+            serial_number: &[0x02; 20],
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: INTER_CN,
+            subject_sn: "INTERCA01",
+            issuer_cn: ROOT_CN,
+            issuer_sn: "ROOTCA01",
+            subject_key_id: ski,
+            authority_key_id: aki,
+            path_len: 1,
+        }
+    }
+
+    #[test]
+    fn mldsa_chain_verifies() {
+        let (root_key, inter_key, leaf_key) = (MlKey::new(1), MlKey::new(2), MlKey::new(3));
+        let root = root(&root_key);
+        assert!(root.verify(&root_key.pkey()).unwrap());
+        assert_eq!(
+            root.public_key().unwrap().raw_public_key().unwrap(),
+            root_key.pk
+        );
+
+        let tbs = cert_builder::intermediate_cert_tbs(&intermediate_params(
+            &inter_key.ski(),
+            &root_key.ski(),
+        ))
+        .unwrap();
+        let inter = certify(&tbs, SigAlg::MlDsa87, &inter_key, mldsa_signed(&root_key));
+        assert!(inter.verify(&root_key.pkey()).unwrap());
+        assert_eq!(inter.subject_key_id().unwrap().as_slice(), &inter_key.ski());
+        assert_eq!(
+            inter.authority_key_id().unwrap().as_slice(),
+            &root_key.ski()
+        );
+
+        let tbs = cert_builder::leaf_cert_tbs(&LeafCertParams {
+            public_key: &[0x04; 97],
+            serial_number: &test_serial_3(),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
+            subject_cn: LEAF_CN,
+            subject_sn: "LEAFKEY01",
+            issuer_cn: INTER_CN,
+            issuer_sn: "INTERCA01",
+            subject_key_id: &leaf_key.ski(),
+            authority_key_id: &inter_key.ski(),
+            key_usage: KeyUsage::new().with_digital_signature(true),
+        })
+        .unwrap();
+        let leaf = certify(&tbs, SigAlg::MlDsa87, &leaf_key, mldsa_signed(&inter_key));
+        assert!(leaf.verify(&inter_key.pkey()).unwrap());
+        assert!(!leaf.verify(&root_key.pkey()).unwrap());
+        assert_eq!(
+            leaf.public_key().unwrap().raw_public_key().unwrap(),
+            leaf_key.pk
+        );
+    }
+
+    /// An ECDSA-P384 issuer certifies an ML-DSA-87 key under a subject Name
+    /// taken from a CSR.
+    #[test]
+    fn ecc_issuer_certifies_mldsa_subject_name() {
+        let (root_key, inter_key) = (TestKeyPair::generate(), MlKey::new(4));
+        let csr = X509Req::from_der(&build_test_csr(&root_key)).unwrap();
+        let name = csr.subject_name().to_der().unwrap();
+        let params = intermediate_params(&[0x55; 20], &[0x66; 20]);
+        let mut tbs = [0u8; 1024];
+        let len = cert_builder::intermediate_cert_tbs_with_subject_name(&params, &name, &mut tbs)
+            .unwrap();
+
+        let inter = certify(&tbs[..len], SigAlg::EcdsaP384Sha384, &inter_key, |tbs| {
+            let (r, s) = root_key.sign_data(tbs);
+            let mut out = vec![0u8; tbs.len() + 128];
+            let len = cert_builder::assemble_cert(tbs, &r, &s, &mut out).unwrap();
+            out.truncate(len);
+            out
+        });
+        let issuer = X509::from_der(&build_test_root_cert(&root_key)).unwrap();
+        assert!(inter.verify(&issuer.public_key().unwrap()).unwrap());
+        assert_eq!(inter.subject_name().to_der().unwrap(), name);
+        assert_eq!(
+            inter.public_key().unwrap().raw_public_key().unwrap(),
+            inter_key.pk
+        );
+    }
+}

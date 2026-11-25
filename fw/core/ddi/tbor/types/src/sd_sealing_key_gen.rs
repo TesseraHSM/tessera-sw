@@ -17,23 +17,26 @@
 //!   domain), carried as its 1-byte [`open_enum`](open_enum::open_enum)
 //!   discriminant.  Mirrors the firmware
 //!   [`HsmKeyScope`](tsra_fw_hsm_pal_traits::HsmKeyScope).
+//! * `kem` — the sealing key's HPKE KEM ([`TransferKemId`]): P-384,
+//!   ML-KEM-1024 (HPKE-13) or MLKEM1024-P384 (HPKE-10).
 //!
 //! Outputs:
 //!
-//! * `masked_key` — the new sealing key's ECC-P384 **private** half,
-//!   masked (AEAD-GCM-256) under the requested scope's masking key, as a
-//!   fixed [`MASKED_SEALING_KEY_LEN`] (280 B) envelope.  The private key
-//!   is **not** stored on the device: the caller holds the masked blob
-//!   and re-imports it (unmask-on-use) when the key is later needed.
-//! * `pub_key` — the raw P-384 public key of the new sealing key: the
-//!   `x ‖ y` affine coordinates (96 bytes, device byte order per coordinate)
-//!   as emitted by the PAL.  This is the bare coordinate pair, **not** a
-//!   SEC1 point encoding (no `0x04` prefix).  The caller uses it as the
-//!   ECDH peer for ECIES-style seal / unseal.
+//! * `masked_key` — the new sealing key's **private** half, masked
+//!   (AEAD-GCM-256) under the requested scope's masking key: 280 B for the
+//!   48-byte P-384 scalar, 296 B for the 64-byte ML-KEM `d ‖ z` seed and
+//!   264 B for the 32-byte hybrid seed.  The private key is **not** stored
+//!   on the device: the caller holds the masked blob and re-imports it
+//!   (unmask-on-use) when the key is later needed.
+//! * `pub_key` — the public key.  For P-384 the raw `x ‖ y` affine
+//!   coordinates (96 bytes, device byte order per coordinate, **not**
+//!   SEC1); for ML-KEM-1024 the 1568-byte encapsulation key; for the hybrid
+//!   the 1665-byte `ek_PQ ‖ SEC1(ek_T)`.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::key_props::KeyScope;
+use crate::key_props::TransferKemId;
 
 /// TBOR opcode for `SdSealingKeyGen`.
 pub const TBOR_OP_SD_SEALING_KEY_GEN: u8 = 0x09;
@@ -52,6 +55,16 @@ pub const SD_SEALING_PUB_KEY_LEN: usize = 96;
 /// [`TborSdSealingKeyGenResp::masked_key`].
 pub const MASKED_SEALING_KEY_LEN: usize = 8 + 16 + 192 + 48 + 16;
 
+/// Largest wire length of a sealing public key (MLKEM1024-P384
+/// `ek_PQ ‖ SEC1(ek_T)`).  Pinned into the `max_len` literal on
+/// [`TborSdSealingKeyGenResp::pub_key`].
+pub const SD_SEALING_PUB_KEY_MAX_LEN: usize = 1568 + 97;
+
+/// Largest masked sealing private key: the masked 64-byte ML-KEM-1024
+/// `d ‖ z` seed.  Pinned into the `max_len` literals on the masked
+/// sealing-key fields.
+pub const MASKED_SEALING_KEY_MAX_LEN: usize = 8 + 16 + 192 + 64 + 16;
+
 /// `SdSealingKeyGen` request schema.
 ///
 /// Generates a security-domain sealing key under the active session's
@@ -67,22 +80,27 @@ pub struct TborSdSealingKeyGenReq {
     /// the 1-byte [`KeyScope`] discriminant.
     #[tbor(U8)]
     pub scope: KeyScope,
+
+    /// Sealing-key KEM, carried as the 1-byte [`TransferKemId`]
+    /// discriminant.
+    #[tbor(U8)]
+    pub kem: TransferKemId,
 }
 
 /// `SdSealingKeyGen` response schema.
 #[tbor(response, pair = TborSdSealingKeyGenReq)]
 pub struct TborSdSealingKeyGenResp<'a> {
-    /// The new sealing key's ECC-P384 private half, masked (AEAD-GCM-256)
-    /// under the requested scope's masking key.  Always exactly
-    /// [`MASKED_SEALING_KEY_LEN`] (280 B).  The private key is not stored
-    /// on the device; the caller re-imports this blob when needed.
-    #[tbor(align = 4, buffer, len = 280)]
+    /// The new sealing key's private half, masked (AEAD-GCM-256) under the
+    /// requested scope's masking key; at most [`MASKED_SEALING_KEY_MAX_LEN`].
+    /// The private key is not stored on the device; the caller re-imports
+    /// this blob when needed.
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 296)]
     pub masked_key: &'a [u8],
 
-    /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// device byte order per coordinate) of the new sealing key, as emitted
-    /// by the PAL.  Not a SEC1 point encoding (no `0x04` prefix).
-    #[tbor(buffer, len = 96)]
+    /// Public key: raw P-384 `x ‖ y` (96 bytes, device byte order per
+    /// coordinate, not SEC1), the ML-KEM-1024 encapsulation key, or the
+    /// hybrid `ek_PQ ‖ SEC1(ek_T)`.
+    #[tbor(buffer, min_len = 96, max_len = 1665)]
     pub pub_key: &'a [u8],
 }
 
@@ -103,26 +121,35 @@ mod tests {
             .unwrap()
             .scope(KeyScope::SecurityDomain)
             .unwrap()
+            .kem(TransferKemId::MlKem1024P384)
+            .unwrap()
             .finish();
 
-        // The wire carries the 1-byte scope discriminant.
+        // The wire carries the 1-byte scope and KEM discriminants.
         assert_eq!(frame.scope(), KeyScope::SecurityDomain);
+        assert_eq!(frame.kem(), TransferKemId::MlKem1024P384);
     }
 
     #[test]
     fn response_round_trips_masked_key_and_pub_key() {
-        let mut buf = [0u8; 512];
-        let masked = [0xCDu8; MASKED_SEALING_KEY_LEN];
-        let pub_key = [0xABu8; SD_SEALING_PUB_KEY_LEN];
-        let frame = TborSdSealingKeyGenResp::encode(&mut buf, (1, 1), 0, true)
-            .unwrap()
-            .masked_key(&masked)
-            .unwrap()
-            .pub_key(&pub_key)
-            .unwrap()
-            .finish();
-        assert_eq!(frame.masked_key(), &masked[..]);
-        assert_eq!(frame.pub_key(), &pub_key[..]);
+        let mut buf = [0u8; 2048];
+        for (masked_len, pub_len) in [
+            (MASKED_SEALING_KEY_LEN, SD_SEALING_PUB_KEY_LEN),
+            (MASKED_SEALING_KEY_MAX_LEN, 1568),
+            (264, SD_SEALING_PUB_KEY_MAX_LEN),
+        ] {
+            let masked = &[0xCDu8; MASKED_SEALING_KEY_MAX_LEN][..masked_len];
+            let pub_key = &[0xABu8; SD_SEALING_PUB_KEY_MAX_LEN][..pub_len];
+            let frame = TborSdSealingKeyGenResp::encode(&mut buf, (1, 1), 0, true)
+                .unwrap()
+                .masked_key(masked)
+                .unwrap()
+                .pub_key(pub_key)
+                .unwrap()
+                .finish();
+            assert_eq!(frame.masked_key(), masked);
+            assert_eq!(frame.pub_key(), pub_key);
+        }
     }
 
     #[test]
@@ -130,8 +157,8 @@ mod tests {
         // The `#[tbor(buffer, len = N)]` attributes must remain numeric
         // literals; pin them against the exported consts.
         const _: () = assert!(96 == SD_SEALING_PUB_KEY_LEN);
+        const _: () = assert!(1665 == SD_SEALING_PUB_KEY_MAX_LEN);
         const _: () = assert!(280 == MASKED_SEALING_KEY_LEN);
-        assert_eq!(SD_SEALING_PUB_KEY_LEN, 96);
-        assert_eq!(MASKED_SEALING_KEY_LEN, 280);
+        const _: () = assert!(296 == MASKED_SEALING_KEY_MAX_LEN);
     }
 }

@@ -20,8 +20,19 @@ tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 
 [dev-dependencies]
+async-channel.workspace = true
+hpke = { features = [
+  "aes",
+  "alloc",
+  "getrandom",
+  "mlkem",
+  "nistp",
+  "shake",
+], workspace = true }
 minicbor = { features = ["derive", "std"], workspace = true }
+tokio = { features = ["macros", "rt"], workspace = true }
 tsra_ddi_mbor_test_helpers = { workspace = true }
+tsra_fw_hsm_pal_std_uno.workspace = true
 
 [lints]
 workspace = true

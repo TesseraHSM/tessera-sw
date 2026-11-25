@@ -21,6 +21,9 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
 use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
@@ -30,6 +33,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MLDSA_SEED_LEN;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
@@ -215,9 +219,12 @@ impl UnoHsmPal {
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
-        if let Some(key_id) = part.id_key_id() {
+        let id_keys = [part.id_key_id(), part.id_mldsa_seed_key_id()];
+        if id_keys.iter().any(Option::is_some) {
             self.with_admin_io(pid, async |admin_io, _alloc| {
-                self.delete_key(admin_io, key_id).await;
+                for key_id in id_keys.into_iter().flatten() {
+                    self.delete_key(admin_io, key_id).await;
+                }
             })
             .await;
         }
@@ -273,7 +280,10 @@ impl UnoHsmPal {
         let cleared = self
             .with_admin_io(pid, async |admin_io, _alloc| {
                 self.clear_enabled_state(admin_io, pid).await;
-                if let Some(key_id) = part.id_key_id() {
+                for key_id in [part.id_key_id(), part.id_mldsa_seed_key_id()]
+                    .into_iter()
+                    .flatten()
+                {
                     self.delete_key(admin_io, key_id).await;
                 }
                 self.vault_clear(admin_io).await
@@ -394,6 +404,48 @@ impl UnoHsmPal {
         .await
     }
 
+    /// Generates a random ML-DSA-87 seed (pair-wise tested) and stores it in
+    /// partition `pid`'s vault as an [`HsmVaultKeyKind::MlDsa87Seed`].
+    ///
+    /// Returns `Ok(None)` on builds without ML-DSA seed generation
+    /// (`mldsa_gen_seed` reports `UnsupportedCmd`): such partitions carry
+    /// only the P-384 identity.
+    async fn create_internal_mldsa_seed(
+        &self,
+        pid: HsmPartId,
+        attrs: HsmVaultKeyAttrs,
+    ) -> HsmResult<Option<HsmKeyId>> {
+        self.with_admin_io(pid, async |admin_io, alloc| {
+            let seed = alloc.dma_alloc(MLDSA_SEED_LEN)?;
+            match self
+                .mldsa_gen_seed(
+                    admin_io,
+                    HsmMlDsaParamSet::MlDsa87,
+                    HsmMlDsaPct::SignVerify,
+                    Some(seed),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(HsmError::UnsupportedCmd) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+            crate::vault::vault(admin_io)
+                .create(
+                    self,
+                    admin_io,
+                    u8::from(pid),
+                    seed,
+                    HsmVaultKeyKind::MlDsa87Seed,
+                    None,
+                    attrs,
+                )
+                .await
+                .map(Some)
+        })
+        .await
+    }
+
     /// Builds the enable-key blob (`pub(96) ‖ priv(48)`, the
     /// establish-credential / session-encryption on-storage layout) in a
     /// freshly allocated DMA buffer.
@@ -429,6 +481,10 @@ impl UnoHsmPal {
             )
             .await?;
         part.set_id_key_id(Some(key_id));
+
+        if let Some(seed_id) = self.create_internal_mldsa_seed(pid, attrs).await? {
+            part.set_id_mldsa_seed_key_id(Some(seed_id));
+        }
 
         // Generate the random partition identity straight into its
         // part_store field (RNG fill is a plain CPU copy, no DMA buffer
@@ -520,6 +576,7 @@ impl UnoHsmPal {
             part.mk_key_id(),
             part.ups_key_id(),
             part.pta_key_id(),
+            part.pta_mldsa_seed_key_id(),
             part.unwrapping_key_id(),
             part.local_mk_key_id(),
             part.ephemeral_mk_key_id(),
@@ -853,6 +910,8 @@ impl HsmPartitionManager for UnoHsmPal {
         let part = PartStore::partition(io.pid())?;
         let key = match id {
             HsmPartPropId::PART_ID_ECC_KEY_ID => part.id_key_id(),
+            HsmPartPropId::PART_ID_MLDSA_SEED_KEY_ID => part.id_mldsa_seed_key_id(),
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => part.pta_mldsa_seed_key_id(),
             HsmPartPropId::MK_KEY_ID => part.mk_key_id(),
             HsmPartPropId::UPS_KEY_ID => part.ups_key_id(),
             HsmPartPropId::PTA_KEY_ID => part.pta_key_id(),
@@ -882,8 +941,9 @@ impl HsmPartitionManager for UnoHsmPal {
             // undo log restores a prior id through this raw path.
             HsmPartPropId::UPS_KEY_ID => part.set_ups_key_id(Some(key)),
             HsmPartPropId::PTA_KEY_ID => part.set_pta_key_id(Some(key)),
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => part.set_pta_mldsa_seed_key_id(Some(key)),
             HsmPartPropId::RSA_UNWRAPPING_KEY_ID => part.set_unwrapping_key_id(Some(key)),
-            // PART_ID_ECC_KEY_ID is read-only.
+            // PART_ID_ECC_KEY_ID / PART_ID_MLDSA_SEED_KEY_ID are read-only.
             _ => return Err(HsmError::UnsupportedCmd),
         }
         Ok(())
@@ -1053,6 +1113,7 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
             HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
             HsmPartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
+            HsmPartPropId::PTA_MLDSA_SEED_KEY_ID => p.set_pta_mldsa_seed_key_id(None),
             HsmPartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
             HsmPartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
             HsmPartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),

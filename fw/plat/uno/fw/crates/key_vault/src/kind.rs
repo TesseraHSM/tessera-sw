@@ -112,7 +112,7 @@ pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 }
 /// `SessionEx` uses the 32-byte AES-256-GCM AEAD key
 /// ([`SESSION_MASKING_KEY_LEN`]). `session_ex_len_is_derived_from_pal_layout`
 /// pins the size to the PAL constants so it cannot drift.
-static KIND_LEN: [KeyLen; 65] = [
+static KIND_LEN: [KeyLen; 69] = [
     /* 0  Free                         */ KeyLen::Invalid,
     /* 1  Rsa2kPublic                  */ KeyLen::Fixed(260),
     /* 2  Rsa3kPublic                  */ KeyLen::Fixed(388),
@@ -183,6 +183,10 @@ static KIND_LEN: [KeyLen; 65] = [
     /* 62 MlKem768Public               */ KeyLen::Fixed(1184),
     /* 63 MlKem1024Public              */ KeyLen::Fixed(1568),
     /* 64 AesXts512                    */ KeyLen::Fixed(64),
+    /* 65 SdSealingMlKem1024           */ KeyLen::Fixed(64),
+    /* 66 SdSealingMlKem1024P384       */ KeyLen::Fixed(32),
+    /* 67 DarcKexMlKem1024             */ KeyLen::Fixed(64),
+    /* 68 DarcKexMlKem1024P384         */ KeyLen::Fixed(32),
 ];
 
 /// Resolves the length contract for `kind` in O(1).
@@ -271,6 +275,10 @@ mod tests {
             (HsmVaultKeyKind::MlKem768Public, 1184),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
             (HsmVaultKeyKind::AesXts512, 64),
+            (HsmVaultKeyKind::SdSealingMlKem1024, 64),
+            (HsmVaultKeyKind::SdSealingMlKem1024P384, 32),
+            (HsmVaultKeyKind::DarcKexMlKem1024, 64),
+            (HsmVaultKeyKind::DarcKexMlKem1024P384, 32),
         ];
         for (kind, len) in table {
             assert_eq!(key_len(kind), Ok(KeyLen::Fixed(len)), "{kind:?}");

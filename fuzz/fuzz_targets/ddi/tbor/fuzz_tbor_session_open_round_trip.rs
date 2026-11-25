@@ -46,7 +46,10 @@ fuzz_target!(|input: FuzzInput| {
 
 /// A genuine handshake whose confirmation is optionally tampered with.
 fn round_trip(ctx: &TestCtx, input: &FuzzInput) {
-    let suite = SessionSuite::EcdhP384;
+    let suite = match input.suite_id % 2 {
+        0 => SessionSuite::EcdhP384,
+        _ => SessionSuite::MlKem1024MlDsa87,
+    };
     let pending = ctx
         .session_open_init_with_options(SessionOpenInitOptions::new(
             input.valid_role.psk_id(),

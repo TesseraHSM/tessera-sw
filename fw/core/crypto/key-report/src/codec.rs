@@ -43,33 +43,6 @@ pub(crate) struct SigStructure<'a> {
     pub payload: &'a [u8],
 }
 
-/// Empty COSE unprotected header (`{}`).
-#[derive(Encode, CborLen)]
-#[cbor(map)]
-pub(crate) struct UnprotectedHeader {}
-
-/// Tagged COSE_Sign1 object body (the CBOR tag byte is written
-/// separately): `[ protected, unprotected, payload, signature ]`.
-#[derive(Encode, CborLen)]
-#[cbor(array)]
-pub(crate) struct CoseSign1<'a> {
-    /// Encoded protected header (bstr-wrapped).
-    #[n(0)]
-    #[cbor(with = "minicbor::bytes")]
-    pub protected_header: &'a [u8],
-    /// Empty unprotected header map.
-    #[n(1)]
-    pub unprotected: UnprotectedHeader,
-    /// Encoded payload (bstr-wrapped).
-    #[n(2)]
-    #[cbor(with = "minicbor::bytes")]
-    pub payload: &'a [u8],
-    /// ES384 signature `r || s`, big-endian per component (bstr-wrapped).
-    #[n(3)]
-    #[cbor(with = "minicbor::bytes")]
-    pub signature: &'a [u8],
-}
-
 /// Public-key payload. v2 permits the signed `PublicKey` discriminator at
 /// key 8; reports without it retain their original wire format.
 #[derive(Encode, CborLen)]

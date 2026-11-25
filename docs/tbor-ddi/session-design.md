@@ -312,12 +312,25 @@ length in `ExpandLabel` is in **bytes**. This encoding is not TLS
 | `suite_id` | KEM / key agreement | `pk_init` | `enc` | `Z` | Transcript authentication |
 |---|---|---|---|---|---|
 | `0x01` | Ephemeral-ephemeral ECDH P-384 | 97-byte SEC1 point | 97-byte device ephemeral SEC1 point | 48-byte big-endian shared x-coordinate | ECDSA P-384 with PID key |
+| `0x02` | ML-KEM-1024 | 1568-byte encapsulation key | 1568-byte ciphertext | 32-byte ML-KEM shared secret | ML-DSA-87 with PID key |
 
 P-384 points are `0x04 || X_be(48) || Y_be(48)`. ECDSA signatures on the wire
 are fixed-size `r_be(48) || s_be(48)`, not ASN.1 DER signatures.
+Suite `0x02` returns its raw 4627-byte ML-DSA-87 signature in OOB output
+item zero, whose length must be exactly 4627; its in-band `sig` is empty.
+Suite `0x01` retains its 96-byte in-band signature and transcript.
 
-ECDH P-384 is the only supported session suite. Other suite identifiers
-are rejected with `UnsupportedSessionSuite`.
+Other suite identifiers are rejected with `UnsupportedSessionSuite`; the
+application selects a suite explicitly, without automatic fallback.
+
+Suite `0x02` uses ML-DSA-87 for both the transcript signature and every
+public key in the validated PID certificate path. The SDK fetches bank `1`,
+checks the same root pin, root self-signature, DICE layer-zero and Tessera
+EKU requirements, and rejects any classical issuer even if the PID itself
+is ML-DSA-87. Bank `1` has its own independently provisioned root pin;
+an ECC-bank pin cannot authorize it. No automatic fallback is permitted.
+The common SHA-384 transcript and key schedule, role PSK, and AES-256-GCM
+transport remain unchanged.
 
 #### 5.2.1 ECDH P-384 shared-secret derivation
 
@@ -356,12 +369,37 @@ key-agreement operations must be rejected. The raw shared x-coordinate
 enters the HKDF extraction below; there is no additional protocol-level
 hash or KEM extraction between this `Z` and `Z || PSK`.
 
+#### 5.2.2 ML-KEM-1024 shared-secret derivation
+
+The host generates a fresh ephemeral ML-KEM-1024 key pair for each open or
+reopen. The device validates the 1568-byte encapsulation key, including the
+FIPS 203 canonical coefficient check, before encapsulating with fresh
+device randomness:
+
+```text
+Host:
+    (ek, dk) = ML-KEM-1024.KeyGen()
+    pk_init = ek                                          # 1568 bytes
+
+Device:
+    (Z_device, enc) = ML-KEM-1024.Encaps(pk_init)            # 32 / 1568 bytes
+
+Host, after verifying the device transcript signature:
+    Z_host = ML-KEM-1024.Decaps(dk, enc)                    # 32 bytes
+```
+
+The raw ML-KEM shared secret enters the common `Z || PSK` HKDF extraction
+below; this is not HPKE and adds no HPKE-specific KEM extraction. The host's
+ephemeral decapsulation key is destroyed when the handshake initiator is
+dropped. It is not retained in the session or sent to the device.
+
 ### 5.3 Signed transcript
 
 #### 5.3.1 Exact bytes being signed
 
 Let `pk_pid` be the public key from the validated PID certificate, encoded
-as a 97-byte uncompressed P-384 point. Its corresponding private key is
+as a 97-byte uncompressed P-384 point for suite `0x01` or a
+2592-byte raw ML-DSA-87 public key for suite `0x02`. Its corresponding private key is
 `sk_pid`, held only by the device. Define the transcript byte string `M1`
 and its digest:
 
@@ -372,7 +410,7 @@ M1 =
     || suite_id(1)
     || psk_id(1)
     || session_type(1)
-    || pk_pid(97)
+    || pk_pid
     || BE16(len(pk_init)) || pk_init
     || BE16(len(enc))     || enc
 
@@ -384,7 +422,7 @@ from the common 12-byte TBOR header, not a duplicate Init body field. Its
 16-bit components are little-endian on the wire and in session storage but
 explicitly big-endian in `M1`. No other header fields, alignment padding,
 certificate wrapper, or signature bytes are inserted into `M1`.
-With `Lp = len(pk_init)` and `Le = len(enc)`, its layout is:
+With `Li = len(pk_pid)`, `Lp = len(pk_init)` and `Le = len(enc)`, its layout is:
 
 | Offset | Length | Value |
 |---|---|---|
@@ -394,18 +432,19 @@ With `Lp = len(pk_init)` and `Le = len(enc)`, its layout is:
 | `19` | 1 | Selected `suite_id`. |
 | `20` | 1 | Selected `psk_id`: CO `0`, CU `1`. |
 | `21` | 1 | `session_type = 0`. |
-| `22` | 97 | Validated PID public key `pk_pid`. |
-| `119` | 2 | `BE16(Lp)`. |
-| `121` | `Lp` | Host ephemeral public key `pk_init`. |
-| `121 + Lp` | 2 | `BE16(Le)`. |
-| `123 + Lp` | `Le` | Device encapsulation output `enc`. |
+| `22` | `Li` | Validated PID public key `pk_pid`. |
+| `22 + Li` | 2 | `BE16(Lp)`. |
+| `24 + Li` | `Lp` | Host ephemeral public key `pk_init`. |
+| `24 + Li + Lp` | 2 | `BE16(Le)`. |
+| `26 + Li + Lp` | `Le` | Device encapsulation output `enc`. |
 
-`M1` is 317 bytes for ECDH P-384.
+`M1` is 317 bytes for suite `0x01` or 5754 bytes for `0x02`,
+before the optional recovery suffix.
 The two-byte lengths encode byte counts, not bit counts.
 
-#### 5.3.2 Device ECDSA signing
+#### 5.3.2 Device signing
 
-The device signs **the already computed 48-byte digest `T1`** with its
+For suite `0x01`, the device signs **the already computed 48-byte digest `T1`** with its
 partition identity private key. The signing operation does not hash `T1`
 again:
 
@@ -422,6 +461,18 @@ device returns it with `enc` and the allocated session ID in the Init
 response. The PID certificate chain authenticates the verification key;
 the handshake signature separately authenticates the current exchange.
 
+For suite `0x02`, the device uses the bank-1 PID seed and hedged, pure
+ML-DSA-87 with an empty FIPS 204 context:
+
+```text
+sig = ML-DSA-87.Sign(sk_pid, message=T1, context="")
+```
+
+`T1` is the message, not an external ML-DSA message representative (`mu`).
+Its transcript label and suite byte supply domain separation. The raw
+4627-byte signature travels out-of-band so Init remains within the 4-KiB
+in-band capacity.
+
 #### 5.3.3 Host verification and authenticated fields
 
 The host must use its validated `pk_pid`, its original `pk_init`, and its
@@ -432,6 +483,8 @@ against that digest.
 
 ```text
 ECDSA-P384.VerifyDigest(pk_pid, T1, sig) == true
+# or, for suite 0x02:
+ML-DSA-87.Verify(pk_pid, message=T1, context="", sig) == true
 ```
 
 Malformed encodings, wrong lengths, or failed verification terminate
@@ -791,7 +844,7 @@ rather than another host-known child of `hs`.
 | Material | Size | Holders / lifecycle | Purpose |
 |---|---|---|---|
 | Root SPKI thumbprint | 48 bytes | Application; provisioned independently | Root-key authentication; integrity-sensitive, not secret. |
-| PID private key | P-384 scalar | HSM partition lifecycle | Sign `T1`. |
+| PID private key | P-384 scalar or ML-DSA-87 seed, selected by suite | HSM partition lifecycle | Sign `T1`. |
 | Role PSK | 32 bytes | Authorized application and HSM partition | Role credential mixed with `Z`. |
 | Initiator ephemeral private key | Suite-dependent | Host handshake only | Recover `Z`. |
 | Device ECDH ephemeral private key | P-384 scalar | Device handshake IO | Produce `Z` for suite `0x01`. |
@@ -825,10 +878,10 @@ sequenceDiagram
     S->>F: Plaintext Init(psk_id, type=0, suite_id, pk_init)
     Note over F: Load role PSK, capture auth_binding,<br/>encapsulate to pk_init, compute T1
     F->>I: Sign digest T1 with partition PID private key
-    I-->>F: ECDSA-P384 signature r(48) followed by s(48)
+    I-->>F: ECDSA-P384 or ML-DSA-87 signature
     Note over F: Derive hs and both transport secrets
     F->>V: Reserve Pending slot
-    F-->>S: Plaintext InitResp(session_id, enc, sig)
+    F-->>S: Plaintext InitResp(session_id, enc, sig), ML-DSA signature via OOB
     Note over S: Recompute T1, verify PID signature,<br/>recover Z, derive hs, fin, param_key, channel keys,<br/>generate seed and seal seed_envelope
     S->>F: Protected Finish(session_id, fin, seed_envelope)
     Note over F: Authenticate transport before parsing,<br/>verify fin and credential binding,<br/>open seed envelope, generate random masking_key,<br/>derive BK_SESSION, construct bmk_session
@@ -1341,7 +1394,7 @@ transport replay tracking:
 | GCM nonce reuse | Checked sender counters, separated directions, independent response IV, Uno retained epoch | Host rollback/key cloning and unsupported lifecycle resets must not rewind a counter under a retained key. |
 | Exposure of host channel keys revealing masked private keys | Independent random device-only session masking key and boot-key wrapping hierarchy | Host still has authority to request whatever operations its role permits. |
 | Later compromise of only long-term PSK or PID signing key | Ephemeral KEM-derived `Z` supplies an intended forward-secrecy argument for captured sessions | Requires suitable KEM security and erasure/non-retention of ephemeral/shared/channel secrets; not a claim about compromised endpoint memory or every temporary copy. |
-| Post-quantum security | Not provided by the current suite | ECDH-P384 key agreement and ECDSA-P384 authentication are not post-quantum. |
+| Post-quantum security | Suite `0x02` uses ML-KEM-1024 and ML-DSA-87 with an all-ML-DSA-87 PID path | Suite `0x01` retains classical authentication; SHA-384, AES-256-GCM, role credentials and root provisioning remain part of the security boundary. |
 | Fresh firmware attestation | Certificate-path profile and signed handshake prove specified identity assertions | No fresh measured-boot challenge/evidence policy is evaluated by open. |
 | Credential rotation races | Credential binding validation at sensitive handlers and partition lock through completion processing | Not universal immediate revocation of all Active channels. |
 | Establishment flooding, packet loss, or forged outer failure status | Bounded session resources, validation, cleanup, and backend ownership policies | Availability and rate limiting remain platform/deployment concerns. |
@@ -1420,7 +1473,7 @@ host/device interoperability.
 |---|---|
 | Root/profile authentication | SDK path/thumbprint/profile regressions, including malformed extensions and root-profile substitution with a matching SPKI. |
 | X.509 portability | Verified-path and DER-extension tests for platform implementations. |
-| Handshake agreement | ECDH P-384 agrees with device-side primitives on Uno 1.1 and Duo 2.0; changed major/minor revision or other transcript/signature inputs fail. |
+| Handshake agreement | Both suites agree with device-side primitives on Uno 1.1 and Duo 2.0; changed revision, transcript/signature inputs, identity algorithm, or ML-DSA context fail. |
 | Transport correlation | Identical-request stale-response substitution fails; reverse-order completions succeed on Uno and Duo. |
 | Integrity failure | Altered response ciphertext, IV, tag, invalid Uno frames/padding, and reflected requests are rejected; host output is discarded/wiped. |
 | Firmware integration | Duo per-IO contexts remain distinct when replies are sent in reverse order; Uno rejects a changed outer session-control value. |

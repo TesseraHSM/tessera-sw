@@ -18,13 +18,16 @@ use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PeerBackup;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
-use tsra_sealing_report::parse_ec2_cose_key_bytes;
+use tsra_sealing_report::attested_recipient;
 use tsra_sealing_report::parse_key_report_bytes;
 use tsra_sealing_report::parse_sd_transfer_report;
+use tsra_sealing_report::recipient_key_id;
+use tsra_sealing_report::validate_sd_envelope;
 use tsra_sealing_report::verify_certificate_chain;
 use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::verify_sd_report_signature;
 use tsra_sealing_report::KeyFlags;
+use tsra_sealing_report::TransferKem;
 
 pub fn write_leaf_receiver(
     output: &mut impl Write,
@@ -107,6 +110,14 @@ pub fn write_remote_creation(
     writeln!(output, "Security domain created.")?;
     writeln!(
         output,
+        "  transfer KEM:         {}",
+        validate_sd_envelope(
+            parse_sd_transfer_report(&recovery.backup.pok_remote_backup)?.envelope
+        )?
+        .name()
+    )?;
+    writeln!(
+        output,
         "  creation receiver:    external software sealing authority"
     )?;
     writeln!(
@@ -126,19 +137,34 @@ pub fn write_remote_creation(
     write_remote_parties(output, recovery)
 }
 
+/// `receiver` is the transfer recipient key; `receiver_key_report` is present
+/// when the SATA leaf delegates to it.
 pub fn write_temporary_creation(
     output: &mut impl Write,
     backup: &RemoteBackup,
-    receiver_pub: &[u8],
+    receiver: &[u8],
     receiver_chain: &[Vec<u8>],
+    receiver_key_report: Option<&[u8]>,
     state_dir: &Path,
 ) -> Result<()> {
     writeln!(output, "Security domain created.")?;
     writeln!(
         output,
-        "  receiver public key:  {}",
-        hex::encode(receiver_pub)
+        "  transfer KEM:         {}",
+        TransferKem::from_recipient(receiver)?.name()
     )?;
+    writeln!(
+        output,
+        "  receiver key ID:      {}",
+        hex::encode(recipient_key_id(receiver)?)
+    )?;
+    if let Some(report) = receiver_key_report {
+        writeln!(
+            output,
+            "  receiver key report:  {} bytes, signed by the SATA receiver leaf",
+            report.len()
+        )?;
+    }
     write_backup_summary(output, backup, state_dir)?;
     write_sender_evidence(output, &backup.evidence, &backup.pok_remote_backup)
         .context("print sender certificate chains and signed backup")?;
@@ -208,6 +234,16 @@ fn write_remote_parties(output: &mut impl Write, remote: &RemoteRecovery) -> Res
         "Receiver",
         "SATA-authorized HPKE",
     )?;
+    if !remote.receiver_key_report.is_empty() {
+        let report = parse_key_report_bytes(&remote.receiver_key_report)?;
+        let recipient = attested_recipient(&report)?;
+        writeln!(
+            output,
+            "  Receiver key report: leaf-signed {} key, key ID {}",
+            TransferKem::from_recipient(&recipient)?.name(),
+            hex::encode(recipient_key_id(&recipient)?)
+        )?;
+    }
     verify_sd_report_signature(
         &remote.backup.pok_remote_backup,
         &tsra_sealing_report::p384_raw_from_spki(&remote.sender_pid_pub_key)?,
@@ -345,12 +381,21 @@ fn write_key_report(output: &mut impl Write, evidence: &Evidence, role: &str) ->
         .public_key
         .get(..usize::from(report.public_key_size))
         .context("attested public-key length exceeds the report field")?;
-    let key = parse_ec2_cose_key_bytes(public_key)
-        .with_context(|| format!("decode {role} EC2 public key"))?;
+    let key = TransferKem::from_recipient(
+        &attested_recipient(&report).with_context(|| format!("decode {role} public key"))?,
+    )?;
     let flags = KeyFlags::from(report.flags);
     writeln!(output, "  Format:              COSE_Sign1 key attestation")?;
     writeln!(output, "  Version:             {}", report.version)?;
-    writeln!(output, "  Public key:          EC2 / {:?}", key.curve)?;
+    writeln!(
+        output,
+        "  Public key:          {}",
+        match key {
+            TransferKem::P384 => "EC2 / P384",
+            TransferKem::MlKem1024 => "AKP / ML-KEM-1024",
+            TransferKem::MlKem1024P384 => "AKP / MLKEM1024-P384",
+        }
+    )?;
     writeln!(
         output,
         "  Key fingerprint:     SHA-384 {}",

@@ -11,6 +11,35 @@
 use super::*;
 
 #[test]
+fn retained_store_migration_initializes_only_new_handles() {
+    let mut p = Partition(63);
+    p.reset();
+    p.set_id_key_id(Some(HsmKeyId::from(0u16)));
+    p.set_pta_key_id(Some(HsmKeyId::from(0x1234u16)));
+    p.set_psk_co(buf(&[0xA5; PSK_LEN])).expect("set PSK");
+    p.session_recovery_mut().fill(0xB6);
+    let slot = p.slot_mut();
+    slot.id_mldsa_seed_key_id = [0; 2];
+    slot.pta_mldsa_seed_key_id = [0; 2];
+    slot.mldsa_store_version = 0;
+
+    p.migrate_mldsa_handles();
+
+    assert_eq!(p.id_mldsa_seed_key_id(), None);
+    assert_eq!(p.pta_mldsa_seed_key_id(), None);
+    assert_eq!(p.id_key_id(), Some(HsmKeyId::from(0u16)));
+    assert_eq!(p.pta_key_id(), Some(HsmKeyId::from(0x1234u16)));
+    assert_eq!(&p.psk_co()[..], &[0xA5; PSK_LEN]);
+    assert_eq!(p.session_recovery(), &[0xB6; 129]);
+
+    p.set_id_mldsa_seed_key_id(Some(HsmKeyId::from(0u16)));
+    p.set_pta_mldsa_seed_key_id(Some(HsmKeyId::from(0x5678u16)));
+    p.migrate_mldsa_handles();
+    assert_eq!(p.id_mldsa_seed_key_id(), Some(HsmKeyId::from(0u16)));
+    assert_eq!(p.pta_mldsa_seed_key_id(), Some(HsmKeyId::from(0x5678u16)));
+}
+
+#[test]
 fn partition_lookup_rejects_wide_ids_without_aliasing() {
     assert!(PartStore::partition(HsmPartId::from(64u8)).is_ok());
     for id in [65u8, u8::MAX] {
@@ -116,6 +145,8 @@ fn preserves_provisioning_and_clears_tenant_state() {
         p.set_mk_key_id(Some(HsmKeyId::from(0x0506u16)));
         p.set_ups_key_id(Some(HsmKeyId::from(0x0708u16)));
         p.set_pta_key_id(Some(HsmKeyId::from(0x090au16)));
+        p.set_pta_mldsa_seed_key_id(Some(HsmKeyId::from(0x1112u16)));
+        p.set_id_mldsa_seed_key_id(Some(HsmKeyId::from(0x1314u16)));
         p.set_local_mk_key_id(Some(HsmKeyId::from(0x0d0eu16)));
         p.set_ephemeral_mk_key_id(Some(HsmKeyId::from(0x0f10u16)));
         p.set_unwrapping_key_id(Some(HsmKeyId::from(0x0b0cu16)));
@@ -179,6 +210,15 @@ fn preserves_provisioning_and_clears_tenant_state() {
     assert!(p.ups_key_id().is_none(), "ups key handle must be cleared");
     assert!(p.pta_key_id().is_none(), "pta key handle must be cleared");
     assert!(
+        p.pta_mldsa_seed_key_id().is_none(),
+        "pta ML-DSA seed handle must be cleared"
+    );
+    assert_eq!(
+        p.id_mldsa_seed_key_id(),
+        Some(HsmKeyId::from(0x1314u16)),
+        "identity ML-DSA seed handle is left for clear_identity"
+    );
+    assert!(
         p.unwrapping_key_id().is_none(),
         "unwrapping key handle must be cleared"
     );
@@ -231,6 +271,7 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
         let mut p = Partition(pid);
         p.set_id(buf(&id)).unwrap();
         p.set_id_key_id(Some(HsmKeyId::from(0x1234u16)));
+        p.set_id_mldsa_seed_key_id(Some(HsmKeyId::from(0x5678u16)));
         p.slot_mut()
             .partition_identifier
             .reserved_pub_key
@@ -249,6 +290,10 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
 
     let p = Partition(pid);
     assert!(p.id_key_id().is_none(), "id key handle must be cleared");
+    assert!(
+        p.id_mldsa_seed_key_id().is_none(),
+        "id ML-DSA seed handle must be cleared"
+    );
     assert_eq!(&p.id()[..], &[0u8; ID_LEN][..], "id must be zeroed");
     assert_eq!(
         &p.slot().partition_identifier.reserved_pub_key[..],

@@ -195,13 +195,13 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
             &policy_buf, &masked_buf, &src_ev.identity(), &dst_ev.get(), &src_buf,
         };
 
-        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
-        tsra_buffer probe_backup_buf{ probe_backup.data(), kPokRemoteBackupLen - 1 };
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupMaxLen);
+        tsra_buffer probe_backup_buf{ probe_backup.data(), kPokRemoteBackupMaxLen - 1 };
         EXPECT_EQ(
             tsra_sd_reseal_remote_backup(ctx.session, &params, &probe_backup_buf),
             TSRA_STATUS_BUFFER_TOO_SMALL
         );
-        EXPECT_EQ(probe_backup_buf.len, kPokRemoteBackupLen);
+        EXPECT_EQ(probe_backup_buf.len, kPokRemoteBackupMaxLen);
         std::vector<uint8_t> dst_backup;
         src_buf = { rcvr.report.data(), static_cast<uint32_t>(rcvr.report.size()) };
         EXPECT_NE(reseal_fill(ctx.session, &params, dst_backup), TSRA_STATUS_SUCCESS)

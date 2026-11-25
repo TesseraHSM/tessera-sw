@@ -26,10 +26,14 @@ an independently provisioned root SPKI thumbprint before trusting that signature
 | `suite_id` | KEM | `pk_init` | `enc` | Authentication |
 |---|---|---|---|---|
 | `0x01` | Ephemeral ECDH P-384 | 97-byte uncompressed SEC1 point | 97-byte device ephemeral SEC1 point | ECDSA P-384 with PID key |
+| `0x02` | ML-KEM-1024 | 1568-byte encapsulation key | 1568-byte ciphertext | ML-DSA-87 with PID key |
 
-The suite uses HKDF-SHA-384, HMAC-SHA-384 Finish confirmation, and
+All suites use HKDF-SHA-384, HMAC-SHA-384 Finish confirmation, and
 AES-256-GCM transport. The selected suite and API revision remain pinned for
-the session lifetime.
+the session lifetime. Suite `0x02` provides post-quantum key agreement and
+ML-DSA-87 transcript authentication, requiring the
+ML-DSA bank (`1`) and ML-DSA-87 keys throughout the validated PID-to-root path.
+Its root must be pinned independently; there is no fallback to the ECC bank.
 
 ## Request
 
@@ -41,8 +45,8 @@ at byte 32.
 | 12 | `reopen_id` | `uint16` (inline) | `65535` for fresh open; otherwise existing stale slot. |
 | 16 | `psk_id` | `uint8` (inline) | `0` = Crypto Officer; `1` = Crypto User. |
 | 20 | `session_type` | `uint8` (inline) | `0` = Encrypted; all other values are rejected. |
-| 24 | `suite_id` | `uint8` (inline) | `0x01`; all other identifiers are unsupported. |
-| 28 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97. |
+| 24 | `suite_id` | `uint8` (inline) | `0x01` or `0x02`; other identifiers are unsupported. |
+| 28 | `pk_init` | `buffer` (ref) | Data-relative offset 0; length 97 or 1568 according to the suite. |
 
 ## Response
 
@@ -52,10 +56,15 @@ request footprint; variable-length data begins at byte 32.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | `session_id` | `session_id` (inline) | Reserved Pending slot: CO 0, CU 1..=7. |
-| 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97. |
-| 20 | `sig` | `buffer` (ref) | Data-relative offset `len(enc)`; 96-byte raw ECDSA signature. |
+| 16 | `enc` | `buffer` (ref) | Data-relative offset 0; length 97 or 1568 according to the suite. |
+| 20 | `sig` | `buffer` (ref) | Data-relative offset `len(enc)`; 96-byte raw ECDSA signature for `0x01`, empty for `0x02`. |
 | 24 | Reserved | `none` | Paired TOC placeholder. |
 | 28 | Reserved | `none` | Paired TOC placeholder. |
+
+For suite `0x02`, the host must supply OOB output item `0` with exactly
+4627 bytes. Firmware writes the raw ML-DSA-87 signature there; the in-band
+response remains below 4 KiB. The public signature is not encrypted, but
+the host must verify it against its locally reconstructed transcript.
 
 ## Transcript and key binding
 
@@ -63,12 +72,17 @@ request footprint; variable-length data begins at byte 32.
 M1 = "TSRA-SESSION-v1"
      || BE16(api_major) || BE16(api_minor)
      || suite_id || psk_id || session_type
-     || pk_pid(97)
+     || pk_pid
      || BE16(len(pk_init)) || pk_init
      || BE16(len(enc)) || enc
 T1 = SHA-384(M1)
-sig = ECDSA-P384.SignDigest(sk_pid, T1)
+sig = ECDSA-P384.SignDigest(sk_pid, T1)                  # suite 0x01
+sig = ML-DSA-87.Sign(sk_pid, T1, context="")             # suite 0x02, pure mode
 ```
+
+`pk_pid` is a 97-byte SEC1 P-384 point for suite `0x01`, or a
+2592-byte raw ML-DSA-87 public key for `0x02`. ML-DSA signing is hedged;
+it signs `T1` as its message, not as an external message representative.
 
 For reopen only, append `"TSRA-REOPEN-v1:" || BE16(reopen_id)` to `M1`
 before hashing. Fresh-open transcripts are unchanged. Reopen uses the same
@@ -100,7 +114,7 @@ transcript, key derivation, transport, and storage layouts.
 | `InvalidPskId` | `psk_id` is neither 0 nor 1. |
 | `InvalidSessionType` | `session_type` is not 0. |
 | `UnsupportedSessionSuite` | Suite is not implemented. |
-| `InvalidArg` | Malformed ephemeral public key or incorrect length. |
+| `InvalidArg` | Malformed ephemeral public key, incorrect length, non-canonical ML-KEM encapsulation key, or missing/wrong-length ML-DSA signature OOB output. |
 | `EccPointValidationFailed` | Invalid P-384 point. |
 | `PartitionNotEnabled` | Partition is not enabled. |
 | `PartitionNotProvisioned` | Identity key is unavailable. |

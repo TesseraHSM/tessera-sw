@@ -7,6 +7,7 @@
 mod common;
 
 use common::COORD_LEN;
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -53,7 +54,7 @@ struct FuzzInput {
 #[derive(Clone)]
 struct SenderEvidence {
     items: Vec<Vec<u8>>,
-    sender_cert_chain: Vec<CertDescriptor>,
+    receiver_cert_chain: Vec<CertDescriptor>,
     mfgr_cert_chain: Vec<CertDescriptor>,
     owner_cert_chain: Vec<CertDescriptor>,
     part_owner_cert_chain: Vec<CertDescriptor>,
@@ -69,11 +70,10 @@ impl SenderEvidence {
 
 struct RestoreFixture {
     session_id: u16,
-    masked_sealing_key: [u8; tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN],
+    masked_sealing_key: Vec<u8>,
     policy: Vec<u8>,
     sender_pid_pub_key: Vec<u8>,
     evidence: SenderEvidence,
-    src_remote_backup: [u8; tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN],
     prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN],
 }
 
@@ -101,8 +101,8 @@ fn build_sender_evidence(
     let owner = make_chain(&CaKey::generate(), pid_pub);
     let part_owner = make_chain(sapota, pid_pub);
 
-    let mut items = Vec::new();
-    let sender_cert_chain = push_chain(&mut items, sender.der_items());
+    let mut items = common::sd_oob_items();
+    let receiver_cert_chain = push_chain(&mut items, sender.der_items());
     let mfgr_cert_chain = push_chain(&mut items, mfgr.der_items());
     let owner_cert_chain = push_chain(&mut items, owner.der_items());
     let part_owner_cert_chain = push_chain(&mut items, part_owner.der_items());
@@ -110,7 +110,7 @@ fn build_sender_evidence(
 
     SenderEvidence {
         items,
-        sender_cert_chain,
+        receiver_cert_chain,
         mfgr_cert_chain,
         owner_cert_chain,
         part_owner_cert_chain,
@@ -176,6 +176,7 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
     let sealing_key = match ctx.tbor(&TborSdSealingKeyGenReq {
         session_id: source_session.session_id,
         scope: bootstrap_scope.to_tbor(),
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     }) {
         Ok(key) => key,
         Err(DdiError::TborStatus(status)) if status == TborStatus::UnsupportedKeyScope => {
@@ -200,64 +201,45 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
     }
 
     let report_bytes = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id: source_session.session_id,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
         })
-        .expect("KeyReport should succeed")
-        .report;
+        .expect("KeyReport should succeed");
     let evidence = build_sender_evidence(&pid_pub, &sealing_pub, &sata, &sapota, &report_bytes);
 
     let create_req = TborSdCreateRemoteBackupReq {
         session_id: source_session.session_id,
-        receiver_cert_chain: evidence.sender_cert_chain.clone(),
+        receiver_cert_chain: evidence.receiver_cert_chain.clone(),
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: evidence.mfgr_cert_chain.clone(),
         receiver_owner_cert_chain: evidence.owner_cert_chain.clone(),
         receiver_part_owner_cert_chain: evidence.part_owner_cert_chain.clone(),
         receiver_report: evidence.report,
         policy: policy.clone(),
     };
-    let created = ctx
-        .tbor_oob(&create_req, &evidence.oob())
+    let (created, op_report) = ctx
+        .sd_oob_report(&create_req, &evidence.oob())
         .expect("SdCreateRemoteBackup should succeed");
+    let op_report = &op_report[..usize::from(created.report_len.get())];
 
-    let (restore_sealing_key, restore_evidence) = if key_scope == common::KeyScope::SecurityDomain {
-        let sealing_key = ctx
-            .tbor(&TborSdSealingKeyGenReq {
-                session_id: source_session.session_id,
-                scope: key_scope.to_tbor(),
-            })
-            .expect("SecurityDomain-scope key generation should succeed after SD creation");
-        let report = ctx
-            .tbor(&TborKeyReportReq {
-                session_id: source_session.session_id,
-                masked_key: sealing_key.masked_key.to_vec(),
-                report_data: [0u8; KEY_REPORT_DATA_LEN],
-                auth_envelope: Vec::new(),
-            })
-            .expect("SecurityDomain-scope KeyReport should succeed")
-            .report;
-        let mut public_key = [0u8; RAW_PUB_LEN];
-        for (dst, src) in public_key[..COORD_LEN]
-            .iter_mut()
-            .zip(sealing_key.pub_key[..COORD_LEN].iter().rev())
-        {
-            *dst = *src;
-        }
-        for (dst, src) in public_key[COORD_LEN..]
-            .iter_mut()
-            .zip(sealing_key.pub_key[COORD_LEN..].iter().rev())
-        {
-            *dst = *src;
-        }
-        (
-            sealing_key,
-            build_sender_evidence(&pid_pub, &public_key, &sata, &sapota, &report),
-        )
+    // Restore authenticates the sender with the create operation report.
+    let mut restore_evidence = evidence;
+    restore_evidence.items[usize::from(restore_evidence.report.index)] = op_report.to_vec();
+    restore_evidence.report.length =
+        U16::new(op_report.len().try_into().expect("report fits descriptor"));
+
+    let restore_sealing_key = if key_scope == common::KeyScope::SecurityDomain {
+        ctx.tbor(&TborSdSealingKeyGenReq {
+            session_id: source_session.session_id,
+            scope: key_scope.to_tbor(),
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
+        })
+        .expect("SecurityDomain-scope key generation should succeed after SD creation")
     } else {
-        (sealing_key, evidence)
+        sealing_key
     };
 
     ctx.session_close(source_session.session_id)
@@ -286,7 +268,6 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
             .to_vec()
             .expect("PID SPKI"),
         evidence: restore_evidence,
-        src_remote_backup: created.pok_remote_backup,
         prev_sd_mk_backup: created.sd_mk_backup,
     })
 }
@@ -365,13 +346,16 @@ fn mutate_request(
             invalidate_descriptor(&mut req.sender_part_owner_cert_chain, input)
         }
         MutationTarget::Signature => flip(
-            &mut req.src_remote_backup[POK_REMOTE_BACKUP_LEN - 96..],
+            &mut evidence.items[usize::from(req.src_remote_backup.index)]
+                [POK_REMOTE_BACKUP_LEN - 96..],
             input.offset,
             input.mask,
         ),
-        MutationTarget::SrcRemoteBackup => {
-            flip(&mut req.src_remote_backup, input.offset, input.mask)
-        }
+        MutationTarget::SrcRemoteBackup => flip(
+            &mut evidence.items[usize::from(req.src_remote_backup.index)],
+            input.offset,
+            input.mask,
+        ),
         MutationTarget::PrevSdMkBackup => {
             flip(&mut req.prev_sd_mk_backup, input.offset, input.mask)
         }
@@ -397,7 +381,7 @@ fn mutate_request(
             input.offset,
         ),
         MutationTarget::Header => flip(
-            &mut req.src_remote_backup[11..172],
+            &mut evidence.items[usize::from(req.src_remote_backup.index)][11..172],
             input.offset,
             input.mask,
         ),
@@ -477,13 +461,13 @@ fuzz_target!(|input: FuzzInput| {
         let mut evidence = fixture.evidence.clone();
         let mut req = TborSdRestoreRemoteBackupReq {
             session_id: fixture.session_id,
-            masked_sealing_key: fixture.masked_sealing_key,
+            masked_sealing_key: fixture.masked_sealing_key.clone(),
             policy: fixture.policy.clone(),
             sender_pid_pub_key: fixture.sender_pid_pub_key.clone(),
             sender_mfgr_cert_chain: evidence.mfgr_cert_chain.clone(),
             sender_owner_cert_chain: evidence.owner_cert_chain.clone(),
             sender_part_owner_cert_chain: evidence.part_owner_cert_chain.clone(),
-            src_remote_backup: fixture.src_remote_backup,
+            src_remote_backup: evidence.report,
             prev_sd_mk_backup: fixture.prev_sd_mk_backup,
         };
 

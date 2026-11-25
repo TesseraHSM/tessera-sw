@@ -328,6 +328,29 @@ impl HsmSession {
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &HsmSdEvidence<'_>,
     ) -> HsmResult<HsmSdRemoteBackupResult> {
+        self.sd_create_remote_backup_with_key_report(
+            part_policy,
+            receiver_cert_chain,
+            None,
+            receiver_evidence,
+        )
+    }
+
+    /// As [`Self::sd_create_remote_backup`], optionally sealing to the KEM
+    /// key attested by `receiver_key_report` instead of the receiver leaf.
+    ///
+    /// `receiver_key_report` is a COSE_Sign1 (ES384) key report signed by
+    /// the receiver chain's leaf key; its attested P-384, ML-KEM-1024 or
+    /// MLKEM1024-P384 key becomes the recipient, so a SATA-certified P-384
+    /// leaf can delegate to a post-quantum sealing key. Under
+    /// `require_trusted_sa_key` the evidence report must attest the same key.
+    pub fn sd_create_remote_backup_with_key_report(
+        &self,
+        part_policy: &[u8],
+        receiver_cert_chain: &[HsmCert<'_>],
+        receiver_key_report: Option<&[u8]>,
+        receiver_evidence: &HsmSdEvidence<'_>,
+    ) -> HsmResult<HsmSdRemoteBackupResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_remote_backup_ex(
@@ -335,6 +358,7 @@ impl HsmSession {
                 inner.rev,
                 inner.id,
                 receiver_cert_chain,
+                receiver_key_report,
                 receiver_evidence,
                 part_policy,
                 &inner.ddi_cookie,
@@ -345,16 +369,38 @@ impl HsmSession {
 
     /// Issues TBOR `DarcKexKeyGen` (opcode `0x20`) on this CO session.
     ///
-    /// Generates a new DARC key-exchange key (ECC-P384) and returns the
-    /// masked private key plus its raw P-384 public key (`x ‖ y`, 96
-    /// bytes, big-endian per coordinate). This is the HPKE recipient key;
-    /// the source authenticates exports using its PID instead. Only valid on
-    /// a V2 session; a V1 session returns [`HsmError::InvalidSession`].
+    /// Generates a new DARC key-exchange key for `kem` and returns the
+    /// masked private key plus its public key: for P-384 the raw `x ‖ y`
+    /// point (96 bytes, big-endian per coordinate), for ML-KEM-1024 the
+    /// 1568-byte encapsulation key, for MLKEM1024-P384 the 1665-byte
+    /// `ek_PQ ‖ SEC1 point`. This is the HPKE recipient key; exporters
+    /// authenticate it through a PID-signed key report over the masked key
+    /// (see [`darc_kex_key_report`](Self::darc_kex_key_report)). Only valid on a V2 session; a
+    /// V1 session returns [`HsmError::InvalidSession`].
     pub fn darc_kex_key_gen(
         &self,
         scope: u8,
-    ) -> HsmResult<([u8; MASKED_KEX_KEY_LEN], [u8; KEX_PUB_KEY_LEN])> {
-        ddi::darc_kex_key_gen(self, scope)
+        kem: HsmTransferKem,
+    ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
+        ddi::darc_kex_key_gen(self, scope, kem)
+    }
+
+    /// Issues TBOR `KeyReport` on a masked DARC key-exchange key from
+    /// [`darc_kex_key_gen`](Self::darc_kex_key_gen).
+    ///
+    /// The partition PID signs a report attesting the key (signed flag
+    /// `is_darc_kex`), with the policy PTA algorithm (ES384 or ML-DSA-87);
+    /// pass it as `target_key_report` to the exporter's
+    /// [`darc_tmk_export`](Self::darc_tmk_export). `report_data` must be
+    /// exactly 128 bytes. With `report = None` returns the maximum report
+    /// size without a round-trip; otherwise returns the actual length.
+    pub fn darc_kex_key_report(
+        &self,
+        masked_kex_key: &[u8],
+        report_data: &[u8],
+        report: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        ddi::masked_key_report(self, masked_kex_key, report_data, report)
     }
 
     /// Issues TBOR `DarcTmkGen` (opcode `0x23`) on this CO session.
@@ -368,26 +414,34 @@ impl HsmSession {
 
     /// Issues TBOR `DarcTmkExport` (opcode `0x24`) on this CO session.
     ///
-    /// Seals the TMK to an authenticated target: validates
-    /// `target_cert_chain` against the policy `data_spki_thumbprint`, then HPKE Base
-    /// seals the TMK to the target's KEX key and PID-signs a `Darc` report.
-    /// Returns both artifacts; no sender KEX key is required. Only
-    /// valid on a V2 session; a V1 session returns
+    /// Seals the TMK to an authenticated target: validates the target PID
+    /// chain `target_cert_chain` against the policy `data_spki_thumbprint`,
+    /// verifies `target_key_report` (the target PID's key report over its
+    /// DARC KEX key), then HPKE Base seals the TMK to the attested KEX key
+    /// and PID-signs the complete encrypted artifact. No sender KEX
+    /// key is required. Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn darc_tmk_export(
         &self,
         masked_tmk: &[u8],
         policy: &[u8],
         target_cert_chain: &[HsmCert<'_>],
+        target_key_report: &[u8],
     ) -> HsmResult<HsmDarcTmkExportResult> {
-        ddi::darc_tmk_export(self, masked_tmk, policy, target_cert_chain)
+        ddi::darc_tmk_export(
+            self,
+            masked_tmk,
+            policy,
+            target_cert_chain,
+            target_key_report,
+        )
     }
 
     /// Issues TBOR `DarcTmkImport` (opcode `0x21`) on this CO session.
     ///
     /// Opens a `sealed_tmk` on the target: validates `remote_cert_chain`
     /// against the policy `pota_spki_thumbprint` to authorize the reporting PID,
-    /// verifies `report` and its recipient/envelope binding, HPKE Base
+    /// verifies the complete signed artifact and its recipient binding, HPKE Base
     /// opens the sealed TMK, and
     /// re-masks it under the partition SDMK. Returns the masked TMK. Only
     /// valid on a V2 session; a V1 session returns
@@ -950,7 +1004,7 @@ mod tests {
         let command_session = session.clone();
         let (completed_tx, completed_rx) = mpsc::channel();
         let command = thread::spawn(move || {
-            let result = ddi::sd_sealing_key_gen(&command_session, u8::MAX);
+            let result = ddi::sd_sealing_key_gen(&command_session, u8::MAX, HsmTransferKem::P384);
             completed_tx.send(result).expect("report command result");
         });
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -12,6 +12,7 @@
 
 use tsra_ddi_tbor_types::PartPolicyFields;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
 use tsra_ddi_tbor_types::POLICY_VERSION;
 
 /// A public-key thumbprint (see [`tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN`]).
@@ -19,6 +20,8 @@ pub type Thumbprint = tsra_ddi_tbor_types::PolicyThumbprint;
 
 /// CBOR major type 0: unsigned integer.
 pub const MAJOR_UINT: u8 = 0;
+/// CBOR major type 1: negative integer.
+pub const MAJOR_NINT: u8 = 1;
 /// CBOR major type 2: byte string.
 pub const MAJOR_BSTR: u8 = 2;
 /// CBOR major type 5: map.
@@ -61,6 +64,11 @@ impl CborWriter {
     /// Append an unsigned integer.
     pub fn uint(&mut self, v: u64) -> &mut Self {
         self.head(MAJOR_UINT, v)
+    }
+
+    /// Append a negative integer (`v < 0`).
+    pub fn nint(&mut self, v: i64) -> &mut Self {
+        self.head(MAJOR_NINT, (-1 - v) as u64)
     }
 
     /// Append a byte string.
@@ -115,11 +123,13 @@ pub struct TestPolicy {
     pub info: Option<Vec<u8>>,
     /// Optional DATA public-key thumbprint (key 9).
     pub data_spki_thumbprint: Option<Thumbprint>,
+    /// Trust-anchor COSE algorithm (key 10).
+    pub pta_alg: i64,
 }
 
 impl TestPolicy {
-    /// Minimal valid policy: version 1, the given POTA/SATA thumbprints,
-    /// no flags and no optional fields.
+    /// Minimal valid policy: the current version, the given POTA/SATA
+    /// thumbprints, ES384 trust anchors, no flags and no optional fields.
     pub fn new(pota_spki_thumbprint: Thumbprint, sata_spki_thumbprint: Thumbprint) -> Self {
         Self {
             version: POLICY_VERSION.into(),
@@ -130,7 +140,14 @@ impl TestPolicy {
             flags: 0,
             info: None,
             data_spki_thumbprint: None,
+            pta_alg: POLICY_PTA_ALG_ES384,
         }
+    }
+
+    /// Set the trust-anchor COSE algorithm.
+    pub fn with_pta_alg(mut self, alg: i64) -> Self {
+        self.pta_alg = alg;
+        self
     }
 
     /// Set the SAPOTA thumbprint.
@@ -185,6 +202,7 @@ impl TestPolicy {
             flags: self.flags,
             info: self.info.as_deref(),
             data_spki_thumbprint: self.data_spki_thumbprint.as_ref(),
+            pta_alg: self.pta_alg,
         }
         .encode()
     }

@@ -204,13 +204,13 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
             &local_buf,
         };
 
-        std::vector<uint8_t> probe_backup(kPokRemoteBackupLen);
-        tsra_buffer probe_backup_buf{ probe_backup.data(), kPokRemoteBackupLen - 1 };
+        std::vector<uint8_t> probe_backup(kPokRemoteBackupMaxLen);
+        tsra_buffer probe_backup_buf{ probe_backup.data(), kPokRemoteBackupMaxLen - 1 };
         EXPECT_EQ(
             tsra_sd_create_peer_backup(ctx.session, &params, &probe_backup_buf),
             TSRA_STATUS_BUFFER_TOO_SMALL
         );
-        EXPECT_EQ(probe_backup_buf.len, kPokRemoteBackupLen);
+        EXPECT_EQ(probe_backup_buf.len, kPokRemoteBackupMaxLen);
         std::vector<uint8_t> peer_backup;
         ASSERT_EQ(create_peer_fill(ctx.session, &params, peer_backup), TSRA_STATUS_SUCCESS);
 

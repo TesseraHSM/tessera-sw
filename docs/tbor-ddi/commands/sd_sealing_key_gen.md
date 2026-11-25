@@ -11,8 +11,17 @@ Licensed under the MIT License.
 ## Description
 
 Generates a new security-domain sealing key and returns the **masked**
-private key together with the public key.  The sealing key is a **P-384
-ECC keypair for ECDH key agreement** (ECIES-style seal / unseal).
+private key together with the public key.  The sealing key is the HPKE
+recipient key for SD transfer; its KEM is chosen by the request `kem`:
+
+| `kem` | KEM | Masked secret | `masked_key` | `pub_key` | Key kind |
+|---|---|---|---|---|---|
+| 0 | DHKEM(P-384, HKDF-SHA384) | 48 B scalar | 280 B | 96 B `x ‖ y` | `SdSealing` (41) |
+| 1 | ML-KEM-1024 (HPKE-13) | 64 B seed `d ‖ z` | 296 B | 1568 B encapsulation key | `SdSealingMlKem1024` (65) |
+| 2 | MLKEM1024-P384 (HPKE-10) | 32 B seed | 264 B | 1665 B `ek_PQ ‖ SEC1(ek_T)` | `SdSealingMlKem1024P384` (66) |
+
+Other `kem` values return `InvalidArg`. PQ keys are expanded from their seed
+on use, and their key report attests the public key as an AKP `COSE_Key`.
 
 The private key is **not** stored on the device.  It is masked
 (AEAD-GCM-256) under the masking key associated with the requested
@@ -56,10 +65,11 @@ Wire layout: 12-byte header, followed by the TOC entries, then the
 |---|---|---|---|
 | 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
 | 16 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Supports Ephemeral, Local, and SecurityDomain when its masking key is provisioned. Other scopes return `UnsupportedKeyScope`. |
+| 20 | `kem` | `uint8` (inline) | `0` = P-384, `1` = ML-KEM-1024, `2` = MLKEM1024-P384. |
 
 ### Data section
 
-_Empty — both fields are carried inline within their TOC entries._
+_Empty — all three fields are carried inline within their TOC entries._
 
 ## Response
 
@@ -71,12 +81,12 @@ section carrying the masked key and public key.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (276 B) | The sealing key's ECC-P384 private half, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖ tag(16)`. Not stored on-device. |
-| 20 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new sealing key. Not a SEC1 point encoding (no `0x04` prefix). |
+| 16 | `masked_key` | `buffer` (264 / 280 / 296 B) | P-384 scalar or PQ seed in `header(8)`, `iv(16)`, metadata AAD(192), padded secret, tag(16). Not stored on-device. |
+| 20 | `pub_key` | `buffer` (96 / 1568 / 1665 B) | P-384 raw coordinates in device byte order, or the ML-KEM-1024 / hybrid HPKE public key. The hybrid's ECC share is an uncompressed SEC1 point. |
 
 ### Data section
 
-Carries the 276-byte `masked_key` followed by the 96-byte `pub_key`.
+Carries the `masked_key` followed by the `pub_key`.
 
 ## Errors
 
@@ -84,7 +94,7 @@ Carries the 276-byte `masked_key` followed by the 96-byte `pub_key`.
 |---|---|
 | `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first) |
+| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), or `kem` is unknown |
 | `UnsupportedKeyScope` | The scope is unsupported, or its masking key has not been provisioned |
 | `DdiDecodeFailed` | Malformed request body |
 

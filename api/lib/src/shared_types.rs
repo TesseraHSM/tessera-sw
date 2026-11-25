@@ -39,10 +39,22 @@ pub struct HsmPartFinalExResult {
     pub local_mk_backup: Vec<u8>,
 }
 
-/// Result of `darc_tmk_export`: one directly PID-signed encrypted TMK.
+/// HPKE KEM of a key-transfer recipient key (security-domain sealing key or
+/// DARC key-exchange key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HsmTransferKem {
+    /// DHKEM(P-384, HKDF-SHA384).
+    P384,
+    /// ML-KEM-1024 (HPKE-13).
+    MlKem1024,
+    /// MLKEM1024-P384 hybrid (HPKE-10).
+    MlKem1024P384,
+}
+
+/// Result of `darc_tmk_export`: one complete PID-signed encrypted TMK.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HsmDarcTmkExportResult {
-    /// ES384 COSE_Sign1 containing the complete P-384 HPKE Base envelope.
+    /// COSE_Sign1 containing the complete HPKE Base encrypted envelope.
     pub sealed_tmk: Vec<u8>,
 }
 
@@ -109,7 +121,7 @@ pub struct HsmSdRemoteBackupResult {
 /// An SD peer export or reseal, including its PID signature.
 #[derive(Debug, Clone, Default)]
 pub struct HsmSdTransferResult {
-    /// ES384 COSE_Sign1 containing the complete P-384 HPKE Base backup.
+    /// COSE_Sign1 containing the complete HPKE Base backup.
     pub backup: Vec<u8>,
 }
 
@@ -269,8 +281,8 @@ pub enum HsmPotaEndorsementSource {
 /// by the caller when opening a session via `open_session_ex`.
 ///
 /// Every such session encrypts its in-session traffic; the suite picks
-/// how the session keys are agreed. The suite authenticates the HSM with
-/// its partition identity key (ECDSA P-384 over the handshake transcript)
+/// how the session keys are agreed and the partition identity signs the
+/// handshake transcript. The suite authenticates the HSM with that identity
 /// and the caller with the role PSK. The discriminant is the wire
 /// `suite_id`.
 #[repr(u32)]
@@ -279,6 +291,8 @@ pub enum HsmPotaEndorsementSource {
 pub enum HsmSessionSuite {
     /// Ephemeral ECDH P-384 key agreement.
     EcdhP384 = 1,
+    /// ML-KEM-1024 with ML-DSA-87 authentication through the ML-DSA certificate bank.
+    MlKem1024MlDsa87 = 2,
 }
 
 /// Length, in bytes, of a partition PSK (Pre-Shared Key). This module is

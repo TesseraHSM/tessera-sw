@@ -30,6 +30,7 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::POLICY_VERSION;
 
@@ -582,6 +583,7 @@ fn part_init_repeated_policy_rejections_preserve_session_and_state() {
 #[derive(Clone, Copy)]
 enum Val<'a> {
     U(u64),
+    N(i64),
     B(&'a [u8]),
 }
 
@@ -600,19 +602,21 @@ fn encode_map(entries: &[(u64, Val<'_>)]) -> Vec<u8> {
         w.uint(*k);
         match v {
             Val::U(u) => w.uint(*u),
+            Val::N(n) => w.nint(*n),
             Val::B(b) => w.bstr(b),
         };
     }
     w.finish()
 }
 
-/// The minimal valid policy entries: version, POTA, SATA, flags.
+/// The minimal valid policy entries: version, POTA, SATA, flags, PTA alg.
 fn minimal_entries() -> Vec<(u64, Val<'static>)> {
     vec![
         (PolicyKey::Version as u64, Val::U(POLICY_VERSION.into())),
         (PolicyKey::PotaSpkiThumbprint as u64, Val::B(&POTA_TP)),
         (PolicyKey::SataSpkiThumbprint as u64, Val::B(&SATA_TP)),
         (PolicyKey::Flags as u64, Val::U(0)),
+        (PolicyKey::PtaAlg as u64, Val::N(POLICY_PTA_ALG_ES384)),
     ]
 }
 
@@ -655,8 +659,12 @@ fn part_init_rejects_malformed_cbor_policies() {
             with_entry(PolicyKey::Version, Val::U(0)),
         ),
         (
-            "version 2".into(),
-            with_entry(PolicyKey::Version, Val::U(2)),
+            "version 1".into(),
+            with_entry(PolicyKey::Version, Val::U(1)),
+        ),
+        (
+            "version 3".into(),
+            with_entry(PolicyKey::Version, Val::U(3)),
         ),
         (
             "version as bstr".into(),
@@ -678,10 +686,24 @@ fn part_init_rejects_malformed_cbor_policies() {
             without_entry(PolicyKey::SataSpkiThumbprint),
         ),
         ("missing flags".into(), without_entry(PolicyKey::Flags)),
+        ("missing pta_alg".into(), without_entry(PolicyKey::PtaAlg)),
+        // Trust-anchor algorithm.
+        (
+            "pta_alg ES256".into(),
+            with_entry(PolicyKey::PtaAlg, Val::N(-7)),
+        ),
+        (
+            "pta_alg ML-DSA-65".into(),
+            with_entry(PolicyKey::PtaAlg, Val::N(-49)),
+        ),
+        (
+            "pta_alg as uint".into(),
+            with_entry(PolicyKey::PtaAlg, Val::U(35)),
+        ),
         // Unknown keys.
-        ("unknown key 10".into(), {
+        ("unknown key 11".into(), {
             let mut e = minimal_entries();
-            e.push((10, Val::U(0)));
+            e.push((11, Val::U(0)));
             encode_map(&e)
         }),
         ("unknown key 0".into(), {
@@ -701,24 +723,25 @@ fn part_init_rejects_malformed_cbor_policies() {
             encode_map(&e)
         }),
         // Non-shortest / indefinite-length heads.
-        ("non-shortest flags value".into(), {
+        ("non-shortest pta_alg value".into(), {
+            // -35 as 0x39 0x00 0x22 instead of 0x38 0x22.
             let mut b = minimal.clone();
-            let last = b.len() - 1;
-            b[last] = 0x18;
-            b.push(0x00);
+            b.truncate(b.len() - 2);
+            b.extend_from_slice(&[0x39, 0x00, 0x22]);
             b
         }),
         ("non-shortest map header".into(), {
-            let mut b = vec![0xB8, 0x04];
+            let mut b = vec![0xB8, 0x05];
             b.extend_from_slice(&minimal[1..]);
             b
         }),
         ("non-shortest bstr length".into(), {
             let mut w = CborWriter::new();
-            w.map(4).uint(1).uint(1).uint(2);
+            w.map(5).uint(1).uint(POLICY_VERSION.into()).uint(2);
             w.raw(&[0x59, 0x00, POLICY_THUMBPRINT_LEN as u8])
                 .raw(&POTA_TP);
             w.uint(3).bstr(&SATA_TP).uint(7).uint(0);
+            w.uint(10).nint(POLICY_PTA_ALG_ES384);
             w.finish()
         }),
         ("indefinite-length map".into(), {

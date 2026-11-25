@@ -77,7 +77,7 @@ pub fn fuzz_tbor_establish_credential(input: FuzzInput) {
             part_policy,
         };
 
-        let resp = ctx.tbor(&req);
+        let resp = ctx.part_init_req(&req);
 
         match (&resp, expect_success) {
             (Err(err @ DdiError::DriverError(_)), _) => panic!("Crash Detected: {err}"),

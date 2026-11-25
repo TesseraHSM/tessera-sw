@@ -79,6 +79,9 @@ pub enum TsraPartPropId {
 
     /// Live security-domain initialization state as tsra_bool; TSRA_BOOL_FALSE when unsupported.
     SdInitialized = 15,
+
+    /// ML-DSA-87 manufacturer certificate chain in PEM format (TBOR only).
+    ManufacturerMlDsaCertChain = 16,
 }
 
 /// UUID structure.
@@ -189,8 +192,13 @@ fn get_partition_prop(
         TsraPartPropId::MaskedOwnerBackupKey => {
             get_property_with_buffer(part_prop, |buf| partition.mobk(buf))
         }
-        TsraPartPropId::ManufacturerCertChain => {
-            let cert_chain = TsraStr::from_string(&partition.cert_chain(0)?);
+        TsraPartPropId::ManufacturerCertChain | TsraPartPropId::ManufacturerMlDsaCertChain => {
+            let pem = if part_prop.id == TsraPartPropId::ManufacturerMlDsaCertChain {
+                partition.cert_chain_mldsa(0)?
+            } else {
+                partition.cert_chain(0)?
+            };
+            let cert_chain = TsraStr::from_string(&pem);
             let cert_chain_bytes = cert_chain.as_bytes();
             // Cert-chain retrieval can race with reset between the C API size
             // query and fetch. Require a larger caller buffer than the current

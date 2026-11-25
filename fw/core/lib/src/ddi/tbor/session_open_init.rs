@@ -4,7 +4,7 @@
 //! TBOR `SessionOpenInit` handler — Phase 1 of session establishment.
 //!
 //! Validates the request, encapsulates to the VM's ephemeral KEM key
-//! (ECDH P-384), hashes the handshake transcript `T1`,
+//! (ECDH P-384 or ML-KEM-1024), hashes the handshake transcript `T1`,
 //! signs it with the partition identity key, derives the handshake
 //! secret `hs` from the KEM secret and the role's PSK, reserves a
 //! `Pending` session slot holding `hs`, `T1` and the transport keys, and
@@ -13,8 +13,8 @@
 //! ```text
 //! T1   = SHA-384("TSRA-SESSION-v1" ‖ BE16(api_major) ‖ BE16(api_minor)
 //!                ‖ suite_id ‖ psk_id ‖ session_type
-//!                ‖ pk_hsm(97) ‖ len16 ‖ pk_init ‖ len16 ‖ enc)
-//! sig  = ECDSA-P384(PID, T1)
+//!                ‖ pk_hsm ‖ len16 ‖ pk_init ‖ len16 ‖ enc)
+//! sig  = ECDSA-P384(PID, T1) or pure ML-DSA-87(PID, T1, empty context)
 //! prk  = HKDF-Extract(salt = "TSRA-SESSION-v1", Z ‖ PSK)
 //! hs   = HKDF-Expand(prk, "tsra-session-hs-v1" ‖ T1, 48)
 //! key ‖ salt = HKDF-Expand-Labeled(hs, "tsra-session-xport-{h2m,m2h}-v1", 36)
@@ -140,10 +140,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Identity + PSK material (all on the scoped allocator) ──
         let psk = load_psk(pal, io, alloc, psk_id)?;
         let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
-        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc).await?;
+        let pk_hsm = if suite == HsmSessionSuite::MlKem1024MlDsa87 {
+            let key_id = crate::part_state::part_id_mldsa_seed_key_id(pal, io)?;
+            super::pta::mldsa87_public_key(pal, io, alloc, key_id).await?
+        } else {
+            load_pk_hsm_sec1(pal, io, alloc).await?
+        };
 
         // ── KEM encapsulation to the VM's ephemeral key ────────────
-        let (enc, z) = ecdh_encapsulate(pal, io, alloc, pk_init).await?;
+        let (enc, z) = encapsulate(pal, io, alloc, suite, pk_init).await?;
 
         // ── Transcript, signature and handshake secret ─────────────
         let major = api_rev.0.to_be_bytes();
@@ -167,7 +172,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             reopen,
         )
         .await?;
-        let sig = sign_transcript(pal, io, alloc, t1).await?;
+        let sig: &[u8] = if suite == HsmSessionSuite::MlKem1024MlDsa87 {
+            let sig = sign_mldsa_transcript(pal, io, alloc, t1).await?;
+            pal.send_oob(io, SESSION_SIGNATURE_OOB_INDEX, sig).await?;
+            &[]
+        } else {
+            sign_transcript(pal, io, alloc, t1).await?
+        };
         let hs = handshake_secret(pal, io, alloc, z, psk, t1).await?;
 
         // ── Pending slot allocation ────────────────────────────────
@@ -267,6 +278,30 @@ async fn load_pk_hsm_sec1<'a, P: HsmPal>(
     Ok(pk_hsm)
 }
 
+/// Encapsulate to the caller's KEM public key, returning `(enc, Z)`.
+async fn encapsulate<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    suite: HsmSessionSuite,
+    pk_init: &HsmDmaBuf,
+) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
+    match suite {
+        HsmSessionSuite::EcdhP384EcdsaP384 => ecdh_encapsulate(pal, io, alloc, pk_init).await,
+        HsmSessionSuite::MlKem1024MlDsa87 => {
+            tsra_fw_core_crypto_hpke::validate_mlkem1024_public_key(pk_init)?;
+            let param = HsmMlKemParamSet::MlKem1024;
+            let pk = HsmMlKemPubKey::Encoded(pk_init);
+            let (ct_len, ss_len) = pal.mlkem_encaps(io, param, pk, None).await?;
+            let enc = alloc.dma_alloc(ct_len)?;
+            let z = alloc.dma_alloc(ss_len)?;
+            pal.mlkem_encaps(io, param, pk, Some((&mut *enc, &mut *z)))
+                .await?;
+            Ok((enc, z))
+        }
+    }
+}
+
 /// Ephemeral ECDH P-384 against the SEC1 point `pk_init`.
 async fn ecdh_encapsulate<'a, P: HsmPal>(
     pal: &P,
@@ -325,20 +360,25 @@ async fn transcript_hash<'a, P: HsmPal>(
     reopen: Option<HsmSessId>,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
     let label = SESSION_TRANSCRIPT_LABEL;
-    let head = alloc.dma_alloc(label.len() + params.len() + pk_hsm.len() + 2)?;
+    let head = alloc.dma_alloc(label.len() + params.len())?;
     let (l, rest) = head.split_at_mut(label.len());
     l.copy_from_slice(label);
-    let (p, rest) = rest.split_at_mut(params.len());
-    p.copy_from_slice(&params);
-    let (k, n) = rest.split_at_mut(pk_hsm.len());
-    k.copy_from_slice(pk_hsm);
-    n.copy_from_slice(&len16(pk_init.len())?);
+    rest.copy_from_slice(&params);
+    let pk_init_len = alloc.dma_alloc(2)?;
+    pk_init_len.copy_from_slice(&len16(pk_init.len())?);
     let enc_len = alloc.dma_alloc(2)?;
     enc_len.copy_from_slice(&len16(enc.len())?);
 
     let state = alloc.dma_alloc(pal.hash_state_size(HsmHashAlgo::Sha384)?)?;
     let mut ctx = pal.hash_begin(io, HsmHashAlgo::Sha384, state)?;
-    for chunk in [head as &HsmDmaBuf, pk_init, enc_len, enc] {
+    for chunk in [
+        head as &HsmDmaBuf,
+        pk_hsm,
+        pk_init_len,
+        pk_init,
+        enc_len,
+        enc,
+    ] {
         pal.hash_continue(io, &mut ctx, chunk).await?;
     }
     if let Some(id) = reopen {
@@ -390,6 +430,36 @@ async fn sign_transcript<'a, P: HsmPal>(
     let sig = byte_order::pair_to_be::<P>(CURVE, sig)?;
     if sig.len() != SIG_LEN {
         return Err(HsmError::InvalidArg);
+    }
+    Ok(sig)
+}
+
+/// Pure ML-DSA-87 over the domain-separated transcript hash, with empty context.
+async fn sign_mldsa_transcript<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    t1: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let key_id = crate::part_state::part_id_mldsa_seed_key_id(pal, io)?;
+    let seed = pal.vault_key(io, key_id)?;
+    if seed.len() != MLDSA_SEED_LEN {
+        return Err(HsmError::InternalError);
+    }
+    let sig = alloc.dma_alloc(SESSION_MLDSA87_SIG_LEN)?;
+    let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 0, t1)?;
+    let written = pal
+        .mldsa_sign(
+            io,
+            HsmMlDsaParamSet::MlDsa87,
+            HsmMlDsaPrivKey::Seed(seed),
+            HsmMlDsaHedge::Required,
+            msg,
+            Some(sig),
+        )
+        .await?;
+    if written != SESSION_MLDSA87_SIG_LEN {
+        return Err(HsmError::InternalError);
     }
     Ok(sig)
 }

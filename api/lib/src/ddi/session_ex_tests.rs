@@ -34,8 +34,30 @@ fn certificate(
     ca: bool,
     extensions: &[(&str, &[u8])],
 ) -> (X509, PKey<Private>) {
-    let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("curve");
-    let key = PKey::from_ec_key(EcKey::generate(&group).expect("key")).expect("PKey");
+    certificate_with_algorithm(name, issuer, ca, extensions, false)
+}
+
+fn certificate_with_algorithm(
+    name: &str,
+    issuer: Option<(&X509, &PKey<Private>)>,
+    ca: bool,
+    extensions: &[(&str, &[u8])],
+    post_quantum: bool,
+) -> (X509, PKey<Private>) {
+    let key = if post_quantum {
+        let id = openssl::pkey::Id::from_raw(
+            Asn1Object::from_str("2.16.840.1.101.3.4.3.19")
+                .expect("ML-DSA-87 OID")
+                .nid()
+                .as_raw(),
+        );
+        let mut ctx = openssl::pkey_ctx::PkeyCtx::new_id(id).expect("ML-DSA context");
+        ctx.keygen_init().expect("keygen init");
+        ctx.keygen().expect("ML-DSA key")
+    } else {
+        let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("curve");
+        PKey::from_ec_key(EcKey::generate(&group).expect("key")).expect("PKey")
+    };
     let mut subject = X509NameBuilder::new().expect("name builder");
     subject.append_entry_by_text("CN", name).expect("CN");
     let subject = subject.build();
@@ -74,8 +96,13 @@ fn certificate(
         .expect("extension");
         cert.append_extension(extension).expect("extension");
     }
-    cert.sign(issuer.map_or(&key, |(_, key)| key), MessageDigest::sha384())
-        .expect("sign certificate");
+    let signer = issuer.map_or(&key, |(_, key)| key);
+    let digest = if signer.id() == openssl::pkey::Id::EC {
+        MessageDigest::sha384()
+    } else {
+        MessageDigest::null()
+    };
+    cert.sign(signer, digest).expect("sign certificate");
     (cert.build(), key)
 }
 
@@ -207,4 +234,54 @@ fn root_profile_requires_an_authentic_self_signature_not_just_a_matching_key() {
     der[offset + 4] = 0; // Forge layer zero without possessing the trusted root key.
     let forged = X509::from_der(&der).expect("forged root DER");
     rejected(&chain(&[&leaf, &forged]), &root_pin(&root));
+}
+
+#[test]
+fn pq_session_authenticates_a_pinned_mldsa87_certificate_path() {
+    let suite = SessionSuite::MlKem1024MlDsa87;
+    let (root, root_key) = certificate_with_algorithm("PQ root", None, true, &[], true);
+    let (device, device_key) =
+        certificate_with_algorithm("PQ device", Some((&root, &root_key)), true, PROFILE, true);
+    let (leaf, _) =
+        certificate_with_algorithm("PQ PID", Some((&device, &device_key)), false, &[], true);
+    let pem = chain(&[&leaf, &device, &root]);
+    let pin = root_pin(&root);
+    let key = validate_session_cert_chain(&pem, &pin, suite).expect("authenticated PQ PID");
+    assert!(matches!(key, SessionIdentityKey::MlDsa87(_)));
+    assert!(matches!(
+        validate_session_cert_chain(&pem, &pin, SessionSuite::EcdhP384),
+        Err(HsmError::InvalidSignature)
+    ));
+    let mut wrong_pin = pin;
+    wrong_pin[0] ^= 1;
+    assert!(matches!(
+        validate_session_cert_chain(&pem, &wrong_pin, suite),
+        Err(HsmError::InvalidSignature)
+    ));
+    let mut corrupt_root = root.to_der().expect("DER");
+    *corrupt_root.last_mut().expect("signature") ^= 1;
+    let corrupt_root = X509::from_der(&corrupt_root).expect("intact root DER");
+    assert!(matches!(
+        validate_session_cert_chain(&chain(&[&leaf, &device, &corrupt_root]), &pin, suite),
+        Err(HsmError::InvalidSignature)
+    ));
+}
+
+#[test]
+fn pq_session_rejects_classical_issuers_even_with_a_valid_pq_leaf_and_root_pin() {
+    for pq_root in [false, true] {
+        let (root, root_key) = certificate_with_algorithm("root", None, true, &[], pq_root);
+        let (device, device_key) =
+            certificate("classical device", Some((&root, &root_key)), true, PROFILE);
+        let (leaf, _) =
+            certificate_with_algorithm("PQ PID", Some((&device, &device_key)), false, &[], true);
+        assert!(matches!(
+            validate_session_cert_chain(
+                &chain(&[&leaf, &device, &root]),
+                &root_pin(&root),
+                SessionSuite::MlKem1024MlDsa87,
+            ),
+            Err(HsmError::InvalidSignature)
+        ));
+    }
 }

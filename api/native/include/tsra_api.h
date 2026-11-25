@@ -23,6 +23,21 @@
 #define TSRA_AES_GCM_TAG_SIZE 16
 
 /*
+ DARC key-exchange KEM: DHKEM(P-384, HKDF-SHA384).
+ */
+#define TSRA_TRANSFER_KEM_P384 0
+
+/*
+ DARC key-exchange KEM: ML-KEM-1024 (HPKE-13).
+ */
+#define TSRA_TRANSFER_KEM_MLKEM1024 1
+
+/*
+ DARC key-exchange KEM: MLKEM1024-P384 hybrid (HPKE-10).
+ */
+#define TSRA_TRANSFER_KEM_MLKEM1024_P384 2
+
+/*
  Length, in bytes, of a partition PSK (Pre-Shared Key). This module is
  shared with the native crate (which does not depend on the wire-types
  crate), so the value is a literal here and pinned to the wire-schema
@@ -610,6 +625,10 @@ enum tsra_part_prop_id
      Live security-domain initialization state as tsra_bool; TSRA_BOOL_FALSE when unsupported.
      */
     TSRA_PART_PROP_ID_SD_INITIALIZED = 15,
+    /*
+     ML-DSA-87 manufacturer certificate chain in PEM format (TBOR only).
+     */
+    TSRA_PART_PROP_ID_MANUFACTURER_ML_DSA_CERT_CHAIN = 16,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_part_prop_id;
@@ -620,8 +639,8 @@ typedef uint32_t tsra_part_prop_id;
  by the caller when opening a session via `open_session_ex`.
 
  Every such session encrypts its in-session traffic; the suite picks
- how the session keys are agreed. The suite authenticates the HSM with
- its partition identity key (ECDSA P-384 over the handshake transcript)
+ how the session keys are agreed and the partition identity signs the
+ handshake transcript. The suite authenticates the HSM with that identity
  and the caller with the role PSK. The discriminant is the wire
  `suite_id`.
  */
@@ -634,6 +653,10 @@ enum tsra_session_suite
      Ephemeral ECDH P-384 key agreement.
      */
     TSRA_SESSION_SUITE_ECDH_P384 = 1,
+    /*
+     ML-KEM-1024 with ML-DSA-87 authentication through the ML-DSA certificate bank.
+     */
+    TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87 = 2,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_session_suite;
@@ -882,9 +905,15 @@ struct tsra_darc_tmk_export_params
      */
     const struct tsra_buffer *policy;
     /*
-     DATA-anchored target certificate chain (1..=2 certs).
+     DATA-anchored target PID certificate chain (1..=3 certs).
      */
     struct tsra_darc_cert_chain target_cert_chain;
+    /*
+     Target PID's key report over its DARC KEX key (from
+     `tsra_darc_kex_key_report` on the masked KEX key), at most
+     8192 B.
+     */
+    const struct tsra_buffer *target_key_report;
 };
 
 /*
@@ -893,8 +922,8 @@ struct tsra_darc_tmk_export_params
 struct tsra_darc_tmk_import_params
 {
     /*
-     Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (280 B).
+     Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`); its KEM
+     selects the HPKE suite.
      */
     const struct tsra_buffer *masked_kex_key;
     /*
@@ -904,8 +933,8 @@ struct tsra_darc_tmk_import_params
      */
     const struct tsra_buffer *policy;
     /*
-     Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-     (367 B), including the PID signature.
+     Complete PID-signed sealed TMK (from `tsra_darc_tmk_export`),
+     367/1838/1935 B with ES384 or 4899/6370/6467 B with ML-DSA-87.
      */
     const struct tsra_buffer *sealed_tmk;
     /*
@@ -1348,6 +1377,13 @@ struct tsra_sd_create_remote_backup_params
      otherwise.
      */
     const struct tsra_sd_evidence *receiver_evidence;
+    /*
+     Optional receiver key report (COSE_Sign1, ES384) signed by the
+     receiver chain leaf over a PQ sealing key (ML-KEM-1024 or
+     MLKEM1024-P384). The backup is sealed to that key instead of the
+     leaf's P-384 key. Pass null to seal to the leaf key.
+     */
+    const struct tsra_buffer *receiver_key_report;
 };
 
 /*
@@ -1380,7 +1416,8 @@ struct tsra_sd_reseal_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the source backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the source backup: 280 B (P-384), 296 B (ML-KEM-1024) or
+     264 B (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
@@ -1392,8 +1429,7 @@ struct tsra_sd_reseal_remote_backup_params
      */
     const struct tsra_sd_evidence *dest_evidence;
     /*
-     Source remote backup to reseal, exactly `POK_REMOTE_BACKUP_LEN`
-     (431 B), including its PID signature.
+     Complete PID-signed source backup, including its encrypted envelope.
      */
     const struct tsra_buffer *src_remote_backup;
 };
@@ -1409,12 +1445,12 @@ struct tsra_sd_restore_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the backup: 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+     (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
-     Report signer PID public key as DER SPKI. Currently only canonical
-     uncompressed P-384 SPKI (120 bytes) is supported.
+     Signer PID as canonical P-384 (120 B) or ML-DSA-87 (2614 B) DER SPKI.
      */
     const struct tsra_buffer *sender_pid_pub_key;
     /*
@@ -1423,7 +1459,7 @@ struct tsra_sd_restore_remote_backup_params
      */
     const struct tsra_sd_identity_evidence *sender_evidence;
     /*
-     Signed remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
+     Complete PID-signed remote backup to restore.
      */
     const struct tsra_buffer *src_remote_backup;
     /*
@@ -1464,7 +1500,8 @@ struct tsra_sd_restore_peer_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
+     unseals the backup: 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+     (MLKEM1024-P384).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
@@ -1472,7 +1509,7 @@ struct tsra_sd_restore_peer_backup_params
      */
     const struct tsra_sd_identity_evidence *src_evidence;
     /*
-     Signed peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
+     Complete PID-signed peer backup to restore.
      */
     const struct tsra_buffer *pok_peer_backup;
     /*
@@ -2238,22 +2275,26 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
 /*
  @brief Generate a DARC key-exchange (KEX) key
 
- Generates a new DARC key-exchange key (ECC-P384) on the calling
- session's partition and returns the masked private key plus its raw
- P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
- the target it yields the HPKE recipient key. The source uses its PID
- to authenticate export reports. The key is not stored on the
- device.
+ Generates a new DARC key-exchange key for `kem` on the calling
+ session's partition and returns the masked private key plus its public
+ key: for P-384 the raw `x ‖ y` point (96 B, big-endian per coordinate),
+ for ML-KEM-1024 the 1568-byte encapsulation key, for MLKEM1024-P384 the
+ 1665-byte `ek_PQ ‖ SEC1 point`. Run on the target it yields the HPKE
+ recipient key; the exporter authenticates it through the target PID's
+ key report over the masked key (`tsra_darc_kex_key_report`). The key is not
+ stored on the device.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
+ @param[in] kem Recipient KEM (`TSRA_TRANSFER_KEM_*`)
  @param[in,out] masked_key Output buffer for the masked KEX private key
-                (`MASKED_KEX_KEY_LEN`, 280 B)
- @param[in,out] pub_key Output buffer for the raw P-384 public key
-                (`KEX_PUB_KEY_LEN`, 96 B)
+                (at most `MASKED_KEX_KEY_MAX_LEN`, 296 B)
+ @param[in,out] pub_key Output buffer for the public key
+                (at most `KEX_PUB_KEY_MAX_LEN`, 1665 B)
 
- Both output buffers follow the probe/fill convention and are validated
- **before** the round-trip.
+ Both output buffers follow the probe/fill convention: their
+ `KEM`-independent maximum sizes are validated **before** the round-trip
+ and the actual lengths are returned on success.
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2266,8 +2307,39 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
 tsra_status tsra_darc_kex_key_gen(
     tsra_handle sess_handle,
     uint8_t scope,
+    uint8_t kem,
     struct tsra_buffer *masked_key,
     struct tsra_buffer *pub_key
+);
+
+/*
+ @brief Attest a DARC key-exchange (KEX) key
+
+ Signs a key report with the partition PID over a masked KEX key from
+ `tsra_darc_kex_key_gen`. The exporter passes it as `target_key_report`
+ to `tsra_darc_tmk_export`.
+
+ @param[in] sess_handle Handle to the security-domain session
+ @param[in] masked_kex_key Masked KEX private key
+ @param[in] report_data Exactly 128 bytes of caller data bound into the report
+ @param[in,out] report Output buffer for the report. Probe/fill validates
+                the maximum report size before issuing the command, then
+                returns the actual length on success.
+
+ @return `TsraStatus` indicating the result of the operation
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `masked_kex_key` and `report_data` must be valid `tsra_buffer`s.
+ - `report` must be a valid `tsra_buffer` with writable backing storage
+   of the advertised length.
+ */
+tsra_status tsra_darc_kex_key_report(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *masked_kex_key,
+    const struct tsra_buffer *report_data,
+    struct tsra_buffer *report
 );
 
 /*
@@ -2300,7 +2372,8 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Export input buffers
  @param[in,out] sealed_tmk Output buffer for the sealed TMK
-                (`SEALED_TMK_LEN`, 367 B), including the PID signature.
+                Capacity must be at least `SEALED_TMK_MAX_LEN` (6467 B).
+                The returned length is the complete signed artifact's actual size.
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -3120,7 +3193,9 @@ tsra_status tsra_part_get_prop(tsra_handle handle, struct tsra_part_prop *part_p
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-backup input buffers
  @param[in,out] pok_remote_backup Output buffer for the remote
-                partition-owner-key backup (431 B), including its PID signature.
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (6531 B). The written length includes the encrypted envelope
+                and PID signature and depends on both algorithms.
  @param[in,out] pok_local_backup Output buffer for the local
                 partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the security-domain
@@ -3159,7 +3234,8 @@ tsra_status tsra_sd_create_remote_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Reseal-backup input buffers
  @param[in,out] dst_remote_backup Output buffer for the resealed remote
-                partition-owner-key backup (431 B), including its PID signature.
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (6531 B), including the PID signature.
 
  The output buffer follows the probe/fill convention and is validated
  **before** the reseal is performed.
@@ -3228,7 +3304,8 @@ tsra_status tsra_sd_restore_remote_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-peer-backup input buffers
  @param[in,out] pok_peer_backup Output buffer for the peer
-                partition-owner-key backup (431 B), including its PID signature.
+                partition-owner-key backup; reserve `POK_REMOTE_BACKUP_MAX_LEN`
+                (6531 B), including the PID signature.
 
  The output buffer follows the probe/fill convention and is validated
  **before** the peer backup is created.
@@ -3368,6 +3445,9 @@ tsra_status tsra_sess_close(tsra_handle handle);
  session. `psk` selects the role slot and (optionally) the PSK, and
  `suite` selects the key-establishment suite. Every session encrypts
  its in-session traffic under keys agreed during the handshake.
+ ECDH P-384 uses ECDSA P-384 authentication;
+ ML-KEM-1024/ML-DSA-87 uses the ML-DSA-87 PID and certificate bank.
+ Its root pin must identify that bank's independently trusted root.
 
  @param[in] dev_handle Handle to the HSM partition
  @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the

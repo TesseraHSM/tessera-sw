@@ -14,6 +14,8 @@ use tsra_crypto::AesKey;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::aead_envelope::{self};
 use tsra_crypto::*;
+use tsra_ddi::DdiResult;
+use tsra_ddi::TborOobItem;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_interface::DdiError;
@@ -54,12 +56,17 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::POLICY_VERSION;
 use tsra_ddi_tbor_types::PolicyFlags;
 use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::ReportDescriptor;
+use tsra_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
+use tsra_ddi_tbor_types::SD_BACKUP_REPORT_OOB_INDEX;
 use tsra_ddi_tbor_types::TborKeyReportReq;
+use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
@@ -613,6 +620,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
     let mut flags = None;
     let mut info = None;
     let mut data = None;
+    let mut pta_alg = None;
     for _ in 0..entries {
         match d.u64().ok()? {
             k if k == PolicyKey::Version as u64 => version = Some(d.u64().ok()?),
@@ -626,6 +634,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
             k if k == PolicyKey::Flags as u64 => flags = Some(d.u64().ok()?),
             k if k == PolicyKey::Info as u64 => info = Some(d.bytes().ok()?.to_vec()),
             k if k == PolicyKey::DataSpkiThumbprint as u64 => data = Some(array(&mut d)?),
+            k if k == PolicyKey::PtaAlg as u64 => pta_alg = Some(d.i64().ok()?),
             _ => return None,
         }
     }
@@ -655,6 +664,7 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
         flags,
         info,
         data_spki_thumbprint: data,
+        pta_alg: pta_alg.filter(|a| [POLICY_PTA_ALG_ES384, POLICY_PTA_ALG_MLDSA87].contains(a))?,
     })
 }
 
@@ -677,6 +687,106 @@ pub fn add_evidence_item(oob_items: &mut Vec<Vec<u8>>, der: &[u8]) -> CertDescri
     CertDescriptor {
         index,
         length: length.into(),
+    }
+}
+
+/// Fresh SD backup OOB item list with the report output slot
+/// ([`SD_BACKUP_REPORT_OOB_INDEX`]) reserved; inputs start at index 1.
+/// The placeholder is nonempty so restore can reuse the list as inputs.
+pub fn sd_oob_items() -> Vec<Vec<u8>> {
+    vec![vec![0]]
+}
+
+pub trait SdReportLen {
+    fn sd_report_len(&self) -> usize;
+}
+
+macro_rules! sd_report_len {
+    ($($ty:ty),* $(,)?) => {
+        $(impl SdReportLen for $ty {
+            fn sd_report_len(&self) -> usize {
+                usize::from(self.report_len.get())
+            }
+        })*
+    };
+}
+
+sd_report_len! {
+    TborSdCreateRemoteBackupResp,
+    TborSdCreatePeerBackupResp,
+    TborSdResealRemoteBackupResp,
+    TborDarcTmkExportResp,
+}
+
+/// Issue SD backup-family commands whose OOB item
+/// [`SD_BACKUP_REPORT_OOB_INDEX`] is the report output slot; `items[0]`
+/// (reserved by [`sd_oob_items`]) is replaced by a fresh output buffer.
+pub trait SdOob {
+    fn sd_oob<R: TborOpReq>(&self, req: &R, items: &[&[u8]]) -> DdiResult<R::OpResp>
+    where
+        R::OpResp: SdReportLen,
+    {
+        self.sd_oob_report(req, items).map(|(resp, _)| resp)
+    }
+
+    /// Like [`SdOob::sd_oob`], but return the complete signed artifact,
+    /// truncated to the response's `report_len`.
+    fn sd_oob_report<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+    ) -> DdiResult<(R::OpResp, Vec<u8>)>
+    where
+        R::OpResp: SdReportLen;
+
+    #[track_caller]
+    fn expect_sd_reject<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+        expected: TborStatus,
+    ) -> DdiError;
+}
+
+impl SdOob for TestCtx {
+    fn sd_oob_report<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+    ) -> DdiResult<(R::OpResp, Vec<u8>)>
+    where
+        R::OpResp: SdReportLen,
+    {
+        let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+        let mut oob = vec![TborOobItem::Out(&mut report)];
+        oob.extend(
+            items
+                .iter()
+                .skip(SD_BACKUP_REPORT_OOB_INDEX + 1)
+                .map(|item| TborOobItem::In(item)),
+        );
+        let resp = self.tbor_oob_io(req, &mut oob)?;
+        drop(oob);
+        report.truncate(resp.sd_report_len());
+        Ok((resp, report))
+    }
+
+    #[track_caller]
+    fn expect_sd_reject<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+        expected: TborStatus,
+    ) -> DdiError {
+        let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+        let mut oob = vec![TborOobItem::Out(&mut report)];
+        oob.extend(
+            items
+                .iter()
+                .skip(SD_BACKUP_REPORT_OOB_INDEX + 1)
+                .map(|item| TborOobItem::In(item)),
+        );
+        self.expect_fw_reject_oob_io(req, &mut oob, expected)
     }
 }
 
@@ -725,8 +835,7 @@ pub fn seal_darc_transfer(
         tmk,
     )
     .expect("seal TMK");
-    let (x, y) = sealed.enc.coord_vec().expect("encapsulated coordinates");
-    let payload = [header, vec![4], x, y, sealed.ct].concat();
+    let payload = [header, sealed.enc, sealed.ct].concat();
     let protected = b"\xa1\x01\x38\x22";
     let external_aad: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
     let mut input = minicbor::Encoder::new(Vec::new());
@@ -777,6 +886,7 @@ pub fn import_darc_tmk(
         .tbor(&TborDarcKexKeyGenReq {
             session_id,
             scope: KEY_SCOPE_LOCAL,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("DarcKexKeyGen");
     let mut recipient_be = kex.pub_key;
@@ -796,13 +906,17 @@ pub fn import_darc_tmk(
         .iter()
         .map(|der| add_evidence_item(&mut evidence, der))
         .collect();
+    let artifact = add_evidence_item(&mut evidence, &sealed_tmk);
     let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
     ctx.tbor_oob(
         &TborDarcTmkImportReq {
             session_id,
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
-            sealed_tmk,
+            sealed_tmk: ReportDescriptor {
+                index: artifact.index,
+                length: artifact.length,
+            },
             remote_cert_chain,
         },
         &oob,
@@ -856,10 +970,11 @@ pub fn create_test_security_domain_with_custom_policy(
         .tbor(&TborSdSealingKeyGenReq {
             session_id: session.session_id,
             scope: KEY_SCOPE_LOCAL,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("local SD sealing-key generation should succeed");
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id: session.session_id,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
@@ -870,11 +985,14 @@ pub fn create_test_security_domain_with_custom_policy(
     let mut receiver_pub = sealing_key.pub_key;
     dev_rev_in_place(&mut receiver_pub[..COORD_LEN]);
     dev_rev_in_place(&mut receiver_pub[COORD_LEN..]);
-    let receiver = make_chain(&sata, &receiver_pub);
+    let receiver = make_chain(
+        &sata,
+        receiver_pub.as_slice().try_into().expect("P384 public key"),
+    );
     let mfgr = make_chain(&CaKey::generate(), &pid_pub);
     let owner = make_chain(&CaKey::generate(), &pid_pub);
     let partition_owner = make_chain(&sata, &pid_pub);
-    let mut oob_items = Vec::new();
+    let mut oob_items = sd_oob_items();
     let receiver_chain = vec![
         add_evidence_item(&mut oob_items, &receiver.root_der),
         add_evidence_item(&mut oob_items, &receiver.leaf_der),
@@ -891,12 +1009,13 @@ pub fn create_test_security_domain_with_custom_policy(
         add_evidence_item(&mut oob_items, &partition_owner.root_der),
         add_evidence_item(&mut oob_items, &partition_owner.leaf_der),
     ];
-    let report_descriptor = add_evidence_item(&mut oob_items, &report.report);
+    let report_descriptor = add_evidence_item(&mut oob_items, &report);
     let oob = oob_items.iter().map(Vec::as_slice).collect::<Vec<_>>();
 
     let req = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
         receiver_cert_chain: receiver_chain,
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: mfgr_chain,
         receiver_owner_cert_chain: owner_chain,
         receiver_part_owner_cert_chain: partition_owner_chain,
@@ -906,7 +1025,7 @@ pub fn create_test_security_domain_with_custom_policy(
         },
         policy: policy.clone(),
     };
-    ctx.tbor_oob(&req, &oob)
+    ctx.sd_oob(&req, &oob)
         .expect("test security-domain creation should succeed");
     SecurityDomainFixture { pota, policy }
 }
@@ -920,6 +1039,7 @@ pub fn exercise_non_partition_key_scope(
     let req = TborSdSealingKeyGenReq {
         session_id: session.session_id,
         scope: scope.to_tbor(),
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     };
     match scope {
         KeyScope::SecurityDomain => {

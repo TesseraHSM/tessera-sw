@@ -60,22 +60,27 @@ key, complete output envelope, and the same request SD policy hash.
 | Field | Shape | Meaning |
 |---|---|---|
 | `session_id` | Inline session ID | Active CO session |
-| `masked_sealing_key` | 280 B, aligned to 4 B | Actual source-envelope recipient key |
+| `masked_sealing_key` | 264 / 280 / 296 B, aligned to 4 B | Actual source-envelope recipient key |
 | `policy` | 1-384 B | Client SD policy |
 | `src_evidence` | Three chain descriptor lists | POTA-authorized source PID identity |
 | `dest_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized destination `PublicKey` evidence |
-| `src_remote_backup` | 431 B | Complete signed source Base envelope |
+| `src_remote_backup` | 3 B report descriptor | OOB complete signed source artifact; 431 / 1902 / 1999 / 4963 / 6434 / 6531 B |
 
 Source identity expands to three TOC entries; destination evidence expands
 to four. Referenced certificates and the recipient report travel out of band.
+
+Out-of-band item 0 is the complete signed-backup output: reserve at least 6531 B
+(`SD_BACKUP_REPORT_MAX_LEN`). Evidence input descriptors therefore index
+from 1. `report_len` gives the bytes written; firmware writes the report
+only on success.
 
 ## Response
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `dst_remote_backup` | 431 B | One fresh SA-PID-signed Base envelope |
+| `report_len` | `U16` inline | Length of the single fresh SA-PID-signed backup in OOB item 0; 431 / 1902 / 1999 / 4963 / 6434 / 6531 B |
 
-See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+See [transfer format](key_report.md#transfer-envelope-binding).
 The direct source signature, transfer kind, PID thumbprint, recipient thumbprint,
 and client policy are verified **before HPKE decapsulation**. A different
 source key's `PublicKey` report cannot authorize a transfer. Failures do not

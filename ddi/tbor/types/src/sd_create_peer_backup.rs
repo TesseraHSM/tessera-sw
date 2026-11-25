@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
 use crate::sd_create_remote_backup::MASKED_SD_LEN;
-use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::tbor;
+use crate::tbor_int::U16;
 use crate::CertDescriptor;
 
 /// TBOR opcode for `SdCreatePeerBackup`.
@@ -75,10 +75,9 @@ pub struct TborSdCreatePeerBackupReq {
 #[tbor(response)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TborSdCreatePeerBackupResp {
-    /// Peer backup: a PID-signed HPKE Base seal of BKS3 (exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] = 431 B on the wire; the firmware schema is
-    /// the length authority).  A fixed-length `[u8; N]` field.
-    pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Bytes of the complete signed backup written to out-of-band item
+    /// [`SD_BACKUP_REPORT_OOB_INDEX`](crate::SD_BACKUP_REPORT_OOB_INDEX).
+    pub report_len: U16,
 }
 
 #[cfg(test)]

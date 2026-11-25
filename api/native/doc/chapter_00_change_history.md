@@ -70,5 +70,13 @@
 |            | Encrypted session responses are bound to their request IV     |
 |            | using implicit 32-byte AAD; SDK and firmware must be updated   |
 |            | together. Out-of-order completions remain supported.           |
+|            | Added `TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87` for ML-DSA-87     |
+|            | session authentication and ML-KEM-1024 key agreement (suite 2). |
+|            | Its PEM chain is available as                                 |
+|            | `TSRA_PART_PROP_ID_MANUFACTURER_ML_DSA_CERT_CHAIN`.              |
+|            | DARC supports P-384, ML-KEM-1024 and MLKEM1024-P384 recipients. |
+|            | Added `kem` to `tsra_darc_kex_key_gen`, required                |
+|            | `target_key_report` to export, and `tsra_darc_kex_key_report`. |
+|            | Export/import exchange one complete PID-signed artifact.      |
 
 \pagebreak

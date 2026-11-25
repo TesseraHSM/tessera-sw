@@ -6,6 +6,7 @@
 #[path = "../../common.rs"]
 mod common;
 
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -23,8 +24,7 @@ const REPEAT_COUNT_VARIANTS: u8 = 3;
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum Fault {
-    ValidSelfPeer,
-    ValidDistinctKeys,
+    Valid,
     Repeat,
     NotFinalized,
     MissingOob,
@@ -94,7 +94,7 @@ fn make_evidence(
     recipient_pub: &[u8; RAW_PUB_LEN],
     report_bytes: &[u8],
 ) -> Evidence {
-    let mut oob = Vec::new();
+    let mut oob = common::sd_oob_items();
     let receiver = push_chain(&mut oob, &make_chain(sata, recipient_pub));
     let mfgr = push_chain(&mut oob, &make_chain(&CaKey::generate(), pid_pub));
     let owner = push_chain(&mut oob, &make_chain(&CaKey::generate(), pid_pub));
@@ -116,7 +116,7 @@ fn make_evidence(
 
 /// Convert a wire-LE P-384 public key into big-endian `x || y` bytes for
 /// the receiver certificate fixture.
-fn public_key_be(wire_le: &[u8; SD_SEALING_PUB_KEY_LEN]) -> [u8; SD_SEALING_PUB_KEY_LEN] {
+fn public_key_be(wire_le: &[u8]) -> [u8; SD_SEALING_PUB_KEY_LEN] {
     let mut out = [0u8; SD_SEALING_PUB_KEY_LEN];
     for i in 0..common::EccCurve::P384.coord_len() {
         out[i] = wire_le[common::EccCurve::P384.coord_len() - 1 - i];
@@ -153,20 +153,20 @@ fn build_policy(
 /// Submit a peer-backup request and check the response length, nonzero
 /// contents, and uncompressed P-384 HPKE encapsulated-key prefix.
 fn checked_success(ctx: &TestCtx, req: &TborSdCreatePeerBackupReq, oob: &[&[u8]]) {
-    let response = ctx
-        .tbor_oob(req, oob)
+    let (_response, report) = ctx
+        .sd_oob_report(req, oob)
         .expect("SdCreatePeerBackup should succeed for a valid fixture");
     assert_eq!(
-        response.pok_peer_backup.len(),
+        report.len(),
         POK_REMOTE_BACKUP_LEN,
         "peer backup response must have the schema length",
     );
     assert!(
-        response.pok_peer_backup.iter().any(|&byte| byte != 0),
+        report.iter().any(|&byte| byte != 0),
         "peer backup response must not be all zero",
     );
     assert_eq!(
-        response.pok_peer_backup[COSE_PAYLOAD_OFFSET + SD_TRANSFER_HEADER_LEN],
+        report[COSE_PAYLOAD_OFFSET + SD_TRANSFER_HEADER_LEN],
         SEC1_UNCOMPRESSED,
         "HPKE encapsulated key must begin with an uncompressed P-384 point",
     );
@@ -243,10 +243,11 @@ fuzz_target!(|input: FuzzInput| {
             .tbor(&TborSdSealingKeyGenReq {
                 session_id: session.session_id,
                 scope: input.key_scope.to_tbor(),
+                kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
             })
             .expect("recipient SdSealingKeyGen should succeed");
         let report = ctx
-            .tbor(&TborKeyReportReq {
+            .key_report(&TborKeyReportReq {
                 session_id: session.session_id,
                 masked_key: recipient.masked_key.to_vec(),
                 report_data: input.report_data,
@@ -255,11 +256,12 @@ fuzz_target!(|input: FuzzInput| {
             .expect("recipient KeyReport should succeed");
         let recipient_pub = public_key_be(&recipient.pub_key);
 
-        let mut evidence = make_evidence(&sata, &pota, &pid_pub, &recipient_pub, &report.report);
+        let mut evidence = make_evidence(&sata, &pota, &pid_pub, &recipient_pub, &report);
 
         let remote_req = TborSdCreateRemoteBackupReq {
             session_id: session.session_id,
             receiver_cert_chain: evidence.receiver.clone(),
+            receiver_key_report: Vec::new(),
             receiver_mfgr_cert_chain: evidence.mfgr.clone(),
             receiver_owner_cert_chain: evidence.owner.clone(),
             receiver_part_owner_cert_chain: evidence.part_owner.clone(),
@@ -268,7 +270,7 @@ fuzz_target!(|input: FuzzInput| {
         };
         let oob = evidence.oob_slices();
         let local_backup = ctx
-            .tbor_oob(&remote_req, &oob)
+            .sd_oob(&remote_req, &oob)
             .expect("SdCreateRemoteBackup fixture must create a valid local backup")
             .pok_local_backup;
 
@@ -364,17 +366,15 @@ fuzz_target!(|input: FuzzInput| {
                     })
                     .expect("wrong-kind destination key");
                 let report = ctx
-                    .tbor(&TborKeyReportReq {
+                    .key_report(&TborKeyReportReq {
                         session_id: session.session_id,
                         masked_key: replacement.masked_key.to_vec(),
                         report_data: input.report_data,
                         auth_envelope: Vec::new(),
                     })
                     .expect("wrong-kind destination report");
-                evidence.report.length = u16::try_from(report.report.len())
-                    .expect("report length")
-                    .into();
-                evidence.oob[usize::from(evidence.report.index)] = report.report;
+                evidence.report.length = u16::try_from(report.len()).expect("report length").into();
+                evidence.oob[usize::from(evidence.report.index)] = report;
                 req.dst_report = evidence.report;
             }
             Fault::InvalidBackupTag if !mutation_is_noop => {
@@ -387,9 +387,12 @@ fuzz_target!(|input: FuzzInput| {
                     .tbor(&TborSdSealingKeyGenReq {
                         session_id: session.session_id,
                         scope: common::KeyScope::Local.to_tbor(),
+                        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
                     })
                     .expect("wrong-kind envelope fixture should be valid")
-                    .masked_key;
+                    .masked_key
+                    .try_into()
+                    .expect("P-384 masked sealing key is MASKED_SD_LEN bytes");
             }
             _ => {}
         }
@@ -436,11 +439,11 @@ fuzz_target!(|input: FuzzInput| {
                 let oob = evidence.oob_slices();
                 if matches!(input.fault, Fault::InactiveCoSession) {
                     let err = ctx
-                        .tbor_oob(&req, &oob)
+                        .sd_oob(&req, &oob)
                         .expect_err("closed session must be rejected");
                     assertions::assert_session_rejects(&err, status);
                 } else {
-                    ctx.expect_fw_reject_oob(&req, &oob, status);
+                    ctx.expect_sd_reject(&req, &oob, status);
                 }
             }
         }

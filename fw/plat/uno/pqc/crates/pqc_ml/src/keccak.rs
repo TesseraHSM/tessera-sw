@@ -234,7 +234,19 @@ impl ShakeCtx {
     }
 
     pub fn finalize(&mut self) {
-        self.st.xor_bytes(&[0x1F], self.pos);
+        self.finalize_with(0x1F);
+    }
+
+    /// Finalize with the SHA-3 domain padding (0x06) rather than SHAKE's.
+    ///
+    /// On a [`shake256_init`] sponge (rate 136) the first 32 squeezed bytes
+    /// are then SHA3-256 of the absorbed message.
+    pub fn finalize_sha3(&mut self) {
+        self.finalize_with(0x06);
+    }
+
+    fn finalize_with(&mut self, pad: u8) {
+        self.st.xor_bytes(&[pad], self.pos);
         self.st.xor_bytes(&[0x80], self.rate - 1);
         self.st.permute();
         self.pos = 0;
@@ -397,4 +409,39 @@ pub fn sha3_256_init() -> Sha3Ctx {
 /// SHA3-512 incremental context.
 pub fn sha3_512_init() -> Sha3Ctx {
     Sha3Ctx::new(SHA3_512_RATE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FIPS 202 SHA3-256 of "abc".
+    const SHA3_256_ABC: [u8; 32] = [
+        0x3a, 0x98, 0x5d, 0xa7, 0x4f, 0xe2, 0x25, 0xb2, 0x04, 0x5c, 0x17, 0x2d, 0x6b, 0xd3, 0x90,
+        0xbd, 0x85, 0x5f, 0x08, 0x6e, 0x3e, 0x9d, 0x52, 0x5b, 0x46, 0xbf, 0xe2, 0x45, 0x11, 0x43,
+        0x15, 0x32,
+    ];
+
+    /// A SHAKE256 sponge finalized with the SHA-3 padding is SHA3-256, for
+    /// messages shorter than, equal to and longer than the 136-byte rate.
+    #[test]
+    fn shake256_finalize_sha3_is_sha3_256() {
+        let mut out = [0u8; 32];
+        let mut ctx = shake256_init();
+        ctx.absorb(b"abc");
+        ctx.finalize_sha3();
+        ctx.squeeze(&mut out);
+        assert_eq!(out, SHA3_256_ABC);
+
+        let msg: [u8; 300] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+        for len in [0, 135, 136, 137, 288, 300] {
+            let mut expected = [0u8; 32];
+            sha3_256(&msg[..len], &mut expected);
+            let mut ctx = shake256_init();
+            ctx.absorb(&msg[..len]);
+            ctx.finalize_sha3();
+            ctx.squeeze(&mut out);
+            assert_eq!(out, expected, "len {len}");
+        }
+    }
 }

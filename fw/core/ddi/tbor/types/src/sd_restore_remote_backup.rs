@@ -9,8 +9,10 @@ use crate::evidence::*;
 pub use crate::policy::PART_POLICY_MAX_LEN;
 pub use crate::sd_create_remote_backup::MASKED_SD_LEN;
 pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN;
 pub use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
 pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
+pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_MAX_LEN;
 
 /// Restore-remote opcode.
 pub const TBOR_OP_SD_RESTORE_REMOTE_BACKUP: u8 = 0x0C;
@@ -23,21 +25,20 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
     /// Actual recipient private key, masked locally.
-    #[tbor(align = 4, buffer, len = 280)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 296)]
     pub masked_sealing_key: &'a [u8],
     /// Bound SD policy.
     #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
-    /// Operation-report signer as DER SPKI. The current profile accepts
-    /// only canonical uncompressed P-384 SPKI (120 bytes).
-    #[tbor(buffer, max_len = 120)]
+    /// Signer PID as canonical P-384 or ML-DSA-87 DER SPKI.
+    #[tbor(buffer, min_len = 120, max_len = 2614)]
     pub sender_pid_pub_key: &'a [u8],
     /// Source identity chains, SAPOTA-checked only under trusted-SA policy.
     #[tbor(include)]
     pub sender_evidence: IdentityEvidence<'a>,
-    /// PID-signed canonical Base envelope.
-    #[tbor(buffer, len = 431)]
-    pub src_remote_backup: &'a [u8],
+    /// Out-of-band complete PID-signed Base envelope.
+    #[tbor(buffer, len = 3)]
+    pub src_remote_backup: &'a ReportDescriptor,
     /// Existing SDMK backup, authenticated by the recovered BKS3 derivation.
     #[tbor(buffer, len = 264)]
     pub prev_sd_mk_backup: &'a [u8],
@@ -47,9 +48,9 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
 #[tbor(response, pair = TborSdRestoreRemoteBackupReq)]
 pub struct TborSdRestoreRemoteBackupResp<'a> {
     /// Local BKS3 backup.
-    #[tbor(align = 4, buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280, mutable)]
     pub pok_local_backup: &'a [u8],
     /// Refreshed SDMK backup.
-    #[tbor(align = 4, buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264, mutable)]
     pub sd_mk_backup: &'a [u8],
 }

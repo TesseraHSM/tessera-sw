@@ -142,6 +142,18 @@ pub fn validate_raw_src(desc: &[u8; 16], dst_len: usize) -> HsmResult<()> {
     Ok(())
 }
 
+/// Restricts an output descriptor to the bytes written without exceeding
+/// its original host-buffer capacity.
+pub fn narrow_raw_dst(desc: &mut [u8; 16], len: usize) -> HsmResult<()> {
+    let cap = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+    if cap < len {
+        return Err(HsmError::InsufficientBuffer);
+    }
+    let len = u32::try_from(len).map_err(|_| HsmError::InvalidArg)?;
+    desc[8..12].copy_from_slice(&len.to_le_bytes());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +165,26 @@ mod tests {
         d[..8].copy_from_slice(&addr.to_le_bytes());
         d[8..12].copy_from_slice(&(src.len() as u32).to_le_bytes());
         d
+    }
+
+    #[test]
+    fn narrow_raw_dst_bounds_write_to_capacity() {
+        let buf = [0u8; 64];
+        let mut desc = sgl_desc(&buf);
+        narrow_raw_dst(&mut desc, 40).expect("fits capacity");
+        assert_eq!(desc, sgl_desc(&buf[..40]));
+        assert!(validate_raw_src(&desc, 40).is_ok());
+
+        let mut exact = sgl_desc(&buf);
+        narrow_raw_dst(&mut exact, 64).expect("exact capacity");
+        assert_eq!(exact, sgl_desc(&buf));
+
+        let mut short = sgl_desc(&buf);
+        assert!(matches!(
+            narrow_raw_dst(&mut short, 65),
+            Err(HsmError::InsufficientBuffer)
+        ));
+        assert_eq!(short, sgl_desc(&buf));
     }
 
     #[test]

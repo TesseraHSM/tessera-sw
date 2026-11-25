@@ -28,7 +28,7 @@ The policy does not carry public keys. It identifies each key by its
 <x>_spki_thumbprint = SHA-384( DER(SubjectPublicKeyInfo) )     // 48 bytes
 ```
 
-The `SubjectPublicKeyInfo` must be in the canonical P-384 form:
+A P-384 `SubjectPublicKeyInfo` must be in the canonical form:
 
 - **algorithm:** `id-ecPublicKey` (1.2.840.10045.2.1) with the named-curve
   parameter `secp384r1` (1.3.132.0.34). Explicit curve parameters are not
@@ -41,6 +41,14 @@ That encoding is exactly 120 bytes: a fixed 23-byte prefix followed by the
 
 ```
 30 76 30 10 06 07 2A 86 48 CE 3D 02 01 06 05 2B 81 04 00 22 03 62 00 ‖ 04 ‖ X ‖ Y
+```
+
+An ML-DSA-87 `SubjectPublicKeyInfo` (only `pota_spki_thumbprint` may name
+one) is `id-ml-dsa-87` (2.16.840.1.101.3.4.3.19, no parameters) and the raw
+2592-byte public key: 2614 bytes, a fixed 22-byte prefix followed by the key.
+
+```
+30 82 0A 32 30 0B 06 09 60 86 48 01 65 03 04 03 13 03 82 0A 21 00 ‖ key
 ```
 
 Host tooling can compute a thumbprint with:
@@ -59,7 +67,7 @@ The policy is a CBOR map whose keys are unsigned integers.
 
 | Key | Name | CBOR type | Presence | Meaning |
 |---|---|---|---|---|
-| 1 | `version` | uint | required | Policy format version. Must be `1`. |
+| 1 | `version` | uint | required | Policy format version. Must be `2`. |
 | 2 | `pota_spki_thumbprint` | bstr (48) | required | Partition Owner Trust Anchor key. |
 | 3 | `sata_spki_thumbprint` | bstr (48) | required | Security-domain (SA) Trust Anchor key. |
 | 4 | `sapota_spki_thumbprint` | bstr (48) | optional | SA Partition Owner Trust Anchor key. |
@@ -68,6 +76,7 @@ The policy is a CBOR map whose keys are unsigned integers.
 | 7 | `flags` | uint | required | Bitmask; see [Flags](#flags). |
 | 8 | `info` | bstr (1..=64) | optional | Opaque caller data. Not interpreted by firmware. |
 | 9 | `data_spki_thumbprint` | bstr (48) | optional | DARC (TMK export) Trust Anchor key. |
+| 10 | `pta_alg` | nint | required | PTA signature algorithm, as a COSE algorithm ID: `-35` (ES384, P-384) or `-50` (ML-DSA-87). See [PTA algorithm](#pta-algorithm). |
 
 Keys 5 and 6 must be either both present or both absent.
 
@@ -84,6 +93,17 @@ which leaves room for future fields.
 | 3..=7 | reserved | Must be zero. |
 
 `flags` must be less than 256 and must not set reserved bits.
+
+### PTA algorithm
+
+`pta_alg` selects the algorithm of the partition's single PTA key. It is
+independent of the POTA algorithm: either POTA algorithm may certify
+either PTA algorithm.
+
+| `pta_alg` | PTA key | PTACSR / PTA cert key | PartOwner `GetCert` bank |
+|---|---|---|---|
+| `-35` (ES384) | P-384 | SEC1 uncompressed point | ECC (0) |
+| `-50` (ML-DSA-87) | ML-DSA-87 (seed) | raw 2592-byte key | ML-DSA (1) |
 
 ## Encoding rules
 
@@ -120,21 +140,24 @@ spki_thumbprint = 9b816e622b2e1a95723958091bfa35d774110a7475ec59c9425e007a8a84e0
                   aabef67249e6a0fe621ae4f4d30b0cc8
 ```
 
-**Minimal policy** (107 bytes): POTA `T(11)`, SATA `T(22)`, flags 0.
+**Minimal policy** (110 bytes): POTA `T(11)`, SATA `T(22)`, flags 0,
+`pta_alg` ES384.
 
 ```
-A4                      map(4)
-   01 01                version 1
+A5                      map(5)
+   01 02                version 2
    02 58 30 T(11)       pota_spki_thumbprint
    03 58 30 T(22)       sata_spki_thumbprint
    07 00                flags 0
+   0A 38 22             pta_alg -35
 ```
 
-**Full policy** (345 bytes): every field present, all flags set.
+**Full policy** (348 bytes): every field present, all flags set, `pta_alg`
+ML-DSA-87.
 
 ```
-A9                      map(9)
-   01 01                version 1
+AA                      map(10)
+   01 02                version 2
    02 58 30 T(11)       pota_spki_thumbprint
    03 58 30 T(22)       sata_spki_thumbprint
    04 58 30 T(33)       sapota_spki_thumbprint
@@ -143,6 +166,7 @@ A9                      map(9)
    07 07                flags 7
    08 58 40 77×64       info
    09 58 30 T(66)       data_spki_thumbprint
+   0A 38 31             pta_alg -50
 ```
 
 ## Firmware use
@@ -161,8 +185,9 @@ the full key is always available from the request or the partition:
 A chain is anchored when the SHA-384 of some non-leaf certificate's
 canonical SPKI equals the anchor thumbprint. The certificate parser
 (`fw/core/crypto/x509-chain`) accepts only named-curve P-384 keys with
-uncompressed points, so firmware rebuilds and hashes the canonical SPKI
-directly.
+uncompressed points, so firmware rebuilds and hashes the canonical P-384
+SPKI directly. For an ML-DSA-87 issuer, firmware checks that the SPKI is
+the canonical encoding above and hashes it in place.
 
 ## Persistence and binding
 

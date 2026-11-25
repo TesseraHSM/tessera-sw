@@ -30,6 +30,7 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
+use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_ddi_tbor_types::PTA_REPORT_MAX_LEN;
@@ -43,6 +44,7 @@ use super::known_good_test_policy;
 use super::mach_seed;
 use super::open_co_with;
 use super::FILLER_POTA_THUMBPRINT;
+use crate::commands::key_report::MLDSA87_PUB_KEY_LEN;
 use crate::commands::part_info::PART_STATE_INITIALIZING;
 
 /// Runs the supplied cleanup function when this value goes out of scope,
@@ -153,6 +155,82 @@ fn part_init_smoke_roundtrip() {
         .part_init(&session2, &seed, &policy)
         .expect_err("second PartInit must be rejected by one-shot state guard");
     assert_fw_rejects(&err, TborStatus::PtaKeyAlreadySet);
+}
+
+/// ML-DSA-87 `pta_alg`: PartInit returns a self-signed ML-DSA-87 CSR and a
+/// PTAReport signed by the ML-DSA PID key that attests the same public key.
+#[test]
+fn part_init_mldsa_pta_roundtrip() {
+    use tsra_crypto::ImportableKey;
+    use tsra_crypto::MlDsaAlgo;
+    use tsra_crypto::MlDsaPublicKey;
+    use tsra_crypto::VerifyOp;
+
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let policy = known_good_test_policy()
+        .with_pta_alg(POLICY_PTA_ALG_MLDSA87)
+        .encode();
+    let resp = ctx
+        .part_init(&session, &mach_seed(), &policy)
+        .expect("ML-DSA PartInit");
+
+    // CertificationRequest ::= SEQUENCE { info, sigAlg, BIT STRING sig }.
+    let (outer, _) = der_tlv(&resp.pta_csr, 0x30);
+    let (_, info_len) = der_tlv(outer, 0x30);
+    let info = &outer[..info_len];
+    let (_, alg_len) = der_tlv(&outer[info_len..], 0x30);
+    let (sig_bits, _) = der_tlv(&outer[info_len + alg_len..], 0x03);
+    assert_eq!(sig_bits[0], 0, "signature BIT STRING has no unused bits");
+
+    let spki_at = info
+        .windows(MLDSA87_SPKI_PREFIX.len())
+        .position(|w| w == MLDSA87_SPKI_PREFIX)
+        .expect("CSR carries an ML-DSA-87 SubjectPublicKeyInfo");
+    let pk_start = spki_at + MLDSA87_SPKI_PREFIX.len();
+    let pk = &info[pk_start..pk_start + MLDSA87_PUB_KEY_LEN];
+    let pta_pub = MlDsaPublicKey::from_bytes(pk).expect("PTA ML-DSA public key");
+    assert!(
+        MlDsaAlgo::new(&[])
+            .expect("ML-DSA engine")
+            .verify(&pta_pub, info, &sig_bits[1..])
+            .expect("ML-DSA verify"),
+        "PTACSR self-signature must verify under the embedded key",
+    );
+
+    let payload = crate::commands::key_report::verify_mldsa_cose_sign1_payload(
+        &resp.pta_report,
+        &crate::commands::key_report::mldsa_pid_pub_key(&ctx),
+    );
+    assert!(
+        payload.windows(pk.len()).any(|w| w == pk),
+        "PTAReport must attest the CSR public key",
+    );
+
+    // Either PTA slot blocks a re-init, whatever algorithm it requests.
+    let err = ctx
+        .part_init(&session, &mach_seed(), &known_good_part_policy())
+        .expect_err("ECC PartInit after ML-DSA PartInit must be rejected");
+    assert_fw_rejects(&err, TborStatus::PtaKeyAlreadySet);
+}
+
+/// ML-DSA-87 SubjectPublicKeyInfo DER up to the raw public key.
+const MLDSA87_SPKI_PREFIX: &[u8] = &[
+    0x30, 0x82, 0x0A, 0x32, 0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03,
+    0x13, 0x03, 0x82, 0x0A, 0x21, 0x00,
+];
+
+/// Split the DER TLV at the start of `der`, asserting its `tag`; returns
+/// the content and the full TLV length.
+fn der_tlv(der: &[u8], tag: u8) -> (&[u8], usize) {
+    assert_eq!(der[0], tag, "unexpected DER tag");
+    let (len, hdr) = match der[1] {
+        n if n < 0x80 => (usize::from(n), 2),
+        0x81 => (usize::from(der[2]), 3),
+        0x82 => (usize::from(u16::from_be_bytes([der[2], der[3]])), 4),
+        n => panic!("unsupported DER length form {n:#x}"),
+    };
+    (&der[hdr..hdr + len], hdr + len)
 }
 
 /// Concurrent requests share the same active CO session. Firmware publishes

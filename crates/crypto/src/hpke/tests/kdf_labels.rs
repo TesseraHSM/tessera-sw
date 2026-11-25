@@ -10,7 +10,7 @@ use crate::hpke::kdf::labeled_extract;
 #[test]
 fn labeled_extract_is_deterministic() {
     let suite = HpkeSuite::DHKemP256Sha256AesGcm256;
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().expect("two-stage");
     let suite_id = suite.hpke_suite_id();
     let a = labeled_extract(&algo, &suite_id, b"salt", b"label", b"ikm").unwrap();
     let b = labeled_extract(&algo, &suite_id, b"salt", b"label", b"ikm").unwrap();
@@ -21,7 +21,7 @@ fn labeled_extract_is_deterministic() {
 #[test]
 fn labeled_expand_is_deterministic_and_sized() {
     let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().expect("two-stage");
     let suite_id = suite.hpke_suite_id();
     let prk = vec![0xAAu8; 48];
     let out1 = labeled_expand(&algo, &suite_id, &prk, b"key", b"ctx", 80).unwrap();
@@ -33,7 +33,7 @@ fn labeled_expand_is_deterministic_and_sized() {
 #[test]
 fn labeled_expand_rejects_oversize() {
     let suite = HpkeSuite::DHKemP256Sha256AesGcm256;
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().expect("two-stage");
     let suite_id = suite.hpke_suite_id();
     let prk = vec![0u8; 32];
     let l = 255 * 32 + 1;
@@ -44,7 +44,7 @@ fn labeled_expand_rejects_oversize() {
 #[test]
 fn label_diverges_outputs() {
     let suite = HpkeSuite::DHKemP256Sha256AesGcm256;
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().expect("two-stage");
     let suite_id = suite.hpke_suite_id();
     let a = labeled_extract(&algo, &suite_id, &[], b"label-a", b"ikm").unwrap();
     let b = labeled_extract(&algo, &suite_id, &[], b"label-b", b"ikm").unwrap();
@@ -57,7 +57,7 @@ fn suite_id_diverges_outputs() {
     let s2 = HpkeSuite::DHKemP384Sha384AesGcm256;
     let id1 = s1.hpke_suite_id();
     let id2 = s2.hpke_suite_id();
-    let algo = s1.kdf_hash();
+    let algo = s1.kdf_hash().expect("two-stage");
     let a = labeled_extract(&algo, &id1, &[], b"label", b"ikm").unwrap();
     let b = labeled_extract(&algo, &id2, &[], b"label", b"ikm").unwrap();
     assert_ne!(a, b);

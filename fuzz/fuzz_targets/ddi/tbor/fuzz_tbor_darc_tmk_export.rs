@@ -16,6 +16,7 @@
 #[path = "../../common.rs"]
 mod common;
 
+use common::SdOob;
 use libfuzzer_sys::*;
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::assertions::*;
@@ -154,6 +155,74 @@ fn raw_public(key: &EccPrivateKey) -> [u8; RAW_PUB_LEN] {
     raw
 }
 
+/// DATA-authorized leaf attestation of the host-known recipient fixture.
+fn recipient_report(key: &EccPrivateKey) -> Vec<u8> {
+    let (x, y) = key.coord_vec().expect("recipient coordinates");
+    let mut cose = minicbor::Encoder::new(Vec::new());
+    cose.map(4)
+        .and_then(|e| {
+            e.i8(1)?
+                .u8(2)?
+                .i8(-1)?
+                .u8(2)?
+                .i8(-2)?
+                .bytes(&x)?
+                .i8(-3)?
+                .bytes(&y)
+        })
+        .expect("EC2 recipient");
+    let cose = cose.into_writer();
+    let mut public = cose.clone();
+    public.resize(525, 0);
+    let mut payload = minicbor::Encoder::new(Vec::new());
+    payload
+        .map(7)
+        .and_then(|e| {
+            e.u8(0)?
+                .u8(1)?
+                .u8(1)?
+                .bytes(&public)?
+                .u8(2)?
+                .u16(cose.len() as u16)?
+                .u8(3)?
+                .u32((1 << 2) | (1 << 11))?
+                .u8(4)?
+                .bytes(&[0; 16])?
+                .u8(5)?
+                .bytes(&[0; 128])?
+                .u8(6)?
+                .bytes(&[0; 16])
+        })
+        .expect("PublicKey payload");
+    let payload = payload.into_writer();
+    let protected = b"\xa2\x01\x38\x22\x03\x70application/cbor";
+    let mut input = minicbor::Encoder::new(Vec::new());
+    input
+        .array(4)
+        .and_then(|e| {
+            e.str("Signature1")?
+                .bytes(protected)?
+                .bytes(&[])?
+                .bytes(&payload)
+        })
+        .expect("PublicKey Sig_structure");
+    let mut signature = [0; 96];
+    EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(key, &input.into_writer(), Some(&mut signature))
+        .expect("recipient attestation signature");
+    let mut report = minicbor::Encoder::new(vec![0xd2]);
+    report
+        .array(4)
+        .and_then(|e| {
+            e.bytes(protected)?
+                .map(0)?
+                .bytes(&payload)?
+                .bytes(&signature)
+        })
+        .expect("PublicKey COSE_Sign1");
+    report.into_writer()
+}
+
 /// Predict public framing/metadata gates and effective AEAD changes.
 ///
 /// This reads the public metadata layout, not the firmware decoder. GCM uses
@@ -281,12 +350,13 @@ impl TborOpReq for WireRequest<'_> {
         ];
         fields[self.field].resize(self.len, 0);
         codec::RequestEncoder::new(buf, api_rev, Self::OPCODE)
-            .with_toc_slots(5)?
+            .with_toc_slots(6)?
             .session_id(self.req.session_id)?
             .align_to(4)?
             .buffer(&fields[0])?
             .buffer(&fields[1])?
             .buffer(&fields[2])?
+            .buffer(self.req.target_key_report.as_bytes())?
             .finish()
     }
 }
@@ -298,12 +368,12 @@ fn execute<R: TborOpReq<OpResp = TborDarcTmkExportResp>>(
     items: Option<&[Vec<u8>]>,
     expected: Expected,
     input: &FuzzInput<'_>,
-) -> Option<TborDarcTmkExportResp> {
+) -> Option<Vec<u8>> {
     let result = if let Some(items) = items {
         let oob = items.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        ctx.tbor_oob(req, &oob)
+        ctx.sd_oob_report(req, &oob).map(|(_, artifact)| artifact)
     } else {
-        ctx.tbor(req)
+        ctx.tbor(req).map(|_| Vec::new())
     };
     match (expected, result) {
         (Expected::Success, Ok(resp)) => Some(resp),
@@ -336,13 +406,13 @@ fn execute<R: TborOpReq<OpResp = TborDarcTmkExportResp>>(
 ///
 /// Plaintext comparisons deliberately omit byte values from assertion output.
 fn assert_success(
-    resp: &TborDarcTmkExportResp,
+    resp: &[u8],
     receiver: &EccPrivateKey,
     sender_pub: &EccPublicKey,
     known_tmk: Option<&[u8; TMK_LEN]>,
 ) -> Vec<u8> {
-    assert_eq!(resp.sealed_tmk.len(), SEALED_TMK_LEN);
-    let mut outer = minicbor::Decoder::new(&resp.sealed_tmk);
+    assert_eq!(resp.len(), SEALED_TMK_LEN);
+    let mut outer = minicbor::Decoder::new(resp);
     assert_eq!(
         outer.tag().expect("COSE tag"),
         minicbor::data::Tag::Unassigned(18)
@@ -353,7 +423,7 @@ fn assert_success(
     assert_eq!(outer.map().expect("unprotected claims"), Some(0));
     let payload = outer.bytes().expect("complete encrypted envelope");
     let signature = outer.bytes().expect("operation signature");
-    assert_eq!(outer.position(), resp.sealed_tmk.len());
+    assert_eq!(outer.position(), resp.len());
     assert_eq!(payload.len(), 258);
     let header = &payload[..113];
     assert_eq!(&header[..17], b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02");
@@ -386,7 +456,6 @@ fn assert_success(
         EccPublicKey::is_on_curve(EccCurve::P384, x, y).expect("point validation"),
         "encapsulated point must be on P-384",
     );
-    let enc = EccPublicKey::from_hsm_bytes(enc_raw).expect("encapsulated public key");
     let plain = open_vec(
         &HpkeOpenConfig::base(
             HpkeSuite::DHKemP384Sha384AesGcm256,
@@ -395,7 +464,7 @@ fn assert_success(
             header,
             &[],
         ),
-        &enc,
+        &payload[113..210],
         &payload[210..],
     )
     .expect("exported TMK must authenticate");
@@ -438,6 +507,10 @@ fn early_case(ctx: &TestCtx, input: &FuzzInput<'_>) -> bool {
             index: 0,
             length: 1u16.into(),
         }],
+        target_key_report: ReportDescriptor {
+            index: 1,
+            length: 1u16.into(),
+        },
     };
     let mut session = Some(session);
     let status = match input.scenario {
@@ -489,6 +562,7 @@ fn mutate_request(
     input: &FuzzInput<'_>,
 ) -> Expected {
     let selected = usize::from(input.controls & 1);
+    let selected_item = usize::from(req.target_cert_chain[selected].index);
     let mut expected = Expected::Success;
     match input.scenario {
         Scenario::Policy => {
@@ -534,11 +608,11 @@ fn mutate_request(
             expected = Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::CertificateTruncate => {
-            let len = usize::from(input.value) % (items[selected].len() + 1);
-            if len < items[selected].len() {
+            let len = usize::from(input.value) % (items[selected_item].len() + 1);
+            if len < items[selected_item].len() {
                 // Empty OOB items are rejected by the transport. Keep backing
                 // storage so a zero-length descriptor reaches firmware.
-                items[selected].truncate(len.max(1));
+                items[selected_item].truncate(len.max(1));
                 req.target_cert_chain[selected].length =
                     u16::try_from(len).expect("bounded DER length").into();
                 expected = Expected::Reject(if len == 0 {
@@ -549,14 +623,16 @@ fn mutate_request(
             }
         }
         Scenario::CertificateDer => {
-            for (i, byte) in items[selected].iter_mut().enumerate() {
+            for (i, byte) in items[selected_item].iter_mut().enumerate() {
                 *byte = input.byte(i);
             }
-            items[selected][0] = 0;
+            items[selected_item][0] = 0;
             expected = Expected::Reject(TborStatus::X509ParseError);
         }
         Scenario::CertificateSignature => {
-            let last = items[selected].last_mut().expect("nonempty certificate");
+            let last = items[selected_item]
+                .last_mut()
+                .expect("nonempty certificate");
             *last ^= input.mask;
             if input.mask != 0 {
                 expected = Expected::Reject(TborStatus::X509SignatureInvalid);
@@ -633,6 +709,10 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
                 index: 0,
                 length: 1u16.into(),
             }],
+            target_key_report: ReportDescriptor {
+                index: 1,
+                length: 1u16.into(),
+            },
         };
         execute(
             ctx,
@@ -687,7 +767,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         chain.leaf_der.len(),
         "descriptor-index oracle lengths"
     );
-    let mut items = Vec::new();
+    let mut items = common::sd_oob_items();
     if input.scenario == Scenario::Relocated {
         for _ in 0..usize::from(input.controls % 8) {
             items.push(vec![input.mask]);
@@ -698,11 +778,16 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         .iter()
         .map(|der| common::add_evidence_item(&mut items, der))
         .collect();
+    let proof = common::add_evidence_item(&mut items, &recipient_report(&receiver));
     let valid = TborDarcTmkExportReq {
         session_id: session.session_id(),
         masked_tmk,
         policy: fixture.policy,
         target_cert_chain,
+        target_key_report: ReportDescriptor {
+            index: proof.index,
+            length: proof.length,
+        },
     };
     let mut req = valid.clone();
     let mut mutated_items = items.clone();
@@ -769,10 +854,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
                 (!generated).then_some(&known_tmk),
             );
             assert!(plain == other, "repeated export plaintext changed");
-            assert!(
-                resp.sealed_tmk != again.sealed_tmk,
-                "export must use a fresh ephemeral"
-            );
+            assert!(resp != &again, "export must use a fresh ephemeral");
         }
     } else if input.scenario != Scenario::NoDataAnchor && input.scenario != Scenario::ForeignAnchor
     {

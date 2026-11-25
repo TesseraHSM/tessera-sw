@@ -21,6 +21,7 @@ use tsra_api::PolicyKey;
 use tsra_api::PART_POLICY_MAX_LEN;
 use tsra_api::POLICY_BACKUP_PART_ID_LEN;
 use tsra_api::POLICY_INFO_MAX_LEN;
+use tsra_api::POLICY_PTA_ALG_ES384;
 use tsra_api::POLICY_THUMBPRINT_LEN;
 use tsra_api::POLICY_VERSION;
 use tsra_crypto::HashAlgo;
@@ -133,7 +134,7 @@ fn encode(fields: &PolicyFields) -> Result<Vec<u8>> {
             "policy info must be 1..={POLICY_INFO_MAX_LEN} bytes"
         );
     }
-    let entries = 4
+    let entries = 5
         + u64::from(fields.sapota_spki_thumbprint.is_some())
         + 2 * u64::from(fields.backup_part.is_some())
         + u64::from(fields.info.is_some())
@@ -164,6 +165,8 @@ fn encode(fields: &PolicyFields) -> Result<Vec<u8>> {
     if let Some(data) = &fields.data_spki_thumbprint {
         enc.u8(PolicyKey::DataSpkiThumbprint as u8)?.bytes(data)?;
     }
+    // The sealing examples use P-384 trust anchors throughout.
+    enc.u8(PolicyKey::PtaAlg as u8)?.i64(POLICY_PTA_ALG_ES384)?;
     let bytes = enc.into_writer();
     anyhow::ensure!(
         bytes.len() <= PART_POLICY_MAX_LEN,
@@ -188,6 +191,7 @@ fn decode(bytes: &[u8]) -> Result<PolicyFields> {
     let mut flags = None;
     let mut info = None;
     let mut data = None;
+    let mut pta_alg = None;
     let mut last_key = 0u8;
     for _ in 0..entries {
         let key = dec.u8()?;
@@ -205,6 +209,7 @@ fn decode(bytes: &[u8]) -> Result<PolicyFields> {
             k if k == PolicyKey::Flags as u8 => flags = Some(dec.u8()?),
             k if k == PolicyKey::Info as u8 => info = Some(dec.bytes()?.to_vec()),
             k if k == PolicyKey::DataSpkiThumbprint as u8 => data = Some(fixed(&mut dec)?),
+            k if k == PolicyKey::PtaAlg as u8 => pta_alg = Some(dec.i64()?),
             _ => anyhow::bail!("unknown policy key {key}"),
         }
     }
@@ -212,6 +217,10 @@ fn decode(bytes: &[u8]) -> Result<PolicyFields> {
     anyhow::ensure!(
         version == Some(POLICY_VERSION),
         "unsupported policy version"
+    );
+    anyhow::ensure!(
+        pta_alg == Some(POLICY_PTA_ALG_ES384),
+        "policy trust anchors must be ES384"
     );
     let backup_part = match (backup_id, backup_pub) {
         (Some(id), Some(thumbprint)) => Some((id, thumbprint)),

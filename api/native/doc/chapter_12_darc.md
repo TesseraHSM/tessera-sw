@@ -2,7 +2,7 @@
 
 The DARC (Device Authentication Root Certificate) API transfers a key from a
 **source** partition to a **target** partition without ever exposing it in
-the clear on the host. All six commands are Crypto-Officer, in-session
+the clear on the host. All DARC commands are Crypto-Officer, in-session
 commands issued on a security-domain session (opened with
 [`tsra_sess_ex_open`](#tsra_sess_ex_open)); a non security-domain
 session is rejected with `TSRA_STATUS_INVALID_SESSION`.
@@ -15,10 +15,12 @@ A transfer proceeds in two phases:
   [`tsra_darc_tmk_gen`](#tsra_darc_tmk_gen), seals it to the target's KEX
   key with [`tsra_darc_tmk_export`](#tsra_darc_tmk_export), and the target
   opens it with [`tsra_darc_tmk_import`](#tsra_darc_tmk_import). The sealed
-  TMK uses P-384 HPKE Base (HKDF-SHA384, AES-256-GCM). A separate
-  PID-signed `Darc` report binds the source PID, recipient key, and exact
-  encrypted envelope. DATA authorizes the recipient KEX; POTA authorizes
-  the source PID report signer. No source KEX key is required.
+  TMK uses HPKE Base with AES-256-GCM and the KEX key's KEM: DHKEM(P-384)
+  with HKDF-SHA384, or ML-KEM-1024 / MLKEM1024-P384 with SHAKE256. A
+  separate PID-signed (ES384 or ML-DSA-87) `Darc` report binds the source
+  PID, recipient key, and exact encrypted envelope. DATA authorizes the
+  target PID, which attests the recipient KEX key with a key report; POTA
+  authorizes the source PID report signer. No source KEX key is required.
 - **Key wrap.** The source wraps the designated key under the TMK with
   [`tsra_darc_key_wrap`](#tsra_darc_key_wrap); the target unwraps and
   installs it with [`tsra_darc_key_unwrap`](#tsra_darc_key_unwrap).
@@ -31,10 +33,18 @@ for subsequent transfer commands.
 
 Generate a DARC key-exchange (KEX) key.
 
-Mints a new ephemeral ECC-P384 KEX key on the calling session's partition and
-returns the masked private key together with its raw P-384 public key
-(`x ‖ y`, 96 bytes, big-endian per coordinate — the certificate-leaf form). Run on the **target** it yields the HPKE receiver
-identity. Outgoing transfers use the source PID for report signing. The
+Mints a new KEX key of the requested KEM on the calling session's partition
+and returns the masked private key together with its public key. Run on the
+**target** it yields the HPKE receiver identity; attest it to the source with
+[`tsra_darc_kex_key_report`](#tsra_darc_kex_key_report), signed by the target PID.
+
+ | `kem`                              | Masked key | Public key                                                   |
+ | ---------------------------------- | ---------- | ------------------------------------------------------------ |
+ | `TSRA_TRANSFER_KEM_P384` (0)       | 280 B      | 96 B raw `x ‖ y`, big-endian per coordinate                  |
+ | `TSRA_TRANSFER_KEM_MLKEM1024` (1)  | 296 B      | 1568 B ML-KEM-1024 encapsulation key                         |
+ | `TSRA_TRANSFER_KEM_MLKEM1024_P384` (2) | 264 B  | 1665 B: encapsulation key followed by the SEC1 P-384 point   |
+
+Other `kem` values return `TSRA_STATUS_INVALID_ARGUMENT`. Outgoing transfers use the source PID for report signing. The
 key is not stored on the device — the caller must retain the returned masked
 key for the subsequent import call.
 
@@ -42,6 +52,7 @@ key for the subsequent import call.
 tsra_status tsra_darc_kex_key_gen(
     tsra_handle sess_handle,
     uint8_t scope,
+    uint8_t kem,
     tsra_buffer *masked_key,
     tsra_buffer *pub_key
     );
@@ -53,8 +64,45 @@ tsra_status tsra_darc_kex_key_gen(
  | ------------------ | ------------------------------- | -------------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle) | security-domain session handle                           |
  | [in] scope         | uint8_t                         | requested key scope (`KeyScope` discriminant)            |
- | [in,out] masked_key| [tsra_buffer*](#tsra_buffer)| out: masked KEX private key (`MASKED_KEX_KEY_LEN`, 280 B)|
- | [in,out] pub_key   | [tsra_buffer*](#tsra_buffer)| out: raw P-384 public key (`KEX_PUB_KEY_LEN`, 96 B) &nbsp;|
+ | [in] kem           | uint8_t                         | KEX KEM (`TSRA_TRANSFER_KEM_*`)                          |
+ | [in,out] masked_key| [tsra_buffer*](#tsra_buffer)| out: masked KEX private key (at most 296 B)              |
+ | [in,out] pub_key   | [tsra_buffer*](#tsra_buffer)| out: KEX public key (at most 1665 B) &nbsp;              |
+
+Both outputs follow probe/fill against their maximum sizes (296 and 1665
+bytes); on success `len` is the actual size for the chosen KEM.
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+## tsra_darc_kex_key_report
+
+Attest a DARC KEX key.
+
+Signs a key report with the partition PID over a masked KEX key from
+[`tsra_darc_kex_key_gen`](#tsra_darc_kex_key_gen). The PID signer follows
+the partition policy's PTA algorithm: ES384 for a P-384 PTA, ML-DSA-87 for
+an ML-DSA-87 PTA. The report sets the
+`is_darc_kex` flag; the exporter passes it as `target_key_report` to
+[`tsra_darc_tmk_export`](#tsra_darc_tmk_export).
+
+```cpp
+tsra_status tsra_darc_kex_key_report(
+    tsra_handle sess_handle,
+    const tsra_buffer *masked_kex_key,
+    const tsra_buffer *report_data,
+    tsra_buffer *report
+    );
+```
+
+**Parameters**
+
+ | Parameter              | Name                                  | Description                                          |
+ | ---------------------- | ------------------------------------- | ---------------------------------------------------- |
+ | [in] sess_handle       | [tsra_handle](#tsra_handle)           | security-domain session handle                       |
+ | [in] masked_kex_key    | const [tsra_buffer*](#tsra_buffer)    | masked KEX private key                               |
+ | [in] report_data       | const [tsra_buffer*](#tsra_buffer)    | exactly 128 bytes bound into the report              |
+ | [in,out] report        | [tsra_buffer*](#tsra_buffer)          | out: PID-signed key report (probe/fill) &nbsp;       |
 
 **Returns**
 
@@ -89,17 +137,25 @@ tsra_status tsra_darc_tmk_gen(
 
 Seal a DARC TMK to an authenticated target.
 
-Validates `target_cert_chain` against the `data_spki_thumbprint` anchored in the
-supplied unified partition policy, then HPKE Base seals the TMK to the
-target's KEX key and directly signs the complete binary `Darc` envelope
+Validates the target PID chain against the policy `data_spki_thumbprint`
+and its required PID-signed key report attesting a device-generated DARC
+KEX key, then HPKE Base seals the TMK to that key and directly signs the complete binary `Darc` envelope
 with the source PID. The canonical 113-byte header binds source and
-recipient SHA-384 canonical-DER-SPKI thumbprints and is used as HPKE
-`info`, with empty AEAD AAD. One 367-byte COSE_Sign1 carries the 258-byte
-envelope and signature. Its protected header is `{1: -35}`; the
+recipient identifiers (canonical SPKI for P-384; algorithm-domain raw-key
+hash for PQ recipients) and is used as HPKE
+`info`, with empty AEAD AAD. One COSE_Sign1 carries the complete
+envelope and signature. Its protected header is `{1: -35}` (ES384) or
+`{1: -50}` (ML-DSA-87), selected by the policy PTA algorithm; the
 unprotected map is empty. COSE external AAD is ASCII `TSRA-Darc-v1`
 followed by 20 zero bytes (32 bytes total), reconstructed by the signer
 and verifier rather than transmitted. Empty or wrong-domain transfer
-signatures are rejected; the 367-byte artifact size is unchanged.
+signatures are rejected.
+
+| Recipient KEM | ES384 signed artifact | ML-DSA-87 signed artifact |
+|---|---:|---:|
+| P-384 | 367 B | 4899 B |
+| ML-KEM-1024 | 1838 B | 6370 B |
+| MLKEM1024-P384 | 1935 B | 6467 B |
 
 ```cpp
 tsra_status tsra_darc_tmk_export(
@@ -115,10 +171,10 @@ tsra_status tsra_darc_tmk_export(
  | ------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle)                              | security-domain session handle                       |
  | [in] params        | const [tsra_darc_tmk_export_params*](#tsra_darc_tmk_export_params) | export input buffers                        |
- | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer) | out: signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
+ | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer) | out: complete signed encrypted TMK; capacity at least 6467 B |
 
 The output follows probe/fill: provide a zero-length buffer to obtain the
-required capacity of 367 bytes with `TSRA_STATUS_BUFFER_TOO_SMALL`, then
+required maximum capacity of 6467 bytes with `TSRA_STATUS_BUFFER_TOO_SMALL`, then
 retry. Persist and transport this single artifact; there is no detached report.
 
 **Returns**
@@ -134,6 +190,7 @@ struct tsra_darc_tmk_export_params {
     const tsra_buffer *masked_tmk;
     const tsra_buffer *policy;
     tsra_darc_cert_chain target_cert_chain;
+    const tsra_buffer *target_key_report;
 };
 ```
 
@@ -141,7 +198,8 @@ struct tsra_darc_tmk_export_params {
  | ----------------- | -------------------------------------------------------- | ------------------------------------------------------------ |
  | masked_tmk        | const [tsra_buffer*](#tsra_buffer)                   | masked TMK to export (`MASKED_TMK_LEN`, 264 B)              |
  | policy            | const [tsra_buffer*](#tsra_buffer)                   | unified partition policy image anchoring `data_spki_thumbprint`        |
- | target_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)        | DATA-anchored target certificate chain (1–2 certs)   &nbsp; |
+ | target_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)        | DATA-anchored target PID certificate chain (1–3 certs) &nbsp; |
+ | target_key_report | const [tsra_buffer*](#tsra_buffer)                   | target PID-signed key report over its KEX key (at most 8192 B) |
 
 ## tsra_darc_tmk_import
 
@@ -194,9 +252,9 @@ struct tsra_darc_tmk_import_params {
 
  | Field             | Name                                                | Description                                                  |
  | ----------------- | --------------------------------------------------- | ------------------------------------------------------------ |
- | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (`MASKED_KEX_KEY_LEN`, 280 B)         |
+ | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (264–296 B); its KEM selects the suite |
  | policy            | const [tsra_buffer*](#tsra_buffer)              | unified partition policy image anchoring `pota_spki_thumbprint`        |
- | sealed_tmk        | const [tsra_buffer*](#tsra_buffer) | signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
+ | sealed_tmk        | const [tsra_buffer*](#tsra_buffer) | complete signed encrypted TMK (sizes in the export table) |
  | remote_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)   | POTA-anchored source PID certificate chain (1..=3 certs) |
 
 ## tsra_darc_key_wrap

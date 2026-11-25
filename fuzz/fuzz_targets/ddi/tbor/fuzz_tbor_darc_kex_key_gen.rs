@@ -49,10 +49,20 @@ struct FuzzInput {
     scenario: Scenario,
     fuzzed_session_id: u16,
     fuzzed_scope: u8,
+    fuzzed_kem: u8,
     controls: u8,
 }
 
 impl FuzzInput {
+    /// Select supported KEMs frequently without losing the full u8 domain.
+    fn kem(&self) -> u8 {
+        if self.fuzzed_kem & 0x80 == 0 {
+            (self.fuzzed_kem & 0x7F) % 3
+        } else {
+            self.fuzzed_kem
+        }
+    }
+
     /// Select supported scopes frequently without losing the full u8 domain.
     fn scope(&self) -> u8 {
         match self.scenario {
@@ -214,17 +224,29 @@ fn expected_outcome(state: &FixtureState, req: &TborDarcKexKeyGenReq) -> Expecte
         return Expected::Reject(TborStatus::InvalidArg);
     }
     match req.scope {
-        common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL => Expected::Success,
-        common::KEY_SCOPE_SECURITY_DOMAIN if state.security_domain_provisioned => Expected::Success,
-        _ => Expected::Reject(TborStatus::UnsupportedKeyScope),
+        common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL => {}
+        common::KEY_SCOPE_SECURITY_DOMAIN if state.security_domain_provisioned => {}
+        _ => return Expected::Reject(TborStatus::UnsupportedKeyScope),
+    }
+    match req.kem {
+        TRANSFER_KEM_P384 | TRANSFER_KEM_MLKEM1024 | TRANSFER_KEM_MLKEM1024_P384 => {
+            Expected::Success
+        }
+        _ => Expected::Reject(TborStatus::InvalidArg),
     }
 }
 
-/// Check the generated envelope and validate the raw little-endian P-384
-/// public point using the existing crypto backend's big-endian point API.
-fn assert_success(resp: &TborDarcKexKeyGenResp) {
-    assert_eq!(resp.masked_key.len(), MASKED_KEX_KEY_LEN);
-    assert_eq!(resp.pub_key.len(), KEX_PUB_KEY_LEN);
+/// Check the generated envelope sizes for `kem`; for DHKEM(P-384) also
+/// validate the raw little-endian public point using the crypto backend's
+/// big-endian point API.
+fn assert_success(kem: u8, resp: &TborDarcKexKeyGenResp) {
+    let (masked_len, pub_len) = match kem {
+        TRANSFER_KEM_P384 => (MASKED_KEX_KEY_LEN, KEX_PUB_KEY_LEN),
+        TRANSFER_KEM_MLKEM1024 => (MASKED_KEX_KEY_MAX_LEN, 1568),
+        _ => (MASKED_KEX_KEY_MIN_LEN, KEX_PUB_KEY_MAX_LEN),
+    };
+    assert_eq!(resp.masked_key.len(), masked_len);
+    assert_eq!(resp.pub_key.len(), pub_len);
     assert!(
         resp.masked_key.iter().any(|&byte| byte != 0),
         "DarcKex masked key must not be all-zero"
@@ -233,9 +255,12 @@ fn assert_success(resp: &TborDarcKexKeyGenResp) {
         resp.pub_key.iter().any(|&byte| byte != 0),
         "DarcKex public key must not be all-zero"
     );
+    if kem != TRANSFER_KEM_P384 {
+        return;
+    }
 
     let curve = EccCurve::P384;
-    let mut point = resp.pub_key;
+    let mut point = resp.pub_key.clone();
     let (x, y) = point.split_at_mut(curve.point_size());
     x.reverse();
     y.reverse();
@@ -265,17 +290,18 @@ fuzz_target!(|input: FuzzInput| {
         let req = TborDarcKexKeyGenReq {
             session_id,
             scope: input.scope(),
+            kem: input.kem(),
         };
         let expected = expected_outcome(&state, &req);
 
         match (expected, ctx.tbor(&req)) {
             (Expected::Success, Ok(resp)) => {
-                assert_success(&resp);
+                assert_success(req.kem, &resp);
                 if input.controls & 0x10 != 0 {
                     let again = ctx
                         .tbor(&req)
                         .expect("repeated valid DarcKexKeyGen should succeed");
-                    assert_success(&again);
+                    assert_success(req.kem, &again);
                     assert!(
                         resp.pub_key != again.pub_key,
                         "DarcKexKeyGen must generate a fresh public key"

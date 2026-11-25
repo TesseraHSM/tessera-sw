@@ -15,7 +15,7 @@ pub(super) fn expand_key(
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     CngPqcKey::import(variant.parameter_name(), PqcBlob::KemSeed, seed)
         .and_then(|key| key.export(PqcBlob::KemPrivate, variant.sec_key_len()))
-        .map_err(|_| CryptoError::MlKemKeyGenError)
+        .map_err(|error| crate::pqc_cng::keygen_error(error, CryptoError::MlKemKeyGenError))
 }
 
 pub(super) fn public_key(variant: MlKemVariant, sk: &[u8]) -> Result<Vec<u8>, CryptoError> {

@@ -385,6 +385,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_io_reserves_scratch_until_teardown() {
+        let (tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let pid = HsmPartId::from(0u8);
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let admin = pal.admin_io(pid, reply_tx).await;
+        let slot = admin.slot;
+        let scratch = pal.dma_alloc(&admin, 16).expect("admin scratch");
+        scratch.fill(0xA5);
+
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(crate::HsmIoRequest::cmd(
+            pid,
+            0,
+            0,
+            Default::default(),
+            reply_tx,
+        ))
+        .await
+        .expect("submit host IO");
+        let host = pal.poll_io().await.expect("host IO");
+        assert_ne!(host.slot, slot);
+        pal.dma_alloc(&host, 16).expect("host scratch").fill(0xB6);
+        assert_eq!(&scratch[..], &[0xA5; 16]);
+        pal.drop_io(host).await.expect("drop host IO");
+        pal.drop_io(admin).await.expect("drop admin IO");
+
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let reused = pal.admin_io(pid, reply_tx).await;
+        assert_eq!(reused.slot, slot);
+        assert_eq!(
+            &pal.dma_alloc(&reused, 16).expect("reused scratch")[..],
+            &[0; 16]
+        );
+        pal.drop_io(reused).await.expect("drop reused admin IO");
+    }
+
+    #[tokio::test]
     async fn teardown_scrubs_nested_scopes_and_grown_allocations() {
         let (_, rx) = async_channel::bounded(1);
         let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());

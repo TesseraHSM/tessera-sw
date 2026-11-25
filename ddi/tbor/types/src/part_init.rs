@@ -8,13 +8,15 @@
 //! configuration params.  It persists the caller-asserted partition
 //! policy (a CBOR document naming the POTA / SATA / optional SAPOTA
 //! trust anchors by key thumbprint), and returns the PTA CSR and the
-//! COSE_Sign1 PTA key-attestation report.  The security-domain local
+//! COSE_Sign1 PTA key-attestation report through out-of-band items
+//! [`PART_INIT_CSR_OOB_INDEX`] and [`PART_INIT_REPORT_OOB_INDEX`].  The security-domain local
 //! masking keys are derived later by a future part-final command.  See
 //! `tsra_fw_ddi_tbor_types::part_init` for the full wire schema.
 
 use alloc::vec::Vec;
 
 use crate::tbor;
+use crate::tbor_int::U16;
 
 /// TBOR opcode for `PartInit`.
 pub const TBOR_OP_PART_INIT: u8 = 0x07;
@@ -34,11 +36,17 @@ pub const MACH_SEED_ENVELOPE_MAX_LEN: usize = 160;
 /// Maximum on-the-wire length of the partition policy document.
 pub use crate::policy::PART_POLICY_MAX_LEN;
 
-/// Maximum on-the-wire length of the PTA CSR (`pta_csr` response field).
-pub const PTA_CSR_MAX_LEN: usize = 512;
+/// Maximum length of the PTA CSR (ML-DSA-87 worst case).
+pub const PTA_CSR_MAX_LEN: usize = 8192;
 
-/// Maximum on-the-wire length of the PTA attestation report (`pta_report` response field).
-pub const PTA_REPORT_MAX_LEN: usize = 1024;
+/// Maximum length of the PTA attestation report (ML-DSA-87 worst case).
+pub const PTA_REPORT_MAX_LEN: usize = 8192;
+
+/// Out-of-band item that receives the PTA CSR.
+pub const PART_INIT_CSR_OOB_INDEX: usize = 0;
+
+/// Out-of-band item that receives the PTA report.
+pub const PART_INIT_REPORT_OOB_INDEX: usize = 1;
 
 /// Host-facing TBOR `PartInit` request.
 ///
@@ -69,17 +77,14 @@ pub struct TborPartInitReq {
 }
 
 /// Host-facing TBOR `PartInit` response.
-///
-/// All byte fields are owned `Vec<u8>` so callers don't have to
-/// carry max-sized padding buffers around.
 #[tbor(response)]
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TborPartInitResp {
-    /// DER-encoded PKCS#10 CertificationRequest for the PTA pubkey.
-    #[tbor(max_len = 512)]
-    pub pta_csr: Vec<u8>,
+    /// Bytes written to out-of-band item [`PART_INIT_CSR_OOB_INDEX`]
+    /// (DER-encoded PKCS#10 CSR for the PTA public key).
+    pub pta_csr_len: U16,
 
-    /// COSE_Sign1 PTA key-attestation report signed by the PID.
-    #[tbor(max_len = 1024)]
-    pub pta_report: Vec<u8>,
+    /// Bytes written to out-of-band item [`PART_INIT_REPORT_OOB_INDEX`]
+    /// (COSE_Sign1 PTA key-attestation report signed by the PID).
+    pub pta_report_len: U16,
 }

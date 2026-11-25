@@ -13,10 +13,18 @@ Licensed under the MIT License.
 Attests a **masked key** (as produced by
 [`SdSealingKeyGen`](./sd_sealing_key_gen.md)).  The handler unmasks the
 key, derives its public component **on-device**, and returns a
-PID-signed COSE_Sign1 key-attestation report over it.  The report is
-signed by the partition-identity (PID) key — the same signer as the
-`PartInit` PTA report — so a relying party can verify it against the
-partition's slot-0 certificate chain.
+PID-signed COSE_Sign1 key-attestation report over it.  The
+partition-identity (PID) signer follows the policy `pta_alg`, the same
+signer as the partition's transfer reports; the request does not choose
+it:
+
+| Policy `pta_alg` | Signer | COSE `alg` | Verify against |
+|---|---|---|---|
+| ES384 | P-384 PID key | ES384 (-35) | ECC-bank PID leaf |
+| ML-DSA-87 | ML-DSA-87 PID key | ML-DSA-87 (-50) | ML-DSA-bank PID leaf |
+
+The payload is identical for both algorithms. Verifiers must check that
+the protected-header `alg` matches the PID leaf they verify against.
 
 Report building:
 
@@ -32,12 +40,17 @@ Report building:
    kind and attributes).
 3. **Derive** the attested public key. ECC-private kinds, including the
    P-384 `SdSealing` key, re-derive the public point via `pub = priv · G`.
+   ML-KEM-1024 and MLKEM1024-P384 `SdSealing` keys re-expand their seed and
+   attest the encapsulation key as an AKP `COSE_Key` `{ 1: 7, 3: alg, -1: pub }`
+   with private-use `alg` -65537 (ML-KEM-1024) or -65538 (MLKEM1024-P384).
    RSA-private and RSA-CRT kinds extract the public modulus and exponent.
    Symmetric and non-attestable internal kinds are rejected with
    `UnsupportedKeyType`.
-4. **Sign** the COSE_Sign1 report (ES384 / ECDSA-P384) with the PID key
-   over the derived key, the caller-supplied `report_data`, the session
-   app id, and the partition VM launch id.
+4. **Sign** the COSE_Sign1 report with the policy algorithm's PID key (ES384, or
+   pure ML-DSA-87 with required hedging and an empty context over the
+   Sig_structure) over the derived key, the caller-supplied
+   `report_data`, the session app id, and the partition VM launch id.
+5. **Return** the report through out-of-band item 0.
 
 Because nothing is persisted, the command records no rollback on the undo
 log.  The masked blob's `svn` / `owner_seed_id` are **not** enforced
@@ -63,6 +76,11 @@ HSM-generated `SdSealing` key. Peer backup, peer restore and reseal require
 this provenance together with Generated set and Imported clear. Ordinary
 ECC/RSA reports remain available but are not SD-sealing evidence.
 
+DARC key-exchange reports likewise set signed flag **bit 11**
+(`is_darc_kex`) only for an authenticated, HSM-generated DARC KEX key
+(P-384, ML-KEM-1024 or MLKEM1024-P384). [`DarcTmkExport`](darc_tmk_export.md)
+requires it, with Generated set and Imported clear.
+
 ## Request
 
 Wire layout: 12-byte header, followed by the TOC entries, then the data
@@ -85,25 +103,28 @@ Carries the variable-length `masked_key` followed by the 128-byte
 
 The authentication envelope uses the existing AEAD framing:
 `header(8) ‖ iv(16) ‖ aad(32) ‖ ciphertext(48) ‖ tag(16)`.
-Its AAD is `"key-report-v1" ‖ session_id_le(2) ‖ zero(17)`.
+Its AAD is `"key-report-v3" ‖ session_id_le(2) ‖ zero(17)`.
 Its plaintext is `SHA-384(masked_key ‖ report_data)`. This binds the exact
-key, report data, command and session without exposing the session key.
+key, report data, command and session without exposing the
+session key.
 The new authentication TOC entry must be encoded even for an empty CO buffer.
 
 ## Response
 
-Wire layout: 12-byte header, followed by the TOC entry, then the data
-section carrying the report.
-
-### TOC entries
+Wire layout: 12-byte header followed by one inline TOC entry.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 12 | `report` | `buffer` (≤ 1024 B) | The tagged COSE_Sign1 key-attestation report (CBOR tag 18, opening byte `0xD2`), signed by the PID key. The embedded COSE_Key holds the derived public key (big-endian coordinates for ECC). |
+| 12 | `report_len` | `U16` (inline) | Number of report bytes written to out-of-band item 0. |
 
-### Data section
+### Out-of-band output
 
-Carries the variable-length COSE_Sign1 `report`.
+| Index | Direction | Size | Contents |
+|---|---|---|---|
+| 0 | Out | ≥ report length (8192 B always suffices) | The tagged COSE_Sign1 key-attestation report (CBOR tag 18, opening byte `0xD2`), signed by the PID key of the policy `pta_alg`. The embedded COSE_Key holds the derived public key (big-endian coordinates for ECC). |
+
+Report size grows with the attested public key and PID signature.
+Reserve 8192 bytes to cover all supported combinations.
 
 ## Errors
 
@@ -115,6 +136,7 @@ Carries the variable-length COSE_Sign1 `report`.
 | `SessionAuthFailure` | The session's authenticated PSK is no longer current |
 | `AeadEnvelopeAuthFailed` | Missing, malformed, tampered or wrong-session CU request authentication |
 | `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), or `report_data` is the wrong length |
+| `InsufficientBuffer` | Out-of-band item 0 is missing or shorter than the report |
 | `UnsupportedKeyScope` | The masked key's scope (`Session`, `SecurityDomain`, or other) has no masking key yet |
 | `AesGcmDecryptTagDoesNotMatch` | The masked key failed authentication (tampered or wrong masking key) |
 | `UnsupportedKeyType` | The attested key kind cannot be attested (symmetric or a non-attestable internal kind) |
@@ -124,8 +146,9 @@ Carries the variable-length COSE_Sign1 `report`.
 
 Report version 2 supports a signed `report_kind` discriminator. Existing
 `KeyReport` commands continue to emit public-key reports without that
-discriminator. Public-key v1/v2 encoding, the protected header
-`{1: -35, 3: "application/cbor"}`, and ES384 signatures are unchanged.
+discriminator. Public-key v1/v2 encoding and ES384 signatures are unchanged.
+Protected headers contain `{1: -35, 3: "application/cbor"}` for ES384 or
+`{1: -50, 3: "application/cbor"}` for ML-DSA-87.
 
 For public-key reports without a discriminator, v1 omits the policy hash
 and v2 requires it. With an explicit `PublicKey` discriminator, v2 permits
@@ -156,16 +179,26 @@ or a digest does not prove export provenance. Signature verification also
 does not replace signer authorization, recipient/envelope binding checks,
 or replay policy.
 
-### P-384 transfer-envelope binding
+### Transfer-envelope binding
 
 The DARC and SD export, reseal, and import/restore commands use this
-envelope with HPKE Base and a direct PID signature.
-Only P-384 is supported; there are no PQ or hybrid selectors.
+envelope with HPKE Base and a direct PID signature. SD and DARC select the KEM
+from their respective recipient key.
+
+| KEM | Suite (KEM / KDF / AEAD) | Recipient identifier | Public key / `enc` |
+|---|---|---|---|
+| DHKEM(P-384, HKDF-SHA384) | `0x0011` / `0x0002` / `0x0002` | SHA-384 of canonical DER SPKI | 97 B SEC1 |
+| ML-KEM-1024 (HPKE-13) | `0x0042` / `0x0011` (SHAKE256) / `0x0002` | SHA-384(`TSRA-MLKEM1024-KEY-v1` followed by raw key) | 1568 B |
+| MLKEM1024-P384 (HPKE-10) | `0x0051` / `0x0011` (SHAKE256) / `0x0002` | SHA-384(`TSRA-MLKEM1024-P384-KEY-v1` followed by raw key) | 1665 B, PQ key followed by SEC1 point |
+
+The SD/DARC signer is the actual partition PID, using ES384 or ML-DSA-87
+according to the policy PTA algorithm.
 
 The single artifact is tagged `COSE_Sign1(payload=envelope)`, where
 `envelope = header || enc || ciphertext || tag`. The protected header is
-exactly `{1: -35}` (ES384), the unprotected map is empty, and the 96-byte
-signature is `r || s` in big-endian order.
+exactly `{1: -35}` (ES384) or `{1: -50}` (ML-DSA-87), with an empty
+unprotected map. ES384 signatures are 96-byte big-endian `r` followed by `s`;
+ML-DSA-87 signatures are 4627 bytes.
 The binary payload has no CBOR content-type claim, duplicate claims map,
 or envelope hash. All integer fields below
 are unsigned; suite IDs use network byte order.
@@ -182,8 +215,8 @@ COSE signature domains use standard
 Signers and verifiers select the domain from the validated kind; callers
 cannot override it. The signature covers the CBOR-encoded
 `["Signature1", protected_header, external_aad, envelope]`. External AAD
-is not serialized in COSE_Sign1, so signed artifacts remain 367 and
-431 bytes. Empty, unpadded, or wrong-kind transfer domains are not accepted.
+is not serialized in COSE_Sign1. Empty, unpadded, or wrong-kind transfer
+domains are not accepted.
 The 32-byte label size is a TSRA profile choice, not a COSE requirement.
 This is separate from HPKE AAD, which remains empty.
 
@@ -192,8 +225,8 @@ This is separate from HPKE AAD, which remains empty.
 | 0 | ASCII `TSRA-XFER` | 9 |
 | 9 | Envelope version (1) | 1 |
 | 10 | Operation kind: `Darc` (1) or `SdBackup` (2) | 1 |
-| 11 | DHKEM(P-384, HKDF-SHA384) ID (`0x0011`) | 2 |
-| 13 | HKDF-SHA384 ID (`0x0002`) | 2 |
+| 11 | KEM ID | 2 |
+| 13 | KDF ID | 2 |
 | 15 | AES-256-GCM ID (`0x0002`) | 2 |
 | 17 | `source_pid_spki_thumbprint` | 48 |
 | 65 | `recipient_spki_thumbprint` | 48 |
@@ -201,22 +234,41 @@ This is separate from HPKE AAD, which remains empty.
 
 For both `Darc` and `SdBackup`, the fields at offsets 17 and 65 are
 `source_pid_spki_thumbprint` and `recipient_spki_thumbprint`, respectively.
-Each is `SHA-384(canonical_DER_SPKI(public_key))`, using the same canonical
-SPKI representation as policy trust-anchor thumbprints. The source is the
-PID signing key; the recipient is the HPKE encryption key, not its PID.
+The source is `SHA-384(canonical_DER_SPKI(PID_public_key))`, using the same
+canonical SPKI representation as policy trust-anchor thumbprints. A P-384
+recipient uses that same construction. For PQ recipients, the field named
+`recipient_spki_thumbprint` carries the algorithm-domain identifier in the
+table above. The recipient is the HPKE encryption key, not its PID.
 
 The SEC1 public key and encapsulation are exactly 97 bytes:
 `0x04 || X_be[48] || Y_be[48]`.
 Canonical SPKI encodes `id-ecPublicKey` and `secp384r1` with that uncompressed
-point (120 bytes total). Header fields identify source or recipient
+point (120 bytes total); canonical ML-DSA-87 SPKI is 2614 bytes. Header fields identify source or recipient
 roles; a matching thumbprint alone does not grant authorization.
 
-HPKE uses **Base** mode with the fixed suite above. The complete canonical
+HPKE uses **Base** mode with the selected suite above. The complete canonical
 header is passed verbatim as HPKE `info`, with empty AEAD AAD. DARC encrypts
 exactly 32 bytes of TMK; SD encrypts exactly 48 bytes of BKS3. Their headers
 are 113 and 161 bytes respectively, and their complete encrypted envelopes
-are 258 and 322 bytes respectively, including the 16-byte GCM tag. The
-complete signed artifacts are 367 bytes for DARC and 431 bytes for SD.
+are 258 and 322 bytes respectively for P-384, including the 16-byte GCM tag.
+PQ SD inner envelopes are 1793 or 1890 bytes.
+
+| DARC recipient KEM | Inner envelope | Complete ES384 artifact | Complete ML-DSA-87 artifact |
+|---|---:|---:|---:|
+| P-384 | 258 B | 367 B | 4899 B |
+| ML-KEM-1024 | 1729 B | 1838 B | 6370 B |
+| MLKEM1024-P384 | 1826 B | 1935 B | 6467 B |
+
+| SD recipient KEM | Inner envelope | Complete ES384 artifact | Complete ML-DSA-87 artifact |
+|---|---:|---:|---:|
+| P-384 | 322 B | 431 B | 4963 B |
+| ML-KEM-1024 | 1793 B | 1902 B | 6434 B |
+| MLKEM1024-P384 | 1890 B | 1999 B | 6531 B |
+
+DARC export and SD creation/reseal write the complete artifact to OOB output item 0 and
+return its `report_len`. Import/restore/reseal source inputs use a report
+descriptor referencing that same complete artifact. There is no inline
+second envelope or detached report.
 Unknown versions/kinds/suites, malformed SEC1 encodings, missing fields,
 wrong secret/ciphertext sizes, and trailing bytes are rejected.
 
@@ -225,7 +277,7 @@ the recipient before sealing; the seal helper additionally checks its SPKI
 thumbprint. No separate transfer report is produced or accepted.
 
 Before opening, the receiver must authorize the reporting PID using the
-operation's trust contract. The binding helper verifies ES384 and the required
+operation's trust contract. The binding helper verifies the PID signature and the required
 transfer kind, derives the source/recipient thumbprints from the actual keys,
 and requires equality with the signed header. For SD, the signed policy
 hash must equal the requested transferred SD policy. A sealing authority's

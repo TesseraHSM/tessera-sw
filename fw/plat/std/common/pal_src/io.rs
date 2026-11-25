@@ -174,9 +174,22 @@ impl StdHsmIo {
     /// Construct a transient admin IO for internal provisioning crypto
     /// (e.g. masking `BK_BOOT` at partition allocation), backed by a
     /// caller-borrowed buffer-pool `slot`.  `tx` is a throwaway reply
-    /// channel — no host awaits the completion.
+    /// channel — no host awaits the completion. The caller must already
+    /// own the slot.
     pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawBulkCqe>) -> Self {
         Self::new(HsmIoRequest::cmd(pid, 0, 0, [0; SQE_DWORDS], tx), slot)
+    }
+}
+
+impl StdHsmPal {
+    /// Reserves a pool slot for an admin IO used to drive PAL crypto directly.
+    ///
+    /// Pass the IO to [`HsmIoController::drop_io`] after its buffers are no
+    /// longer borrowed to scrub and release the slot. Dropping it otherwise
+    /// leaves the slot reserved until this PAL is destroyed.
+    pub async fn admin_io(&self, pid: HsmPartId, tx: ReplySender<RawBulkCqe>) -> StdHsmIo {
+        let slot = self.iic.pool().alloc().await;
+        StdHsmIo::admin(pid, slot, tx)
     }
 }
 
@@ -318,10 +331,14 @@ impl StdHsmPal {
     /// Writes `buf` to the host buffer described by OOB descriptor `index`.
     pub(crate) async fn oob_write(&self, io: &StdHsmIo, index: usize, buf: &[u8]) -> HsmResult<()> {
         let desc = self.oob_desc(io, index).await?;
-        crate::drivers::gdma::validate_raw_src(&desc, buf.len())?;
+        self.oob_write_desc(&desc, buf)
+    }
+
+    fn oob_write_desc(&self, desc: &[u8; OOB_DESC_LEN], buf: &[u8]) -> HsmResult<()> {
+        crate::drivers::gdma::validate_raw_src(desc, buf.len())?;
         // SAFETY: std host addresses are raw host-process pointers the
         // submitter keeps valid; `validate_raw_src` checked length and null.
-        unsafe { self.gdma.copy_mem_to_host_raw(buf, &desc) };
+        unsafe { self.gdma.copy_mem_to_host_raw(buf, desc) };
         Ok(())
     }
 }
@@ -362,6 +379,17 @@ impl HsmIoController for StdHsmPal {
 
     async fn send_oob(&self, io: &StdHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
         self.oob_write(io, index, src).await
+    }
+
+    async fn send_oob_bounded(
+        &self,
+        io: &StdHsmIo,
+        index: usize,
+        src: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let mut desc = self.oob_desc(io, index).await?;
+        crate::drivers::gdma::narrow_raw_dst(&mut desc, src.len())?;
+        self.oob_write_desc(&desc, src)
     }
 
     /// Complete an IO: post the response CQE via the OIC driver.

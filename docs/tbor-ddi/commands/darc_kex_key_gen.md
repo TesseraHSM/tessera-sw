@@ -11,8 +11,19 @@ Licensed under the MIT License.
 ## Description
 
 Generates a new DARC key-exchange key and returns the **masked** private
-key together with the public key.  The key-exchange key is a **P-384 ECC
-keypair for ECDH key agreement**.
+key together with the public key.  The request's `kem` selects the HPKE
+KEM of the key-exchange key:
+
+| `kem` | KEM | Private key (masked) | `masked_key` | `pub_key` |
+|---|---|---|---|---|
+| `0` | DHKEM(P-384, HKDF-SHA384) | 48-B scalar | 280 B | 96 B raw `x ‖ y` |
+| `1` | ML-KEM-1024 | 64-B seed (`d ‖ z`) | 296 B | 1568 B encapsulation key |
+| `2` | MLKEM1024-P384 (hybrid) | 32-B seed | 264 B | 1665 B (`ek ‖ SEC1 P-384`) |
+
+Each KEM is recorded under its own masked-key kind (`DarcKex`,
+`DarcKexMlKem1024`, `DarcKexMlKem1024P384`); the kind selects the KEM when
+the key is later used by [`DarcTmkImport`](darc_tmk_import.md) or attested
+by [`KeyReport`](key_report.md).
 
 This is the HPKE **recipient** key for DARC TMK imports. Outgoing DARC
 transfers use HPKE Base and authenticate with a source PID-signed
@@ -30,14 +41,15 @@ firmware `HsmKeyScope`.  Scope → masking key:
 
 - `Ephemeral` → the partition `PartitionEphemeralMaskingKey`.
 - `Local` → the partition `PartitionLocalMaskingKey`.
+- `SecurityDomain` → `SdMasking`, once the security domain is initialized.
 
 Both masking keys are provisioned by `PartFinal`, so the partition must
-be in the `Initialized` lifecycle state.  The `Session` and
-`SecurityDomain` scopes (and any other) are rejected with
+be in the `Initialized` lifecycle state. The `Session` scope
+and unsupported scopes are rejected with
 `UnsupportedKeyScope`.  The masked key's metadata records the
 key-exchange key as `derive`-only, `local`, `private`, and
 never-extractable, plus the requested scope, under the distinct
-`DarcKex` key kind (kept separate from the security-domain `SdSealing`
+DARC key-exchange kind (kept separate from the security-domain `SdSealing`
 kind so the two are never interchangeable in later commands).
 
 This command is **Crypto-Officer-only**: a Crypto-User session is
@@ -50,14 +62,15 @@ Wire layout: 12-byte header, followed by the TOC entries, then the
 
 ### TOC entries
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 12 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 16 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Only `Ephemeral` and `Local` are supported; others return `UnsupportedKeyScope`. |
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| `scope` | `uint8` (inline) | Requested key scope: `2` = Ephemeral, `3` = Local, `4` = SecurityDomain (requires initialized SD). Unsupported scopes return `UnsupportedKeyScope`. |
+| `kem` | `uint8` (inline) | `TransferKemId`: `0` = P-384, `1` = ML-KEM-1024, `2` = MLKEM1024-P384. Other values return `InvalidArg`. |
 
 ### Data section
 
-_Empty — both fields are carried inline within their TOC entries._
+_Empty — all fields are carried inline within their TOC entries._
 
 ## Response
 
@@ -66,15 +79,15 @@ section carrying the masked key and public key.
 
 ### TOC entries
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (280 B) | The P-384 private key masked under the scope's masking key. Not stored on-device. |
-| 20 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new key-exchange key. Not a SEC1 point encoding (no `0x04` prefix). |
+| Field | Type | Description |
+|---|---|---|
+| (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary. |
+| `masked_key` | `buffer` (264..=296 B) | Masked private P-384 scalar or ML-KEM seed; not stored on-device. |
+| `pub_key` | `buffer` (96..=1665 B) | P-384: raw device-order coordinates (96 B), not SEC1. ML-KEM-1024: 1568 B. Hybrid: 1568-B PQ key followed by the 97-B SEC1 P-384 point. |
 
 ### Data section
 
-Carries the 280-byte `masked_key` followed by the 96-byte `pub_key`.
+Carries `masked_key` followed by `pub_key`; lengths depend on `kem` (see above).
 
 ## Errors
 
@@ -82,8 +95,8 @@ Carries the 280-byte `masked_key` followed by the 96-byte `pub_key`.
 |---|---|
 | `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first) |
-| `UnsupportedKeyScope` | The requested scope (`Session`, `SecurityDomain`, or other) has no masking key yet |
+| `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), or `kem` is unknown (checked after `scope`) |
+| `UnsupportedKeyScope` | Unsupported scope, or the requested security-domain masking key has not been provisioned |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also

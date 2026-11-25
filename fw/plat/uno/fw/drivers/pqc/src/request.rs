@@ -31,7 +31,7 @@ pub enum PqcOp {
     /// Generate an ML-DSA keypair.
     MlDsaGenerateKey = 1,
 
-    /// Sign a message with a caller-supplied seed.
+    /// Sign a message with a staged expanded key.
     MlDsaSign = 2,
 
     /// Verify a signature under a supplied public key.
@@ -51,6 +51,15 @@ pub enum PqcOp {
 
     /// Hash a message with SHAKE256.
     Shake256 = 8,
+
+    /// Sign a message with a key given as its seed `ξ`.
+    MlDsaSignSeed = 9,
+
+    /// Verify a signature under a key given as its seed `ξ`.
+    MlDsaVerifySeed = 10,
+
+    /// Hash a message with SHA3-256.
+    Sha3_256 = 11,
 }
 
 /// Number of `u32` words in a request message.

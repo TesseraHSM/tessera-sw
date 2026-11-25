@@ -11,14 +11,35 @@
 //! HPKE Base opens `sealed_tmk` to recover the TMK, and
 //! re-masks it under the partition SDMK as a `DarcTmk` masked-key blob.
 //!
-//! The source certificate-chain DER travels **out of band**; the request
-//! carries only `(index, length)` descriptors, built here via
-//! [`push_cert_chain`]. Runs **inside an already-open** security-domain
+//! The source certificate-chain DER and the report travel **out of band**;
+//! the request carries only `(index, length)` descriptors. Runs **inside an already-open** security-domain
 //! (V2) session.
 
 use tsra_ddi_tbor_types::*;
 
 use super::*;
+
+/// Validate a complete signed artifact's recipient/signature-dependent length.
+pub(super) fn validate_sealed_tmk(sealed: &[u8]) -> HsmResult<()> {
+    const ENVELOPE_OVERHEAD: usize = SEALED_TMK_LEN - 97 - 109;
+    let valid = [
+        97,
+        SD_SEALING_MLKEM1024_PUB_KEY_LEN,
+        SD_SEALING_MLKEM1024_P384_PUB_KEY_LEN,
+    ]
+    .iter()
+    .any(|enc| {
+        [109, 4641]
+            .iter()
+            .any(|sign1| sealed.len() == ENVELOPE_OVERHEAD + enc + sign1)
+    });
+    if !valid {
+        return Err(HsmError::InvalidArgument);
+    }
+    Ok(())
+}
+
+const _: () = assert!(SEALED_TMK_MAX_LEN == SEALED_TMK_LEN - 97 - 109 + 1665 + 4641);
 
 /// Issue `DarcTmkImport` (opcode `0x21`) on the active session.
 ///
@@ -31,8 +52,7 @@ use super::*;
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes)
 ///   whose POTA key thumbprint anchors `remote_cert_chain`.
 /// * `sealed_tmk` - The sealed TMK from
-///   [`darc_tmk_export`](super::darc_tmk_export), exactly
-///   [`SEALED_TMK_LEN`] bytes.
+///   [`darc_tmk_export`](super::darc_tmk_export), including its PID signature.
 /// * `remote_cert_chain` - POTA-anchored source PID certificate chain
 ///   (1..=3 certs, normally POTA -> PTA -> PID); DER carried out of band.
 ///
@@ -48,12 +68,8 @@ pub(crate) fn darc_tmk_import(
     sealed_tmk: &[u8],
     remote_cert_chain: &[HsmCert<'_>],
 ) -> HsmResult<Vec<u8>> {
-    let masked_kex_key: [u8; MASKED_KEX_KEY_LEN] = masked_kex_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    let sealed_tmk: [u8; SEALED_TMK_LEN] = sealed_tmk
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
+    let masked_kex_key = masked_sealing_key_wire(masked_kex_key)?;
+    validate_sealed_tmk(sealed_tmk)?;
     let policy = policy_wire(policy)?;
 
     let mut oob: Vec<&[u8]> = Vec::new();
@@ -62,6 +78,7 @@ pub(crate) fn darc_tmk_import(
         &mut oob,
         DARC_SOURCE_CERT_CHAIN_MAX_CERTS,
     )?;
+    let sealed_tmk = push_report(sealed_tmk, &mut oob)?;
 
     let req = TborDarcTmkImportReq {
         session_id: session.ex_session_id()?,

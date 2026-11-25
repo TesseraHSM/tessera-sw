@@ -58,10 +58,10 @@ fn key_gen(ready: &SdReady) -> Vec<u8> {
 /// Import a known TMK via `DarcTmkImport` and return the masked envelope
 /// (the reference the created envelope's metadata must match).
 fn import_tmk(ready: &SdReady) -> Vec<u8> {
-    let (req, chain) = build_valid_import(ready, &ready.pota, &TMK);
+    let (req, items) = build_valid_import(ready, &ready.pota, &TMK);
     let resp = ready
         .ctx
-        .tbor_oob(&req, &chain.der_items())
+        .tbor_oob(&req, &items.oob())
         .expect("DarcTmkImport");
     resp.masked_tmk
 }

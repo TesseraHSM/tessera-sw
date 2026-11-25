@@ -38,16 +38,17 @@
 //! `pending` with `auto_pad` enabled so the hardware appends standard SHA
 //! padding and writes the final truncated NIST digest.
 //!
-//! ## SHAKE
+//! ## SHAKE and SHA3-256
 //!
-//! The SHA engine has no SHA-3 modes, so SHAKE128 / SHAKE256 run on a PQC
-//! (fastpath) core via [`PqcDriver::shake`](tsra_fw_uno_drivers_pqc::PqcDriver::shake),
+//! The SHA engine has no SHA-3 modes, so SHAKE128 / SHAKE256 and SHA3-256
+//! run on a PQC (fastpath) core via
+//! [`PqcDriver::shake`](tsra_fw_uno_drivers_pqc::PqcDriver::shake),
 //! which takes the whole message at once. The multi-step path therefore
 //! buffers the message (up to [`SHAKE_MSG_MAX`] bytes) in the context and
 //! submits it at [`hash_finish`](HsmHash::hash_finish).
 //!
 //! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which has
-//! no PQC engine, so SHAKE is refused with
+//! no PQC engine, so SHAKE and SHA3-256 are refused with
 //! [`HsmError::UnsupportedDigestHashAlgorithm`] before anything is written to
 //! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
 //! ML-DSA and ML-KEM are.
@@ -209,6 +210,13 @@ impl<'a> HsmHashContext<'a> {
 // HsmHash trait implementation
 // ---------------------------------------------------------------------------
 
+/// Whether `algo` runs on a PQC core rather than the SHA engine: the SHAKE
+/// XOFs and SHA3-256. SHA3-384/512 run nowhere and stay on the SHA path,
+/// which rejects them.
+fn on_pqc(algo: HsmHashAlgo) -> bool {
+    algo.is_xof() || matches!(algo, HsmHashAlgo::Sha3_256)
+}
+
 /// Refuse SHAKE when the FP cores have no PQC engine; see the module docs.
 fn shake_available() -> HsmResult<()> {
     if cfg!(feature = "bulk_crypto") {
@@ -224,7 +232,7 @@ impl HsmHash for UnoHsmPal {
     /// Computes a one-shot hash of the entire message.
     ///
     /// Delegates to [`sha_oneshot`](Self::sha_oneshot) with the hardware mode
-    /// derived from `algo`, or to a PQC core for SHAKE.
+    /// derived from `algo`, or to a PQC core for SHAKE and SHA3-256.
     ///
     /// # Parameters
     ///
@@ -253,7 +261,7 @@ impl HsmHash for UnoHsmPal {
         let _ = io;
         self.hash_state_size(algo)?;
         let digest_len = algo.digest_len();
-        if (algo.is_xof() && data.len() > SHAKE_MSG_MAX) || u32::try_from(data.len()).is_err() {
+        if (on_pqc(algo) && data.len() > SHAKE_MSG_MAX) || u32::try_from(data.len()).is_err() {
             return Err(HsmError::InvalidArg);
         }
         let Some(digest) = digest else {
@@ -262,7 +270,7 @@ impl HsmHash for UnoHsmPal {
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
-        if algo.is_xof() {
+        if on_pqc(algo) {
             shake_available()?;
             // Reject what the PQC core cannot take before claiming one.
             if data.len() > SHAKE_MSG_MAX || digest_len > SHAKE_OUT_MAX {
@@ -317,7 +325,7 @@ impl HsmHash for UnoHsmPal {
     }
 
     fn hash_state_size(&self, algo: HsmHashAlgo) -> HsmResult<usize> {
-        if algo.is_xof() {
+        if on_pqc(algo) {
             shake_available()?;
             if algo.digest_len() > SHAKE_OUT_MAX {
                 return Err(HsmError::InvalidArg);
@@ -413,7 +421,7 @@ impl HsmHash for UnoHsmPal {
         }
 
         ctx.active = false;
-        if algo.is_xof() {
+        if on_pqc(algo) {
             let msg = &ctx.buf[..ctx.byte_count as usize];
             self.pqc.shake(algo, msg, &mut digest[..digest_len]).await?;
         } else {
@@ -446,7 +454,7 @@ impl UnoHsmPal {
         if !ctx.active {
             return Err(HsmError::InvalidArg);
         }
-        if ctx.algo.is_xof() {
+        if on_pqc(ctx.algo) {
             let start = ctx.byte_count as usize;
             let end = start
                 .checked_add(data.len())

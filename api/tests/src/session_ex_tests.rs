@@ -10,6 +10,9 @@
 //! the native FFI) would.
 
 use tsra_api::*;
+use tsra_crypto::x509_builder::der_helpers::MLDSA87_SPKI_HEADER;
+use x509::X509Certificate;
+use x509::X509CertificateOp;
 
 use crate::utils::partition_ex_helpers::*;
 
@@ -170,7 +173,7 @@ fn open_session_ex_cu_ecdh_p384() {
 }
 
 #[test]
-fn open_session_ex_removed_suite_rejected() {
+fn open_session_ex_unknown_suite_rejected() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -180,9 +183,92 @@ fn open_session_ex_removed_suite_rejected() {
         rev,
         &test_root_spki_sha384(&part),
         HsmSessionPsk::new(HsmPskId::CU),
-        HsmSessionSuite(0x02),
+        HsmSessionSuite(0x03),
     );
     assert!(matches!(result, Err(HsmError::InvalidArgument)));
+}
+
+#[test]
+fn open_session_ex_mlkem1024_authenticates_rotates_and_recovers_both_roles() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let suite = HsmSessionSuite::MlKem1024MlDsa87;
+    let host_available = crate::utils::partition_ex_helpers::host_pqc_available(
+        tsra_crypto::MlDsaPrivateKey::from_seed(tsra_crypto::MlDsaVariant::MlDsa87, &[7; 32]),
+    ) && crate::utils::partition_ex_helpers::host_pqc_available(
+        tsra_crypto::MlKemPrivateKey::from_seed(tsra_crypto::MlKemVariant::MlKem1024, &[7; 64]),
+    );
+    for role in [HsmPskId::CO, HsmPskId::CU] {
+        let (part, rev) = new_partition();
+        if !crate::utils::partition_ex_helpers::backend_mldsa_available(&part) {
+            assert!(matches!(
+                part.open_session_ex(
+                    rev,
+                    &test_root_spki_sha384(&part),
+                    HsmSessionPsk::new(role),
+                    suite,
+                ),
+                Err(HsmError::UnsupportedAlgorithm)
+            ));
+            continue;
+        }
+        if !host_available {
+            continue;
+        }
+        let root =
+            crate::utils::partition_ex_helpers::test_root_spki_sha384_for_suite(&part, suite);
+        let pem = part.cert_chain_mldsa(0).expect("ML-DSA certificate bank");
+        let certificates =
+            X509Certificate::from_pem_stack(pem.as_bytes()).expect("ML-DSA bank certificates");
+        let leaf = certificates.first().expect("PID leaf");
+        let path = leaf
+            .verified_chain(&certificates[1..])
+            .expect("verify certificate path")
+            .expect("valid certificate path");
+        assert!(path.len() > 1, "PID path must include its issuer");
+        let all_mldsa = path.iter().all(|certificate| {
+            certificate
+                .subject_public_key_info_der()
+                .expect("certificate SPKI")
+                .starts_with(&MLDSA87_SPKI_HEADER)
+        });
+        let mut wrong_root = root;
+        wrong_root[0] ^= 1;
+        assert!(matches!(
+            part.open_session_ex(rev, &wrong_root, HsmSessionPsk::new(role), suite,),
+            Err(HsmError::InvalidSignature)
+        ));
+        // Uno may serve an ML-DSA leaf under its P-384 alias chain.
+        if !all_mldsa {
+            assert!(matches!(
+                part.open_session_ex(rev, &root, HsmSessionPsk::new(role), suite),
+                Err(HsmError::InvalidSignature)
+            ));
+            continue;
+        }
+        let psk = [0xB5; PSK_LEN];
+        let session = part
+            .open_session_ex(rev, &root, HsmSessionPsk::new(role), suite)
+            .expect("ML-KEM session");
+        assert_eq!(session.api_rev(), rev);
+        session.change_psk(&psk).expect("rotate role PSK");
+        drop(session);
+        let session = part
+            .open_session_ex(rev, &root, HsmSessionPsk::with_psk(role, &psk), suite)
+            .expect("ML-KEM session with rotated PSK");
+        part.reset().expect("migration");
+        session
+            .reopen_ex(&root, None)
+            .expect("ML-KEM recovery with default PSK");
+        session.change_psk(&psk).expect("rotate after migration");
+        drop(session);
+        assert!(
+            part.open_session_ex(rev, &root, HsmSessionPsk::new(role), suite,)
+                .is_err()
+        );
+    }
 }
 
 /// PSK-rotation round trip: after rotating the CO PSK from the default,

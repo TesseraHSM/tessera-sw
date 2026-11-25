@@ -78,7 +78,7 @@ fuzz_target!(|input: FuzzInput| {
         //   non-canonical or oversized. Encoding, firmware decoding,
         //   or AEAD authentication rejects it with `TborEncodeError`
         //   or a firmware `TborStatus`, never a response-decoding failure.
-        let result = ctx.tbor(&part_init_req);
+        let result = ctx.part_init_req(&part_init_req);
 
         if envelope_is_valid && policy_is_valid {
             result.expect(

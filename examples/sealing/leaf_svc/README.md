@@ -3,11 +3,14 @@
 The `sock` feature runs the existing root and leaf sealing workflows against
 host-native firmware in `ddi_sock_server`. TBOR OOB certificate/report bytes are
 serialized in index order and reconstructed as server-owned SGL descriptors.
-SD transfers use P-384 HPKE Base (KEM `0x0011`, KDF `0x0002`, AEAD `0x0002`)
-with one 431-byte COSE_Sign1/ES384 signed SdBackup envelope.
+SD transfers use HPKE Base with P-384, ML-KEM-1024 or MLKEM1024-P384
+recipients (see [Transfer KEMs](#transfer-kems)) and one complete
+COSE_Sign1 signed SdBackup envelope, sized by KEM and PID signature algorithm.
 The 161-byte binary header is HPKE info, with empty AAD. The signature
 directly binds the entire header, encapsulation, ciphertext, and tag.
-Source and recipient IDs are SHA-384 canonical-DER-SPKI thumbprints.
+Source and P-384 recipient IDs are SHA-384 canonical-DER-SPKI thumbprints;
+PQ recipient IDs use the algorithm-domain hashes in the
+[transfer format](../../../docs/tbor-ddi/commands/key_report.md#transfer-envelope-binding).
 COSE external AAD is `TSRA-SdBackup-v1` followed by 16 zero bytes.
 It is signed but not transmitted; it is distinct from the empty HPKE AAD.
 Source evidence carries only PID chains, not a report or sealing-key
@@ -188,6 +191,36 @@ cargo run -p tsra_sealing_leaf_svc -- \
 
 Both leaf workers must sign with the same public domain-key identity. Their
 local, ephemeral, and session keys remain independent. The primary stays live.
+
+## Transfer KEMs
+
+`root_svc create` and `root_svc clone` accept `--kem` (default `p384`):
+
+| `--kem` | HPKE KEM | Inner envelope | ES384 signed backup | ML-DSA-87 signed backup | Masked sealing key |
+|---|---|---:|---:|---:|---:|
+| `p384` | DHKEM(P-384) `0x0011` | 322 B | 431 B | 4963 B | 280 B |
+| `mlkem1024` | ML-KEM-1024 `0x0042` (HPKE-13) | 1793 B | 1902 B | 6434 B | 296 B |
+| `mlkem1024-p384` | MLKEM1024-P384 `0x0051` (HPKE-10) | 1890 B | 1999 B | 6531 B | 264 B |
+
+The HSM chooses the KEM from the recipient sealing key, and the complete
+signed artifact binds its recipient identifier. A P-384 recipient is certified directly by the SATA leaf.
+A post-quantum recipient is delegated by a COSE_Sign1 key report signed by the
+P-384 SATA leaf; remote-recovery records keep it as `receiver_key_report`. The
+software authority still signs its operation report with P-384. A temporary
+`create` (without `--remote-restorable`) also opens the envelope with host HPKE
+to check interoperability. `leaf_svc` uses P-384.
+
+To run remote-restorable create, peer clone, local and remote restore, and a
+temporary create for every KEM against fresh simulators:
+
+```sh
+examples/sealing/run_all_kems.sh                 # all three
+examples/sealing/run_all_kems.sh mlkem1024-p384  # selected KEMs
+```
+
+The script starts its own `ddi_sock_server` processes on loopback ports from
+`BASE_PORT` (default 13400) and stores state under `STATE_ROOT` (default: a new
+temporary directory).
 
 ## Transport limits
 

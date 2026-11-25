@@ -694,6 +694,20 @@ pub(crate) fn get_cert_chain(partition: &HsmPartition, slot_id: u8) -> HsmResult
     get_cert_chain_raw_no_res(dev, inner.api_rev(), slot_id)
 }
 
+#[resiliency_cert_chain(partition = "partition")]
+pub(crate) fn get_cert_chain_mldsa(partition: &HsmPartition, slot_id: u8) -> HsmResult<String> {
+    let inner = partition.inner().read();
+    let rev = inner.api_rev();
+    require_tbor_rev(rev)?;
+    let (chain, _) = fetch_cert_chain_checked_tbor_bank(
+        inner.dev(),
+        rev,
+        slot_id,
+        tsra_ddi_tbor_types::CERT_BANK_MLDSA,
+    )?;
+    Ok(chain)
+}
+
 /// Raw cert chain retrieval — no resiliency retry, no partition lock.
 ///
 /// For use in contexts that already have `dev` and `rev` (e.g.,

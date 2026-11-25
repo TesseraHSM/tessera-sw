@@ -13,15 +13,49 @@ use tsra_api::*;
 
 pub(crate) use crate::utils::partition::PARTITION_LOCK;
 
+pub(crate) fn host_pqc_available<T>(result: Result<T, tsra_crypto::CryptoError>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(tsra_crypto::CryptoError::PqcUnavailable) => {
+            eprintln!("host crypto does not support PQC; skipping positive PQ flow");
+            false
+        }
+        Err(error) => panic!("host PQC capability probe failed: {error:?}"),
+    }
+}
+
+pub(crate) fn backend_mldsa_available(part: &HsmPartition) -> bool {
+    match part.cert_chain_mldsa(0) {
+        Ok(_) => true,
+        Err(HsmError::UnsupportedAlgorithm) => {
+            eprintln!("backend does not support the ML-DSA bank; skipping positive PQ flow");
+            false
+        }
+        Err(error) => panic!("backend ML-DSA capability probe failed: {error:?}"),
+    }
+}
+
 /// Controlled test enrollment only: trust the root advertised by the test
 /// backend. Applications must provision this pin independently of the device.
 pub(crate) fn test_root_spki_sha384(part: &HsmPartition) -> [u8; 48] {
+    test_root_spki_sha384_for_suite(part, HsmSessionSuite::EcdhP384)
+}
+
+pub(crate) fn test_root_spki_sha384_for_suite(
+    part: &HsmPartition,
+    suite: HsmSessionSuite,
+) -> [u8; 48] {
     use tsra_crypto::HashAlgo;
     use tsra_crypto::Hasher;
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
-    let pem = part.cert_chain(0).expect("test certificate chain");
+    let pem = if suite == HsmSessionSuite::MlKem1024MlDsa87 {
+        part.cert_chain_mldsa(0)
+    } else {
+        part.cert_chain(0)
+    }
+    .expect("test certificate chain");
     let certificates = X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
     let spki = certificates
         .last()
@@ -94,4 +128,24 @@ pub(crate) fn new_co_session() -> HsmSession {
         HsmSessionSuite::EcdhP384,
     )
     .expect("open CO session")
+}
+
+#[cfg(test)]
+mod pqc_capability_tests {
+    use tsra_crypto::CryptoError;
+
+    use super::host_pqc_available;
+
+    #[test]
+    fn host_pqc_unavailability_skips_positive_flow() {
+        assert!(!host_pqc_available(Err::<(), _>(
+            CryptoError::PqcUnavailable
+        )));
+    }
+
+    #[test]
+    #[should_panic(expected = "host PQC capability probe failed")]
+    fn host_pqc_keygen_failure_is_not_skipped() {
+        host_pqc_available(Err::<(), _>(CryptoError::MlDsaKeyGenError));
+    }
 }

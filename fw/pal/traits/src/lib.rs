@@ -342,6 +342,12 @@ pub const SESSION_HS_LEN: usize = 48;
 /// Length in bytes of a P-384 SEC1 uncompressed point.
 pub const SESSION_P384_SEC1_LEN: usize = 97;
 
+/// Length in bytes of an ML-KEM-1024 encapsulation key.
+pub const SESSION_MLKEM1024_PK_LEN: usize = 1568;
+
+/// Length in bytes of an ML-KEM-1024 ciphertext.
+pub const SESSION_MLKEM1024_CT_LEN: usize = 1568;
+
 /// Length in bytes of the raw big-endian `r ‖ s` ECDSA-P384 transcript
 /// signature.
 pub const SESSION_SIG_LEN: usize = 96;

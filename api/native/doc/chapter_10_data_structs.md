@@ -374,11 +374,12 @@ Algorithm ID type values
 
 ### TSRA_SESSION_SUITE_XXX
 
-Security-domain session key-establishment suite values. The supported suite signs
-the handshake transcript with the partition identity key (ECDSA P-384).
+Security-domain session suite values. Each signs the handshake transcript
+with its selected partition identity algorithm.
 
 ```cpp
 #define TSRA_SESSION_SUITE_ECDH_P384 1   // ephemeral ECDH P-384
+#define TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87 2 // ML-KEM-1024; ML-DSA-87 authentication
 ```
 
 <!-- 

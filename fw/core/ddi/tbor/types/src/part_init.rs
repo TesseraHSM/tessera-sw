@@ -23,16 +23,18 @@
 //!
 //! Outputs:
 //!
-//! * `pta_csr` — DER-encoded PKCS#10 CertificationRequest for the PTA
-//!   public key (≤ [`PTA_CSR_MAX_LEN`] bytes).
-//! * `pta_report` — COSE_Sign1 PTA key-attestation report
-//!   (≤ [`PTA_REPORT_MAX_LEN`] bytes).
+//! * Out-of-band item [`PART_INIT_CSR_OOB_INDEX`] — DER-encoded PKCS#10
+//!   CertificationRequest for the PTA public key (≤ [`PTA_CSR_MAX_LEN`]
+//!   bytes), signed by the PTA with the policy's `pta_alg`.
+//! * Out-of-band item [`PART_INIT_REPORT_OOB_INDEX`] — COSE_Sign1 PTA
+//!   key-attestation report (≤ [`PTA_REPORT_MAX_LEN`] bytes), signed by
+//!   the partition identity key of the same algorithm.
 //!
-//! Byte fields are declared as `&[u8]` slices with `len` / `max_len`
-//! constraints so handler code can pass and receive slices end-to-end
-//! without materializing stack-allocated arrays at any layer.
+//! The inline response carries only the written length of each item.
 
 use tsra_fw_ddi_tbor_api::tbor;
+
+use crate::tbor_int::U16;
 
 /// TBOR opcode for `PartInit`.
 pub const TBOR_OP_PART_INIT: u8 = 0x07;
@@ -86,27 +88,20 @@ pub const MACH_SEED_ENVELOPE_MAX_LEN: usize = 160;
 /// [`PartPolicy`]: crate::policy::PartPolicy
 pub use crate::policy::PART_POLICY_MAX_LEN;
 
-/// Upper bound on the DER-encoded PTA CSR carried in the response.
-///
-/// Device-CSR template is 248 B of CertificationRequestInfo + outer
-/// SEQUENCE wrapper + ECDSA-with-SHA384 AlgorithmIdentifier + BIT
-/// STRING-wrapped DER signature (≤ 108 B); cap rounded up to 512 to
-/// leave headroom for the KeyUsage extension the PTA CSR carries on
-/// top of the device-CSR template.
-pub const PTA_CSR_MAX_LEN: usize = 512;
+/// Upper bound on the DER-encoded PTA CSR: an ML-DSA-87 CSR carries a
+/// 2592-byte public key and a 4627-byte signature.
+pub const PTA_CSR_MAX_LEN: usize = 8192;
 
-/// Upper bound on the COSE_Sign1 PTA key-attestation report carried
-/// in the response.
-///
-/// Sized for the worst-case PTAReport produced by
-/// `tsra_fw_core_crypto_key_report` (COSE_Sign1 fixed overhead +
-/// max payload).  A cross-crate `const _` static assert in the
-/// firmware handler module pins this `>= KEY_REPORT_MAX_LEN` from the
-/// key-report crate (which `tsra_fw_ddi_tbor_types` cannot depend on
-/// directly due to layering); the handler additionally computes the
-/// report size at runtime and rejects any report exceeding this cap
-/// with `InternalError`.
-pub const PTA_REPORT_MAX_LEN: usize = 1024;
+/// Upper bound on the COSE_Sign1 PTA key-attestation report.  The
+/// firmware handler pins this `>= KEY_REPORT_MAX_LEN` from the
+/// key-report crate and rejects any larger report at runtime.
+pub const PTA_REPORT_MAX_LEN: usize = 8192;
+
+/// Out-of-band item that receives the PTA CSR.
+pub const PART_INIT_CSR_OOB_INDEX: usize = 0;
+
+/// Out-of-band item that receives the PTA report.
+pub const PART_INIT_REPORT_OOB_INDEX: usize = 1;
 
 /// `PartInit` request schema.
 ///
@@ -153,19 +148,15 @@ pub struct TborPartInitReq<'a> {
 
 /// `PartInit` response schema.
 ///
-/// Carries the DER-encoded PTA CSR and the COSE_Sign1 PTA
-/// key-attestation report.
+/// The CSR and report travel out of band; the response carries their
+/// written lengths.
 #[tbor(response, pair = TborPartInitReq)]
-pub struct TborPartInitResp<'a> {
-    /// DER-encoded PKCS#10 CertificationRequest for the PTA public
-    /// key.  Variable length up to [`PTA_CSR_MAX_LEN`].
-    #[tbor(buffer, max_len = 512)]
-    pub pta_csr: &'a [u8],
+pub struct TborPartInitResp {
+    /// Bytes written to out-of-band item [`PART_INIT_CSR_OOB_INDEX`].
+    pub pta_csr_len: U16,
 
-    /// COSE_Sign1 PTA key-attestation report.  Variable length up to
-    /// [`PTA_REPORT_MAX_LEN`].
-    #[tbor(buffer, max_len = 1024)]
-    pub pta_report: &'a [u8],
+    /// Bytes written to out-of-band item [`PART_INIT_REPORT_OOB_INDEX`].
+    pub pta_report_len: U16,
 }
 
 #[cfg(test)]
@@ -179,12 +170,5 @@ mod tests {
         // canonical `PART_POLICY_MAX_LEN` from `crate::policy`.
         const _: () = assert!(384 == PART_POLICY_MAX_LEN);
         assert_eq!(PART_POLICY_MAX_LEN, 384);
-    }
-
-    #[test]
-    fn pta_csr_and_report_caps_within_tbor_data_limits() {
-        // TBOR `MAX_DATA_SIZE` is 8191; our two response buffers must
-        // sum to comfortably less than that.
-        const { assert!(PTA_CSR_MAX_LEN + PTA_REPORT_MAX_LEN < 8191) };
     }
 }

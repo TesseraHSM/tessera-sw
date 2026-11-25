@@ -251,7 +251,10 @@ fn SysTick() {
 /// the public key straight into this core's operand slot.
 ///
 fn service(lane: u8, req: &mailbox::Request) {
-    if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
+    if matches!(
+        req.op,
+        mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256 | mailbox::OP_SHA3_256
+    ) {
         service_shake(lane, req);
         scrub_shake_stack();
         return;
@@ -284,7 +287,13 @@ fn service(lane: u8, req: &mailbox::Request) {
     match req.op {
         mailbox::OP_MLDSA_GENERATE_KEY => service_keygen(lane, req, variant),
         mailbox::OP_MLDSA_SIGN => service_sign(lane, req, variant),
-        mailbox::OP_MLDSA_VERIFY => service_verify(lane, req, variant),
+        mailbox::OP_MLDSA_SIGN_SEED => {
+            expand_sign_key(lane, req, variant);
+            service_sign(lane, req, variant);
+        }
+        mailbox::OP_MLDSA_VERIFY | mailbox::OP_MLDSA_VERIFY_SEED => {
+            service_verify(lane, req, variant)
+        }
         _ => mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_OP, 0),
     }
 }
@@ -497,16 +506,21 @@ struct Align4<const N: usize>([u8; N]);
 /// SHAKE message and squeezing its output.
 const SHAKE_CHUNK: usize = 512;
 
-/// Hash the message staged in the operand slot with SHAKE128 or SHAKE256,
-/// writing `sig_len` bytes of output back into the slot.
+/// Hash the message staged in the operand slot with SHAKE128, SHAKE256 or
+/// SHA3-256, writing `sig_len` bytes of output back into the slot.
+///
+/// SHA3-256 is SHAKE256's sponge (same rate) with the SHA-3 padding, and
+/// takes exactly [`mailbox::SHA3_256_LEN`] bytes of output.
 ///
 /// Both directions go through a dTCM buffer: PSRAM is far cheaper to move
 /// in bursts (see [`mailbox::stage`]) than to feed the sponge byte by byte.
 #[inline(never)]
 fn service_shake(lane: u8, req: &mailbox::Request) {
     let out_len = req.sig_len;
+    let sha3 = req.op == mailbox::OP_SHA3_256;
     // The message has to end before the output begins.
     let fits = out_len != 0
+        && (!sha3 || out_len == mailbox::SHA3_256_LEN)
         && req.msg_len <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET
         && out_len <= mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
     let msg = if fits {
@@ -530,7 +544,11 @@ fn service_shake(lane: u8, req: &mailbox::Request) {
         mailbox::stage(staged, part);
         sponge.absorb(staged);
     }
-    sponge.finalize();
+    if sha3 {
+        sponge.finalize_sha3();
+    } else {
+        sponge.finalize();
+    }
 
     let Some(out) = mailbox::slot_range_mut(lane, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len) else {
         buf.0.zeroize();
@@ -718,12 +736,71 @@ fn dsa_input<'a>(
     }
 }
 
-/// Sign the message, or external `μ`, staged in the operand slot.
+/// Derive the expanded secret key from the seed `xi` into the operand
+/// slot's key region, where [`service_sign`] reads a staged key.
+///
+/// A frame of its own, entered and left before `service_sign`'s, so the
+/// key-generation and signing scratch are never on the stack together.
+/// Signing never reads the slot's public-key region, but ML-DSA-87's key
+/// runs into it, so the public key is built in dTCM and dropped.
+#[inline(never)]
+fn expand_sign_key(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
+    let params = variant.params();
+    // Left unwritten if the slot is too small; `service_sign` then fails
+    // the same bounds check and answers for both.
+    let Some(sk) = mailbox::slot_range_mut(lane, mailbox::SLOT_KEY_IN_OFFSET, params.sk_bytes())
+    else {
+        return;
+    };
+
+    // SAFETY: both are written in full by `fast_zero` before any read.
+    let mut work = core::mem::MaybeUninit::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>::uninit();
+    let mut pk_buf = core::mem::MaybeUninit::<Align4<DSA_PK_LEN>>::uninit();
+    let (work, pk_buf) = unsafe {
+        fast_zero(
+            work.as_mut_ptr().cast(),
+            core::mem::size_of::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>(),
+        );
+        fast_zero(
+            pk_buf.as_mut_ptr().cast(),
+            core::mem::size_of::<Align4<DSA_PK_LEN>>(),
+        );
+        (
+            &mut work.assume_init_mut()[..],
+            &mut pk_buf.assume_init_mut().0,
+        )
+    };
+
+    pqc_ml::ml_dsa_keygen(variant, &req.xi, &mut pk_buf[..params.pk_bytes()], sk, work);
+
+    // The scratch holds the secret polynomials.
+    // SAFETY: `work` is this frame's own and word aligned.
+    unsafe {
+        fast_zero(
+            work.as_mut_ptr().cast(),
+            core::mem::size_of::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>(),
+        )
+    };
+}
+
+/// Zero `len` bytes of `lane`'s operand slot from `offset`.
+fn wipe_slot(lane: u8, offset: usize, len: usize) {
+    if let Some(region) = mailbox::slot_range_mut(lane, offset, len) {
+        // SAFETY: `region` is `len` bytes of the slot, and every slot
+        // offset is word aligned.
+        unsafe { fast_zero(region.as_mut_ptr(), len) };
+    }
+}
+
+/// Sign the message, or external `μ`, staged in the operand slot. A pure
+/// message may instead be read in place from the HSM's IO DMA buffer.
 ///
 /// The caller supplies the **expanded secret key**, staged in the slot, so
 /// no key derivation happens here. Deriving it from the seed instead used
 /// to cost a full key generation per signature — 8.51 ms of ML-DSA-87's
-/// 24.5 ms floor.
+/// 24.5 ms floor. For a seed-form key ([`mailbox::OP_MLDSA_SIGN_SEED`])
+/// [`expand_sign_key`] has already derived it into the slot, and it is
+/// wiped from there before the response.
 ///
 /// The key overlaps the region the signature goes back into, so one of the
 /// two has to be staged in dTCM. It is the signature: at up to 4627 bytes
@@ -756,34 +833,41 @@ fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant)
         (work.assume_init_mut(), &mut sig_buf.assume_init_mut().0)
     };
 
-    let ok = {
+    let signed = 'sign: {
         let (Some(sk), Some(msg), Some(ctx)) = (
             mailbox::slot_range(lane, mailbox::SLOT_KEY_IN_OFFSET, sk_len),
-            mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len),
+            dsa_msg(lane, req),
             mailbox::slot_range(lane, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
         ) else {
-            mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
-            return;
+            break 'sign Err(mailbox::STATUS_SLOT_TOO_SMALL);
         };
         let input = match dsa_input(req, msg, ctx) {
             Ok(input) => input,
-            Err(status) => {
-                mailbox::respond(lane, req, status, 0);
-                return;
-            }
+            Err(status) => break 'sign Err(status),
         };
 
         let sig = &mut sig_buf[..sig_len];
-        match input {
+        let ok = match input {
             DsaInput::Message { msg, ctx } => {
                 pqc_ml::ml_dsa_sign(variant, sig, msg, ctx, sk, &req.rnd, work)
             }
             DsaInput::Mu(mu) => pqc_ml::ml_dsa_sign_internal(variant, sig, mu, sk, &req.rnd, work),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(mailbox::STATUS_CRYPTO_FAILED)
         }
     };
 
-    if !ok {
-        mailbox::respond(lane, req, mailbox::STATUS_CRYPTO_FAILED, 0);
+    // A key this core derived does not outlive the request. Wiped before
+    // the response: once it is posted the HSM may stage the next request.
+    if req.op == mailbox::OP_MLDSA_SIGN_SEED {
+        wipe_slot(lane, mailbox::SLOT_KEY_IN_OFFSET, sk_len);
+    }
+
+    if let Err(status) = signed {
+        mailbox::respond(lane, req, status, 0);
         return;
     }
 
@@ -796,6 +880,18 @@ fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant)
     sig.copy_from_slice(&sig_buf[..sig_len]);
 
     mailbox::respond(lane, req, mailbox::STATUS_OK, sig_len as u32);
+}
+
+/// The ML-DSA message operand: staged in the lane's slot, or -- for a pure
+/// message only -- read in place from the HSM's IO DMA heap at `msg_addr`.
+fn dsa_msg(lane: u8, req: &mailbox::Request) -> Option<&'static [u8]> {
+    if req.msg_addr == 0 {
+        mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len)
+    } else if req.msg_type == mailbox::MSG_TYPE_PURE {
+        mailbox::io_dma_range(req.msg_addr, req.msg_len)
+    } else {
+        None
+    }
 }
 
 /// Verify a signature over the message, or external `μ`, under the supplied
@@ -813,20 +909,16 @@ fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant)
 #[inline(never)]
 fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
-    if req.pub_key_len != params.pk_bytes() || req.sig_len != params.sig_bytes() {
+    // A seed-form key carries no public key; it is derived from `xi`.
+    let seed_form = req.op == mailbox::OP_MLDSA_VERIFY_SEED;
+    let staged_pk_len = if seed_form { 0 } else { params.pk_bytes() };
+    if req.pub_key_len != staged_pk_len || req.sig_len != params.sig_bytes() {
         mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
         return;
     }
 
-    let msg = if req.msg_addr == 0 {
-        mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len)
-    } else if req.msg_type == mailbox::MSG_TYPE_PURE {
-        mailbox::io_dma_range(req.msg_addr, req.msg_len)
-    } else {
-        None
-    };
     let (Some(msg), Some(ctx), Some(sig_src), Some(pk_src)) = (
-        msg,
+        dsa_msg(lane, req),
         mailbox::slot_range(lane, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
         mailbox::slot_range(lane, mailbox::SLOT_SIG_OFFSET, req.sig_len),
         mailbox::slot_range(lane, mailbox::SLOT_PK_OFFSET, req.pub_key_len),
@@ -876,9 +968,8 @@ fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVarian
     }
 
     let sig = &mut sig_buf[..sig_src.len()];
-    let pk = &mut pk_buf[..pk_src.len()];
+    let pk = &mut pk_buf[..params.pk_bytes()];
     mailbox::stage(sig, sig_src);
-    mailbox::stage(pk, pk_src);
 
     // SAFETY: see `service_keygen` -- one operation in flight per core, so
     // the scratch cannot be aliased.
@@ -891,6 +982,30 @@ fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVarian
         );
         &mut work.assume_init_mut()[..]
     };
+
+    if seed_form {
+        // Derive the public key into its dTCM buffer with verify's own
+        // scratch, so the stack claim does not grow. The secret key it
+        // also produces goes to the slot's signature and public-key
+        // regions, both free now the signature is staged; it and the
+        // scratch are wiped before anything else runs.
+        let sk_len = params.sk_bytes();
+        let Some(sk) = mailbox::slot_range_mut(lane, mailbox::SLOT_KEY_IN_OFFSET, sk_len) else {
+            mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+            return;
+        };
+        pqc_ml::ml_dsa_keygen(variant, &req.xi, pk, sk, work);
+        wipe_slot(lane, mailbox::SLOT_KEY_IN_OFFSET, sk_len);
+        // SAFETY: `work` is this frame's own and word aligned.
+        unsafe {
+            fast_zero(
+                work.as_mut_ptr().cast(),
+                core::mem::size_of::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>(),
+            )
+        };
+    } else {
+        mailbox::stage(pk, pk_src);
+    }
 
     let verified = match input {
         DsaInput::Message { msg, ctx } => pqc_ml::ml_dsa_verify(variant, msg, sig, ctx, pk, work),

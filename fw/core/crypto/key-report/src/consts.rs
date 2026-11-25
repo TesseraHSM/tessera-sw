@@ -36,6 +36,14 @@ pub const DARC_EXTERNAL_AAD: [u8; 32] = *b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\
 
 /// SD COSE signature domain: ASCII label followed by 16 zero bytes.
 pub const SD_BACKUP_EXTERNAL_AAD: [u8; 32] = *b"TSRA-SdBackup-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+/// Encoded protected header `{ 1: -50 (ML-DSA-87), 3: "application/cbor" }`
+/// (draft-ietf-cose-dilithium). Same 22-byte shape as [`PROTECTED_HEADER`].
+pub const PROTECTED_HEADER_MLDSA87: [u8; 22] = [
+    0xa2, 0x01, 0x38, 0x31, 0x03, 0x70, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f,
+    0x6e, 0x2f, 0x63, 0x62, 0x6f, 0x72,
+];
+/// Protected `{ 1: -50 (ML-DSA-87) }` for directly signed binary envelopes.
+pub const TRANSFER_PROTECTED_HEADER_MLDSA87: [u8; 4] = [0xa1, 0x01, 0x38, 0x31];
 
 // ─── Payload fields ─────────────────────────────────────────────────────────
 
@@ -96,10 +104,52 @@ const _: () = assert!(
 /// their response caps against it.
 pub const KEY_REPORT_MAX_LEN: usize = 896;
 
+/// Upper bound on the encoded size of any report, including an ML-DSA-87
+/// signature over a payload attesting an ML-DSA-87 public key.
+pub const REPORT_MAX_LEN: usize = 8192;
+
 // ─── Signing (ES384 / ECDSA-P384) ──────────────────────────────────────────
 
 /// ECDSA-P384 raw signature length (`r || s`, 48 + 48).
 pub const SIGNATURE_LEN: usize = 96;
+
+/// ML-DSA-87 signature length.
+pub const MLDSA87_SIGNATURE_LEN: usize = 4627;
+
+/// ML-DSA-87 encoded public-key length.
+pub const MLDSA87_PUB_KEY_LEN: usize = 2592;
+
+/// ML-DSA private-key seed (`ξ`) length.
+pub const MLDSA_SEED_LEN: usize = 32;
+
+/// Size of an ML-DSA-87 AKP COSE_Key `{ 1: 7, 3: -50, -1: pub }`: the map
+/// header, `kty` and `alg` pairs (2 + 3 bytes), the `pub` label and its
+/// 3-byte bstr header, and the public key. It exceeds
+/// [`PUBLIC_KEY_MAX_SIZE`], so such a key's `public_key` field is exactly
+/// this long rather than padded.
+pub const MLDSA87_COSE_KEY_LEN: usize = 1 + 2 + 3 + 1 + 3 + MLDSA87_PUB_KEY_LEN;
+
+/// ML-KEM-1024 encapsulation-key length (FIPS 203).
+pub const MLKEM1024_PUB_KEY_LEN: usize = 1568;
+
+/// MLKEM1024-P384 hybrid public-key length: `ek_PQ ‖ SEC1(ek_T)`
+/// (draft-ietf-hpke-pq).
+pub const MLKEM1024P384_PUB_KEY_LEN: usize = MLKEM1024_PUB_KEY_LEN + 97;
+
+/// Size of an ML-KEM-1024 AKP COSE_Key `{ 1: 7, 3: alg, -1: pub }`: the
+/// map header, the `kty` pair (2 bytes), the `alg` pair with a 5-byte
+/// private-use algorithm (6 bytes), the `pub` label and its 3-byte bstr
+/// header, and the key. Like ML-DSA-87 it exceeds [`PUBLIC_KEY_MAX_SIZE`].
+pub const MLKEM1024_COSE_KEY_LEN: usize = 1 + 2 + 6 + 1 + 3 + MLKEM1024_PUB_KEY_LEN;
+
+/// Size of an MLKEM1024-P384 AKP COSE_Key (see [`MLKEM1024_COSE_KEY_LEN`]).
+pub const MLKEM1024P384_COSE_KEY_LEN: usize = 1 + 2 + 6 + 1 + 3 + MLKEM1024P384_PUB_KEY_LEN;
+
+/// Upper bound on an ES384-signed key-attestation report whose attested key
+/// is an ML-KEM-1024 or MLKEM1024-P384 key: [`KEY_REPORT_MAX_LEN`] with the
+/// padded `public_key` field replaced by the largest KEM COSE_Key.
+pub const KEM_KEY_REPORT_MAX_LEN: usize =
+    KEY_REPORT_MAX_LEN - PUBLIC_KEY_MAX_SIZE + MLKEM1024P384_COSE_KEY_LEN;
 
 /// P-384 attestation private-key (raw scalar) length.
 pub const PRIV_KEY_LEN: usize = 48;
@@ -139,6 +189,8 @@ pub struct KeyFlags {
     pub can_derive: bool,
     /// The authenticated key kind is an HSM-generated SD sealing key.
     pub is_sd_sealing: bool,
-    #[bits(21)]
+    /// The authenticated key kind is an HSM-generated DARC key-exchange key.
+    pub is_darc_kex: bool,
+    #[bits(20)]
     _reserved: u32,
 }

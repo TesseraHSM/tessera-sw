@@ -136,6 +136,7 @@ impl HsmSessionType {
 /// | `suite_id` | Variant | KEM | Signature |
 /// |---|---|---|---|
 /// | `0x01` | [`EcdhP384EcdsaP384`](Self::EcdhP384EcdsaP384) | ephemeral ECDH P-384 | ECDSA P-384 (partition identity) |
+/// | `0x02` | [`MlKem1024MlDsa87`](Self::MlKem1024MlDsa87) | ML-KEM-1024 | ML-DSA-87 (partition identity) |
 ///
 /// Any other value is rejected by `OpenSessionInit` with
 /// [`HsmError::UnsupportedSessionSuite`].
@@ -146,6 +147,9 @@ pub enum HsmSessionSuite {
     /// uncompressed points (97 B); the shared secret is the 48 B
     /// big-endian x-coordinate.
     EcdhP384EcdsaP384 = 0x01,
+
+    /// ML-KEM-1024 with ML-DSA-87 partition-identity authentication.
+    MlKem1024MlDsa87 = 0x02,
 }
 
 impl HsmSessionSuite {
@@ -163,6 +167,7 @@ impl HsmSessionSuite {
     pub const fn from_u8(v: u8) -> HsmResult<Self> {
         match v {
             0x01 => Ok(Self::EcdhP384EcdsaP384),
+            0x02 => Ok(Self::MlKem1024MlDsa87),
             _ => Err(HsmError::UnsupportedSessionSuite),
         }
     }
@@ -172,6 +177,7 @@ impl HsmSessionSuite {
     pub const fn pk_init_len(self) -> usize {
         match self {
             Self::EcdhP384EcdsaP384 => SESSION_P384_SEC1_LEN,
+            Self::MlKem1024MlDsa87 => SESSION_MLKEM1024_PK_LEN,
         }
     }
 }

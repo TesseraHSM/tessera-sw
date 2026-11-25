@@ -32,3 +32,7 @@ pub mod leaf_cert;
 
 /// Root CA (self-signed) certificate TBS template — auto-generated.
 pub mod root_cert;
+
+/// Signature-algorithm and subject-key retargeting of the P-384 templates
+/// (ML-DSA-87 issuers and subject keys).
+pub mod retarget;

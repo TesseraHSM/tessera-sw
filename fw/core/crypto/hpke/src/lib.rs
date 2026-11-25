@@ -4,19 +4,23 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-//! Hybrid Public Key Encryption (HPKE — RFC 9180), single-shot API.
+//! Hybrid Public Key Encryption (HPKE — RFC 9180, draft-ietf-hpke-hpke
+//! and draft-ietf-hpke-pq), single-shot API.
 //!
 //! Supports all four HPKE modes (Base / PSK / Auth / AuthPSK) across
-//! six ciphersuites built from three KEMs and two AEAD primitives:
+//! eight ciphersuites built from five KEMs, two KDF families and two
+//! AEAD primitives:
 //!
-//! | KEM          | KDF          | AEAD                    |
-//! |--------------|--------------|-------------------------|
-//! | DHKEM(P-256) | HKDF-SHA-256 | AES-256-GCM             |
-//! | DHKEM(P-256) | HKDF-SHA-256 | AES-256-CBC-HMAC-SHA-256 |
-//! | DHKEM(P-384) | HKDF-SHA-384 | AES-256-GCM             |
-//! | DHKEM(P-384) | HKDF-SHA-384 | AES-256-CBC-HMAC-SHA-384 |
-//! | DHKEM(P-521) | HKDF-SHA-512 | AES-256-GCM             |
-//! | DHKEM(P-521) | HKDF-SHA-512 | AES-256-CBC-HMAC-SHA-512 |
+//! | KEM            | KDF          | AEAD                     | Modes      |
+//! |----------------|--------------|--------------------------|------------|
+//! | DHKEM(P-256)   | HKDF-SHA-256 | AES-256-GCM              | all        |
+//! | DHKEM(P-256)   | HKDF-SHA-256 | AES-256-CBC-HMAC-SHA-256 | all        |
+//! | DHKEM(P-384)   | HKDF-SHA-384 | AES-256-GCM              | all        |
+//! | DHKEM(P-384)   | HKDF-SHA-384 | AES-256-CBC-HMAC-SHA-384 | all        |
+//! | DHKEM(P-521)   | HKDF-SHA-512 | AES-256-GCM              | all        |
+//! | DHKEM(P-521)   | HKDF-SHA-512 | AES-256-CBC-HMAC-SHA-512 | all        |
+//! | MLKEM1024-P384 | SHAKE256     | AES-256-GCM (HPKE-10)    | Base / PSK |
+//! | ML-KEM-1024    | SHAKE256     | AES-256-GCM (HPKE-13)    | Base / PSK |
 //!
 //! See [`HpkeSuite`] for the full enum and per-suite size constants.
 //!
@@ -55,10 +59,12 @@
 //! ## Internal modules
 //!
 //! * `aead` — AES-GCM / AES-CBC-HMAC seal & open dispatch.
-//! * `kdf` — RFC 9180 §4 LabeledExtract / LabeledExpand.
-//! * `kem` — DHKEM Encap / Decap and their Auth variants.
+//! * `kdf` — LabeledExtract / LabeledExpand (two-stage) and
+//!   LabeledDerive (one-stage).
+//! * `kem` — DHKEM, ML-KEM and hybrid Encap / Decap, plus the DHKEM
+//!   Auth variants.
 //! * `ops` — public seal / open / export entry points.
-//! * `schedule` — RFC 9180 §5.1 key schedule.
+//! * `schedule` — one- and two-stage key schedule.
 //! * `suite` — [`HpkeSuite`] enum and per-suite constants.
 //! * `error` — placeholder; HPKE currently surfaces
 //!   [`tsra_fw_hsm_pal_traits::HsmError`] directly.
@@ -72,6 +78,9 @@ mod ops;
 mod schedule;
 mod suite;
 
+pub use kem::generate_key_pair;
+pub use kem::public_key;
+pub use kem::validate_mlkem1024_public_key;
 pub use ops::open;
 pub use ops::receive_export;
 pub use ops::seal;

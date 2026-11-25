@@ -104,7 +104,7 @@ fn prepare_partition(ctx: &TestCtx, selector: u8) -> Lifecycle {
 /// Read stable slot-0 metadata and cross-check it against the MBOR path.
 fn read_slot_zero(ctx: &TestCtx) -> TborGetCertChainInfoResp {
     let response = ctx
-        .tbor(&TborGetCertChainInfoReq::new(0))
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
         .expect("sessionless slot-0 metadata must be available");
     validate_metadata(&response);
     let mbor = ctx.cert_chain_info().expect("MBOR slot-0 metadata");
@@ -184,7 +184,7 @@ fuzz_target!(|input: FuzzInput| {
                 };
                 exercise_request(
                     ctx,
-                    &TborGetCertChainInfoReq::new(slot_id),
+                    &TborGetCertChainInfoReq::new(slot_id, CERT_BANK_ECC),
                     expected,
                     state,
                     &baseline,

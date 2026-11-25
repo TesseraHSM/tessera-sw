@@ -40,6 +40,20 @@ pub enum KeyScope {
     Internal = 0b101,
 }
 
+/// HPKE KEM of a generated transfer-recipient key (an SD sealing key or a
+/// DARC key-exchange key) on the TBOR wire.
+#[repr(u8)]
+#[open_enum]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferKemId {
+    /// DHKEM(P-384, HKDF-SHA384).
+    P384 = 0,
+    /// ML-KEM-1024 (HPKE-13).
+    MlKem1024 = 1,
+    /// MLKEM1024-P384 hybrid (HPKE-10).
+    MlKem1024P384 = 2,
+}
+
 /// Hash algorithm selector on the TBOR wire.
 ///
 /// The 1-byte wire discriminants (`Sha1 = 0`, `Sha256 = 1`, `Sha384 = 2`,

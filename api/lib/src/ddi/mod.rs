@@ -52,6 +52,7 @@ pub(crate) use key::*;
 pub(crate) use masked_key::*;
 pub use part_policy::PartPolicyBuilder;
 pub use part_policy::PolicyKeyFormat;
+pub use part_policy::PolicyPtaAlg;
 pub use part_policy::policy_key_thumbprint;
 pub(crate) use partition::*;
 pub(crate) use partition_ex::*;
@@ -82,12 +83,16 @@ pub use tsra_ddi_tbor_types::DARC_WRAP_MASKED_KEY_MAX_LEN;
 pub use tsra_ddi_tbor_types::DARC_WRAP_WRAPPED_KEY_MAX_LEN;
 /// Maximum number of certificates in one SD-evidence certificate chain.
 pub use tsra_ddi_tbor_types::EVIDENCE_CHAIN_MAX_CERTS;
-/// Wire length of the DARC key-exchange public key (raw P-384 `x ‖ y`).
+/// Wire length of a P-384 DARC key-exchange public key (raw `x ‖ y`).
 pub use tsra_ddi_tbor_types::KEX_PUB_KEY_LEN;
+/// Maximum DARC key-exchange public key length (MLKEM1024-P384).
+pub use tsra_ddi_tbor_types::KEX_PUB_KEY_MAX_LEN;
 /// Size, in bytes, of the `part_final` `local_mk_backup` envelope.
 pub use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
-/// Wire length of the masked DARC key-exchange private key.
+/// Wire length of a masked P-384 DARC key-exchange private key.
 pub use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
+/// Maximum masked DARC key-exchange private key length (ML-KEM-1024).
+pub use tsra_ddi_tbor_types::MASKED_KEX_KEY_MAX_LEN;
 /// Exact length of the local (masked) security-domain backup.
 pub use tsra_ddi_tbor_types::MASKED_SD_LEN;
 /// Wire length of the masked DARC TMK envelope.
@@ -98,13 +103,17 @@ pub use tsra_ddi_tbor_types::MAX_CERTS;
 pub use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 /// Exact length of the remote partition-owner-key backup (`SdCreate`/`SdReseal`).
 pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
+/// Maximum remote/peer backup length (MLKEM1024-P384 sealing key).
+pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_MAX_LEN;
 /// Partition policy (CBOR) schema: `backup_part_id` length.
 pub use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
 /// Partition policy (CBOR) schema: maximum `info` length.
 pub use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+/// Partition policy (CBOR) schema: supported `version`.
+pub use tsra_ddi_tbor_types::POLICY_PTA_ALG_ES384;
+pub use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
 /// Partition policy (CBOR) schema: public-key thumbprint length.
 pub use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
-/// Partition policy (CBOR) schema: supported `version`.
 pub use tsra_ddi_tbor_types::POLICY_VERSION;
 /// Maximum size, in bytes, of the `part_init` `pta_csr` buffer.
 pub use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
@@ -118,8 +127,10 @@ pub use tsra_ddi_tbor_types::PolicyKey;
 pub use tsra_ddi_tbor_types::PolicyThumbprint;
 /// Exact length of the security-domain masking-key backup envelope.
 pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-/// Wire length of a sealed DARC TMK.
+/// Wire length of a P-384 sealed DARC TMK.
 pub use tsra_ddi_tbor_types::SEALED_TMK_LEN;
+/// Maximum sealed DARC TMK length (MLKEM1024-P384).
+pub use tsra_ddi_tbor_types::SEALED_TMK_MAX_LEN;
 use tsra_ddi_tbor_types::TborStatus;
 pub(crate) use wire_order::*;
 
@@ -180,6 +191,7 @@ impl From<DdiError> for HsmError {
             DdiError::DriverError(DriverError::IoAborted) => HsmError::IoAborted,
             DdiError::DriverError(DriverError::IoAbortInProgress) => HsmError::IoAbortInProgress,
             DdiError::DeviceNotReady => HsmError::DeviceNotReady,
+            DdiError::TborStatus(TborStatus::UnsupportedCmd) => HsmError::UnsupportedAlgorithm,
             DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished) => {
                 HsmError::CredentialsNotEstablished
             }
@@ -609,6 +621,18 @@ mod tests {
         assert_eq!(
             HsmError::from(DdiError::TborStatus(TborStatus::VaultNotFound)),
             HsmError::DdiCmdFailure
+        );
+    }
+
+    #[test]
+    fn unsupported_tbor_command_is_distinct_from_operational_failure() {
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::UnsupportedCmd)),
+            HsmError::UnsupportedAlgorithm,
+        );
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::VaultNotFound)),
+            HsmError::DdiCmdFailure,
         );
     }
 }

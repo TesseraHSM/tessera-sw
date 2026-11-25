@@ -53,6 +53,43 @@ fn bits(value: &[u8]) -> Vec<u8> {
     tlv(3, &[&[0], value].concat())
 }
 
+fn canonical_mldsa87_spki() -> Vec<u8> {
+    let key: Vec<u8> = (0..2592).map(|i| i as u8).collect();
+    sequence(&[sequence(&[oid("2.16.840.1.101.3.4.3.19")]), bits(&key)])
+}
+
+#[test]
+fn mldsa87_spki_inverse_accepts_canonical_der() {
+    let spki = canonical_mldsa87_spki();
+    let key = mldsa87_key_from_spki(&spki).expect("canonical ML-DSA-87 SPKI");
+    assert_eq!(key, &spki[22..]);
+}
+
+#[test]
+fn mldsa87_spki_inverse_rejects_noncanonical_der() {
+    let spki = canonical_mldsa87_spki();
+    for offset in [0, 3, 16, 21] {
+        let mut invalid = spki.clone();
+        invalid[offset] ^= 1;
+        assert!(matches!(
+            mldsa87_key_from_spki(&invalid),
+            Err(HsmError::InvalidArg)
+        ));
+    }
+    for length in [0, 21, 22, spki.len() - 1] {
+        assert!(matches!(
+            mldsa87_key_from_spki(&spki[..length]),
+            Err(HsmError::InvalidArg)
+        ));
+    }
+    let mut trailing = spki;
+    trailing.push(0);
+    assert!(matches!(
+        mldsa87_key_from_spki(&trailing),
+        Err(HsmError::InvalidArg)
+    ));
+}
+
 fn hash_oid(hash: HsmHashAlgo) -> &'static str {
     match hash {
         HsmHashAlgo::Sha256 => "2.16.840.1.101.3.4.2.1",
@@ -294,36 +331,37 @@ async fn walk<P: HsmPal>(
         .as_bytes()
         .to_vec();
     let mut leaf = vec![0xa5; expected.len()];
-    let max_pair_len = certs
-        .windows(2)
-        .map(|pair| pair[0].len() + pair[1].len())
-        .max()
-        .unwrap_or(certs[0].len());
+    let max_len = certs.iter().map(Vec::len).max().expect("test chain");
     let result = pal
         .alloc_scoped_async(io, async |scope| {
-            let mut previous_range: Option<core::ops::Range<usize>> = None;
+            let mut der_start: Option<usize> = None;
             let fetch = async |index: usize, out: &mut HsmDmaBuf| {
-                let range = out.as_ptr() as usize..out.as_ptr() as usize + out.len();
-                assert_eq!(range.start % 4, 0, "unaligned DMA receive view");
-                if let Some(previous) = &previous_range {
-                    assert!(
-                        range.end <= previous.start || previous.end <= range.start,
-                        "receiving a certificate would overwrite its issuer DER"
-                    );
-                    assert!(
-                        range.end.max(previous.end) - range.start.min(previous.start)
-                            <= max_pair_len + 6,
-                        "DER receive storage exceeds the largest adjacent pair and alignment"
-                    );
-                }
-                previous_range = Some(range);
+                let start = out.as_ptr() as usize;
+                assert_eq!(start % 4, 0, "unaligned DMA receive view");
+                assert!(
+                    out.len() <= max_len,
+                    "DER receive view exceeds largest certificate"
+                );
+                // Every certificate is received into the same reused buffer.
+                assert_eq!(
+                    *der_start.get_or_insert(start),
+                    start,
+                    "DER buffer not reused"
+                );
                 out.copy_from_slice(&certs[index]);
                 Ok(())
             };
             if issuing {
-                validate_issuing_chain(pal, io, scope, &descriptors, anchor, &mut leaf, fetch).await
+                let der =
+                    validate_issuing_chain(pal, io, scope, &descriptors, anchor, fetch).await?;
+                assert_eq!(&**der, &certs.last().expect("test chain")[..]);
+                leaf.copy_from_slice(parse_cert(der)?.pub_key.as_bytes());
+                Ok(())
             } else {
-                validate_chain(pal, io, scope, &descriptors, anchor, &mut leaf, fetch).await
+                let len =
+                    validate_chain(pal, io, scope, &descriptors, anchor, &mut leaf, fetch).await?;
+                assert_eq!(len, leaf.len());
+                Ok(())
             }
         })
         .await;
@@ -444,6 +482,52 @@ async fn mldsa_cases<P: HsmPal>(pal: &P, io: &P::Io) {
         assert_eq!(
             walk(pal, io, &tampered, None, false).await,
             Err(HsmError::X509SignatureInvalid)
+        );
+
+        // An ML-DSA issuer anchors only as ML-DSA-87.
+        let mut ml_anchor = [0u8; SPKI_THUMBPRINT_LEN];
+        HashAlgo::sha384()
+            .hash(&root.spki(), Some(&mut ml_anchor))
+            .expect("root SPKI thumbprint");
+        let anchored = walk(pal, io, &certs, Some(&ml_anchor), false).await;
+        if param == HsmMlDsaParamSet::MlDsa87 {
+            anchored.expect("ML-DSA-87 anchor");
+        } else {
+            assert_eq!(anchored, Err(HsmError::InvalidArg));
+        }
+    }
+
+    // POTA/PTA shapes: the anchor and issuing terminal algorithms are
+    // independent (ML-DSA-87 → P-384 CA, P-384 → ML-DSA-87 CA, and
+    // all-ML-DSA-87).
+    let ml = TestKey::mldsa(HsmMlDsaParamSet::MlDsa87);
+    let ml_algo = SigAlgo::MlDsa(HsmMlDsaParamSet::MlDsa87);
+    let thumbprint = |key: &TestKey| {
+        let mut out = [0u8; SPKI_THUMBPRINT_LEN];
+        HashAlgo::sha384()
+            .hash(&key.spki(), Some(&mut out))
+            .expect("SPKI thumbprint");
+        out
+    };
+    let ec_root = certificate(b"pota", b"pota", ec.spki(), &ec, SigAlgo::EcdsaSha384, true);
+    let ml_pta = TestKey::MlDsa(
+        MlDsaPrivateKey::from_seed(MlDsaVariant::MlDsa87, &[9; 32]).expect("ML-DSA key"),
+    );
+    let ml_root = certificate(b"pota", b"pota", ml.spki(), &ml, ml_algo, true);
+    for (root_cert, root_key, root_algo, pta_key) in [
+        (&ml_root, &ml, ml_algo, &ec),
+        (&ec_root, &ec, SigAlgo::EcdsaSha384, &ml),
+        (&ml_root, &ml, ml_algo, &ml_pta),
+    ] {
+        let pta = certificate(b"pta", b"pota", pta_key.spki(), root_key, root_algo, true);
+        let certs = vec![root_cert.clone(), pta];
+        walk(pal, io, &certs, Some(&thumbprint(root_key)), true)
+            .await
+            .expect("POTA-anchored PTA chain");
+        assert_eq!(
+            walk(pal, io, &certs, Some(&thumbprint(pta_key)), true).await,
+            Err(HsmError::InvalidArg),
+            "terminal certificate must not satisfy the anchor"
         );
     }
 }
@@ -897,6 +981,34 @@ async fn rejection_cases<P: HsmPal>(pal: &P, io: &P::Io) {
     assert_eq!(
         parse_cert(dma(&pss)).err(),
         Some(HsmError::X509UnsupportedAlgorithm)
+    );
+
+    // An issuer whose subject, SPKI and SKID exceed the carry bound is
+    // rejected; the same certificate is fine as a terminal. The test
+    // certificate repeats the name as subject, issuer, SKID and AKID.
+    let big_name = vec![b'n'; MAX_ISSUER_CARRY_LEN / 2];
+    let big_root = certificate(
+        &big_name,
+        &big_name,
+        ec.spki(),
+        &ec,
+        SigAlgo::EcdsaSha384,
+        true,
+    );
+    walk(pal, io, std::slice::from_ref(&big_root), None, false)
+        .await
+        .expect("large terminal certificate");
+    let leaf = certificate(
+        b"leaf",
+        &big_name,
+        ec.spki(),
+        &ec,
+        SigAlgo::EcdsaSha384,
+        false,
+    );
+    assert_eq!(
+        walk(pal, io, &[big_root, leaf], None, false).await,
+        Err(HsmError::InvalidArg)
     );
 
     let descriptors = [CertDescriptor {

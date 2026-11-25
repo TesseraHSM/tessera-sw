@@ -9,8 +9,10 @@ use crate::evidence::*;
 pub use crate::policy::PART_POLICY_MAX_LEN;
 pub use crate::sd_create_remote_backup::MASKED_SD_LEN;
 pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_MAX_LEN;
 pub use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
 pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
+pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_MAX_LEN;
 
 /// Restore-peer opcode.
 pub const TBOR_OP_SD_RESTORE_PEER_BACKUP: u8 = 0x0F;
@@ -22,7 +24,7 @@ pub struct TborSdRestorePeerBackupReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
     /// Actual recipient's masked key.
-    #[tbor(align = 4, buffer, len = 280)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 296)]
     pub masked_sealing_key: &'a [u8],
     /// Bound SD policy.
     #[tbor(buffer, max_len = 384)]
@@ -30,9 +32,9 @@ pub struct TborSdRestorePeerBackupReq<'a> {
     /// POTA-authorized source PID identity chains.
     #[tbor(include)]
     pub src_evidence: IdentityEvidence<'a>,
-    /// PID-signed canonical peer envelope.
-    #[tbor(buffer, len = 431)]
-    pub pok_peer_backup: &'a [u8],
+    /// Out-of-band complete PID-signed peer envelope.
+    #[tbor(buffer, len = 3)]
+    pub pok_peer_backup: &'a ReportDescriptor,
     /// Existing SDMK backup.
     #[tbor(buffer, len = 264)]
     pub prev_sd_mk_backup: &'a [u8],
@@ -42,9 +44,9 @@ pub struct TborSdRestorePeerBackupReq<'a> {
 #[tbor(response, pair = TborSdRestorePeerBackupReq)]
 pub struct TborSdRestorePeerBackupResp<'a> {
     /// Local BKS3 backup.
-    #[tbor(align = 4, buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280, mutable)]
     pub pok_local_backup: &'a [u8],
     /// Refreshed SDMK backup.
-    #[tbor(align = 4, buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264, mutable)]
     pub sd_mk_backup: &'a [u8],
 }

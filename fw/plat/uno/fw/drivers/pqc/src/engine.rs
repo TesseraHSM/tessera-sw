@@ -7,6 +7,9 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKeyMut;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPubKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_trace::tracing::*;
@@ -58,8 +61,10 @@ const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from
 /// parameter set, which is why the key kind has to travel with it.
 pub const MLDSA_SEED_LEN: usize = 32;
 
-/// Largest message a pure sign or verify accepts: what the operand slot is
-/// sized for alongside the largest key, context string and signature.
+/// Largest message a sign or verify stages in the operand slot: what it is
+/// sized for alongside the largest key, context string and signature. A
+/// pure message in the IO DMA heap is passed by address instead and has no
+/// such limit.
 pub const MLDSA_MSG_MAX: usize = 586;
 
 /// Largest context string, the FIPS 204 limit.
@@ -85,10 +90,30 @@ const _: () =
 ///
 /// # Errors
 /// * [`HsmError::InvalidArg`] — the input is malformed for `msg_type`.
-/// * [`PqcError::INVALID_BUFFER_SIZE`] — the message or context is too long.
+/// * [`PqcError::INVALID_BUFFER_SIZE`] — the context is too long, or a
+///   message that must be staged is.
 /// * [`HsmError::UnsupportedCmd`] — a pre-hash type; the FP cores take the
 ///   message itself or an external `μ`.
-pub fn mldsa_check_msg(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<()> {
+pub fn mldsa_check_msg(msg_type: HsmMlDsaMsgType, msg: &HsmDmaBuf, ctx: &[u8]) -> HsmResult<()> {
+    mldsa_msg_wire(msg_type, msg, ctx).map(drop)
+}
+
+/// How a validated ML-DSA message reaches the FP core: its mailbox type and
+/// IO DMA address, or `0` when it is staged in the operand slot.
+///
+/// A pure message is passed by address whenever it lies in one IO DMA
+/// slot, so it is neither copied nor capped at [`MLDSA_MSG_MAX`].
+fn mldsa_msg_wire(msg_type: HsmMlDsaMsgType, msg: &HsmDmaBuf, ctx: &[u8]) -> HsmResult<(u32, u32)> {
+    match (msg_type, mailbox::io_dma_addr(msg)) {
+        (HsmMlDsaMsgType::Pure, Some(addr)) if ctx.len() <= MLDSA_CTX_MAX => {
+            Ok((mailbox::MSG_TYPE_PURE, addr))
+        }
+        _ => Ok((mailbox_msg_type(msg_type, msg, ctx)?, 0)),
+    }
+}
+
+/// Validate a message to be staged in the operand slot.
+fn check_staged_msg(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<()> {
     match msg_type {
         HsmMlDsaMsgType::Pure => {}
         HsmMlDsaMsgType::ExternalMu if msg.len() == mailbox::MU_LEN && ctx.is_empty() => {}
@@ -105,7 +130,7 @@ pub fn mldsa_check_msg(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> Hsm
 
 /// The mailbox encoding of a validated ML-DSA message.
 fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
-    mldsa_check_msg(msg_type, msg, ctx)?;
+    check_staged_msg(msg_type, msg, ctx)?;
     Ok(if matches!(msg_type, HsmMlDsaMsgType::ExternalMu) {
         mailbox::MSG_TYPE_EXTERNAL_MU
     } else {
@@ -298,28 +323,36 @@ impl PqcEngine<'_> {
     /// # Parameters
     /// * `kind` — ML-DSA seed kind selecting the parameter set.
     /// * `sk` — the expanded secret key recovered from the caller's
-    ///   masked key. Supplying it rather than the seed is what keeps a key
-    ///   generation out of every signature.
+    ///   masked key, or its seed `ξ`. The expanded form keeps a key
+    ///   generation out of the signature; from the seed, the FP core
+    ///   derives the key first and wipes it before answering.
     /// * `rnd` — per-signature randomness from the device TRNG.
     /// * `msg_type` — how `msg` is read: the message itself, or an external
     ///   `μ` (64 bytes, with an empty `ctx`).
-    /// * `msg`, `ctx` — staged into the operand slot.
+    /// * `msg` — passed by address if it is a pure message in the IO DMA
+    ///   heap, as [`Self::mldsa_verify`] does; otherwise staged into the
+    ///   operand slot.
+    /// * `ctx` — staged into the operand slot.
     /// * `sig` — output, exactly the parameter set's signature length.
     #[allow(clippy::too_many_arguments)]
     pub async fn mldsa_sign(
         &mut self,
         kind: HsmVaultKeyKind,
-        sk: &[u8],
+        sk: HsmMlDsaPrivKey<'_>,
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
-        msg: &[u8],
+        msg: &HsmDmaBuf,
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
         if sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, sk, rnd, msg_type, msg, ctx)
+        let (seed_form, sk) = match sk {
+            HsmMlDsaPrivKey::Seed(seed) => (true, &**seed),
+            HsmMlDsaPrivKey::Expanded(sk) => (false, &**sk),
+        };
+        self.mldsa_sign_submit(kind, seed_form, sk, rnd, msg_type, msg, ctx)
             .await?;
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
@@ -327,25 +360,35 @@ impl PqcEngine<'_> {
         Ok(())
     }
 
-    /// Consume a tail-aligned expanded key before signature readback at the front.
+    /// Consume a tail-aligned key, expanded or seed, before signature
+    /// readback at the front.
     pub async fn mldsa_sign_in_place(
         &mut self,
         kind: HsmVaultKeyKind,
-        sk_sig: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        sk_sig: HsmMlDsaPrivKeyMut<'_>,
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
-        msg: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
-        ctx: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        msg: &HsmDmaBuf,
+        ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
+        let (seed_form, sk_sig) = match sk_sig {
+            HsmMlDsaPrivKeyMut::Seed(buf) => (true, buf),
+            HsmMlDsaPrivKeyMut::Expanded(buf) => (false, buf),
+        };
+        let key_len = if seed_form {
+            MLDSA_SEED_LEN
+        } else {
+            mldsa_sec_key_len(kind)?
+        };
         let key_at = sk_sig
             .len()
-            .checked_sub(mldsa_sec_key_len(kind)?)
+            .checked_sub(key_len)
             .ok_or(PqcError::INVALID_BUFFER_SIZE)?;
         let sig_len = mldsa_sig_len(kind)?;
         if sk_sig.len() < sig_len {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, &sk_sig[key_at..], rnd, msg_type, msg, ctx)
+        self.mldsa_sign_submit(kind, seed_form, &sk_sig[key_at..], rnd, msg_type, msg, ctx)
             .await?;
         let output = &mut sk_sig[..sig_len];
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, output) {
@@ -354,50 +397,95 @@ impl PqcEngine<'_> {
         Ok(())
     }
 
+    /// Post a sign request. `sk` is the seed `ξ` if `seed_form`, which
+    /// travels in the mailbox; otherwise the expanded key, staged.
+    #[allow(clippy::too_many_arguments)]
     async fn mldsa_sign_submit(
         &mut self,
         kind: HsmVaultKeyKind,
+        seed_form: bool,
         sk: &[u8],
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
-        msg: &[u8],
+        msg: &HsmDmaBuf,
         ctx: &[u8],
     ) -> HsmResult<()> {
         let expected_sig = mldsa_sig_len(kind)?;
-        let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
-        if sk.len() != mldsa_sec_key_len(kind)? {
+        let (msg_type, msg_addr) = mldsa_msg_wire(msg_type, msg, ctx)?;
+        let (op, staged_sk) = if seed_form {
+            (PqcOp::MlDsaSignSeed, &[][..])
+        } else {
+            (PqcOp::MlDsaSign, sk)
+        };
+        let key_len = if seed_form {
+            MLDSA_SEED_LEN
+        } else {
+            mldsa_sec_key_len(kind)?
+        };
+        if sk.len() != key_len {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
+        let mut xi = [0u8; MLDSA_SEED_LEN];
+        if seed_form {
+            xi.copy_from_slice(sk);
+        }
+        let result = self
+            .mldsa_sign_post(kind, op, &xi, staged_sk, rnd, msg_type, msg, msg_addr, ctx)
+            .await;
+        xi.fill(0);
+        if result? != expected_sig {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
 
+    /// Stage a sign request's operands and post it, returning the
+    /// signature length the core reports.
+    #[allow(clippy::too_many_arguments)]
+    async fn mldsa_sign_post(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        op: PqcOp,
+        xi: &[u8; MLDSA_SEED_LEN],
+        sk: &[u8],
+        rnd: &[u8; MLDSA_SEED_LEN],
+        msg_type: u32,
+        msg: &HsmDmaBuf,
+        msg_addr: u32,
+        ctx: &[u8],
+    ) -> HsmResult<usize> {
         self.settle()?;
         // Stage the bulk inputs before posting: the core reads them only
         // after seeing the request sequence number, which is written last.
-        if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
+        // A borrowed message and a seed (empty `sk`) are not staged.
+        if (msg_addr == 0 && !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg))
             || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
             || !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
+        // Declared before the request is posted; see `mldsa_verify`.
+        let _fp_reads_msg = FpReadGuard {
+            id: self.id,
+            armed: msg_addr != 0,
+        };
+
         let resp = self
             .submit(&mailbox::RequestParams {
-                op: PqcOp::MlDsaSign as u32,
+                op: op as u32,
                 key_kind: kind.0 as u32,
-                xi: &[0u8; MLDSA_SEED_LEN],
+                xi,
                 rnd,
                 msg_len: msg.len() as u32,
                 ctx_len: ctx.len() as u32,
                 sig_len: 0,
                 pub_key_len: 0,
                 msg_type,
-                msg_addr: 0,
+                msg_addr,
             })
             .await?;
-
-        if resp.out_len as usize != expected_sig {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        Ok(())
+        Ok(resp.out_len as usize)
     }
 
     /// Generate an ML-KEM key pair on this engine.
@@ -618,9 +706,9 @@ impl PqcEngine<'_> {
     /// `msg_type` says how `msg` is read: the message itself, or an
     /// external `μ` (64 bytes, with an empty `ctx`).
     ///
-    /// A pure message is not copied: the FP core reads it where it lies in
-    /// the IO DMA heap, so it has no mailbox size limit and must live there.
-    /// Until the core answers, that buffer stays in use, and this call does
+    /// A pure message in the IO DMA heap is not copied: the FP core reads it
+    /// where it lies, so it has no mailbox size limit. Any other message is
+    /// staged, up to [`MLDSA_MSG_MAX`] bytes. Until the core answers, that buffer stays in use, and this call does
     /// not return -- whether it completes, times out, or is dropped -- before
     /// then; see [`FpReadGuard`].
     ///
@@ -630,23 +718,48 @@ impl PqcEngine<'_> {
     pub async fn mldsa_verify(
         &mut self,
         kind: HsmVaultKeyKind,
+        pk: HsmMlDsaPubKey<'_>,
+        msg_type: HsmMlDsaMsgType,
+        msg: &HsmDmaBuf,
+        ctx: &[u8],
+        sig: &[u8],
+    ) -> HsmResult<bool> {
+        if sig.len() != mldsa_sig_len(kind)? {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        // From a seed, the FP core derives the public key itself.
+        let mut xi = [0u8; MLDSA_SEED_LEN];
+        let (op, pk) = match pk {
+            HsmMlDsaPubKey::Encoded(pk) if pk.len() == mldsa_pub_key_len(kind)? => {
+                (PqcOp::MlDsaVerify, &**pk)
+            }
+            HsmMlDsaPubKey::Seed(seed) if seed.len() == MLDSA_SEED_LEN => {
+                xi.copy_from_slice(seed);
+                (PqcOp::MlDsaVerifySeed, &[][..])
+            }
+            _ => return Err(PqcError::INVALID_BUFFER_SIZE),
+        };
+        let result = self
+            .mldsa_verify_post(kind, op, &xi, pk, msg_type, msg, ctx, sig)
+            .await;
+        xi.fill(0);
+        result
+    }
+
+    /// Stage a verify request's operands, post it, and read its verdict.
+    #[allow(clippy::too_many_arguments)]
+    async fn mldsa_verify_post(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        op: PqcOp,
+        xi: &[u8; MLDSA_SEED_LEN],
         pk: &[u8],
         msg_type: HsmMlDsaMsgType,
         msg: &HsmDmaBuf,
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        if pk.len() != mldsa_pub_key_len(kind)? || sig.len() != mldsa_sig_len(kind)? {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        let (wire_type, msg_addr) = match msg_type {
-            HsmMlDsaMsgType::Pure if ctx.len() <= MLDSA_CTX_MAX && !msg.is_empty() => (
-                mailbox::MSG_TYPE_PURE,
-                mailbox::io_dma_addr(msg).ok_or(PqcError::INVALID_BUFFER_SIZE)?,
-            ),
-            HsmMlDsaMsgType::Pure if ctx.len() <= MLDSA_CTX_MAX => (mailbox::MSG_TYPE_PURE, 0),
-            _ => (mailbox_msg_type(msg_type, msg, ctx)?, 0),
-        };
+        let (wire_type, msg_addr) = mldsa_msg_wire(msg_type, msg, ctx)?;
 
         self.settle()?;
         // Only the lane's own operands are staged; a borrowed message is not.
@@ -669,9 +782,9 @@ impl PqcEngine<'_> {
         // submit rather than letting every non-zero status become an error.
         let resp = self
             .submit_raw(&mailbox::RequestParams {
-                op: PqcOp::MlDsaVerify as u32,
+                op: op as u32,
                 key_kind: kind.0 as u32,
-                xi: &[0u8; MLDSA_SEED_LEN],
+                xi,
                 rnd: &[0u8; MLDSA_SEED_LEN],
                 msg_len: msg.len() as u32,
                 ctx_len: ctx.len() as u32,
@@ -691,11 +804,12 @@ impl PqcEngine<'_> {
         }
     }
 
-    /// Hash `msg` with SHAKE on this engine.
+    /// Hash `msg` with SHAKE or SHA3-256 on this engine.
     ///
     /// # Parameters
     /// * `algo` — [`HsmHashAlgo::Shake128`] or [`HsmHashAlgo::Shake256`],
-    ///   carrying the number of output bytes (at most [`SHAKE_OUT_MAX`]).
+    ///   carrying the number of output bytes (at most [`SHAKE_OUT_MAX`]), or
+    ///   [`HsmHashAlgo::Sha3_256`] for a 32-byte digest.
     /// * `msg` — up to [`SHAKE_MSG_MAX`] bytes, staged into the operand slot.
     /// * `out` — at least that many bytes; only the first that many are
     ///   written, as with [`HsmHash`](tsra_fw_hsm_pal_traits::HsmHash).
@@ -703,6 +817,7 @@ impl PqcEngine<'_> {
         let (op, out_len) = match algo {
             HsmHashAlgo::Shake128(len) => (PqcOp::Shake128, usize::from(len.get())),
             HsmHashAlgo::Shake256(len) => (PqcOp::Shake256, usize::from(len.get())),
+            HsmHashAlgo::Sha3_256 => (PqcOp::Sha3_256, HsmHashAlgo::Sha3_256.digest_len()),
             _ => return Err(HsmError::UnsupportedDigestHashAlgorithm),
         };
         if msg.len() > SHAKE_MSG_MAX || out_len > SHAKE_OUT_MAX {
@@ -932,7 +1047,7 @@ mod tests {
         let msg = [0u8; MLDSA_MSG_MAX + 1];
         let ctx = [0u8; MLDSA_CTX_MAX + 1];
         assert_eq!(
-            mldsa_check_msg(
+            check_staged_msg(
                 HsmMlDsaMsgType::Pure,
                 &msg[..MLDSA_MSG_MAX],
                 &ctx[..MLDSA_CTX_MAX]
@@ -940,11 +1055,11 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            mldsa_check_msg(HsmMlDsaMsgType::Pure, &msg, &[]),
+            check_staged_msg(HsmMlDsaMsgType::Pure, &msg, &[]),
             Err(PqcError::INVALID_BUFFER_SIZE)
         );
         assert_eq!(
-            mldsa_check_msg(HsmMlDsaMsgType::Pure, &[], &ctx),
+            check_staged_msg(HsmMlDsaMsgType::Pure, &[], &ctx),
             Err(PqcError::INVALID_BUFFER_SIZE)
         );
     }
@@ -958,7 +1073,7 @@ mod tests {
         );
         for (msg, ctx) in [(&mu[..mailbox::MU_LEN - 1], &[][..]), (&mu[..], &b"x"[..])] {
             assert_eq!(
-                mldsa_check_msg(HsmMlDsaMsgType::ExternalMu, msg, ctx),
+                check_staged_msg(HsmMlDsaMsgType::ExternalMu, msg, ctx),
                 Err(HsmError::InvalidArg)
             );
         }
@@ -967,7 +1082,7 @@ mod tests {
             HsmMlDsaMsgType::HashMsg(HsmHashAlgo::Sha256),
         ] {
             assert_eq!(
-                mldsa_check_msg(msg_type, &[], &[]),
+                check_staged_msg(msg_type, &[], &[]),
                 Err(HsmError::UnsupportedCmd)
             );
         }

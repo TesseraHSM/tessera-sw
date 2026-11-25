@@ -7,6 +7,7 @@
 mod common;
 
 use common::COORD_LEN;
+use common::SdOob;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -67,8 +68,8 @@ struct Fixture {
     session_id: u16,
     request: TborSdResealRemoteBackupReq,
     evidence: ResealEvidence,
-    src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
-    wrong_receiver_key: Option<[u8; MASKED_SEALING_KEY_LEN]>,
+    src_remote_backup: Vec<u8>,
+    wrong_receiver_key: Option<Vec<u8>>,
 }
 
 /// Append a certificate or report to the OOB items and return its descriptor.
@@ -116,7 +117,7 @@ fn build_reseal_evidence(
     pota_key: &CaKey,
     dest_report: &[u8],
 ) -> ResealEvidence {
-    let mut oob_items = Vec::new();
+    let mut oob_items = common::sd_oob_items();
     let (src_mfgr, src_owner, src_part_owner) = push_identity(&mut oob_items, pid_pub, pota_key);
     let src_leaf_index = usize::from(src_mfgr[CHAIN_LEAF_INDEX].index);
     let (dest_mfgr, dest_owner, dest_part_owner) = push_identity(&mut oob_items, pid_pub, pota_key);
@@ -168,28 +169,24 @@ fn sealing_key_report_and_pub(
     ctx: &TestCtx,
     session_id: u16,
     key_scope: common::KeyScope,
-) -> ([u8; MASKED_SEALING_KEY_LEN], Vec<u8>, [u8; RAW_PUB_LEN]) {
+) -> (Vec<u8>, Vec<u8>, [u8; RAW_PUB_LEN]) {
     let seal = ctx
         .tbor(&TborSdSealingKeyGenReq {
             session_id,
             scope: key_scope.to_tbor(),
+            kem: TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
-    let masked_key: [u8; MASKED_SEALING_KEY_LEN] = seal
-        .masked_key
-        .as_slice()
-        .try_into()
-        .expect("SdSealingKeyGen returns a fixed-length masked key");
+    let masked_key = seal.masked_key;
     let pub_key = public_key_from_wire(&seal.pub_key);
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id,
-            masked_key: masked_key.to_vec(),
+            masked_key: masked_key.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
             auth_envelope: Vec::new(),
         })
-        .expect("KeyReport")
-        .report;
+        .expect("KeyReport");
     (masked_key, report, pub_key)
 }
 
@@ -238,7 +235,7 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
     let wrong_receiver_key = wrong_receiver_key
         .then(|| sealing_key_report_and_pub(ctx, session.session_id, key_scope).0);
 
-    let mut oob_items = Vec::new();
+    let mut oob_items = common::sd_oob_items();
     let receiver_chain = push_chain(&mut oob_items, &make_chain(&sata_key, &receiver_pub));
     let mfgr = push_chain(&mut oob_items, &make_chain(&CaKey::generate(), &pid_pub));
     let owner = push_chain(&mut oob_items, &make_chain(&CaKey::generate(), &pid_pub));
@@ -249,6 +246,7 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
         receiver_cert_chain: receiver_chain,
+        receiver_key_report: Vec::new(),
         receiver_mfgr_cert_chain: mfgr,
         receiver_owner_cert_chain: owner,
         receiver_part_owner_cert_chain: part_owner,
@@ -258,12 +256,12 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
         },
         policy: policy.clone(),
     };
-    let source = ctx
-        .tbor_oob(&request, &oob)
+    let (_created, src_remote_backup) = ctx
+        .sd_oob_report(&request, &oob)
         .expect("create real source remote backup");
-    let src_remote_backup = source.pok_remote_backup;
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &destination_report);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &destination_report);
+    let source = common::add_evidence_item(&mut evidence.oob_items, &src_remote_backup);
     let request = TborSdResealRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_receiver,
@@ -275,7 +273,10 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
         dest_owner_cert_chain: evidence.dest_owner.clone(),
         dest_part_owner_cert_chain: evidence.dest_part_owner.clone(),
         dest_report: evidence.dest_report,
-        src_remote_backup,
+        src_remote_backup: ReportDescriptor {
+            index: source.index,
+            length: source.length,
+        },
     };
 
     Fixture {
@@ -290,28 +291,28 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
 /// Submit the reseal request and check that the destination backup has the
 /// schema length, is nonzero, and differs from the source. Return the backup
 /// for freshness checks across repeated calls.
-fn assert_success(ctx: &TestCtx, fixture: &Fixture) -> [u8; POK_REMOTE_BACKUP_LEN] {
+fn assert_success(ctx: &TestCtx, fixture: &Fixture) -> Vec<u8> {
     let oob = fixture.evidence.oob();
-    let response = ctx
-        .tbor_oob(&fixture.request, &oob)
+    let (_response, report) = ctx
+        .sd_oob_report(&fixture.request, &oob)
         .expect("valid SdResealRemoteBackup fixture must succeed");
-    assert_eq!(response.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(report.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        response.dst_remote_backup.iter().any(|byte| *byte != 0),
+        report.iter().any(|byte| *byte != 0),
         "resealed remote backup must not be all zero",
     );
     assert_ne!(
-        response.dst_remote_backup, fixture.src_remote_backup,
+        report, fixture.src_remote_backup,
         "resealing must produce a fresh HPKE encapsulation",
     );
-    response.dst_remote_backup
+    report
 }
 
 /// Check that the reseal request is rejected with a firmware status rather
 /// than a transport or host-side error.
 fn assert_rejected(ctx: &TestCtx, fixture: &Fixture) {
     let oob = fixture.evidence.oob();
-    let result = ctx.tbor_oob(&fixture.request, &oob);
+    let result = ctx.sd_oob(&fixture.request, &oob);
     assert!(
         matches!(&result, Err(tsra_ddi_interface::DdiError::TborStatus(_))),
         "invalid SdResealRemoteBackup fixture must be rejected by firmware",
@@ -364,7 +365,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
         }
         Mutation::EmptySourceChain => {
             fixture.request.src_mfgr_cert_chain.clear();
-            ctx.expect_fw_reject_oob(
+            ctx.expect_sd_reject(
                 &fixture.request,
                 &fixture.evidence.oob(),
                 TborStatus::InvalidArg,
@@ -372,7 +373,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
         }
         Mutation::EmptyDestinationChain => {
             fixture.request.dest_part_owner_cert_chain.clear();
-            ctx.expect_fw_reject_oob(
+            ctx.expect_sd_reject(
                 &fixture.request,
                 &fixture.evidence.oob(),
                 TborStatus::InvalidArg,
@@ -415,6 +416,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
         Mutation::WrongReceiverKey => {
             fixture.request.masked_sealing_key = fixture
                 .wrong_receiver_key
+                .take()
                 .expect("wrong receiver key generated for this case");
             assert_rejected(ctx, &fixture);
         }
@@ -422,8 +424,10 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             if mask == 0 {
                 assert_success(ctx, &fixture);
             } else {
-                let index = usize::from(offset) % POK_REMOTE_BACKUP_LEN;
-                fixture.request.src_remote_backup[index] ^= mask;
+                let artifact = &mut fixture.evidence.oob_items
+                    [usize::from(fixture.request.src_remote_backup.index)];
+                let index = usize::from(offset) % artifact.len();
+                artifact[index] ^= mask;
                 assert_rejected(ctx, &fixture);
             }
         }

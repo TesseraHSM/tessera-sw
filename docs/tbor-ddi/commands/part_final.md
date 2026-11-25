@@ -26,17 +26,31 @@ and replays as `prev_local_mk_backup` on subsequent launches.
 1. **Gate:** CO-only; partition must be in `Initializing`; reject otherwise.
 2. **Integrity:** verify `SHA-384(part_policy)` == the stored
    `policy_hash` (bound at `PartInit`); validate the typed policy.
-3. **UPS:** read the partition root (UMS) from the `ups_key_id` slot and
+3. **Trust:** walk the out-of-band PTA chain (root first, PTA cert last)
+   in one reused DER buffer:
+   * every certificate's signature verifies under its issuer, and names,
+     key identifiers, basic constraints and key usage chain;
+   * some non-terminal certificate's SPKI thumbprint equals the policy
+     `pota_spki_thumbprint`. The POTA may be P-384 or ML-DSA-87,
+     independent of `pta_alg`;
+   * the partition's PTA key has the policy `pta_alg`, and the terminal
+     certificate certifies exactly that key (SEC1 P-384 point or raw
+     ML-DSA-87 key);
+   * the terminal certificate follows the PTA profile: the subject is the
+     deterministic PTAID `commonName` and the SKID is SHA-1 of the PTA key,
+     so the on-demand PartOwner PID leaf (see
+     [`GetCert`](./get_cert.md)) chains to it.
+4. **UPS:** read the partition root (UMS) from the `ups_key_id` slot and
    derive `UPS = KBKDF(UMS, "TSRA-PartFinal-UPS-v1")` (cert-chain hash
    deferred → empty context).
-4. **PartLocalMK:** derive `PartLocalBMK` (svn/owner-bound); generate a
+5. **PartLocalMK:** derive `PartLocalBMK` (svn/owner-bound); generate a
    fresh 32 B `PartLocalMK` (no prior backup) or restore it by unmasking
    `prev_local_mk_backup` and re-mask under the current SVN.
-5. **EphemeralMK:** sample a fresh 32 B random masking key.
-6. **Commit:** vault `PartLocalMK` (Local scope) + `EphemeralMK`
+6. **EphemeralMK:** sample a fresh 32 B random masking key.
+7. **Commit:** vault `PartLocalMK` (Local scope) + `EphemeralMK`
    (Ephemeral scope) recording their ids; replace UMS → UPS in the root
    slot (free the old UMS key); transition `Initializing → Initialized`.
-7. **Respond:** return the 260 B `local_mk_backup`.
+8. **Respond:** return the 260 B `local_mk_backup`.
 
 ## Request
 
@@ -83,7 +97,8 @@ Carries the 260-byte `local_mk_backup` envelope.
 | Error | Cause |
 |---|---|
 | `TborInvalidFixedLength` | Decode-time length-bound violation: `part_policy` > 384 B, `cert_descriptors` byte length outside `3..=6` B, or `prev_local_mk_backup` > 260 B |
-| `InvalidArg` | Handler-time validation: `cert_descriptors` within range but not a whole number of 3-byte descriptors (e.g. 4 or 5 B), or a present `prev_local_mk_backup` not exactly 260 B |
+| `InvalidArg` | Handler-time validation: `cert_descriptors` within range but not a whole number of 3-byte descriptors (e.g. 4 or 5 B), or a present `prev_local_mk_backup` not exactly 260 B; a PTA chain that does not verify, is not anchored to `pota_spki_thumbprint`, or has a certificate over 8192 B |
+| `PartFinalPtaMismatch` | The terminal certificate does not certify this partition's PTA key, its key algorithm differs from `pta_alg`, or it violates the PTA profile (subject or SKID) |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also
