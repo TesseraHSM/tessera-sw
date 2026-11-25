@@ -866,6 +866,8 @@ impl UnoHsmPal {
         match kind {
             HsmIoKind::Cmd => {
                 reset_io_alloc(self, index);
+                // The slot's MBOR undo records belong to its previous IO.
+                crate::mbor_ledger::clear_slot(index);
                 if (index as u32) < IO_SQ_COUNT {
                     self.io_session_key[index as usize].set(None);
                     copy_sqe(index as usize);

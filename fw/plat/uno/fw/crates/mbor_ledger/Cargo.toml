@@ -1,0 +1,13 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_fw_uno_mbor_ledger"
+version = "0.1.0"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

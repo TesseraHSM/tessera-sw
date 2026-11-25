@@ -510,7 +510,8 @@ pub struct UnoHsmPal {
     /// Serializes bulk-key registration with the fast-path engine against
     /// bulk-key deletion and session teardown, so a key for a session that is
     /// being torn down can't be registered with the engine after the
-    /// session's engine-side delete (see `vault.rs`).
+    /// session's engine-side delete (see `vault.rs`). Session-scoped
+    /// non-bulk creates also take it, so teardown can't evict a staged slot.
     pub(crate) fp_bulk_lock: Mutex<NoopRawMutex, ()>,
 
     /// Count of host IOs currently holding an IO_SQ slot: incremented when an
@@ -549,6 +550,10 @@ pub struct UnoHsmPal {
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
     pub(crate) unwrap_pct_busy: [Cell<bool>; NUM_PARTITIONS],
+
+    /// One-shot command failure, scoped to the requesting partition.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) io_failure: [Cell<bool>; NUM_PARTITIONS],
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
@@ -791,6 +796,8 @@ impl Default for UnoHsmPal {
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
+            #[cfg(feature = "tsra_test_hooks")]
+            io_failure: [const { Cell::new(false) }; NUM_PARTITIONS],
         }
     }
 }
@@ -824,6 +831,28 @@ const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
 const SHUTDOWN_IO_DRAIN_MS: u64 = 10;
 
 impl UnoHsmPal {
+    /// Consume the partition's one-shot IO failure, if armed.
+    ///
+    /// Checked by the response allocators, so an armed failure surfaces
+    /// from the next IO's response encode, after its mutations are
+    /// recorded in the undo log, and follows normal command rollback.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) fn take_io_failure(&self, io: &UnoHsmIo) -> HsmResult<()> {
+        // Bulk IOs share the allocators but must not consume the failure.
+        if io.kind() != HsmIoKind::Cmd {
+            return Ok(());
+        }
+        if self
+            .io_failure
+            .get(usize::from(u8::from(io.pid())))
+            .ok_or(HsmError::InvalidArg)?
+            .replace(false)
+        {
+            return Err(HsmError::InvalidKeyType);
+        }
+        Ok(())
+    }
+
     /// Returns the current boot phase.
     ///
     /// # Parameters

@@ -26,6 +26,8 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+use crate::mbor_ledger;
+use crate::mbor_ledger::Kind;
 use crate::vault::FP_BULK_KEY_LEN;
 use crate::vault::is_bulk_kind;
 
@@ -61,7 +63,11 @@ impl HsmBulkCrypto for UnoHsmPal {
         };
 
         match self.bulk_key_id(io, key_id) {
-            Ok(bulk_key_id) => Ok((key_id, bulk_key_id)),
+            Ok(bulk_key_id) => {
+                let session = session_id.map(u16::from);
+                mbor_ledger::record(io, Kind::Key, u16::from(key_id), session);
+                Ok((key_id, bulk_key_id))
+            }
             Err(e) => {
                 // Don't leave a key (or engine registration) the host has
                 // no handle for.

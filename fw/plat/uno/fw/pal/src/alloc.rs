@@ -583,6 +583,8 @@ impl HsmAlloc for UnoHsmPal {
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
     {
+        #[cfg(feature = "tsra_test_hooks")]
+        self.take_io_failure(io)?;
         let io_index = io.alloc_index();
         let (_, cap) = heap_base_cap(io_index, DMA);
         let w = wm(self, io_index, DMA);
@@ -644,6 +646,8 @@ impl HsmAlloc for UnoHsmPal {
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,
     {
+        #[cfg(feature = "tsra_test_hooks")]
+        self.take_io_failure(io)?;
         let io_index = io.alloc_index();
         let (_, cap) = heap_base_cap(io_index, DMA);
         let w = wm(self, io_index, DMA);

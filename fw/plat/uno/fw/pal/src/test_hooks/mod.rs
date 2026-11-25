@@ -59,6 +59,8 @@ use core::task::Context;
 use core::task::Poll;
 
 #[cfg(feature = "tsra_test_hooks")]
+mod clear_provisioning_state;
+#[cfg(feature = "tsra_test_hooks")]
 mod clear_user_credentials;
 mod common;
 #[cfg(feature = "fips_validation_hooks")]

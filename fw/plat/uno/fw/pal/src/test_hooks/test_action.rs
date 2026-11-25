@@ -21,6 +21,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 #[cfg(feature = "tsra_test_hooks")]
+use super::clear_provisioning_state;
+#[cfg(feature = "tsra_test_hooks")]
 use super::clear_user_credentials;
 use super::common::ReqHdr;
 #[cfg(feature = "tsra_test_hooks")]
@@ -61,12 +63,18 @@ struct DdiTestActionResp {
 #[derive(Debug, Copy, Clone)]
 #[repr(u32)]
 enum SupportedTestAction {
+    /// Fail the next command that reaches a post-mutation checkpoint.
+    #[cfg(feature = "tsra_test_hooks")]
+    TriggerIoFailure = 5,
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
+    /// Clear the partition's provisioning marker without deleting keys.
+    #[cfg(feature = "tsra_test_hooks")]
+    ClearProvisioningState = 19,
     /// Read back private key material.
     #[cfg(feature = "fips_validation_hooks")]
     GetPrivKey = 25,
@@ -92,12 +100,20 @@ impl TryFrom<u32> for SupportedTestAction {
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::TriggerIoFailure as u32 {
+            return Ok(Self::TriggerIoFailure);
+        }
+        #[cfg(feature = "tsra_test_hooks")]
         if value == Self::TriggerCrash as u32 {
             return Ok(Self::TriggerCrash);
         }
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::ClearUserCredentials as u32 {
             return Ok(Self::ClearUserCredentials);
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::ClearProvisioningState as u32 {
+            return Ok(Self::ClearProvisioningState);
         }
         #[cfg(feature = "fips_validation_hooks")]
         if value == Self::GetPrivKey as u32 {
@@ -127,8 +143,31 @@ pub(super) async fn dispatch<'p>(
 
     match selector.action {
         #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::TriggerIoFailure => {
+            expect_empty_payload(decoder, selector.request_field_count, request_len)?;
+            let pending = pal
+                .io_failure
+                .get(usize::from(u8::from(io.pid())))
+                .ok_or(HsmError::InvalidArg)?;
+            let resp = encode_success(pal, io, hdr)?;
+            pending.set(true);
+            Ok(resp)
+        }
+        #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::ClearProvisioningState => {
+            clear_provisioning_state::dispatch(
                 pal,
                 io,
                 hdr,

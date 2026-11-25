@@ -35,6 +35,7 @@ use tsra_fw_ddi_mbor_types::unmask_key::DdiUnmaskKeyReq;
 use tsra_fw_ddi_mbor_types::unmask_key::DdiUnmaskKeyResp;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
 use tsra_fw_ddi_mbor_types::DdiPublicKey;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -44,6 +45,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let body: DdiUnmaskKeyReq<'_> = decoder.decode_data()?;
@@ -126,6 +128,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
                 kind,
                 HsmSessId::from(sess_id),
                 attrs,
+                undo,
             )
             .await
             {
@@ -170,16 +173,16 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
                             attrs,
                             HsmVaultPct::None,
                         )
-                        .await;
-                    created
+                        .await?;
+                    undo.push_vault_create(created)?;
+                    Ok(created)
                 })
                 .await?;
             (key_id, None, None)
         };
 
-    // Every step after the commit runs inside one inner block so any
-    // failure rolls back the committed key.
-    let outcome = async {
+    // The undo log retains the imported key through response DMA and CQE.
+    async {
         // Read back the material to re-mask: for bulk keys the vault may hold
         // only a backend handle, so the 32-byte material (kept alive above)
         // is the source; other kinds read the committed key from vault storage,
@@ -279,9 +282,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
 
         Ok::<&HsmDmaBuf, HsmError>(resp)
     }
-    .await;
-
-    super::bulk::rollback_on_err(pal, io, key_id, outcome).await
+    .await
 }
 
 /// Copy the first `key_len` plaintext bytes of an unmasked blob into `out`.
