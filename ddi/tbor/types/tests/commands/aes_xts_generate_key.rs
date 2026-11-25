@@ -17,12 +17,15 @@
 
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsGenerateKeyReq;
+use tsra_ddi_tbor_types::KEY_KIND_AES_XTS512;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_AES_XTS_KEY_LEN;
+
+use crate::commands::aes_generate_key::assert_generated_aes_key;
 
 /// Builds an `AesXtsGenerateKey` request with encrypt + decrypt usage.
 pub(crate) fn generate_xts_key_req(session_id: u16, scope: u8) -> TborAesXtsGenerateKeyReq {
@@ -36,9 +39,10 @@ pub(crate) fn generate_xts_key_req(session_id: u16, scope: u8) -> TborAesXtsGene
 
 /// Generates a masked AES-XTS key of `scope` on `session_id`.
 pub(crate) fn generate_xts_key(ctx: &TestCtx, session_id: u16, scope: u8) -> Vec<u8> {
-    ctx.tbor(&generate_xts_key_req(session_id, scope))
-        .expect("AesXtsGenerateKey")
-        .masked_key
+    let req = generate_xts_key_req(session_id, scope);
+    let masked_key = ctx.tbor(&req).expect("AesXtsGenerateKey").masked_key;
+    assert_generated_aes_key(&masked_key, scope, KEY_KIND_AES_XTS512, &req.key_label);
+    masked_key
 }
 
 /// Happy path: expected length, non-zero, and a fresh blob per call.
