@@ -65,6 +65,8 @@ mod common;
 mod get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
 mod get_rng;
+#[cfg(feature = "tsra_test_hooks")]
+mod negative_self_test;
 #[cfg(feature = "fips_validation_hooks")]
 mod raw_key_import;
 #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]

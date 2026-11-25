@@ -28,7 +28,7 @@ use crate::UnoHsmPal;
 /// (PRK + `info` → OKM) and compares the derived OKM against the expected
 /// vector. Returns [`HsmError::SelfTestKatMismatch`] on a mismatch (or any
 /// error surfaced by the KDF path / allocator).
-pub(super) async fn run_hkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+pub(super) async fn run_hkdf(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &HKDF_SHA256_KAT;
     let algo = HsmHashAlgo::Sha256;
 
@@ -50,6 +50,7 @@ pub(super) async fn run_hkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
         let okm = scope.dma_alloc_zeroed(v.okm.len())?;
         pal.hkdf_expand(io, algo, &*prk, Some(&*info), &mut *okm)
             .await?;
+        super::corrupt_kat_output(okm, negative)?;
 
         // KAT vectors are public, fixed test data — a plain slice comparison is
         // correct; no constant-time compare is needed.
@@ -73,7 +74,7 @@ pub(super) async fn run_hkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
 /// production path used by the `KbkdfCounterHmacDerive` DDI op — and compares
 /// against the expected vector. Returns [`HsmError::SelfTestKatMismatch`] on a
 /// mismatch (or any error surfaced by the KDF path / allocator).
-pub(super) async fn run_kbkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+pub(super) async fn run_kbkdf(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &KBKDF_SHA512_KAT;
 
     pal.alloc_scoped_async(io, async |scope| {
@@ -95,6 +96,7 @@ pub(super) async fn run_kbkdf(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
             &mut *okm,
         )
         .await?;
+        super::corrupt_kat_output(okm, negative)?;
 
         if &okm[..] != v.okm {
             error!(

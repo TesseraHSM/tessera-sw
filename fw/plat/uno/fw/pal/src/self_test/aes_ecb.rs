@@ -26,7 +26,7 @@ use crate::UnoHsmPal;
 /// Decrypts the KAT ciphertext and verifies the recovered plaintext. Returns
 /// [`HsmError::SelfTestKatMismatch`] on any mismatch (or any error surfaced by
 /// the AES engine / allocator).
-pub(super) async fn run_aes_ecb(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+pub(super) async fn run_aes_ecb(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &AES_ECB_256_KAT;
 
     pal.alloc_scoped_async(io, async |scope| {
@@ -39,6 +39,7 @@ pub(super) async fn run_aes_ecb(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
 
         pal.aes_ecb_enc_dec(io, HsmAesOp::Decrypt, &*key, &*ct, &mut *pt_out)
             .await?;
+        super::corrupt_kat_output(pt_out, negative)?;
 
         // KAT vectors are public, fixed test data — a plain slice comparison is
         // correct; no constant-time compare is needed.

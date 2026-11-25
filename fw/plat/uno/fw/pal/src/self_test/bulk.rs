@@ -36,7 +36,9 @@ const GCM_PADDED_AAD_LEN: usize = 32;
 const GCM_AAD_OFFSET: usize = 16;
 
 /// Runs the AES-256-GCM known-answer test on the BCP.
-pub(super) async fn run_aes_gcm(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+///
+/// `negative` corrupts the encrypt tag so the test fails.
+pub(super) async fn run_aes_gcm(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &AES_GCM_256_KAT;
     if v.aad.len() != GCM_PADDED_AAD_LEN - GCM_AAD_OFFSET {
         return Err(HsmError::InternalError);
@@ -57,6 +59,7 @@ pub(super) async fn run_aes_gcm(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
         let tag = scope.dma_alloc_zeroed(v.tag.len())?;
         pal.gcm_encrypt(io, &*key, &*iv, v.aad.len(), &*pt, &mut *ct, &mut *tag)
             .await?;
+        super::corrupt_kat_output(tag, negative)?;
         // KAT vectors are public, fixed test data: a plain comparison is
         // correct.
         if &ct[GCM_PADDED_AAD_LEN..] != v.ciphertext || &tag[..] != v.tag {
@@ -89,7 +92,9 @@ pub(super) async fn run_aes_gcm(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
 }
 
 /// Runs the AES-256-XTS known-answer test on the BCP.
-pub(super) async fn run_aes_xts(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+///
+/// `negative` corrupts the encrypt output so the test fails.
+pub(super) async fn run_aes_xts(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &AES_XTS_256_KAT;
     let tweak: &[u8; BCP_TWEAK_LEN] = v.tweak.try_into().map_err(|_| HsmError::InternalError)?;
 
@@ -98,6 +103,7 @@ pub(super) async fn run_aes_xts(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
         pt.copy_from_slice(v.plaintext);
         let ct = scope.dma_alloc_zeroed(v.ciphertext.len())?;
         xts(pal, BcpOp::Encrypt, v.key1, v.key2, tweak, pt, ct).await?;
+        super::corrupt_kat_output(ct, negative)?;
         if &ct[..] != v.ciphertext {
             error!(
                 "selftest",

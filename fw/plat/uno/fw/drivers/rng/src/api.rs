@@ -333,6 +333,16 @@ impl RngDriver {
     /// poll iterations instead. Exhausting the budget fails the test (never a
     /// hang), so a stuck DRBG surfaces a clean CAST failure at the boot gate.
     pub fn self_test(&self) -> HsmResult<()> {
+        self.self_test_inner(false)
+    }
+
+    /// Run the hardware KAT with one deliberately incorrect expected word.
+    #[cfg(feature = "fips_validation_hooks")]
+    pub fn self_test_negative(&self) -> HsmResult<()> {
+        self.self_test_inner(true)
+    }
+
+    fn self_test_inner(&self, negative: bool) -> HsmResult<()> {
         // Before switching to FW mode, ensure the DRBG is not actively reading
         // entropy — FW mode cannot be entered while an entropy read is in
         // flight.
@@ -374,7 +384,8 @@ impl RngDriver {
 
         Self::wait_for_drbg_instantiate().inspect_err(|_e| cleanup())?;
         Self::wait_for_drbg_generate().inspect_err(|_e| cleanup())?;
-        Self::compare_output(&RNG_SELF_TEST_EXPECTED_OUTPUT).inspect_err(|_e| cleanup())?;
+        Self::compare_output(&RNG_SELF_TEST_EXPECTED_OUTPUT, negative)
+            .inspect_err(|_e| cleanup())?;
 
         // Reseed path: wait for the DRBG to request a reseed, feed it the
         // reseed vector, then wait for it to complete.
@@ -465,12 +476,17 @@ impl RngDriver {
 
     /// Read and discard the first 16 FW-output words, then compare the next 16
     /// against `expected`. Mirrors the reference `compare_output`.
-    fn compare_output(expected: &[u32; 16]) -> HsmResult<()> {
+    fn compare_output(expected: &[u32; 16], negative: bool) -> HsmResult<()> {
         for _ in 0..expected.len() {
             let _ = REGS.fwout_data.read(FWOUT_DATA::DATA);
         }
-        for &word in expected {
-            if REGS.fwout_data.read(FWOUT_DATA::DATA) != word {
+        for (index, &word) in expected.iter().enumerate() {
+            let expected_word = if negative && index == 0 {
+                word ^ 1
+            } else {
+                word
+            };
+            if REGS.fwout_data.read(FWOUT_DATA::DATA) != expected_word {
                 return Err(HsmError::SelfTestKatMismatch);
             }
         }
