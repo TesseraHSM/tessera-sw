@@ -11,6 +11,35 @@
 use super::*;
 
 #[test]
+fn retained_store_migration_initializes_only_new_handles() {
+    let mut p = Partition(63);
+    p.reset();
+    p.set_id_key_id(Some(HsmKeyId::from(0u16)));
+    p.set_pta_key_id(Some(HsmKeyId::from(0x1234u16)));
+    p.set_psk_co(buf(&[0xA5; PSK_LEN])).expect("set PSK");
+    p.session_recovery_mut().fill(0xB6);
+    let slot = p.slot_mut();
+    slot.id_mldsa_seed_key_id = [0; 2];
+    slot.pta_mldsa_seed_key_id = [0; 2];
+    slot.mldsa_store_version = 0;
+
+    p.migrate_mldsa_handles();
+
+    assert_eq!(p.id_mldsa_seed_key_id(), None);
+    assert_eq!(p.pta_mldsa_seed_key_id(), None);
+    assert_eq!(p.id_key_id(), Some(HsmKeyId::from(0u16)));
+    assert_eq!(p.pta_key_id(), Some(HsmKeyId::from(0x1234u16)));
+    assert_eq!(&p.psk_co()[..], &[0xA5; PSK_LEN]);
+    assert_eq!(p.session_recovery(), &[0xB6; 129]);
+
+    p.set_id_mldsa_seed_key_id(Some(HsmKeyId::from(0u16)));
+    p.set_pta_mldsa_seed_key_id(Some(HsmKeyId::from(0x5678u16)));
+    p.migrate_mldsa_handles();
+    assert_eq!(p.id_mldsa_seed_key_id(), Some(HsmKeyId::from(0u16)));
+    assert_eq!(p.pta_mldsa_seed_key_id(), Some(HsmKeyId::from(0x5678u16)));
+}
+
+#[test]
 fn partition_lookup_rejects_wide_ids_without_aliasing() {
     assert!(PartStore::partition(HsmPartId::from(64u8)).is_ok());
     for id in [65u8, u8::MAX] {

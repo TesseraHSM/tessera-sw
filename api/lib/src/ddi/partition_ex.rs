@@ -313,15 +313,21 @@ pub(crate) fn part_info(partition: &HsmPartition) -> HsmResult<HsmPartInfo> {
 ///
 /// Returns [`HsmError::InternalError`] if the certificate count is zero,
 /// and [`HsmError::CertChainChanged`] if the count or thumbprint changes
-/// between the pre- and post-fetch `GetCertChainInfo` reads. This helper is
-/// retrieves the explicitly selected certificate bank. The regenerated
-/// ECC slot-2 PID certificate is served earlier in [`fetch_cert_chain_checked`].
+/// between the pre- and post-fetch `GetCertChainInfo` reads. Slot 2 in
+/// either bank mints a fresh randomized PID certificate on every access,
+/// so certificate 0 is fetched directly without stability probes.
 pub(super) fn fetch_cert_chain_checked_tbor_bank(
     dev: &HsmDev,
     rev: HsmApiRev,
     slot_id: u8,
     bank: u8,
 ) -> HsmResult<(String, Vec<u8>)> {
+    if slot_id == 2 {
+        let der = get_cert_tbor_bank(dev, rev, slot_id, bank, 0)?;
+        let pem = der_to_pem(&der).map_hsm_err(HsmError::InternalError)?;
+        return Ok((pem, der));
+    }
+
     let (count, thumbprint) = get_cert_chain_info_tbor_bank(dev, rev, slot_id, bank)?;
     if count == 0 {
         return Err(HsmError::InternalError);

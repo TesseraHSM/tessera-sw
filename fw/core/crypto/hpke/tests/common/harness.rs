@@ -13,11 +13,11 @@ use tsra_fw_hsm_pal_std_uno::StdHsmIo;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::*;
 
-pub fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
+pub async fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
     let (_tx, rx) = async_channel::bounded(1);
     let pal = StdHsmPal::new(rx, Handle::current());
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+    let io = pal.admin_io(HsmPartId::from(0u8), reply_tx).await;
     (pal, io)
 }
 

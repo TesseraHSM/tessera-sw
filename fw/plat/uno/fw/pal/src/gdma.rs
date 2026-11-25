@@ -42,7 +42,6 @@ use tsra_fw_uno_reg_soc::zero::ZERO_SIZE;
 use tsra_fw_uno_trace::tracing::*;
 use zeroize::Zeroize;
 
-#[cfg(not(feature = "bulk_crypto"))]
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
@@ -270,6 +269,7 @@ fn sgl_segment_shape_ok(ty: u8, desc_len: u32) -> bool {
 /// [`raw_sgl_len`]; zero-length Data Blocks are rejected, so each
 /// segment makes forward progress and a cyclic host list cannot spin
 /// the walker forever.
+#[derive(Clone)]
 pub(crate) struct HostSgl {
     /// Host address of the next byte in the current Data Block.
     blk_addr: u64,
@@ -286,6 +286,38 @@ pub(crate) struct HostSgl {
 }
 
 impl HostSgl {
+    fn new_bounded(desc: &[u8; 16], total: usize) -> HsmResult<Self> {
+        let mut desc = *desc;
+        if sgl_desc_type(&desc) == SGL_TYPE_DATA_BLOCK {
+            if (sgl_desc_len(&desc) as usize) < total {
+                return Err(HsmError::InsufficientBuffer);
+            }
+            let len = u32::try_from(total).map_err(|_| HsmError::InvalidArg)?;
+            desc[8..12].copy_from_slice(&len.to_le_bytes());
+        }
+        Self::new(&desc, total)
+    }
+
+    /// Check payload capacity before publishing any output. Descriptor-byte
+    /// lengths in segment pointers are not payload capacities.
+    async fn check_capacity(
+        mut self,
+        pal: &UnoHsmPal,
+        io: &crate::UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        while self.remaining != 0 {
+            if self.blk_rem == 0 {
+                if self.seg_rem == 0 {
+                    return Err(HsmError::InsufficientBuffer);
+                }
+                self.next_block(pal, io, scratch).await?;
+            }
+            self.advance(self.blk_rem as usize)?;
+        }
+        Ok(())
+    }
+
     /// Opens a cursor over the `total`-byte host buffer named by `desc`.
     ///
     /// # Errors
@@ -645,7 +677,6 @@ impl UnoHsmPal {
     /// The GDMA does not honor an SGL as a host destination, so this walks
     /// the list with [`HostSgl`] and writes page-bounded PRPs. `scratch`
     /// (≥ 16 bytes of GDMA-reachable memory) holds fetched descriptors.
-    #[cfg(not(feature = "bulk_crypto"))]
     pub(crate) async fn copy_to_host_sgl(
         &self,
         io: &UnoHsmIo,
@@ -653,9 +684,9 @@ impl UnoHsmPal {
         src: &HsmDmaBuf,
         desc: &[u8; 16],
     ) -> HsmResult<()> {
-        HostSgl::new(desc, src.len())?
-            .write_from(self, io, scratch, src)
-            .await
+        let mut sgl = HostSgl::new_bounded(desc, src.len())?;
+        sgl.clone().check_capacity(self, io, scratch).await?;
+        sgl.write_from(self, io, scratch, src).await
     }
 
     /// Zero the first `len` bytes of the host buffer named by the raw SGL

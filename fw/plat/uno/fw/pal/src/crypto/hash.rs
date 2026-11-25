@@ -261,7 +261,7 @@ impl HsmHash for UnoHsmPal {
         let _ = io;
         self.hash_state_size(algo)?;
         let digest_len = algo.digest_len();
-        if (algo.is_xof() && data.len() > SHAKE_MSG_MAX) || u32::try_from(data.len()).is_err() {
+        if (on_pqc(algo) && data.len() > SHAKE_MSG_MAX) || u32::try_from(data.len()).is_err() {
             return Err(HsmError::InvalidArg);
         }
         let Some(digest) = digest else {

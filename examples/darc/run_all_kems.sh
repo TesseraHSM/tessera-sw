@@ -18,6 +18,7 @@ else
     KEMS=(p384 mlkem1024 mlkem1024-p384)
 fi
 STATE_ROOT=${STATE_ROOT:-$(mktemp -d -t darc-kems.XXXXXX)}
+mkdir -p -- "$STATE_ROOT"
 BASE_PORT=${BASE_PORT:-13600}
 if [[ ! "$BASE_PORT" =~ ^[1-9][0-9]{3,4}$ ]] || ((BASE_PORT < 1024 || BASE_PORT > 65534)); then
     echo "BASE_PORT must be an integer from 1024 to 65534" >&2

@@ -242,7 +242,7 @@ fn suite_keys(suite: HpkeSuite) -> Keys {
 
 #[tokio::test]
 async fn reference_seal_fw_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let k = suite_keys(suite);
         for mode in MODES {
@@ -257,7 +257,7 @@ async fn reference_seal_fw_open() {
 
 #[tokio::test]
 async fn fw_seal_reference_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let k = suite_keys(suite);
         for mode in MODES {
@@ -272,7 +272,7 @@ async fn fw_seal_reference_open() {
 
 #[tokio::test]
 async fn export_interop() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let k = suite_keys(suite);
         for mode in MODES {
@@ -295,7 +295,7 @@ async fn export_interop() {
 
 #[tokio::test]
 async fn wrong_sender_key_fails_auth_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let k = suite_keys(suite);
         for mode in MODES.into_iter().filter(|m| m.auth()) {
@@ -312,7 +312,7 @@ async fn wrong_sender_key_fails_auth_open() {
 
 #[tokio::test]
 async fn psk_mismatch_fails_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let k = suite_keys(suite);
         for mode in MODES.into_iter().filter(|m| m.psk()) {

@@ -1666,7 +1666,7 @@ impl HsmPal for UnoHsmPal {
         // Recovery boot: only a cold (power-on) boot wipes the partition
         // store. On a warm / fw-update reset the GSRAM-resident store survived,
         // so preserve every partition's persisted state (res_mask, keys, creds,
-        // sessions) and only re-arm Gate 1. Mirrors the reference `HsmEnv::new`
+        // sessions), migrate added fields and re-arm Gate 1. Mirrors `HsmEnv::new`
         // constructor selection on `SocInfo::reset_type` (`env.rs`).
         match tsra_fw_uno_drivers_soc::reset_type() {
             SocResetType::Por => {
@@ -1678,12 +1678,13 @@ impl HsmPal for UnoHsmPal {
             SocResetType::WarmReset | SocResetType::FwUpdateWarmReset => {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
-                // preserved as-is; only Gate 1 and the session transport
-                // epochs are advanced.
+                // migrated before use; Gate 1 and the session transport
+                // epochs are then advanced.
                 info!(
                     "boot",
                     "init: reset=warm/fwupdate -> keep store, rearm gate1"
                 );
+                tsra_fw_uno_drivers_part_store::PartStore::migrate_retained();
                 tsra_fw_uno_drivers_part_store::PartStore::rearm_unwrapping_key_required();
                 // Surviving sessions keep their keys but their DTCM message
                 // counters restarted: move to a fresh sequence-number epoch.

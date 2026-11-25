@@ -586,15 +586,10 @@ impl HsmIoController for UnoHsmPal {
     }
 
     /// Writes `src` to the host buffer of OOB descriptor `index`, which
-    /// must be an SGL Data Block of exactly `src.len()` bytes.
+    /// must describe exactly `src.len()` payload bytes.
     async fn send_oob(&self, io: &UnoHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
-        const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
-
         let desc = self.oob_desc(io, index).await?;
-        let len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
-        if desc[15] >> 4 != SGL_TYPE_DATA_BLOCK || len as usize != src.len() {
-            return Err(HsmError::InvalidArg);
-        }
+        crate::gdma::raw_sgl_len(&desc, src.len())?;
         self.send_oob_desc(io, desc, src).await
     }
 
@@ -604,16 +599,7 @@ impl HsmIoController for UnoHsmPal {
         index: usize,
         src: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mut desc = self.oob_desc(io, index).await?;
-        if desc[15] >> 4 != 0 {
-            return Err(HsmError::InvalidArg);
-        }
-        let capacity = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
-        if (capacity as usize) < src.len() {
-            return Err(HsmError::InsufficientBuffer);
-        }
-        let len = u32::try_from(src.len()).map_err(|_| HsmError::InvalidArg)?;
-        desc[8..12].copy_from_slice(&len.to_le_bytes());
+        let desc = self.oob_desc(io, index).await?;
         self.send_oob_desc(io, desc, src).await
     }
 
@@ -822,17 +808,11 @@ impl UnoHsmPal {
         desc: [u8; OOB_ENTRY_LEN as usize],
         src: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        let len = u32::try_from(src.len()).map_err(|_| HsmError::InvalidArg)?;
-        self.gdma
-            .copy_mem(
-                crate::gdma::device_dma_buf(src.as_ptr(), len),
-                MemInterface::Device,
-                len,
-                crate::gdma::sgl_desc_buf(&desc),
-                crate::gdma::host_interface(io.pid())?,
-                len,
-            )?
-            .await
+        self.alloc_scoped_async(io, async |scope| {
+            let scratch = scope.dma_alloc(OOB_ENTRY_LEN as usize)?;
+            self.copy_to_host_sgl(io, scratch, src, &desc).await
+        })
+        .await
     }
 }
 

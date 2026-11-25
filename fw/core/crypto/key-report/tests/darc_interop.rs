@@ -36,11 +36,11 @@ const KEMS: [TransferKem; 3] = [
     TransferKem::MlKem1024P384,
 ];
 
-fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
+async fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
     let (_tx, rx) = async_channel::bounded(1);
     let pal = StdHsmPal::new(rx, Handle::current());
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+    let io = pal.admin_io(HsmPartId::from(0u8), reply_tx).await;
     (pal, io)
 }
 
@@ -205,7 +205,7 @@ async fn fw_open(
 /// The firmware seals and signs; the reference opens the signed payload.
 #[tokio::test(flavor = "current_thread")]
 async fn firmware_seal_opens_with_reference() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let (signer_sk, signer_pk) = signer(&pal, &io);
     let source_id = key_id(&pal, &io, &signer_pk, true).await;
     for kem in KEMS {
@@ -258,7 +258,7 @@ async fn firmware_seal_opens_with_reference() {
 /// Duplicating the header as AAD fails despite a valid artifact signature.
 #[tokio::test(flavor = "current_thread")]
 async fn reference_seal_opens_in_firmware() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let (signer_sk, signer_pk) = signer(&pal, &io);
     let source_id = key_id(&pal, &io, &signer_pk, true).await;
     for kem in KEMS {

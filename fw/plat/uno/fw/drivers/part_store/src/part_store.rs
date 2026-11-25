@@ -94,6 +94,9 @@ impl TryFrom<u16> for HsmPartId {
 /// Persistent-store schema version stamped by this driver.
 pub const STORE_VERSION: u8 = 1;
 
+/// Version of the Uno-only ML-DSA handle extension in the reserved tail.
+const MLDSA_STORE_VERSION: u8 = 1;
+
 // ── Field sizes (mirror the reference `HsmPartPersistentStore`) ──────────
 const ID_LEN: usize = 16;
 const ID_PRIV_LEN: usize = 48;
@@ -129,7 +132,8 @@ const RESERVED3_LEN: usize = 626
     - 2  // session_meta (pending_mask + reserved)
     - 2  // transport_epoch
     - 129 // session recovery fingerprints and rotation-consumed mask
-    - 2 * 2; // ML-DSA seed handles (identity + PTA)
+    - 2 * 2 // ML-DSA seed handles (identity + PTA)
+    - 1; // ML-DSA extension version
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -440,6 +444,7 @@ struct Storage {
     // straight from GSRAM, absent = `KEY_ABSENT`.
     id_mldsa_seed_key_id: [u8; 2],
     pta_mldsa_seed_key_id: [u8; 2],
+    mldsa_store_version: u8,
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -504,6 +509,14 @@ impl PartStore {
     pub fn init_default() {
         for idx in 0..NUM_PARTITIONS {
             Partition(idx).reset();
+        }
+    }
+
+    /// Migrates the formerly zeroed reserved tail before retained handles
+    /// are used after a warm or impactless firmware-update boot.
+    pub fn migrate_retained() {
+        for idx in 0..NUM_PARTITIONS {
+            Partition(idx).migrate_mldsa_handles();
         }
     }
 
@@ -636,6 +649,15 @@ impl Partition {
 
     // ── lifecycle ────────────────────────────────────────────────────────
 
+    fn migrate_mldsa_handles(mut self) {
+        if self.slot().mldsa_store_version < MLDSA_STORE_VERSION {
+            let slot = self.slot_mut();
+            slot.id_mldsa_seed_key_id = KEY_ABSENT.to_le_bytes();
+            slot.pta_mldsa_seed_key_id = KEY_ABSENT.to_le_bytes();
+            slot.mldsa_store_version = MLDSA_STORE_VERSION;
+        }
+    }
+
     /// Wipes this partition's slot (zeroizes all fields), re-stamps the
     /// store version, and resets all key handles to the "absent" sentinel
     /// (zeroing alone would otherwise read back as the valid handle 0).
@@ -661,6 +683,7 @@ impl Partition {
         slot.unwrapping_key_id = absent;
         slot.id_mldsa_seed_key_id = absent;
         slot.pta_mldsa_seed_key_id = absent;
+        slot.mldsa_store_version = MLDSA_STORE_VERSION;
     }
 
     /// Zeroes the provisioned identity and drops its key handle.

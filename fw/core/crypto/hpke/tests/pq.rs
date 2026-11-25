@@ -166,7 +166,7 @@ fn reference_matches_kem_vectors() {
 
 #[tokio::test]
 async fn reference_seal_fw_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
         for psk in [false, true] {
@@ -185,7 +185,7 @@ async fn reference_seal_fw_open() {
 
 #[tokio::test]
 async fn fw_seal_reference_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
         for psk in [false, true] {
@@ -204,7 +204,7 @@ async fn fw_seal_reference_open() {
 
 #[tokio::test]
 async fn export_interop() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
 
@@ -226,7 +226,7 @@ async fn export_interop() {
 
 #[tokio::test]
 async fn auth_modes_rejected() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let sk_s = [1u8; 48];
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
@@ -256,7 +256,7 @@ async fn auth_modes_rejected() {
 
 #[tokio::test]
 async fn tampered_inputs_fail_open() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
         let (enc, ct) = with_ref_kem!(suite, ref_seal(&pk, false));
@@ -286,7 +286,7 @@ async fn tampered_inputs_fail_open() {
 
 #[tokio::test]
 async fn hybrid_invalid_ct_t_point_rejected() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let suite = HpkeSuite::MlKem1024P384Shake256AesGcm256;
     let (sk, pk) = recipient(suite);
     let (mut enc, ct) = ref_seal::<MlKem1024P384>(&pk, false);
@@ -303,7 +303,7 @@ async fn hybrid_invalid_ct_t_point_rejected() {
 
 #[tokio::test]
 async fn invalid_encapsulation_key_rejected() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (_, mut pk) = recipient(suite);
         // First 12-bit coefficient = 0xFFF >= q = 3329 (FIPS 203 §7.2).
@@ -356,7 +356,7 @@ async fn fw_generate(
 
 #[tokio::test]
 async fn public_key_matches_vectors() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = recipient(suite);
         let got = fw_public_key(&pal, &io, suite, &sk)
@@ -369,7 +369,7 @@ async fn public_key_matches_vectors() {
 
 #[tokio::test]
 async fn key_generation_reuses_public_key_output() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let suite = HpkeSuite::MlKem1024Shake256AesGcm256;
     let (sk, pk) = pal
         .alloc_scoped_async(&io, async |alloc| -> HsmResult<_> {
@@ -397,7 +397,7 @@ async fn key_generation_reuses_public_key_output() {
 
 #[tokio::test]
 async fn generated_key_pairs_interoperate() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     for suite in SUITES {
         let (sk, pk) = fw_generate(&pal, &io, suite).await.expect("generate");
         let (sk2, _) = fw_generate(&pal, &io, suite).await.expect("generate");
@@ -420,7 +420,7 @@ async fn generated_key_pairs_interoperate() {
 
 #[tokio::test]
 async fn key_generation_rejects_dhkem_suites() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
     assert!(fw_generate(&pal, &io, suite).await.is_err());
     assert!(fw_public_key(&pal, &io, suite, &[1; 48]).await.is_err());

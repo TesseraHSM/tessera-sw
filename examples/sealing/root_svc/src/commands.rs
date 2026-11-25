@@ -20,6 +20,7 @@ use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_api::TransferKem;
+use tsra_sealing_common::evidence;
 
 use crate::cli::CreateArgs;
 use crate::cli::RestoreArgs;
@@ -110,6 +111,14 @@ fn create_temporary_backup(
         receiver.key_report.as_deref(),
         state_dir,
     )?;
+    evidence::verify_transfer_source(
+        &created.evidence,
+        domain.env().policy(),
+        &domain.env().policy().pota_spki_thumbprint,
+        &created.pok_remote_backup,
+        Some(&receiver.recipient),
+    )
+    .context("verify SD backup source before host HPKE open")?;
     receiver
         .open(&created.pok_remote_backup)
         .context("host HPKE open of the SD envelope failed")?;

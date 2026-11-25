@@ -39,6 +39,48 @@ fn one_cert() -> Vec<u8> {
     vec![0u8; 4]
 }
 
+#[test]
+fn part_owner_mldsa_certificate_can_be_fetched() {
+    use tsra_ddi_tbor_test_harness::x509_fixture::AnchorKey;
+    use tsra_ddi_tbor_test_harness::x509_fixture::AnyPotaFixture;
+    use tsra_ddi_tbor_test_harness::x509_fixture::csr_public_key;
+    use tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87;
+
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let session = open_rotated_co_session(&part, rev);
+    let pota = AnyPotaFixture::new(AnchorKey::mldsa87(&[7; 32]));
+    let policy = TestPolicy::new(pota.spki_thumbprint(), [0; POLICY_THUMBPRINT_LEN])
+        .with_pta_alg(POLICY_PTA_ALG_MLDSA87)
+        .encode();
+    let init = session
+        .part_init_ex(&policy, &valid_mach_seed())
+        .expect("ML-DSA PartInit");
+    let chain = pota.chain_for(csr_public_key(&init.pta_csr));
+    let certs = chain.der_items();
+    let certs: Vec<_> = certs.iter().map(|cert| HsmCert { cert }).collect();
+    session
+        .part_final_ex(&policy, &certs, None)
+        .expect("ML-DSA PartFinal");
+    let issuer = X509Certificate::from_der(&chain.pta_der).expect("PTA certificate");
+
+    for _ in 0..2 {
+        let pem = part
+            .cert_chain_mldsa(2)
+            .expect("fetch regenerated PartOwner ML-DSA leaf");
+        let certs = X509Certificate::from_pem_stack(pem.as_bytes()).expect("PID certificate");
+        assert_eq!(certs.len(), 1);
+        assert!(certs[0].verify_signature(&issuer).expect("PID signature"));
+    }
+    assert!(
+        part.cert_chain(2).is_err(),
+        "ECC bank must remain unavailable"
+    );
+}
+
 // ── PartInit ────────────────────────────────────────────────────────────────
 
 /// An empty or over-long (`> PART_POLICY_MAX_LEN`) policy is rejected by

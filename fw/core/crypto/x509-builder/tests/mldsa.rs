@@ -37,11 +37,11 @@ use tsra_fw_hsm_pal_traits::*;
 
 const PK_LEN: usize = 2592;
 
-fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
+async fn pal_and_io() -> (StdHsmPal, StdHsmIo) {
     let (_tx, rx) = async_channel::bounded(1);
     let pal = StdHsmPal::new(rx, Handle::current());
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+    let io = pal.admin_io(HsmPartId::from(0u8), reply_tx).await;
     (pal, io)
 }
 
@@ -134,7 +134,7 @@ fn check_leaf(der: &[u8], pk: &[u8], issuer: &PKey<impl openssl::pkey::HasPublic
 
 #[tokio::test]
 async fn mldsa_issuer_leaf_verifies() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let (issuer_seed, issuer_pk) = mldsa_keypair(&pal, &io).await;
     let (_, pk) = mldsa_keypair(&pal, &io).await;
     let pk: [u8; PK_LEN] = pk.try_into().expect("pk len");
@@ -163,7 +163,7 @@ async fn mldsa_issuer_leaf_verifies() {
 
 #[tokio::test]
 async fn ecc_issuer_mldsa_leaf_verifies() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let (_, pk) = mldsa_keypair(&pal, &io).await;
     let pk: [u8; PK_LEN] = pk.try_into().expect("pk len");
     let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("group");
@@ -202,7 +202,7 @@ async fn ecc_issuer_mldsa_leaf_verifies() {
 
 #[tokio::test]
 async fn mldsa_csr_verifies() {
-    let (pal, io) = pal_and_io();
+    let (pal, io) = pal_and_io().await;
     let (seed, pk) = mldsa_keypair(&pal, &io).await;
     let pk: [u8; PK_LEN] = pk.try_into().expect("pk len");
     let cn = [b'C'; csr::SUBJECT_CN_LEN];
