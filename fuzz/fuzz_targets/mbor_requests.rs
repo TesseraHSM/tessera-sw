@@ -101,6 +101,19 @@ impl Default for RequestBuffers {
     }
 }
 
+fn check_response_type(
+    result: Result<(), DdiError>,
+    expected_op: DdiOp,
+    actual_op: DdiOp,
+) -> Result<(), DdiError> {
+    match result {
+        // A randomized opcode can succeed with a different response body than
+        // the typed request's decoder expects.
+        Err(DdiError::MborError(MborError::DecodeError)) if actual_op != expected_op => Ok(()),
+        result => result,
+    }
+}
+
 macro_rules! requests {
     ($($op:ident => ($request:ident, $command:ident)
         { $($field:ident $(=> $generator:ident)?),* $(,)? }),+ $(,)?) => {
@@ -184,10 +197,11 @@ macro_rules! requests {
                         }
 
                         let mut resp = None;
-                        dev.exec_op_mbor(
+                        let result = dev.exec_op_mbor(
                             &$command { hdr: header, data, ext: None },
                             &mut resp,
-                        ).map(|_| ())
+                        ).map(|_| ());
+                        check_response_type(result, DdiOp::$op, header.op)
                     }),+
                 }
             }
