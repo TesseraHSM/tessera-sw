@@ -2328,19 +2328,28 @@ mod tests {
             // or a disable and re-enable returns them to their defaults, as on
             // the Uno PAL.
             if round == 0 {
-                pal.part_migrate_internal(0).await.expect("internal partition migration should succeed");
+                pal.part_migrate_internal(0)
+                    .await
+                    .expect("internal partition migration should succeed");
             } else {
-                pal.part_disable_internal(0).expect("internal partition disabling should succeed");
-                pal.part_enable_internal(0).await.expect("internal partition enabling should succeed");
+                pal.part_disable_internal(0)
+                    .expect("internal partition disabling should succeed");
+                pal.part_enable_internal(0)
+                    .await
+                    .expect("internal partition enabling should succeed");
             }
             let entry = &pal.table().entries[0];
             assert_eq!(entry.state, HsmPartState::Enabled);
             assert_eq!(
-                entry.prop_get_bytes(HsmPartPropId::PSK_CO).expect("byte property retrieval should succeed"),
+                entry
+                    .prop_get_bytes(HsmPartPropId::PSK_CO)
+                    .expect("byte property retrieval should succeed"),
                 DEFAULT_PSK_CO.as_slice()
             );
             assert_eq!(
-                entry.prop_get_bytes(HsmPartPropId::PSK_CU).expect("byte property retrieval should succeed"),
+                entry
+                    .prop_get_bytes(HsmPartPropId::PSK_CU)
+                    .expect("byte property retrieval should succeed"),
                 DEFAULT_PSK_CU.as_slice()
             );
         }
