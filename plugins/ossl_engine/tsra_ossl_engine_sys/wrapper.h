@@ -34,6 +34,10 @@ static const int EVP_PKEY_CTRL_RSA_KEYGEN_BITS_CONST =
 static const int EVP_PKEY_OP_KEYGEN_CONST = EVP_PKEY_OP_KEYGEN;
 static const int EVP_PKEY_FLAG_AUTOARGLEN_CONST = EVP_PKEY_FLAG_AUTOARGLEN;
 static const int EVP_PKEY_CTRL_MD_CONST = EVP_PKEY_CTRL_MD;
+/* HMAC pkey method: digest init, raw MAC key, and the no-init digest flag. */
+static const int EVP_PKEY_CTRL_DIGESTINIT_CONST = EVP_PKEY_CTRL_DIGESTINIT;
+static const int EVP_PKEY_CTRL_SET_MAC_KEY_CONST = EVP_PKEY_CTRL_SET_MAC_KEY;
+static const int EVP_MD_CTX_FLAG_NO_INIT_CONST = EVP_MD_CTX_FLAG_NO_INIT;
 static const int EVP_PKEY_OP_TYPE_SIG_CONST = EVP_PKEY_OP_TYPE_SIG;
 static const int RSA_FLAG_FIPS_METHOD_CONST = RSA_FLAG_FIPS_METHOD;
 /* RSA signature ctx getters (macros) used by the PSS sign path. */

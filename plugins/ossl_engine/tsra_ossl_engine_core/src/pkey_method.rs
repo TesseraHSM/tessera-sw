@@ -624,10 +624,15 @@ static PKEY_NIDS: [c_int; 4] = [
     ffi::EVP_PKEY_RSA_PSS as c_int,
 ];
 
-/// Per-`(ENGINE, NID)` method table shared by the EC and HKDF pkey methods
+/// Served but not advertised: HMAC reaches the engine only for keys bound to
+/// it (see [`hmac_method`](crate::hmac_method)).
+static UNADVERTISED_PKEY_NIDS: [c_int; 1] = [ffi::EVP_PKEY_HMAC as c_int];
+
+/// Per-`(ENGINE, NID)` method table shared by the engine's pkey methods
 /// (see [`method_table`](crate::method_table) for the ownership rules the
 /// engine framework imposes).
-pub(crate) static ENGINE_METHODS: MethodTable<ffi::EVP_PKEY_METHOD> = MethodTable::new(&PKEY_NIDS);
+pub(crate) static ENGINE_METHODS: MethodTable<ffi::EVP_PKEY_METHOD> =
+    MethodTable::with_unadvertised(&PKEY_NIDS, &UNADVERTISED_PKEY_NIDS);
 
 /// `ENGINE_PKEY_METHS_PTR` callback: NID enumeration and per-ENGINE method
 /// lookup via [`method_table::dispatch`](crate::method_table::dispatch), with

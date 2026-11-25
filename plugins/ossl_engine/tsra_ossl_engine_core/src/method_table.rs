@@ -71,9 +71,12 @@ pub(crate) fn take_pending_engine() -> usize {
 /// Builders + per-`(ENGINE, NID)` method table for one method type (see the
 /// module docs). A NID's builder is set by its first registration — one
 /// handler type per NID per process. `nids` is the 'static list the
-/// enumeration branch of the lookup callback advertises.
+/// enumeration branch of the lookup callback advertises; `unadvertised` NIDs
+/// are served on lookup but never enumerated, so OpenSSL never makes the
+/// engine their default (it reaches them only for keys bound to the engine).
 pub(crate) struct MethodTable<M> {
     nids: &'static [c_int],
+    unadvertised: &'static [c_int],
     builders: OnceLock<Mutex<HashMap<c_int, fn() -> EngineResult<*mut M>>>>,
     entries: OnceLock<Mutex<HashMap<(usize, c_int), usize>>>,
 }
@@ -90,8 +93,17 @@ enum Lookup<M> {
 
 impl<M> MethodTable<M> {
     pub(crate) const fn new(nids: &'static [c_int]) -> Self {
+        Self::with_unadvertised(nids, &[])
+    }
+
+    /// A table that also serves `unadvertised` NIDs (see [`MethodTable`]).
+    pub(crate) const fn with_unadvertised(
+        nids: &'static [c_int],
+        unadvertised: &'static [c_int],
+    ) -> Self {
         Self {
             nids,
+            unadvertised,
             builders: OnceLock::new(),
             entries: OnceLock::new(),
         }
@@ -105,6 +117,11 @@ impl<M> MethodTable<M> {
         self.entries.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// Whether `nid` is served, advertised or not.
+    fn serves(&self, nid: c_int) -> bool {
+        self.nids.contains(&nid) || self.unadvertised.contains(&nid)
+    }
+
     /// Record `builder` for `nid` (first caller wins) and store a freshly
     /// built method as `engine`'s entry, overwriting any stale one. Building
     /// eagerly makes build errors surface at registration.
@@ -114,9 +131,9 @@ impl<M> MethodTable<M> {
         nid: c_int,
         builder: fn() -> EngineResult<*mut M>,
     ) -> EngineResult<()> {
-        if !self.nids.contains(&nid) {
+        if !self.serves(nid) {
             return Err(EngineError::Other(format!(
-                "NID {nid} is not advertised by this method table"
+                "NID {nid} is not served by this method table"
             )));
         }
         let builder = *self.builders().lock().entry(nid).or_insert(builder);
@@ -182,7 +199,7 @@ pub(crate) unsafe fn dispatch<M>(
         unsafe { *nids = table.nids.as_ptr() };
         return c_int::try_from(table.nids.len()).unwrap_or(0);
     }
-    let resolved = if table.nids.contains(&nid) {
+    let resolved = if table.serves(nid) {
         table.lookup(e, nid)
     } else {
         None

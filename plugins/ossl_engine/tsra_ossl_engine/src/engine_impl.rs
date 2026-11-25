@@ -138,6 +138,7 @@ impl DestroyHandler for TsraDestroy {
         // already freed the methods themselves (engine_pkey_(asn1_)meths_free
         // run before this hook); only stale pointers are dropped here.
         tsra_ossl_engine_core::pkey_method::release_pkey_methods(engine);
+        tsra_ossl_engine_core::hmac_method::release_hmac_keys(engine);
         tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(engine);
         // The framework never frees engine ciphers: free this ENGINE's copies.
         // SAFETY: the destroy hook runs once the last functional reference on
@@ -264,6 +265,9 @@ fn bind_helper(engine: &mut Engine, id: &CStr) -> EngineResult<()> {
         crate::rsasign::TsraRsaPssSign,
         crate::rsadecrypt::TsraRsaDecrypt,
     >(engine)?;
+    // HMAC on the HSM for keys loaded with type=hmac; other HMAC keys never
+    // reach this method (see tsra_ossl_engine_core::hmac_method).
+    tsra_ossl_engine_core::hmac_method::register_hmac_pkey_method(engine)?;
     // Provider-parity serialization for HSM-backed keys (-text info block,
     // clean export refusal); software EC keys keep the built-in behavior via
     // the ported fallbacks (see tsra_ossl_engine_core::asn1_method).

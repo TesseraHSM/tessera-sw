@@ -2723,6 +2723,325 @@ mod round_trips {
         let _ = std::fs::remove_file(&blob_path);
         Ok(())
     }
+
+    /// The HMAC key kinds: the HKDF digest name, the key bits and the matching
+    /// EVP digest.
+    #[allow(unsafe_code)]
+    fn hmac_kinds() -> [(&'static str, u32, *const ffi::EVP_MD); 3] {
+        // SAFETY: the EVP_sha* accessors return process-lifetime constants.
+        unsafe {
+            [
+                ("SHA256", 256, ffi::EVP_sha256()),
+                ("SHA384", 384, ffi::EVP_sha384()),
+                ("SHA512", 512, ffi::EVP_sha512()),
+            ]
+        }
+    }
+
+    /// A masked ECDH shared secret written to `dir`, the IKM HMAC keys are
+    /// derived from (HMAC keys come from HKDF; the HSM does not generate them
+    /// on this session type).
+    #[allow(unsafe_code)]
+    fn hmac_ikm(engine_raw: *mut ffi::ENGINE, dir: &Path) -> EngineResult<std::path::PathBuf> {
+        let tag = std::process::id();
+        let agree_blob = dir.join(format!("hmac-agree-{tag}.bin"));
+        let _ = std::fs::remove_file(&agree_blob);
+        let raw = try_armed_keygen(
+            engine_raw,
+            "P-384",
+            Some(&agree_blob),
+            &[("tsra.key_usage", "keyAgreement")],
+        )
+        .map_err(|e| EngineError::Other(format!("keyAgreement keygen failed: {e}")))?;
+        let group =
+            EcGroup::from_curve_name(Nid::SECP384R1).map_err(|e| EngineError::wrap("group", e))?;
+        let peer =
+            PKey::from_ec_key(EcKey::generate(&group).map_err(|e| EngineError::wrap("peer", e))?)
+                .map_err(|e| EngineError::wrap("peer", e))?;
+        let secret = derive_masked(engine_raw, raw, peer.as_ptr().cast(), None);
+        // SAFETY: raw is the owning key from keygen.
+        unsafe { ffi::EVP_PKEY_free(raw) };
+        let _ = std::fs::remove_file(&agree_blob);
+        let ikm = dir.join(format!("hmac-ikm-{tag}.bin"));
+        let _ = std::fs::remove_file(&ikm);
+        write_key_material(&ikm, &secret).map_err(|e| EngineError::wrap("write IKM", e))?;
+        Ok(ikm)
+    }
+
+    /// Derive an HMAC key with HKDF (`md`, `bits`) from `ikm`, write its masked
+    /// blob to `path`, and return the SDK's MAC of each of `messages` under it.
+    fn hmac_blob(
+        engine_raw: *mut ffi::ENGINE,
+        data: &EngineData,
+        ikm: &Path,
+        (md, bits): (&str, u32),
+        path: &Path,
+        messages: &[&[u8]],
+    ) -> EngineResult<Vec<Vec<u8>>> {
+        let ikm = ikm.to_str().ok_or(EngineError::Other("IKM path".into()))?;
+        let bits_str = bits.to_string();
+        let masked = try_hkdf(
+            engine_raw,
+            &[
+                ("md", md),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "hmac"),
+                ("derived_key_bits", &bits_str),
+            ],
+            None,
+        )
+        .map_err(|e| EngineError::Other(format!("HKDF-{md} HMAC key: {e}")))?;
+        let macs = data.with_session(|session| {
+            let key = HsmKeyManager::unmask_key(
+                session,
+                &mut tsra_api::HsmHmacKeyUnmaskAlgo::default(),
+                &masked,
+            )
+            .map_err(|e| EngineError::wrap("unmask HMAC key", e))?;
+            let macs = messages
+                .iter()
+                .map(|m| {
+                    HsmSigner::sign_vec(&mut tsra_api::HsmHmacAlgo::new(), &key, m)
+                        .map_err(|e| EngineError::wrap("SDK HMAC", e))
+                })
+                .collect::<EngineResult<Vec<_>>>();
+            crate::context::delete_hsm_key(key, "test HMAC key");
+            macs
+        })?;
+        let _ = std::fs::remove_file(path);
+        write_key_material(path, &masked).map_err(|e| EngineError::wrap("write HMAC blob", e))?;
+        Ok(macs)
+    }
+
+    /// MAC `chunks` (one update each) with `pkey` and `md` through
+    /// `EVP_DigestSign*`; the OpenSSL error text on failure.
+    #[allow(unsafe_code)]
+    pub(super) fn try_hmac(
+        pkey: *mut ffi::EVP_PKEY,
+        md: *const ffi::EVP_MD,
+        chunks: &[&[u8]],
+    ) -> Result<Vec<u8>, String> {
+        // SAFETY: the EVP_DigestSign sequence on a live key; the context is
+        // freed on every path.
+        unsafe {
+            let ctx = ffi::EVP_MD_CTX_new();
+            assert!(!ctx.is_null(), "EVP_MD_CTX_new");
+            let result = (|| {
+                if ffi::EVP_DigestSignInit(ctx, null_mut(), md, null_mut(), pkey) != 1 {
+                    return Err(());
+                }
+                for chunk in chunks {
+                    if ffi::EVP_DigestUpdate(ctx, chunk.as_ptr().cast(), chunk.len()) != 1 {
+                        return Err(());
+                    }
+                }
+                let mut len = 0usize;
+                if ffi::EVP_DigestSignFinal(ctx, null_mut(), &mut len) != 1 {
+                    return Err(());
+                }
+                let mut mac = vec![0u8; len];
+                if ffi::EVP_DigestSignFinal(ctx, mac.as_mut_ptr(), &mut len) != 1 {
+                    return Err(());
+                }
+                mac.truncate(len);
+                Ok(mac)
+            })();
+            ffi::EVP_MD_CTX_free(ctx);
+            result.map_err(|()| openssl::error::ErrorStack::get().to_string())
+        }
+    }
+
+    /// An engine for the HMAC tests: the pkey methods, including HMAC. Undo with
+    /// [`hmac_engine_teardown`].
+    fn hmac_engine(data: EngineData) -> EngineResult<(Engine, *mut ffi::ENGINE)> {
+        let (engine, engine_raw) = keygen_engine(data)?;
+        tsra_ossl_engine_core::hmac_method::register_hmac_pkey_method(&engine)?;
+        Ok((engine, engine_raw))
+    }
+
+    /// Drop the engine's HMAC keys and the parked EngineData, then free the
+    /// engine (see run_keygen for the release ordering contract).
+    #[allow(unsafe_code)]
+    fn hmac_engine_teardown(mut engine: Engine, engine_raw: *mut ffi::ENGINE) -> EngineResult<()> {
+        tsra_ossl_engine_core::hmac_method::release_hmac_keys(&engine);
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        Ok(())
+    }
+
+    /// HMAC with HSM keys of every kind through `EVP_DigestSign*` equals the
+    /// SDK's HMAC under the same key, for 0, 1 and 1024 message bytes, in one
+    /// update or in pieces; with no digest given (SHA-256) only the SHA-256 key
+    /// MACs. Software HMAC keys keep working (RFC 4231 case 2) and a software
+    /// key without key bytes is refused. Backend-agnostic.
+    #[allow(unsafe_code)]
+    pub(super) fn run_hmac(data: EngineData, dir: &Path) -> EngineResult<()> {
+        use tsra_ossl_engine_core::hmac_method::HMAC_MAX_MESSAGE;
+
+        let (engine, engine_raw) = hmac_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let ed = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let msg = pattern(HMAC_MAX_MESSAGE);
+        let messages: [&[u8]; 3] = [&[], &msg[..1], &msg];
+        let ikm = hmac_ikm(engine_raw, dir)?;
+
+        for (md_name, bits, md) in hmac_kinds() {
+            let path = dir.join(format!("hmac-{bits}-{}.bin", std::process::id()));
+            let expected = hmac_blob(engine_raw, ed, &ikm, (md_name, bits), &path, &messages)?;
+            let uri = format!("tsra://{};type=hmac", path.display());
+            let pkey = crate::keyload::load_key(&engine, ed, &uri)?;
+            for (m, want) in messages.iter().zip(&expected) {
+                let mac = try_hmac(pkey, md, &[m])
+                    .map_err(|e| EngineError::Other(format!("HMAC-{bits}: {e}")))?;
+                assert_eq!(&mac, want, "HMAC-{bits} over {} bytes", m.len());
+            }
+            let pieces = try_hmac(pkey, md, &[&msg[..1], &msg[1..512], &msg[512..]])
+                .map_err(|e| EngineError::Other(format!("HMAC-{bits} in pieces: {e}")))?;
+            assert_eq!(pieces, expected[2], "HMAC-{bits} in pieces");
+            // No digest given: OpenSSL's HMAC default, SHA-256.
+            let default = try_hmac(pkey, std::ptr::null(), &[&msg]);
+            if bits == 256 {
+                assert_eq!(
+                    default.map_err(EngineError::Other)?,
+                    expected[2],
+                    "default digest"
+                );
+            } else {
+                assert!(
+                    default.is_err_and(|e| e.contains("computes with digest")),
+                    "HMAC-{bits} with the default digest"
+                );
+            }
+            // SAFETY: pkey is the owning key from load_key.
+            unsafe { ffi::EVP_PKEY_free(pkey) };
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::remove_file(&ikm);
+
+        // SAFETY: software HMAC keys built through the public API, freed below.
+        unsafe {
+            let key = b"Jefe";
+            let sw = ffi::EVP_PKEY_new_raw_private_key(
+                ffi::EVP_PKEY_HMAC as c_int,
+                null_mut(),
+                key.as_ptr(),
+                key.len(),
+            );
+            assert!(!sw.is_null(), "software HMAC key");
+            let mac = try_hmac(sw, ffi::EVP_sha256(), &[b"what do ya want for nothing?"])
+                .map_err(EngineError::Other)?;
+            let rfc4231_case2: [u8; 32] = [
+                0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
+                0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
+                0x64, 0xec, 0x38, 0x43,
+            ];
+            assert_eq!(mac, rfc4231_case2, "software HMAC (RFC 4231 test case 2)");
+
+            let empty = ffi::EVP_PKEY_new();
+            assert!(!empty.is_null());
+            assert_eq!(
+                ffi::EVP_PKEY_assign(
+                    empty,
+                    ffi::EVP_PKEY_HMAC as c_int,
+                    ffi::ASN1_STRING_new().cast()
+                ),
+                1
+            );
+            assert!(
+                try_hmac(empty, ffi::EVP_sha256(), &[b"m"]).is_err(),
+                "a software key without key bytes must be refused"
+            );
+            ffi::EVP_PKEY_free(sw);
+            ffi::EVP_PKEY_free(empty);
+        }
+
+        hmac_engine_teardown(engine, engine_raw)
+    }
+
+    /// HMAC uses that must fail: a digest other than the key's (incl. SHA-1),
+    /// more than 1024 message bytes (at the update that crosses the limit), a
+    /// short output buffer, a raw key on an HSM key's context, and HMAC and EC
+    /// blobs under each other's URI type.
+    /// Backend-agnostic.
+    #[allow(unsafe_code)]
+    pub(super) fn run_hmac_rejects(data: EngineData, dir: &Path) -> EngineResult<()> {
+        use std::ffi::CString;
+
+        use tsra_ossl_engine_core::hmac_method::HMAC_MAX_MESSAGE;
+
+        let (engine, engine_raw) = hmac_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let ed = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let path = dir.join(format!("hmac-reject-{}.bin", std::process::id()));
+        let ikm = hmac_ikm(engine_raw, dir)?;
+        hmac_blob(engine_raw, ed, &ikm, ("SHA256", 256), &path, &[])?;
+        let _ = std::fs::remove_file(&ikm);
+        let uri = format!("tsra://{};type=hmac", path.display());
+        let pkey = crate::keyload::load_key(&engine, ed, &uri)?;
+        let msg = pattern(HMAC_MAX_MESSAGE + 1);
+
+        // SAFETY: EVP digest accessors return process-lifetime constants; the
+        // contexts are freed on every path.
+        unsafe {
+            for (name, md) in [("SHA-384", ffi::EVP_sha384()), ("SHA-1", ffi::EVP_sha1())] {
+                let err = try_hmac(pkey, md, &[b"m"]).expect_err(name);
+                assert!(err.contains("computes with digest"), "{name}: {err}");
+            }
+            let err = try_hmac(pkey, ffi::EVP_sha256(), &[&msg[..1000], &msg[1000..]])
+                .expect_err("1025 bytes");
+            assert!(err.contains("at most 1024"), "1025 bytes: {err}");
+
+            let ctx = ffi::EVP_MD_CTX_new();
+            let mut pctx = null_mut();
+            assert_eq!(
+                ffi::EVP_DigestSignInit(ctx, &mut pctx, ffi::EVP_sha256(), null_mut(), pkey),
+                1
+            );
+            let key = CString::new("key").unwrap_or_default();
+            let value = CString::new("raw").unwrap_or_default();
+            assert!(
+                ffi::EVP_PKEY_CTX_ctrl_str(pctx, key.as_ptr(), value.as_ptr()) <= 0,
+                "a raw key on an HSM key's context must be refused"
+            );
+            let mut short = [0u8; 16];
+            let mut len = short.len();
+            assert_ne!(
+                ffi::EVP_DigestSignFinal(ctx, short.as_mut_ptr(), &mut len),
+                1,
+                "a 16-byte buffer for a 32-byte MAC must be refused"
+            );
+            let err = openssl::error::ErrorStack::get().to_string();
+            assert!(err.contains("fewer than 32"), "short buffer: {err}");
+            ffi::EVP_MD_CTX_free(ctx);
+            ffi::EVP_PKEY_free(pkey);
+        }
+
+        let ec_path = dir.join(format!("hmac-reject-ec-{}.bin", std::process::id()));
+        let (ec_blob, _) = generate_masked(ed, HsmEccCurve::P384)?;
+        let _ = std::fs::remove_file(&ec_path);
+        write_key_material(&ec_path, &ec_blob)
+            .map_err(|e| EngineError::wrap("write EC blob", e))?;
+        for uri in [
+            format!("tsra://{};type=hmac", ec_path.display()),
+            format!("tsra://{};type=ec", path.display()),
+        ] {
+            assert!(
+                crate::keyload::load_key(&engine, ed, &uri).is_err(),
+                "{uri} must not load"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&ec_path);
+
+        hmac_engine_teardown(engine, engine_raw)
+    }
 }
 
 #[cfg(test)]
@@ -3127,6 +3446,35 @@ mod sim {
             .unwrap();
             round_trips::run_keygen(data, &scratch.0, curve).unwrap();
         }
+    }
+
+    // HMAC with HSM keys through EVP_DigestSign*, every key kind (see
+    // round_trips::run_hmac).
+    #[test]
+    #[serial]
+    fn hmac_via_pkey_method_matches_sdk() {
+        let scratch = Scratch::new("hmac");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_hmac(data, &scratch.0).unwrap();
+    }
+
+    // HMAC uses that must fail (see round_trips::run_hmac_rejects).
+    #[test]
+    #[serial]
+    fn hmac_rejects_bad_use() {
+        let scratch = Scratch::new("hmac-reject");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_hmac_rejects(data, &scratch.0).unwrap();
     }
 
     // Import an external RSA key into the HSM through the real EVP_PKEY_keygen
@@ -3641,6 +3989,24 @@ mod hw_tests {
     /// ```text
     /// cargo test -p tsra_ossl_engine --features engine keygen_ec_key_from_env_smoke -- --ignored --nocapture
     /// ```
+    /// Hardware HMAC, same flows as the simulator tests (see
+    /// [`super::round_trips::run_hmac`] and
+    /// [`super::round_trips::run_hmac_rejects`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine hmac_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn hmac_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_hmac(data, &std::env::temp_dir())?;
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_hmac_rejects(data, &std::env::temp_dir())
+    }
+
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn keygen_ec_key_from_env_smoke() -> EngineResult<()> {

@@ -85,6 +85,7 @@ pub fn load_key(
             }
             Ok(pkey)
         }
+        KeyType::Hmac => crate::hmac::load_hmac(engine, data, &open_and_read(data, path)?),
         // A symmetric key is attached to a cipher context instead; refused
         // without opening the HSM.
         KeyType::Aes(_) => Err(EngineError::Other(
