@@ -228,6 +228,7 @@ CK_RV tsra_pkcs11_keygen_check_template(
     CK_BBOOL have_value_len = CK_FALSE;
     CK_BBOOL have_key_type = CK_FALSE;
     CK_KEY_TYPE key_type = 0;
+    CK_BBOOL priv = CK_TRUE; /* a generated key is private unless the template says otherwise */
     const CK_ATTRIBUTE *allowed = NULL;
 
     CK_RV rv = tsra_pkcs11_tmpl_check_bounds(tmpl, count);
@@ -352,11 +353,24 @@ CK_RV tsra_pkcs11_keygen_check_template(
                 return rv;
             }
             break;
+        case CKA_PRIVATE:
+            rv = tsra_pkcs11_tmpl_bool(a, &priv);
+            if (rv != CKR_OK)
+            {
+                return rv;
+            }
+            break;
         default:
             break; /* stored verbatim on the object */
         }
     }
 
+    /* Only a sealed record guards the attributes that limit a token key and
+     * its masked blob, and the file store seals only private records. */
+    if (*token && !priv)
+    {
+        return CKR_TEMPLATE_INCONSISTENT;
+    }
     const tsra_pkcs11_keygen_policy *p = NULL;
     rv = resolve_policy(mech, allowed, &p);
     if (rv != CKR_OK)
@@ -368,16 +382,17 @@ CK_RV tsra_pkcs11_keygen_check_template(
         return CKR_TEMPLATE_INCONSISTENT;
     }
     /* The key-generation mechanisms derive the strength solely from
-     * CKA_VALUE_LEN. */
+     * CKA_VALUE_LEN; an unwrap takes it from the wrapped key instead. */
+    *policy = p;
     if (!have_value_len)
     {
         return CKR_TEMPLATE_INCOMPLETE;
     }
     if (!policy_has_len(p, *value_len))
     {
+        *policy = NULL;
         return CKR_ATTRIBUTE_VALUE_INVALID;
     }
-    *policy = p;
     return CKR_OK;
 }
 
@@ -399,6 +414,7 @@ CK_RV tsra_pkcs11_keygen_build_template(
     const tsra_pkcs11_keygen_policy *policy,
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
+    bool local,
     tsra_pkcs11_keygen_fill *fill,
     CK_ATTRIBUTE *full,
     CK_ULONG *n
@@ -414,7 +430,7 @@ CK_RV tsra_pkcs11_keygen_build_template(
     fill->kt = policy->key_type;
     fill->btrue = CK_TRUE;
     fill->bfalse = CK_FALSE;
-    fill->kgm = policy->keygen_mech;
+    fill->kgm = local ? policy->keygen_mech : CK_UNAVAILABLE_INFORMATION;
     memcpy(fill->mechs, policy->mechs, policy->mech_count * sizeof(fill->mechs[0]));
 
     CK_ULONG k = 0;
@@ -479,10 +495,12 @@ CK_RV tsra_pkcs11_keygen_build_template(
         count,
         (CK_ATTRIBUTE){ CKA_DECRYPT, &fill->btrue, sizeof(fill->btrue) }
     );
-    /* Rejected by the check as inputs, so always appended. */
-    full[k++] = (CK_ATTRIBUTE){ CKA_LOCAL, &fill->btrue, sizeof(fill->btrue) };
-    full[k++] = (CK_ATTRIBUTE){ CKA_ALWAYS_SENSITIVE, &fill->btrue, sizeof(fill->btrue) };
-    full[k++] = (CK_ATTRIBUTE){ CKA_NEVER_EXTRACTABLE, &fill->btrue, sizeof(fill->btrue) };
+    /* Rejected by the check as inputs, so always appended. A key that came
+     * from outside the token has been neither local nor always protected. */
+    CK_BBOOL *origin = local ? &fill->btrue : &fill->bfalse;
+    full[k++] = (CK_ATTRIBUTE){ CKA_LOCAL, origin, sizeof(*origin) };
+    full[k++] = (CK_ATTRIBUTE){ CKA_ALWAYS_SENSITIVE, origin, sizeof(*origin) };
+    full[k++] = (CK_ATTRIBUTE){ CKA_NEVER_EXTRACTABLE, origin, sizeof(*origin) };
     full[k++] = (CK_ATTRIBUTE){ CKA_KEY_GEN_MECHANISM, &fill->kgm, sizeof(fill->kgm) };
     *n = k;
     return CKR_OK;

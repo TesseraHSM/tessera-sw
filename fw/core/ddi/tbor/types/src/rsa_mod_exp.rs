@@ -3,31 +3,28 @@
 
 //! TBOR `RsaModExp` wire schema.
 //!
-//! `RsaModExp` is an in-session command that performs the RSA private-key
-//! primitive `x = y^d mod n` using a caller-held **masked** RSA private
-//! key (imported via [`UnwrapKey`](crate::unwrap_key) with the RSA /
-//! RSA-CRT key class).  The device unmasks the key on-device (recovering
-//! its modulus size from the key kind), computes the modular
-//! exponentiation, and returns the result.  This is the raw primitive
-//! underlying RSA decrypt / sign — the host applies and removes any
-//! padding.  This is the TBOR analogue of MBOR `RsaModExp`, keyed by a
-//! masked blob instead of a vault id.  There is no TBOR RSA key
-//! generation; RSA keys enter the device only through `UnwrapKey`.
+//! `RsaModExp` is an in-session command that performs a raw RSA
+//! exponentiation using a caller-held **masked** RSA private key (imported
+//! via [`UnwrapKey`](crate::unwrap_key) with the RSA / RSA-CRT key class).
+//! Public operations derive `n || e` from that authenticated key on-device;
+//! no raw-public-key input is accepted. Encryption padding and recovered
+//! signature-block validation remain host responsibilities.
 //!
 //! Inputs:
 //!
 //! * `session_id` — TOC-carried session id; cross-checked by the dispatcher.
 //! * `masked_key` — the masked RSA private key (unmasked in place); its
 //!   kind recovers the modulus size and CRT form.
-//! * `op_type` — the [`RsaOp`] selecting which usage attribute gates the
-//!   operation (`Decrypt` → `decrypt`, `Sign` → `sign`).
+//! * `op_type` — the [`RsaOp`] selecting the exponent direction and exact
+//!   usage attribute (`Decrypt` → `decrypt`, `Sign` → `sign`, `Encrypt` →
+//!   `encrypt`, `Verify` → `verify`).
 //! * `y` — the input integer in device byte order, exactly the
 //!   key's modulus length (256 / 384 / 512 B for RSA-2048 / 3072 / 4096).
 //!
 //! Outputs:
 //!
-//! * `x` — the result `y^d mod n` in device byte order, exactly the
-//!   key's modulus length.
+//! * `x` — the modulus-sized result in device byte order (`y^d mod n` for
+//!   Decrypt/Sign, `y^e mod n` for Encrypt/Verify).
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -59,11 +56,11 @@ pub const RSA_MOD_EXP_MAX_LEN: usize = 512;
 // tbor derive requires integer literals in the attributes).
 const _: () = assert!(RSA_MASKED_KEY_MAX_LEN == 3168);
 
-/// RSA private-key operation selector on the TBOR wire.
+/// RSA operation selector on the TBOR wire.
 ///
 /// Selects which usage attribute the masked key must carry for the
-/// modular exponentiation to be permitted.  The 1-byte discriminants
-/// mirror the MBOR `DdiRsaOpType` values (`Decrypt = 1`, `Sign = 2`).
+/// modular exponentiation to be permitted. The selector also determines
+/// the exponent direction.
 /// Kept as an [`open_enum`] so an unrecognized discriminant round-trips as
 /// `RsaOp(x)` and is rejected on-device rather than failing to decode.
 #[repr(u8)]
@@ -75,6 +72,12 @@ pub enum RsaOp {
 
     /// RSA sign primitive — requires the `sign` usage attribute.
     Sign = 2,
+
+    /// RSA encrypt primitive — requires the `encrypt` usage attribute.
+    Encrypt = 3,
+
+    /// RSA verify primitive — requires the `verify` usage attribute.
+    Verify = 4,
 }
 
 /// `RsaModExp` request schema.
@@ -99,8 +102,7 @@ pub struct TborRsaModExpReq<'a> {
     #[tbor(align = 4, buffer, min_len = 264, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The private-key operation, 1-byte [`RsaOp`] (gates on `decrypt` /
-    /// `sign`).
+    /// The operation, 1-byte [`RsaOp`] (gates on the corresponding usage).
     #[tbor(U8)]
     pub op_type: RsaOp,
 }
@@ -108,11 +110,11 @@ pub struct TborRsaModExpReq<'a> {
 /// `RsaModExp` response schema.
 ///
 /// `x` is `#[tbor(mutable)]` so the handler can reserve the slot and have
-/// the PAL write `y^d mod n` straight into it (`decode_mut`).
+/// the operation result replace `y` (`decode_mut`).
 #[tbor(response, pair = TborRsaModExpReq)]
 pub struct TborRsaModExpResp<'a> {
-    /// The result `x = y^d mod n` in device byte order, exactly the
-    /// key's modulus length (256 / 384 / 512 B).
+    /// The modulus-sized result in device byte order (`y^d mod n` for
+    /// Decrypt/Sign, `y^e mod n` for Encrypt/Verify).
     #[tbor(buffer, max_len = 512, mutable)]
     pub x: &'a [u8],
 }
@@ -130,7 +132,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let masked = [0x11u8; RSA_MASKED_KEY_MIN_LEN];
         let y = [0x22u8; 256];
-        let frame = TborRsaModExpReq::encode(&mut buf)
+        let frame = TborRsaModExpReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
@@ -149,7 +151,7 @@ mod tests {
     fn response_round_trips_x() {
         let mut buf = [0u8; 1024];
         let x = [0x33u8; RSA_MOD_EXP_MAX_LEN];
-        let frame = TborRsaModExpResp::encode(&mut buf, 0, true)
+        let frame = TborRsaModExpResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .x(&x)
             .unwrap()
@@ -162,5 +164,14 @@ mod tests {
         assert_eq!(RSA_MOD_EXP_MAX_LEN, 512);
         assert_eq!(RSA_MASKED_KEY_MAX_LEN, 3168);
         assert_eq!(RSA_MASKED_KEY_MIN_LEN, 264);
+    }
+
+    #[test]
+    fn operation_discriminants_are_stable() {
+        assert_eq!(RsaOp::Decrypt, RsaOp(1));
+        assert_eq!(RsaOp::Sign, RsaOp(2));
+        assert_eq!(RsaOp::Encrypt, RsaOp(3));
+        assert_eq!(RsaOp::Verify, RsaOp(4));
+        assert_eq!(RsaOp(5), RsaOp(5));
     }
 }

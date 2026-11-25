@@ -3,7 +3,7 @@
 
 //! Integration tests for the TBOR `DarcKexKeyGen` command.
 //!
-//! Cross-test isolation comes from `open_dev`'s factory reset; no
+//! Cross-test isolation comes from `open_dev`'s NSSR; no
 //! per-test cleanup is required (see [`tsra_ddi_tbor_test_harness::fixture`]).
 //!
 //! The command generates a P-384 key-exchange keypair and returns the
@@ -30,11 +30,11 @@
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::KEX_PUB_KEY_LEN;
@@ -132,7 +132,7 @@ fn darc_kex_key_gen_rejected_on_cu_session() {
 
     // Rotate the CU PSK out of the default so the dispatcher's default-PSK
     // gate does not fire first; then reopen a CU session under the rotated
-    // PSK.  CU sessions are pinned to `SessionType::PlainText` (CO-only is
+    // PSK.  CU sessions are pinned to `SessionSuite::EcdhP384` (CO-only is
     // `Authenticated`).
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
@@ -152,7 +152,7 @@ fn darc_kex_key_gen_rejected_on_default_psk() {
     // default) — the dispatcher's default-PSK gate must reject the command
     // before the handler runs.
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
 
     let req = TborDarcKexKeyGenReq {

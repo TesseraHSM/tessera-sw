@@ -12,6 +12,7 @@
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::build_mac_fin;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
@@ -20,63 +21,326 @@ use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
 use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MAC_FIN_LEN;
-use tsra_ddi_tbor_types::PK_INIT_LEN;
 use tsra_ddi_tbor_types::SEED_ENVELOPE_LEN;
-use tsra_ddi_tbor_types::SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256;
+use tsra_ddi_tbor_types::SESSION_P384_SEC1_LEN;
+use tsra_ddi_tbor_types::SESSION_SUITE_ECDH_P384_ECDSA_P384;
+use tsra_session_ex_crypto::SessionInitiator;
 
-/// Opens a CO authenticated session and verifies handshake metadata and MAC keys.
+/// Every key-establishment suite the host supports.
+const SUITES: [SessionSuite; 1] = [SessionSuite::EcdhP384];
+
 #[test]
-fn open_session_co_authenticated_happy() {
+fn session_reopen_rejects_another_slots_valid_recovery_material() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
     let ctx = TestCtx::new();
-    let session = ctx
-        .open_session(CO, SessionType::Authenticated)
-        .expect("open_session must succeed");
-    let h = session.handshake();
-    assert_eq!(h.psk_id, CO);
-    assert!(h.session_type.is_authenticated());
+    let first = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("first init");
+    let first = ctx.session_open_finish(first).expect("first finish");
+    let other = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("other init");
+    let other = ctx.session_open_finish(other).expect("other finish");
+    ctx.erase().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, first.suite).for_reopen(first.session_id);
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("recovery init");
     assert!(
-        !h.bmk_session.is_empty(),
-        "FW must return a non-empty bmk_session envelope",
+        ctx.session_reopen_finish(pending, &other).is_err(),
+        "different slot lineage rejected"
     );
-    // Authenticated sessions: host can re-derive MAC keys from
-    // `exported`; both should be 48(ie MAC_FIN_LEN) bytes .
-    let tx = h.derive_mac_tx_key().expect("derive mac tx key");
-    let rx = h.derive_mac_rx_key().expect("derive mac rx key");
-    assert_eq!(tx.len(), MAC_FIN_LEN);
-    assert_eq!(rx.len(), MAC_FIN_LEN);
-    assert!(tx != rx, "mac tx and rx keys must differ");
+    assert!(
+        ctx.session_open_init_with_options(
+            SessionOpenInitOptions::new(CO, first.suite).for_reopen(first.session_id)
+        )
+        .is_err(),
+        "wrong role rejected"
+    );
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init");
+    ctx.session_reopen_finish(pending, &first)
+        .expect("correct lineage succeeds");
+    ctx.session_close(first.session_id)
+        .expect("close recovered");
+    ctx.tbor(&tsra_ddi_tbor_types::TborSessionClosePlainReq {
+        session_id: other.session_id,
+    })
+    .expect("close stale peer");
 }
 
-/// Opens a CU plaintext session and verifies its handshake role and type.
 #[test]
-fn open_session_cu_plaintext_happy() {
+fn session_reopen_and_plaintext_close_are_serialized() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+    use tsra_ddi_tbor_types::TborSessionClosePlainReq;
+
     let ctx = TestCtx::new();
-    let session = ctx
-        .open_session(CU, SessionType::PlainText)
-        .expect("open_session must succeed");
-    let h = session.handshake();
-    assert_eq!(h.psk_id, CU);
-    assert!(!h.session_type.is_authenticated());
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    ctx.erase().expect("migration");
+    let barrier = std::sync::Barrier::new(2);
+    let (close, reopen) = std::thread::scope(|scope| {
+        let close = scope.spawn(|| {
+            barrier.wait();
+            ctx.tbor(&TborSessionClosePlainReq {
+                session_id: original.session_id,
+            })
+        });
+        let reopen = scope.spawn(|| {
+            barrier.wait();
+            ctx.session_open_init_with_options(
+                SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id),
+            )
+        });
+        (
+            close.join().expect("close thread"),
+            reopen.join().expect("reopen thread"),
+        )
+    });
+    match (close, reopen) {
+        (Ok(_), Err(_)) => {
+            ctx.open_session(CU, original.suite)
+                .expect("closed slot reusable")
+                .close()
+                .expect("close new");
+        }
+        (Err(err), Ok(pending)) => {
+            assert_fw_rejects(&err, TborStatus::InvalidPermissions);
+            ctx.session_reopen_finish(pending, &original)
+                .expect("close did not destroy recovery");
+            ctx.session_close(original.session_id)
+                .expect("close recovered");
+        }
+        _ => panic!("exactly one lifecycle operation must win"),
+    }
 }
 
-/// Rejects the unsupported CO plaintext session pairing.
 #[test]
-fn open_session_co_plaintext_rejected() {
-    let ctx = TestCtx::new();
-    let err = ctx
-        .session_open_init(CO, SessionType::PlainText)
-        .expect_err("CO + PlainText is not a permitted pairing");
-    assert_fw_rejects(&err, TborStatus::InvalidSessionType);
+fn session_reopen_after_migration_restores_masked_keys_under_default_psk_for_both_roles() {
+    use tsra_crypto::ExportableKey;
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+    use tsra_ddi_tbor_types::*;
+
+    for role in [CO, CU] {
+        let ctx = TestCtx::new();
+        let pending = ctx
+            .session_open_init(role, SessionSuite::EcdhP384)
+            .expect("init");
+        let original = ctx.session_open_finish(pending).expect("finish");
+        let psk = [0xA7; PSK_LEN];
+        ctx.psk_change(&original, &psk)
+            .expect("rotate without reopening");
+        let masked_key = crate::commands::aes_generate_key::generate_key(
+            &ctx,
+            original.session_id,
+            crate::commands::common::SCOPE_SESSION,
+            AES_KEY_SIZE_256,
+        );
+        let request = TborAesEncryptDecryptReq {
+            session_id: original.session_id,
+            op: AES_OP_ENCRYPT,
+            mode: AES_MODE_CBC,
+            iv: vec![0; 16],
+            msg: vec![0x42; 32],
+            masked_key,
+        };
+        let before = ctx.tbor(&request).expect("use key before migration");
+        ctx.erase().expect("migration");
+        let error = ctx.tbor(&request).expect_err("stale channel rejected");
+        assert!(
+            matches!(
+                error,
+                tsra_ddi_interface::DdiError::DdiStatus(
+                    tsra_ddi_mbor_types::DdiStatus::SessionNeedsRenegotiation
+                )
+            ),
+            "{error:?}"
+        );
+        // The migration returned the PSKs to their defaults: the rotated PSK
+        // no longer authenticates a reopen.
+        let pending = ctx
+            .session_open_init_with_options(
+                SessionOpenInitOptions::new(role, original.suite)
+                    .with_psk(&psk)
+                    .for_reopen(original.session_id),
+            )
+            .expect("recovery init");
+        assert!(
+            ctx.session_reopen_finish(pending, &original).is_err(),
+            "rotated PSK rejected after migration"
+        );
+        let pending = ctx
+            .session_open_init_with_options(
+                SessionOpenInitOptions::new(role, original.suite).for_reopen(original.session_id),
+            )
+            .expect("recovery init");
+        let recovered = ctx
+            .session_reopen_finish(pending, &original)
+            .expect("recovery finish");
+        assert_eq!(recovered.session_id, original.session_id);
+        assert!(
+            recovered.param_key.to_vec().expect("new key")
+                != original.param_key.to_vec().expect("original key"),
+            "fresh parameter key"
+        );
+        // The default PSK gates the restored key until the role rotates again,
+        // which the migration allows once more.
+        ctx.expect_fw_reject(&request, TborStatus::DefaultPskMustRotate);
+        ctx.psk_change(&recovered, &psk)
+            .expect("rotate again after migration");
+        assert_eq!(ctx.tbor(&request).expect("use original masked key"), before);
+        let err = ctx
+            .psk_change(&recovered, &[0xB8; PSK_LEN])
+            .expect_err("one change per session");
+        assert_fw_rejects(&err, TborStatus::PskChangeAlreadyUsed);
+        ctx.session_close(recovered.session_id)
+            .expect("close recovered");
+    }
 }
 
-/// Rejects the unsupported CU authenticated session pairing.
 #[test]
-fn open_session_cu_authenticated_rejected() {
+fn session_reopen_failed_recovery_is_retryable() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
     let ctx = TestCtx::new();
-    let err = ctx
-        .session_open_init(CU, SessionType::Authenticated)
-        .expect_err("CU + Authenticated is not a permitted pairing");
-    assert_fw_rejects(&err, TborStatus::InvalidSessionType);
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let mut original = ctx.session_open_finish(pending).expect("finish");
+    ctx.erase().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("init recovery");
+    original.seed[0] ^= 1;
+    assert!(
+        ctx.session_reopen_finish(pending, &original).is_err(),
+        "wrong seed rejected"
+    );
+    original.seed[0] ^= 1;
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init");
+    original.bmk_session[0] ^= 1;
+    assert!(
+        ctx.session_reopen_finish(pending, &original).is_err(),
+        "tampered recovery rejected"
+    );
+    original.bmk_session[0] ^= 1;
+    let pending = ctx
+        .session_open_init_with_options(opts())
+        .expect("retry init again");
+    ctx.session_reopen_finish(pending, &original)
+        .expect("retry succeeds");
+    ctx.session_close(original.session_id).expect("close");
+}
+
+#[test]
+fn session_reopen_abandoned_handshake_can_be_replaced() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    ctx.erase().expect("migration");
+    let opts = || SessionOpenInitOptions::new(CU, original.suite).for_reopen(original.session_id);
+    let abandoned = ctx
+        .session_open_init_with_options(opts())
+        .expect("abandoned recovery");
+    let replacement = ctx
+        .session_open_init_with_options(opts())
+        .expect("replacement recovery");
+    assert!(
+        ctx.session_reopen_finish(abandoned, &original).is_err(),
+        "old channel rejected"
+    );
+    ctx.session_reopen_finish(replacement, &original)
+        .expect("replacement succeeds");
+    ctx.session_close(original.session_id).expect("close");
+}
+
+#[test]
+fn session_reopen_rejects_active_and_fresh_pending_slots() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let opts =
+        || SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).for_reopen(pending.session_id);
+    assert!(ctx.session_open_init_with_options(opts()).is_err());
+    let id = pending.session_id;
+    ctx.session_open_finish(pending)
+        .expect("ordinary pending survives");
+    assert!(ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).for_reopen(id)
+        )
+        .is_err());
+    ctx.session_close(id).expect("active session survives");
+}
+
+/// A raw `SessionOpenInit` request for a CU session.
+fn raw_init_req(session_type: u8, suite_id: u8, pk_init: Vec<u8>) -> TborSessionOpenInitReq {
+    TborSessionOpenInitReq {
+        reopen_id: u16::MAX,
+        psk_id: CU,
+        session_type,
+        suite_id,
+        pk_init,
+    }
+}
+
+/// A raw ECDH P-384 `SessionOpenInit` request for a CU session.
+fn raw_ecdh_init_req(pk_init: Vec<u8>) -> TborSessionOpenInitReq {
+    raw_init_req(
+        SessionType::Encrypted.to_u8(),
+        SESSION_SUITE_ECDH_P384_ECDSA_P384,
+        pk_init,
+    )
+}
+
+/// Opens CO and CU sessions under every suite and verifies the handshake
+/// metadata. The close travels encrypted under the session transport, so
+/// a successful close also proves both sides derived the same keys.
+#[test]
+fn open_session_every_role_and_suite_happy() {
+    let ctx = TestCtx::new();
+    for suite in SUITES {
+        for role in [CO, CU] {
+            let session = ctx
+                .open_session(role, suite)
+                .expect("open_session must succeed");
+            let h = session.handshake();
+            assert_eq!(h.psk_id, role);
+            assert_eq!(h.suite, suite);
+            assert!(
+                !h.bmk_session.is_empty(),
+                "FW must return a non-empty bmk_session envelope",
+            );
+            session.close().expect("encrypted close must succeed");
+        }
+    }
+}
+
+/// Rejects every session type other than `Encrypted` (`0`), including the
+/// retired authenticated value (`1`), for both roles.
+#[test]
+fn open_session_legacy_session_types_rejected() {
+    let ctx = TestCtx::new();
+    for (role, session_type) in [(CO, 1u8), (CU, 1), (CO, 2), (CU, 2)] {
+        let mut req = raw_ecdh_init_req(vec![0x04u8; SESSION_P384_SEC1_LEN]);
+        req.psk_id = role;
+        req.session_type = session_type;
+        ctx.expect_fw_reject(&req, TborStatus::InvalidSessionType);
+    }
 }
 
 /// Rejects out-of-range PSK IDs before opening a session.
@@ -86,11 +350,11 @@ fn open_session_invalid_psk_id() {
     // a small set of out-of-range values covering: the smallest invalid
     // value (`2`), a mid-range value (`0x7F`), and the all-ones byte
     // (`0xFF`). All must surface `InvalidPskId` from the FW
-    // dispatcher's `psk_id`-validation arm before any HPKE work.
+    // dispatcher's `psk_id`-validation arm before any KEM work.
     let ctx = TestCtx::new();
     for bad in [2u8, 0x7F, 0xFF] {
         let err = ctx
-            .session_open_init(bad, SessionType::PlainText)
+            .session_open_init(bad, SessionSuite::EcdhP384)
             .expect_err(&format!("psk_id {bad} must be rejected"));
         assert_fw_rejects(&err, TborStatus::InvalidPskId);
     }
@@ -102,31 +366,38 @@ fn open_session_invalid_session_type_byte() {
     // Bypass the typed `SessionType` enum to ship an out-of-range
     // byte directly. The FW `SessionType::from_u8` must reject.
     let ctx = TestCtx::new();
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: 42,
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init: [0x04u8; PK_INIT_LEN],
-    };
+    let mut req = raw_ecdh_init_req(vec![0x04u8; SESSION_P384_SEC1_LEN]);
+    req.session_type = 42;
     ctx.expect_fw_reject(&req, TborStatus::InvalidSessionType);
 }
 
 /// Rejects unsupported session-suite identifiers.
 #[test]
 fn open_session_unsupported_suite_id() {
-    // Any byte other than 0x01 must be rejected by `HsmSessionSuite::from_u8`
-    // before any HPKE work happens. Spot-check three boundary values
-    // covering "reserved-but-not-yet-implemented" (0x02), zero (0x00),
-    // and the all-ones byte (0xFF).
+    // Only 0x01 (ECDH P-384) is supported, including rejection of the
+    // removed 0x02 suite before any key-agreement work happens.
     let ctx = TestCtx::new();
-    for bad in [0x00u8, 0x02, 0xff] {
-        let req = TborSessionOpenInitReq {
-            psk_id: CU,
-            session_type: SessionType::PlainText.to_u8(),
-            suite_id: bad,
-            pk_init: [0x04u8; PK_INIT_LEN],
-        };
+    for bad in [0x00u8, 0x02, 0x03, 0xff] {
+        let req = raw_init_req(
+            SessionType::Encrypted.to_u8(),
+            bad,
+            vec![0x04u8; SESSION_P384_SEC1_LEN],
+        );
         ctx.expect_fw_reject(&req, TborStatus::UnsupportedSessionSuite);
+    }
+}
+
+/// Rejects a `pk_init` whose length does not match the selected suite.
+#[test]
+fn open_session_pk_init_length_mismatch_rejected() {
+    let ctx = TestCtx::new();
+    let ecdh_pk = SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
+        .expect("generate ECDH ephemeral")
+        .pk_init()
+        .to_vec();
+    for len in [0, 1, SESSION_P384_SEC1_LEN - 1] {
+        let req = raw_ecdh_init_req(ecdh_pk[..len].to_vec());
+        ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
     }
 }
 
@@ -140,7 +411,7 @@ fn session_open_finish_mac_tampered() {
         let ctx = TestCtx::new_with_path(&path);
 
         let pending = ctx
-            .session_open_init(CU, SessionType::PlainText)
+            .session_open_init(CU, SessionSuite::EcdhP384)
             .unwrap_or_else(|e| panic!("phase 1 must succeed for MAC tamper index {index}: {e:?}"));
 
         let mut mac_fin = build_mac_fin(&pending)
@@ -163,6 +434,7 @@ fn session_open_finish_unknown_session_id() {
     // pending slot. The FW pre-check fails to load the blob.
     let ctx = TestCtx::new();
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: 0xFFFF,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -178,10 +450,11 @@ fn session_open_finish_unknown_session_id() {
 fn open_session_double_finish() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     // Replay the finish: pending slot is gone, FW must refuse.
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: session.session_id(),
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -199,7 +472,7 @@ fn session_open_finish_seed_envelope_tampered() {
     // ciphertext byte after Phase-1 succeeds but before shipping it.
     let ctx = TestCtx::new();
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("phase 1 must succeed");
     let session_id = pending.session_id;
     let mac_fin = build_mac_fin(&pending).expect("build phase-2 mac");
@@ -212,6 +485,7 @@ fn session_open_finish_seed_envelope_tampered() {
     seed_envelope[4] = 0x03; // AeadAlg::AesGcm256
 
     let req = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id,
         mac_fin,
         seed_envelope,
@@ -224,7 +498,7 @@ fn session_open_finish_seed_envelope_tampered() {
 fn open_session_multiple_concurrent() {
     let ctx_a = TestCtx::new();
     let a = ctx_a
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
 
     // Second session lives on its own Dev — on hw the kernel driver
@@ -233,7 +507,7 @@ fn open_session_multiple_concurrent() {
     // device (`ctx_a.path()`).
     let ctx_b = TestCtx::new_with_path(ctx_a.path());
     let b = ctx_b
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open second session on extra dev");
 
     assert_ne!(
@@ -255,10 +529,10 @@ fn open_session_second_on_same_fd_rejected() {
     }
     let ctx = TestCtx::new();
     let _a = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("first open on a fresh fd must succeed");
     let err = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("second open on the same fd must be rejected");
     assert_fw_rejects(&err, TborStatus::FileHandleSessionLimitReached);
 }
@@ -291,7 +565,7 @@ fn open_session_fills_cu_table_then_recovers() {
         .iter()
         .enumerate()
         .map(|(_i, c)| {
-            c.open_session(CU, SessionType::PlainText)
+            c.open_session(CU, SessionSuite::EcdhP384)
                 .unwrap_or_else(|e| {
                     panic!("CU session {_i} of {CU_SESSION_LIMIT} must succeed, got {e:?}")
                 })
@@ -301,7 +575,7 @@ fn open_session_fills_cu_table_then_recovers() {
     // One more CU open must be rejected — table is full.
     let overflow_ctx = TestCtx::new_with_path(ctx.path());
     let err = overflow_ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("open_session past CU limit must be rejected");
     assert_fw_rejects(&err, TborStatus::VaultSessionLimitReached);
     drop(overflow_ctx);
@@ -313,7 +587,7 @@ fn open_session_fills_cu_table_then_recovers() {
     guards.pop().expect("guards must not be empty");
 
     let _recovered = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("session table must recover after freeing one slot");
     // `_recovered` closes on drop at end of scope.
 }
@@ -325,12 +599,12 @@ fn open_session_fills_co_slot_then_recovers() {
 
     let ctx_first = TestCtx::new_with_path(ctx.path());
     let first = ctx_first
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("first CO session must succeed");
 
     let ctx_second = TestCtx::new_with_path(ctx.path());
     let err = ctx_second
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect_err("second concurrent CO open must be rejected");
     assert_fw_rejects(&err, TborStatus::VaultSessionLimitReached);
 
@@ -339,7 +613,7 @@ fn open_session_fills_co_slot_then_recovers() {
     drop(ctx_first);
 
     let _recovered = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("CO slot must recover after the first fd is dropped");
     // `_recovered` closes on drop at end of scope.
 }
@@ -352,7 +626,7 @@ fn open_session_fills_full_table_then_recovers() {
     // CO slot: one guard + its own fd (hw needs one fd per session).
     let ctx_co = TestCtx::new_with_path(ctx.path());
     let co_guard = ctx_co
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("CO session must succeed");
 
     // CU slots: `CU_SESSION_LIMIT` guards, each on its own fd.
@@ -363,7 +637,7 @@ fn open_session_fills_full_table_then_recovers() {
         .iter()
         .enumerate()
         .map(|(_i, c)| {
-            c.open_session(CU, SessionType::PlainText)
+            c.open_session(CU, SessionSuite::EcdhP384)
                 .unwrap_or_else(|e| {
                     panic!("CU session {_i} of {CU_SESSION_LIMIT} must succeed, got {e:?}")
                 })
@@ -373,7 +647,7 @@ fn open_session_fills_full_table_then_recovers() {
     // Table is full — one more CO open must be rejected.
     let overflow_co_ctx = TestCtx::new_with_path(ctx.path());
     let err_co = overflow_co_ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect_err("second concurrent CO open must be rejected");
     assert_fw_rejects(&err_co, TborStatus::VaultSessionLimitReached);
     drop(overflow_co_ctx);
@@ -381,7 +655,7 @@ fn open_session_fills_full_table_then_recovers() {
     // One more CU open must be rejected too.
     let overflow_cu_ctx = TestCtx::new_with_path(ctx.path());
     let err_cu = overflow_cu_ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("open_session past CU limit must be rejected");
     assert_fw_rejects(&err_cu, TborStatus::VaultSessionLimitReached);
     drop(overflow_cu_ctx);
@@ -391,7 +665,7 @@ fn open_session_fills_full_table_then_recovers() {
     cu_guards.pop().expect("cu_guards must not be empty");
     let ctx_recover_cu = TestCtx::new_with_path(ctx.path());
     let _recovered_cu = ctx_recover_cu
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("CU slot must recover after freeing one CU guard");
 
     // Recovery-2: drop the CO guard + its fd. A fresh CO open on a
@@ -403,7 +677,7 @@ fn open_session_fills_full_table_then_recovers() {
     drop(ctx_co);
     let ctx_recover_co = TestCtx::new_with_path(ctx.path());
     let _recovered_co = ctx_recover_co
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("CO slot must recover after CO fd is dropped");
     // Remaining guards close on drop at end of scope.
 }
@@ -413,78 +687,62 @@ fn open_session_fills_full_table_then_recovers() {
 fn open_close_then_open_new_session() {
     let ctx = TestCtx::new();
     let first = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("first handshake must succeed");
     first.close().expect("first SessionClose must succeed");
 
     let second = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open new session after close must succeed");
     second.close().expect("second SessionClose must succeed");
 }
 
-/// Verifies independent CO handshakes derive distinct secret and MAC-key material.
+/// Verifies independent handshakes bind distinct transcripts and derive
+/// distinct host confirmations under every suite.
 #[test]
-fn co_authenticated_derives_unique_keys_per_session() {
+fn handshakes_derive_unique_transcripts() {
     let ctx = TestCtx::new();
+    for suite in SUITES {
+        let a = ctx
+            .session_open_init(CO, suite)
+            .expect("first Phase-1 must succeed");
+        let a_t1 = *a.keys.transcript_hash();
+        let a_fin = build_mac_fin(&a).expect("first fin");
+        ctx.session_open_finish(a)
+            .and_then(|h| ctx.session_close(h.session_id))
+            .expect("first session must open and close");
 
-    let a = ctx
-        .open_session(CO, SessionType::Authenticated)
-        .expect("first CO+Authenticated handshake must succeed");
-    let a_tx = a.handshake().derive_mac_tx_key().expect("derive a tx");
-    let a_rx = a.handshake().derive_mac_rx_key().expect("derive a rx");
-    let a_exported = a.handshake().exported.clone();
-    a.close().expect("close first session must succeed");
+        let b = ctx
+            .session_open_init(CO, suite)
+            .expect("second Phase-1 must succeed");
+        let b_t1 = *b.keys.transcript_hash();
+        let b_fin = build_mac_fin(&b).expect("second fin");
+        ctx.session_open_finish(b)
+            .and_then(|h| ctx.session_close(h.session_id))
+            .expect("second session must open and close");
 
-    let b = ctx
-        .open_session(CO, SessionType::Authenticated)
-        .expect("second CO+Authenticated handshake must succeed");
-    let b_tx = b.handshake().derive_mac_tx_key().expect("derive b tx");
-    let b_rx = b.handshake().derive_mac_rx_key().expect("derive b rx");
-    let b_exported = b.handshake().exported.clone();
-    // Close before asserting so a failing assertion never leaks.
-    b.close().expect("close second session must succeed");
-
-    assert!(
-        a_exported != b_exported,
-        "two handshakes must derive distinct HPKE exported material"
-    );
-    assert!(a_tx != b_tx, "per-session mac tx keys must differ");
-    assert!(a_rx != b_rx, "per-session mac rx keys must differ");
-    assert!(a_tx != a_rx, "session A TX and RX keys must differ");
-    assert!(b_tx != b_rx, "session B TX and RX keys must differ");
+        assert_ne!(
+            a_t1, b_t1,
+            "fresh ephemerals must yield distinct transcripts"
+        );
+        assert_ne!(a_fin, b_fin, "per-session host confirmations must differ");
+    }
 }
 
-/// Verifies the partition identity public key is stable across handshakes.
+/// Verifies the partition identity certificate the handshake signature is
+/// checked against is stable across handshakes.
 #[test]
 fn partition_pk_hsm_stable_across_handshakes() {
     let ctx = TestCtx::new();
-
-    let pending_a = ctx
-        .session_open_init(CU, SessionType::PlainText)
-        .expect("first Phase-1 must succeed");
-    let pk_hsm_a = pending_a.pk_hsm;
-    let handshake_a = ctx
-        .session_open_finish(pending_a)
-        .expect("first Phase-2 must succeed");
-    let a_id = handshake_a.session_id;
-    ctx.session_close(a_id)
-        .expect("close first session must succeed");
-
-    let pending_b = ctx
-        .session_open_init(CU, SessionType::PlainText)
-        .expect("second Phase-1 must succeed");
-    let pk_hsm_b = pending_b.pk_hsm;
-    let handshake_b = ctx
-        .session_open_finish(pending_b)
-        .expect("second Phase-2 must succeed");
-    let b_id = handshake_b.session_id;
-    ctx.session_close(b_id)
-        .expect("close second session must succeed");
-
+    let leaf_a = ctx.leaf_certificate().expect("first leaf certificate");
+    ctx.open_session(CU, SessionSuite::EcdhP384)
+        .expect("handshake must succeed")
+        .close()
+        .expect("close must succeed");
+    let leaf_b = ctx.leaf_certificate().expect("second leaf certificate");
     assert_eq!(
-        pk_hsm_a, pk_hsm_b,
-        "partition identity pub key must be stable across handshakes",
+        leaf_a, leaf_b,
+        "partition identity certificate must be stable across handshakes",
     );
 }
 
@@ -492,12 +750,7 @@ fn partition_pk_hsm_stable_across_handshakes() {
 #[test]
 fn pk_init_all_zero_rejected() {
     let ctx = TestCtx::new();
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init: [0u8; PK_INIT_LEN],
-    };
+    let req = raw_ecdh_init_req(vec![0u8; SESSION_P384_SEC1_LEN]);
     let err = ctx
         .tbor(&req)
         .expect_err("all-zero pk_init must be rejected");
@@ -508,14 +761,9 @@ fn pk_init_all_zero_rejected() {
 #[test]
 fn pk_init_not_on_curve_rejected() {
     let ctx = TestCtx::new();
-    let mut pk_init = [0xFFu8; PK_INIT_LEN];
+    let mut pk_init = vec![0xFFu8; SESSION_P384_SEC1_LEN];
     pk_init[0] = 0x04; // SEC1 uncompressed prefix
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init,
-    };
+    let req = raw_ecdh_init_req(pk_init);
     let err = ctx
         .tbor(&req)
         .expect_err("off-curve pk_init must be rejected");
@@ -549,8 +797,8 @@ const P384_INVALID_X_FOR_Y_AS_PRIME_BE: [u8; 48] = [
 ];
 
 /// Pack (X, Y) as SEC1 uncompressed: `0x04 || X_be || Y_be`.
-fn pack_sec1_uncompressed(x_be: &[u8; MAC_FIN_LEN], y_be: &[u8; MAC_FIN_LEN]) -> [u8; PK_INIT_LEN] {
-    let mut out = [0u8; PK_INIT_LEN];
+fn pack_sec1_uncompressed(x_be: &[u8; 48], y_be: &[u8; 48]) -> Vec<u8> {
+    let mut out = vec![0u8; SESSION_P384_SEC1_LEN];
     out[0] = 0x04;
     out[1..49].copy_from_slice(x_be);
     out[49..97].copy_from_slice(y_be);
@@ -562,12 +810,7 @@ fn pack_sec1_uncompressed(x_be: &[u8; MAC_FIN_LEN], y_be: &[u8; MAC_FIN_LEN]) ->
 fn pk_init_x_as_prime_rejected() {
     let ctx = TestCtx::new();
     let pk_init = pack_sec1_uncompressed(&P384_PRIME_BE, &P384_INVALID_Y_FOR_X_AS_PRIME_BE);
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init,
-    };
+    let req = raw_ecdh_init_req(pk_init);
     let err = ctx
         .tbor(&req)
         .expect_err("pk_init with X = P-384 prime must be rejected");
@@ -579,12 +822,7 @@ fn pk_init_x_as_prime_rejected() {
 fn pk_init_y_as_prime_rejected() {
     let ctx = TestCtx::new();
     let pk_init = pack_sec1_uncompressed(&P384_INVALID_X_FOR_Y_AS_PRIME_BE, &P384_PRIME_BE);
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init,
-    };
+    let req = raw_ecdh_init_req(pk_init);
     let err = ctx
         .tbor(&req)
         .expect_err("pk_init with Y = P-384 prime must be rejected");
@@ -595,17 +833,13 @@ fn pk_init_y_as_prime_rejected() {
 #[test]
 fn pk_init_single_byte_tampered_rejected() {
     let ctx = TestCtx::new();
-    let ephemeral = tsra_session_ex_crypto::generate_vm_ephemeral()
-        .expect("generate_vm_ephemeral must succeed on the test host");
-    let mut pk_init = ephemeral.pk_sec1;
+    let mut pk_init = SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
+        .expect("generate ECDH ephemeral")
+        .pk_init()
+        .to_vec();
     pk_init[8] ^= 0x01; // Inside X (X is bytes 1..49); avoids prefix + X/Y boundary.
 
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init,
-    };
+    let req = raw_ecdh_init_req(pk_init);
     let err = ctx
         .tbor(&req)
         .expect_err("single-bit-tampered pk_init must be rejected");
@@ -628,7 +862,7 @@ fn open_session_multi_threaded_all_should_open() {
     let results: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = ctxs
             .iter()
-            .map(|c| s.spawn(move || c.open_session(CU, SessionType::PlainText)))
+            .map(|c| s.spawn(move || c.open_session(CU, SessionSuite::EcdhP384)))
             .collect();
         handles
             .into_iter()
@@ -663,18 +897,17 @@ fn open_session_multi_threaded_all_should_open() {
     );
 }
 
-/// Verifies a rejected role/type pairing leaves the handle reusable.
+/// Verifies a rejected session type leaves the handle reusable.
 #[test]
-fn rejected_role_type_does_not_poison_fd() {
+fn rejected_session_type_does_not_poison_fd() {
     let ctx = TestCtx::new();
 
-    let err = ctx
-        .session_open_init(CU, SessionType::Authenticated)
-        .expect_err("CU + Authenticated must be rejected");
-    assert_fw_rejects(&err, TborStatus::InvalidSessionType);
+    let mut req = raw_ecdh_init_req(vec![0x04u8; SESSION_P384_SEC1_LEN]);
+    req.session_type = 1;
+    ctx.expect_fw_reject(&req, TborStatus::InvalidSessionType);
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("valid session must succeed after rejected Phase-1");
 
     session
@@ -687,17 +920,16 @@ fn rejected_role_type_does_not_poison_fd() {
 fn rejected_suite_does_not_consume_session_slot() {
     let ctx = TestCtx::new();
 
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: 0xff,
-        pk_init: [0x04u8; PK_INIT_LEN],
-    };
+    let req = raw_init_req(
+        SessionType::Encrypted.to_u8(),
+        0xff,
+        vec![0x04u8; SESSION_P384_SEC1_LEN],
+    );
 
     ctx.expect_fw_reject(&req, TborStatus::UnsupportedSessionSuite);
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("valid session must succeed after unsupported suite");
 
     session
@@ -712,14 +944,14 @@ fn rejected_suite_does_not_consume_session_slot() {
         .iter()
         .map(|other_ctx| {
             other_ctx
-                .open_session(CU, SessionType::PlainText)
+                .open_session(CU, SessionSuite::EcdhP384)
                 .expect("CU session must succeed after unsupported suite rejection")
         })
         .collect();
     // All CU slots are occupied; one additional open must be rejected.
     let overflow_ctx = TestCtx::new_with_path(ctx.path());
     let err = overflow_ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("eighth CU session must be rejected");
 
     assert_fw_rejects(&err, TborStatus::VaultSessionLimitReached);
@@ -730,17 +962,12 @@ fn rejected_suite_does_not_consume_session_slot() {
 fn rejected_pk_init_does_not_consume_session_slot() {
     let ctx = TestCtx::new();
 
-    let req = TborSessionOpenInitReq {
-        psk_id: CU,
-        session_type: SessionType::PlainText.to_u8(),
-        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-        pk_init: [0u8; PK_INIT_LEN],
-    };
+    let req = raw_ecdh_init_req(vec![0u8; SESSION_P384_SEC1_LEN]);
 
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("valid session must succeed after invalid pk_init");
 
     session
@@ -756,14 +983,14 @@ fn rejected_pk_init_does_not_consume_session_slot() {
         .iter()
         .map(|other_ctx| {
             other_ctx
-                .open_session(CU, SessionType::PlainText)
+                .open_session(CU, SessionSuite::EcdhP384)
                 .expect("CU session must succeed after invalid pk_init rejection")
         })
         .collect();
     // All CU slots are occupied; one additional open must be rejected.
     let overflow_ctx = TestCtx::new_with_path(ctx.path());
     let err = overflow_ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("eighth CU session must be rejected");
 
     assert_fw_rejects(&err, TborStatus::VaultSessionLimitReached);
@@ -780,11 +1007,11 @@ fn pending_session_blocks_second_open_on_same_fd() {
     let ctx = TestCtx::new();
 
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("first Phase-1 must succeed");
 
     let err = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect_err("second Phase-1 on the same fd must be rejected");
 
     assert_fw_rejects(&err, TborStatus::FileHandleSessionLimitReached);
@@ -803,7 +1030,7 @@ fn failed_finish_mac_reclaims_session_state() {
     let ctx = TestCtx::new();
 
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("Phase-1 must succeed");
 
     let session_id = pending.session_id;
@@ -819,6 +1046,7 @@ fn failed_finish_mac_reclaims_session_state() {
 
     // Confirm the failed authentication destroyed the FW pending slot.
     let replay = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -843,7 +1071,7 @@ fn failed_finish_mac_reclaims_session_state() {
         .iter()
         .map(|recovery_ctx| {
             recovery_ctx
-                .open_session(CU, SessionType::PlainText)
+                .open_session(CU, SessionSuite::EcdhP384)
                 .expect("CU recovery session must succeed after failed Phase-2")
         })
         .collect();
@@ -855,13 +1083,13 @@ fn session_open_finish_rejects_mac_from_another_session() {
     let ctx_a = TestCtx::new();
 
     let pending_a = ctx_a
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("phase 1 for session A must succeed");
 
     let ctx_b = TestCtx::new_with_path(ctx_a.path());
 
     let pending_b = ctx_b
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("phase 1 for session B must succeed");
 
     assert_ne!(
@@ -895,12 +1123,13 @@ fn unknown_finish_does_not_destroy_pending_session() {
     let ctx = TestCtx::new();
 
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("phase 1 must succeed");
 
     let mac_fin = build_mac_fin(&pending).expect("build valid phase-2 MAC");
 
     let unknown = TborSessionOpenFinishReq {
+        bmk_session: Vec::new(),
         session_id: 0xFFFF,
         mac_fin: [0u8; MAC_FIN_LEN],
         seed_envelope: [0u8; SEED_ENVELOPE_LEN],
@@ -920,28 +1149,6 @@ fn unknown_finish_does_not_destroy_pending_session() {
         .expect("session must close successfully");
 }
 
-/// Verifies repeated TX/RX MAC-key derivation is stable and direction-specific.
-#[test]
-fn authenticated_session_mac_key_derivation_is_stable() {
-    let ctx = TestCtx::new();
-
-    let session = ctx
-        .open_session(CO, SessionType::Authenticated)
-        .expect("CO authenticated session must succeed");
-
-    let h = session.handshake();
-
-    let tx_first = h.derive_mac_tx_key().expect("derive first TX key");
-    let tx_second = h.derive_mac_tx_key().expect("derive second TX key");
-
-    let rx_first = h.derive_mac_rx_key().expect("derive first RX key");
-    let rx_second = h.derive_mac_rx_key().expect("derive second RX key");
-
-    assert!(tx_first == tx_second, "TX derivation must be stable");
-    assert!(rx_first == rx_second, "RX derivation must be stable");
-    assert!(tx_first != rx_first, "TX and RX keys must remain distinct");
-}
-
 /// Verifies failed Phase-2 authentication leaves the original handle session-bound.
 #[test]
 fn failed_finish_mac_keeps_original_fd_session_bound() {
@@ -953,7 +1160,7 @@ fn failed_finish_mac_keeps_original_fd_session_bound() {
     let ctx = TestCtx::new();
 
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("Phase-1 must succeed");
 
     let mut mac_fin = build_mac_fin(&pending).expect("build Phase-2 mac");
@@ -966,7 +1173,7 @@ fn failed_finish_mac_keeps_original_fd_session_bound() {
     assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
 
     let err = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect_err("original fd must remain session-bound");
 
     assert_fw_rejects(&err, TborStatus::FileHandleSessionLimitReached);
@@ -982,10 +1189,10 @@ fn socket_connection_supports_multiple_sessions() {
     }
     let ctx = TestCtx::new();
     let first = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("first Pending session");
     let second = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("second Pending session on the same connection");
     assert_ne!(first.session_id, second.session_id);
     let first = ctx
@@ -1010,7 +1217,7 @@ fn socket_connection_can_open_after_failed_finish() {
     }
     let ctx = TestCtx::new();
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("Pending session");
     let mut mac = build_mac_fin(&pending).expect("phase 2 MAC");
     mac[0] ^= 1;
@@ -1019,7 +1226,7 @@ fn socket_connection_can_open_after_failed_finish() {
         .expect_err("tampered MAC must fail");
     assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("fresh session on the original connection");
     session.close().expect("close fresh session");
 }

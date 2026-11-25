@@ -73,10 +73,6 @@ pub struct SessionTable {
     /// state (in-flight session-establishment handshake; no vault
     /// entry yet).
     pending_mask: u8,
-    /// Per-slot "PSK rotation already used" bitmask — bit N is set
-    /// after a successful `ChangePsk` on session N.  Cleared
-    /// by `delete` and `promote`.
-    psk_change_mask: u8,
     /// Logical → physical mapping: `phys_ids[slot]` is the vault key ID
     /// for session slot `slot` once Active.  Only valid when
     /// `alloc_mask` is set AND `pending_mask` is clear.
@@ -90,6 +86,12 @@ pub struct SessionTable {
     /// Monotonic counter incremented for every Pending allocation;
     /// stamped into `pending_seqs` to order evictions.
     next_init_seq: u64,
+    /// Per-slot next HSM→VM transport sequence number.  Restarts when a
+    /// Pending slot installs fresh transport keys; carries over on
+    /// promote, which keeps them.
+    m2h_seqs: [u64; MAX_SESSIONS],
+    recovery_bindings: [[u8; 16]; MAX_SESSIONS],
+    psk_changed: u8,
 }
 
 /// Opaque per-slot handshake state for Pending sessions.
@@ -142,11 +144,13 @@ impl SessionTable {
             alloc_mask: 0,
             renego_mask: 0,
             pending_mask: 0,
-            psk_change_mask: 0,
             phys_ids: [0; MAX_SESSIONS],
             pending_blobs: core::array::from_fn(|_| PendingBlob::default()),
             pending_seqs: [0u64; MAX_SESSIONS],
             next_init_seq: 0,
+            m2h_seqs: [0u64; MAX_SESSIONS],
+            recovery_bindings: [[0; 16]; MAX_SESSIONS],
+            psk_changed: 0,
         }
     }
 
@@ -159,7 +163,7 @@ impl SessionTable {
     /// because they carry no reopenable credential state.  Mirrors the
     /// reference firmware's `backup`/`restore` pair.
     pub fn backup(&self) -> u8 {
-        self.alloc_mask & !self.pending_mask
+        self.alloc_mask & (!self.pending_mask | self.renego_mask)
     }
 
     /// Re-establish session slots preserved across a partition disable,
@@ -176,13 +180,21 @@ impl SessionTable {
         self.alloc_mask = mask;
         self.renego_mask = mask;
         self.pending_mask = 0;
-        self.psk_change_mask = 0;
         self.phys_ids = [0; MAX_SESSIONS];
         for blob in &mut self.pending_blobs {
             blob.clear();
         }
         self.pending_seqs = [0u64; MAX_SESSIONS];
         self.next_init_seq = 0;
+        self.m2h_seqs = [0u64; MAX_SESSIONS];
+        // Each caller (disable, NSSR) also resets the PSKs, so no survivor
+        // has used its change of the PSK it reauthenticates with.
+        self.psk_changed = 0;
+        for (slot, binding) in self.recovery_bindings.iter_mut().enumerate() {
+            if mask & (1 << slot) == 0 {
+                binding.fill(0);
+            }
+        }
     }
 
     /// Validate that a logical session ID refers to an allocated slot.
@@ -236,10 +248,12 @@ impl SessionTable {
         self.alloc_mask &= mask;
         self.renego_mask &= mask;
         self.pending_mask &= mask;
-        self.psk_change_mask &= mask;
         self.phys_ids[slot] = 0;
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
+        self.m2h_seqs[slot] = 0;
+        self.recovery_bindings[slot].fill(0);
+        self.psk_changed &= mask;
         Ok(phys)
     }
 
@@ -281,8 +295,6 @@ impl SessionTable {
         self.validate_recreation(id)?;
         let slot = u16::from(id) as usize;
         self.renego_mask &= !(1u8 << slot);
-        // Fresh key material → fresh one-shot PSK-change budget.
-        self.psk_change_mask &= !(1u8 << slot);
         self.phys_ids[slot] = u16::from(new_physical);
         Ok(id)
     }
@@ -302,6 +314,48 @@ impl SessionTable {
         let slot = self.active_slot(id)?;
         self.renego_mask |= 1 << slot;
         self.phys_ids[slot] = 0;
+        self.pending_mask &= !(1 << slot);
+        self.pending_blobs[slot].clear();
+        Ok(())
+    }
+
+    /// Reserve an existing migrated slot without resetting its recovery identity.
+    pub fn reopen_pending(&mut self, id: HsmSessId, blob: &[u8]) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if self.renego_mask & (1 << slot) == 0 {
+            return Err(HsmError::ProcessedIoEventInInvalidState);
+        }
+        self.install_pending(u16::from(id) as usize, blob)
+    }
+
+    /// Read the original masking-key fingerprint retained across migration.
+    pub fn recovery_binding(&self, id: HsmSessId) -> HsmResult<&[u8]> {
+        Ok(&self.recovery_bindings[self.active_slot(id)?])
+    }
+
+    /// Install a fresh session's recovery fingerprint.
+    pub fn set_recovery_binding(&mut self, id: HsmSessId, binding: &[u8]) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if binding.len() != 16 {
+            return Err(HsmError::InvalidArg);
+        }
+        self.recovery_bindings[slot].copy_from_slice(binding);
+        Ok(())
+    }
+
+    /// Read the one-successful-rotation flag.
+    pub fn psk_changed(&self, id: HsmSessId) -> HsmResult<bool> {
+        Ok(self.psk_changed & (1 << self.active_slot(id)?) != 0)
+    }
+
+    /// Update the one-successful-rotation flag.
+    pub fn set_psk_changed(&mut self, id: HsmSessId, changed: bool) -> HsmResult<()> {
+        let bit = 1 << self.active_slot(id)?;
+        if changed {
+            self.psk_changed |= bit;
+        } else {
+            self.psk_changed &= !bit;
+        }
         Ok(())
     }
 
@@ -365,7 +419,9 @@ impl SessionTable {
         let mut victim: Option<usize> = None;
         let mut victim_seq = u64::MAX;
         for slot in range_start..=range_end {
-            if (self.pending_mask & (1 << slot)) != 0 && self.pending_seqs[slot] < victim_seq {
+            if (self.pending_mask & !self.renego_mask & (1 << slot)) != 0
+                && self.pending_seqs[slot] < victim_seq
+            {
                 victim_seq = self.pending_seqs[slot];
                 victim = Some(slot);
             }
@@ -392,7 +448,29 @@ impl SessionTable {
         self.next_init_seq = self.next_init_seq.wrapping_add(1);
         self.pending_seqs[slot] = self.next_init_seq;
         self.phys_ids[slot] = 0;
+        self.m2h_seqs[slot] = 0;
         Ok(())
+    }
+
+    /// Reserves the next HSM→VM transport sequence number of a Pending or
+    /// Active slot.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotFound`] — the slot is free or awaiting
+    ///   renegotiation.
+    /// - [`HsmError::SessionTransportError`] — the counter is exhausted.
+    pub fn next_m2h_seq(&mut self, id: HsmSessId) -> HsmResult<u64> {
+        if !matches!(
+            self.state(id),
+            HsmSessionState::Pending | HsmSessionState::Active
+        ) {
+            return Err(HsmError::SessionNotFound);
+        }
+        let slot = u16::from(id) as usize;
+        let seq = self.m2h_seqs[slot];
+        self.m2h_seqs[slot] = seq.checked_add(1).ok_or(HsmError::SessionTransportError)?;
+        Ok(seq)
     }
 
     /// Borrow the Pending blob for a slot.
@@ -415,40 +493,11 @@ impl SessionTable {
             return Err(HsmError::SessionNotPending);
         }
         self.pending_mask &= !(1u8 << slot);
-        self.psk_change_mask &= !(1u8 << slot);
+        self.renego_mask &= !(1u8 << slot);
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
         self.phys_ids[slot] = u16::from(physical_id);
         Ok(())
-    }
-
-    /// Atomically reserves the slot's one-shot "PSK change" budget.
-    /// Returns `Ok(())` on the first call for a given slot lifetime
-    /// and `Err(InvalidPermissions)` thereafter.  Pending or
-    /// unallocated slots report `SessionNotFound` (matches the
-    /// convention used by [`physical_id`](Self::physical_id)).
-    pub fn try_consume_psk_change(&mut self, id: HsmSessId) -> HsmResult<()> {
-        let slot = self.active_slot(id)?;
-        if (self.pending_mask & (1 << slot)) != 0 {
-            return Err(HsmError::SessionNotFound);
-        }
-        let bit = 1u8 << slot;
-        if (self.psk_change_mask & bit) != 0 {
-            return Err(HsmError::InvalidPermissions);
-        }
-        self.psk_change_mask |= bit;
-        Ok(())
-    }
-
-    /// Test-only inspector for the per-slot "PSK change consumed"
-    /// bit.  Pending or unallocated slots report `SessionNotFound`.
-    #[cfg(test)]
-    pub fn psk_change_used(&self, id: HsmSessId) -> HsmResult<bool> {
-        let slot = self.active_slot(id)?;
-        if (self.pending_mask & (1 << slot)) != 0 {
-            return Err(HsmError::SessionNotFound);
-        }
-        Ok((self.psk_change_mask & (1 << slot)) != 0)
     }
 }
 
@@ -463,6 +512,50 @@ fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_identity_survives_retry_migration_and_eviction_pressure() {
+        let mut table = SessionTable::new();
+        let id = table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .expect("pending");
+        table.promote(id, HsmKeyId::from(1u16)).expect("promote");
+        table
+            .set_recovery_binding(id, &[0xA5; 16])
+            .expect("fingerprint");
+        table.set_psk_changed(id, true).expect("rotation");
+        table.restore(table.backup());
+        table.reopen_pending(id, b"recovery").expect("recovery");
+        assert!(table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .is_err());
+        table.reopen_pending(id, b"replacement").expect("replace");
+        table.restore(table.backup());
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+        assert_eq!(
+            table.recovery_binding(id).expect("fingerprint"),
+            &[0xA5; 16]
+        );
+        // The reset returned the PSKs to their defaults, so the change is
+        // available again.
+        assert!(!table.psk_changed(id).expect("allowance restored"));
+        table.set_psk_changed(id, true).expect("rotation");
+        table.reopen_pending(id, b"retry").expect("retry");
+        table.rollback_recreation(id).expect("rollback");
+        assert!(table.psk_changed(id).expect("rollback retained rotation"));
+        table.delete(id).expect("close");
+        let fresh = table
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
+            .expect("fresh");
+        assert!(!table.psk_changed(fresh).expect("new allowance"));
+        assert_eq!(
+            table.recovery_binding(fresh).expect("new fingerprint"),
+            &[0; 16]
+        );
+    }
 
     #[test]
     fn create_session() {
@@ -904,98 +997,34 @@ mod tests {
     }
 
     #[test]
-    fn psk_change_flag_defaults_to_unused() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        assert!(!table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn try_consume_psk_change_succeeds_once() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        assert!(table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn try_consume_psk_change_rejects_second_call() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        let err = table.try_consume_psk_change(id).unwrap_err();
-        assert_eq!(err, HsmError::InvalidPermissions);
-        // Flag must remain set after the rejection.
-        assert!(table.psk_change_used(id).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_cleared_by_delete() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
-        table.delete(id).unwrap();
-        // Re-allocating the same slot must observe a fresh (false) flag.
-        let id2 = table.create(HsmKeyId::from(0x200)).unwrap();
-        assert_eq!(u16::from(id2), u16::from(id));
-        assert!(!table.psk_change_used(id2).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_cleared_by_promote() {
+    fn m2h_seq_carries_over_promote_and_restarts_with_new_keys() {
         let mut table = SessionTable::new();
         let id = table
             .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
-        // Force the flag on (it shouldn't normally be touched on a
-        // Pending slot, but the invariant must hold across promote).
-        table.psk_change_mask |= 1 << u16::from(id) as usize;
-        table.promote(id, HsmKeyId::from(0xABCD)).unwrap();
-        assert!(!table.psk_change_used(id).unwrap());
-    }
+        assert_eq!(table.next_m2h_seq(id), Ok(0));
+        assert_eq!(table.next_m2h_seq(id), Ok(1));
+        table.promote(id, HsmKeyId::from(0x10)).unwrap();
+        assert_eq!(table.next_m2h_seq(id), Ok(2));
 
-    #[test]
-    fn psk_change_flag_cleared_by_recreate() {
-        let mut table = SessionTable::new();
-        let id = table.create(HsmKeyId::from(0x100)).unwrap();
-        table.try_consume_psk_change(id).unwrap();
         table.set_needs_renego(id);
-        table.recreate(id, HsmKeyId::from(0x200)).unwrap();
-        // Renegotiation rebinds the slot to fresh key material, so
-        // the one-shot budget MUST reset.
-        assert!(!table.psk_change_used(id).unwrap());
-        table.try_consume_psk_change(id).unwrap();
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionNotFound));
+
+        table.delete(id).unwrap();
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionNotFound));
+        let id = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        assert_eq!(table.next_m2h_seq(id), Ok(0));
     }
 
     #[test]
-    fn psk_change_flag_independent_across_slots() {
-        let mut table = SessionTable::new();
-        let id0 = table.create(HsmKeyId::from(0x100)).unwrap();
-        let id1 = table.create(HsmKeyId::from(0x101)).unwrap();
-        table.try_consume_psk_change(id0).unwrap();
-        assert!(table.psk_change_used(id0).unwrap());
-        assert!(!table.psk_change_used(id1).unwrap());
-    }
-
-    #[test]
-    fn psk_change_flag_on_unallocated_slot_errors() {
-        let table = SessionTable::new();
-        let err = table.psk_change_used(HsmSessId::from(3)).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
-    }
-
-    #[test]
-    fn psk_change_ops_on_pending_slot_error() {
+    fn m2h_seq_fails_when_exhausted() {
         let mut table = SessionTable::new();
         let id = table
             .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
-        // Both the read and the consume path report SessionNotFound
-        // on a Pending slot (matches `physical_id`'s convention —
-        // the slot has no Active vault entry to operate on).
-        let err = table.try_consume_psk_change(id).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
-        let err = table.psk_change_used(id).unwrap_err();
-        assert_eq!(err, HsmError::SessionNotFound);
+        table.m2h_seqs[u16::from(id) as usize] = u64::MAX;
+        assert_eq!(table.next_m2h_seq(id), Err(HsmError::SessionTransportError));
     }
 }

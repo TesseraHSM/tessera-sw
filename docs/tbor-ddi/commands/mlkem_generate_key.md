@@ -3,9 +3,9 @@ Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 -->
 
-# MlKemGenerateKey (Opcode 0x29) — schema-only
+# MlKemGenerateKey (Opcode 0x29)
 
-**Handler:** _Not implemented yet (wire schema only)_
+**Handler:** `fw/core/lib/src/ddi/tbor/mlkem_generate_key.rs`
 **Session:** InSession
 
 ## Description
@@ -23,14 +23,14 @@ instead of a vault `private_key_id`.
 `key_kind` is byte-identical to the PQC subset of `HsmVaultKeyKind` and
 selects the ML-KEM parameter set.
 
-The TBOR wire is **seed-only**: the only accepted kinds are the three
-seed kinds `55`/`56`/`57` (ML-KEM-512/-768/-1024), each carrying the
-compact 64-byte `(d ‖ z)` seed material that is re-expanded on every use.
-The expanded kinds `MlKem512Private = 56` … `MlKem1024Private = 58` still
-exist in `HsmVaultKeyKind` and remain supported by the vault; they are
-simply not offered on the wire yet.  Adding them later is additive to the
-wire enum, but also requires raising the `masked_key` cap from 196 B to
-3300 B (an expanded ML-KEM-1024 decapsulation key is 3168 B).
+The accepted key kinds are the three seed kinds `55`/`56`/`57`
+(ML-KEM-512/-768/-1024). The masked payload contains the 64-byte `(d, z)`
+seed pair followed by the expanded decapsulation key, authenticated
+together. Decapsulation uses the expanded key directly; the seeds permit
+public-key regeneration.
+
+An active session is required. The requested scope determines the masking
+key; there is no out-of-session development-key path.
 
 ## Request
 
@@ -38,9 +38,9 @@ wire enum, but also requires raising the `masked_key` cap from 196 B to
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the decapsulation key. |
-| 16 | `key_kind` | `u8` (inline) | PQC key kind, seed-only: `55` = ML-KEM-512 seed, `56` = ML-KEM-768 seed, `57` = ML-KEM-1024 seed. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the decapsulation key. |
+| 20 | `key_kind` | `u8` (inline) | PQC key kind, seed-only: `55` = ML-KEM-512 seed, `56` = ML-KEM-768 seed, `57` = ML-KEM-1024 seed. |
 
 ### Data section
 
@@ -52,27 +52,30 @@ _Empty._
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `masked_key` | `buffer` (196 B) | The ML-KEM `(d ‖ z)` seed material, masked (AEAD-GCM-256) under the scope's masking key. |
-| 16 | `pub_key` | `buffer` (up to 1568 B) | The ML-KEM public / encapsulation key bytes. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_key` | `buffer` (up to 3464 B) | The seed pair and expanded decapsulation key, masked (AEAD-GCM-256) under the scope's masking key. |
+| 20 | `pub_key` | `buffer` (up to 1568 B) | The ML-KEM public / encapsulation key bytes. |
 
 ### Data section
 
-Carries the masked decapsulation key followed by the public key.  The
-wire is seed-only, so the masked blob is always `64 + 132 = 196` bytes:
-the 64-byte `(d ‖ z)` seed material plus masked-envelope overhead
-(header 8 + IV 12 + AAD 96 + tag 16).  If expanded key kinds are added
-later the blob grows to `3168 + 132 = 3300` bytes for ML-KEM-1024.
+Carries the masked decapsulation key followed by the public key. Masked
+lengths are 1928 / 2696 / 3464 bytes for ML-KEM-512 / -768 / -1024:
+`64 + expanded_decapsulation_key_len + 232`, where the envelope overhead
+is header 8 + IV 16 + AAD 192 + tag 16.
 
-Worst-case frame: request `4 + 3*4 = 16` B (no data section); response
-`8 + 2*4 + (196 + 1568) = 1780` B — both well inside the 8192-byte
-transport buffer.
+The largest response carries `3464 + 1568 = 5032` data bytes and fits
+inside the 8192-byte transport buffer with its header, TOC, and padding.
 
 ## Errors
 
-Handler errors are not defined yet because this command is schema-only.
-Expected future errors include unsupported `key_kind`, unsupported key
-scope, session lookup failures, and malformed request bodies.
+| Error | Cause |
+|---|---|
+| `SessionNotFound` | `session_id` does not refer to an active session |
+| `InvalidArg` | `key_kind` is not one of the three supported seed kinds |
+| `UnsupportedKeyScope` | The requested scope has no available masking key |
+
+Malformed request bodies and backend key-generation or masking failures
+are reported through their corresponding error statuses.
 
 ## See also
 

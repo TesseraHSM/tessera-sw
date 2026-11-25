@@ -45,6 +45,21 @@ TCP endpoints and does not switch transports automatically.
 
 Wait for its listening message and leave it running. In a second terminal:
 
+Set `TSRA_ROOT_SPKI_SHA384` to the independently enrolled root certificate's
+96 hexadecimal SPKI SHA-384 digits (`export TSRA_ROOT_SPKI_SHA384=...` on Linux,
+or `$env:TSRA_ROOT_SPKI_SHA384 = "..."` in PowerShell). It is required; the client
+does not discover trust from the connection. For an authenticated root file:
+
+```sh
+openssl x509 -in trusted-root.pem -pubkey -noout |
+  openssl pkey -pubin -outform DER |
+  openssl dgst -sha384
+```
+
+Use only the 96 hex digits, without the OpenSSL label. A simulator generates
+a new root when its server process restarts, so re-enroll it through a trusted
+test setup after restarting; do not disable verification.
+
 ```sh
 cargo run -p tsra_api_sock_ecc384_loop -- tcp://127.0.0.1:1234 5
 ```

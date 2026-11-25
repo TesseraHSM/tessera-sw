@@ -88,7 +88,9 @@ pub(crate) async fn handle<P: HsmPal>(
 /// Encode the `Hmac` response around the computed tag.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, tag: &[u8]) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborHmacResp::encode(buf, 0, false)?.tag(tag)?.finish();
+        let frame = TborHmacResp::encode_for_request(buf, 0, false)?
+            .tag(tag)?
+            .finish();
         Ok(frame.as_bytes().len())
     })?;
     Ok(resp)

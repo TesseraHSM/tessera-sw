@@ -9,8 +9,8 @@
 //! ([`crate::utils::sd_provision::finalized_backing_session`]), mint an SD sealing
 //! key, attest it via the masked-blob `KeyReport`, build the receiver's
 //! three-chain attestation evidence, then call
-//! [`HsmSession::sd_create_remote_backup`] and validate the three returned
-//! backups. This is a **self-backup** (sender == receiver): the partition
+//! [`HsmSession::sd_create_remote_backup`] and validate the returned
+//! backups and operation report. This is a **self-backup**: the partition
 //! seals to its own attested identity key.
 
 use tsra_api::*;
@@ -24,6 +24,37 @@ use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::finalized_backing_session;
 use crate::utils::sd_provision::masked_key_and_report;
 
+#[test]
+fn sd_create_remote_backup_uses_negotiated_session_revision() {
+    let _guard = PARTITION_LOCK.lock();
+    let info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("partition");
+    let range = info.api_rev_range.expect("API revision range");
+    if range.min() == range.max() {
+        return;
+    }
+    let sata_key = CaKey::generate();
+    let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
+    drop(session);
+
+    let part =
+        HsmPartitionManager::open_partition(&info.path, range.min()).expect("open partition");
+    // The provisioning above rotated the CO PSK, with no reset since.
+    let session =
+        crate::utils::partition_ex_helpers::open_co_session_with_rotated_psk(&part, range.max());
+    assert_ne!(part.api_rev(), session.api_rev());
+    let result = evidence
+        .with_create_backup(|rcvr_chain, receiver| {
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
+        })
+        .expect("create remote backup using the session revision");
+    assert_eq!(result.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+}
+
 /// Happy path: creating a security domain on a partition that names
 /// itself as the backing partition returns three non-zero backups of the
 /// pinned wire lengths.
@@ -36,15 +67,15 @@ fn sd_create_remote_backup_roundtrip() {
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
 
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
     let result = evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
         })
         .expect("create remote backup");
 
-    // Remote backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
+    // Remote backup: PID-reported HPKE Base envelope of BKS3, 322 B.
     assert_eq!(result.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
         result.pok_remote_backup.iter().any(|&b| b != 0),
@@ -80,18 +111,18 @@ fn sd_create_remote_backup_is_one_shot() {
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
 
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
 
     evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
         })
         .expect("first create remote backup");
 
     // A second create on the same (now initialized) partition must fail.
     let second = evidence.with_create_backup(|rcvr_chain, receiver| {
-        session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+        session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
     });
     assert!(
         matches!(second, Err(HsmError::SdAlreadyInitialized)),
@@ -115,7 +146,7 @@ fn sd_create_remote_backup_roundtrip_empty_evidence() {
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
 
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     // Reuse the evidence builder only to mint the mandatory receiver chain;
     // the three attestation chains and report are passed empty below.
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
@@ -128,7 +159,7 @@ fn sd_create_remote_backup_roundtrip_empty_evidence() {
     };
 
     let result = session
-        .sd_create_remote_backup(&policy, &masked, &receiver, &empty)
+        .sd_create_remote_backup(&policy, &receiver, &empty)
         .expect("create remote backup with empty evidence");
 
     assert_eq!(result.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);

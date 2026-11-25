@@ -385,11 +385,19 @@ async fn verify_pota_signature<P: HsmPal>(
     id_uncompressed[0] = 0x04;
     crate::part_state::part_id_pub_key(pal, io, id_uncompressed.split_at_mut(1).1).await?;
 
-    // `ecc_verify` consumes the digest in operand order.
-    let digest = pal.dma_alloc(io, HsmHashAlgo::Sha384.digest_len())?;
+    // `ecc_verify` consumes `r ‖ s ‖ digest` with the digest in operand
+    // order.
+    let curve = HsmEccCurve::P384;
+    let hash = HsmHashAlgo::Sha384;
+    let input = pal.dma_alloc(io, curve.ecdsa_verify_input_len(hash, P::ECC_COORD_PAD))?;
+    let (signature, digest) = input.split_at_mut(curve.wire_sig_len(P::ECC_COORD_PAD));
+    if signature_raw.len() != signature.len() {
+        return Err(HsmError::InvalidArg);
+    }
+    signature.copy_from_slice(signature_raw);
     pal.hash(
         io,
-        HsmHashAlgo::Sha384,
+        hash,
         id_uncompressed,
         HsmDigestForm::Operand,
         Some(digest),
@@ -397,13 +405,7 @@ async fn verify_pota_signature<P: HsmPal>(
     .await?;
 
     if !pal
-        .ecc_verify(
-            io,
-            HsmEccCurve::P384,
-            signer_pub_key_raw,
-            digest,
-            signature_raw,
-        )
+        .ecc_verify(io, curve, hash, signer_pub_key_raw, input)
         .await?
     {
         return Err(HsmError::EccVerifyFailed);

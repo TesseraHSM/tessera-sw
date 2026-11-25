@@ -6,210 +6,129 @@ Licensed under the MIT License.
 # SessionOpenFinish (Opcode 0x04)
 
 **Handler:** `fw/core/lib/src/ddi/tbor/session_open_finish.rs`
-**Session:** NoSession
+**Session:** InSession (Pending)
 
 ## Description
 
-Phase 2 of the session-establishment handshake.  The host VM submits
-its Phase-2 confirmation MAC for the slot reserved by
-[`SessionOpenInit`](./session_open_init.md) together with a
-fresh 32-byte `seed` sealed as an AEAD-GCM envelope under the
-HPKE-derived `param_key`.  The HSM verifies the MAC, AEAD-opens the
-seed envelope, derives the per-session key schedule selected by the
-`session_type` chosen in Phase 1, and promotes the slot from
-`Pending` to `Active`.
+Phase 2 confirms the revision-bound Init transcript and promotes its Pending
+slot to Active. The entire request and response are AES-256-GCM protected using
+the Pending transport keys on both Uno and Duo.
 
-All suite-derived sizes in this command (the `mac_fin` MAC length,
-the `seed_envelope` AEAD parameters, the `bmk_session` AEAD key
-length) follow the `suite_id` selected during Phase 1; the HSM
-recovers `suite_id` from the Pending slot itself so the host cannot
-re-negotiate it here.  For the only currently registered suite
-(`0x01` — `P384HkdfSha384AesGcm256`), the wire sizes shown below
-apply verbatim.
+The common header must use the exact API major/minor selected in Init.
+Firmware recovers the revision, suite, type, transcript, and credential binding
+from Pending state rather than accepting replacements in the Finish body.
 
-`param_key` is HKDF-derived from the HPKE `exported` value on both
-sides — the host computes it locally during Phase 2 to seal the
-`seed_envelope`, and the HSM computes the same key from its own
-`exported` to open the envelope.
-
-The derived schedule always includes `param_key` (per-parameter
-AEAD-GCM encryption via [`aead_envelope`](
-../../../fw/core/crypto/aead-envelope/src/lib.rs)) and `masking_key`
-(host-visible masked-key blobs).  `Authenticated` sessions
-additionally derive a per-direction MAC key pair
-(`mac_tx_key`, `mac_rx_key`) used to authenticate subsequent command
-and response bodies.  See [Derived keys](#derived-keys) below for
-the full HKDF schedule.
+The host sends `mac_fin = HMAC-SHA-384(fin_key, T1)` and a 32-byte seed in
+an AEAD envelope under the fresh `param_key`. For a fresh open, the seed is
+new and firmware generates an independent random masking key. Reopen instead
+sends the original seed and saved masking-key envelope to restore the original
+masking key after validating its slot lineage. Firmware verifies the confirmation
+and current credential, wraps the masking key for the response, and commits
+Active state.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
-data section.
-
-### TOC entries
+The 12-byte header is followed by four TOC entries. Data begins at byte 28.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
-| 12 | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
-| 16 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
-
-### Data section
-
-| Offset | Length | Field | Description |
-|---|---|---|---|
-| 20 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
-| 68 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
+| 12 | `session_id` | `session_id` (inline) | Pending slot allocated by Init. |
+| 16 | `mac_fin` | `buffer` (ref) | 48-byte confirmation at data-relative offset 0. |
+| 20 | `seed_envelope` | `buffer` (ref) | 72-byte envelope at data-relative offset 48. |
+| 24 | `bmk_session` | `buffer` (ref) | Empty for fresh open; saved envelope for recovery, up to 512 bytes. |
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
-data section.
-
-### TOC entries
+The header echoes the request revision. Four TOC slots preserve the request
+footprint; data begins at byte 28.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `bmk_session` | `buffer` (ref) | References the `bmk_session` payload below.  TOC word carries `(data_offset = 12, length = N)` where `N` is the actual envelope length (≤ 512). |
+| 12 | `bmk_session` | `buffer` (ref) | 264-byte wrapped masking key at data-relative offset 0. |
+| 16 | Reserved | `none` | Paired TOC placeholder. |
+| 20 | Reserved | `none` | Paired TOC placeholder. |
+| 24 | Reserved | `none` | Paired TOC placeholder. |
 
-### Data section
+## Key schedule and storage
 
-| Offset | Length | Field | Description |
-|---|---|---|---|
-| 20 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
+```text
+IKM = Z || PSK
+PRK = HKDF-Extract("TSRA-SESSION-v1", IKM)
+hs  = HKDF-Expand(PRK, "tsra-session-hs-v1" || T1, 48)
+ExpandLabel(label, n) = HKDF-Expand(hs, ASCII(label) || BE16(n), n)
 
-## `seed_envelope` format
-
-`seed_envelope` is a fixed-size 72-byte [`aead_envelope`](
-../../../fw/core/crypto/aead-envelope/src/lib.rs) blob sealed by the
-host with the AEAD-GCM `AesGcm256` algorithm under `param_key` with
-**empty AAD**:
-
-```
-"AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=0(2)
-        | IV(16)        | seed(32)                 | TAG(16)
-```
-
-The IV slot contains a 12-byte GCM nonce followed by `00 00 00 01`.
-Opening ignores the four-byte suffix. The HSM AEAD-opens this envelope
-(the AEAD tag authenticates the nonce and ciphertext); any failure destroys the
-Pending slot and returns `SessionAuthFailure`.  The recovered 32-byte
-`seed` is the input to `BK_SESSION` derivation for the response's
-`bmk_session` envelope below.
-
-On transports that seal session traffic with keys derived from the
-Pending slot (Duo), the slot is kept until the sealed `SessionAuthFailure`
-reply has been sent and is destroyed immediately afterwards. A competing
-finish cannot exploit this window: it must itself authenticate under
-transport keys derived from the slot's `exported` secret.
-
-## `bmk_session` envelope
-
-`bmk_session` is an [`aead_envelope`](
-../../../fw/core/crypto/aead-envelope/src/lib.rs) blob (AES-256-GCM)
-wrapping the freshly-derived `masking_key` under `BK_SESSION`:
-
-```
-BK_SESSION  = SP800-108-KBKDF-HMAC-SHA-384(
-    key     = BK_BOOT,           // 80-byte partition boot key
-    label   = "SESSION_BK",
-    context = seed,              // 32-byte seed from seed_envelope
-    L       = 32 bytes,          // AES-256 key
-)
+fin_key   = ExpandLabel("tsra-session-host-fin-v1", 48)
+param_key = ExpandLabel("tsra-session-param-v1", 32)
+h2m       = ExpandLabel("tsra-session-xport-h2m-v1", 36)
+m2h       = ExpandLabel("tsra-session-xport-m2h-v1", 36)
 ```
 
-The masking API seals the 32-byte `masking_key` with `AesGcm256` (`0x03`)
-under `BK_SESSION`. Its AAD is the 192-byte version-1 `MaskedKeyMetadata`,
-binding the `MaskingKey` kind, vault attributes, SVN, owner-seed identifier,
-and label `SESSION_BMK`. The authenticated padding count is zero for this
-block-aligned key.
+Each transport secret is `AES key(32) || nonce salt(4)`. The masking key is
+random device-generated material, not derived from host-known `hs`.
 
-Wire layout (264 B total):
+The 243-byte Pending blob is replaced by the 216-byte Active blob:
 
-```
-"AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=192(2)
-        | IV(16) | metadata(192) | masking_key_ct(32) | TAG(16)
+```text
+internal_format_tag(8) || LE16(api_major) || LE16(api_minor)
+|| param_key(32) || masking_key(32) || auth_binding(68)
+|| h2m(36) || m2h(36)
 ```
 
-Only the `masking_key` is wrapped — transport keys (`param_key`,
-`mac_tx_key`, `mac_rx_key`) are never persisted in `bmk_session`.
+The opaque internal tag is not the selected DDI revision. Revision checks
+continue for all subsequent session commands. Transport keys and sender
+counters carry over through promotion; they must not restart.
 
-TBOR sessions do not provide a resume path; a host that wants to
-restore a masking-key blob across resets uses the MBOR
-`ReopenSession` command instead.
+## Seed and masking-key envelopes
 
-A subsequent `BK_BOOT` rotation (SVN bump) invalidates all previously
-issued `bmk_session` blobs.
+The seed envelope uses AES-256-GCM under `param_key` with empty AAD:
 
-## Phase-2 confirmation MAC (`mac_fin`)
-
-```
-mac_fin = HMAC-SHA-384(
-    key = exported,
-    msg = "phase2-confirm" ‖ session_id_be ‖ pk_init ‖ pk_hsm ‖ pk_resp,
-)
+```text
+"AEAD"(4) || alg(1) || reserved(1) || BE16(0)
+|| IV_slot(16) || seed_ciphertext(32) || tag(16)
 ```
 
-Identical input layout to
-[`mac_resp`](./session_open_init.md#phase-1-confirmation-mac-mac_resp);
-only the 14-byte domain-separation label differs.
+`IV_slot` is the 12-byte GCM nonce followed by `00 00 00 01`.
 
-## Derived keys
+`bmk_session` wraps only the independent 32-byte masking key under
+`BK_SESSION`, using the partition's 80-byte boot-key material and the seed
+with SP800-108 HMAC-SHA-384 counter KDF, label `SESSION_BK`, and 32-byte output.
+Its 192-byte authenticated metadata identifies the masking key, attributes,
+SVN, owner seed, and `SESSION_BMK` label:
 
-After MAC verify, the HSM expands `exported` (48 B) into per-session
-key material via HKDF-SHA-384-Expand.  The set of keys derived
-depends on the `session_type` chosen in
-[`SessionOpenInit`](./session_open_init.md):
+```text
+"AEAD"(4) || alg(1) || reserved(1) || BE16(192)
+|| IV_slot(16) || metadata(192) || masking_key_ciphertext(32) || tag(16)
+```
 
-| Key | HKDF label | Length | Derived for |
-|---|---|---|---|
-| `param_key`   | `"tsra-session-param-v1"` | 32 B  | All sessions (AES-256 for `aead_envelope`) |
-| `masking_key` | `"tsra-masking-v1"`       | 32 B  | All sessions |
-| `mac_tx_key`  | `"tsra-session-mac-tx-v1"`| 48 B  | `Authenticated` sessions only (HSM → host) |
-| `mac_rx_key`  | `"tsra-session-mac-rx-v1"`| 48 B  | `Authenticated` sessions only (host → HSM) |
-
-`param_key` and `masking_key` are raw 32-byte AES-256 keys for the
-TBOR AEAD envelopes. The legacy MBOR masking schedule is separate.
-MAC keys are raw 48-byte
-HMAC-SHA-384 keys.
-
-The derived keys are committed to the slot's session vault blob in
-a length-discriminated layout:
-
-| `session_type` | Blob layout | Size |
-|---|---|---|
-| `PlainText` (CU)        | `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)` | 140 B |
-| `Authenticated` (CO)    | CU layout `‖ mac_tx_key(48) ‖ mac_rx_key(48)` | 236 B |
-
-`auth_binding` captures the handshake role (4-byte little-endian CO=0/CU=1),
-AppId (16 B), and SHA-384 PSK digest (48 B). The firmware checks that
-the credential remains current before promotion, PSK rotation and key
-attestation. Legacy MBOR sessions have no TBOR credential binding.
-
-Per-direction MAC keys (`mac_tx`/`mac_rx` rather than a single
-shared key) eliminate any risk of a reflected-message attack and
-provide built-in domain separation between the two traffic
-directions without needing to encode the direction in the MAC
-input.
+Neither the handshake secret nor parameter/transport keys are included in
+`bmk_session`. On reopen, the host reuses its securely retained original seed
+and supplies the saved envelope inside the fresh protected Finish. Firmware
+unwraps and validates the masking key, its metadata and a retained per-slot
+128-bit SHA-384 fingerprint. It restores the original masking key rather than
+generating a new one, but installs fresh parameter and transport keys.
+The firmware-owned PSK-change-consumed bit survives recovery. A migration
+clears it when it returns the PSKs to their defaults, so a session recovered
+after a migration rotates its role PSK again.
 
 ## Errors
 
 | Error | Cause |
 |---|---|
-| `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
-| `SessionNotPending` | Slot is not in `Pending` state |
-| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed (on Duo, after the sealed reply is sent) |
-| `PartitionNotProvisioned` | Identity key not present |
+| `UnsupportedRevision` | Unsupported header revision or mismatch with Pending state. |
+| `InvalidArg` | Invalid field lengths or session identifier. |
+| `SessionNotPending` | Slot is not Pending. |
+| `SessionAuthFailure` | Confirmation, seed authentication, or credential validation failed. |
+| `PartitionNotProvisioned` | Required partition material is unavailable. |
 
-A late `SessionOpenFinish` arriving against an evicted-and-reused slot
-fails MAC verification because the slot now carries a different
-`exported` value.  This is the replay/late-arrival defence; no wire
-sequence number is needed.
+For fresh open, authentication failure tears down the slot after its protected error response,
+so transport keys remain available long enough to authenticate that response.
+A late Finish for an evicted/reused slot fails under its different handshake
+and transport keys; this is not a general command replay cache.
+Failed reopen instead restores `NeedsRenegotiation` after completion, preserving
+the original recovery identity and rotation allowance state for retry.
 
 ## See also
 
-- Wire encoding: [TBOR specification](../../../fw/core/ddi/tbor/docs/spec.md)
-- Wire schema: `fw/core/ddi/tbor/types/src/session_open_finish.rs`
-- AEAD envelope crate: `fw/core/crypto/aead-envelope/src/lib.rs`
-- Phase 1: [`session_open_init.md`](./session_open_init.md)
-- Cleanup: [`session_close.md`](./session_close.md)
+- [Complete session design](../session-design.md)
+- [SessionOpenInit](./session_open_init.md)
+- [SessionClose](./session_close.md)

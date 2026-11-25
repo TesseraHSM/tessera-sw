@@ -26,6 +26,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
+use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -172,6 +173,7 @@ impl HsmIoTypes for FakePal {
 
 impl HsmCryptoOrder for FakePal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
 }
 
 impl HsmMlDsa for FakePal {
@@ -307,6 +309,18 @@ impl HsmHash for FakePal {
         Ok(algo.digest_len())
     }
 
+    async fn hash_oob(
+        &self,
+        _io: &Self::Io,
+        _algo: HsmHashAlgo,
+        _expected_len: usize,
+        _index: usize,
+        _form: HsmDigestForm,
+        _digest: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
     fn hash_state_size(&self, _algo: HsmHashAlgo) -> HsmResult<usize> {
         unimplemented!()
     }
@@ -389,26 +403,48 @@ impl HsmEcc for FakePal {
         &self,
         _io: &Self::Io,
         curve: HsmEccCurve,
+        _hash: HsmHashAlgo,
         _priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        _nonce: HsmEcdsaNonce,
+        input: &mut HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let len = curve.wire_sig_len(Self::BYTE_ORDER);
+        let len = curve.wire_sig_len(Self::ECC_COORD_PAD);
         if let Some(signature) = out {
-            self.ecc_sign.run(&self.calls, hash, signature)?;
+            let digest = &input[curve.wire_coord_len(Self::ECC_COORD_PAD)..];
+            self.ecc_sign.run(&self.calls, digest, signature)?;
         }
+        Ok(len)
+    }
+
+    async fn ecc_sign_in_place(
+        &self,
+        _io: &Self::Io,
+        curve: HsmEccCurve,
+        _hash: HsmHashAlgo,
+        _priv_key: &HsmDmaBuf,
+        _nonce: HsmEcdsaNonce,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let len = curve.wire_sig_len(Self::ECC_COORD_PAD);
+        let coord = curve.wire_coord_len(Self::ECC_COORD_PAD);
+        let mut digest = [0u8; 144];
+        let digest = &mut digest[..k_sig.len() - coord];
+        digest.copy_from_slice(&k_sig[coord..]);
+        self.ecc_sign.run(&self.calls, digest, &mut k_sig[..len])?;
         Ok(len)
     }
 
     async fn ecc_verify(
         &self,
         _io: &Self::Io,
-        _curve: HsmEccCurve,
+        curve: HsmEccCurve,
+        _hash: HsmHashAlgo,
         _pub_key: &HsmDmaBuf,
-        _hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let mut result = [0xFF; 4];
+        let signature = &input[..curve.wire_sig_len(Self::ECC_COORD_PAD)];
         self.ecc_verify.run(&self.calls, signature, &mut result)?;
         Ok(result[0] & 1 == 0)
     }
@@ -882,8 +918,8 @@ fn run_ecc(
     curve: HsmEccCurve,
     pct: &HsmEccPct,
 ) -> HsmResult<bool> {
-    let priv_key = key(curve.wire_coord_len(FakePal::BYTE_ORDER));
-    let pub_key = key(curve.wire_pub_key_len(FakePal::BYTE_ORDER));
+    let priv_key = key(curve.wire_coord_len(FakePal::ECC_COORD_PAD));
+    let pub_key = key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD));
     block_on(ecc_pct(
         pal,
         &FakeIo::default(),
@@ -988,22 +1024,20 @@ fn ecc_pct_reuses_caller_workspace_for_backend_operations() {
                 &io,
                 curve,
                 &pct,
-                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+                key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
                 workspace,
                 async |operation, scratch| {
                     assert_eq!(scratch.len(), 16);
                     scratch.fill(0xAB);
                     match operation {
                         crate::EccPctOperation::Verify {
+                            hash,
                             public,
-                            digest,
-                            signature,
+                            input,
                             valid,
                         } => {
-                            *valid = pal
-                                .ecc_verify(&io, curve, public, digest, signature)
-                                .await?;
+                            *valid = pal.ecc_verify(&io, curve, hash, public, input).await?;
                             Ok(())
                         }
                         crate::EccPctOperation::Derive {
@@ -1036,8 +1070,8 @@ fn ecc_pct_rejects_short_workspace_before_running_operations() {
                 &FakeIo::default(),
                 curve,
                 &pct,
-                key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-                key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+                key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+                key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
                 &mut *workspace,
                 async |_, _| panic!("short workspace must not reach a backend"),
             ));
@@ -1067,8 +1101,8 @@ fn sign_verify_fails_when_backend_does_not_set_validity() {
             &FakeIo::default(),
             curve,
             &pct,
-            key(curve.wire_coord_len(FakePal::BYTE_ORDER)),
-            key(curve.wire_pub_key_len(FakePal::BYTE_ORDER)),
+            key(curve.wire_coord_len(FakePal::ECC_COORD_PAD)),
+            key(curve.wire_pub_key_len(FakePal::ECC_COORD_PAD)),
             workspace,
             async |_, _| Ok(()),
         ));

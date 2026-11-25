@@ -10,72 +10,86 @@ Licensed under the MIT License.
 
 ## Description
 
-Performs the RSA private-key primitive `x = y^d mod n` using a
-caller-held **masked** RSA private key (imported via
-[`UnwrapKey`](./unwrap_key.md) with the RSA / RSA-CRT key class).
+Performs one raw RSA modular exponentiation using a caller-held **masked
+RSA private key** imported with `UnwrapKey` as RSA or RSA-CRT. This command
+does not accept a raw public key. The device authenticates and unmasks the
+private-key envelope, checks the selected usage, and for public operations
+derives the actual `n || e` from that private key using the PAL.
 
-The device unmasks the key **in place** in the request buffer (recovering
-its modulus size and CRT form from the blob's key kind), checks the usage
-attribute the requested operation needs, computes the modular
-exponentiation, and returns the result.  The recovered plaintext key is
-scrubbed from the request buffer during IO teardown.  This is the raw primitive
-underlying RSA decrypt / sign — the host applies and removes any padding.
-This is the TBOR analogue of MBOR `RsaModExp`, keyed by a masked blob
-instead of a vault id.
+| `op_type` | Operation | Primitive | Required key usage |
+|---:|---|---|---|
+| 1 | Decrypt | `x = y^d mod n` | `decrypt` |
+| 2 | Sign | `x = y^d mod n` | `sign` |
+| 3 | Encrypt | `x = y^e mod n` | `encrypt` |
+| 4 | Verify | `x = y^e mod n` | `verify` |
 
-There is no TBOR RSA key generation; RSA keys enter the device only
-through `UnwrapKey`.
+Encrypt returns a raw RSA result, not a padded OAEP/PKCS#1 encryption service.
+Verify returns the recovered encoded block; it does not validate PSS or
+PKCS#1 padding, compare a digest, or return a signature-valid boolean. The
+host is responsible for adding/removing encryption padding and validating
+signature blocks.
 
-Both the input `y` and the output `x` are in **device byte order** (see
-[Crypto operand byte order](../README.md#crypto-operand-byte-order)).
+All operands are exactly the RSA modulus length (256, 384, or 512 bytes) and
+are in **device byte order**: little-endian on Uno/std Uno and big-endian on
+std Duo. Public operations accept `0 <= y < n`; private Decrypt/Sign preserve
+the existing `1 < y < n - 1` restriction.
 
-Available to **both Crypto-Officer and Crypto-User** sessions.
+Available to both Crypto-Officer and Crypto-User sessions. Existing session
+gating, default-PSK rotation requirements, SQE/body session cross-checking,
+and secure-session transport are unchanged. The unmasked private-key bytes
+remain in the request buffer and are scrubbed by IO teardown.
 
 ## Request
 
-### TOC entries
+The request has five TOC entries. Offsets below identify the TOC entries,
+not the variable data they describe.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
-| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 20 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
-| 24 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
+| 20 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 24 | `masked_key` | `buffer` (264..=3168 B) | The masked RSA private key; unmasked in place. Its kind recovers the modulus size and CRT form. |
+| 28 | `op_type` | `u8` (inline) | Selector 1..=4 as specified above; other values are `InvalidArg`. |
 
-### Data section
+### Data section and canonical placement
 
-Carries the input integer at offset 24, followed by the masked key. The integer
-must start immediately after the TOC so the PAL can replace `y` with `x` in place
-without moving the result or overlapping the key. Host and firmware schemas
-must be updated together.
+The data section begins at byte offset 32. `y` starts at offset 32, and
+`masked_key` begins immediately after `y`, rounded up to a 4-byte boundary.
+Since valid modulus lengths are multiples of four, there is no intervening
+padding for a valid request. The `op_type` and session id are inline in their
+TOC entries and do not occupy data-section bytes. Firmware rejects a request
+whose `y` does not start at offset 32.
 
 ## Response
 
-### TOC entries
+The response has five TOC entries: `x` refers to the request's `y` storage,
+and the remaining paired TOC slots are `None`. The result replaces `y` at
+data offset 32 and has exactly the modulus length:
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `x` | `buffer` (256 / 384 / 512 B) | The result `x = y^d mod n` in device byte order, exactly the key's modulus length. |
+| 12 | `x` | `buffer` (256 / 384 / 512 B) | The result in device byte order: `y^d mod n` for Decrypt/Sign or `y^e mod n` for Encrypt/Verify. |
 
 ### Data section
 
-Carries the result integer at offset 24, replacing the request's `y`. The remaining
-three paired TOC slots are `None`, and the unused allocation tail, including the
+Carries the result integer at offset 32, replacing the request's `y`. The remaining
+four paired TOC slots are `None`, and the unused allocation tail, including the
 unmasked key, is scrubbed during IO teardown.
 
 ## Errors
 
 | Error | Cause |
 |---|---|
-| `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-| `InvalidArg` | Unknown `op_type`, `y` length ≠ the key's modulus length |
-| `InvalidKeyType` | The masked blob is not an RSA private key |
-| `InvalidPermissions` | The key lacks the usage the operation needs (`decrypt` for Decrypt, `sign` for Sign) |
-| `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The masked key is malformed or fails authentication (wrong scope / tampered) |
-| `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |
-| `TborNonCanonicalLayout` | `y` does not start the data section |
-| `DdiDecodeFailed` | Malformed request body |
+| `SessionNotFound` | The session id does not refer to an active session. |
+| `InvalidArg` | Unknown selector; wrong operand length; public `y >= n`; or the PAL rejects a private representative outside `1 < y < n - 1`. |
+| `InvalidKeyType` | The authenticated masked blob is not an RSA private key. |
+| `InvalidPermissions` | The key lacks the exact usage required by the selector. |
+| `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The envelope is malformed, tampered, or authenticated under a different key/session. |
+| `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler). |
+| `TborNonCanonicalLayout` | `y` does not start the data section. |
+| `InternalError` | A PAL reports success but writes/returns a non-modulus-sized result. |
+| `DdiDecodeFailed` | The request body is malformed. |
 
 ## See also
 

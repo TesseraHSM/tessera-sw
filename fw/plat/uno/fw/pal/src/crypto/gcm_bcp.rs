@@ -48,9 +48,9 @@ use tsra_fw_uno_drivers_aes::AesOp;
 use tsra_fw_uno_drivers_bcp::BCP_ADDR_ALIGN;
 use tsra_fw_uno_drivers_bcp::BCP_KEY_LEN;
 use tsra_fw_uno_drivers_bcp::BCP_MAX_SRC_LEN;
+use tsra_fw_uno_drivers_bcp::BcpData;
 use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_bcp::GcmCompletion;
-use tsra_fw_uno_drivers_bcp::GcmData;
 use tsra_fw_uno_drivers_bcp::GcmOp;
 use tsra_fw_uno_drivers_bcp::GcmRequest;
 
@@ -75,6 +75,13 @@ const GCM_AAD_PAD: usize = 32;
 
 type Block = [u8; AES_BLOCK_SIZE];
 
+/// A tag as [`UnoHsmPal::gcm_run`] returns it. Word-aligned, so that it is
+/// carried through the futures a word at a time: a bare [`Block`] in an
+/// [`HsmResult`] sits at offset 1, where it is moved a byte at a time.
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+struct Tag(Block);
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -87,44 +94,69 @@ fn padded_aad_len(aad_len: usize) -> usize {
 }
 
 /// GCM length block `[8·aad_len]₆₄ ‖ [8·text_len]₆₄`.
-fn len_block(aad_len: usize, text_len: usize) -> Block {
+pub(super) fn len_block(aad_len: usize, text_len: usize) -> Block {
     let mut b = [0u8; AES_BLOCK_SIZE];
     b[..8].copy_from_slice(&(aad_len as u64 * 8).to_be_bytes());
     b[8..].copy_from_slice(&(text_len as u64 * 8).to_be_bytes());
     b
 }
 
-/// Copy a block a word at a time when it is word-aligned: a tag inside a
-/// masked blob sits in DMA memory, which the CPU reads uncached, a load per
-/// word rather than per byte.
+/// Copy a block with one burst when it is word-aligned: a tag inside a
+/// masked blob or a frame's trailer sits in DMA memory, which the CPU reads
+/// uncached, where a burst costs about one load's latency and a load per
+/// word four.
 fn read_block(b: &Block) -> Block {
     if b.as_ptr().align_offset(4) != 0 {
         return *b;
     }
-    let mut out = [0u8; AES_BLOCK_SIZE];
-    for (o, w) in out
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(b.as_chunks::<4>().0)
+    let words: [u32; 4];
+    #[cfg(target_arch = "arm")]
     {
-        // SAFETY: `w` is four readable bytes at a 4-aligned address.
-        *o = unsafe { w.as_ptr().cast::<u32>().read() }.to_ne_bytes();
+        let (w0, w1, w2, w3): (u32, u32, u32, u32);
+        // SAFETY: `b` is sixteen readable bytes at a 4-aligned address; the
+        // registers ascend, so they take its words in memory order.
+        unsafe {
+            core::arch::asm!(
+                "ldm {s}, {{r2, r3, r4, r5}}",
+                s = in(reg) b.as_ptr(),
+                out("r2") w0,
+                out("r3") w1,
+                out("r4") w2,
+                out("r5") w3,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+        words = [w0, w1, w2, w3];
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        words = core::array::from_fn(|i| {
+            // SAFETY: word `i < 4` of `b`, at a 4-aligned address.
+            unsafe { b.as_ptr().cast::<u32>().add(i).read() }
+        });
+    }
+    let mut out = [0u8; AES_BLOCK_SIZE];
+    for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *o = w.to_ne_bytes();
     }
     out
 }
 
-fn xor(a: &Block, b: &Block) -> Block {
+pub(super) fn xor(a: &Block, b: &Block) -> Block {
     core::array::from_fn(|i| a[i] ^ b[i])
 }
 
-/// Constant-time comparison of two blocks.
-fn constant_time_eq(a: &Block, b: &Block) -> bool {
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+/// Constant-time comparison of two blocks, a word at a time.
+#[inline]
+pub(super) fn constant_time_eq(a: &Block, b: &Block) -> bool {
+    let (a, _) = a.as_chunks::<4>();
+    let (b, _) = b.as_chunks::<4>();
+    let diff = a.iter().zip(b).fold(0u32, |diff, (x, y)| {
+        diff | (u32::from_ne_bytes(*x) ^ u32::from_ne_bytes(*y))
+    });
+    // Opaque to the optimizer, which would otherwise turn the fold into
+    // compares that stop at the first differing word.
+    core::hint::black_box(diff) == 0
 }
 
 fn ghash(h: &Block) -> HsmResult<Ghash> {
@@ -183,13 +215,14 @@ impl Bufs<'_> {
     }
 
     /// Hand the first `n` bytes to the engine as they are.
-    fn engine_data(&mut self, n: usize) -> GcmData<'_> {
+    #[inline(always)]
+    fn engine_data(&mut self, n: usize) -> BcpData<'_> {
         match self {
-            Self::Copy { src, dst } => GcmData::Copy {
+            Self::Copy { src, dst } => BcpData::Copy {
                 src: &src[..n],
                 dst: &mut dst[..n],
             },
-            Self::InPlace(buf) => GcmData::InPlace(&mut buf[..n]),
+            Self::InPlace(buf) => BcpData::InPlace(&mut buf[..n]),
         }
     }
 }
@@ -221,7 +254,7 @@ impl UnoHsmPal {
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
-    ) -> HsmResult<Block> {
+    ) -> HsmResult<Tag> {
         if key.len() != BCP_KEY_LEN {
             return Err(HsmError::InvalidArg);
         }
@@ -249,10 +282,12 @@ impl UnoHsmPal {
         // they are (most masked keys): one engine command, with no scratch,
         // no hash subkey and no tag correction.
         if !fix && bufs.aligned() {
-            let engine_tag = match dir {
+            // Word-aligned, so the driver reads it into the command with one
+            // burst rather than a byte at a time.
+            let engine_tag = Tag(match dir {
                 Dir::Decrypt(t) => read_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
-            };
+            });
             self.service_pka();
             let done = self
                 .bcp
@@ -265,11 +300,11 @@ impl UnoHsmPal {
                     iv,
                     aad_len: pad,
                     unpadded_aad_len: aad_len,
-                    tag: &engine_tag,
+                    tag: &engine_tag.0,
                     data: bufs.engine_data(len),
                 })
                 .await;
-            let result = verdict(dir, &engine_tag, done);
+            let result = verdict(dir, &engine_tag.0, done);
             if result.is_err() {
                 bufs.dst()[pad..len].fill(0);
             }
@@ -285,7 +320,7 @@ impl UnoHsmPal {
             };
 
             // The tag the engine checks a decrypt against.
-            let engine_tag = match (dir, &h) {
+            let engine_tag = Tag(match (dir, &h) {
                 (Dir::Decrypt(t), Some(h)) => {
                     let mut g = ghash(h)?;
                     g.update(&len_fix);
@@ -293,7 +328,7 @@ impl UnoHsmPal {
                 }
                 (Dir::Decrypt(t), None) => *t,
                 (Dir::Encrypt, _) => [0; AES_BLOCK_SIZE],
-            };
+            });
             let req = |data| GcmRequest {
                 op: match dir {
                     Dir::Encrypt => GcmOp::Encrypt,
@@ -303,7 +338,7 @@ impl UnoHsmPal {
                 iv,
                 aad_len: pad,
                 unpadded_aad_len: aad_len,
-                tag: &engine_tag,
+                tag: &engine_tag.0,
                 data,
             };
 
@@ -313,7 +348,7 @@ impl UnoHsmPal {
             let result = if tail == 0 && bufs.aligned() {
                 // Whole blocks: the engine runs on the caller's buffers.
                 let done = self.bcp.gcm(req(bufs.engine_data(len))).await;
-                let result = verdict(dir, &engine_tag, done);
+                let result = verdict(dir, &engine_tag.0, done);
                 if result.is_err() {
                     bufs.dst()[pad..len].fill(0);
                 }
@@ -324,8 +359,8 @@ impl UnoHsmPal {
                 let work = engine_buf(scope, pad + rounded)?;
                 work[..len].copy_from_slice(bufs.src());
                 work[len..].fill(0);
-                let done = self.bcp.gcm(req(GcmData::InPlace(work))).await;
-                let result = verdict(dir, &engine_tag, done);
+                let done = self.bcp.gcm(req(BcpData::InPlace(work))).await;
+                let result = verdict(dir, &engine_tag.0, done);
                 if result.is_ok() {
                     if tail != 0 {
                         pad_ks[tail..].copy_from_slice(&work[len..]);
@@ -344,7 +379,7 @@ impl UnoHsmPal {
                         g.update(&pad_ks);
                     }
                     g.update(&len_fix);
-                    Ok(xor(&engine_tag, &g.finish()))
+                    Ok(Tag(xor(&engine_tag.0, &g.finish())))
                 }
                 _ => Ok(engine_tag),
             }
@@ -362,7 +397,7 @@ impl UnoHsmPal {
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
-    ) -> HsmResult<Block> {
+    ) -> HsmResult<Tag> {
         self.alloc_scoped_async(io, async |scope| {
             // [0¹²⁸ | J₀] → [H | E_K(J₀)].
             let blocks = scope.dma_alloc_zeroed(2 * AES_BLOCK_SIZE)?;
@@ -390,7 +425,7 @@ impl UnoHsmPal {
             if let Bufs::Copy { src, dst } = &mut bufs {
                 dst.copy_from_slice(src);
             }
-            Ok(tag)
+            Ok(Tag(tag))
         })
         .await
     }
@@ -421,7 +456,7 @@ impl UnoHsmPal {
         let t = self
             .gcm_run(io, key, iv, aad_len, Dir::Encrypt, bufs)
             .await?;
-        tag.copy_from_slice(&t);
+        tag.copy_from_slice(&t.0);
         Ok(())
     }
 
@@ -441,7 +476,7 @@ impl UnoHsmPal {
         let t = self
             .gcm_run(io, key, iv, aad_len, Dir::Encrypt, Bufs::InPlace(data))
             .await?;
-        tag.copy_from_slice(&t);
+        tag.copy_from_slice(&t.0);
         Ok(())
     }
 
@@ -495,11 +530,14 @@ impl UnoHsmPal {
 
 /// Interpret an engine completion: the engine's tag for an encrypt, or the
 /// verdict on a decrypt.
-fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Block> {
+#[inline]
+fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Tag> {
     let done = done?;
     match dir {
-        Dir::Encrypt if done.ok() => Ok(done.tag),
-        Dir::Decrypt(_) if done.ok() && constant_time_eq(&done.tag, engine_tag) => Ok(done.tag),
+        Dir::Encrypt if done.ok() => Ok(Tag(done.tag)),
+        Dir::Decrypt(_) if done.ok() && constant_time_eq(&done.tag, engine_tag) => {
+            Ok(Tag(done.tag))
+        }
         Dir::Decrypt(_) if done.ok() || done.tag_mismatch_only() => {
             Err(HsmError::AesGcmDecryptTagDoesNotMatch)
         }

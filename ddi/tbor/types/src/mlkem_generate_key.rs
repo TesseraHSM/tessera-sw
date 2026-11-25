@@ -3,28 +3,17 @@
 
 //! Host-side wrapper for the TBOR `MlKemGenerateKey` command.
 //!
-//! `MlKemGenerateKey` is (temporarily) an **out-of-session** command that generates a fresh ML-KEM keypair and returns the
+//! `MlKemGenerateKey` is an in-session command that generates a fresh ML-KEM keypair and returns the
 //! decapsulation key as a **masked** blob plus the public encapsulation
 //! key.  The private key is not stored on-device; the caller holds the
 //! masked blob and passes it back to [`MlKemDecapsulate`](crate::mlkem_decapsulate).
 //! `key_kind` is a raw 1-byte `MlKemKeyKind` discriminant (the firmware
 //! types it as an open enum) byte-identical to the PQC subset of
-//! `HsmVaultKeyKind`. It selects the ML-KEM parameter set.  The TBOR wire
-//! ships **seed-only** decapsulation keys today, so the returned masked
-//! blob always carries the compact 64-byte `(d ‖ z)` seed material.
+//! `HsmVaultKeyKind`. It selects the ML-KEM parameter set. Only seed key-kind
+//! selectors are accepted; the returned masked blob carries the 64-byte
+//! seed pair followed by the expanded decapsulation key.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use alloc::vec::Vec;
 
@@ -106,7 +95,7 @@ mod tests {
             key_kind: MLKEM_KEY_KIND_768_SEED,
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&MLKEM_KEY_KIND_768_SEED),
             "encoded frame must carry the key-kind discriminant",
@@ -126,7 +115,7 @@ mod tests {
                 key_kind: kind,
             };
             let mut buf = [0u8; 256];
-            let frame = req.encode_request(&mut buf).expect("encode");
+            let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
             assert!(
                 frame.contains(&kind),
                 "encoded frame must carry the key-kind discriminant",

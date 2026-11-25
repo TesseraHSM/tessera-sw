@@ -99,7 +99,7 @@ impl SessionTable {
         self.region_mut()[off..off + 2].copy_from_slice(&value.to_le_bytes());
     }
 
-    // ── volatile pending / psk-change masks (uno session_meta region) ────
+    // ── volatile pending mask (uno session_meta region) ────
 
     #[inline]
     fn pending_mask(&self) -> u8 {
@@ -109,16 +109,6 @@ impl SessionTable {
     #[inline]
     fn set_pending_mask(&mut self, v: u8) {
         self.0.session_meta_mut()[0] = v;
-    }
-
-    #[inline]
-    fn psk_change_mask(&self) -> u8 {
-        self.0.session_meta()[1]
-    }
-
-    #[inline]
-    fn set_psk_change_mask(&mut self, v: u8) {
-        self.0.session_meta_mut()[1] = v;
     }
 
     /// Slot range eligible for a Pending session of `role`:
@@ -132,6 +122,7 @@ impl SessionTable {
     }
 
     /// Validates that `id` refers to an allocated slot, returning its index.
+    #[inline]
     fn active_slot(&self, id: HsmSessId) -> HsmResult<usize> {
         let slot = u16::from(id) as usize;
         if slot >= MAX_SESSIONS || (self.alloc_mask() & (1 << slot)) == 0 {
@@ -173,8 +164,9 @@ impl SessionTable {
         self.region_mut()[ALLOC_MASK] &= clear;
         self.region_mut()[RENEGO_MASK] &= clear;
         self.set_pending_mask(self.pending_mask() & clear);
-        self.set_psk_change_mask(self.psk_change_mask() & clear);
         self.set_phys_id(slot, 0);
+        self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].fill(0);
+        self.0.session_recovery_mut()[128] &= clear;
         Ok(phys)
     }
 
@@ -183,7 +175,9 @@ impl SessionTable {
     /// # Errors
     ///
     /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
-    #[inline(never)]
+    ///
+    /// Inlined: every in-session request looks its session up this way.
+    #[inline]
     pub fn physical_id(&self, id: HsmSessId) -> HsmResult<HsmKeyId> {
         let slot = self.active_slot(id)?;
         Ok(HsmKeyId::from(self.phys_id(slot)))
@@ -245,6 +239,57 @@ impl SessionTable {
         let slot = self.active_slot(id)?;
         self.region_mut()[RENEGO_MASK] |= 1u8 << slot;
         self.set_phys_id(slot, 0);
+        self.set_pending_mask(self.pending_mask() & !(1 << slot));
+        Ok(())
+    }
+
+    /// Reserve a migrated slot for a new handshake, preserving recovery metadata.
+    pub fn reopen_pending(&mut self, id: HsmSessId, physical_id: HsmKeyId) -> HsmResult<()> {
+        self.validate_reopen_pending(id)?;
+        let slot = u16::from(id) as usize;
+        self.set_pending_mask(self.pending_mask() | (1 << slot));
+        self.set_phys_id(slot, u16::from(physical_id));
+        Ok(())
+    }
+
+    /// Validate a stale slot or a replaceable recovery handshake.
+    pub fn validate_reopen_pending(&self, id: HsmSessId) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if self.renego_mask() & (1 << slot) == 0 {
+            return Err(HsmError::ProcessedIoEventInInvalidState);
+        }
+        Ok(())
+    }
+
+    /// Fingerprint of the original session masking key.
+    pub fn recovery_binding(&self, id: HsmSessId) -> HsmResult<&'static [u8]> {
+        let slot = self.active_slot(id)?;
+        Ok(&self.0.session_recovery()[slot * 16..slot * 16 + 16])
+    }
+
+    /// Install the fingerprint for a fresh session.
+    pub fn set_recovery_binding(&mut self, id: HsmSessId, binding: &[u8]) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        if binding.len() != 16 {
+            return Err(HsmError::InvalidArg);
+        }
+        self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].copy_from_slice(binding);
+        Ok(())
+    }
+
+    /// Whether this logical session has consumed its PSK change.
+    pub fn psk_changed(&self, id: HsmSessId) -> HsmResult<bool> {
+        Ok(self.0.session_recovery()[128] & (1 << self.active_slot(id)?) != 0)
+    }
+
+    /// Set the rotation-consumed flag without changing slot identity.
+    pub fn set_psk_changed(&mut self, id: HsmSessId, changed: bool) -> HsmResult<()> {
+        let bit = 1 << self.active_slot(id)?;
+        if changed {
+            self.0.session_recovery_mut()[128] |= bit;
+        } else {
+            self.0.session_recovery_mut()[128] &= !bit;
+        }
         Ok(())
     }
 
@@ -254,7 +299,9 @@ impl SessionTable {
     /// [`Pending`](HsmSessionState::Pending); a renegotiation-flagged
     /// slot reports [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation);
     /// otherwise [`Active`](HsmSessionState::Active).
-    #[inline(never)]
+    ///
+    /// Inlined: every in-session request looks its session up this way.
+    #[inline]
     pub fn state(&self, id: HsmSessId) -> HsmSessionState {
         let Ok(slot) = self.active_slot(id) else {
             return HsmSessionState::Invalid;
@@ -316,17 +363,23 @@ impl SessionTable {
     /// `alloc_mask & !pending_mask`.
     #[inline(never)]
     pub fn mark_all_needs_renego(&mut self) {
-        let survivors = self.alloc_mask() & !self.pending_mask();
+        let survivors = self.alloc_mask() & (!self.pending_mask() | self.renego_mask());
         self.region_mut()[ALLOC_MASK] = survivors;
         self.region_mut()[RENEGO_MASK] = survivors;
         self.region_mut()[PHYS_IDS..].fill(0);
+        // Each caller (disable, NSSR) also resets the PSKs, so no survivor
+        // has used its change of the PSK it reauthenticates with.
+        self.0.session_recovery_mut()[128] = 0;
+        for slot in 0..MAX_SESSIONS {
+            if survivors & (1 << slot) == 0 {
+                self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].fill(0);
+            }
+        }
         self.set_pending_mask(0);
-        self.set_psk_change_mask(0);
     }
 
     /// Releases every slot: clears the allocation and renegotiation masks,
-    /// the physical-id indirection, and the volatile pending / PSK-change
-    /// masks.
+    /// the physical-id indirection, and the volatile Pending mask.
     ///
     /// Used on partition free, which releases the prior session context.
     /// Disable and NSSR (`Migrate`) use
@@ -336,8 +389,8 @@ impl SessionTable {
     #[inline(never)]
     pub fn clear_all(&mut self) {
         self.region_mut().fill(0);
+        self.0.session_recovery_mut().fill(0);
         self.set_pending_mask(0);
-        self.set_psk_change_mask(0);
     }
 
     /// Returns the physical vault key id of every slot that still owns live
@@ -403,7 +456,7 @@ impl SessionTable {
 
         // 2. Evict the lowest-index Pending slot in range.
         for slot in start..=end {
-            if (self.pending_mask() & (1 << slot)) != 0 {
+            if (self.pending_mask() & !self.renego_mask() & (1 << slot)) != 0 {
                 let evicted = HsmKeyId::from(self.phys_id(slot));
                 self.install_pending(slot, physical_id);
                 return Ok((HsmSessId::from(slot as u16), Some(evicted)));
@@ -421,8 +474,9 @@ impl SessionTable {
         self.region_mut()[ALLOC_MASK] |= bit;
         self.region_mut()[RENEGO_MASK] &= !bit;
         self.set_pending_mask(self.pending_mask() | bit);
-        self.set_psk_change_mask(self.psk_change_mask() & !bit);
         self.set_phys_id(slot, u16::from(physical_id));
+        self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].fill(0);
+        self.0.session_recovery_mut()[128] &= !bit;
     }
 
     /// Returns the handshake-blob vault key id for a Pending session.
@@ -460,30 +514,8 @@ impl SessionTable {
         }
         let old = HsmKeyId::from(self.phys_id(slot));
         self.set_pending_mask(self.pending_mask() & !bit);
-        self.set_psk_change_mask(self.psk_change_mask() & !bit);
+        self.region_mut()[RENEGO_MASK] &= !bit;
         self.set_phys_id(slot, u16::from(new_physical));
         Ok(old)
-    }
-
-    /// Consumes the one PSK change permitted for an Active session.
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot, or
-    ///   is still Pending.
-    /// - [`HsmError::InvalidPermissions`] — the session has already
-    ///   consumed its PSK change (the flag remains set).
-    #[inline(never)]
-    pub fn try_consume_psk_change(&mut self, id: HsmSessId) -> HsmResult<()> {
-        let slot = self.active_slot(id)?;
-        let bit = 1u8 << slot;
-        if (self.pending_mask() & bit) != 0 {
-            return Err(HsmError::SessionNotFound);
-        }
-        if (self.psk_change_mask() & bit) != 0 {
-            return Err(HsmError::InvalidPermissions);
-        }
-        self.set_psk_change_mask(self.psk_change_mask() | bit);
-        Ok(())
     }
 }

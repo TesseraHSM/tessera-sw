@@ -3,7 +3,9 @@
 
 #![allow(unsafe_code)]
 
-use core::future::poll_fn;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::Context;
 use core::task::Poll;
 
 use embassy_sync::waitqueue::WakerRegistration;
@@ -43,15 +45,18 @@ struct TagSlot {
     cookie: u16,
 }
 
-struct GdmaState<const DEPTH: usize> {
+struct GdmaState<const TAGS: usize> {
     cq_head: u16,
     sq_tail: u16,
     /// Cached SQ head index. Updated lazily when the queue looks full.
     sq_head_cached: u16,
-    tag_free: u32,
+    tag_free: u64,
     /// Completed detached transfers, one bit per tag.
-    detached_done: u32,
-    tags: [TagSlot; DEPTH],
+    detached_done: u64,
+    /// SQ entries were written since the doorbell last rang: the next
+    /// [`GdmaDriver::ring`] rings it.
+    bell: bool,
+    tags: [TagSlot; TAGS],
 }
 
 /// Async GDMA (General DMA Controller) driver.
@@ -62,9 +67,13 @@ struct GdmaState<const DEPTH: usize> {
 ///
 /// # Type Parameters
 ///
-/// - `DEPTH`: Queue depth and max concurrent tags. Must be a power of 2, at
-///   most 32.
-pub struct GdmaDriver<const DEPTH: usize> {
+/// - `DEPTH`: SQ and CQ ring depth. Must be a power of 2. A ring holds
+///   `DEPTH - 1` entries (`PI == CI` means empty).
+/// - `TAGS`: Maximum concurrent transfers, at most 64 and less than `DEPTH`,
+///   so the SQ cannot fill while a tag is free. A transfer that finds every
+///   tag taken fails with [`GdmaError::NO_FREE_TAGS`] rather than waiting,
+///   so size `TAGS` to the number of transfers that can be in flight at once.
+pub struct GdmaDriver<const DEPTH: usize, const TAGS: usize> {
     /// Physical channel index.
     channel: u8,
 
@@ -87,30 +96,35 @@ pub struct GdmaDriver<const DEPTH: usize> {
     sq_head_shadow: *const u32,
 
     /// Mutable state protected by single-threaded access.
-    state: SingleCell<GdmaState<DEPTH>>,
+    state: SingleCell<GdmaState<TAGS>>,
 }
 
 // SAFETY: GdmaDriver is only used on single-core Cortex-M firmware with
 // cooperative scheduling. The raw pointers reference MMIO or DTCM memory with
 // a single owner in practice; Send/Sync are needed for Embassy's static tasks.
-unsafe impl<const DEPTH: usize> Send for GdmaDriver<DEPTH> {}
+unsafe impl<const DEPTH: usize, const TAGS: usize> Send for GdmaDriver<DEPTH, TAGS> {}
 // SAFETY: Single-core cooperative scheduling serializes access to the owned queues and state.
-unsafe impl<const DEPTH: usize> Sync for GdmaDriver<DEPTH> {}
+unsafe impl<const DEPTH: usize, const TAGS: usize> Sync for GdmaDriver<DEPTH, TAGS> {}
 
-impl<const DEPTH: usize> core::fmt::Debug for GdmaDriver<DEPTH> {
+impl<const DEPTH: usize, const TAGS: usize> core::fmt::Debug for GdmaDriver<DEPTH, TAGS> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GdmaDriver")
             .field("DEPTH", &DEPTH)
+            .field("TAGS", &TAGS)
             .field("channel", &self.channel)
             .finish()
     }
 }
 
-impl<const DEPTH: usize> GdmaDriver<DEPTH> {
+impl<const DEPTH: usize, const TAGS: usize> GdmaDriver<DEPTH, TAGS> {
     const MASK: u16 = (DEPTH - 1) as u16;
 
     const _ASSERT_DEPTH_POW2: () = assert!(DEPTH.is_power_of_two(), "DEPTH must be power of 2");
-    const _ASSERT_DEPTH_MAX: () = assert!(DEPTH <= 32, "DEPTH must be <= 32 (u32 tag bitmap)");
+    const _ASSERT_TAGS_MAX: () = assert!(TAGS <= 64, "TAGS must be <= 64 (u64 tag bitmap)");
+    const _ASSERT_TAGS_FIT: () = assert!(
+        TAGS > 0 && TAGS < DEPTH,
+        "TAGS must be nonzero and below DEPTH, so the SQ cannot fill"
+    );
     const _ASSERT_SQ_FIT: () =
         assert!(DEPTH <= GDMA_SQ_COUNT as usize, "DEPTH exceeds SQ capacity");
     const _ASSERT_CQ_FIT: () =
@@ -137,13 +151,14 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// # Panics
     ///
-    /// Compile-time panic if `DEPTH` is not a power of 2, exceeds 32, or is
-    /// larger than the GDMA queue storage allocated in DTCM.
+    /// Compile-time panic if `DEPTH` is not a power of 2 or exceeds the GDMA
+    /// queue storage, or if `TAGS` exceeds 64 or is not below `DEPTH`.
     pub fn new(config: ChannelConfig) -> Self {
         #[allow(clippy::let_unit_value)]
         {
             let _ = Self::_ASSERT_DEPTH_POW2;
-            let _ = Self::_ASSERT_DEPTH_MAX;
+            let _ = Self::_ASSERT_TAGS_MAX;
+            let _ = Self::_ASSERT_TAGS_FIT;
             let _ = Self::_ASSERT_SQ_FIT;
             let _ = Self::_ASSERT_CQ_FIT;
             let _ = Self::_ASSERT_SQ_ENTRY_SIZE;
@@ -161,10 +176,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             cookie: 0,
         });
 
-        let tag_free = if DEPTH >= 32 {
-            u32::MAX
+        let tag_free = if TAGS >= 64 {
+            u64::MAX
         } else {
-            (1u32 << DEPTH) - 1
+            (1u64 << TAGS) - 1
         };
 
         Self {
@@ -181,6 +196,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 sq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
+                bell: false,
                 tags,
             }),
         }
@@ -222,10 +238,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         }
     }
 
-    /// Allocate a tag, write an SQ entry, and ring the doorbell. A
-    /// `detached` transfer carries the given cookie and completes into
+    /// Allocate a tag and write an SQ entry, for the next
+    /// [`ring`](Self::ring) to hand to the engine. A `detached` transfer
+    /// carries the given cookie and completes into
     /// [`take_detached`](Self::take_detached) rather than a waker.
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn submit(
         &self,
         src_addr: GdmaBuf,
@@ -248,7 +266,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 return Err(GdmaError::NO_FREE_TAGS);
             }
             let tag = s.tag_free.trailing_zeros() as u16;
-            s.tag_free &= !(1u32 << tag);
+            s.tag_free &= !(1u64 << tag);
             let slot = &mut s.tags[tag as usize];
             slot.detached = detached.is_some();
             slot.cookie = detached.unwrap_or(0);
@@ -262,7 +280,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                         .head
                         .read(SQ_CHANNEL_HEAD::HEAD) as u16;
                     if next_tail == s.sq_head_cached {
-                        s.tag_free |= 1u32 << tag;
+                        s.tag_free |= 1u64 << tag;
                         return Err(GdmaError::SQ_FULL);
                     }
                 }
@@ -307,16 +325,30 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
             tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
 
-            // Ensure SQ entry write is visible to HW before doorbell
-            cortex_m::asm::dmb();
-
             s.sq_tail = next_tail;
-            self.regs.sq[self.channel as usize]
-                .tail
-                .write(SQ_CHANNEL_TAIL::TAIL.val(s.sq_tail.into()));
+            s.bell = true;
 
             Ok(tag)
         })
+    }
+
+    /// Ring the doorbell for the SQ entries written since the last call,
+    /// if any. The PAL calls this on every pass of its poll loop, so the
+    /// transfers submitted in a pass share one barrier, by which time
+    /// their entries, and the data they copy, have mostly drained.
+    #[inline(always)]
+    pub fn ring(&self) {
+        self.state.with(|s| {
+            if s.bell {
+                s.bell = false;
+                // The SQ entries, and the data the transfers read, must be
+                // visible to the engine before the doorbell.
+                cortex_m::asm::dmb();
+                self.regs.sq[self.channel as usize]
+                    .tail
+                    .write(SQ_CHANNEL_TAIL::TAIL.val(s.sq_tail.into()));
+            }
+        });
     }
 
     /// Submit a DMA copy from `src` to `dst` and await completion.
@@ -329,10 +361,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// Returns immediately:
     /// - [`GdmaError::ZERO_LENGTH`] — `src_len` or `dst_len` is zero.
     /// - [`GdmaError::INVALID_HOST_IFC`] — `Host { ctrl_id: 0 }` used.
-    /// - [`GdmaError::NO_FREE_TAGS`] — all tag slots are in use.
-    /// - [`GdmaError::SQ_FULL`] — SQ ring buffer is full.
     ///
     /// Returns on await:
+    /// - [`GdmaError::NO_FREE_TAGS`] or [`GdmaError::SQ_FULL`] — every tag
+    ///   or SQ entry is taken.
     /// - [`GdmaError::dma_error`] — hardware reported an error.
     pub fn copy_mem(
         &self,
@@ -343,24 +375,21 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_ifc: MemInterface,
         dst_len: u32,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
-        Ok(poll_fn(move |cx| {
-            self.state.with(|s| {
-                let slot = &mut s.tags[tag as usize];
-                if slot.completed {
-                    let status = slot.status;
-                    slot.completed = false;
-                    s.tag_free |= 1u32 << tag;
-                    return Poll::Ready(if status == 0 {
-                        Ok(())
-                    } else {
-                        Err(GdmaError::dma_error(status))
-                    });
-                }
-                slot.waker.register(cx.waker());
-                Poll::Pending
-            })
-        }))
+        if src_len == 0 || dst_len == 0 {
+            return Err(GdmaError::ZERO_LENGTH);
+        }
+        if src_ifc.is_invalid_host() || dst_ifc.is_invalid_host() {
+            return Err(GdmaError::INVALID_HOST_IFC);
+        }
+        Ok(async move {
+            let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
+            GdmaCopyFuture {
+                driver: self,
+                tag,
+                released: false,
+            }
+            .await
+        })
     }
 
     /// Submit a DMA copy that no task awaits: its completion is collected,
@@ -368,7 +397,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// # Errors
     ///
-    /// As [`copy_mem`](Self::copy_mem) fails immediately.
+    /// As [`copy_mem`](Self::copy_mem) fails immediately, and also
+    /// [`GdmaError::NO_FREE_TAGS`] or [`GdmaError::SQ_FULL`] when every tag
+    /// or SQ entry is taken: with no task to wait, the caller falls back.
     #[allow(clippy::too_many_arguments)]
     pub fn copy_mem_detached(
         &self,
@@ -400,12 +431,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 return None;
             }
             let tag = s.detached_done.trailing_zeros();
-            s.detached_done &= !(1u32 << tag);
+            s.detached_done &= !(1u64 << tag);
             let slot = &mut s.tags[tag as usize];
             slot.completed = false;
             slot.detached = false;
             let done = (slot.cookie, slot.status == 0);
-            s.tag_free |= 1u32 << tag;
+            s.tag_free |= 1u64 << tag;
             Some(done)
         })
     }
@@ -413,10 +444,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// Record the completion whose CQ status word is `st` for its tag, and
     /// wake its awaiter (or mark a detached copy done).
     #[inline(always)]
-    fn complete(s: &mut GdmaState<DEPTH>, st: u32) {
+    fn complete(s: &mut GdmaState<TAGS>, st: u32) {
         let st = tock_registers::LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(st);
         let tag = st.read(GDMA_CQ_STATUS::TAG) as usize;
-        if tag < DEPTH {
+        if tag < TAGS {
             let slot = &mut s.tags[tag];
             slot.status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
                 0
@@ -425,7 +456,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             };
             slot.completed = true;
             if slot.detached {
-                s.detached_done |= 1u32 << tag;
+                s.detached_done |= 1u64 << tag;
             } else {
                 slot.waker.wake();
             }
@@ -438,9 +469,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// SingleCell borrow and batching the MMIO head pointer write.
     /// Call from the GDMA_CQ IRQ handler or the main poll loop.
     pub fn wake(&self, irq: u16) {
-        self.state.with(|s| {
-            // Clear NVIC pending bit for this interrupt
+        self.reap();
+        tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+    }
 
+    fn reap(&self) {
+        self.state.with(|s| {
             // SAFETY: The configured CQ shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
 
@@ -469,7 +503,63 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             self.regs.cq[self.channel as usize]
                 .head
                 .write(CQ_CHANNEL_HEAD::HEAD.val(s.cq_head.into()));
-            tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
+        });
+    }
+}
+
+struct GdmaCopyFuture<'a, const DEPTH: usize, const TAGS: usize> {
+    driver: &'a GdmaDriver<DEPTH, TAGS>,
+    tag: u16,
+    released: bool,
+}
+
+impl<const DEPTH: usize, const TAGS: usize> Future for GdmaCopyFuture<'_, DEPTH, TAGS> {
+    type Output = HsmResult<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.driver.state.with(|s| {
+            let slot = &mut s.tags[this.tag as usize];
+            if slot.completed {
+                let status = slot.status;
+                slot.completed = false;
+                s.tag_free |= 1u64 << this.tag;
+                this.released = true;
+                return Poll::Ready(if status == 0 {
+                    Ok(())
+                } else {
+                    Err(GdmaError::dma_error(status))
+                });
+            }
+            slot.waker.register(cx.waker());
+            Poll::Pending
+        })
+    }
+}
+
+impl<const DEPTH: usize, const TAGS: usize> Drop for GdmaCopyFuture<'_, DEPTH, TAGS> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+
+        // The DMA engine may still own both buffers. Reap completions until
+        // this transfer is known to be done before returning control to the
+        // caller, which may reclaim its allocation immediately.
+        while !self
+            .driver
+            .state
+            .with(|s| s.tags[self.tag as usize].completed)
+        {
+            self.driver.reap();
+            core::hint::spin_loop();
+        }
+
+        self.driver.state.with(|s| {
+            let slot = &mut s.tags[self.tag as usize];
+            slot.completed = false;
+            slot.detached = false;
+            s.tag_free |= 1u64 << self.tag;
         });
     }
 }
@@ -505,5 +595,114 @@ unsafe fn read_pair(p: *const u32) -> (u32, u32) {
     // SAFETY: per the function contract.
     unsafe {
         (p.read_volatile(), p.add(4).read_volatile())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::boxed::Box;
+
+    use super::*;
+
+    #[test]
+    fn dropping_unpolled_copy_does_not_submit_or_reserve_tag() {
+        let driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        let buffer = GdmaBuf::Prp {
+            prp0: crate::GdmaAddr::from_u32(0x1000),
+            prp1: crate::GdmaAddr::ZERO,
+        };
+        let future = driver
+            .copy_mem(
+                buffer,
+                MemInterface::Device,
+                4,
+                buffer,
+                MemInterface::Device,
+                4,
+            )
+            .expect("valid copy arguments");
+        drop(future);
+        driver.state.with(|s| {
+            assert_eq!(s.sq_tail, 0);
+            assert_eq!(s.tag_free, 0b111);
+        });
+    }
+
+    #[test]
+    fn dropping_pending_copy_reaps_completion_before_releasing_tag() {
+        // SAFETY: the register overlay consists of integer MMIO cells; leaked
+        // zeroed storage supplies permanent, aligned fake registers.
+        let regs = Box::leak(Box::new(unsafe {
+            core::mem::MaybeUninit::<GdmaRegs>::zeroed().assume_init()
+        }));
+        // SAFETY: the CQ overlay also contains only integer MMIO cells.
+        let ring = unsafe { core::mem::MaybeUninit::<[GdmaCqEntry; 4]>::zeroed().assume_init() };
+        ring[0].status.write(GDMA_CQ_STATUS::SUCCESS.val(1));
+        let tail = 1u32;
+        let mut driver = GdmaDriver::<4, 3>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        // SAFETY: the fake register storage is leaked and has the overlay's alignment.
+        driver.regs = unsafe { StaticRef::new(regs) };
+        driver.cq_ring = ring.as_ptr();
+        driver.cq_tail_shadow = &tail;
+        driver.state.with(|s| {
+            s.tag_free &= !1;
+            assert!(!s.tags[0].completed);
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 0,
+            released: false,
+        });
+
+        driver.state.with(|s| {
+            assert_eq!(s.cq_head, 1);
+            assert_ne!(s.tag_free & 1, 0);
+            assert!(!s.tags[0].completed);
+        });
+        assert_eq!(driver.regs.cq[0].head.read(CQ_CHANNEL_HEAD::HEAD), 1);
+    }
+
+    #[test]
+    fn dropping_completed_copy_releases_tag_for_reuse() {
+        let driver = GdmaDriver::<64, 48>::new(ChannelConfig {
+            channel: 0,
+            sq_base: 0,
+            cq_base: 0,
+            cq_tail_shadow: 0,
+            sq_head_shadow: 0,
+            interrupt: false,
+        });
+        driver.state.with(|s| {
+            s.tag_free &= !(1u64 << 40);
+            s.tags[40].completed = true;
+        });
+
+        drop(GdmaCopyFuture {
+            driver: &driver,
+            tag: 40,
+            released: false,
+        });
+
+        driver.state.with(|s| {
+            assert_ne!(s.tag_free & (1u64 << 40), 0);
+            assert!(!s.tags[40].completed);
+        });
     }
 }

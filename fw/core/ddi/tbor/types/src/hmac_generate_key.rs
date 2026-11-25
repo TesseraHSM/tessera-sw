@@ -120,7 +120,7 @@ mod tests {
     fn request_round_trips_scope_and_hash() {
         let mut buf = [0u8; 256];
         let label = b"hmac-key";
-        let frame = TborHmacGenerateKeyReq::encode(&mut buf)
+        let frame = TborHmacGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(5))
             .unwrap()
@@ -144,7 +144,7 @@ mod tests {
     fn response_round_trips_masked_key() {
         let mut buf = [0u8; 512];
         let masked = [0xABu8; MASKED_HMAC_KEY_MAX_LEN];
-        let frame = TborHmacGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborHmacGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

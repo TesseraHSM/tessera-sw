@@ -22,6 +22,14 @@
 //! `owner_seed_id`, `key_label`, and the entire reserved tail of
 //! [`MaskedKeyMetadata`]. Any single-bit flip is caught at
 //! [`unmask`](crate::aead::unmask) before the `target_key` is exposed.
+//!
+//! ## Target key alignment
+//!
+//! The target key starts at offset 216, a multiple of 8, so a blob placed
+//! at a 4-byte aligned address (TBOR `align = 4`) yields a 4-byte aligned
+//! key. The ciphertext is zero-padded to a multiple of 16 bytes, so at
+//! least `roundup8(target_key_len)` bytes of the blob follow the key's
+//! start. PAL ECC and RSA operations rely on both properties.
 
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -239,26 +247,53 @@ impl MaskedKeyMetadata {
     /// for future use, and the platform-identity bindings are policy
     /// fields for the caller to compare against current PAL values.
     pub(crate) fn validate_v1(&self) -> HsmResult<()> {
+        // Pad bytes after the label MUST be zero — prevents callers
+        // from smuggling unbound-looking data through the slack.
         if self.magic != META_MAGIC
             || self.version.get() != META_VERSION_V1
             || self.data_pad_len > 15
             || (self.key_label_len as usize) > KEY_LABEL_MAX
-            || !all_zero(&self._reserved)
+            || !self.slack_and_reserved_zero()
         {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
-        // Pad bytes after the label MUST be zero — prevents callers
-        // from smuggling unbound-looking data through the slack.
-        let n = self.key_label_len as usize;
-        if !all_zero(&self.key_label[n..]) {
-            return Err(HsmError::MaskedKeyDecodeFailed);
-        }
         Ok(())
+    }
+
+    /// Whether the label's slack, `key_label[key_label_len..]`, and the
+    /// reserved tail are all zero: every byte from the slack on but
+    /// `data_pad_len`, which lies between them.
+    ///
+    /// Tested a word at a time on the record's word boundaries, which an
+    /// aligned record (as [`unmask`](crate::aead::unmask) validates) keeps
+    /// aligned, rather than from the label's mid-word start.
+    fn slack_and_reserved_zero(&self) -> bool {
+        const PAD_WORD: usize = PAD_OFF / 4;
+        const PAD_MASK: u32 = !(0xFF << (8 * (PAD_OFF % 4)));
+        let (words, _) = self.as_bytes().as_chunks::<4>();
+        let or = |words: &[[u8; 4]]| words.iter().fold(0, |a, w| a | u32::from_le_bytes(*w));
+        let from = LABEL_OFF + (self.key_label_len as usize).min(KEY_LABEL_MAX);
+        let first = from / 4;
+        // The slack's first word, without the label bytes it starts with.
+        let mut acc = u32::from_le_bytes(words[first]) & (u32::MAX << (8 * (from % 4)));
+        if first < PAD_WORD {
+            acc |=
+                or(&words[first + 1..PAD_WORD]) | (u32::from_le_bytes(words[PAD_WORD]) & PAD_MASK);
+        } else {
+            acc &= PAD_MASK;
+        }
+        acc | or(&words[PAD_WORD + 1..]) == 0
     }
 }
 
 /// Offset of `key_label` within [`MaskedKeyMetadata`].
 const LABEL_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, key_label);
+
+/// Offset of `data_pad_len`, which directly follows the label and directly
+/// precedes the reserved tail, the record's last bytes.
+const PAD_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, data_pad_len);
+const _: () = assert!(PAD_OFF == LABEL_OFF + KEY_LABEL_MAX);
+const _: () = assert!(PAD_OFF + 1 + RESERVED_LEN == META_LEN && META_LEN.is_multiple_of(4));
 
 /// Whether every byte is zero, tested a word at a time.
 pub(crate) fn all_zero(bytes: &[u8]) -> bool {

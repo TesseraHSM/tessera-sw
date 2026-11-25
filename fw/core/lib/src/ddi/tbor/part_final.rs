@@ -661,7 +661,7 @@ fn commit_final<P: HsmPal>(
 /// Encode the `TborPartFinalResp` into a fresh IO-scoped HsmDmaBuf.
 fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, backup: &HsmDmaBuf) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborPartFinalResp::encode(buf, 0, false)?
+        let frame = TborPartFinalResp::encode_for_request(buf, 0, false)?
             .local_mk_backup(backup)?
             .finish();
         Ok(frame.as_bytes().len())

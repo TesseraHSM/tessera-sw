@@ -5,18 +5,21 @@ use core::ops::AsyncFnOnce;
 
 use embassy_sync::waitqueue::WakerRegistration;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
 
 use crate::engine::ecc_sign_cmd;
+use crate::engine::ecc_sign_in_place_cmd;
 use crate::engine::rsa_mod_exp_priv_cmd;
+use crate::engine::rsa_mod_exp_priv_in_place_cmd;
 use crate::engine::rsa_mod_exp_pub_cmd;
 use crate::engine::UpkaEngine;
+use crate::executor::EngineExecutor;
 use crate::pool::EngineSlot;
 use crate::pool::QueueSlot;
 use crate::pool::SpecificWaiter;
-use crate::pool::StagedCmd;
 use crate::pool::Ticket;
 use crate::pool::TicketState;
 use crate::pool::UpkaState;
@@ -66,8 +69,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Initialize the PKA engine pool.
     ///
-    /// No MMIO setup is required. Engines are always present and command status
-    /// is reported through the per-engine status registers.
+    /// Engines are always present and command status is reported through the
+    /// per-engine status registers; the only setup is writing the shared
+    /// `MEM_WIPE` descriptor in GSRAM.
     ///
     /// # Returns
     ///
@@ -87,6 +91,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
             Self::_ASSERT_ENGINES_MAX,
             Self::_ASSERT_ENGINE_COUNT,
         );
+
+        EngineExecutor::init_wipe_descriptor();
 
         Self {
             state: SingleCell::new(UpkaState {
@@ -114,7 +120,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                 tickets: core::array::from_fn(|_| Ticket {
                     waker: WakerRegistration::new(),
                     state: TicketState::Free,
-                    cmd: StagedCmd::default(),
                 }),
                 ticket_free: if TICKETS == 64 {
                     u64::MAX
@@ -193,8 +198,10 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts.
     /// - `priv_key`: DMA-capable private key buffer.
-    /// - `hash`: DMA-capable digest buffer.
+    /// - `input`: DMA-capable packed `k ‖ digest` operand (`k` lane unused).
     /// - `signature`: DMA-capable output buffer for `r || s`.
     ///
     /// # Returns
@@ -206,12 +213,38 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_sign(
         &self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         priv_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.scheduler()
-            .run_staged(ecc_sign_cmd(curve, priv_key, hash, signature)?)
+            .run_staged(ecc_sign_cmd(curve, hash, priv_key, input, signature)?)
+            .await
+    }
+
+    /// Sign the digest in the digest lane of the packed `k ‖ digest`
+    /// operand `k_sig` using ECDSA, writing `r || s` over its start.
+    ///
+    /// Like [`Self::rsa_mod_exp_priv_in_place`], it relies on the engine
+    /// loading its operands before it writes the result. `k_sig` stays
+    /// exclusively borrowed until the command completes.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: `r || s` was written to the start of `k_sig`.
+    /// - `Err(UpkaError::CMD_ERROR)`: Buffer shape is invalid, or hardware
+    ///   rejected the command.
+    /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
+    pub async fn ecc_sign_in_place(
+        &self,
+        curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        k_sig: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.scheduler()
+            .run_staged(ecc_sign_in_place_cmd(curve, hash, priv_key, k_sig)?)
             .await
     }
 
@@ -223,9 +256,10 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
+    /// - `hash`: Algorithm that produced the digest; selects where the
+    ///   digest operand starts.
     /// - `pub_key`: DMA-capable public key buffer.
-    /// - `hash`: DMA-capable digest buffer.
-    /// - `signature`: DMA-capable signature buffer.
+    /// - `input`: DMA-capable packed `r ‖ s ‖ digest` operand.
     /// - `result`: DMA-capable output buffer that receives the 4-byte
     ///   hardware status word.
     /// - `prime`: DMA-capable curve prime buffer (LE).
@@ -242,15 +276,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_verify(
         &self,
         curve: UpkaEccCurve,
+        hash: HsmHashAlgo,
         pub_key: &HsmDmaBuf,
-        hash: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        input: &HsmDmaBuf,
         result: &mut HsmDmaBuf,
         prime: &HsmDmaBuf,
         mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| {
-            eng.ecc_verify(curve, pub_key, hash, signature, result, prime, mont_result)
+            eng.ecc_verify(curve, hash, pub_key, input, result, prime, mont_result)
                 .await
         })
         .await
@@ -365,18 +399,20 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     }
 
     /// Replace the input block with the private-key result.
+    ///
+    /// Runs as a staged command, as [`rsa_mod_exp_priv`](Self::rsa_mod_exp_priv)
+    /// does: started by whichever completion frees an engine and wiped as
+    /// soon as it completes, so the engine never idles waiting for this task
+    /// to run.
     pub async fn rsa_mod_exp_priv_in_place(
         &self,
         key_type: UpkaRsaKeyType,
         key: &HsmDmaBuf,
         input_output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .rsa_mod_exp_priv_in_place(key_type, key, input_output)
-                .await
-        })
-        .await
+        self.scheduler()
+            .run_staged(rsa_mod_exp_priv_in_place_cmd(key_type, key, input_output)?)
+            .await
     }
 
     /// Run an RSA public-key modular exponentiation.

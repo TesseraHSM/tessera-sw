@@ -26,6 +26,59 @@ use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
 
 #[test]
+fn tbor_recovery_retains_identity_and_cannot_be_evicted() {
+    let pid = HsmPartId::from(56u8);
+    let part = PartStore::partition(pid).expect("partition");
+    part.reset();
+    let mut table = SessionStore::partition(pid).expect("sessions");
+    let id = table.create(HsmKeyId::from(1u16)).expect("active");
+    table
+        .set_recovery_binding(id, &[0xA5; 16])
+        .expect("fingerprint");
+    table.set_psk_changed(id, true).expect("consumed");
+    table.mark_all_needs_renego();
+    part.clear_state(PartResetKind::Migrate);
+    table
+        .reopen_pending(id, HsmKeyId::from(2u16))
+        .expect("recovery");
+    assert!(matches!(table.state(id), HsmSessionState::Pending));
+    assert!(table
+        .create_pending(HsmSessionRole::CryptoOfficer, HsmKeyId::from(3u16))
+        .is_err());
+    table
+        .reopen_pending(id, HsmKeyId::from(3u16))
+        .expect("replace");
+    table.mark_all_needs_renego();
+    part.clear_state(PartResetKind::Migrate);
+    assert!(matches!(
+        table.state(id),
+        HsmSessionState::NeedsRenegotiation
+    ));
+    assert_eq!(
+        table.recovery_binding(id).expect("fingerprint"),
+        &[0xA5; 16]
+    );
+    // The NSSR returned the PSKs to their defaults, so the change is
+    // available again.
+    assert!(!table.psk_changed(id).expect("allowance restored"));
+    table.set_psk_changed(id, true).expect("consumed");
+    table
+        .reopen_pending(id, HsmKeyId::from(4u16))
+        .expect("retry");
+    table.rollback_recreation(id).expect("rollback");
+    assert!(table.psk_changed(id).expect("rollback preserves consumed"));
+    table.delete(id).expect("close");
+    let (fresh, _) = table
+        .create_pending(HsmSessionRole::CryptoOfficer, HsmKeyId::from(5u16))
+        .expect("fresh");
+    assert!(!table.psk_changed(fresh).expect("new allowance"));
+    assert_eq!(
+        table.recovery_binding(fresh).expect("no fingerprint"),
+        &[0; 16]
+    );
+}
+
+#[test]
 fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     let pid = HsmPartId::from(50u8);
     let part = PartStore::partition(pid).unwrap();
@@ -35,7 +88,6 @@ fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(1u16))
         .unwrap();
-    table.try_consume_psk_change(active).unwrap();
 
     table.mark_all_needs_renego();
     part.clear_state(PartResetKind::Migrate);
@@ -64,7 +116,6 @@ fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     assert_eq!(table.recreate(active, new_key).unwrap(), active);
     assert!(matches!(table.state(active), HsmSessionState::Active));
     assert_eq!(table.physical_id(active).unwrap(), new_key);
-    table.try_consume_psk_change(active).unwrap();
     assert_eq!(table.create(HsmKeyId::from(3u16)).unwrap(), pending);
 }
 
@@ -212,9 +263,8 @@ fn clear_all_releases_active_pending_and_renegotiating_slots() {
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(2u16))
         .unwrap();
-    table.try_consume_psk_change(active).unwrap();
 
-    // Full teardown must clear both masks, even if some slots already
+    // Full teardown must clear the masks, even if some slots already
     // needed renegotiation before resources were removed.
     table.clear_all();
 

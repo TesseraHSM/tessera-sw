@@ -2,8 +2,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# Runs the checks of the CI workflow's build-and-drive and unit-tests jobs in
-# one go. Builds the standalone no-device module and drives it with OpenSC
+# Runs the checks of the CI workflow (pkcs11.yml) in one go, except two.
+# Builds the standalone no-device module and drives it with OpenSC
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
 # (build_units.sh); if the product module has been built (cargo build -p
 # tsra_pkcs11; TSRA_PKCS11_MODULE overrides its path), it also
@@ -12,9 +12,9 @@
 # pair generation and a refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
 # pkcs11test conformance gate (tests/pkcs11test) and the per-PR part of the
-# pkcs11-check gate (tests/pkcs11-check) against the simulator. The
-# workflow's ASan module build (functional-asan) and its libFuzzer run
-# (template-fuzz, which needs clang) are not repeated here.
+# pkcs11-check gate (tests/pkcs11-check) against the simulator. The two it
+# leaves out are the functional suite on an ASan build of the module and the
+# libFuzzer run, which needs clang.
 #
 # pkcs11-tool is expected locally (extracted from a distro package, no system
 # install). Point PKCS11_TESTING at that directory; it defaults to the
@@ -110,9 +110,10 @@ if [ -f "$HSMMOD" ]; then
     # ceremony's best-effort diagnostic above), so announce a failure before the
     # pipefail/errexit abort rather than aborting the script silently.
     echo; echo "== emulator-backed: AES keygen via pkcs11-tool =="
-    # --sensitive is required: this token refuses non-sensitive HSM keys.
+    # --sensitive and --private are required: this token refuses
+    # non-sensitive HSM keys and public token keys.
     if ! pkcs11-tool --module "$HSMMOD" --login --pin 1234 --keygen \
-        --key-type aes:32 --label validation --sensitive 2>&1 | sed 's/^/   /'; then
+        --key-type aes:32 --label validation --sensitive --private 2>&1 | sed 's/^/   /'; then
         echo "   (AES keygen failed)"; exit 1
     fi
 
@@ -138,22 +139,29 @@ if [ -f "$HSMMOD" ]; then
         || { echo "   (plaintext key import was not refused)"; exit 1; }
 
     echo; echo "== emulator-backed: gtest functional suite (integration-tests/cpp) =="
-    # googletest is fetched by CMake. Cache only its SOURCE between runs and
-    # let every build tree compile it privately: a shared build directory
-    # breaks as soon as one of the trees using it goes away.
+    # googletest and Wycheproof are fetched by CMake. Cache only their SOURCE
+    # between runs and let every build tree compile privately: a shared build
+    # directory breaks as soon as one of the trees using it goes away.
     deps="${XDG_CACHE_HOME:-$HOME/.cache}/tsra-pkcs11-cpp-deps"
     src_arg=()
-    if [ -d "$deps/googletest-src" ]; then
-        src_arg=(-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$deps/googletest-src")
-    fi
+    for dep in googletest wycheproof; do
+        if [ -d "$deps/$dep-src" ]; then
+            src_arg+=(-DFETCHCONTENT_SOURCE_DIR_"${dep^^}"="$deps/$dep-src")
+        fi
+    done
     cmake -S "$PLUGIN/integration-tests/cpp" -B "$WORK/cpp-tests" \
         -DCMAKE_BUILD_TYPE=Release "${src_arg[@]}" > "$WORK/cmake.log" 2>&1 \
         || { tail -n 20 "$WORK/cmake.log"; echo "   (cmake configure failed)"; exit 1; }
-    # Seed the cache from the first run's download.
-    if [ ! -d "$deps/googletest-src" ] && [ -d "$WORK/cpp-tests/_deps/googletest-src" ]; then
-        mkdir -p "$deps"
-        cp -r "$WORK/cpp-tests/_deps/googletest-src" "$deps/googletest-src" || true
-    fi
+    # Seed the cache from the first run's downloads.
+    for dep in googletest wycheproof; do
+        if [ ! -d "$deps/$dep-src" ] && [ -d "$WORK/cpp-tests/_deps/$dep-src" ]; then
+            mkdir -p "$deps"
+            cp -r "$WORK/cpp-tests/_deps/$dep-src" "$deps/$dep-src" || {
+                echo "   (could not cache $dep; the next run fetches it again)"
+                rm -rf "$deps/$dep-src"
+            }
+        fi
+    done
     cmake --build "$WORK/cpp-tests" --parallel > "$WORK/cmake-build.log" 2>&1 \
         || { tail -n 30 "$WORK/cmake-build.log"; echo "   (cmake build failed)"; exit 1; }
     TSRA_PKCS11_MODULE="$HSMMOD" ctest --test-dir "$WORK/cpp-tests" --output-on-failure \

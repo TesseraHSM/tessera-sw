@@ -32,7 +32,10 @@ pub(crate) mod darc_tmk_gen;
 pub(crate) mod darc_tmk_import;
 pub(crate) mod ecc_generate_key;
 pub(crate) mod ecc_sign;
+pub(crate) mod ecc_verify;
 pub(crate) mod ecdh_derive;
+pub(crate) mod ecdsa_sign;
+pub(crate) mod ecdsa_verify;
 pub(crate) mod from_pal;
 pub(crate) mod get_cert;
 pub(crate) mod get_cert_chain_info;
@@ -55,7 +58,9 @@ pub mod part_init;
 pub mod policy;
 pub(crate) mod psk_change;
 pub(crate) mod pta;
+pub(crate) mod rsa_encrypt_decrypt;
 pub(crate) mod rsa_mod_exp;
+pub(crate) mod rsa_sign_verify;
 pub(crate) mod sd_backup;
 pub(crate) mod sd_create_peer_backup;
 pub(crate) mod sd_create_remote_backup;
@@ -64,6 +69,7 @@ pub(crate) mod sd_restore_local_backup;
 pub(crate) mod sd_restore_peer_backup;
 pub(crate) mod sd_restore_remote_backup;
 pub(crate) mod sd_sealing_key_gen;
+pub(crate) mod sd_transfer;
 pub(crate) mod session_close;
 pub(crate) mod session_open_finish;
 pub(crate) mod session_open_init;
@@ -73,13 +79,13 @@ pub(crate) mod verify_key;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
-use tsra_fw_ddi_tbor::PROTOCOL_VERSION;
+use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
@@ -89,6 +95,15 @@ use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 use crate::part_state;
+
+pub(crate) fn ecc_hash_from_selector(algo: HashAlgo) -> Option<HsmHashAlgo> {
+    match algo {
+        HashAlgo::Sha256 => Some(HsmHashAlgo::Sha256),
+        HashAlgo::Sha384 => Some(HsmHashAlgo::Sha384),
+        HashAlgo::Sha512 => Some(HsmHashAlgo::Sha512),
+        _ => None,
+    }
+}
 
 /// TBOR opcodes recognised by the firmware dispatcher.
 ///
@@ -344,42 +359,35 @@ pub(crate) mod opcode {
     /// `MlDsaGenerateKey` — generate an ML-DSA (FIPS 204) keypair and
     /// return the private half **masked**, plus the public key.
     ///
-    /// TEMPORARY: currently dispatched out of session for hardware
-    /// bring-up, and served by a stub that decodes and rejects rather
-    /// than generating a key.  See [`super::mldsa_generate_key`].
+    /// In-session; see [`super::mldsa_generate_key`].
     pub(crate) const MLDSA_GENERATE_KEY: u8 = 0x26;
 
     /// `MlDsaSign` — sign a message with a caller-held masked ML-DSA key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like
-    /// `MLDSA_GENERATE_KEY`.  See [`super::mldsa_sign`].
+    /// In-session; see [`super::mldsa_sign`].
     pub(crate) const MLDSA_SIGN: u8 = 0x27;
 
     /// `MlDsaVerify` — verify a signature under a supplied public key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mldsa_verify`].
+    /// In-session; see [`super::mldsa_verify`].
     pub(crate) const MLDSA_VERIFY: u8 = 0x28;
 
     /// `MlKemGenerateKey` — generate an ML-KEM key pair and return the
     /// decapsulation key **masked**, plus the encapsulation key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_generate_key`].
+    /// In-session; see [`super::mlkem_generate_key`].
     pub(crate) const MLKEM_GENERATE_KEY: u8 = 0x29;
 
     /// `MlKemEncapsulate` — encapsulate to an ML-KEM public key, returning
     /// the ciphertext and the shared secret **masked**.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_encapsulate`].
+    /// In-session; see [`super::mlkem_encapsulate`].
     pub(crate) const MLKEM_ENCAPSULATE: u8 = 0x2A;
 
     /// `MlKemDecapsulate` — decapsulate a ciphertext with a caller-held
     /// masked ML-KEM key, returning the shared secret **masked**.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
+    /// In-session; see [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
 
     /// `AesGcmEncryptDecrypt` — AES-256-GCM over OOB in / out SGL blocks
@@ -400,9 +408,32 @@ pub(crate) mod opcode {
     /// private key. See [`super::get_public_key`].
     pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
 
+    /// `RsaEncryptDecrypt` — perform padded RSA encryption or decryption
+    /// with a caller-held masked private key. See
+    /// [`super::rsa_encrypt_decrypt`].
+    pub(crate) const RSA_ENCRYPT_DECRYPT: u8 = 0x34;
+
     /// `VerifyKey` — authenticate a masked key of any kind without using
     /// it. See [`super::verify_key`].
     pub(crate) const VERIFY_KEY: u8 = 0x32;
+
+    /// `EccVerify` — verify a precomputed digest using an authenticated
+    /// masked ECC private key.
+    pub(crate) const ECC_VERIFY: u8 = 0x33;
+
+    /// `RsaSign` — sign the internal hash of a raw OOB message using a
+    /// caller-held masked RSA private key.
+    pub(crate) const RSA_SIGN: u8 = 0x35;
+
+    /// `RsaVerify` — verify the internal hash of a raw OOB message using
+    /// the public component of a caller-held masked RSA private key.
+    pub(crate) const RSA_VERIFY: u8 = 0x36;
+
+    /// `EcdsaSign` — sign a raw OOB message with internal hashing.
+    pub(crate) const ECDSA_SIGN: u8 = 0x37;
+
+    /// `EcdsaVerify` — verify a raw OOB message with internal hashing.
+    pub(crate) const ECDSA_VERIFY: u8 = 0x38;
 }
 
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
@@ -557,15 +588,14 @@ pub(crate) struct DispatchResult {
 /// log's storage for these only; any other command gets an empty log over
 /// no storage, so teardown has none of it to scrub, and on which any push
 /// fails -- so a command missing here fails rather than runs unrecorded.
-pub(crate) fn records_undo<P: HsmPalFeatures>(opcode: u8) -> bool {
-    // With secure sessions, `SessionClose` defers its destroy to the commit
-    // walk so the response can still be encrypted.
-    if P::IO_PROTOCOL.secure_session() && opcode == opcode::SESSION_CLOSE {
-        return true;
-    }
+///
+/// `SessionClose` defers its destroy to the commit walk so its response
+/// can still be sealed under the session's transport key.
+pub(crate) fn records_undo(opcode: u8) -> bool {
     matches!(
         opcode,
-        opcode::SESSION_OPEN_INIT
+        opcode::SESSION_CLOSE
+            | opcode::SESSION_OPEN_INIT
             | opcode::SESSION_OPEN_FINISH
             | opcode::PSK_CHANGE
             | opcode::PART_INIT
@@ -605,8 +635,12 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::UNWRAP_KEY => types::TborUnwrapKeyResp::MAX_ENCODED_SIZE,
         opcode::AES_GENERATE_KEY => types::TborAesGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::ECC_GENERATE_KEY => types::TborEccGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECC_VERIFY => types::TborEccVerifyResp::MAX_ENCODED_SIZE,
         opcode::ECDH_DERIVE => types::TborEcdhDeriveResp::MAX_ENCODED_SIZE,
         opcode::RSA_MOD_EXP => types::TborRsaModExpResp::MAX_ENCODED_SIZE,
+        opcode::RSA_ENCRYPT_DECRYPT => types::TborRsaEncryptDecryptResp::MAX_ENCODED_SIZE,
+        opcode::RSA_SIGN => types::TborRsaSignResp::MAX_ENCODED_SIZE,
+        opcode::RSA_VERIFY => types::TborRsaVerifyResp::MAX_ENCODED_SIZE,
         opcode::HASH => types::TborHashResp::MAX_ENCODED_SIZE,
         opcode::HKDF_DERIVE => types::TborHkdfDeriveResp::MAX_ENCODED_SIZE,
         opcode::CONCAT_KDF_DERIVE => types::TborConcatKdfDeriveResp::MAX_ENCODED_SIZE,
@@ -628,6 +662,8 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::AES_XTS_GENERATE_KEY => types::TborAesXtsGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::GET_PUBLIC_KEY => types::TborGetPublicKeyResp::MAX_ENCODED_SIZE,
         opcode::VERIFY_KEY => types::TborVerifyKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECDSA_SIGN => types::TborEcdsaSignResp::MAX_ENCODED_SIZE,
+        opcode::ECDSA_VERIFY => types::TborEcdsaVerifyResp::MAX_ENCODED_SIZE,
         // These handlers reclaim response space within every valid request.
         opcode::AES_ENCRYPT_DECRYPT | opcode::AES_GCM_ENCRYPT_DECRYPT | opcode::ECC_SIGN => {
             request_len
@@ -652,6 +688,9 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     body_sess_id: Option<HsmSessId>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<DispatchResult> {
+    let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(cmd_buf.request())?;
+    validate_api_rev::<P>(api_rev)?;
+
     // Reject unknown opcodes with the canonical error *before*
     // applying any gating logic so the gate cannot leak existence of
     // unsupported opcodes through a different error code.
@@ -700,6 +739,19 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
             if needs_cross_check && u16::from(sess_id) != sqe_session_id {
                 return Err(HsmError::InvalidArg);
             }
+            if needs_cross_check {
+                let stale_close = opcode == opcode::SESSION_CLOSE
+                    && matches!(
+                        pal.session_state(io, sess_id),
+                        HsmSessionState::NeedsRenegotiation
+                    );
+                if !stale_close {
+                    let selected = pal.session_api_revision(io, sess_id)?;
+                    if api_rev != (selected.major, selected.minor) {
+                        return Err(HsmError::UnsupportedRevision);
+                    }
+                }
+            }
 
             // Default-PSK gate: applies only to in-session commands
             // that are not on the allow-list.
@@ -708,6 +760,19 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
                 if crate::part_state::part_psk_is_default(pal, io, psk_id)? {
                     return Err(HsmError::DefaultPskMustRotate);
                 }
+            }
+            if is_in_session(opcode)
+                && opcode != opcode::SESSION_CLOSE
+                && sess_id.role() == HsmSessionRole::CryptoUser
+            {
+                // Rotation does not upgrade existing bootstrap sessions.
+                // All CU work, including PskChange, requires the captured
+                // credential to remain current; close is always available.
+                pal.alloc_scoped_async(io, async |alloc| {
+                    let binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
+                    crate::session::validate_auth_binding(pal, io, alloc, sess_id, binding).await
+                })
+                .await?;
             }
         }
     }
@@ -719,6 +784,9 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::HASH => hash::handle(pal, io, cmd_buf).await,
         opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, cmd_buf).await,
         opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf).await,
+        opcode::ECC_VERIFY => ecc_verify::handle(pal, io, cmd_buf).await,
+        opcode::ECDSA_SIGN => ecdsa_sign::handle(pal, io, cmd_buf).await,
+        opcode::ECDSA_VERIFY => ecdsa_verify::handle(pal, io, cmd_buf).await,
         opcode::SESSION_OPEN_INIT => {
             session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
@@ -752,6 +820,10 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
         opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
+        opcode::RSA_ENCRYPT_DECRYPT => rsa_encrypt_decrypt::handle(pal, io, cmd_buf).await,
+        opcode::RSA_SIGN | opcode::RSA_VERIFY => {
+            rsa_sign_verify::handle(pal, io, cmd_buf, opcode == opcode::RSA_VERIFY).await
+        }
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
         opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,
@@ -813,8 +885,14 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::AES_ENCRYPT_DECRYPT
             | opcode::ECC_GENERATE_KEY
             | opcode::ECC_SIGN
+            | opcode::ECC_VERIFY
+            | opcode::ECDSA_SIGN
+            | opcode::ECDSA_VERIFY
             | opcode::ECDH_DERIVE
             | opcode::RSA_MOD_EXP
+            | opcode::RSA_ENCRYPT_DECRYPT
+            | opcode::RSA_SIGN
+            | opcode::RSA_VERIFY
             | opcode::HASH
             | opcode::HKDF_DERIVE
             | opcode::CONCAT_KDF_DERIVE
@@ -881,8 +959,14 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECC_VERIFY
+        | opcode::ECDSA_SIGN
+        | opcode::ECDSA_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
+        | opcode::RSA_ENCRYPT_DECRYPT
+        | opcode::RSA_SIGN
+        | opcode::RSA_VERIFY
         | opcode::HASH
         | opcode::HKDF_DERIVE
         | opcode::CONCAT_KDF_DERIVE
@@ -951,8 +1035,14 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::AES_ENCRYPT_DECRYPT
         | opcode::ECC_GENERATE_KEY
         | opcode::ECC_SIGN
+        | opcode::ECC_VERIFY
+        | opcode::ECDSA_SIGN
+        | opcode::ECDSA_VERIFY
         | opcode::ECDH_DERIVE
         | opcode::RSA_MOD_EXP
+        | opcode::RSA_ENCRYPT_DECRYPT
+        | opcode::RSA_SIGN
+        | opcode::RSA_VERIFY
         | opcode::HASH
         | opcode::HKDF_DERIVE
         | opcode::CONCAT_KDF_DERIVE
@@ -1043,11 +1133,12 @@ fn extract_session_id(view: &RequestView<'_>) -> HsmResult<HsmSessId> {
 /// Encode a TBOR error response: header with `status = err.0` and a
 /// single `none` placeholder TOC entry (the wire format requires
 /// `toc_count >= 1`).
-///
-/// `opcode` is included only in trace context — TBOR responses do not
-/// carry the opcode (it's implicit from the request/response pairing).
-pub(crate) fn encode_tbor_err(_opcode: u8, err: HsmError, out: &mut [u8]) -> HsmResult<usize> {
-    let bytes = ResponseEncoder::new(out, PROTOCOL_VERSION, err.0, false)
+pub(crate) fn encode_tbor_err(
+    api_rev: (u16, u16),
+    err: HsmError,
+    out: &mut [u8],
+) -> HsmResult<usize> {
+    let bytes = ResponseEncoder::new(out, api_rev, err.0, false)
         .none()?
         .finish()?;
     Ok(bytes.len())
@@ -1055,11 +1146,23 @@ pub(crate) fn encode_tbor_err(_opcode: u8, err: HsmError, out: &mut [u8]) -> Hsm
 
 /// Replace the response prefix with a fully initialized TBOR error frame.
 pub(crate) fn encode_exchange_err(
-    opcode: u8,
+    _opcode: u8,
     err: HsmError,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    encode_tbor_err(opcode, err, cmd_buf.buffer_mut())
+    let api_rev = tsra_fw_ddi_tbor::api_rev_from_header(cmd_buf.request())?;
+    encode_tbor_err(api_rev, err, cmd_buf.buffer_mut())
+}
+
+fn validate_api_rev<P: HsmPalFeatures>(api_rev: (u16, u16)) -> HsmResult<()> {
+    if api_rev < (1, 1)
+        || api_rev < (P::API_REV_MIN.major, P::API_REV_MIN.minor)
+        || api_rev > (P::API_REV_MAX.major, P::API_REV_MAX.minor)
+        || api_rev.0 != P::API_REV_MAX.major
+    {
+        return Err(HsmError::UnsupportedRevision);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1085,7 +1188,7 @@ mod tests {
     fn exchange_api_rev_reuses_the_request_allocation() {
         let mut storage = [0xA5; 32];
         let address = storage.as_ptr();
-        let len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage)
+        let len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage, (1, 1))
             .unwrap()
             .finish()
             .len();
@@ -1128,19 +1231,20 @@ mod tests {
             let fill = storage[0];
             let (undo, buffer) = storage.split_at_mut(32);
             let address = buffer.as_ptr();
-            let mut cmd_buf = HsmCmdBuf::new(dma(buffer), 16, 12).unwrap();
+            buffer[..4].copy_from_slice(&[1, 0, 1, 0]);
+            let mut cmd_buf = HsmCmdBuf::new(dma(buffer), 16, 16).unwrap();
             let len =
                 encode_exchange_err(opcode::API_REV, HsmError::InvalidArg, &mut cmd_buf).unwrap();
             let bytes = cmd_buf.response(len).unwrap();
             assert_eq!(bytes.as_ptr(), address);
-            assert_eq!(len, 12);
+            assert_eq!(len, 16);
             let response = tsra_fw_ddi_tbor::ResponseView::parse(bytes).unwrap();
             assert_eq!(response.status(), HsmError::InvalidArg.0);
             assert_eq!(response.toc_count(), 1);
             assert!(cmd_buf.buffer_mut()[len..].iter().all(|&b| b == fill));
             assert!(undo.iter().all(|&b| b == fill));
         }
-        assert_eq!(storage[0][32..44], storage[1][32..44]);
+        assert_eq!(storage[0][32..48], storage[1][32..48]);
     }
 
     /// Synthetic opcode used to exercise the "future in-session

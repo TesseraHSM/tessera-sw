@@ -13,10 +13,108 @@ use tsra_api::*;
 
 use crate::utils::partition_ex_helpers::*;
 
-/// Happy path: CO pairs with an Authenticated session and returns a
+#[test]
+fn session_ex_migration_reopen_uses_default_psk_and_restores_psk_change() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let root = test_root_spki_sha384(&part);
+    let psk = [0xB4; PSK_LEN];
+    let session = part
+        .open_session_ex(
+            rev,
+            &root,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("open CU");
+    session.change_psk(&psk).expect("rotate");
+    part.reset().expect("migration");
+    assert_eq!(
+        session.change_psk(&[0xC5; PSK_LEN]),
+        Err(HsmError::SessionNeedsRenegotiation)
+    );
+    assert!(
+        session.reopen_ex(&root, Some(&[0xD6; PSK_LEN])).is_err(),
+        "wrong PSK"
+    );
+    // The migration returned the PSKs to their defaults.
+    assert!(
+        session.reopen_ex(&root, Some(&psk)).is_err(),
+        "rotated PSK after migration"
+    );
+    session
+        .reopen_ex(&root, None)
+        .expect("retry with the default PSK");
+    // It also restored the change allowance, so the role rotates again.
+    session.change_psk(&psk).expect("rotate after migration");
+    assert_eq!(
+        session.change_psk(&[0xC5; PSK_LEN]),
+        Err(HsmError::PskChangeAlreadyUsed)
+    );
+}
+
+#[test]
+fn session_ex_migration_close_does_not_require_reopen() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let root = test_root_spki_sha384(&part);
+    let session = part
+        .open_session_ex(
+            rev,
+            &root,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("open CO");
+    part.reset().expect("migration");
+    drop(session);
+    part.open_session_ex(
+        rev,
+        &root,
+        HsmSessionPsk::new(HsmPskId::CO),
+        HsmSessionSuite::EcdhP384,
+    )
+    .expect("stale close freed the CO slot");
+}
+
+#[test]
+fn open_session_ex_rejects_wrong_root_pin() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let pin = test_root_spki_sha384(&part);
+    let mut wrong_pin = pin;
+    wrong_pin[0] ^= 1;
+    assert!(matches!(
+        part.open_session_ex(
+            rev,
+            &wrong_pin,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionSuite::EcdhP384,
+        ),
+        Err(HsmError::InvalidSignature)
+    ));
+    part.open_session_ex(
+        rev,
+        &pin,
+        HsmSessionPsk::new(HsmPskId::CO),
+        HsmSessionSuite::EcdhP384,
+    )
+    .expect("correct root pin must still open");
+}
+
+/// Happy path: a CO session under the ECDH P-384 suite returns a
 /// live `HsmSession` over the public API.
 #[test]
-fn open_session_ex_co_authenticated() {
+fn open_session_ex_co_ecdh_p384() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -30,10 +128,11 @@ fn open_session_ex_co_authenticated() {
     let session = part
         .open_session_ex(
             rev,
+            &test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
-        .expect("CO/Authenticated open_session_ex should succeed against emu");
+        .expect("CO/ECDH-P384 open_session_ex should succeed against emu");
 
     // The V2 session must carry the negotiated api revision through.
     let sess_rev = session.api_rev();
@@ -44,9 +143,9 @@ fn open_session_ex_co_authenticated() {
     );
 }
 
-/// Happy path: CU pairs with a PlainText session.
+/// Happy path: a CU session under the ECDH P-384 suite.
 #[test]
-fn open_session_ex_cu_plaintext() {
+fn open_session_ex_cu_ecdh_p384() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -56,10 +155,11 @@ fn open_session_ex_cu_plaintext() {
     let session = part
         .open_session_ex(
             rev,
+            &test_root_spki_sha384(&part),
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionExType::PlainText,
+            HsmSessionSuite::EcdhP384,
         )
-        .expect("CU/PlainText open_session_ex should succeed against emu");
+        .expect("CU/ECDH-P384 open_session_ex should succeed against emu");
 
     let sess_rev = session.api_rev();
     assert_eq!(
@@ -67,6 +167,22 @@ fn open_session_ex_cu_plaintext() {
         (rev.major, rev.minor),
         "session must echo the negotiated api revision"
     );
+}
+
+#[test]
+fn open_session_ex_removed_suite_rejected() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let result = part.open_session_ex(
+        rev,
+        &test_root_spki_sha384(&part),
+        HsmSessionPsk::new(HsmPskId::CU),
+        HsmSessionSuite(0x02),
+    );
+    assert!(matches!(result, Err(HsmError::InvalidArgument)));
 }
 
 /// PSK-rotation round trip: after rotating the CO PSK from the default,
@@ -77,6 +193,7 @@ fn change_psk_rotates_co_psk() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
+
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
 
@@ -88,8 +205,9 @@ fn change_psk_rotates_co_psk() {
         let session = part
             .open_session_ex(
                 rev,
+                &test_root_spki_sha384(&part),
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open with the default CO PSK");
         session
@@ -100,19 +218,55 @@ fn change_psk_rotates_co_psk() {
     // Reopening with the rotated secret must now succeed.
     part.open_session_ex(
         rev,
+        &test_root_spki_sha384(&part),
         HsmSessionPsk::with_psk(HsmPskId::CO, &new_psk),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     )
     .expect("open with the rotated CO PSK should succeed");
 
     // Reopening with the (now stale) default CO PSK must be rejected.
     let stale = part.open_session_ex(
         rev,
+        &test_root_spki_sha384(&part),
         HsmSessionPsk::new(HsmPskId::CO),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     );
     assert!(
         stale.is_err(),
         "the default CO PSK must be rejected after rotation",
     );
+}
+
+#[test]
+fn session_ex_cu_rotation_keeps_session_and_consumes_allowance() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let pin = test_root_spki_sha384(&part);
+    let psk = [0xA5; PSK_LEN];
+    let bootstrap = part
+        .open_session_ex(
+            rev,
+            &pin,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("bootstrap CU session");
+    bootstrap.change_psk(&psk).expect("initial rotation");
+    assert_eq!(
+        bootstrap.change_psk(&[0xB6; PSK_LEN]),
+        Err(HsmError::PskChangeAlreadyUsed)
+    );
+    drop(bootstrap);
+    let session = part
+        .open_session_ex(
+            rev,
+            &pin,
+            HsmSessionPsk::with_psk(HsmPskId::CU, &psk),
+            HsmSessionSuite::EcdhP384,
+        )
+        .expect("reopen with rotated PSK");
+    assert_eq!(session.change_psk(&psk), Err(HsmError::InvalidArgument));
 }

@@ -3,8 +3,9 @@
 
 /*
  * Key-backed operations: C_GenerateKey (CKM_AES_KEY_GEN, CKM_AES_XTS_KEY_GEN),
- * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN) and AES-CBC / AES-CBC-PAD / AES-GCM /
- * AES-XTS encrypt/decrypt, one-shot and multi-part. Sign and verify are in
+ * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN here, the RSA unwrapping key pair in
+ * tsra_pkcs11_unwrap.c) and AES-CBC / AES-CBC-PAD / AES-GCM / AES-XTS
+ * encrypt/decrypt, one-shot and multi-part. Sign and verify are in
  * tsra_pkcs11_sign.c.
  *
  * The TSRA device holds keys only as session-scoped handles; the durable form
@@ -90,13 +91,7 @@ void tsra_pkcs11_cipher_op_free(void *op_ctx)
     free(op);
 }
 
-/*
- * Store one generated key object: the object from `full`, its masked body, and
- * for a session object its place on the session's owned list. On failure
- * nothing remains: a key object without its masked body, or one the session
- * cannot track, is not handed out.
- */
-static CK_RV store_key(
+CK_RV tsra_pkcs11_store_key(
     tsra_pkcs11_session_t *s,
     const CK_ATTRIBUTE *full,
     CK_ULONG n,
@@ -106,6 +101,10 @@ static CK_RV store_key(
     CK_OBJECT_HANDLE *out
 )
 {
+    if ((s == NULL) || (out == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
     CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
     CK_RV rv =
         g_tsra_pkcs11.store.ops->create(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, full, n, &h);
@@ -113,8 +112,11 @@ static CK_RV store_key(
     {
         return rv;
     }
-    rv = g_tsra_pkcs11.store.ops
-             ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
+    if (blob != NULL)
+    {
+        rv = g_tsra_pkcs11.store.ops
+                 ->set_key_body(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, h, blob, blob_len);
+    }
     if ((rv == CKR_OK) && !token)
     {
         /* A session object dies with this session (the C_CloseSession rule). */
@@ -236,14 +238,14 @@ CK_RV C_GenerateKey(
     }
     tsra_pkcs11_keygen_fill fill;
     CK_ULONG n = 0;
-    rv = tsra_pkcs11_keygen_build_template(policy, pTemplate, ulCount, &fill, full, &n);
+    rv = tsra_pkcs11_keygen_build_template(policy, pTemplate, ulCount, true, &fill, full, &n);
     if (rv != CKR_OK)
     {
         goto cleanup;
     }
 
     CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
-    rv = store_key(s, full, n, token, blob, blob_len, &h);
+    rv = tsra_pkcs11_store_key(s, full, n, token, blob, blob_len, &h);
     if (rv != CKR_OK)
     {
         goto cleanup;
@@ -272,9 +274,7 @@ cleanup:
 /* C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN)                                   */
 /* ========================================================================= */
 
-/* Destroy a key object this call created (one half of a pair whose other half
- * failed), and take it off the session's owned list. */
-static void discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h)
+void tsra_pkcs11_discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h)
 {
     tsra_pkcs11_session_disown_object(s->slot, h);
     (void
@@ -404,15 +404,15 @@ static CK_RV ec_generate_pair(
 
     /* Both objects carry the pair's masked blob: the SDK verifies only with
      * a device handle, which only unmasking the pair gives. */
-    rv = store_key(s, pub_full, pub_n, kg.pub_token, blob, blob_len, &pub_handle);
+    rv = tsra_pkcs11_store_key(s, pub_full, pub_n, kg.pub_token, blob, blob_len, &pub_handle);
     if (rv != CKR_OK)
     {
         goto cleanup;
     }
-    rv = store_key(s, priv_full, priv_n, kg.priv_token, blob, blob_len, h_priv);
+    rv = tsra_pkcs11_store_key(s, priv_full, priv_n, kg.priv_token, blob, blob_len, h_priv);
     if (rv != CKR_OK)
     {
-        discard_key(s, pub_handle);
+        tsra_pkcs11_discard_key(s, pub_handle);
         goto cleanup;
     }
     *h_pub = pub_handle;
@@ -444,6 +444,8 @@ static keypair_fn keypair_generator(CK_MECHANISM_TYPE mech)
     {
     case CKM_EC_KEY_PAIR_GEN:
         return ec_generate_pair;
+    case CKM_RSA_PKCS_KEY_PAIR_GEN:
+        return tsra_pkcs11_unwrapping_pair_generate;
     default:
         return NULL;
     }
@@ -517,6 +519,70 @@ CK_RV C_GenerateKeyPair(
 /* AES-CBC / AES-GCM / AES-XTS: init and one-shot encrypt / decrypt          */
 /* ========================================================================= */
 
+/* The mechanism and direction check_cipher_key decides on. */
+typedef struct
+{
+    const tsra_pkcs11_cipher_mech *cm;
+    bool encrypt;
+} cipher_check_ctx;
+
+/*
+ * Whether the key may run the cipher mechanism in the direction asked: a
+ * secret key of the mechanism's type with CKA_ENCRYPT or CKA_DECRYPT, and the
+ * mechanism permitted by its CKA_ALLOWED_MECHANISMS. A missing or malformed
+ * class, type or usage permits nothing. The store runs it on the record it
+ * returns the body from, so a record rewritten in between cannot pass the
+ * check with one version and supply the body from another. The class matters
+ * as much: a clear record of another class could hold a sealed record's key
+ * as its body, and encrypting with that key under a caller-chosen IV and AAD
+ * would forge records.
+ */
+static CK_RV check_cipher_key(void *cctx, tsra_pkcs11_objstore_reader read, void *rctx)
+{
+    const cipher_check_ctx *cc = (const cipher_check_ctx *)cctx;
+    CK_KEY_TYPE kt = CK_UNAVAILABLE_INFORMATION;
+    CK_OBJECT_CLASS cls = CK_UNAVAILABLE_INFORMATION;
+    CK_BBOOL allowed = CK_FALSE;
+    CK_MECHANISM_TYPE mechs[KEYGEN_MAX_ALLOWED_MECHS];
+    CK_ATTRIBUTE attrs[] = {
+        { CKA_KEY_TYPE, &kt, sizeof(kt) },
+        { CKA_CLASS, &cls, sizeof(cls) },
+        { cc->encrypt ? CKA_ENCRYPT : CKA_DECRYPT, &allowed, sizeof(allowed) },
+        { CKA_ALLOWED_MECHANISMS, mechs, sizeof(mechs) }, /* last: its read result decides */
+    };
+    const size_t n = sizeof(attrs) / sizeof(attrs[0]);
+    CK_RV rv = CKR_OK;
+    for (size_t i = 0; i < n; i++)
+    {
+        rv = read(rctx, &attrs[i]);
+        /* Only an absent or over-long attribute is a policy verdict, and the
+         * read then leaves the value above; a store failure is reported as
+         * itself. */
+        if ((rv != CKR_OK) && (rv != CKR_ATTRIBUTE_TYPE_INVALID) && (rv != CKR_BUFFER_TOO_SMALL))
+        {
+            return rv;
+        }
+    }
+    if (kt != cc->cm->key_type)
+    {
+        return CKR_KEY_TYPE_INCONSISTENT;
+    }
+    /* C_EncryptInit has no return value for a key of the wrong class; the
+     * one C_SignInit uses for it keeps the two consistent. */
+    if ((cls != CKO_SECRET_KEY) || !allowed)
+    {
+        return CKR_KEY_FUNCTION_NOT_PERMITTED;
+    }
+    /* A GCM key and a CBC key are both CKK_AES; the allowed-mechanism list
+     * recorded at generation tells them apart, so a family mismatch is caught
+     * here rather than as the device's refusal of a blob unmasked under the
+     * wrong kind (a key-handle error). The rules, including keys that predate
+     * the list, are in tsra_pkcs11_key_mech_permitted. */
+    return tsra_pkcs11_key_mech_permitted(rv, mechs, attrs[n - 1].ulValueLen, cc->cm->mech)
+               ? CKR_OK
+               : CKR_KEY_FUNCTION_NOT_PERMITTED;
+}
+
 static CK_RV cipher_init(
     CK_SESSION_HANDLE hSession,
     CK_MECHANISM_PTR pMechanism,
@@ -583,7 +649,10 @@ static CK_RV cipher_init(
     CK_ULONG body_len = 0;
     CK_ULONG body_cap = 0; /* the read may report a larger body_len if the record changed */
     cipher_op *op = NULL;
+    cipher_check_ctx cc = { cm, want == P11_OP_ENCRYPT };
 
+    /* Sizing only, so it runs unchecked and an object without a body stays a
+     * handle error; the check runs on the read that returns the body. */
     rv = g_tsra_pkcs11.store.ops->get_key_body(
         g_tsra_pkcs11.store.ctx,
         s->slot,
@@ -609,54 +678,6 @@ static CK_RV cipher_init(
         goto cleanup;
     }
 
-    /* Host-side attribute gates; the unmasked key enforces its own device-side
-     * usage policy on top. An object without the attribute passes (unknowable
-     * here, knowable on use). */
-    CK_KEY_TYPE kt = 0;
-    CK_ATTRIBUTE type_attr = { CKA_KEY_TYPE, &kt, sizeof(kt) };
-    rv = g_tsra_pkcs11.store.ops
-             ->get_attr(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, hKey, &type_attr, 1);
-    if ((rv == CKR_OK) && (kt != cm->key_type))
-    {
-        rv = CKR_KEY_TYPE_INCONSISTENT;
-        goto cleanup;
-    }
-    /* A GCM key and a CBC key are both CKK_AES; the allowed-mechanism list
-     * recorded at generation tells them apart, so a family mismatch is caught
-     * here rather than as the device's refusal of a blob unmasked under the
-     * wrong kind (a key-handle error). The rules, including keys that predate
-     * the list, are in tsra_pkcs11_key_mech_permitted. */
-    CK_MECHANISM_TYPE mechs[KEYGEN_MAX_ALLOWED_MECHS];
-    CK_ATTRIBUTE mechs_attr = { CKA_ALLOWED_MECHANISMS, mechs, sizeof(mechs) };
-    rv = g_tsra_pkcs11.store.ops
-             ->get_attr(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, hKey, &mechs_attr, 1);
-    /* Only an absent or over-long list is a policy verdict; a store failure
-     * is reported as itself. */
-    if ((rv != CKR_OK) && (rv != CKR_ATTRIBUTE_TYPE_INVALID) && (rv != CKR_BUFFER_TOO_SMALL))
-    {
-        if (rv == CKR_OBJECT_HANDLE_INVALID)
-        {
-            rv = CKR_KEY_HANDLE_INVALID;
-        }
-        goto cleanup;
-    }
-    if (!tsra_pkcs11_key_mech_permitted(rv, mechs, mechs_attr.ulValueLen, cm->mech))
-    {
-        rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
-        goto cleanup;
-    }
-    CK_BBOOL allowed = CK_TRUE;
-    CK_ATTRIBUTE use_attr = { (want == P11_OP_ENCRYPT) ? CKA_ENCRYPT : CKA_DECRYPT,
-                              &allowed,
-                              sizeof(allowed) };
-    rv = g_tsra_pkcs11.store.ops
-             ->get_attr(g_tsra_pkcs11.store.ctx, s->slot, CK_TRUE, hKey, &use_attr, 1);
-    if ((rv == CKR_OK) && !allowed)
-    {
-        rv = CKR_KEY_FUNCTION_NOT_PERMITTED;
-        goto cleanup;
-    }
-
     body_cap = body_len;
     body = (CK_BYTE *)malloc(body_cap);
     if (body == NULL)
@@ -664,6 +685,9 @@ static CK_RV cipher_init(
         rv = CKR_HOST_MEMORY;
         goto cleanup;
     }
+    /* The key's class, type, usage and allowed mechanisms are checked on the
+     * record the body comes from; the device key enforces its own usage on
+     * top. */
     rv = g_tsra_pkcs11.store.ops->get_key_body(
         g_tsra_pkcs11.store.ctx,
         s->slot,
@@ -671,9 +695,13 @@ static CK_RV cipher_init(
         hKey,
         body,
         &body_len,
-        NULL,
-        NULL
+        check_cipher_key,
+        &cc
     );
+    if (rv == CKR_OBJECT_HANDLE_INVALID)
+    {
+        rv = CKR_KEY_HANDLE_INVALID; /* removed since the length was read */
+    }
     if (rv != CKR_OK)
     {
         goto cleanup;

@@ -5,10 +5,12 @@
 //!
 //! `SdRestoreRemoteBackup` is an **in-session** command that restores a
 //! security domain from a **remote** backup: it
-//! HPKE-Auth-opens the caller-supplied `src_remote_backup` (an HPKE seal of
-//! BKS3) with the masked receiver key — authenticated by the sender's
-//! attested key — recovers `SDMK` from `prev_sd_mk_backup`, and returns the
+//! verifies the mandatory `SdBackup` report and target policy before
+//! HPKE Base-opening with the actual recipient key, recovers `SDMK`
+//! from `prev_sd_mk_backup`, and returns the
 //! device-local backups (`pok_local_backup`, `sd_mk_backup`).
+//! SAPOTA authenticates source PID identity only under trusted-SA policy;
+//! otherwise the supplied PID key establishes signature integrity only.
 //!
 //! Both wire schemas are shared with the firmware handler via
 //! `tsra_fw_ddi_tbor_types::sd_restore_remote_backup`; this module
@@ -19,7 +21,6 @@
 
 use alloc::vec::Vec;
 
-use crate::evidence::ReportDescriptor;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
@@ -44,20 +45,18 @@ pub struct TborSdRestoreRemoteBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified partition policy describing the security domain being
-    /// restored.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified [`PartPolicy`] describing the security domain being
+    /// restored.  Encoded as its deterministic CBOR document of at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
-    /// Sender key certificate-chain descriptors (spec `SndrCertChain`).
-    /// Always present; validated and anchored to the policy **SATA** key,
-    /// its leaf public key is the sender public key (`SndrPub`) that sealed
-    /// `src_remote_backup`.  The DER bytes travel out of band.
-    #[tbor(max_len = 24)]
-    pub sender_cert_chain: Vec<CertDescriptor>,
+    /// Operation report signer PID as DER SPKI. Currently only canonical
+    /// uncompressed P-384 (120 bytes) is supported.
+    #[tbor(max_len = 120)]
+    pub sender_pid_pub_key: Vec<u8>,
 
     /// Sender manufacturer certificate-chain descriptors.  Flattened from
-    /// the firmware `sender_evidence` field group (first of its four TOC
+    /// the firmware `sender_evidence` field group (first of its three TOC
     /// entries); the DER bytes travel out of band.
     #[tbor(max_len = 8)]
     pub sender_mfgr_cert_chain: Vec<CertDescriptor>,
@@ -70,11 +69,8 @@ pub struct TborSdRestoreRemoteBackupReq {
     #[tbor(max_len = 8)]
     pub sender_part_owner_cert_chain: Vec<CertDescriptor>,
 
-    /// Sender attestation-report (COSE_Sign1) descriptor.
-    pub sender_report: ReportDescriptor,
-
-    /// Remote backup to restore: an HPKE-Auth seal of BKS3, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (161 B).  The firmware schema is the length
+    /// Remote backup to restore: an HPKE Base seal of BKS3, exactly
+    /// [`POK_REMOTE_BACKUP_LEN`] (431 B), including its PID signature. The firmware schema is the length
     /// authority.
     pub src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN],
 
@@ -91,12 +87,12 @@ pub struct TborSdRestoreRemoteBackupResp {
     /// Partition-owner-key backup re-wrapped under the device-local key
     /// (exactly 280 B on the wire; the firmware schema is the length
     /// authority).
-    #[tbor(max_len = 280)]
+    #[tbor(align = 4, max_len = 280)]
     pub pok_local_backup: Vec<u8>,
 
     /// Security-domain masking-key backup envelope (exactly 264 B on the
     /// wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub sd_mk_backup: Vec<u8>,
 }
 
@@ -111,20 +107,19 @@ mod tests {
         let req = TborSdRestoreRemoteBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
-            sender_cert_chain: Vec::new(),
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
+            sender_pid_pub_key: alloc::vec![0; 120],
             sender_mfgr_cert_chain: Vec::new(),
             sender_owner_cert_chain: Vec::new(),
             sender_part_owner_cert_chain: Vec::new(),
-            sender_report: ReportDescriptor::default(),
             src_remote_backup: [0xABu8; POK_REMOTE_BACKUP_LEN],
             prev_sd_mk_backup: [0xCDu8; SD_MK_BACKUP_LEN],
         };
 
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The maximum-length policy plus the sealing key and the two backups must
+        // The crate::policy::PART_POLICY_MAX_LEN-byte policy plus the sealing key and the two backups must
         // be carried in the data section.
         assert!(
             frame.len()

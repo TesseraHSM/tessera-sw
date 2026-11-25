@@ -12,12 +12,14 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_codec::EncodeError;
 use tsra_ddi_tbor_codec::RequestEncoder;
 use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
-use tsra_ddi_tbor_codec::PROTOCOL_VERSION;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
+use tsra_ddi_tbor_types::TborEccVerifyReq;
 use tsra_ddi_tbor_types::TborHashReq;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborSessionCloseResp;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::TBOR_OP_AES_ENCRYPT_DECRYPT;
 use tsra_ddi_tbor_types::TBOR_OP_AES_GCM_ENCRYPT_DECRYPT;
@@ -33,7 +35,10 @@ use tsra_ddi_tbor_types::TBOR_OP_DARC_TMK_GEN;
 use tsra_ddi_tbor_types::TBOR_OP_DARC_TMK_IMPORT;
 use tsra_ddi_tbor_types::TBOR_OP_ECC_GENERATE_KEY;
 use tsra_ddi_tbor_types::TBOR_OP_ECC_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_ECC_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_ECDH_DERIVE;
+use tsra_ddi_tbor_types::TBOR_OP_ECDSA_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_ECDSA_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_GET_CERTIFICATE;
 use tsra_ddi_tbor_types::TBOR_OP_GET_CERT_CHAIN_INFO;
 use tsra_ddi_tbor_types::TBOR_OP_GET_PUBLIC_KEY;
@@ -52,7 +57,10 @@ use tsra_ddi_tbor_types::TBOR_OP_MLKEM_GENERATE_KEY;
 use tsra_ddi_tbor_types::TBOR_OP_PART_FINAL;
 use tsra_ddi_tbor_types::TBOR_OP_PART_INIT;
 use tsra_ddi_tbor_types::TBOR_OP_PSK_CHANGE;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_ENCRYPT_DECRYPT;
 use tsra_ddi_tbor_types::TBOR_OP_RSA_MOD_EXP;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_SIGN;
+use tsra_ddi_tbor_types::TBOR_OP_RSA_VERIFY;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_PEER_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_CREATE_REMOTE_BACKUP;
 use tsra_ddi_tbor_types::TBOR_OP_SD_RESEAL_REMOTE_BACKUP;
@@ -93,8 +101,14 @@ const OPCODES: &[u8] = &[
     TBOR_OP_AES_ENCRYPT_DECRYPT,
     TBOR_OP_ECC_GENERATE_KEY,
     TBOR_OP_ECC_SIGN,
+    TBOR_OP_ECDSA_SIGN,
+    TBOR_OP_ECDSA_VERIFY,
+    TBOR_OP_ECC_VERIFY,
     TBOR_OP_ECDH_DERIVE,
     TBOR_OP_RSA_MOD_EXP,
+    TBOR_OP_RSA_ENCRYPT_DECRYPT,
+    TBOR_OP_RSA_SIGN,
+    TBOR_OP_RSA_VERIFY,
     TBOR_OP_HASH,
     TBOR_OP_HKDF_DERIVE,
     TBOR_OP_CONCAT_KDF_DERIVE,
@@ -148,8 +162,12 @@ impl TborOpReq for AllNoneReq {
         }
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let mut encoder = RequestEncoder::new(buf, PROTOCOL_VERSION, self.opcode);
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let mut encoder = RequestEncoder::new(buf, api_rev, self.opcode);
         for _ in 0..MAX_TOC_ENTRIES {
             encoder = encoder.none()?;
         }
@@ -192,5 +210,26 @@ fn malformed_requests_for_every_command_are_rejected_and_session_survives() {
             })
             .digest;
         assert_eq!(digest.len(), 32, "opcode {opcode:#04x}: SHA-256 digest");
+    }
+}
+
+#[test]
+fn malformed_ecc_verify_is_rejected_by_default_psk_gate() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(crate::commands::common::CO, SessionSuite::EcdhP384)
+        .expect("open default-PSK CO session");
+    let result = ctx.tbor(&TborEccVerifyReq {
+        session_id: session.session_id(),
+        hash_algo: HASH_ALGO_SHA256,
+        masked_key: vec![0; 264],
+        input: vec![0; 96],
+    });
+
+    match result {
+        Err(DdiError::TborStatus(status)) => {
+            assert_eq!(status, TborStatus::DefaultPskMustRotate)
+        }
+        other => panic!("expected default-PSK gate rejection, got {other:?}"),
     }
 }

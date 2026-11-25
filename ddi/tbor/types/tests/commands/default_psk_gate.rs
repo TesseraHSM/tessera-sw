@@ -8,12 +8,15 @@
 //! compiled-in default (`DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`).
 //!
 //! Out-of-session opcodes such as `ApiRev`, `SessionOpenInit`, and
-//! `SessionOpenFinish` are never gated. In-session opcodes on the
-//! bootstrap allow-list, such as `PskChange` and `SessionClose`, are
-//! always permitted.
+//! `SessionOpenFinish` bypass the ordinary-command gate, but Finish
+//! still rejects obsolete credentials. `PskChange` is permitted only
+//! while the session's credential remains current; `SessionClose`
+//! remains permitted after expiration.
 //!
 //! Coverage in this file:
 //!
+//! * Every ordinary CU opcode has an independently named test checking
+//!   `DefaultPskMustRotate` before rotation and `DefaultPskChanged` after.
 //! * `ApiRev` bypasses the gate while PSKs are default.
 //! * Supported CO and CU session-open flows work with default PSKs.
 //! * `SessionClose` bypasses the gate for both roles.
@@ -31,17 +34,19 @@
 //! * `ApiRev` remains available after rotation and during an active
 //!   session.
 //!
-//! Each test receives a factory-reset device from
+//! Each test receives a device reset by NSSR from
 //! [`TestCtx::new`](tsra_ddi_tbor_test_harness::TestCtx::new), so partition PSKs
 //! begin at their canonical defaults.
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
-use tsra_ddi_tbor_test_harness::assertions::assert_tbor_decode_error;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
-use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborSessionCloseReq;
+use tsra_ddi_tbor_types::TborSessionCloseResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
@@ -49,6 +54,176 @@ use tsra_ddi_tbor_types::PSK_LEN;
 
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
+
+struct SessionCommandProbe<const OP: u8>(u16);
+
+impl<const OP: u8> TborOpReq for SessionCommandProbe<OP> {
+    const OPCODE: u8 = OP;
+    type OpResp = TborSessionCloseResp;
+
+    fn get_session_id(&self) -> Option<u16> {
+        Some(self.0)
+    }
+
+    fn session_ctrl(&self) -> tsra_ddi_tbor_types::SessionControlKind {
+        tsra_ddi_tbor_types::SessionControlKind::InSession
+    }
+
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], tsra_ddi_tbor_types::codec::EncodeError> {
+        // The gate must reject the session before command-specific decoding.
+        let len = TborSessionCloseReq { session_id: self.0 }
+            .encode_request(buf, api_rev)?
+            .len();
+        buf[5] = OP;
+        Ok(&buf[..len])
+    }
+}
+
+macro_rules! bootstrap_command_test {
+    ($name:ident, $request:ty) => {
+        #[test]
+        fn $name() {
+            let ctx = TestCtx::new();
+            let session = ctx
+                .open_session(CU, SessionSuite::EcdhP384)
+                .expect("bootstrap CU");
+            let request =
+                SessionCommandProbe::<{ <$request as TborOpReq>::OPCODE }>(session.session_id());
+            ctx.expect_fw_reject(&request, TborStatus::DefaultPskMustRotate);
+            let peer_ctx = TestCtx::new_with_path(ctx.path());
+            let rotating = peer_ctx
+                .open_session(CU, SessionSuite::EcdhP384)
+                .expect("rotating peer");
+            peer_ctx
+                .psk_change(rotating.handshake(), &GATE_ROTATED_PSK_A)
+                .expect("rotate CU PSK");
+            ctx.expect_fw_reject(&request, TborStatus::DefaultPskChanged);
+            session.close().expect("close expired bootstrap session");
+        }
+    };
+}
+
+use tsra_ddi_tbor_types as types;
+
+bootstrap_command_test!(cu_bootstrap_blocks_part_init, types::TborPartInitReq);
+bootstrap_command_test!(cu_bootstrap_blocks_part_final, types::TborPartFinalReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_sealing_key_gen,
+    types::TborSdSealingKeyGenReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_create_remote_backup,
+    types::TborSdCreateRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_reseal_remote_backup,
+    types::TborSdResealRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_remote_backup,
+    types::TborSdRestoreRemoteBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_local_backup,
+    types::TborSdRestoreLocalBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_create_peer_backup,
+    types::TborSdCreatePeerBackupReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_sd_restore_peer_backup,
+    types::TborSdRestorePeerBackupReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_key_report, types::TborKeyReportReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_hmac_generate_key,
+    types::TborHmacGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_hmac, types::TborHmacReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_get_unwrapping_key,
+    types::TborGetUnwrappingKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_unwrap_key, types::TborUnwrapKeyReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_generate_key,
+    types::TborAesGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_encrypt_decrypt,
+    types::TborAesEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_ecc_generate_key,
+    types::TborEccGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_ecc_sign, types::TborEccSignReq);
+bootstrap_command_test!(cu_bootstrap_blocks_ecdh_derive, types::TborEcdhDeriveReq);
+bootstrap_command_test!(cu_bootstrap_blocks_rsa_mod_exp, types::TborRsaModExpReq);
+bootstrap_command_test!(cu_bootstrap_blocks_hash, types::TborHashReq);
+bootstrap_command_test!(cu_bootstrap_blocks_hkdf_derive, types::TborHkdfDeriveReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_concat_kdf_derive,
+    types::TborConcatKdfDeriveReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_kex_key_gen,
+    types::TborDarcKexKeyGenReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_tmk_import,
+    types::TborDarcTmkImportReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_key_unwrap,
+    types::TborDarcKeyUnwrapReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_darc_tmk_gen, types::TborDarcTmkGenReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_darc_tmk_export,
+    types::TborDarcTmkExportReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_darc_key_wrap, types::TborDarcKeyWrapReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mldsa_generate_key,
+    types::TborMlDsaGenerateKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_mldsa_sign, types::TborMlDsaSignReq);
+bootstrap_command_test!(cu_bootstrap_blocks_mldsa_verify, types::TborMlDsaVerifyReq);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_generate_key,
+    types::TborMlKemGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_encapsulate,
+    types::TborMlKemEncapsulateReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_mlkem_decapsulate,
+    types::TborMlKemDecapsulateReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_gcm_encrypt_decrypt,
+    types::TborAesGcmEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_xts_encrypt_decrypt,
+    types::TborAesXtsEncryptDecryptReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_aes_xts_generate_key,
+    types::TborAesXtsGenerateKeyReq
+);
+bootstrap_command_test!(
+    cu_bootstrap_blocks_get_public_key,
+    types::TborGetPublicKeyReq
+);
+bootstrap_command_test!(cu_bootstrap_blocks_verify_key, types::TborVerifyKeyReq);
 
 /// First non-default CO PSK used by rotation tests.
 const GATE_ROTATED_PSK_A: [u8; PSK_LEN] = [
@@ -91,8 +266,7 @@ fn default_psk_gate_session_open_init_bypass() {
 
     // Hardware permits only one active session per file descriptor,
     // so probe CO and CU sequentially.
-    let opts_co =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&DEFAULT_PSK_CO);
+    let opts_co = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&DEFAULT_PSK_CO);
 
     let pending_co = ctx
         .session_open_init_with_options(opts_co)
@@ -105,7 +279,7 @@ fn default_psk_gate_session_open_init_bypass() {
     ctx.session_close(session_co.session_id)
         .expect("close CO session before opening CU session");
 
-    let opts_cu = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&DEFAULT_PSK_CU);
+    let opts_cu = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&DEFAULT_PSK_CU);
 
     let pending_cu = ctx
         .session_open_init_with_options(opts_cu)
@@ -126,7 +300,7 @@ fn default_psk_gate_session_close_bypass() {
     let ctx = TestCtx::new();
 
     let session_co = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     session_co
@@ -134,7 +308,7 @@ fn default_psk_gate_session_close_bypass() {
         .expect("SessionClose must bypass gate while CO PSK is default");
 
     let session_cu = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU plaintext session");
 
     session_cu
@@ -150,7 +324,7 @@ fn default_psk_gate_session_close_repeated_sessions() {
 
     for attempt in 1..=3 {
         let session = ctx
-            .open_session(CO, SessionType::Authenticated)
+            .open_session(CO, SessionSuite::EcdhP384)
             .unwrap_or_else(|err| {
                 panic!(
                     "failed to open CO authenticated session on attempt {}: {:?}",
@@ -168,7 +342,7 @@ fn default_psk_gate_session_close_repeated_sessions() {
 
     for attempt in 1..=3 {
         let session = ctx
-            .open_session(CU, SessionType::PlainText)
+            .open_session(CU, SessionSuite::EcdhP384)
             .unwrap_or_else(|err| {
                 panic!(
                     "failed to open CU plaintext session on attempt {}: {:?}",
@@ -191,7 +365,7 @@ fn default_psk_gate_session_close_repeated_sessions() {
 fn default_psk_gate_psk_change_bypass() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
@@ -205,7 +379,7 @@ fn default_psk_gate_psk_change_co_rotation_takes_effect() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
@@ -216,7 +390,7 @@ fn default_psk_gate_psk_change_co_rotation_takes_effect() {
         .expect("SessionClose remains permitted after CO rotation");
 
     let opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -237,7 +411,7 @@ fn default_psk_gate_old_co_psk_rejected_after_rotation() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
@@ -248,21 +422,22 @@ fn default_psk_gate_old_co_psk_rejected_after_rotation() {
         .expect("close session used for CO PSK rotation");
 
     let old_psk_opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&DEFAULT_PSK_CO);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&DEFAULT_PSK_CO);
 
     // Run the deliberately rejected authentication on a separate file
     // handle. A failed SessionOpenInit can leave pending session state on
     // that handle, so dropping it prevents the negative probe from
     // contaminating the valid reopen below.
     let stale_ctx = TestCtx::new_with_path(ctx.path());
-    let err = stale_ctx
-        .session_open_init_with_options(old_psk_opts)
-        .expect_err("DEFAULT_PSK_CO must no longer authenticate after rotation");
-    assert_tbor_decode_error(&err);
+    assert_psk_rejected(
+        &stale_ctx,
+        old_psk_opts,
+        "DEFAULT_PSK_CO must no longer authenticate after rotation",
+    );
     drop(stale_ctx);
 
     let rotated_psk_opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     let pending = ctx
         .session_open_init_with_options(rotated_psk_opts)
@@ -286,7 +461,7 @@ fn default_psk_gate_wrong_rotated_psk_rejected() {
     let ctx = TestCtx::new();
 
     let bootstrap = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(bootstrap.handshake(), &GATE_ROTATED_PSK_A)
@@ -295,20 +470,21 @@ fn default_psk_gate_wrong_rotated_psk_rejected() {
     bootstrap.close().expect("close CO bootstrap session");
 
     let wrong_opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_WRONG_PSK);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_WRONG_PSK);
 
     // Isolate the intentionally failed authentication attempt on a
     // separate file handle so any pending session state is discarded when
     // that handle is dropped.
     let stale_ctx = TestCtx::new_with_path(ctx.path());
-    let err = stale_ctx
-        .session_open_init_with_options(wrong_opts)
-        .expect_err("an incorrect non-default CO PSK must not authenticate");
-    assert_tbor_decode_error(&err);
+    assert_psk_rejected(
+        &stale_ctx,
+        wrong_opts,
+        "an incorrect non-default CO PSK must not authenticate",
+    );
     drop(stale_ctx);
 
     let correct_opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     let pending = ctx
         .session_open_init_with_options(correct_opts)
@@ -329,7 +505,7 @@ fn default_psk_gate_co_can_rotate_twice() {
     let ctx = TestCtx::new();
 
     let bootstrap = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(bootstrap.handshake(), &GATE_ROTATED_PSK_A)
@@ -340,7 +516,7 @@ fn default_psk_gate_co_can_rotate_twice() {
         .expect("close session after first rotation");
 
     let opts_a =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     let pending_a = ctx
         .session_open_init_with_options(opts_a)
@@ -357,7 +533,7 @@ fn default_psk_gate_co_can_rotate_twice() {
         .expect("close session after second rotation");
 
     let opts_b =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_B);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_B);
 
     let pending_b = ctx
         .session_open_init_with_options(opts_b)
@@ -378,7 +554,7 @@ fn default_psk_gate_previous_psk_rejected_after_second_rotation() {
     let ctx = TestCtx::new();
 
     let bootstrap = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(bootstrap.handshake(), &GATE_ROTATED_PSK_A)
@@ -389,7 +565,7 @@ fn default_psk_gate_previous_psk_rejected_after_second_rotation() {
         .expect("close session after first rotation");
 
     let opts_a =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     let pending_a = ctx
         .session_open_init_with_options(opts_a)
@@ -406,20 +582,21 @@ fn default_psk_gate_previous_psk_rejected_after_second_rotation() {
         .expect("close session after second rotation");
 
     let stale_opts =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_A);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_A);
 
     // Use a throwaway file handle for the stale-PSK probe. The failed
     // authentication must not leave pending state on the primary handle
     // used to verify PSK B immediately afterward.
     let stale_ctx = TestCtx::new_with_path(ctx.path());
-    let err = stale_ctx
-        .session_open_init_with_options(stale_opts)
-        .expect_err("PSK A must stop authenticating after rotation to PSK B");
-    assert_tbor_decode_error(&err);
+    assert_psk_rejected(
+        &stale_ctx,
+        stale_opts,
+        "PSK A must stop authenticating after rotation to PSK B",
+    );
     drop(stale_ctx);
 
     let opts_b =
-        SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&GATE_ROTATED_PSK_B);
+        SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(&GATE_ROTATED_PSK_B);
 
     let pending_b = ctx
         .session_open_init_with_options(opts_b)
@@ -439,7 +616,7 @@ fn default_psk_gate_co_rotation_does_not_change_cu_default() {
     let ctx = TestCtx::new();
 
     let co_session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(co_session.handshake(), &GATE_ROTATED_PSK_A)
@@ -449,7 +626,7 @@ fn default_psk_gate_co_rotation_does_not_change_cu_default() {
         .close()
         .expect("close CO bootstrap session after rotation");
 
-    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&DEFAULT_PSK_CU);
+    let opts = SessionOpenInitOptions::new(CU, SessionSuite::EcdhP384).with_psk(&DEFAULT_PSK_CU);
 
     let pending = ctx
         .session_open_init_with_options(opts)
@@ -469,7 +646,7 @@ fn default_psk_gate_cu_session_does_not_change_co_default() {
     let ctx = TestCtx::new();
 
     let cu_session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU PlainText session");
 
     cu_session
@@ -477,7 +654,7 @@ fn default_psk_gate_cu_session_does_not_change_co_default() {
         .expect("close CU session while CU PSK is default");
 
     let co_session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(co_session.handshake(), &GATE_ROTATED_PSK_A)
@@ -492,7 +669,7 @@ fn default_psk_gate_api_rev_bypass_after_co_rotation() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     ctx.psk_change(session.handshake(), &GATE_ROTATED_PSK_A)
@@ -513,7 +690,7 @@ fn default_psk_gate_api_rev_bypass_after_co_rotation() {
 fn default_psk_gate_api_rev_bypass_while_session_active() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO authenticated session");
 
     let _ = ctx
@@ -532,7 +709,7 @@ fn default_psk_gate_second_close_of_same_session_is_rejected() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO session");
 
     let session_id = session.session_id();
@@ -546,7 +723,7 @@ fn default_psk_gate_second_close_of_same_session_is_rejected() {
     ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 
     let replacement = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open replacement CO session");
 
     replacement
@@ -562,7 +739,7 @@ fn default_psk_gate_second_close_of_same_session_is_rejected() {
 fn default_psk_gate_part_init_rejected() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
 
     let err = ctx
@@ -584,12 +761,12 @@ fn default_psk_gate_co_and_cu_parallel_on_separate_devs_bypass() {
     let ctx_a = TestCtx::new();
 
     let session_co = ctx_a
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open CO session on first file descriptor");
 
     let ctx_b = TestCtx::new_with_path(ctx_a.path());
     let session_cu = ctx_b
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open CU session on second file descriptor while CO session is active");
 
     assert_ne!(
@@ -599,4 +776,16 @@ fn default_psk_gate_co_and_cu_parallel_on_separate_devs_bypass() {
     );
 
     // Both sessions are closed automatically when their SessionGuards drop.
+}
+
+/// A PSK only enters the key schedule, so `SessionOpenInit` succeeds with
+/// any PSK. The wrong one yields transport keys the HSM does not share, and
+/// firmware rejects the sealed `SessionOpenFinish` before dispatch.
+#[track_caller]
+fn assert_psk_rejected(ctx: &TestCtx, opts: SessionOpenInitOptions<'_>, msg: &str) {
+    let pending = ctx
+        .session_open_init_with_options(opts)
+        .expect("SessionOpenInit does not check the PSK");
+    let err = ctx.session_open_finish(pending).expect_err(msg);
+    assert_fw_rejects(&err, TborStatus::SessionTransportError);
 }

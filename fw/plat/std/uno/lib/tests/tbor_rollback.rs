@@ -17,6 +17,7 @@ use tsra_fw_hsm_pal_std_uno::HsmIoRequest;
 use tsra_fw_hsm_pal_std_uno::HsmPartId;
 use tsra_fw_hsm_pal_std_uno::StdHsmPal;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmApiRevision;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
@@ -24,7 +25,10 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
+use tsra_fw_hsm_undo::UndoLog;
+use tsra_fw_hsm_undo::WalkOutcome;
 use tsra_fw_hsm_undo::UNDO_LOG_SIZE;
 
 /// Core's crate-private `SessionCtrl::Open` session-control value.
@@ -73,7 +77,9 @@ async fn check_tbor_rollback() {
         let fail_completion = attempt == 8;
         let mut request = HostPage([0; 4096]);
         let mut response = HostPage([0xA5; 4096]);
-        let request_len = types::TborSessionOpenInitReq::encode(&mut request.0)
+        let request_len = types::TborSessionOpenInitReq::encode(&mut request.0, (1, 1))
+            .unwrap()
+            .reopen_id(u16::MAX)
             .unwrap()
             .psk_id(types::PskId::CryptoUser)
             .unwrap()
@@ -92,7 +98,7 @@ async fn check_tbor_rollback() {
             0,
             SqeBuilder::new()
                 .cmd(CmdDword::new().with_op(OP_TBOR))
-                .buf_lens(request_len as u32, if short_response { 12 } else { 4096 })
+                .buf_lens(request_len as u32, if short_response { 16 } else { 4096 })
                 .src_prp1(request.0.as_ptr() as u64)
                 .dst_prp1(response.0.as_mut_ptr() as u64)
                 .session_flags(SessionFlags::new().with_ctrl(SESSION_CTRL_OPEN))
@@ -141,7 +147,9 @@ async fn check_tbor_rollback() {
                 .unwrap()
                 .fill(0xA5);
         }
-        types::TborSessionOpenInitReq::encode(&mut request.0)
+        types::TborSessionOpenInitReq::encode(&mut request.0, (1, 1))
+            .unwrap()
+            .reopen_id(u16::MAX)
             .unwrap()
             .psk_id(types::PskId::CryptoUser)
             .unwrap()
@@ -179,7 +187,7 @@ async fn check_tbor_rollback() {
                     HsmError::TborBufferTooSmall.0,
                     "attempt {attempt}"
                 );
-                assert_eq!(len, 12);
+                assert_eq!(len, 16);
                 assert!(!cqe.dw0().session_id_valid());
             } else {
                 let frame =
@@ -212,4 +220,89 @@ async fn check_tbor_rollback() {
     ));
     hsm.pal().session_destroy(&io, id).await.unwrap();
     hsm.pal().drop_io(io).await.unwrap();
+}
+
+#[tokio::test]
+async fn reopen_undo_retains_recovery_metadata_before_and_after_promotion() {
+    let (tx, rx) = async_channel::bounded(1);
+    let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+    pal.part_alloc_internal(0, 1).await.expect("partition");
+    pal.part_enable_internal(0).await.expect("enable");
+    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(HsmIoRequest::cmd(
+        HsmPartId::from(0u8),
+        0,
+        0,
+        [0; SQE_DWORDS],
+        reply_tx,
+    ))
+    .await
+    .expect("control IO");
+    let io = pal.poll_io().await.expect("control IO");
+    let key = response_bytes(&[0x33; 32]);
+    let binding = response_bytes(&[0; 68]);
+    let transport = response_bytes(&[0x44; 36]);
+    let id = pal
+        .session_create_pending(&io, HsmSessionRole::CryptoOfficer, key)
+        .await
+        .expect("pending");
+    pal.session_promote(
+        &io,
+        id,
+        &[0; 8],
+        HsmApiRevision::new(1, 1),
+        key,
+        key,
+        binding,
+        transport,
+        transport,
+    )
+    .await
+    .expect("promote");
+    pal.session_set_recovery_binding(&io, id, &[0x5a; 16])
+        .expect("lineage");
+    pal.session_set_auth_binding(&io, id, binding, true)
+        .expect("consumed rotation");
+    pal.session_rollback_reopen(&io, id)
+        .await
+        .expect("stale slot");
+
+    for promoted in [false, true] {
+        pal.session_reopen_pending(&io, id, key)
+            .await
+            .expect("retry recovery");
+        let mut undo = UndoLog::new(pal.dma_alloc(&io, UNDO_LOG_SIZE).expect("undo"));
+        undo.push_session_reopen(id).expect("record inverse");
+        if promoted {
+            pal.session_promote(
+                &io,
+                id,
+                &[0; 8],
+                HsmApiRevision::new(1, 1),
+                key,
+                key,
+                binding,
+                transport,
+                transport,
+            )
+            .await
+            .expect("recovery promote");
+        }
+        assert_eq!(undo.apply_undo(&pal, &io).await, WalkOutcome::Ok);
+        assert!(matches!(
+            pal.session_state(&io, id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+        assert_eq!(
+            pal.session_recovery_binding(&io, id).expect("lineage"),
+            &[0x5a; 16]
+        );
+        assert!(pal
+            .session_psk_changed(&io, id)
+            .expect("rotation remains consumed"));
+    }
+    pal.session_destroy(&io, id)
+        .await
+        .expect("close stale slot");
+    pal.drop_io(io).await.expect("release control IO");
 }

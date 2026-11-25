@@ -3,23 +3,12 @@
 
 //! TBOR `MlKemEncapsulate` wire schema.
 //!
-//! `MlKemEncapsulate` is (temporarily) an out-of-session command that encapsulates to a
+//! `MlKemEncapsulate` is an in-session command that encapsulates to a
 //! host-supplied ML-KEM public key and returns both the ciphertext and the
 //! derived shared secret as a **masked** blob under the requested scope's
 //! masking key.  This schema carries raw key bytes, not vault key ids.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -63,7 +52,7 @@ pub struct TborMlKemEncapsulateResp<'a> {
     pub ciphertext: &'a [u8],
 
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
-    /// requested scope's masking key.  The envelope is always 164 B.
+    /// requested scope's masking key. The envelope is always 264 B.
     #[tbor(align = 4, buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }
@@ -80,7 +69,7 @@ mod tests {
     fn request_round_trips_fields() {
         let mut buf = [0u8; 4096];
         let pub_key = [0x11u8; MLKEM_PUB_KEY_MAX_LEN];
-        let frame = TborMlKemEncapsulateReq::encode(&mut buf)
+        let frame = TborMlKemEncapsulateReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -98,7 +87,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let ciphertext = [0x22u8; MLKEM_CIPHERTEXT_MAX_LEN];
         let secret = [0x33u8; MASKED_MLKEM_SHARED_SECRET_MAX_LEN];
-        let frame = TborMlKemEncapsulateResp::encode(&mut buf, 0, true)
+        let frame = TborMlKemEncapsulateResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .ciphertext(&ciphertext)
             .unwrap()

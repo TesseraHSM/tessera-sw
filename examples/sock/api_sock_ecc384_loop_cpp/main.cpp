@@ -177,13 +177,35 @@ Partition open_partition(const std::string &endpoint)
         );
         return partition;
     }
-    throw std::runtime_error(
-        "TCP partition not found; check the endpoint and socket server"
-    );
+    throw std::runtime_error("TCP partition not found; check the endpoint and socket server");
 }
 
 Session open_session(tsra_handle partition)
 {
+    std::array<char, 97> encoded_root{};
+    if (GetEnvironmentVariableA(
+            "TSRA_ROOT_SPKI_SHA384",
+            encoded_root.data(),
+            static_cast<DWORD>(encoded_root.size())
+        ) != 96)
+    {
+        throw std::runtime_error(
+            "configure TSRA_ROOT_SPKI_SHA384 as 96 trusted-root SPKI hash hex digits"
+        );
+    }
+    std::array<uint8_t, 48> root_hash{};
+    for (size_t i = 0; i < root_hash.size(); ++i)
+    {
+        unsigned value = 0;
+        const char *begin = encoded_root.data() + 2 * i;
+        const auto result = std::from_chars(begin, begin + 2, value, 16);
+        if (result.ec != std::errc{} || result.ptr != begin + 2)
+        {
+            throw std::runtime_error("root pin must contain only hex digits");
+        }
+        root_hash[i] = static_cast<uint8_t>(value);
+    }
+    tsra_buffer root_pin{ root_hash.data(), static_cast<uint32_t>(root_hash.size()) };
     std::array<uint8_t, TSRA_PSK_LEN> test_psk{};
     test_psk.fill(0xA5);
     tsra_buffer psk_buffer{ test_psk.data(), static_cast<uint32_t>(test_psk.size()) };
@@ -193,8 +215,9 @@ Session open_session(tsra_handle partition)
     Session session;
     const auto default_status = tsra_sess_ex_open(
         partition,
+        &root_pin,
         &credential,
-        TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+        TSRA_SESSION_SUITE_ECDH_P384,
         session.out()
     );
     if (default_status == TSRA_STATUS_SUCCESS)
@@ -206,8 +229,9 @@ Session open_session(tsra_handle partition)
         credential.psk = &psk_buffer;
         const auto rotated_status = tsra_sess_ex_open(
             partition,
+            &root_pin,
             &credential,
-            TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+            TSRA_SESSION_SUITE_ECDH_P384,
             session.out()
         );
         if (rotated_status != TSRA_STATUS_SUCCESS)

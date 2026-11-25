@@ -65,19 +65,19 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
-| 20 | `mu` | `buffer` (64 B) | The message representative `μ` to sign. |
-| 24 | `hedge` | `u8` | `0` = hedge preferred; `1` = hedge required; `2` = deterministic required. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
+| 24 | `mu` | `buffer` (64 B) | The message representative `μ` to sign. |
+| 28 | `hedge` | `u8` | `0` = hedge preferred; `1` = hedge required; `2` = deterministic required. |
 
 ### Data section
 
 Carries the masked key, then `μ`.
 
-Worst-case frame (ML-DSA-87 key): data `5160 + 64 = 5224` B; staged
-`132 + 5224 = 5356` B and encoded `8 + 4*4 + 5224 = 5248` B — both inside
-the 8192-byte transport buffer.  `hedge` travels in its TOC entry, so it
+Worst-case frame (ML-DSA-87 key): data `5160 + 64 = 5224` B, encoded directly
+as `12 + 5*4 + 5224 = 5256` B, inside the 8192-byte transport buffer.
+`hedge` travels in its TOC entry, so it
 costs the data section nothing.
 
 ## Response
@@ -86,8 +86,8 @@ costs the data section nothing.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | (padding) | `padding` (0..=3 B) | Places `signature` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 12 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes (maximum for ML-DSA-87). |
+| 12 | (padding) | `padding` (0..=3 B) | Places `signature` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes (maximum for ML-DSA-87). |
 
 ### Data section
 

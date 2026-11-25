@@ -3,22 +3,11 @@
 
 //! Host-side wrapper for the TBOR `MlKemEncapsulate` command.
 //!
-//! `MlKemEncapsulate` is (temporarily) an **out-of-session** command that encapsulates to a host-supplied ML-KEM public key and
+//! `MlKemEncapsulate` is an in-session command that encapsulates to a host-supplied ML-KEM public key and
 //! returns the ciphertext plus a **masked** shared secret under the
 //! requested scope's masking key.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use alloc::vec::Vec;
 
@@ -76,7 +65,7 @@ mod tests {
             pub_key: alloc::vec![0x22u8; 64],
         };
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.windows(4).any(|w| w == [0x22u8; 4]),
             "encoded frame must carry the public-key bytes",

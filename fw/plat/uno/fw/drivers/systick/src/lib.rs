@@ -18,7 +18,7 @@
 //! └──────────┬───────────────────────────────┘
 //!            │ every 31.25 ms
 //!            ▼
-//!    TICK_COUNT.fetch_add(1)
+//!    tick count += 1
 //!    queue.next_expiration() → wake Embassy tasks
 //! ```
 //!
@@ -42,6 +42,7 @@
 #![allow(unsafe_code)]
 
 use core::cell::RefCell;
+use core::sync::atomic::compiler_fence;
 use core::task::Waker;
 
 use cortex_m_rt::exception;
@@ -49,7 +50,6 @@ use critical_section::Mutex;
 use embassy_time_driver::Driver;
 use embassy_time_queue_utils::Queue;
 use portable_atomic::AtomicU32;
-use portable_atomic::AtomicU64;
 use portable_atomic::Ordering;
 
 #[cfg(not(feature = "fp-core"))]
@@ -76,8 +76,13 @@ const _: () = assert!(
     "SysTick reload exceeds the 24-bit counter"
 );
 
-/// Monotonic tick counter, incremented by the SysTick exception handler.
-static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Monotonic tick counter, incremented by the SysTick exception handler:
+/// its high and low words. This core has no 64-bit atomics, whose emulation
+/// takes a lock and four barriers per load, and timestamps are taken on
+/// the request path; with the handler the only writer, [`Driver::now`]
+/// reads the two words without either.
+static TICK_HI: AtomicU32 = AtomicU32::new(0);
+static TICK_LO: AtomicU32 = AtomicU32::new(0);
 
 /// Interrupts seen since the last tick, when `IRQ_PER_TICK` exceeds 1.
 static IRQ_DIVIDER: AtomicU32 = AtomicU32::new(0);
@@ -100,7 +105,19 @@ impl SysTickDriver {
 
 impl Driver for SysTickDriver {
     fn now(&self) -> u64 {
-        TICK_COUNT.load(Ordering::Relaxed)
+        // The handler updates both words with interrupts masked, so between
+        // two of these loads, never during one; a low word read between two
+        // equal reads of the high word is the count's at the time. This
+        // core sees its own loads, and a handler's stores, in program order.
+        loop {
+            let hi = TICK_HI.load(Ordering::Relaxed);
+            compiler_fence(Ordering::SeqCst);
+            let lo = TICK_LO.load(Ordering::Relaxed);
+            compiler_fence(Ordering::SeqCst);
+            if TICK_HI.load(Ordering::Relaxed) == hi {
+                return (u64::from(hi) << 32) | u64::from(lo);
+            }
+        }
     }
 
     fn schedule_wake(&self, at: u64, waker: &Waker) {
@@ -140,9 +157,15 @@ fn SysTick() {
         return;
     }
 
-    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-
     critical_section::with(|cs| {
+        let lo = TICK_LO.load(Ordering::Relaxed).wrapping_add(1);
+        if lo == 0 {
+            TICK_HI.store(
+                TICK_HI.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
+        }
+        TICK_LO.store(lo, Ordering::Relaxed);
         let mut queue = DRIVER.queue.borrow(cs).borrow_mut();
         queue.next_expiration(DRIVER.now());
     });

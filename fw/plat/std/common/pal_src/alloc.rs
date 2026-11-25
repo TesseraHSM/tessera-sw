@@ -454,6 +454,26 @@ mod tests {
     }
 
     #[test]
+    fn dma_prefix_can_be_discarded_and_the_tail_grown_without_copying() {
+        let pal = StdHsmPal::default();
+        let io = io(0);
+        let mut request = pal.dma_alloc_exchange(&io, 44).expect("allocate");
+        request.buffer_mut()[..32].fill(0x17);
+        request.buffer_mut()[32..].fill(0x42);
+        let address = request.as_ptr() as usize;
+        let mut request = request.skip_prefix(32).expect("skip AAD");
+        assert_eq!(request.as_ptr() as usize, address + 32);
+        assert_eq!(request.buffer_mut(), &[0x42; 12]);
+        pal.dma_grow(&io, &mut request, 36).expect("grow tail");
+        assert_eq!(request.as_ptr() as usize, address + 32);
+        assert_eq!(&request.buffer_mut()[..12], &[0x42; 12]);
+        let scratch = pal.dma_alloc(&io, 4).expect("allocate scratch");
+        assert_eq!(scratch.as_ptr() as usize, address + 32 + 36);
+        let invalid = pal.dma_alloc_exchange(&io, 4).expect("allocate");
+        assert_eq!(invalid.skip_prefix(5).err(), Some(HsmError::InvalidArg));
+    }
+
+    #[test]
     fn dma_growth_preserves_request_and_does_not_move_undo_or_scratch() {
         let pal = StdHsmPal::default();
         let io = io(0);

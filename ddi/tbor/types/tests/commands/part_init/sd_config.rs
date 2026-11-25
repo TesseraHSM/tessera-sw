@@ -11,11 +11,9 @@
 //! the SD anchors and that they are bound into the derived PTA key
 //! (the partition root is derived over the full policy bytes).
 
-use tsra_ddi_tbor_test_harness::assertions;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use x509::X509Csr;
 use x509::X509CsrOp;
@@ -78,7 +76,8 @@ fn part_init_sapota_presence_changes_pta_key() {
     );
 }
 
-/// A session created before erase cannot be reused for PartInit.
+/// A session created before an NSSR cannot be used for PartInit until it is
+/// reopened.
 #[test]
 fn part_init_with_stale_session_after_erase_is_rejected() {
     let ctx = TestCtx::new();
@@ -90,8 +89,13 @@ fn part_init_with_stale_session_after_erase_is_rejected() {
         .part_init(&session, &mach_seed(), &known_good_part_policy())
         .expect_err("PartInit with a session created before erase must be rejected");
 
-    assertions::assert_fw_rejects(
-        &err,
-        ctx.unknown_session_status(TborStatus::DefaultPskMustRotate),
+    assert!(
+        matches!(
+            err,
+            tsra_ddi_interface::DdiError::DdiStatus(
+                tsra_ddi_mbor_types::DdiStatus::SessionNeedsRenegotiation
+            )
+        ),
+        "{err:?}"
     );
 }

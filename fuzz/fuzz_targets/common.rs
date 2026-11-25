@@ -16,6 +16,7 @@ use tsra_crypto::aead_envelope::{self};
 use tsra_crypto::*;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_codec::Encoder;
 use tsra_ddi_tbor_codec::Header;
 use tsra_ddi_tbor_codec::MAX_DATA_SIZE;
@@ -27,6 +28,7 @@ use tsra_ddi_tbor_codec::TocEntry;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::dev_rev;
@@ -39,7 +41,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
-use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
@@ -58,7 +59,6 @@ use tsra_ddi_tbor_types::POLICY_VERSION;
 use tsra_ddi_tbor_types::PolicyFlags;
 use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::ReportDescriptor;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
@@ -69,6 +69,61 @@ use tsra_ddi_tbor_types::*;
 pub type DdiTest = TsraDdi;
 
 pub const COORD_LEN: usize = RAW_PUB_LEN / 2;
+
+/// Generate and import a host RSA private key as a caller-held masked key.
+pub fn import_rsa_private_key(
+    ctx: &TestCtx,
+    session_id: u16,
+    modulus_bytes: usize,
+    crt: bool,
+    scope: u8,
+    key_usage: u64,
+    key_label: &[u8],
+) -> Result<(Vec<u8>, RsaPrivateKey), DdiError> {
+    let key = RsaPrivateKey::generate(modulus_bytes).expect("generate host RSA key");
+    let private_der = key.to_vec().expect("export host RSA private key");
+    let unwrapping_key = ctx
+        .tbor(&TborGetUnwrappingKeyReq { session_id })
+        .expect("get built-in unwrapping public key")
+        .pub_key;
+    assert_eq!(unwrapping_key.len(), 260);
+    let mut public_key_be = Vec::with_capacity(unwrapping_key.len());
+    public_key_be.extend(unwrapping_key[..256].iter().rev());
+    public_key_be.extend(unwrapping_key[256..].iter().rev());
+    let public_key =
+        RsaPublicKey::from_hsm_bytes(&public_key_be).expect("parse unwrapping public key");
+
+    let kek = [0xA7u8; 32];
+    let mut encrypted_kek = Encrypter::encrypt_vec(
+        &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
+        &public_key,
+        &kek,
+    )
+    .expect("RSA-OAEP wrap AES key");
+    encrypted_kek.reverse();
+    let kek = AesKey::from_bytes(&kek).expect("construct AES key-encryption key");
+    let encrypted_private_key =
+        Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, &private_der)
+            .expect("AES-KWP wrap RSA private key");
+    let mut wrapped_blob = encrypted_kek;
+    wrapped_blob.extend(encrypted_private_key);
+    let key_class = if crt {
+        KEY_CLASS_RSA_CRT
+    } else {
+        KEY_CLASS_RSA
+    };
+
+    ctx.tbor(&TborUnwrapKeyReq {
+        session_id,
+        scope,
+        key_class,
+        key_usage,
+        oaep_hash_algo: 1,
+        wrapped_blob,
+        key_label: key_label.to_vec(),
+    })
+    .map(|resp| (resp.masked_key, key))
+}
 
 const MACH_SEED_PATTERN_BASE: u8 = 0x40;
 const SATA_THUMBPRINT_PATTERN_BASE: u8 = 0x20;
@@ -131,9 +186,9 @@ pub enum EncoderTOCBuilders {
 /// Which role's session to open for this iteration.
 #[derive(Arbitrary, Debug)]
 pub enum FuzzRole {
-    /// `psk_id = 0`, `SessionType::Authenticated`
+    /// `psk_id = 0`, ECDH-P384 suite
     Co,
-    /// `psk_id = 1`, `SessionType::PlainText`
+    /// `psk_id = 1`, ECDH-P384 suite
     Cu,
 }
 
@@ -145,10 +200,10 @@ impl FuzzRole {
         }
     }
 
-    pub fn session_type(&self) -> SessionType {
+    pub fn suite(&self) -> SessionSuite {
         match self {
-            FuzzRole::Co => SessionType::Authenticated,
-            FuzzRole::Cu => SessionType::PlainText,
+            FuzzRole::Co => SessionSuite::EcdhP384,
+            FuzzRole::Cu => SessionSuite::EcdhP384,
         }
     }
 }
@@ -182,7 +237,7 @@ impl EccCurve {
         }
     }
 
-    /// Device coordinate width, including Uno's P-521 padding.
+    /// Device coordinate width, including lane padding (P-521: 66 -> 68 or 72 bytes).
     pub fn wire_coord_len(self) -> usize {
         wire_coord_len(self.coord_len())
     }
@@ -202,7 +257,7 @@ impl EccCurve {
     }
 
     /// Wire `x ‖ y` public-key length, each coordinate padded to the wire
-    /// coordinate width (P-521: 68 bytes on Uno, 66 on Duo).
+    /// coordinate width (P-521: 68 or 72 bytes).
     pub fn wire_pub_key_len(self) -> usize {
         self.wire_coord_len() * 2
     }
@@ -636,6 +691,78 @@ pub struct SecurityDomainFixture {
     pub policy: Vec<u8>,
 }
 
+pub fn sha384(bytes: &[u8]) -> [u8; 48] {
+    let mut digest = [0; 48];
+    HashAlgo::sha384()
+        .hash(bytes, Some(&mut digest))
+        .expect("SHA384");
+    digest
+}
+
+pub fn darc_key_id(key: &impl EccKeyOp) -> [u8; 48] {
+    let (x, y) = key.coord_vec().expect("public coordinates");
+    let public =
+        EccPublicKey::from_coordinates(tsra_crypto::EccCurve::P384, &x, &y).expect("public key");
+    sha384(&tsra_crypto::ExportableKey::to_vec(&public).expect("canonical DER SPKI"))
+}
+
+/// Independently seal a TMK and directly sign the complete DARC envelope.
+pub fn seal_darc_transfer(
+    recipient: &EccPublicKey,
+    sender: &EccPrivateKey,
+    tmk: &[u8; TMK_LEN],
+) -> [u8; SEALED_TMK_LEN] {
+    let source = darc_key_id(sender);
+    let destination = darc_key_id(recipient);
+    let header = [
+        b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02".as_slice(),
+        &source,
+        &destination,
+    ]
+    .concat();
+    let sealed = seal_vec(
+        &HpkeSealConfig::base(HpkeSuite::DHKemP384Sha384AesGcm256, recipient, &header, &[]),
+        tmk,
+    )
+    .expect("seal TMK");
+    let (x, y) = sealed.enc.coord_vec().expect("encapsulated coordinates");
+    let payload = [header, vec![4], x, y, sealed.ct].concat();
+    let protected = b"\xa1\x01\x38\x22";
+    let external_aad: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    let mut input = minicbor::Encoder::new(Vec::new());
+    input
+        .array(4)
+        .expect("Sig_structure")
+        .str("Signature1")
+        .expect("context")
+        .bytes(protected)
+        .expect("protected")
+        .bytes(external_aad)
+        .expect("AAD")
+        .bytes(&payload)
+        .expect("payload");
+    let mut signature = [0; RAW_PUB_LEN];
+    EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(sender, &input.into_writer(), Some(&mut signature))
+        .expect("sign DARC report");
+    let mut report = minicbor::Encoder::new(vec![0xd2]);
+    report
+        .array(4)
+        .expect("COSE")
+        .bytes(protected)
+        .expect("protected")
+        .map(0)
+        .expect("unprotected")
+        .bytes(&payload)
+        .expect("payload")
+        .bytes(&signature)
+        .expect("signature");
+    report
+        .into_writer()
+        .try_into()
+        .expect("signed DARC envelope length")
+}
+
 /// Import a host-known TMK through the POTA-authenticated DARC transfer flow.
 ///
 /// The fixture must belong to this initialized security domain. Keeping the
@@ -662,26 +789,7 @@ pub fn import_darc_tmk(
     sender_pub[..COORD_LEN].copy_from_slice(&x);
     sender_pub[COORD_LEN..].copy_from_slice(&y);
     let chain = make_chain(&fixture.pota, &sender_pub);
-    let sealed = seal_vec(
-        &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            &recipient,
-            &[],
-            &[],
-            &sender,
-        ),
-        tmk,
-    )
-    .expect("seal known TMK");
-    let (ex, ey) = sealed
-        .enc
-        .coord_vec()
-        .expect("encapsulated public coordinates");
-    let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[0] = 4;
-    sealed_tmk[1..1 + COORD_LEN].copy_from_slice(&ex);
-    sealed_tmk[1 + COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
-    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
+    let sealed_tmk = seal_darc_transfer(&recipient, &sender, tmk);
     let mut evidence = Vec::new();
     let remote_cert_chain = chain
         .der_items()
@@ -788,7 +896,6 @@ pub fn create_test_security_domain_with_custom_policy(
 
     let req = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain: receiver_chain,
         receiver_mfgr_cert_chain: mfgr_chain,
         receiver_owner_cert_chain: owner_chain,

@@ -6,7 +6,7 @@
 //! `PartInit` is mainline-supported on both `emu` and hardware. Tests
 //! run on both backends by default.
 //!
-//! Cross-test isolation comes from [`TestCtx::new`] (factory-reset +
+//! Cross-test isolation comes from [`TestCtx::new`] (NSSR +
 //! process-global lock held for the ctx's lifetime, see
 //! [`tsra_ddi_tbor_test_harness::fixture`]) so each test starts from a pristine
 //! `Enabled` partition with the canonical default PSKs.
@@ -28,11 +28,11 @@
 use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_types::PolicyKey;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
@@ -130,7 +130,7 @@ pub(super) fn build_envelope(
 /// Open a CO session under the supplied PSK (bypassing the partition
 /// default).
 pub(super) fn open_co_with(ctx: &TestCtx, psk: &[u8; PSK_LEN]) -> SessionHandshake {
-    let opts = SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(psk);
+    let opts = SessionOpenInitOptions::new(CO, SessionSuite::EcdhP384).with_psk(psk);
     let pending = ctx
         .session_open_init_with_options(opts)
         .expect("session_open_init under PSK");

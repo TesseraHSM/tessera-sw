@@ -3,7 +3,7 @@
 
 //! TBOR `MlDsaSign` wire schema.
 //!
-//! `MlDsaSign` is (temporarily) an out-of-session command that produces an ML-DSA signature
+//! `MlDsaSign` is an in-session command that produces an ML-DSA signature
 //! over a host-supplied message using a caller-held **masked** ML-DSA
 //! secret key (from [`MlDsaGenerateKey`](crate::mldsa_generate_key)).  The
 //! device unmasks the key on-device and signs; this types crate only
@@ -22,18 +22,7 @@
 //! and the result is a pure ML-DSA signature over `M` under `ctx`.  See
 //! [`MLDSA_MU_LEN`].
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -77,8 +66,8 @@ pub struct TborMlDsaSignReq<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// The masked ML-DSA secret key, an AEAD-GCM-256 envelope of 164 B:
-    /// the wire ships seed-only keys.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
+    /// The masked ML-DSA seed and expanded secret key, in an AEAD-GCM-256
+    /// envelope of up to 5160 B. See [`MASKED_MLDSA_KEY_MAX_LEN`].
     #[tbor(align = 4, buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
@@ -116,7 +105,7 @@ mod tests {
         mu: &[u8],
         hedge: MlDsaHedge,
     ) -> TborMlDsaSignReqFrame<'a> {
-        TborMlDsaSignReq::encode(buf)
+        TborMlDsaSignReq::encode(buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -140,8 +129,8 @@ mod tests {
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.mu(), &mu[..]);
         assert_eq!(frame.hedge(), MlDsaHedge::Deterministic);
-        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
-        assert_eq!(frame.len(), 5252);
+        // header(12) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5256);
         assert!(frame.len() <= TborMlDsaSignReq::MAX_ENCODED_SIZE);
     }
 
@@ -167,7 +156,7 @@ mod tests {
     fn response_round_trips_signature() {
         let mut buf = [0u8; 8192];
         let sig = [0x33u8; MLDSA_SIGNATURE_MAX_LEN];
-        let frame = TborMlDsaSignResp::encode(&mut buf, 0, true)
+        let frame = TborMlDsaSignResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .signature(&sig)
             .unwrap()

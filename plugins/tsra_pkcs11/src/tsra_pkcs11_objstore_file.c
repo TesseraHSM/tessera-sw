@@ -26,8 +26,8 @@
  * A private token object is stored sealed: AES-GCM through the device with a
  * key generated for that write alone and kept masked in the record
  * (tsra_pkcs11_store_cipher). Public objects stay in clear, and a clear record
- * that claims CKA_PRIVATE, or holds a private key, is refused, so the tag guards
- * every private object and every private key.
+ * that claims CKA_PRIVATE, or holds a private or secret key, is refused, so the
+ * tag guards every private object and every private and secret key.
  *
  * Like the in-memory backend this file links no libcrypto (durability rests on
  * the filesystem, and sealing on the device) so the no-device smoke build
@@ -128,8 +128,8 @@ static CK_BBOOL rec_bool(const tsra_pkcs11_rec_object *o, CK_ATTRIBUTE_TYPE t, C
     return a->value[0] != 0 ? CK_TRUE : CK_FALSE;
 }
 
-/* Whether the record's CKA_CLASS is CKO_PRIVATE_KEY. */
-static bool rec_is_private_key(const tsra_pkcs11_rec_object *o)
+/* Whether the record's CKA_CLASS is CKO_PRIVATE_KEY or CKO_SECRET_KEY. */
+static bool rec_is_private_or_secret_key(const tsra_pkcs11_rec_object *o)
 {
     const tsra_pkcs11_rec_attr *a = rec_find(o, CKA_CLASS);
     CK_OBJECT_CLASS cls = CKO_DATA;
@@ -137,7 +137,7 @@ static bool rec_is_private_key(const tsra_pkcs11_rec_object *o)
     {
         memcpy(&cls, a->value, sizeof(cls));
     }
-    return cls == CKO_PRIVATE_KEY;
+    return (cls == CKO_PRIVATE_KEY) || (cls == CKO_SECRET_KEY);
 }
 
 /* Set (replace or append) one attribute on a decoded record. The new value is
@@ -544,10 +544,10 @@ static CK_RV read_token_object(
         }
         /* A clear record that claims CKA_PRIVATE was not sealed by this module
          * and would escape the tag, so it counts as corrupt. So does a clear
-         * private key: this module never writes one, and its key body could
-         * sign under attributes nobody authenticated. */
+         * private or secret key: this module never writes one, and its key
+         * body could sign or encrypt under attributes nobody authenticated. */
         if ((rv == CKR_OK) && (((rec_bool(out, CKA_PRIVATE, CK_FALSE) != CK_FALSE) != sealed) ||
-                               (!sealed && rec_is_private_key(out))))
+                               (!sealed && rec_is_private_or_secret_key(out))))
         {
             tsra_pkcs11_record_free(out);
             rv = CKR_FUNCTION_FAILED;

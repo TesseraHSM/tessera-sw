@@ -39,6 +39,13 @@ pub struct HsmPartFinalExResult {
     pub local_mk_backup: Vec<u8>,
 }
 
+/// Result of `darc_tmk_export`: one directly PID-signed encrypted TMK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HsmDarcTmkExportResult {
+    /// ES384 COSE_Sign1 containing the complete P-384 HPKE Base envelope.
+    pub sealed_tmk: Vec<u8>,
+}
+
 /// Borrowed attestation evidence for one party in a security-domain
 /// backup: required manufacturer and partition-owner DER chains, an optional
 /// device-owner chain, and the COSE_Sign1 report.
@@ -58,6 +65,30 @@ pub struct HsmSdEvidence<'a> {
     pub report: &'a [u8],
 }
 
+/// Identity chains authorizing a signed SD backup's source PID.
+///
+/// The backup contains its signature; no separate operation report is required.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HsmSdIdentityEvidence<'a> {
+    /// Manufacturer certificate chain.
+    pub mfgr_cert_chain: &'a [HsmCert<'a>],
+    /// Optional device-owner certificate chain.
+    pub owner_cert_chain: &'a [HsmCert<'a>],
+    /// Partition-owner certificate chain.
+    pub part_owner_cert_chain: &'a [HsmCert<'a>],
+}
+
+impl<'a> HsmSdEvidence<'a> {
+    /// Borrow the identity chains without the recipient-key attestation report.
+    pub fn identity(&self) -> HsmSdIdentityEvidence<'a> {
+        HsmSdIdentityEvidence {
+            mfgr_cert_chain: self.mfgr_cert_chain,
+            owner_cert_chain: self.owner_cert_chain,
+            part_owner_cert_chain: self.part_owner_cert_chain,
+        }
+    }
+}
+
 /// Result of `sd_create_remote_backup`: the three backups the device
 /// returns after creating a security domain.
 ///
@@ -66,13 +97,20 @@ pub struct HsmSdEvidence<'a> {
 /// layer, so the wire type never surfaces to public callers.
 #[derive(Debug, Clone, Default)]
 pub struct HsmSdRemoteBackupResult {
-    /// Remote partition-owner-key backup (HPKE-Auth seal of BKS3).
+    /// Remote partition-owner-key backup: PID-signed HPKE Base envelope of BKS3.
     pub pok_remote_backup: Vec<u8>,
     /// Local partition-owner-key backup (BKS3 masked under the
     /// partition-local masking key).
     pub pok_local_backup: Vec<u8>,
     /// Security-domain masking-key backup envelope.
     pub sd_mk_backup: Vec<u8>,
+}
+
+/// An SD peer export or reseal, including its PID signature.
+#[derive(Debug, Clone, Default)]
+pub struct HsmSdTransferResult {
+    /// ES384 COSE_Sign1 containing the complete P-384 HPKE Base backup.
+    pub backup: Vec<u8>,
 }
 
 /// Result of `sd_restore_remote_backup`: the refreshed device-local backups
@@ -227,22 +265,20 @@ pub enum HsmPotaEndorsementSource {
     Tpm = 2,
 }
 
-/// Channel-level integrity profile for a security-domain (TBOR) session,
-/// selected by the caller when opening a session via `open_session_ex`.
+/// Key-establishment suite of a security-domain (TBOR) session, selected
+/// by the caller when opening a session via `open_session_ex`.
 ///
-/// API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
-/// separate `#[open_enum]` so the public API surface does not leak the
-/// DDI-layer wire type.
+/// Every such session encrypts its in-session traffic; the suite picks
+/// how the session keys are agreed. The suite authenticates the HSM with
+/// its partition identity key (ECDSA P-384 over the handshake transcript)
+/// and the caller with the role PSK. The discriminant is the wire
+/// `suite_id`.
 #[repr(u32)]
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoBytes, Immutable)]
-pub enum HsmSessionExType {
-    /// Channel transports bodies without per-message MAC.
-    PlainText = 0,
-
-    /// Channel transports bodies wrapped in an outer per-message HMAC
-    /// envelope.
-    Authenticated = 1,
+pub enum HsmSessionSuite {
+    /// Ephemeral ECDH P-384 key agreement.
+    EcdhP384 = 1,
 }
 
 /// Length, in bytes, of a partition PSK (Pre-Shared Key). This module is

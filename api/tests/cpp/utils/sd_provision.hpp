@@ -5,10 +5,23 @@
 
 #include <tsra_api.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
+
+/// Controlled test enrollment only. Applications must provision root trust
+/// independently, not learn it from the connection being authenticated.
+struct TestRootPin
+{
+    explicit TestRootPin(tsra_handle partition);
+    TestRootPin(const TestRootPin &) = delete;
+    TestRootPin &operator=(const TestRootPin &) = delete;
+
+    std::array<uint8_t, 48> hash{};
+    tsra_buffer buffer{ hash.data(), static_cast<uint32_t>(hash.size()) };
+};
 
 // Pinned TBOR masked-blob wire lengths, mirroring the host / firmware
 // `tsra_ddi_tbor_types` constants (which are not exposed in the C
@@ -18,8 +31,8 @@ inline constexpr uint32_t kMaskedSealingKeyLen = 280; ///< sealing priv scalar (
 inline constexpr uint32_t kMaskedSdLen = 280;         ///< masked BKS3 (48 B)
 inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 backup (48 B)
 inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
-/// Remote partition-owner-key backup: an HPKE-Auth seal (`enc(97) + ct(64)`).
-inline constexpr uint32_t kPokRemoteBackupLen = 161;
+/// COSE_Sign1 containing header(161) + enc(97) + ciphertext(48) + tag(16).
+inline constexpr uint32_t kPokRemoteBackupLen = 431;
 
 // Security-domain provisioning helper for the sealing round-trip test.
 //
@@ -149,6 +162,17 @@ class SdEvidenceHolder
         return ev_;
     }
 
+    const tsra_sd_identity_evidence &identity() const
+    {
+        return identity_;
+    }
+
+    void set_report(const std::vector<uint8_t> &report)
+    {
+        report_ = report;
+        wire();
+    }
+
     /// The receiver key certificate chain (spec `RcvrCertChain`); anchored
     /// to the policy SATA key, its leaf certifies `RcvrPub`. Valid for this
     /// holder's lifetime.
@@ -183,6 +207,7 @@ class SdEvidenceHolder
     tsra_buffer rcvr_bufs_[2]{};
     tsra_buffer report_buf_{};
     tsra_sd_evidence ev_{};
+    tsra_sd_identity_evidence identity_{};
     tsra_sd_cert_chain rcvr_chain_{};
 };
 
@@ -218,6 +243,8 @@ struct DarcReadyContext
     std::shared_ptr<CaKey> data_key;
     /// Policy POTA CA — anchors the `tsra_darc_tmk_import` sender chain.
     std::shared_ptr<CaKey> pota_key;
+    /// Actual partition PID public key signing DARC export reports.
+    std::vector<uint8_t> pid_pub;
 };
 
 /// Provision a freshly-reset partition for the DARC key-transfer commands:

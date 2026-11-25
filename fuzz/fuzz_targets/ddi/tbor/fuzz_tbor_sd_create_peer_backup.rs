@@ -15,6 +15,8 @@ use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
 
 const SEC1_UNCOMPRESSED: u8 = 0x04;
+const COSE_PAYLOAD_OFFSET: usize = 11;
+const SD_TRANSFER_HEADER_LEN: usize = 161;
 const POLICY_MUTATION_MASK: u8 = 1;
 const MIN_REPEAT_CALLS: usize = 2;
 const REPEAT_COUNT_VARIANTS: u8 = 3;
@@ -34,7 +36,7 @@ enum Fault {
     WrongPotaAnchor,
     MismatchedEvidenceLeaf,
     InvalidReportSignature,
-    InvalidSenderTag,
+    InvalidDestinationKey,
     InvalidBackupTag,
     WrongKindBackup,
     ZeroReportLength,
@@ -164,7 +166,8 @@ fn checked_success(ctx: &TestCtx, req: &TborSdCreatePeerBackupReq, oob: &[&[u8]]
         "peer backup response must not be all zero",
     );
     assert_eq!(
-        response.pok_peer_backup[0], SEC1_UNCOMPRESSED,
+        response.pok_peer_backup[COSE_PAYLOAD_OFFSET + SD_TRANSFER_HEADER_LEN],
+        SEC1_UNCOMPRESSED,
         "HPKE encapsulated key must begin with an uncompressed P-384 point",
     );
 }
@@ -175,7 +178,6 @@ fn setup_unfinalized(ctx: &TestCtx) {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let req = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: [0; MASKED_SEALING_KEY_LEN],
         policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         dst_mfgr_cert_chain: Vec::new(),
         dst_owner_cert_chain: Vec::new(),
@@ -255,20 +257,8 @@ fuzz_target!(|input: FuzzInput| {
 
         let mut evidence = make_evidence(&sata, &pota, &pid_pub, &recipient_pub, &report.report);
 
-        let sender = if matches!(input.fault, Fault::ValidSelfPeer | Fault::Repeat) {
-            recipient.masked_key
-        } else {
-            ctx.tbor(&TborSdSealingKeyGenReq {
-                session_id: session.session_id,
-                scope: input.key_scope.to_tbor(),
-            })
-            .expect("sender SdSealingKeyGen should succeed")
-            .masked_key
-        };
-
         let remote_req = TborSdCreateRemoteBackupReq {
             session_id: session.session_id,
-            masked_sealing_key: recipient.masked_key,
             receiver_cert_chain: evidence.receiver.clone(),
             receiver_mfgr_cert_chain: evidence.mfgr.clone(),
             receiver_owner_cert_chain: evidence.owner.clone(),
@@ -351,7 +341,6 @@ fuzz_target!(|input: FuzzInput| {
 
         let mut req = TborSdCreatePeerBackupReq {
             session_id: session.session_id,
-            masked_sealing_key: sender,
             policy: policy.clone(),
             dst_mfgr_cert_chain: evidence.mfgr.clone(),
             dst_owner_cert_chain: evidence.owner.clone(),
@@ -364,8 +353,29 @@ fuzz_target!(|input: FuzzInput| {
             Fault::PolicyMismatch => {
                 common::mutate_policy_tail(&mut req.policy, POLICY_MUTATION_MASK)
             }
-            Fault::InvalidSenderTag if !mutation_is_noop => {
-                req.masked_sealing_key[MASKED_SEALING_KEY_LEN - 1] ^= input.mutation_mask;
+            Fault::InvalidDestinationKey if !mutation_is_noop => {
+                let replacement = ctx
+                    .tbor(&TborEccGenerateKeyReq {
+                        session_id: session.session_id,
+                        scope: input.key_scope.to_tbor(),
+                        curve: ECC_CURVE_P384,
+                        key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                        key_label: Vec::new(),
+                    })
+                    .expect("wrong-kind destination key");
+                let report = ctx
+                    .tbor(&TborKeyReportReq {
+                        session_id: session.session_id,
+                        masked_key: replacement.masked_key.to_vec(),
+                        report_data: input.report_data,
+                        auth_envelope: Vec::new(),
+                    })
+                    .expect("wrong-kind destination report");
+                evidence.report.length = u16::try_from(report.report.len())
+                    .expect("report length")
+                    .into();
+                evidence.oob[usize::from(evidence.report.index)] = report.report;
+                req.dst_report = evidence.report;
             }
             Fault::InvalidBackupTag if !mutation_is_noop => {
                 req.pok_local_backup[MASKED_SD_LEN - 1] ^= input.mutation_mask;
@@ -393,9 +403,7 @@ fuzz_target!(|input: FuzzInput| {
             Fault::EmptyMfgrChain | Fault::EmptyPartOwnerChain => Some(TborStatus::InvalidArg),
             Fault::WrongPotaAnchor | Fault::MismatchedEvidenceLeaf => Some(TborStatus::InvalidArg),
             Fault::InvalidReportSignature if !mutation_is_noop => Some(TborStatus::InvalidArg),
-            Fault::InvalidSenderTag if !mutation_is_noop => {
-                Some(TborStatus::AesGcmDecryptTagDoesNotMatch)
-            }
+            Fault::InvalidDestinationKey if !mutation_is_noop => Some(TborStatus::InvalidArg),
             Fault::InvalidBackupTag if !mutation_is_noop => {
                 Some(TborStatus::AesGcmDecryptTagDoesNotMatch)
             }

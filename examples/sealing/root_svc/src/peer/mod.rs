@@ -112,12 +112,11 @@ pub fn serve(
             ("POST", "/v1/sd/clone") => {
                 let receiver = wire::evidence(request)?;
                 evidence::verify_peer(&receiver, env.policy())?;
-                let backup = domain.create_peer_backup(&session, &receiver, |key| {
-                    Ok(Evidence {
+                let backup = domain.create_peer_backup(&session, &receiver, || {
+                    Ok(tsra_sealing_api::IdentityEvidence {
                         mfgr_cert_chain: manufacturer.clone(),
                         owner_cert_chain: Vec::new(),
                         part_owner_cert_chain: pid_chain.clone(),
-                        report: key.report.clone(),
                     })
                 })?;
                 Ok(wire::encode_backup(&backup))
@@ -173,12 +172,16 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
     evidence::verify_peer(&receiver, env.policy())?;
     display::write_peer_evidence(&mut std::io::stdout().lock(), &receiver, "Receiver")?;
     let backup = wire::backup(&client.post("/v1/sd/clone", &wire::encode_evidence(&receiver))?)?;
-    evidence::verify_peer(&backup.sender_evidence, env.policy())?;
-    display::write_peer_evidence(
-        &mut std::io::stdout().lock(),
+    let (_, public) =
+        evidence::verify_attested_key(&receiver, env.policy(), &env.policy().pota_spki_thumbprint)?;
+    evidence::verify_transfer_source(
         &backup.sender_evidence,
-        "Sender",
+        env.policy(),
+        &env.policy().pota_spki_thumbprint,
+        &backup.pok_peer_backup,
+        Some(&public),
     )?;
+    display::write_peer_backup(&mut std::io::stdout().lock(), &backup)?;
     domain.restore_peer(&session, &prepared, &backup)?;
     let keys = key_check::generate(&session.session)?;
     env.store.save_ecc_keys(&keys)?;

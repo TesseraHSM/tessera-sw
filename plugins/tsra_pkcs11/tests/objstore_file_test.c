@@ -596,6 +596,23 @@ int main(void)
             kb_refusals == 2 && kb_len == sizeof(kb_buf) && kb_buf[0] == 0,
         "get_key_body: a refusing check withholds the body, token and session objects alike"
     );
+    kb_len = sizeof(kb_buf);
+    CHECK(
+        (s.ops->get_key_body(s.ctx, SLOT, CK_FALSE, x, NULL, &kb_len, refuse_check, &kb_refusals) ==
+         CKR_ACTION_PROHIBITED) &&
+            (s.ops->get_key_body(
+                 s.ctx,
+                 SLOT,
+                 CK_FALSE,
+                 sess,
+                 NULL,
+                 &kb_len,
+                 refuse_check,
+                 &kb_refusals
+             ) == CKR_ACTION_PROHIBITED) &&
+            (kb_refusals == 4) && (kb_len == sizeof(kb_buf)),
+        "get_key_body: the check runs on the sizing call too, which then reports no length"
+    );
 
     /* --- get_size: attribute values plus body, the same count on both backends --- */
     CK_OBJECT_HANDLE sz_tok = 0, sz_sess = 0;
@@ -1084,6 +1101,16 @@ int main(void)
             read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 902, lbuf, sizeof(lbuf), &llen) ==
                 CKR_FUNCTION_FAILED,
         "seal: a clear record holding a private key is refused"
+    );
+    /* Likewise a secret key: its record limits what its key body may encrypt. */
+    kcls = CKO_SECRET_KEY;
+    fl = sizeof(fbuf);
+    snprintf(path, sizeof(path), "%s/903.object", seal_dir);
+    CHECK(
+        tsra_pkcs11_record_encode(&clear_key, NULL, fbuf, &fl) == CKR_OK && spill(path, fbuf, fl) &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 903, lbuf, sizeof(lbuf), &llen) ==
+                CKR_FUNCTION_FAILED,
+        "seal: a clear record holding a secret key is refused"
     );
     forged_attrs[2].value = &ck_false;
     fl = sizeof(fbuf);

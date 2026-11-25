@@ -477,7 +477,7 @@ fn run(input: &Input<'_>) {
         if input.scenario() == Scenario::DefaultPsk {
             let role = input.role();
             let session = ctx
-                .open_session(role.psk_id(), role.session_type())
+                .open_session(role.psk_id(), role.suite())
                 .expect("default-PSK session");
             ctx.expect_fw_reject(
                 &TborGetPublicKeyReq {
@@ -517,8 +517,7 @@ fn run(input: &Input<'_>) {
                 };
                 let pending = ctx
                     .session_open_init_with_options(
-                        SessionOpenInitOptions::new(role.psk_id(), role.session_type())
-                            .with_psk(psk),
+                        SessionOpenInitOptions::new(role.psk_id(), role.suite()).with_psk(psk),
                     )
                     .expect("replacement session init");
                 let replacement = SessionGuard::new(
@@ -550,7 +549,7 @@ fn run(input: &Input<'_>) {
             .is_some_and(|s| s.session_id() == req.session_id)
         {
             let mut buf = [0; common::FUZZ_REQ_BUF_SIZE];
-            if req.encode_request(&mut buf).is_err() {
+            if req.encode_request(&mut buf, (1, 1)).is_err() {
                 expected = Expected::HostEncode;
             } else if req.masked_key.len() > GET_PUBLIC_KEY_MASKED_KEY_MAX_LEN {
                 expected = Expected::Reject(TborStatus::TborInvalidFixedLength);

@@ -6,113 +6,81 @@ Licensed under the MIT License.
 # SdResealRemoteBackup (Opcode 0x0B)
 
 **Handler:** `fw/core/lib/src/ddi/tbor/sd_reseal_remote_backup.rs`
-**Session:** InSession (Crypto Officer)
+**Session:** Active Crypto Officer
 
-## Description
+An initialized sealing authority validates and opens a source Base envelope
+with its actual recipient private key, then reseals BKS3 to a new recipient.
+It does not provision or mutate its SD.
 
-Reseals a security-domain **remote backup** from a source recipient to a
-destination recipient, run by a Sealing
-Authority.  The caller supplies the source backup (`src_remote_backup`,
-an HPKE-Auth seal of a 48-byte BKS3) together with the *receiver's*
-masked SD-sealing key (`masked_sealing_key`, unmasked on-device to
-recover the receiver private key `RcvrPriv`).
+The source evidence contains **PID identity chains only**; the source
+`SdBackup` already includes its direct signature, not a sender-key attestation. Its PID must
+be POTA-authorized by the request's client SD policy. The destination remains
+POTA-authorized `PublicKey` evidence proving an HSM-generated SD sealing key
+with the same client SD policy hash. Manufacturer and partition-owner chains
+are required; the optional owner chain must agree on the PID leaf.
 
-The handler HPKE-Auth-**opens** `src_remote_backup` with `RcvrPriv`
-(recovering the BKS3), authenticated by the source *sender's* public key
-(`SndrPub`, from `src_evidence`); then HPKE-Auth-**reseals** that same
-BKS3 to the destination *receiver's* public key (`DstRcvrPub`, from
-`dest_evidence`), using the same `RcvrPriv` as the sender-authentication
-key ("for simplicity, the same HPKE private key").  The
-result is returned as `dst_remote_backup`.
+The SA's bound local policy may differ from the transferred SD policy.
+Both input bindings and the outgoing envelope use the **request's SD policy
+hash**, never the SA-local hash. Firmware signs the fresh outgoing envelope
+with its actual SA PID.
 
-The command is **stateless** — nothing is persisted (no vault writes, no
-undo log).  It requires an `Initialized` partition (the SD masking keys
-are provisioned by `PartFinal`).
+The signed `source_pid_spki_thumbprint` and `recipient_spki_thumbprint`
+in the binary header are 48-byte SHA-384 hashes of the keys'
+canonical DER SPKI. The source
+thumbprint identifies the PID signing key; the recipient thumbprint
+identifies the encryption key. A reseal replaces both with the SA's PID
+thumbprint and the new destination key's thumbprint.
 
-Both attestation **evidences** are validated on-device
-([`verify_evidence`](../../../fw/core/evidence/src/lib.rs)): each one's
-manufacturer and partition-owner chains are required, and the device-owner
-chain is optional. All supplied chains are verified and must share the report
-signer's leaf key. The partition-owner chain is anchored to the **request**
-policy's POTA key (the client partitions' owner), and each
-report's v2 `policy_hash` must equal `SHA-384(policy)`.  This binds the
-source and destination to the same policy (whose digest covers the POTA
-key).  The attested COSE_Keys are recovered as `SndrPub` (source sender)
-and `DstRcvrPub` (destination receiver).  `BKS3` and `RcvrPriv` are
-scrubbed during IO teardown.
+## Required source and destination validation
 
-Omit the device-owner chain with an empty descriptor list. Supplying an invalid
-owner chain still fails. The wire layout is unchanged.
+**The source backup signature and destination report signature are verified.** Certificate-chain
+validation alone is not sufficient.
 
-## Request
+| Evidence | Signature verification | Required signed claims and bindings |
+|---|---|---|
+| `src_evidence` | Verify the direct ES384 signature on `src_remote_backup` using the source PID certified by these identity chains. | Require the `SdBackup` kind, source PID thumbprint, request SD policy hash, and actual input recipient derived from `masked_sealing_key`. A `PublicKey` attestation cannot substitute for the signed backup. |
+| `dest_evidence` | Verify the `PublicKey` attestation report's ES384 signature using the destination PID certified by its identity chains. | Require a P-384 SD-sealing public key marked Generated and not Imported, with a policy hash matching the request SD policy. This attested key becomes the output HPKE recipient. |
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
-variable-length data section.
+For each side, the partition-owner chain must anchor to the **request SD
+policy's POTA**. Manufacturer and partition-owner chains are mandatory;
+every supplied chain, including the optional owner chain, must certify the
+same PID for that side. Source and destination need not have the same PID.
+These checks are mandatory regardless of `require_trusted_sa_key`; the
+conditional SAPOTA checks of remote restore do not apply to reseal.
 
-### TOC entries
+Both signatures and their required bindings must pass **before
+HPKE decapsulation of the source envelope**. The receiver key may already
+have been unmasked to derive the actual input recipient. After successful
+opening, the SA encrypts BKS3 to the attested destination key and signs a
+**new complete `SdBackup` envelope with its own PID**, binding that PID, destination
+key, complete output envelope, and the same request SD policy hash.
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | (padding) | `padding` (0..=3 B) | Places `masked_sealing_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_sealing_key` | `buffer` (fixed 276 B) | Receiver's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `RcvrPriv`. The same key both opens the source and authenticates the reseal; never a vault handle. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 20 | `policy` | `buffer` (max 384 B) | Caller-asserted partition policy CBOR document the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key thumbprint anchors both evidence chains. |
-| 24 | `src_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source **sender** manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
-| 28 | `src_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender owner certificate-chain descriptors. |
-| 32 | `src_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender partition-owner certificate-chain descriptors. |
-| 36 | `src_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Source sender attestation-report (COSE_Sign1) descriptor; its attested key is `SndrPub`. |
-| 40 | `dest_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination **receiver** manufacturer certificate-chain descriptors (from the `dest_evidence` field group). |
-| 44 | `dest_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver owner certificate-chain descriptors. |
-| 48 | `dest_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Destination receiver partition-owner certificate-chain descriptors. |
-| 52 | `dest_report` | `buffer` (single `&ReportDescriptor`, 3 B) | Destination receiver attestation-report (COSE_Sign1) descriptor; its attested key is `DstRcvrPub`. |
-| 56 | `src_remote_backup` | `buffer` (fixed 161 B) | Source remote backup to reseal: an HPKE-Auth seal of BKS3 under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). |
+## Request fields, in wire order
 
-The two four-entry descriptor blocks are spliced in by the shared
-[`Evidence`](../../../fw/core/ddi/tbor/types/src/evidence.rs) field group
-(`src_evidence` then `dest_evidence`).  Each descriptor is
-`{ index: u8, length: U16 }`: `index` selects a 16-byte NVMe SGL Data
-Block descriptor in the **out-of-band** SGL page (SQE `oob_prp`/`oob_len`),
-and `length` is the byte count of the referenced payload.  Both evidences'
-certificate-chain DER bytes **and** their COSE_Sign1 reports travel out of
-band, referenced by these `(offset, length)` descriptors.
+| Field | Shape | Meaning |
+|---|---|---|
+| `session_id` | Inline session ID | Active CO session |
+| `masked_sealing_key` | 280 B, aligned to 4 B | Actual source-envelope recipient key |
+| `policy` | 1-384 B | Client SD policy |
+| `src_evidence` | Three chain descriptor lists | POTA-authorized source PID identity |
+| `dest_evidence` | Three chain descriptor lists and report descriptor | POTA-authorized destination `PublicKey` evidence |
+| `src_remote_backup` | 431 B | Complete signed source Base envelope |
 
-### Data section
-
-Carries the 276-byte `masked_sealing_key`, the `policy` document (at most 384 B),
-the packed source / destination cert-chain and report descriptors, and the
-161-byte `src_remote_backup` seal.  The referenced evidence payloads (the
-two `KeyReport`s and their certificate chains) travel out of band.
+Source identity expands to three TOC entries; destination evidence expands
+to four. Referenced certificates and the recipient report travel out of band.
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entry, then the data
-section.
+| Field | Shape | Meaning |
+|---|---|---|
+| `dst_remote_backup` | 431 B | One fresh SA-PID-signed Base envelope |
 
-### TOC entries
+See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+The direct source signature, transfer kind, PID thumbprint, recipient thumbprint,
+and client policy are verified **before HPKE decapsulation**. A different
+source key's `PublicKey` report cannot authorize a transfer. Failures do not
+publish BKS3 or a successful output envelope.
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 8 | `dst_remote_backup` | `buffer` (fixed 161 B) | Resealed remote backup: an HPKE-Auth seal of the same BKS3 to `DstRcvrPub` under `DHKemP384Sha384AesGcm256`, `enc(97) ‖ ct(64)` = `POK_REMOTE_BACKUP_LEN` (161 B). Each reseal re-randomizes the HPKE ephemeral, so the ciphertext differs from `src_remote_backup` and between calls. |
-
-### Data section
-
-Carries the 161-byte `dst_remote_backup` seal.
-
-## Errors
-
-| Error | Cause |
-|---|---|
-| `TborInvalidFixedLength` | `masked_sealing_key` (276 B) or `src_remote_backup` (161 B) is the wrong length, or `policy` exceeds 384 B, (rejected at decode before the handler runs) |
-| `InvalidArg` | Not `Initialized`; missing out-of-band evidence; a report is not v2 (no `policy_hash`); a report's `policy_hash` does not match `SHA-384(policy)`; or evidence chain verification fails |
-| `InvalidPermissions` | Not a Crypto-Officer session |
-| `UnsupportedKeyScope` | The masked sealing key's scope has no provisioned masking key |
-| `UnsupportedKeyType` | The unmasked key is not an `SdSealing` key |
-| `AesGcmDecryptTagDoesNotMatch` | `src_remote_backup` fails to HPKE-Auth-open under the recovered receiver key and attested sender key (tampered backup, or mismatched receiver/sender) |
-| `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-
-## See also
-
-- Wire encoding: [TBOR specification](../../../fw/core/ddi/tbor/docs/spec.md)
-- Wire schema: `fw/core/ddi/tbor/types/src/sd_reseal_remote_backup.rs`
-- Source backup: [`SdCreateRemoteBackup`](sd_create_remote_backup.md) produces the `src_remote_backup` this command reseals
-- Key provenance: [`SdSealingKeyGen`](sd_sealing_key_gen.md) → [`KeyReport`](key_report.md) mints and attests each party's SD sealing key
+Malformed sizes fail decoding. Invalid source/destination evidence, policy,
+recipient, envelope, report, masked key, lifecycle, session, and permission
+errors are propagated.

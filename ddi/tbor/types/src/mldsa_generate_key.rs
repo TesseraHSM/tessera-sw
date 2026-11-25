@@ -3,7 +3,7 @@
 
 //! Host-side wrapper for the TBOR `MlDsaGenerateKey` command.
 //!
-//! `MlDsaGenerateKey` is (temporarily) an **out-of-session** command that generates a fresh ML-DSA keypair and returns the
+//! `MlDsaGenerateKey` is an in-session command that generates a fresh ML-DSA keypair and returns the
 //! secret key as a **masked** blob plus the wire public key.  The private
 //! key is not stored on-device; the caller holds the masked blob and
 //! passes it back to [`MlDsaSign`](crate::mldsa_sign).
@@ -11,22 +11,11 @@
 //!
 //! `key_kind` is a raw 1-byte `MlDsaKeyKind` discriminant (the firmware
 //! types it as an open enum) byte-identical to the PQC subset of
-//! `HsmVaultKeyKind`. It selects the ML-DSA parameter set.  The TBOR wire
-//! ships **seed-only** private keys today, so the returned masked blob
-//! always carries the compact 32-byte `xi` seed.
+//! `HsmVaultKeyKind`. It selects the ML-DSA parameter set. Only seed key-kind
+//! selectors are accepted; the returned masked blob carries the 32-byte
+//! `xi` seed followed by the expanded secret key.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use alloc::vec::Vec;
 
@@ -101,8 +90,8 @@ pub struct TborMlDsaGenerateKeyReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborMlDsaGenerateKeyResp {
     /// The generated ML-DSA private key, masked under the scope's masking
-    /// key.  Always 164 B: the wire is seed-only, so the plaintext is the
-    /// 32-byte `xi` seed.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
+    /// key. The plaintext is the 32-byte `xi` seed followed by the
+    /// expanded secret key. See [`MASKED_MLDSA_KEY_MAX_LEN`].
     #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
 
@@ -128,7 +117,7 @@ mod tests {
             key_kind: MLDSA_KEY_KIND_65_SEED,
         };
         let mut buf = [0u8; 256];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&MLDSA_KEY_KIND_65_SEED),
             "encoded frame must carry the key-kind discriminant",
@@ -148,7 +137,7 @@ mod tests {
                 key_kind: kind,
             };
             let mut buf = [0u8; 256];
-            let frame = req.encode_request(&mut buf).expect("encode");
+            let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
             assert!(
                 frame.contains(&kind),
                 "encoded frame must carry the key-kind discriminant",

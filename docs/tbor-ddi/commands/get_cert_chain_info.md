@@ -22,25 +22,25 @@ the request does not carry a partition selector.
 
 ## Request
 
-Wire layout: 8-byte header, followed by the TOC entries.
+Wire layout: 12-byte header, followed by the TOC entries.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition (e.g. `0` = identity chain). |
+| 12 | `slot_id` | `uint8` (inline) | Certificate chain slot within the caller's partition (e.g. `0` = identity chain). |
 
 ## Response
 
-Wire layout: 8-byte header, followed by the TOC entries, then the
+Wire layout: 12-byte header, followed by the TOC entries, then the
 variable-length data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `num_certs` | `uint8` (inline) | Number of certificates in the chain.  Valid `GetCertificate` indices are `0..num_certs`. |
-| 12 | `thumbprint` | `buffer` (offset/len) | SHA-256 thumbprint of the leaf certificate (32 B). |
+| 12 | `num_certs` | `uint8` (inline) | Number of certificates in the chain.  Valid `GetCertificate` indices are `0..num_certs`. |
+| 16 | `thumbprint` | `buffer` (offset/len) | SHA-256 thumbprint of the leaf certificate (32 B). |
 
 ### Data section
 

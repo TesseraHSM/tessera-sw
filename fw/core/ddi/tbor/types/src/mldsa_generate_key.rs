@@ -3,7 +3,7 @@
 
 //! TBOR `MlDsaGenerateKey` wire schema.
 //!
-//! `MlDsaGenerateKey` is (temporarily) an out-of-session command that generates a fresh
+//! `MlDsaGenerateKey` is an in-session command that generates a fresh
 //! ML-DSA (FIPS 204) keypair for the requested PQC key kind and returns
 //! the private key as a **masked** blob plus the wire public key.  The
 //! private key is **not** stored on the device: the caller holds the
@@ -15,27 +15,16 @@
 //!
 //! * `scope` — the [`KeyScope`] whose masking key wraps the private key.
 //! * `key_kind` — the [`MlDsaKeyKind`] selecting ML-DSA-44 / -65 / -87.
-//!   The TBOR wire ships **seed-only** private keys, so `masked_key`
-//!   always carries the compact 32-byte `xi` seed.
+//!   Only seed key-kind selectors are accepted; `masked_key` carries the
+//!   32-byte `xi` seed followed by the expanded secret key.
 //!
 //! Outputs:
 //!
-//! * `masked_key` — the ML-DSA seed, masked (AEAD-GCM-256) under the
+//! * `masked_key` — the seed and expanded key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
 //! * `pub_key` — the ML-DSA public key bytes.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -47,20 +36,12 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 
 /// Maximum masked ML-DSA private-key envelope length.
 ///
-/// The TBOR wire ships **seed-only** ML-DSA private keys (see
-/// [`MlDsaKeyKind`]), so the masked plaintext is always the 32-byte `xi`
-/// seed: `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)` = 264 bytes.
-/// The 232-byte constant part is the AEAD-GCM-256 masked-envelope
-/// overhead.
+/// The plaintext is the 32-byte `xi` seed followed by the expanded secret
+/// key. ML-DSA-87 needs `32 + 4896 + 232 = 5160` bytes including the
+/// AEAD-GCM-256 envelope: header 8 + IV 16 + AAD 192 + tag 16.
+/// Masked lengths are 2824 / 4296 / 5160 bytes for ML-DSA-44 / -65 / -87.
 ///
-/// If an expanded (`Private`) kind is ever added to [`MlDsaKeyKind`], the
-/// worst-case plaintext becomes the 4896-byte ML-DSA-87 secret key and
-/// this constant — together with the `max_len` literals on
-/// [`TborMlDsaGenerateKeyResp::masked_key`] and
-/// [`TborMlDsaSignReq`](crate::mldsa_sign::TborMlDsaSignReq)`::masked_key`
-/// — must be raised to `4896 + 232 = 5124`.
-///
-/// Pinned into the `#[tbor(buffer, max_len = 264)]` literal on
+/// Pinned into the `#[tbor(buffer, max_len = 5160)]` literal on
 /// [`TborMlDsaGenerateKeyResp::masked_key`].
 pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 4896 + 16;
 
@@ -96,16 +77,11 @@ pub const MLDSA_MU_LEN: usize = 64;
 /// taxonomy where each algorithm/variant/format pair is its own kind (the
 /// same way fixed- and variable-length HMAC keys are distinct kinds).
 ///
-/// **Seed-only on the wire.**  This enum deliberately exposes only the
-/// three `Seed` kinds (44–46): a seed kind stores the 32-byte generation
-/// seed `xi` and is re-expanded on each use.  The matching expanded
-/// (`Private`) kinds `MlDsa44Private = 47` … `MlDsa87Private = 49` do
-/// exist in `HsmVaultKeyKind` and remain fully supported by the vault;
-/// they are simply not offered on the TBOR wire yet.  Adding them later
-/// is a purely additive change to this enum — but it also requires
-/// raising the `masked_key` `max_len` literals (and
-/// [`MASKED_MLDSA_KEY_MAX_LEN`]) from 164 to 5028, because an expanded
-/// ML-DSA-87 secret key is 4896 bytes instead of a 32-byte seed.
+/// Only the three `Seed` kinds (46-48) are accepted. Their masked blobs
+/// contain the 32-byte generation seed `xi` followed by the expanded
+/// secret key. The seed supports public-key regeneration; signing uses
+/// the expanded key directly. Separate `Private` kinds are not exposed
+/// by this wire enum.
 ///
 /// Kept as an [`open_enum`] so an unrecognized discriminant round-trips as
 /// `MlDsaKeyKind(x)` and is rejected on-device rather than failing to
@@ -147,8 +123,8 @@ pub struct TborMlDsaGenerateKeyReq {
 #[tbor(response, pair = TborMlDsaGenerateKeyReq)]
 pub struct TborMlDsaGenerateKeyResp<'a> {
     /// The generated ML-DSA private key, masked (AEAD-GCM-256) under the
-    /// scope's masking key.  Always 164 B: the wire is seed-only, so the
-    /// plaintext is the 32-byte `xi` seed.  See
+    /// scope's masking key. The plaintext is the 32-byte `xi` seed
+    /// followed by the expanded secret key. See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`].
     #[tbor(align = 4, buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
@@ -175,7 +151,7 @@ mod tests {
     #[test]
     fn request_round_trips_seed_kind() {
         let mut buf = [0u8; 256];
-        let frame = TborMlDsaGenerateKeyReq::encode(&mut buf)
+        let frame = TborMlDsaGenerateKeyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -197,7 +173,7 @@ mod tests {
             MlDsaKeyKind::MlDsa87Seed,
         ] {
             let mut buf = [0u8; 256];
-            let frame = TborMlDsaGenerateKeyReq::encode(&mut buf)
+            let frame = TborMlDsaGenerateKeyReq::encode(&mut buf, (1, 1))
                 .unwrap()
                 .session_id(SessionId(1))
                 .unwrap()
@@ -223,7 +199,7 @@ mod tests {
         let mut buf = [0u8; 8192];
         let masked = [0xABu8; MASKED_MLDSA_KEY_MAX_LEN];
         let pub_key = [0xCDu8; MLDSA_PUB_KEY_MAX_LEN];
-        let frame = TborMlDsaGenerateKeyResp::encode(&mut buf, 0, true)
+        let frame = TborMlDsaGenerateKeyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .masked_key(&masked)
             .unwrap()

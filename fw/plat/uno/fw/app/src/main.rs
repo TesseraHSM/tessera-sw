@@ -9,9 +9,9 @@
 //! # Task architecture
 //!
 //! ```text
-//!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
-//!                            │
-//!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
+//!  main ──► init PAL ──► spawn poll_ipc ──► executor + NVIC scan loop
+//!                                               │
+//!                          ICQ IRQ ──► accept IO ──► signal io_worker[slot]
 //!                                                       │
 //!                                                   HSM core pipeline:
 //!                                                   SQE parse → in-DMA
@@ -21,20 +21,26 @@
 //! ```
 //!
 //! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
-//!   spawns the IO receive loop, then enters the NVIC polling loop.
-//! - **`poll_io`** (single instance): Awaits IOs from the IIC driver
-//!   and hands each one to the `io_worker` of its IO slot.
+//!   spawns the IPC loop, then runs the executor, scanning the NVIC after
+//!   each of its passes; the scan hands each inbound command IO to the
+//!   `io_worker` of its IO slot once boot completes.
+//! - **`poll_io`** (single instance): Receives the IOs the run loop leaves
+//!   (bulk IOs, and command IOs that come while host IO is paused for a
+//!   PCIe reset) and hands each one to the worker of its IO slot.
 //! - **`io_worker`** (one per host IO slot, 32): Owns its slot's IO for
 //!   the IO's lifetime, delegating to the HSM core for SQE parsing, DMA,
 //!   and CQE delivery, then waits for the slot's next IO.
+//! - **`bulk_io_worker`** (one per bulk IO slot, 32; not with
+//!   `bulk_crypto`): The same for the bulk AES-GCM/XTS slots.
 //!
 //! # Interrupt handling
 //!
 //! Peripheral interrupts (IIC, OIC, GDMA) are enabled at the source
 //! (`irq_enable` register) so the hardware asserts the NVIC pending bit.
-//! No ISR handlers are installed for these — the PAL's `run()` loop
-//! polls `Nvic::is_pending()` and wakes the appropriate driver. The
-//! SysTick exception is handled internally by the systick driver crate.
+//! No ISR handlers are installed for these — `main`'s loop scans the
+//! pending bits with the PAL's `poll_once()` and wakes the appropriate
+//! driver. The SysTick exception is handled internally by the systick
+//! driver crate.
 
 #![no_std]
 #![no_main]
@@ -46,7 +52,10 @@
 #[allow(unsafe_code)]
 mod trampoline;
 
+use core::mem::MaybeUninit;
+
 use embassy_executor::Spawner;
+use embassy_executor::raw;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::signal::Signal;
@@ -84,29 +93,59 @@ static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 /// Host IO slots, each served by its own [`io_worker`] task.
 const IO_WORKERS: usize = 32;
 
+/// Bulk IO slots, shared by the FP1 and FP2 bulk channels, each served by
+/// its own [`bulk_io_worker`] task.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_IO_WORKERS: usize = 32;
+
 /// Hands each received IO to the worker that owns its slot.
-struct IoHandoff([Signal<NoopRawMutex, UnoHsmIo>; IO_WORKERS]);
+struct IoHandoff<const N: usize>([Signal<NoopRawMutex, UnoHsmIo>; N]);
 
 // SAFETY: single-core Cortex-M7 with Embassy cooperative scheduling; only
 // tasks, never an ISR, touch these signals.
 #[allow(unsafe_code)]
-unsafe impl Sync for IoHandoff {}
+unsafe impl<const N: usize> Sync for IoHandoff<N> {}
 
-static IO_HANDOFF: IoHandoff = IoHandoff([const { Signal::new() }; IO_WORKERS]);
+static IO_HANDOFF: IoHandoff<IO_WORKERS> = IoHandoff([const { Signal::new() }; IO_WORKERS]);
+
+#[cfg(not(feature = "bulk_crypto"))]
+static BULK_IO_HANDOFF: IoHandoff<BULK_IO_WORKERS> =
+    IoHandoff([const { Signal::new() }; BULK_IO_WORKERS]);
+
+/// Hands `io` to the worker that owns its slot: an [`io_worker`] for a
+/// command IO, a [`bulk_io_worker`] for a bulk IO (command and bulk IOs
+/// index separate slot arrays).
+///
+/// A slot is not handed out again until its IO is dropped, by which time
+/// the slot's worker is waiting for the next one. An IO from a slot with no
+/// worker is dropped.
+fn dispatch_io(io: UnoHsmIo) {
+    #[cfg(not(feature = "bulk_crypto"))]
+    let handoff: &[_] = if io.kind() == HsmIoKind::Bulk {
+        &BULK_IO_HANDOFF.0
+    } else {
+        &IO_HANDOFF.0
+    };
+    #[cfg(feature = "bulk_crypto")]
+    let handoff: &[_] = &IO_HANDOFF.0;
+    if let Some(slot) = handoff.get(usize::from(io.index())) {
+        slot.signal(io);
+    }
+}
 
 /// IO receive loop — runs forever as a single Embassy task.
 ///
-/// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC driver and hands it to the [`io_worker`] that owns its slot.
-/// A slot is not handed out again until its IO is dropped, by which time
-/// the slot's worker is waiting for the next one. An IO from a slot with
-/// no worker is dropped and the loop retries on the next iteration.
+/// Once boot completes the PAL's run loop hands each inbound command IO to
+/// its worker itself (see [`UnoHsmPal::set_io_dispatch`]); this task
+/// receives the rest through [`HsmIoController::poll_io`]: bulk IOs, and
+/// the command IO that comes while host IO is paused for a PCIe reset,
+/// which `poll_io` recycles. It hands on any IO it returns.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent receive-and-dispatch loop.
 ///
 /// # Side Effects
-/// - Continuously drains inbound IO work from PAL.
+/// - Drains inbound IO work from PAL that the run loop leaves.
 /// - Wakes the worker of each received IO's slot.
 #[embassy_executor::task]
 async fn poll_io() -> ! {
@@ -115,17 +154,15 @@ async fn poll_io() -> ! {
         let Ok(io) = hsm.pal().poll_io().await else {
             continue;
         };
-
-        if let Some(slot) = IO_HANDOFF.0.get(usize::from(io.index())) {
-            slot.signal(io);
-        }
+        dispatch_io(io);
     }
 }
 
 /// Processes the IOs of one slot, one at a time, each to completion.
 ///
-/// Waits for [`poll_io`] to hand over the slot's next [`UnoHsmIo`], keeping
-/// the underlying IO_SQ slot reserved until the completion DMA finishes.
+/// Waits for the run loop or [`poll_io`] to hand over the slot's next
+/// [`UnoHsmIo`], keeping the underlying IO_SQ slot reserved until the
+/// completion DMA finishes.
 /// First lets the PAL certify the partition's SP-published unwrapping key
 /// (a FIPS 140-3 pairwise consistency test that runs once per published
 /// key), then delegates SQE parsing, inbound/outbound DMA, DDI dispatch,
@@ -150,6 +187,28 @@ async fn io_worker(slot: &'static Signal<NoopRawMutex, UnoHsmIo>) -> ! {
         let io = slot.wait().await;
         hsm.pal().certify_pending_unwrapping_key(&io).await;
         hsm.handle_io(io).await;
+    }
+}
+
+/// Processes the bulk (fast-path) IOs of one bulk slot, one at a time,
+/// each to completion.
+///
+/// The bulk workers are separate from the [`io_worker`]s, so bulk IOs
+/// cannot hold up command IOs, and their task future carries only the bulk
+/// path.
+///
+/// # Parameters
+/// - `slot`: The hand-off of the bulk slot this worker serves.
+///
+/// # Returns
+/// Never returns (`!`).
+#[cfg(not(feature = "bulk_crypto"))]
+#[embassy_executor::task(pool_size = BULK_IO_WORKERS)]
+async fn bulk_io_worker(slot: &'static Signal<NoopRawMutex, UnoHsmIo>) -> ! {
+    let hsm = HSM.get().await;
+    loop {
+        let io = slot.wait().await;
+        hsm.handle_bulk_io(io).await;
     }
 }
 
@@ -212,9 +271,16 @@ async fn poll_ipc(spawner: Spawner) -> ! {
                     spawner.spawn(token);
                 }
             }
+            #[cfg(not(feature = "bulk_crypto"))]
+            for slot in &BULK_IO_HANDOFF.0 {
+                if let Ok(token) = bulk_io_worker(slot) {
+                    spawner.spawn(token);
+                }
+            }
             if let Ok(token) = poll_io() {
                 spawner.spawn(token);
             }
+            hsm.pal().set_io_dispatch(dispatch_io);
             if let Ok(token) = periodic_self_tests() {
                 spawner.spawn(token);
             }
@@ -222,47 +288,67 @@ async fn poll_ipc(spawner: Spawner) -> ! {
     }
 }
 
-/// Firmware async entry point.
+/// Firmware entry point.
 ///
 /// 1. Initialises the HSM singleton with a default [`UnoHsmPal`].
 /// 2. Calls [`HsmPal::init`] — sets up SysTick, RNG, IPC, signals Done.
-/// 3. Spawns [`poll_ipc`] which drives boot handshake + steady-state IPC.
-/// 4. Enters [`HsmPal::run`] — the NVIC polling loop that wakes
-///    drivers when peripheral interrupts are pending.
+/// 3. Spawns [`poll_ipc`], which drives the boot handshake and
+///    steady-state IPC, and [`heartbeat`].
+/// 4. Runs the executor, scanning the NVIC after each of its passes
+///    ([`UnoHsmPal::poll_once`]) to wake the drivers whose peripheral
+///    interrupts are pending.
 ///
-/// The NVIC loop runs from the start so `ipc.wake()` fires naturally
-/// when Admin sends messages — no poll_once hack needed.
+/// The scan runs from the start so `ipc.wake()` fires naturally when
+/// Admin sends messages. It is the executor loop's own rather than a
+/// task's: a task would have to wake itself and pass through the run queue
+/// on every pass, and the passes come between every few task polls.
 ///
-/// # Parameters
-/// - `spawner`: Embassy task spawner used to start long-lived background tasks.
+/// If a task cannot be spawned the scan never starts, and the executor
+/// idles with whatever was spawned.
 ///
 /// # Returns
-/// Returns `()` if initialization fails to spawn IPC handling and exits early;
-/// otherwise, this function does not normally return while firmware is running.
+/// Never returns.
 ///
 /// # Side Effects
 /// - Initializes global singleton state.
 /// - Initializes PAL platform services.
-/// - Spawns IPC loop task and enters main NVIC polling loop.
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+/// - Spawns the IPC loop and heartbeat tasks and runs the executor.
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    // `entry` hands this to `main`, which runs once, as a `&'static mut`.
+    static mut EXECUTOR: MaybeUninit<raw::Executor> = MaybeUninit::uninit();
+
     info!("app", "Tessera Integrated HSM firmware starting up...");
     let _ = HSM.init(Hsm::new(UnoHsmPal::default()));
-    let hsm = HSM.get().await;
-    hsm.pal().init();
+    let hsm = HSM.try_get();
+    if let Some(hsm) = hsm {
+        hsm.pal().init();
+    }
 
+    // Thread mode only: the pender then just raises the event a sleeping
+    // `wfe` waits for.
+    let executor: &'static raw::Executor =
+        EXECUTOR.write(raw::Executor::new(usize::MAX as *mut ()));
+    let spawner = executor.spawner();
+
+    let mut started = false;
     if let Ok(token) = poll_ipc(spawner) {
         spawner.spawn(token);
-    } else {
-        return;
+        if let Ok(token) = heartbeat() {
+            spawner.spawn(token);
+            started = true;
+        }
     }
 
-    if let Ok(token) = heartbeat() {
-        spawner.spawn(token);
-    } else {
-        return;
+    loop {
+        // SAFETY: the executor is polled only here, in thread mode.
+        #[allow(unsafe_code)]
+        unsafe {
+            executor.poll();
+        }
+        match hsm {
+            Some(hsm) if started => hsm.pal().poll_once(),
+            _ => cortex_m::asm::wfe(),
+        }
     }
-
-    hsm.pal().run().await;
-    hsm.pal().deinit();
 }

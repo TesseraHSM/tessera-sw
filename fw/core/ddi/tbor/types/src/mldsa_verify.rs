@@ -3,7 +3,7 @@
 
 //! TBOR `MlDsaVerify` wire schema.
 //!
-//! `MlDsaVerify` is (temporarily) an out-of-session command that verifies an ML-DSA
+//! `MlDsaVerify` is an in-session command that verifies an ML-DSA
 //! signature over a host-supplied 64-byte message representative `μ` and
 //! public key.  The response is an empty frame on success; no key is stored
 //! or returned by this command.
@@ -14,18 +14,7 @@
 //! `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`.  See
 //! [`MLDSA_MU_LEN`].
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -90,7 +79,7 @@ mod tests {
         let pub_key = [0x11u8; MLDSA_PUB_KEY_MAX_LEN];
         let mu = [0x55u8; MLDSA_MU_LEN];
         let signature = [0x33u8; MLDSA_SIGNATURE_MAX_LEN];
-        let frame = TborMlDsaVerifyReq::encode(&mut buf)
+        let frame = TborMlDsaVerifyReq::encode(&mut buf, (1, 1))
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
@@ -104,15 +93,15 @@ mod tests {
         assert_eq!(frame.pub_key(), &pub_key[..]);
         assert_eq!(frame.mu(), &mu[..]);
         assert_eq!(frame.signature(), &signature[..]);
-        // header(8) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
-        assert_eq!(frame.len(), 7307);
+        // header(12) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
+        assert_eq!(frame.len(), 7311);
         assert_eq!(frame.len(), TborMlDsaVerifyReq::MAX_ENCODED_SIZE);
     }
 
     #[test]
     fn response_carries_no_payload() {
         let mut buf = [0u8; 512];
-        let _ = TborMlDsaVerifyResp::encode(&mut buf, 0, true)
+        let _ = TborMlDsaVerifyResp::encode(&mut buf, (1, 1), 0, true)
             .unwrap()
             .finish();
     }

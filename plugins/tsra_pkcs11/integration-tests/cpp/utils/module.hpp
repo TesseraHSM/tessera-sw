@@ -188,6 +188,27 @@ inline bool on_hardware()
         }                                                                                          \
     } while (0)
 
+/// Read a variable-length attribute (two-call sizing) into `out`.
+inline CK_RV get_bytes(
+    CK_SESSION_HANDLE s,
+    CK_OBJECT_HANDLE obj,
+    CK_ATTRIBUTE_TYPE type,
+    std::vector<CK_BYTE> &out
+)
+{
+    CK_ATTRIBUTE a = { type, nullptr, 0 };
+    CK_RV rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    out.assign(a.ulValueLen, 0);
+    a.pValue = out.data();
+    rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
+    out.resize(a.ulValueLen);
+    return rv;
+}
+
 /// C_Login as CKU_USER with the test PIN.
 inline CK_RV login_user(CK_SESSION_HANDLE s)
 {

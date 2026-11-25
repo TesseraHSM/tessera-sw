@@ -69,6 +69,7 @@ include = [
   "TsraSdCreatePeerBackupParams",
   "TsraSdCreateRemoteBackupParams",
   "TsraSdEvidence",
+  "TsraSdIdentityEvidence",
   "TsraSdResealRemoteBackupParams",
   "TsraSdRestoreLocalBackupParams",
   "TsraSdRestorePeerBackupParams",
@@ -97,7 +98,7 @@ item_types = [
 "HsmOwnerBackupKeySource" = "tsra_owner_backup_key_source"
 "HsmPartType" = "tsra_part_type"
 "HsmPotaEndorsementSource" = "tsra_pota_endorsement_source"
-"HsmSessionExType" = "tsra_session_ex_type"
+"HsmSessionSuite" = "tsra_session_suite"
 "PSK_LEN" = "TSRA_PSK_LEN"
 "TsraAlgo" = "tsra_algo"
 "TsraAlgoAesCbcParams" = "tsra_algo_aes_cbc_params"
@@ -152,16 +153,17 @@ item_types = [
 "TsraSdCreatePeerBackupParams" = "tsra_sd_create_peer_backup_params"
 "TsraSdCreateRemoteBackupParams" = "tsra_sd_create_remote_backup_params"
 "TsraSdEvidence" = "tsra_sd_evidence"
+"TsraSdIdentityEvidence" = "tsra_sd_identity_evidence"
 "TsraSdResealRemoteBackupParams" = "tsra_sd_reseal_remote_backup_params"
 "TsraSdRestoreLocalBackupParams" = "tsra_sd_restore_local_backup_params"
 "TsraSdRestorePeerBackupParams" = "tsra_sd_restore_peer_backup_params"
 "TsraSdRestoreRemoteBackupParams" = "tsra_sd_restore_remote_backup_params"
 "TsraSessExPartFinalParams" = "tsra_sess_ex_part_final_params"
 "TsraSessExPartInitParams" = "tsra_sess_ex_part_init_params"
-"TsraSessionExType" = "tsra_session_ex_type"
 "TsraSessionProp" = "tsra_session_prop"
 "TsraSessionPropId" = "tsra_session_prop_id"
 "TsraSessionPsk" = "tsra_session_psk"
+"TsraSessionSuite" = "tsra_session_suite"
 "TsraStatus" = "tsra_status"
 "TsraStr" = "tsra_str"
 

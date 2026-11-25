@@ -117,7 +117,7 @@ pub(crate) async fn handle<P: HsmPal>(
             .await?
         };
         let buffer = cmd_buf.buffer_mut();
-        let frame = TborMlDsaSignResp::encode(buffer, 0, false)?
+        let frame = TborMlDsaSignResp::encode_for_request(buffer, 0, false)?
             .signature_existing(sig_len)?
             .finish();
         Ok(frame.as_bytes().len())

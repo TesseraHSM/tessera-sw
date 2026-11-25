@@ -3,11 +3,11 @@
 
 /*
  * Seeds a file object store for the conformance gate's second run (run.sh):
- * a public and a private token data object and a public token AES key, so the
- * tests that search and list objects meet a store that is not empty. The key
- * is public so a search finds it in every process: a private object is sealed
- * with a device key, and whether another process unmasks it depends on the
- * device's history.
+ * a public and a private token data object and a token AES key, so the tests
+ * that search and list objects meet a store that is not empty. The key is
+ * private, as every token key must be, so like the private data object it is
+ * sealed with a device key: whether another process unmasks it depends on the
+ * device's history, and the public data object is what every process finds.
  *
  *   seed_store <module.so> <pin>
  *
@@ -88,7 +88,6 @@ int main(int argc, char **argv)
     };
     CK_ATTRIBUTE token_key[] = {
         { CKA_TOKEN, &yes, sizeof(yes) },
-        { CKA_PRIVATE, &no, sizeof(no) },
         { CKA_VALUE_LEN, &key_len, sizeof(key_len) },
         { CKA_LABEL, key_label, sizeof(key_label) - 1 },
     };

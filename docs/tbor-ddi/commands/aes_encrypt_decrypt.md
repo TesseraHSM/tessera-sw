@@ -49,13 +49,13 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `op` | `uint8` (inline) | Direction (`AesOp` discriminant): `1` = Encrypt, `2` = Decrypt. |
-| 16 | `mode` | `uint8` (inline) | Mode (`AesMode` discriminant): `0` = CBC, `1` = ECB, `2` = CFB-128, `3` = OFB, `4` = CTR. |
-| 20 | `iv` | `buffer` (0 or 16 B) | The input IV: empty for ECB, otherwise 16 bytes (the initial counter block for CTR). |
-| 24 | `msg` | `buffer` (1–1024 B) | The message to transform; a multiple of the 16-byte AES block for CBC / ECB. |
-| 28 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 32 | `masked_key` | `buffer` (248–264 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
+| 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 16 | `op` | `uint8` (inline) | Direction (`AesOp` discriminant): `1` = Encrypt, `2` = Decrypt. |
+| 20 | `mode` | `uint8` (inline) | Mode (`AesMode` discriminant): `0` = CBC, `1` = ECB, `2` = CFB-128, `3` = OFB, `4` = CTR. |
+| 24 | `iv` | `buffer` (0 or 16 B) | The input IV: empty for ECB, otherwise 16 bytes (the initial counter block for CTR). |
+| 28 | `msg` | `buffer` (1–1024 B) | The message to transform; a multiple of the 16-byte AES block for CBC / ECB. |
+| 32 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 36 | `masked_key` | `buffer` (248–264 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
 
 ### Data section
 
@@ -69,8 +69,8 @@ Noncanonical IV/message offsets are rejected.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `msg` | `buffer` (≤ 1024 B) | The transformed message (same length as the input `msg`). |
-| 12 | `iv` | `buffer` (0 or 16 B) | The output chaining IV (same length as the input `iv`; see the mode table above). |
+| 12 | `msg` | `buffer` (≤ 1024 B) | The transformed message (same length as the input `msg`). |
+| 16 | `iv` | `buffer` (0 or 16 B) | The output chaining IV (same length as the input `iv`; see the mode table above). |
 
 The remaining four TOC slots (bytes 16 through 31) contain `None`.
 

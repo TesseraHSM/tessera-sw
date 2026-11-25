@@ -17,14 +17,54 @@
 //! methods so they can call close twice, close an unknown id, or
 //! close a pending-only slot.
 //!
-//! Cross-test isolation comes from `open_dev`'s factory-reset; no
+//! Cross-test isolation comes from `open_dev`'s NSSR; no
 //! per-test cleanup is required.
 
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
-use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborSessionClosePlainReq;
 use tsra_ddi_tbor_types::TborStatus;
+
+#[test]
+fn session_close_plaintext_rejects_active_and_pending() {
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let request = TborSessionClosePlainReq {
+        session_id: pending.session_id,
+    };
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    ctx.session_open_finish(pending)
+        .expect("pending survives denied close");
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    ctx.session_close(request.session_id)
+        .expect("protected close");
+}
+
+#[test]
+fn session_close_plaintext_after_migration_cannot_close_reused_active_slot() {
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionSuite::EcdhP384)
+        .expect("init");
+    let original = ctx.session_open_finish(pending).expect("finish");
+    let request = TborSessionClosePlainReq {
+        session_id: original.session_id,
+    };
+    ctx.erase().expect("migration");
+    ctx.tbor(&request).expect("plaintext stale close");
+    let replacement = ctx
+        .open_session(CU, SessionSuite::EcdhP384)
+        .expect("reuse slot");
+    assert_eq!(replacement.session_id(), original.session_id);
+    ctx.expect_fw_reject(&request, TborStatus::InvalidPermissions);
+    replacement
+        .close()
+        .expect("replacement survives stale close");
+}
 
 // ---------------------------------------------------------------------------
 // Happy paths — close an Active session
@@ -34,7 +74,7 @@ use tsra_ddi_tbor_types::TborStatus;
 fn session_close_cu_plaintext_active() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     session.close().expect("close active CU session");
 }
@@ -43,7 +83,7 @@ fn session_close_cu_plaintext_active() {
 fn session_close_co_authenticated_active() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     session.close().expect("close active CO session");
 }
@@ -57,7 +97,7 @@ fn session_close_co_authenticated_active() {
 fn session_close_pending_slot() {
     let ctx = TestCtx::new();
     let pending = ctx
-        .session_open_init(CU, SessionType::PlainText)
+        .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("phase 1 init reserves a pending slot");
     ctx.session_close(pending.session_id)
         .expect("close pending slot");
@@ -84,7 +124,7 @@ fn session_close_double_close() {
     // we own the lifecycle for the second (failing) call. The first
     // close therefore must succeed — the test asserts the second.
     let session = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     let session_id = session.session_id();
     session.close().expect("first close succeeds");
@@ -102,12 +142,12 @@ fn session_close_double_close() {
 fn session_close_then_reopen() {
     let ctx = TestCtx::new();
     let first = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
     first.close().expect("close first");
     // FW is free to reuse the freed slot id; we only assert the
     // second handshake completes end-to-end (guard drops it).
     let _second = ctx
-        .open_session(CU, SessionType::PlainText)
+        .open_session(CU, SessionSuite::EcdhP384)
         .expect("open_session must succeed");
 }

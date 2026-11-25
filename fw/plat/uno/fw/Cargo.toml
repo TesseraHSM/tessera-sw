@@ -102,7 +102,7 @@ tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"
 cortex-m = { features = ["inline-asm"], version = "0.7.7" }
-cortex-m-rt = "0.7.5"
+cortex-m-rt = "0.7.6"
 critical-section = "1.2.0"
 der = { default-features = false, features = [
   "derive",
@@ -232,6 +232,14 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.tsra_fw_core_crypto_key_masking]
+opt-level = 3
+
+# The HSM's per-command path: the BCP driver and the PAL around it run on
+# every GCM command, three to a sealed request.
+[profile.release.package.tsra_fw_uno_drivers_bcp]
+opt-level = 3
+
+[profile.release.package.tsra_fw_uno_pal]
 opt-level = 3
 
 [profile.dev]

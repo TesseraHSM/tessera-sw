@@ -27,8 +27,11 @@ use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::dev_rev_in_place;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
+use tsra_ddi_tbor_types::ecc_sign_hash_algo;
+use tsra_ddi_tbor_types::ecc_sign_input;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
@@ -38,6 +41,9 @@ use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyResp;
+use tsra_ddi_tbor_types::ECC_CURVE_P256;
+use tsra_ddi_tbor_types::ECC_CURVE_P384;
+use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
@@ -60,6 +66,50 @@ pub(crate) const CO: u8 = 0;
 
 /// `SessionType` role identifier for Crypto-User sessions.
 pub(crate) const CU: u8 = 1;
+
+/// Independent COSE_Sign1 fixture for a complete binary transfer envelope.
+pub(crate) fn sign_transfer_envelope(
+    payload: &[u8],
+    signer: &tsra_crypto::EccPrivateKey,
+) -> Vec<u8> {
+    use tsra_crypto::SignOp;
+
+    let external_aad: &[u8; 32] = match payload.get(10) {
+        Some(1) => b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        Some(2) => b"TSRA-SdBackup-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        _ => panic!("invalid transfer fixture kind"),
+    };
+    let protected = b"\xa1\x01\x38\x22";
+    let mut structure = minicbor::Encoder::new(Vec::new());
+    structure
+        .array(4)
+        .expect("Sig_structure")
+        .str("Signature1")
+        .expect("context")
+        .bytes(protected)
+        .expect("protected")
+        .bytes(external_aad)
+        .expect("external AAD")
+        .bytes(payload)
+        .expect("payload");
+    let mut signature = [0; 96];
+    tsra_crypto::EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(signer, &structure.into_writer(), Some(&mut signature))
+        .expect("sign transfer envelope");
+    let mut signed = minicbor::Encoder::new(vec![0xD2]);
+    signed
+        .array(4)
+        .expect("COSE_Sign1")
+        .bytes(protected)
+        .expect("protected")
+        .map(0)
+        .expect("unprotected")
+        .bytes(payload)
+        .expect("payload")
+        .bytes(&signature)
+        .expect("signature");
+    signed.into_writer()
+}
 
 /// AEAD envelope component lengths.
 pub(crate) const ENVELOPE_HEADER_LEN: usize = tsra_crypto::aead_envelope::HEADER_LEN;
@@ -249,15 +299,55 @@ pub(crate) fn assert_rsa_decrypts(
     );
 }
 
-/// Sign `digest` with a caller-held masked key.
-pub(crate) fn sign(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>, digest: &[u8]) -> Vec<u8> {
-    ctx.tbor(&TborEccSignReq {
-        session_id,
-        masked_key,
-        digest: digest.to_vec(),
+/// Wire coordinate lane length of TBOR curve `curve`.
+pub(crate) fn curve_coord_len(curve: u8) -> usize {
+    wire_coord_len(match curve {
+        ECC_CURVE_P256 => 32,
+        ECC_CURVE_P384 => 48,
+        ECC_CURVE_P521 => 66,
+        _ => panic!("unsupported ECC curve {curve}"),
     })
-    .expect("EccSign")
-    .signature
+}
+
+/// Build an `EccSign` request for the device-order SHA-2 `digest`, packed
+/// as `k ‖ digest` with `coord`-byte coordinate lanes.
+pub(crate) fn sign_req(
+    session_id: u16,
+    masked_key: Vec<u8>,
+    coord: usize,
+    digest: &[u8],
+) -> TborEccSignReq {
+    TborEccSignReq {
+        session_id,
+        hash_algo: ecc_sign_hash_algo(digest.len()).expect("SHA-2 digest length"),
+        masked_key,
+        input: ecc_sign_input(coord, wire_coord_len(1), digest).expect("valid ECC layout"),
+    }
+}
+
+/// Sign `digest` with a caller-held masked key on `curve`.
+pub(crate) fn sign(
+    ctx: &TestCtx,
+    session_id: u16,
+    curve: u8,
+    masked_key: Vec<u8>,
+    digest: &[u8],
+) -> Vec<u8> {
+    sign_coord(ctx, session_id, curve_coord_len(curve), masked_key, digest)
+}
+
+/// Sign `digest` with a caller-held masked key whose curve has
+/// `coord`-byte wire coordinate lanes.
+fn sign_coord(
+    ctx: &TestCtx,
+    session_id: u16,
+    coord: usize,
+    masked_key: Vec<u8>,
+    digest: &[u8],
+) -> Vec<u8> {
+    ctx.tbor(&sign_req(session_id, masked_key, coord, digest))
+        .expect("EccSign")
+        .signature
 }
 
 /// Verify a wire-LE ECDSA signature on the host with `tsra_crypto`.
@@ -267,7 +357,11 @@ pub(crate) fn sign(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>, digest: 
 /// * `digest_le` — the wire-LE digest that was handed to `EccSign`.
 pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) -> bool {
     let (wire_coord, raw_coord) = coord_sizes(pub_le.len());
-    assert_eq!(sig_le.len(), wire_coord * 2, "signature length mismatch");
+    let signature_lane = sig_le.len() / 2;
+    assert!(
+        sig_le.len() == wire_coord * 2 || (raw_coord == 66 && signature_lane == 72),
+        "signature length mismatch"
+    );
 
     // Public key: convert each wire coordinate → big-endian
     // `hsm_point_size` coordinates (P-521 is left-padded to 68 bytes).
@@ -278,7 +372,7 @@ pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) 
 
     // Signature: reverse the meaningful `raw_coord` bytes of each component
     // → big-endian `r ‖ s`.
-    let (r_le, s_le) = sig_le.split_at(wire_coord);
+    let (r_le, s_le) = sig_le.split_at(signature_lane);
     let mut sig_be = rev(&r_le[..raw_coord]);
     sig_be.extend(rev(&s_le[..raw_coord]));
 
@@ -302,7 +396,7 @@ pub(crate) fn assert_ecc_signs(
     let digest: Vec<u8> = (0..digest_len)
         .map(|i| (i as u8).wrapping_mul(7).wrapping_add(0x11))
         .collect();
-    let signature = sign(ctx, session_id, masked_key, &digest);
+    let signature = sign_coord(ctx, session_id, pub_le.len() / 2, masked_key, &digest);
     assert_eq!(
         signature.len(),
         pub_le.len(),
@@ -359,8 +453,12 @@ impl<R: TborOpReq> TborOpReq for PayloadGapReq<R> {
         self.0.session_ctrl()
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let len = self.0.encode_request(buf)?.len();
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let len = self.0.encode_request(buf, api_rev)?.len();
         let toc_count = RequestView::parse(&buf[..len])
             .expect("parse canonical request")
             .toc_count();
@@ -463,8 +561,12 @@ impl<R: TborOpReq> TborOpReq for MaskedKeyLayoutReq<'_, R> {
         self.req.session_ctrl()
     }
 
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
-        let len = self.req.encode_request(buf)?.len();
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], EncodeError> {
+        let len = self.req.encode_request(buf, api_rev)?.len();
         let toc_count = RequestView::parse(&buf[..len])
             .expect("parse canonical request")
             .toc_count();
@@ -515,7 +617,9 @@ where
     R::OpResp: core::fmt::Debug,
 {
     let mut buf = vec![0u8; 0x2000];
-    let encoded = req.encode_request(&mut buf).expect("encode request");
+    let encoded = req
+        .encode_request(&mut buf, (1, 1))
+        .expect("encode request");
     let toc_count = RequestView::parse(encoded)
         .expect("parse canonical request")
         .toc_count();

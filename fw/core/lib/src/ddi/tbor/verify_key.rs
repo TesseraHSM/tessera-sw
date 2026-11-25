@@ -48,7 +48,7 @@ pub(crate) async fn handle<P: HsmPal>(
     }
 
     cmd_buf.encode_response(|buf| {
-        let frame = TborVerifyKeyResp::encode(buf, 0, false)?.finish();
+        let frame = TborVerifyKeyResp::encode_for_request(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })
 }

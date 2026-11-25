@@ -21,13 +21,10 @@ pub const MAX_TOC_ENTRIES: usize = 32;
 pub const MAX_DATA_SIZE: usize = 8191;
 
 /// Request header size in bytes.
-pub const REQ_HEADER_LEN: usize = 8;
+pub const REQ_HEADER_LEN: usize = 12;
 
 /// Response header size in bytes.
-pub const RESP_HEADER_LEN: usize = 8;
-
-/// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 0x01;
+pub const RESP_HEADER_LEN: usize = 12;
 
 // ── TOC entry type IDs ─────────────────────────────────────────────────
 

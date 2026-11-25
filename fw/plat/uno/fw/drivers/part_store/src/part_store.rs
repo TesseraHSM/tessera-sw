@@ -126,7 +126,9 @@ const RESERVED3_LEN: usize = 626
     - CREDENTIAL_LEN
     - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
     - PUB_KEY_LEN  // reserved_pta_pub_key
-    - 2; // session_meta (pending_mask + psk_change_mask)
+    - 2  // session_meta (pending_mask + reserved)
+    - 2  // transport_epoch
+    - 129; // session recovery fingerprints and rotation-consumed mask
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
@@ -423,10 +425,17 @@ struct Storage {
     // the DMA-target public keys above stay 4-aligned.
     valid_flags: u8,
     // Volatile TBOR session slot metadata: byte 0 = pending_mask
-    // (bit N set while slot N's handshake is in flight), byte 1 =
-    // psk_change_mask (bit N set once slot N has consumed its one
-    // allowed PSK change). Owned by the session_store driver.
+    // (bit N set while slot N's handshake is in flight), byte 1 is
+    // reserved. Owned by the session_store driver.
     session_meta: [u8; 2],
+    // Little-endian TBOR session transport epoch: the top 16 bits of every
+    // HSM→VM sequence number. Bumped on every warm / fw-update boot, which
+    // preserves sessions but restarts the DTCM message counters, so a
+    // sequence number (and thus an AES-GCM nonce) is never reused under a
+    // surviving session's keys. Zeroed only by `reset` (power-on), which
+    // also drops every session.
+    transport_epoch: [u8; 2],
+    session_recovery: [u8; 129],
     reserved3: [u8; RESERVED3_LEN],
 }
 
@@ -447,13 +456,16 @@ pub struct PartStore;
 ///
 /// Both kinds clear the per-tenant runtime state (enable-time key handles,
 /// credential, BK3 session key, nonce, volatile session metadata, and PIN
-/// policy); they differ only in whether the write-once provisioning material is
-/// preserved. The persistent session table is left for the PAL to manage.
+/// policy) and the `PartInit` provisioning (policy hash and PTA public key);
+/// they differ only in whether the migrated state is kept. The persistent
+/// session table is left for the PAL to manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartResetKind {
-    /// NSSR `Migrate`: preserve the partition's provisioning material.
+    /// NSSR `Migrate`: keep the migrated state (sealed BK3 + incarnation flag
+    /// and VM launch GUID), and return the PSKs to their defaults.
     Migrate,
-    /// Partition deallocation / disable: also wipe the provisioning material.
+    /// Partition deallocation / disable: also wipe the migrated state and the
+    /// PSKs.
     Disable,
 }
 
@@ -507,6 +519,23 @@ impl PartStore {
             if part.res_mask() != 0 {
                 part.set_unwrapping_key_required(true);
             }
+        }
+    }
+
+    /// Advances every partition's session transport epoch after a warm /
+    /// fw-update reboot, which keeps sessions but restarts their volatile
+    /// message counters. Saturates at `u16::MAX`, after which
+    /// [`Partition::transport_epoch`] reports exhaustion.
+    pub fn bump_transport_epochs() {
+        for idx in 0..NUM_PARTITIONS {
+            let slot = Partition(idx).slot_ptr();
+            // SAFETY: the index is in range, keeping the slot within the
+            // partition-store GSRAM region; boot runs before any task, so
+            // nothing else accesses the slot. `transport_epoch` is not
+            // shadowed, so the shadow caches need no invalidation.
+            let epoch = unsafe { &mut (*slot).transport_epoch };
+            let next = u16::from_le_bytes(*epoch).saturating_add(1);
+            *epoch = next.to_le_bytes();
         }
     }
 }
@@ -656,24 +685,24 @@ impl Partition {
     /// provisioning vault-key handles (the vault deletions themselves are the
     /// PAL's responsibility), the cached public keys, the caller-presented
     /// credential, the derived BK3 session key, the nonce, the volatile
-    /// session metadata, and the PIN lockout policy — matching the
-    /// reference `state.disable()` / `state.migrate()`, which both reset the
-    /// policy.
+    /// session metadata, and the PIN lockout policy (which the reference
+    /// `state.disable()` / `state.migrate()` both reset), and the `PartInit`
+    /// policy hash and PTA public key, so the partition is provisioned
+    /// (`PartInit` / `PartFinal`) afresh after either kind.
     ///
-    /// [`PartResetKind::Disable`] additionally wipes the write-once
-    /// provisioning material (policy hash, sealed BK3 + incarnation flag,
-    /// and rotated PSKs); [`PartResetKind::Migrate`] preserves it so a host
-    /// that resets via NSSR keeps its provisioning and only re-establishes
-    /// its credential. This helper leaves the partition identity, the VM
+    /// [`PartResetKind::Disable`] additionally wipes the migrated sealed BK3
+    /// (+ incarnation flag) and the PSKs; [`PartResetKind::Migrate`] keeps it
+    /// and returns the PSKs to their defaults, so a host that resets via NSSR
+    /// re-establishes its credential, rotates its PSKs and provisions the
+    /// partition again. This helper leaves the partition identity, the VM
     /// launch GUID (cleared only when the partition is freed, as in the
     /// reference `reset()`), `Masked_BK_BOOT`, persistent session table,
-    /// resource mask, generation
-    /// counter, lifecycle state, and the SP-published unwrapping-key slot
-    /// (Gate 1 + backup, wiped only when the partition is freed so a
-    /// re-enabled partition re-imports the same key) for the caller to
-    /// manage. The PAL
-    /// preserves established session reservations on disable and releases
-    /// all slots on NSSR/migrate or free.
+    /// resource mask, generation counter, lifecycle state, and the
+    /// SP-published unwrapping-key slot (Gate 1 + backup, wiped only when the
+    /// partition is freed so a re-enabled partition re-imports the same key)
+    /// for the caller to manage. The PAL keeps established session
+    /// reservations on disable and NSSR/migrate, and releases all slots on
+    /// free.
     #[inline(never)]
     pub fn clear_state(mut self, kind: PartResetKind) {
         // ── Per-tenant runtime state (cleared for every reset kind) ──
@@ -722,30 +751,25 @@ impl Partition {
             slot.session_meta = [0u8; 2];
         }
 
-        // ── Write-once provisioning material ──
-        // Preserved by `Migrate` (NSSR keeps provisioning); wiped by `Disable`
-        // (partition disable or deallocation).
-        // An NSSR (`Migrate`) returns the partition to its just-allocated
-        // state as far as the session PSKs are concerned: `part_psk` is
-        // `RequiredPresent` and default-baked at allocation, so the slots
-        // must read back as the defaults rather than keeping a rotated
-        // value. Re-uses [`bake_default_psks`] so allocation and NSSR can
-        // never drift apart. Mirrors the std PAL, whose migrated entry
-        // resets `psk_co`/`psk_cu` to `None` and therefore reads back as
-        // `DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`. `Disable` instead zeroes
-        // them below; the PAL restores defaults on a subsequent enable.
-        if matches!(kind, PartResetKind::Migrate) {
-            self.bake_default_psks();
-        }
+        // `PartInit`'s write-once provisioning: not migrated, so the
+        // partition is provisioned afresh.
+        self.slot_mut().reserved_pta_pub_key.fill(0);
+        self.clear_policy_hash();
 
-        if matches!(kind, PartResetKind::Disable) {
-            self.slot_mut().reserved_pta_pub_key.fill(0);
-            self.clear_policy_hash();
-            self.clear_sealed_bk3();
-            self.set_bk3_initialized(false);
-            let slot = self.slot_mut();
-            slot.psk_co = [0u8; PSK_LEN];
-            slot.psk_cu = [0u8; PSK_LEN];
+        // ── Migrated state ──
+        // Kept by `Migrate` (NSSR); wiped by `Disable` (partition disable or
+        // deallocation). The PSKs are not migrated: an NSSR returns them to
+        // their defaults, as a migration target starts with them, and each
+        // role rotates its PSK again.
+        match kind {
+            PartResetKind::Migrate => self.bake_default_psks(),
+            PartResetKind::Disable => {
+                self.clear_sealed_bk3();
+                self.set_bk3_initialized(false);
+                let slot = self.slot_mut();
+                slot.psk_co = [0u8; PSK_LEN];
+                slot.psk_cu = [0u8; PSK_LEN];
+            }
         }
     }
 
@@ -1670,8 +1694,8 @@ impl Partition {
         &mut self.slot_mut().session_table
     }
 
-    /// Borrows the 2-byte volatile session metadata (`pending_mask`,
-    /// `psk_change_mask`) for the TBOR session slots.
+    /// Borrows the volatile Pending mask and one reserved byte for the
+    /// TBOR session slots.
     #[inline(never)]
     pub fn session_meta(self) -> &'static [u8; 2] {
         &self.slot().session_meta
@@ -1681,6 +1705,25 @@ impl Partition {
     #[inline(never)]
     pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
         &mut self.slot_mut().session_meta
+    }
+
+    /// Session masking-key fingerprints and rotation flags retained across LM.
+    pub fn session_recovery(self) -> &'static [u8; 129] {
+        &self.slot().session_recovery
+    }
+
+    /// Mutable session recovery metadata, owned by the session-store driver.
+    pub fn session_recovery_mut(&mut self) -> &mut [u8; 129] {
+        &mut self.slot_mut().session_recovery
+    }
+
+    /// The session transport epoch (see
+    /// [`PartStore::bump_transport_epochs`]), or `None` once it has
+    /// saturated and no fresh sequence numbers remain.
+    #[inline(never)]
+    pub fn transport_epoch(self) -> Option<u16> {
+        let epoch = u16::from_le_bytes(self.slot().transport_epoch);
+        (epoch != u16::MAX).then_some(epoch)
     }
 }
 

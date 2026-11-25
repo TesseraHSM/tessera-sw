@@ -7,14 +7,14 @@
 # -pkeyopt tsra.key_usage:keyEncipherment -pkeyopt tsra.input_key`), load the
 # masked blob through `ENGINE_load_private_key` (`tsra://<blob>;type=rsa`), then
 # decrypt with it on the HSM. Decryption reaches the engine's RSA EVP_PKEY_METHOD
-# decrypt override via the standard asym-cipher parameters (rsa_padding_mode:oaep
-# / pkcs1, rsa_oaep_md, rsa_mgf1_md, rsa_oaep_label); the HSM performs the raw
-# private-key operation and the SDK removes the padding.
+# decrypt override via the standard asym-cipher parameters (rsa_padding_mode:oaep,
+# rsa_oaep_md, rsa_mgf1_md, rsa_oaep_label); the HSM performs the raw private-key
+# operation and the SDK removes the padding.
 #
 # Ciphertexts are produced in software (no engine) with the public half extracted
 # through the engine — proving the loaded key decrypts what its public half
-# encrypts. Covers OAEP across SHA-256/384/512, OAEP with a label, PKCS#1 v1.5,
-# and a tampered-ciphertext negative check.
+# encrypts. Covers OAEP across SHA-256/384/512, OAEP with a label, the refusal
+# of PKCS#1 v1.5 decryption, and a tampered-ciphertext negative check.
 source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 
 swpem="$KEYDIR/rsa_dec_sw.pem"
@@ -71,14 +71,17 @@ label="00010203deadbeef"
     -in "$lct" -out "$lpt"
 cmp -s "$msg" "$lpt" || { echo "OAEP label decryption mismatch"; exit 1; }
 
-# PKCS#1 v1.5.
+# PKCS#1 v1.5 decryption is refused.
 pct="$KEYDIR/rsa_dec_pkcs1.ct"
-ppt="$KEYDIR/rsa_dec_pkcs1.pt"
+perr="$KEYDIR/rsa_dec_pkcs1.err"
 "$OPENSSL_BIN" pkeyutl -encrypt -pubin -inkey "$pub" \
     -pkeyopt rsa_padding_mode:pkcs1 -in "$msg" -out "$pct"
-"$OPENSSL_BIN" pkeyutl -decrypt -engine tsra -keyform engine -inkey "$uri" \
-    -pkeyopt rsa_padding_mode:pkcs1 -in "$pct" -out "$ppt"
-cmp -s "$msg" "$ppt" || { echo "PKCS#1 v1.5 decryption mismatch"; exit 1; }
+if "$OPENSSL_BIN" pkeyutl -decrypt -engine tsra -keyform engine -inkey "$uri" \
+    -pkeyopt rsa_padding_mode:pkcs1 -in "$pct" -out /dev/null 2>"$perr"; then
+    echo "PKCS#1 v1.5 decryption unexpectedly succeeded"
+    exit 1
+fi
+grep -q "PKCS#1 v1.5 decryption is not supported" "$perr"
 
 # A tampered OAEP ciphertext must fail to decrypt. Flip the first byte (XOR 0xff)
 # so the change is guaranteed regardless of its value, while preserving length.

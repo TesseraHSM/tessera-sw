@@ -21,8 +21,8 @@
 //! `Encrypt`, `decrypt` for `Decrypt`; `InvalidPermissions` otherwise).
 //! Available to both Crypto-Officer and Crypto-User sessions.
 
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_frame;
+use tsra_fw_core_crypto_key_masking::aead::unmask_framed;
 use tsra_fw_ddi_tbor_types::AesMode;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
@@ -119,9 +119,9 @@ pub(crate) async fn handle<P: HsmPal>(
         let masked_key = &mut tail[..key_len];
         let data = &mut head[data_start..region_end];
 
-        let scope = peek_scope(masked_key)?;
+        let (scope, frame) = peek_frame(masked_key)?;
         let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-        let view = unmask(pal, io, masking_key, masked_key).await?;
+        let view = unmask_framed(pal, io, masking_key, masked_key, frame).await?;
         assert_aes_kind(view.key_kind)?;
         let permitted = match op {
             HsmAesOp::Encrypt => view.key_attrs.encrypt(),
@@ -134,7 +134,7 @@ pub(crate) async fn handle<P: HsmPal>(
             .await?;
 
         Ok(
-            TborAesEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?
+            TborAesEncryptDecryptResp::encode_for_request(cmd_buf.buffer_mut(), 0, false)?
                 .msg_existing(msg_len)?
                 .iv_existing(iv_len)?
                 .finish()

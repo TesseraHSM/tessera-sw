@@ -4,7 +4,7 @@
 //! Integration tests for the TBOR `SdRestorePeerBackup` command.
 //!
 //! `SdRestorePeerBackup` restores a security domain from a **peer** backup:
-//! it HPKE-Auth-opens the caller-supplied `pok_peer_backup` (an HPKE seal
+//! it HPKE Base-opens the caller-supplied `pok_peer_backup` (an HPKE seal
 //! of BKS3) with the receiver's masked SD-sealing key — authenticated by
 //! the sender peer's attested key — recovers `SDMK` from `prev_sd_mk_backup`,
 //! and returns the device-local backups.  It is `SdRestoreRemoteBackup`
@@ -13,7 +13,7 @@
 //! The **round-trip** test uses a self-peer backup (sender == receiver): a
 //! first device finalizes, `CreateSD`s, and `CreatePeerBackup`s (producing
 //! the `pok_peer_backup` / `prev_sd_mk_backup` this command consumes, plus
-//! the `local_mk_backup`), then a second device (factory-reset, same machine
+//! the `local_mk_backup`), then a second device (reset by NSSR, same machine
 //! seed) restores `PartLocalMK` via `PartFinal` — so it can unmask the
 //! captured sealing key — and restores the security domain from the peer
 //! backup.
@@ -24,6 +24,8 @@
 //! * One-shot — restore onto an already-initialized SD → `SdAlreadyInitialized`.
 //! * Policy without `allow_peer_cloning` → `SdPeerCloningNotAllowed`.
 //! * Restore before finalize → `InvalidArg`.
+//! * Sender partition-owner chain rooted at SATA instead of POTA →
+//!   `InvalidArg`; the genuine POTA-rooted evidence then restores.
 //! * Sender partition-owner chain rooted at SATA instead of POTA →
 //!   `InvalidArg`; the genuine POTA-rooted evidence then restores.
 
@@ -85,7 +87,7 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, sata, pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
@@ -93,7 +95,6 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
         .tbor_oob(
             &create_peer_req(
                 session_id,
-                &masked,
                 &evidence,
                 &part.policy,
                 &created.pok_local_backup,
@@ -136,13 +137,12 @@ fn restore_peer_req_with(
         src_mfgr_cert_chain: evidence.mfgr.clone(),
         src_owner_cert_chain: evidence.owner.clone(),
         src_part_owner_cert_chain: evidence.part_owner.clone(),
-        src_report: evidence.report,
         pok_peer_backup: backup.pok_peer_backup,
         prev_sd_mk_backup: backup.prev_sd_mk_backup,
     }
 }
 
-/// Drive device 2 (factory-reset, same machine seed): finalize with the
+/// Drive device 2 (reset by NSSR, same machine seed): finalize with the
 /// captured policy and restore `PartLocalMK`, leaving the partition
 /// initialized but SD-uninitialized.  Returns the context and session id.
 fn restore_target(seed: &[u8], pota: &CaKey, backup: &PeerBackup) -> (TestCtx, u16) {
@@ -213,7 +213,7 @@ fn sd_restore_peer_backup_is_one_shot() {
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
@@ -221,7 +221,6 @@ fn sd_restore_peer_backup_is_one_shot() {
         .tbor_oob(
             &create_peer_req(
                 session_id,
-                &masked,
                 &evidence,
                 &part.policy,
                 &created.pok_local_backup,
@@ -292,7 +291,6 @@ fn sd_restore_peer_backup_rejects_before_finalize() {
         src_mfgr_cert_chain: Vec::new(),
         src_owner_cert_chain: Vec::new(),
         src_part_owner_cert_chain: Vec::new(),
-        src_report: Default::default(),
         pok_peer_backup: [0u8; POK_REMOTE_BACKUP_LEN],
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };
@@ -334,4 +332,234 @@ fn sd_restore_peer_backup_rejects_bad_masked_key_layout() {
     let backup = create_peer_backup(&seed, &sata, &pota);
     let (ctx, session_id) = restore_target(&seed, &pota, &backup);
     assert_masked_key_layout_rejected(&ctx, &restore_peer_req(session_id, &backup));
+}
+
+/// Finalize a fresh incarnation using the original partition's local-MK backup.
+/// The SD is intentionally left uninitialized for negative restore tests.
+fn peer_restore_target(backup: &PeerBackup, seed: &[u8], pota: &CaKey) -> (TestCtx, u16) {
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let init = ctx
+        .part_init(&session, seed, &backup.policy)
+        .expect("PartInit (restore target)");
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("PartFinal (restore target)");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    (ctx, session.session_id)
+}
+
+/// Each case starts from a fresh restore target so a previous failure cannot
+/// affect the result. Check the lifecycle state as well as the rejection.
+fn assert_peer_restore_rejected<F>(mutate: F)
+where
+    F: FnOnce(&mut TborSdRestorePeerBackupReq),
+{
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+    let mut req = restore_peer_req(session_id, &backup);
+    mutate(&mut req);
+    assert!(
+        ctx.tbor_oob(&req, &backup.evidence.oob()).is_err(),
+        "mutated peer restore must be rejected"
+    );
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_inactive_session_id() {
+    assert_peer_restore_rejected(|req| {
+        assert_eq!(req.session_id, 0);
+
+        // Session 0 is active. Session 2 is expected to be inactive.
+        req.session_id = 2;
+    });
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_max_session_id() {
+    assert_peer_restore_rejected(|req| req.session_id = u16::MAX);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_corrupted_peer_backup() {
+    assert_peer_restore_rejected(|req| req.pok_peer_backup[0] ^= 0x80);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_corrupted_peer_backup_tail() {
+    assert_peer_restore_rejected(|req| {
+        let last = req.pok_peer_backup.len() - 1;
+        req.pok_peer_backup[last] ^= 0x01;
+    });
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_corrupted_previous_sd_mk_backup() {
+    assert_peer_restore_rejected(|req| req.prev_sd_mk_backup[0] ^= 0x80);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_corrupted_previous_sd_mk_backup_tail() {
+    assert_peer_restore_rejected(|req| {
+        let last = req.prev_sd_mk_backup.len() - 1;
+        req.prev_sd_mk_backup[last] ^= 0x01;
+    });
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_corrupted_masked_sealing_key() {
+    assert_peer_restore_rejected(|req| req.masked_sealing_key[0] ^= 0x80);
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_zeroed_masked_sealing_key() {
+    assert_peer_restore_rejected(|req| req.masked_sealing_key.fill(0));
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_missing_manufacturer_chain() {
+    assert_peer_restore_rejected(|req| req.src_mfgr_cert_chain.clear());
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_missing_partition_owner_chain() {
+    assert_peer_restore_rejected(|req| req.src_part_owner_cert_chain.clear());
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_zeroed_peer_backup() {
+    assert_peer_restore_rejected(|req| req.pok_peer_backup.fill(0));
+}
+
+#[test]
+fn sd_restore_peer_backup_rejects_zeroed_previous_sd_mk_backup() {
+    assert_peer_restore_rejected(|req| req.prev_sd_mk_backup.fill(0));
+}
+
+/// A rejected restore must not consume the one-shot initialization opportunity.
+#[test]
+fn sd_restore_peer_backup_failed_restore_then_valid_restore_succeeds() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+
+    let mut corrupted = restore_peer_req(session_id, &backup);
+    corrupted.pok_peer_backup[0] ^= 0x80;
+    assert!(
+        ctx.tbor_oob(&corrupted, &backup.evidence.oob()).is_err(),
+        "corrupted peer backup must be rejected"
+    );
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    let valid = restore_peer_req(session_id, &backup);
+    let restored = ctx
+        .tbor_oob(&valid, &backup.evidence.oob())
+        .expect("valid restore should succeed after rejected restore");
+    assert_eq!(restored.pok_local_backup.len(), MASKED_SD_LEN);
+    assert_eq!(restored.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+}
+
+/// A well-formed SDMK backup from another independently created domain
+/// must not be silently accepted as the companion to this peer backup.
+#[test]
+fn sd_restore_peer_backup_rejects_unrelated_previous_sd_mk_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let other = create_peer_backup(&seed, &sata, &pota);
+    assert_ne!(backup.prev_sd_mk_backup, other.prev_sd_mk_backup);
+
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+    let mut req = restore_peer_req(session_id, &backup);
+    req.prev_sd_mk_backup = other.prev_sd_mk_backup;
+    assert!(
+        ctx.tbor_oob(&req, &backup.evidence.oob()).is_err(),
+        "unrelated SDMK backup must be rejected"
+    );
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+}
+
+/// The device-owner chain is optional; the required manufacturer and
+/// partition-owner chains remain present.
+#[test]
+fn sd_restore_peer_backup_accepts_missing_optional_owner_chain() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+    let mut req = restore_peer_req(session_id, &backup);
+    req.src_owner_cert_chain.clear();
+
+    let restored = ctx
+        .tbor_oob(&req, &backup.evidence.oob())
+        .expect("optional device-owner chain should not be required");
+    assert_eq!(restored.pok_local_backup.len(), MASKED_SD_LEN);
+    assert_eq!(restored.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+}
+
+/// Several independent failures must leave the restore target usable.
+#[test]
+fn sd_restore_peer_backup_multiple_failures_then_success() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+
+    let mut bad_peer = restore_peer_req(session_id, &backup);
+    bad_peer.pok_peer_backup[0] ^= 1;
+    assert!(ctx.tbor_oob(&bad_peer, &backup.evidence.oob()).is_err());
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    let mut bad_mk = restore_peer_req(session_id, &backup);
+    bad_mk.prev_sd_mk_backup[0] ^= 1;
+    assert!(ctx.tbor_oob(&bad_mk, &backup.evidence.oob()).is_err());
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    let mut missing_chain = restore_peer_req(session_id, &backup);
+    missing_chain.src_mfgr_cert_chain.clear();
+    assert!(ctx
+        .tbor_oob(&missing_chain, &backup.evidence.oob())
+        .is_err());
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    let valid = restore_peer_req(session_id, &backup);
+    ctx.tbor_oob(&valid, &backup.evidence.oob())
+        .expect("valid restore should succeed after multiple rejected attempts");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+}
+
+/// Successful restore consumes the one-shot opportunity; a replay fails.
+#[test]
+fn sd_restore_peer_backup_rejects_replay_after_success() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let backup = create_peer_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = peer_restore_target(&backup, &seed, &pota);
+    let req = restore_peer_req(session_id, &backup);
+
+    ctx.tbor_oob(&req, &backup.evidence.oob())
+        .expect("first peer restore should succeed");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+    ctx.expect_fw_reject_oob(
+        &req,
+        &backup.evidence.oob(),
+        TborStatus::SdAlreadyInitialized,
+    );
 }

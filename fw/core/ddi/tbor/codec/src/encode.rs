@@ -15,6 +15,80 @@ use tsra_fw_hsm_pal_traits::HsmError;
 
 use crate::toc::*;
 
+/// Write alignment padding for a derive-generated encoder.
+#[doc(hidden)]
+#[inline(never)]
+pub fn write_padding(
+    buf: &mut [u8],
+    data_start: usize,
+    data_offset: &mut usize,
+    toc_offset: usize,
+    alignment: usize,
+) -> Result<(), HsmError> {
+    if alignment == 0 {
+        return Err(HsmError::InvalidArg);
+    }
+    let start = data_start
+        .checked_add(*data_offset)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let len = (alignment - start % alignment) % alignment;
+    let end = start
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let toc_end = toc_offset
+        .checked_add(4)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let word = build_toc_offset_len(TocType::Padding as u8, len, *data_offset);
+    buf.get_mut(toc_offset..toc_end)
+        .ok_or(HsmError::TborBufferTooSmall)?
+        .copy_from_slice(&word.to_be_bytes());
+    buf[start..end].fill(0);
+    *data_offset = end - data_start;
+    Ok(())
+}
+
+/// Write a bounded byte field for a derive-generated encoder.
+#[doc(hidden)]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn write_buffer(
+    buf: &mut [u8],
+    data_start: usize,
+    data_offset: &mut usize,
+    toc_offset: usize,
+    entry_type: u8,
+    data: &[u8],
+    min_len: usize,
+    max_len: usize,
+) -> Result<(), HsmError> {
+    let len = data.len();
+    if !(min_len..=max_len).contains(&len) {
+        return Err(HsmError::TborDataTooLarge);
+    }
+    let start = data_start
+        .checked_add(*data_offset)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let end = start
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let next_offset = end - data_start;
+    if next_offset > MAX_DATA_SIZE {
+        return Err(HsmError::TborDataTooLarge);
+    }
+    let toc_end = toc_offset
+        .checked_add(4)
+        .ok_or(HsmError::TborBufferTooSmall)?;
+    let word = build_toc_offset_len(entry_type, len, *data_offset);
+    buf.get_mut(toc_offset..toc_end)
+        .ok_or(HsmError::TborBufferTooSmall)?
+        .copy_from_slice(&word.to_be_bytes());
+    buf[start..end].copy_from_slice(data);
+    *data_offset = next_offset;
+    Ok(())
+}
+
 // ── RequestEncoder ─────────────────────────────────────────────────────
 
 /// Fluent builder for encoding a TBOR request message.
@@ -24,7 +98,7 @@ use crate::toc::*;
 #[derive(Debug)]
 pub struct RequestEncoder<'a> {
     buf: &'a mut [u8],
-    version: u8,
+    api_rev: (u16, u16),
     opcode: u8,
     toc_words: [u32; MAX_TOC_ENTRIES],
     toc_count: usize,
@@ -33,10 +107,10 @@ pub struct RequestEncoder<'a> {
 
 impl<'a> RequestEncoder<'a> {
     /// Create a new request encoder writing into `buf`.
-    pub fn new(buf: &'a mut [u8], version: u8, opcode: u8) -> Self {
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), opcode: u8) -> Self {
         Self {
             buf,
-            version,
+            api_rev,
             opcode,
             toc_words: [0u32; MAX_TOC_ENTRIES],
             toc_count: 0,
@@ -176,10 +250,10 @@ impl<'a> RequestEncoder<'a> {
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
         }
 
-        // Write header as a single u32.
-        let hdr = u32::from_le_bytes([self.version, 0x00, (self.toc_count - 1) as u8, self.opcode]);
-        self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
-        self.buf[4..8].fill(0);
+        self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+        self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+        self.buf[4..8].copy_from_slice(&[(self.toc_count - 1) as u8, self.opcode, 0, 0]);
+        self.buf[8..12].fill(0);
 
         // Write TOC entries.
         for i in 0..self.toc_count {
@@ -231,7 +305,7 @@ impl<'a> RequestEncoder<'a> {
 #[derive(Debug)]
 pub struct ResponseEncoder<'a> {
     buf: &'a mut [u8],
-    version: u8,
+    api_rev: (u16, u16),
     flags: u8,
     status: u32,
     toc_words: [u32; MAX_TOC_ENTRIES],
@@ -241,10 +315,10 @@ pub struct ResponseEncoder<'a> {
 
 impl<'a> ResponseEncoder<'a> {
     /// Create a new response encoder.
-    pub fn new(buf: &'a mut [u8], version: u8, status: u32, fips_approved: bool) -> Self {
+    pub fn new(buf: &'a mut [u8], api_rev: (u16, u16), status: u32, fips_approved: bool) -> Self {
         Self {
             buf,
-            version,
+            api_rev,
             flags: if fips_approved { 0x01 } else { 0x00 },
             status,
             toc_words: [0u32; MAX_TOC_ENTRIES],
@@ -382,10 +456,10 @@ impl<'a> ResponseEncoder<'a> {
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
         }
 
-        // Write header as two u32 words.
-        let hdr0 = u32::from_le_bytes([self.version, self.flags, (self.toc_count - 1) as u8, 0x00]);
-        self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
-        self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
+        self.buf[..2].copy_from_slice(&self.api_rev.0.to_le_bytes());
+        self.buf[2..4].copy_from_slice(&self.api_rev.1.to_le_bytes());
+        self.buf[4..8].copy_from_slice(&[(self.toc_count - 1) as u8, self.flags, 0, 0]);
+        self.buf[8..12].copy_from_slice(&self.status.to_le_bytes());
 
         // Write TOC entries.
         for i in 0..self.toc_count {

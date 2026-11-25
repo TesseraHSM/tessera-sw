@@ -150,7 +150,7 @@ fn encode_kex_response(
     pub_key: &HsmDmaBuf,
 ) -> HsmResult<usize> {
     let resp = cmd_buf.encode_response(|buf| {
-        let frame = TborDarcKexKeyGenResp::encode(buf, 0, false)?
+        let frame = TborDarcKexKeyGenResp::encode_for_request(buf, 0, false)?
             .masked_key(masked_key)?
             .pub_key(pub_key)?
             .finish();

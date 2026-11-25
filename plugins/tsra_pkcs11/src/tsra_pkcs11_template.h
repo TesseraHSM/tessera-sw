@@ -103,7 +103,9 @@ void tsra_pkcs11_tmpl_append(
  * CKM_AES_XTS_KEY_GEN), pick the key family it asks for (*policy), and
  * extract what the device needs: the key length in bytes (*value_len) and
  * whether the caller asked for a token object (*token). All outputs are
- * cleared first and are meaningful only on CKR_OK. Returns:
+ * cleared first and are meaningful only on CKR_OK, except that a template
+ * lacking only CKA_VALUE_LEN also gets its *policy and *token: C_UnwrapKey
+ * takes the length from the wrapped key. Returns:
  *   CKR_ARGUMENTS_BAD             NULL outputs, NULL tmpl with count > 0, or
  *                                 count > TEMPLATE_MAX_ATTRS
  *   CKR_MECHANISM_INVALID         `mech` is not an AES key-generation mechanism
@@ -121,16 +123,19 @@ void tsra_pkcs11_tmpl_append(
  *                                 or naming any mechanism outside the family
  *                                 `mech` produces), CKA_SENSITIVE=FALSE,
  *                                 CKA_EXTRACTABLE=TRUE (device keys only ever
- *                                 exist masked), or key material (generated
- *                                 keys take none)
+ *                                 exist masked), key material (generated
+ *                                 keys take none), or CKA_TOKEN=TRUE with
+ *                                 CKA_PRIVATE=FALSE (the file store seals only
+ *                                 private records)
  *   CKR_ATTRIBUTE_READ_ONLY       an attribute only the token sets
  *                                 (tsra_pkcs11_attr_is_token_set)
  *   CKR_TEMPLATE_INCOMPLETE       no CKA_VALUE_LEN
  *   CKR_OK                        otherwise; unknown types are accepted and
  *                                 later stored verbatim
  * Attribute shapes are checked in template order and the first failure wins;
- * the checks that depend on the family (it can be named by an attribute later
- * in the template) run after that pass.
+ * the checks that combine attributes (CKA_TOKEN with CKA_PRIVATE, and the
+ * family, which an attribute later in the template can name) run after that
+ * pass.
  */
 CK_RV tsra_pkcs11_keygen_check_template(
     CK_MECHANISM_TYPE mech,
@@ -154,16 +159,17 @@ typedef struct
 } tsra_pkcs11_keygen_fill;
 
 /*
- * Build the template C_GenerateKey stores: the caller's `tmpl` copied verbatim,
- * then the token-decided attributes (see KEYGEN_APPENDED_ATTRS) — class/type
- * identify the object for search and C_GetAttributeValue, the allowed
- * mechanisms record the key family `policy` chose, the sensitivity quartet
- * states the only possible key-protection reality, CKA_LOCAL and
- * CKA_KEY_GEN_MECHANISM say how the key came to be, a key is private unless
- * the caller says otherwise, and the usage defaults make an attribute-less
- * template usable. A caller's own
- * CKA_ALLOWED_MECHANISMS (already checked to lie within the family) is kept
- * as the narrower list. `full` must have room for count +
+ * Build the template C_GenerateKey (`local`) or C_UnwrapKey (not `local`)
+ * stores: the caller's `tmpl` copied verbatim, then the token-decided
+ * attributes (see KEYGEN_APPENDED_ATTRS): class/type identify the object for
+ * search and C_GetAttributeValue, the allowed mechanisms record the key family
+ * `policy` chose, the sensitivity quartet states the only possible
+ * key-protection reality, CKA_LOCAL and CKA_KEY_GEN_MECHANISM say how the key
+ * came to be (an unwrapped key is not local, and neither always sensitive nor
+ * never extractable, as PKCS#11 has it), a key is private unless the caller
+ * says otherwise, and the usage defaults make an attribute-less template
+ * usable. A caller's own CKA_ALLOWED_MECHANISMS (already checked to lie within
+ * the family) is kept as the narrower list. `full` must have room for count +
  * KEYGEN_APPENDED_ATTRS entries; *n receives the number written. `tmpl` is
  * expected to have passed tsra_pkcs11_keygen_check_template.
  * CKR_ARGUMENTS_BAD for NULL policy/fill/full/n, a NULL tmpl with count > 0,
@@ -173,6 +179,7 @@ CK_RV tsra_pkcs11_keygen_build_template(
     const tsra_pkcs11_keygen_policy *policy,
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
+    bool local,
     tsra_pkcs11_keygen_fill *fill,
     CK_ATTRIBUTE *full,
     CK_ULONG *n

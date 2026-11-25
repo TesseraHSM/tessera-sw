@@ -115,6 +115,18 @@ enum tsra_status
      Authentication of a masked key's AES-GCM envelope failed.
      */
     TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED = -78,
+    /*
+     Bootstrap sessions must rotate the public default PSK before use.
+     */
+    TSRA_STATUS_DEFAULT_PSK_MUST_ROTATE = -79,
+    /*
+     The CU default PSK changed; close and reopen with the new credential.
+     */
+    TSRA_STATUS_DEFAULT_PSK_CHANGED = -80,
+    /*
+     This session already committed its one permitted PSK change.
+     */
+    TSRA_STATUS_PSK_CHANGE_ALREADY_USED = -81,
     TSRA_STATUS_PANIC = INT32_MIN,
 };
 #ifndef __cplusplus
@@ -604,30 +616,27 @@ typedef uint32_t tsra_part_prop_id;
 #endif // __cplusplus
 
 /*
- Channel-level integrity profile for a security-domain (TBOR) session,
- selected by the caller when opening a session via `open_session_ex`.
+ Key-establishment suite of a security-domain (TBOR) session, selected
+ by the caller when opening a session via `open_session_ex`.
 
- API-layer mirror of `tsra_ddi_tbor_types::SessionType`; kept as a
- separate `#[open_enum]` so the public API surface does not leak the
- DDI-layer wire type.
+ Every such session encrypts its in-session traffic; the suite picks
+ how the session keys are agreed. The suite authenticates the HSM with
+ its partition identity key (ECDSA P-384 over the handshake transcript)
+ and the caller with the role PSK. The discriminant is the wire
+ `suite_id`.
  */
-enum tsra_session_ex_type
+enum tsra_session_suite
 #ifdef __cplusplus
     : uint32_t
 #endif // __cplusplus
 {
     /*
-     Channel transports bodies without per-message MAC.
+     Ephemeral ECDH P-384 key agreement.
      */
-    TSRA_SESSION_EX_TYPE_PLAIN_TEXT = 0,
-    /*
-     Channel transports bodies wrapped in an outer per-message HMAC
-     envelope.
-     */
-    TSRA_SESSION_EX_TYPE_AUTHENTICATED = 1,
+    TSRA_SESSION_SUITE_ECDH_P384 = 1,
 };
 #ifndef __cplusplus
-typedef uint32_t tsra_session_ex_type;
+typedef uint32_t tsra_session_suite;
 #endif // __cplusplus
 
 /*
@@ -862,13 +871,8 @@ struct tsra_darc_cert_chain
 struct tsra_darc_tmk_export_params
 {
     /*
-     Source's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (276 B).
-     */
-    const struct tsra_buffer *masked_sender_key;
-    /*
      Masked TMK (from `tsra_darc_tmk_gen`), exactly `MASKED_TMK_LEN`
-     (260 B).
+     (264 B).
      */
     const struct tsra_buffer *masked_tmk;
     /*
@@ -890,7 +894,7 @@ struct tsra_darc_tmk_import_params
 {
     /*
      Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-     exactly `MASKED_KEX_KEY_LEN` (276 B).
+     exactly `MASKED_KEX_KEY_LEN` (280 B).
      */
     const struct tsra_buffer *masked_kex_key;
     /*
@@ -901,11 +905,11 @@ struct tsra_darc_tmk_import_params
     const struct tsra_buffer *policy;
     /*
      Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-     (145 B).
+     (367 B), including the PID signature.
      */
     const struct tsra_buffer *sealed_tmk;
     /*
-     POTA-anchored source certificate chain (1..=2 certs).
+     POTA-anchored source PID certificate chain (1..=3 certs).
      */
     struct tsra_darc_cert_chain remote_cert_chain;
 };
@@ -921,7 +925,7 @@ struct tsra_darc_key_wrap_params
     tsra_handle source_key;
     /*
      Masked TMK (from `tsra_darc_tmk_gen` or `tsra_darc_tmk_import`),
-     exactly `MASKED_TMK_LEN` (260 B).
+     exactly `MASKED_TMK_LEN` (264 B).
      */
     const struct tsra_buffer *masked_tmk;
 };
@@ -982,7 +986,7 @@ struct tsra_darc_key_unwrap_params
 {
     /*
      Masked TMK (from `tsra_darc_tmk_import`), exactly `MASKED_TMK_LEN`
-     (260 B).
+     (264 B).
      */
     const struct tsra_buffer *masked_tmk;
     /*
@@ -1318,7 +1322,7 @@ struct tsra_sd_evidence
      */
     struct tsra_sd_cert_chain part_owner_cert_chain;
     /*
-     COSE_Sign1 attestation-report buffer.
+     Recipient-key PublicKey attestation report.
      */
     const struct tsra_buffer *report;
 };
@@ -1332,11 +1336,6 @@ struct tsra_sd_create_remote_backup_params
      Unified partition-policy image (584 B) describing the domain.
      */
     const struct tsra_buffer *part_policy;
-    /*
-     Sender's masked SD-sealing key (from `tsra_key_gen`), exactly
-     `MASKED_SEALING_KEY_LEN` (276 B).
-     */
-    const struct tsra_buffer *masked_sealing_key;
     /*
      Receiver key certificate chain (spec `RcvrCertChain`): validated
      and anchored to the policy SATA key, its leaf is the recipient key
@@ -1352,6 +1351,25 @@ struct tsra_sd_create_remote_backup_params
 };
 
 /*
+ Identity chains authorizing a signed SD backup's source PID.
+ */
+struct tsra_sd_identity_evidence
+{
+    /*
+     Manufacturer certificate chain.
+     */
+    struct tsra_sd_cert_chain mfgr_cert_chain;
+    /*
+     Optional device-owner certificate chain.
+     */
+    struct tsra_sd_cert_chain owner_cert_chain;
+    /*
+     Partition-owner certificate chain.
+     */
+    struct tsra_sd_cert_chain part_owner_cert_chain;
+};
+
+/*
  Input buffers for [`tsra_sd_reseal_remote_backup`].
  */
 struct tsra_sd_reseal_remote_backup_params
@@ -1362,20 +1380,20 @@ struct tsra_sd_reseal_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the source backup, exactly `MASKED_SEALING_KEY_LEN` (276 B).
+     unseals the source backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
-     Source (sender) attestation evidence.
+     POTA-authorized source PID identity chains.
      */
-    const struct tsra_sd_evidence *src_evidence;
+    const struct tsra_sd_identity_evidence *src_evidence;
     /*
      Destination (receiver) attestation evidence.
      */
     const struct tsra_sd_evidence *dest_evidence;
     /*
      Source remote backup to reseal, exactly `POK_REMOTE_BACKUP_LEN`
-     (161 B).
+     (431 B), including its PID signature.
      */
     const struct tsra_buffer *src_remote_backup;
 };
@@ -1391,28 +1409,26 @@ struct tsra_sd_restore_remote_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (276 B).
+     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
-     Sender key certificate chain (spec `SndrCertChain`): validated and
-     anchored to the policy SATA key, its leaf is the sender key that
-     sealed the remote backup.  Always required.
+     Report signer PID public key as DER SPKI. Currently only canonical
+     uncompressed P-384 SPKI (120 bytes) is supported.
      */
-    struct tsra_sd_cert_chain sender_cert_chain;
+    const struct tsra_buffer *sender_pid_pub_key;
     /*
-     Sender attestation evidence.  Verified only when the policy sets
-     `require_trusted_sa_key`; pass empty chains and an empty report
-     otherwise.
+     Source PID identity chains, required only under trusted-SA policy.
+     Otherwise chains may be empty; the backup signature is still checked.
      */
-    const struct tsra_sd_evidence *sender_evidence;
+    const struct tsra_sd_identity_evidence *sender_evidence;
     /*
-     Remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (161 B).
+     Signed remote backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
      */
     const struct tsra_buffer *src_remote_backup;
     /*
      Previous security-domain masking-key backup, exactly
-     `SD_MK_BACKUP_LEN` (260 B).
+     `SD_MK_BACKUP_LEN` (264 B).
      */
     const struct tsra_buffer *prev_sd_mk_backup;
 };
@@ -1427,16 +1443,11 @@ struct tsra_sd_create_peer_backup_params
      */
     const struct tsra_buffer *part_policy;
     /*
-     Sender's masked SD-sealing key (from `tsra_key_gen`), exactly
-     `MASKED_SEALING_KEY_LEN` (276 B).
-     */
-    const struct tsra_buffer *masked_sealing_key;
-    /*
      Destination (peer) attestation evidence.
      */
     const struct tsra_sd_evidence *dst_evidence;
     /*
-     Device-local partition-owner-key backup (276 B) from which BKS3 is
+     Device-local partition-owner-key backup (280 B) from which BKS3 is
      recovered.
      */
     const struct tsra_buffer *pok_local_backup;
@@ -1453,20 +1464,20 @@ struct tsra_sd_restore_peer_backup_params
     const struct tsra_buffer *part_policy;
     /*
      Receiver's masked SD-sealing key (from `tsra_key_gen`) that
-     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (276 B).
+     unseals the backup, exactly `MASKED_SEALING_KEY_LEN` (280 B).
      */
     const struct tsra_buffer *masked_sealing_key;
     /*
-     Source (peer) attestation evidence.
+     POTA-authorized source PID identity chains.
      */
-    const struct tsra_sd_evidence *src_evidence;
+    const struct tsra_sd_identity_evidence *src_evidence;
     /*
-     Peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (161 B).
+     Signed peer backup to restore, exactly `POK_REMOTE_BACKUP_LEN` (431 B).
      */
     const struct tsra_buffer *pok_peer_backup;
     /*
      Previous security-domain masking-key backup, exactly
-     `SD_MK_BACKUP_LEN` (260 B).
+     `SD_MK_BACKUP_LEN` (264 B).
      */
     const struct tsra_buffer *prev_sd_mk_backup;
 };
@@ -1478,12 +1489,12 @@ struct tsra_sd_restore_local_backup_params
 {
     /*
      Device-local partition-owner-key backup to restore, exactly
-     `MASKED_SD_LEN` (276 B).
+     `MASKED_SD_LEN` (280 B).
      */
     const struct tsra_buffer *pok_local_backup;
     /*
      Security-domain masking-key backup, exactly `SD_MK_BACKUP_LEN`
-     (260 B).
+     (264 B).
      */
     const struct tsra_buffer *sd_mk_backup;
 };
@@ -1510,7 +1521,7 @@ struct tsra_session_psk
     const struct tsra_buffer *psk;
 };
 
-typedef tsra_session_ex_type tsra_session_ex_type;
+typedef tsra_session_suite tsra_session_suite;
 
 /*
  Input buffers for [`tsra_sess_ex_part_init`].
@@ -2230,14 +2241,14 @@ tsra_status tsra_crypt_verify_finish(tsra_handle ctx_handle, const struct tsra_b
  Generates a new DARC key-exchange key (ECC-P384) on the calling
  session's partition and returns the masked private key plus its raw
  P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
- the target it yields the HPKE receiver identity; run on the source it
- yields the HPKE sender-auth identity. The key is not stored on the
+ the target it yields the HPKE recipient key. The source uses its PID
+ to authenticate export reports. The key is not stored on the
  device.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
  @param[in,out] masked_key Output buffer for the masked KEX private key
-                (`MASKED_KEX_KEY_LEN`, 276 B)
+                (`MASKED_KEX_KEY_LEN`, 280 B)
  @param[in,out] pub_key Output buffer for the raw P-384 public key
                 (`KEX_PUB_KEY_LEN`, 96 B)
 
@@ -2267,7 +2278,7 @@ tsra_status tsra_darc_kex_key_gen(
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in,out] masked_tmk Output buffer for the masked TMK
-                (`MASKED_TMK_LEN`, 260 B)
+                (`MASKED_TMK_LEN`, 264 B)
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2282,14 +2293,14 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
 /*
  @brief Seal a DARC TMK to an authenticated target
 
- Validates the target certificate chain against the policy DATA key thumbprint,
- then HPKE-Auth seals the TMK to the target's KEX key, returning the
- sealed TMK.
+ Validates the target certificate chain against the policy `data_spki_thumbprint`,
+ then HPKE Base seals the TMK to the target's KEX key and PID-signs the
+ complete encrypted envelope directly as COSE_Sign1.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Export input buffers
  @param[in,out] sealed_tmk Output buffer for the sealed TMK
-                (`SEALED_TMK_LEN`, 145 B)
+                (`SEALED_TMK_LEN`, 367 B), including the PID signature.
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -2298,8 +2309,7 @@ tsra_status tsra_darc_tmk_gen(tsra_handle sess_handle, struct tsra_buffer *maske
  - `sess_handle` must be a valid security-domain session handle.
  - `params` and each of its buffer pointers must be valid; the
    `target_cert_chain.certs` array must hold `len` valid `tsra_buffer`s.
- - `sealed_tmk` must be a valid `tsra_buffer` with writable backing
-   storage of the advertised length.
+ - The output buffer must be valid and writable.
  */
 tsra_status tsra_darc_tmk_export(
     tsra_handle sess_handle,
@@ -2310,14 +2320,15 @@ tsra_status tsra_darc_tmk_export(
 /*
  @brief Import (open) a sealed DARC TMK on the target
 
- Validates the source certificate chain against the policy POTA key thumbprint,
- HPKE-Auth opens the sealed TMK, and re-masks it under the partition
+ Authorizes the source PID chain against the policy `pota_spki_thumbprint`,
+ verifies the `Darc` report and exact recipient/envelope binding,
+ HPKE Base opens the sealed TMK, and re-masks it under the partition
  SDMK, returning the masked TMK.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Import input buffers
  @param[in,out] masked_tmk Output buffer for the imported masked TMK
-                (`MASKED_TMK_LEN`, 260 B)
+                (`MASKED_TMK_LEN`, 264 B)
 
  @return `TsraStatus` indicating the result of the operation
 
@@ -3099,23 +3110,23 @@ tsra_status tsra_part_get_prop(tsra_handle handle, struct tsra_part_prop *part_p
  @brief Create a new security domain and its remote backup
 
  Creates a security domain under the calling session's partition from
- `params.part_policy`, using the sender's masked sealing key. The
+ `params.part_policy`. The
  recipient key is recovered from the authoritative
  `params.receiver_cert_chain` (always required, anchored to the policy
  SATA key); the `params.receiver_evidence` is optional and verified only
- when the policy sets `require_trusted_sa_key`. Returns the three backups
- the firmware produces.
+ when the policy sets `require_trusted_sa_key`. Returns the directly
+ PID-signed Base envelope and unchanged local backups.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-backup input buffers
  @param[in,out] pok_remote_backup Output buffer for the remote
-                partition-owner-key backup (161 B).
+                partition-owner-key backup (431 B), including its PID signature.
  @param[in,out] pok_local_backup Output buffer for the local
-                partition-owner-key backup (276 B).
+                partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the security-domain
-                masking-key backup (260 B).
+                masking-key backup (264 B).
 
- All three output buffers follow the probe/fill convention and are
+ All three distinct output buffers follow the probe/fill convention and are
  validated **before** the domain is created, so the one-shot command is
  not consumed when a buffer is too small.
 
@@ -3140,15 +3151,15 @@ tsra_status tsra_sd_create_remote_backup(
 /*
  @brief Reseal an existing remote backup to a new recipient
 
- HPKE-opens `params.src_remote_backup` with the receiver's masked
- sealing key (authenticated by the source sender in `params.src_evidence`)
- and reseals the recovered backup to the destination receiver
- (`params.dest_evidence`), returning the resealed remote backup.
+ Verifies the source PID's POTA-authorized SdBackup report before
+ Base-opening with the actual recipient key and resealing to the authorized
+ destination. Both reports bind the request SD policy, which may differ
+ from the SA-local policy. Returns one directly SA-PID-signed envelope.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Reseal-backup input buffers
  @param[in,out] dst_remote_backup Output buffer for the resealed remote
-                partition-owner-key backup (161 B).
+                partition-owner-key backup (431 B), including its PID signature.
 
  The output buffer follows the probe/fill convention and is validated
  **before** the reseal is performed.
@@ -3172,18 +3183,19 @@ tsra_status tsra_sd_reseal_remote_backup(
 /*
  @brief Restore a security domain from a remote backup
 
- HPKE-opens `params.src_remote_backup` with the receiver's masked sealing
- key (authenticated by the sender key recovered from
- `params.sender_cert_chain`), recovers the security-domain masking key
+ Verifies the direct signature, actual recipient, envelope and target SD
+ policy before Base-opening with the receiver's masked key. SAPOTA is
+ optional; without trusted-SA policy this does not authenticate SA identity.
+ Recovers the security-domain masking key
  from `params.prev_sd_mk_backup`, and returns the refreshed device-local
  backups.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Restore-backup input buffers
  @param[in,out] pok_local_backup Output buffer for the local
-                partition-owner-key backup (276 B).
+                partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the security-domain
-                masking-key backup (260 B).
+                masking-key backup (264 B).
 
  Both output buffers follow the probe/fill convention and are validated
  **before** the restore is performed.
@@ -3208,15 +3220,15 @@ tsra_status tsra_sd_restore_remote_backup(
 /*
  @brief Create a peer-transferable backup of a security domain
 
- Recovers BKS3 from `params.pok_local_backup` and HPKE-Auth-seals it to
- the destination peer named by `params.dst_evidence` (authenticated by
- the sender's masked sealing key), returning the peer backup. Gated by
+ Recovers BKS3 from `params.pok_local_backup` and Base-seals it to the
+ POTA-authorized same-policy destination in `params.dst_evidence`,
+ returning the directly PID-signed envelope. Gated by
  the security domain's `allow_peer_cloning` policy flag.
 
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Create-peer-backup input buffers
  @param[in,out] pok_peer_backup Output buffer for the peer
-                partition-owner-key backup (161 B).
+                partition-owner-key backup (431 B), including its PID signature.
 
  The output buffer follows the probe/fill convention and is validated
  **before** the peer backup is created.
@@ -3248,9 +3260,9 @@ tsra_status tsra_sd_create_peer_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Restore-backup input buffers
  @param[in,out] pok_local_backup Output buffer for the local
-                partition-owner-key backup (276 B).
+                partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the security-domain
-                masking-key backup (260 B).
+                masking-key backup (264 B).
 
  Both output buffers follow the probe/fill convention and are validated
  **before** the restore is performed.
@@ -3282,9 +3294,9 @@ tsra_status tsra_sd_restore_peer_backup(
  @param[in] sess_handle Handle to the security-domain session
  @param[in] params Restore-backup input buffers
  @param[in,out] pok_local_backup Output buffer for the refreshed local
-                partition-owner-key backup (276 B).
+                partition-owner-key backup (280 B).
  @param[in,out] sd_mk_backup Output buffer for the refreshed
-                security-domain masking-key backup (260 B).
+                security-domain masking-key backup (264 B).
 
  Both output buffers follow the probe/fill convention and are validated
  **before** the restore is performed.
@@ -3354,13 +3366,18 @@ tsra_status tsra_sess_close(tsra_handle handle);
  Opens a security-domain session using the API revision negotiated when
  the partition was opened, and returns a handle to the resulting
  session. `psk` selects the role slot and (optionally) the PSK, and
- `session_type` selects the channel integrity profile pinned for the
- session.
+ `suite` selects the key-establishment suite. Every session encrypts
+ its in-session traffic under keys agreed during the handshake.
 
  @param[in] dev_handle Handle to the HSM partition
+ @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the
+            trusted root certificate's DER SubjectPublicKeyInfo, obtained
+            independently of this connection. The verified PID path must
+            contain a non-PID certificate with DICE TCB Info layer zero and
+            Tessera EKU `1.3.6.1.4.1.311.102.1.50.1`.
  @param[in] psk PSK credential — slot plus optional PSK
             (see `tsra_session_psk`)
- @param[in] session_type Channel integrity profile to pin for the session
+ @param[in] suite Key-establishment suite (`tsra_session_suite`)
  @param[out] sess_handle Pointer to the session handle to be allocated
 
  @return `TsraStatus` indicating the result of the operation
@@ -3368,6 +3385,8 @@ tsra_status tsra_sess_close(tsra_handle handle);
  # Safety
 
  - `dev_handle` must be a valid partition handle.
+ - `root_spki_thumbprint` must point to a valid `tsra_buffer` containing
+   exactly 48 bytes.
  - `psk` must be a valid pointer to an `tsra_session_psk` whose `psk`
    field is NULL or a valid `tsra_buffer` holding exactly `TSRA_PSK_LEN`
    bytes.
@@ -3376,9 +3395,32 @@ tsra_status tsra_sess_close(tsra_handle handle);
  */
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
     const struct tsra_session_psk *psk,
-    tsra_session_ex_type session_type,
+    tsra_session_suite suite,
     tsra_handle *sess_handle
+);
+
+/*
+ @brief Recover a migrated security-domain session in place
+
+ Establishes fresh channel keys while restoring the original session
+ masking key. Uses the session's existing role and the current role PSK,
+ which a migration returns to its default (pass NULL). Does not replay an
+ interrupted command; the migration, not the reopen, restores the
+ PSK-change allowance.
+
+ # Safety
+
+ - `sess_handle` must be a valid security-domain session handle.
+ - `root_spki_thumbprint` must identify a valid buffer of exactly 48 bytes.
+ - `psk` must be NULL (default PSK) or identify a valid buffer containing
+   exactly `TSRA_PSK_LEN` bytes.
+ */
+tsra_status tsra_sess_ex_reopen(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *root_spki_thumbprint,
+    const struct tsra_buffer *psk
 );
 
 /*

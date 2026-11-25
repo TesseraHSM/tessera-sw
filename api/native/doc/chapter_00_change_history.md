@@ -59,5 +59,16 @@
 |            | `tsra_policy_key_thumbprint`                                     |
 |            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
 |            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
+| 11/13/2026 | Replaced `tsra_session_ex_type` with `tsra_session_suite`        |
+|            | (`ECDH_P384`); every security-domain session is                 |
+|            | encrypted on every device model                                  |
+
+| Unreleased | `tsra_sess_ex_open` requires a 48-byte trusted-root SPKI SHA-384 |
+|            | digest and authenticates the PID path before the handshake;    |
+|            | a non-PID path certificate must carry DICE layer 0 and the      |
+|            | Tessera device EKU `1.3.6.1.4.1.311.102.1.50.1`                 |
+|            | Encrypted session responses are bound to their request IV     |
+|            | using implicit 32-byte AAD; SDK and firmware must be updated   |
+|            | together. Out-of-order completions remain supported.           |
 
 \pagebreak

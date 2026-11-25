@@ -25,7 +25,7 @@ use tsra_ddi_tbor_types::*;
 use tsra_fw_core_crypto_key_masking::aead::*;
 use zerocopy::*;
 
-/// Eight selectors out of 44 are dedicated known-plaintext success cases.
+/// Eight selectors out of 39 are dedicated known-plaintext success cases.
 /// Generated-TMK and relocated-evidence cases provide two more success lanes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -52,18 +52,13 @@ enum Scenario {
     CertificateTruncate,
     CertificateDer,
     CertificateSignature,
-    SenderFlip,
     TmkFlip,
-    RawSender,
     RawTmk,
-    SenderMetadata,
     TmkMetadata,
-    SenderScope,
     TmkScope,
-    WrongSenderKind,
     WrongTmkKind,
     WireChainLength,
-    WireSenderLength,
+    WirePolicyLength,
     WireTmkLength,
     Combined,
 }
@@ -84,7 +79,7 @@ impl<'a> FuzzInput<'a> {
     /// Decode bounded controls without rejecting short libFuzzer inputs.
     fn new(bytes: &'a [u8]) -> Self {
         let byte = |i| bytes.get(i).copied().unwrap_or(0);
-        let scenario = match byte(0) % 44 {
+        let scenario = match byte(0) % 39 {
             0..=7 => Scenario::Valid,
             8 => Scenario::Generated,
             9 => Scenario::Relocated,
@@ -108,19 +103,14 @@ impl<'a> FuzzInput<'a> {
             27 => Scenario::CertificateTruncate,
             28 => Scenario::CertificateDer,
             29 => Scenario::CertificateSignature,
-            30 => Scenario::SenderFlip,
-            31 => Scenario::TmkFlip,
-            32 => Scenario::RawSender,
-            33 => Scenario::RawTmk,
-            34 => Scenario::SenderMetadata,
-            35 => Scenario::TmkMetadata,
-            36 => Scenario::SenderScope,
-            37 => Scenario::TmkScope,
-            38 => Scenario::WrongSenderKind,
-            39 => Scenario::WrongTmkKind,
-            40 => Scenario::WireChainLength,
-            41 => Scenario::WireSenderLength,
-            42 => Scenario::WireTmkLength,
+            30 => Scenario::TmkFlip,
+            31 => Scenario::RawTmk,
+            32 => Scenario::TmkMetadata,
+            33 => Scenario::TmkScope,
+            34 => Scenario::WrongTmkKind,
+            35 => Scenario::WireChainLength,
+            36 => Scenario::WirePolicyLength,
+            37 => Scenario::WireTmkLength,
             _ => Scenario::Combined,
         };
         Self {
@@ -153,14 +143,6 @@ enum EnvelopeOutcome {
 enum Expected {
     Success,
     Reject(TborStatus),
-}
-
-/// Convert device-order coordinates to host big-endian points.
-fn host_public(wire: &[u8; RAW_PUB_LEN]) -> EccPublicKey {
-    let mut raw = *wire;
-    dev_rev_in_place(&mut raw[..common::COORD_LEN]);
-    dev_rev_in_place(&mut raw[common::COORD_LEN..]);
-    EccPublicKey::from_hsm_bytes(&raw).expect("generated P-384 public point")
 }
 
 /// Return certificate-format coordinates for a host-owned P-384 key.
@@ -221,13 +203,13 @@ fn envelope_outcome(original: &[u8], changed: &[u8]) -> EnvelopeOutcome {
 /// are real no-ops. Raw replacements force invalid magic independently of data.
 fn mutate_envelope(blob: &mut [u8], input: &FuzzInput<'_>) {
     match input.scenario {
-        Scenario::RawSender | Scenario::RawTmk => {
+        Scenario::RawTmk => {
             for (i, byte) in blob.iter_mut().enumerate() {
                 *byte = input.byte(i);
             }
             blob[0] = 0;
         }
-        Scenario::SenderScope | Scenario::TmkScope => {
+        Scenario::TmkScope => {
             let env = aead_envelope::inspect(blob).expect("original envelope");
             let mut metadata = MaskedKeyMetadata::read_from_bytes(env.aad).expect("metadata");
             let mut scope = metadata.usage_flags().scope();
@@ -238,10 +220,7 @@ fn mutate_envelope(blob: &mut [u8], input: &FuzzInput<'_>) {
                 .copy_from_slice(metadata.as_bytes());
         }
         _ => {
-            let offset = if matches!(
-                input.scenario,
-                Scenario::SenderMetadata | Scenario::TmkMetadata
-            ) {
+            let offset = if input.scenario == Scenario::TmkMetadata {
                 let fields = [
                     core::mem::offset_of!(MaskedKeyMetadata, magic),
                     core::mem::offset_of!(MaskedKeyMetadata, version),
@@ -290,21 +269,23 @@ impl TborOpReq for WireRequest<'_> {
     }
 
     /// Build valid framing around exactly one fuzz-controlled buffer length.
-    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], codec::EncodeError> {
+    fn encode_request<'b>(
+        &self,
+        buf: &'b mut [u8],
+        api_rev: (u16, u16),
+    ) -> Result<&'b [u8], codec::EncodeError> {
         let mut fields = [
-            self.req.masked_sender_key.to_vec(),
             self.req.masked_tmk.to_vec(),
+            self.req.policy.clone(),
             self.req.target_cert_chain.as_slice().as_bytes().to_vec(),
         ];
         fields[self.field].resize(self.len, 0);
-        codec::RequestEncoder::new(buf, codec::PROTOCOL_VERSION, Self::OPCODE)
-            .with_toc_slots(7)?
+        codec::RequestEncoder::new(buf, api_rev, Self::OPCODE)
+            .with_toc_slots(5)?
             .session_id(self.req.session_id)?
             .align_to(4)?
             .buffer(&fields[0])?
-            .align_to(4)?
             .buffer(&fields[1])?
-            .buffer(self.req.policy.as_bytes())?
             .buffer(&fields[2])?
             .finish()
     }
@@ -361,26 +342,61 @@ fn assert_success(
     known_tmk: Option<&[u8; TMK_LEN]>,
 ) -> Vec<u8> {
     assert_eq!(resp.sealed_tmk.len(), SEALED_TMK_LEN);
-    assert_eq!(resp.sealed_tmk[0], 4, "SEC1 uncompressed point");
-    let enc_raw = &resp.sealed_tmk[1..SEC1_PUB_LEN];
+    let mut outer = minicbor::Decoder::new(&resp.sealed_tmk);
+    assert_eq!(
+        outer.tag().expect("COSE tag"),
+        minicbor::data::Tag::Unassigned(18)
+    );
+    assert_eq!(outer.array().expect("COSE array"), Some(4));
+    let protected = outer.bytes().expect("protected header");
+    assert_eq!(protected, b"\xa1\x01\x38\x22");
+    assert_eq!(outer.map().expect("unprotected claims"), Some(0));
+    let payload = outer.bytes().expect("complete encrypted envelope");
+    let signature = outer.bytes().expect("operation signature");
+    assert_eq!(outer.position(), resp.sealed_tmk.len());
+    assert_eq!(payload.len(), 258);
+    let header = &payload[..113];
+    assert_eq!(&header[..17], b"TSRA-XFER\x01\x01\x00\x11\x00\x02\x00\x02");
+    assert_eq!(&header[17..65], &common::darc_key_id(sender_pub));
+    let receiver_pub = receiver.public_key().expect("receiver public key");
+    assert_eq!(&header[65..113], &common::darc_key_id(&receiver_pub));
+    let mut input = minicbor::Encoder::new(Vec::new());
+    let external_aad: &[u8; 32] = b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    input
+        .array(4)
+        .expect("Sig_structure")
+        .str("Signature1")
+        .expect("context")
+        .bytes(protected)
+        .expect("protected")
+        .bytes(external_aad)
+        .expect("AAD")
+        .bytes(payload)
+        .expect("payload");
+    assert!(
+        EcdsaAlgo::new(HashAlgo::sha384())
+            .verify(sender_pub, &input.into_writer(), signature)
+            .expect("verify operation signature"),
+        "operation report must be signed by the real PID",
+    );
+    assert_eq!(payload[113], 4, "SEC1 uncompressed point");
+    let enc_raw = &payload[114..210];
     let (x, y) = enc_raw.split_at(common::COORD_LEN);
     assert!(
         EccPublicKey::is_on_curve(EccCurve::P384, x, y).expect("point validation"),
         "encapsulated point must be on P-384",
     );
     let enc = EccPublicKey::from_hsm_bytes(enc_raw).expect("encapsulated public key");
-    let receiver_pub = receiver.public_key().expect("receiver public key");
     let plain = open_vec(
-        &HpkeOpenConfig::auth(
+        &HpkeOpenConfig::base(
             HpkeSuite::DHKemP384Sha384AesGcm256,
             receiver,
             &receiver_pub,
+            header,
             &[],
-            &[],
-            sender_pub,
         ),
         &enc,
-        &resp.sealed_tmk[SEC1_PUB_LEN..],
+        &payload[210..],
     )
     .expect("exported TMK must authenticate");
     assert_eq!(plain.len(), TMK_LEN);
@@ -409,14 +425,13 @@ fn early_case(ctx: &TestCtx, input: &FuzzInput<'_>) -> bool {
     }
     let session = match input.scenario {
         Scenario::DefaultPsk => ctx
-            .open_session(CO_PSK_ID, SessionType::Authenticated)
+            .open_session(CO_PSK_ID, SessionSuite::EcdhP384)
             .expect("default-PSK session"),
         Scenario::CryptoUser => SessionGuard::new(ctx, bootstrap_rotated_cu(ctx, &ROTATED_CU_PSK)),
         _ => SessionGuard::new(ctx, bootstrap_rotated_co(ctx, &ROTATED_CO_PSK)),
     };
     let mut req = TborDarcTmkExportReq {
         session_id: session.session_id(),
-        masked_sender_key: [0; MASKED_KEX_KEY_LEN],
         masked_tmk: [0; MASKED_TMK_LEN],
         policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         target_cert_chain: vec![CertDescriptor {
@@ -547,28 +562,10 @@ fn mutate_request(
                 expected = Expected::Reject(TborStatus::X509SignatureInvalid);
             }
         }
-        Scenario::SenderFlip
-        | Scenario::SenderMetadata
-        | Scenario::SenderScope
-        | Scenario::RawSender => {
-            let original = req.masked_sender_key;
-            mutate_envelope(&mut req.masked_sender_key, input);
-            expected = envelope_expected(envelope_outcome(&original, &req.masked_sender_key));
-        }
         Scenario::TmkFlip | Scenario::TmkMetadata | Scenario::TmkScope | Scenario::RawTmk => {
             let original = req.masked_tmk;
             mutate_envelope(&mut req.masked_tmk, input);
             expected = envelope_expected(envelope_outcome(&original, &req.masked_tmk));
-        }
-        Scenario::WrongSenderKind => {
-            req.masked_sender_key = ctx
-                .tbor(&TborSdSealingKeyGenReq {
-                    session_id: req.session_id,
-                    scope: common::KEY_SCOPE_LOCAL,
-                })
-                .expect("authentic wrong-kind sender")
-                .masked_key;
-            expected = Expected::Reject(TborStatus::UnsupportedKeyType);
         }
         Scenario::WrongTmkKind => {
             let donor = ctx
@@ -595,10 +592,8 @@ fn mutate_request(
                     expected = Expected::Reject(TborStatus::InvalidArg);
                 }
                 1 => {
-                    let start =
-                        aead_envelope::HEADER_LEN + aead_envelope::AeadAlg::AesGcm256.iv_len();
-                    req.masked_sender_key[start] ^= 1;
-                    expected = Expected::Reject(TborStatus::MaskedKeyDecodeFailed);
+                    req.target_cert_chain.clear();
+                    expected = Expected::Reject(TborStatus::TborInvalidFixedLength);
                 }
                 _ => {
                     let mut controls = FuzzInput::new(&[]);
@@ -632,7 +627,6 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
     if input.scenario == Scenario::ArbitrarySession && input.session_id != session.session_id() {
         let req = TborDarcTmkExportReq {
             session_id: input.session_id,
-            masked_sender_key: [0; MASKED_KEX_KEY_LEN],
             masked_tmk: [0; MASKED_TMK_LEN],
             policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
             target_cert_chain: vec![CertDescriptor {
@@ -665,17 +659,9 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             }
         },
     );
-    let scopes = [
-        common::KEY_SCOPE_LOCAL,
-        common::KEY_SCOPE_EPHEMERAL,
-        common::KEY_SCOPE_SECURITY_DOMAIN,
-    ];
-    let sender = ctx
-        .tbor(&TborDarcKexKeyGenReq {
-            session_id: session.session_id(),
-            scope: scopes[usize::from(input.controls) % scopes.len()],
-        })
-        .expect("export sender generation");
+    let info = ctx.tbor(&TborPartInfoReq::new()).expect("source PID");
+    let sender_pub =
+        EccPublicKey::from_hsm_bytes(&info.pid_pub_key).expect("source PID public key");
     let known_tmk: [u8; TMK_LEN] = core::array::from_fn(|i| input.byte(i));
     let generated = input.scenario == Scenario::Generated;
     let masked_tmk = if generated {
@@ -714,7 +700,6 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         .collect();
     let valid = TborDarcTmkExportReq {
         session_id: session.session_id(),
-        masked_sender_key: sender.masked_key,
         masked_tmk,
         policy: fixture.policy,
         target_cert_chain,
@@ -723,15 +708,15 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
     let mut mutated_items = items.clone();
     let expected = mutate_request(ctx, &mut req, &mut mutated_items, input);
     let result = match input.scenario {
-        Scenario::WireChainLength | Scenario::WireSenderLength | Scenario::WireTmkLength => {
+        Scenario::WireChainLength | Scenario::WirePolicyLength | Scenario::WireTmkLength => {
             let field = match input.scenario {
-                Scenario::WireSenderLength => 0,
-                Scenario::WireTmkLength => 1,
+                Scenario::WireTmkLength => 0,
+                Scenario::WirePolicyLength => 1,
                 _ => 2,
             };
             let original_len = [
-                MASKED_KEX_KEY_LEN,
                 MASKED_TMK_LEN,
+                req.policy.len(),
                 2 * core::mem::size_of::<CertDescriptor>(),
             ][field];
             let len = if field == 2 {
@@ -742,7 +727,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             };
             let expected = if len == original_len {
                 Expected::Success
-            } else if field == 2 && (3..=6).contains(&len) {
+            } else if (field == 2 && (3..=6).contains(&len)) || field == 1 {
                 Expected::Reject(TborStatus::InvalidArg)
             } else {
                 Expected::Reject(TborStatus::TborInvalidFixedLength)
@@ -767,7 +752,6 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             input,
         ),
     };
-    let sender_pub = host_public(&sender.pub_key);
     if let Some(resp) = result.as_ref() {
         let plain = assert_success(
             resp,

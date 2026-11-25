@@ -13,18 +13,24 @@
 //! are placed at addresses in upper DTCM defined by `io_bufs.rdl`
 //! and passed to the driver at init time.
 //!
+//! A post goes out at the next [`OicDriver::ring`], which the owner's poll
+//! loop calls on every pass, as it calls [`OicDriver::wake`].
+//!
 //! # Example
 //!
 //! ```ignore
 //! type Oic = OicDriver<32>;
 //! let oic = static_init!(Oic, Oic::new(ChannelConfig {
+//!     controller: 0,
 //!     channel: 0,
 //!     osq_base: 0x2003_DD00,
 //!     ocq_base: 0x2003_DF00,
 //!     ocq_tail_shadow: 0x2003_E300,
 //!     io_cq_base: 0x2003_E100,
+//!     io_cq_size: 16,
 //!     io_meta_base: 0x2003_DC00,
 //!     interrupt: true,
+//!     return_credit: false,
 //! }));
 //! oic.init(); // attach on fw-update, full program otherwise (reads reset reason)
 //! oic.enable();

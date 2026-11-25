@@ -159,15 +159,17 @@ impl<S: TableStorage> KeyVault<S> {
                 continue;
             };
 
-            let start = match crate::block::alloc(self.storage.bitmap_mut(table)?, need) {
-                Ok(s) => s,
-                Err(HsmError::DefragmentationNeeded) => {
-                    saw_defrag = true;
-                    continue;
-                }
-                Err(HsmError::NotEnoughSpace) => continue,
-                Err(e) => return Err(e),
-            };
+            let start =
+                match crate::block::alloc(self.storage.bitmap_mut(table)?, need, block_align(kind))
+                {
+                    Ok(s) => s,
+                    Err(HsmError::DefragmentationNeeded) => {
+                        saw_defrag = true;
+                        continue;
+                    }
+                    Err(HsmError::NotEnoughSpace) => continue,
+                    Err(e) => return Err(e),
+                };
 
             // Stage the entry's fields directly in storage.
             {
@@ -360,6 +362,19 @@ impl<S: TableStorage> KeyVault<S> {
         self.blob_of(table, &entry)
     }
 
+    /// Overwrite a checked range without changing the key's identity.
+    pub fn update(&mut self, key_id: HsmKeyId, offset: usize, bytes: &[u8]) -> HsmResult<()> {
+        let (table, off, len) = self.key_location(key_id)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(HsmError::InvalidArg)?;
+        if end > len {
+            return Err(HsmError::InvalidArg);
+        }
+        self.storage.blob_mut(table)?[off + offset..off + end].copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Disabled-aware variant of [`key`](Self::key), for the teardown walks
     /// that also visit disabled entries (see [`key_entry`](Self::key_entry)).
     fn key_present(&self, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
@@ -539,7 +554,7 @@ impl<S: TableStorage> KeyVault<S> {
         if !self.storage.is_valid_table(table) || slot >= ENTRIES_PER_TABLE {
             return Err(HsmError::KeyNotFound);
         }
-        let entry = *self.storage.entry(table, slot)?;
+        let entry = Entry::load(self.storage.entry(table, slot)?);
         if entry.is_free() {
             return Err(HsmError::KeyNotFound);
         }
@@ -662,6 +677,24 @@ fn split_key_id(key_id: HsmKeyId) -> (usize, usize) {
     let raw = u16::from(key_id);
     (usize::from(raw >> 8), usize::from(raw & 0xFF))
 }
+
+/// Blocks that the run of a key of `kind` starts on a multiple of.
+///
+/// The masking keys the BCP loads on every unmask (the partition's and the
+/// security domain's, 32-byte AES-256-GCM keys) start on a 32-byte boundary
+/// of the blob, which is 32-byte aligned, past their 32-byte attributes:
+/// the GSRAM vault is read uncached, and a load within one 32-byte line
+/// costs half one that crosses into the next.
+fn block_align(kind: HsmVaultKeyKind) -> usize {
+    match kind {
+        HsmVaultKeyKind::PartitionLocalMaskingKey
+        | HsmVaultKeyKind::PartitionEphemeralMaskingKey
+        | HsmVaultKeyKind::SdMasking => 32 / BLOCK_ALIGNMENT,
+        _ => 1,
+    }
+}
+
+const _: () = assert!(ATTRIBUTES_BLOB_SIZE.is_multiple_of(32));
 
 /// Block-aligned total storage for a key of `key_len` bytes
 /// (`attributes + align8(key)`).

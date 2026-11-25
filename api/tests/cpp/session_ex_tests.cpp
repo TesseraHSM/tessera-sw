@@ -69,10 +69,16 @@ class tsra_sess_ex : public ::testing::Test
     // early-return. The returned handle must be closed by the caller.
     static tsra_handle open_sd_session(tsra_handle part_handle)
     {
+        TestRootPin root(part_handle);
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        auto err = tsra_sess_ex_open(
+            part_handle,
+            &root.buffer,
+            &psk,
+            TSRA_SESSION_SUITE_ECDH_P384,
+            &sess_handle
+        );
         if (err != TSRA_STATUS_SUCCESS || sess_handle == 0)
         {
             ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;
@@ -84,6 +90,31 @@ class tsra_sess_ex : public ::testing::Test
 
 // Happy-path session open requires the two-phase TBOR HPKE handshake, which is
 // implemented by a real backend (emu or hardware).
+TEST(tsra_sess_ex_boundary, invalid_root_buffers_fail_before_handle_lookup)
+{
+    tsra_handle session = 0;
+    tsra_session_psk psk{ 0, nullptr };
+    EXPECT_EQ(
+        tsra_sess_ex_open(0, nullptr, &psk, TSRA_SESSION_SUITE_ECDH_P384, &session),
+        TSRA_STATUS_INVALID_ARGUMENT
+    );
+    uint8_t bytes[49]{};
+    for (uint32_t length : { 0u, 47u, 49u })
+    {
+        tsra_buffer root{ bytes, length };
+        EXPECT_EQ(
+            tsra_sess_ex_open(0, &root, &psk, TSRA_SESSION_SUITE_ECDH_P384, &session),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+    }
+    tsra_buffer null_data{ nullptr, 48 };
+    EXPECT_EQ(
+        tsra_sess_ex_open(0, &null_data, &psk, TSRA_SESSION_SUITE_ECDH_P384, &session),
+        TSRA_STATUS_INVALID_ARGUMENT
+    );
+    EXPECT_EQ(session, 0);
+}
+
 TEST_F(tsra_sess_ex, open_and_close)
 {
     if (!api_rev_at_least(1, 1))
@@ -101,8 +132,27 @@ TEST_F(tsra_sess_ex, open_and_close)
 
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 0, nullptr };
-        auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+        TestRootPin root(part_handle);
+        root.hash[0] ^= 1;
+        EXPECT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &psk,
+                TSRA_SESSION_SUITE_ECDH_P384,
+                &sess_handle
+            ),
+            TSRA_STATUS_INVALID_SIGNATURE
+        );
+        EXPECT_EQ(sess_handle, 0);
+        root.hash[0] ^= 1;
+        auto err = tsra_sess_ex_open(
+            part_handle,
+            &root.buffer,
+            &psk,
+            TSRA_SESSION_SUITE_ECDH_P384,
+            &sess_handle
+        );
 
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
         ASSERT_NE(sess_handle, 0);
@@ -129,8 +179,10 @@ TEST_F(tsra_sess_ex, open_null_sess_handle)
             scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
 
         tsra_session_psk psk{ 0, nullptr };
+        uint8_t hash[48]{};
+        tsra_buffer root{ hash, sizeof(hash) };
         auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, nullptr);
+            tsra_sess_ex_open(part_handle, &root, &psk, TSRA_SESSION_SUITE_ECDH_P384, nullptr);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -148,8 +200,10 @@ TEST_F(tsra_sess_ex, open_invalid_partition_handle)
         tsra_handle sess_handle = 0;
 
         tsra_session_psk psk{ 0, nullptr };
+        uint8_t hash[48]{};
+        tsra_buffer root{ hash, sizeof(hash) };
         auto err =
-            tsra_sess_ex_open(bad_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+            tsra_sess_ex_open(bad_handle, &root, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
     });
@@ -172,10 +226,13 @@ TEST_F(tsra_sess_ex, open_null_psk)
             scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
 
         tsra_handle sess_handle = 0;
+        uint8_t hash[48]{};
+        tsra_buffer root{ hash, sizeof(hash) };
         auto err = tsra_sess_ex_open(
             part_handle,
+            &root,
             nullptr,
-            TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+            TSRA_SESSION_SUITE_ECDH_P384,
             &sess_handle
         );
 
@@ -201,10 +258,43 @@ TEST_F(tsra_sess_ex, open_invalid_psk_id)
 
         tsra_handle sess_handle = 0;
         tsra_session_psk psk{ 2, nullptr }; // 2 is neither CO nor CU
+        uint8_t hash[48]{};
+        tsra_buffer root{ hash, sizeof(hash) };
         auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+            tsra_sess_ex_open(part_handle, &root, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_sess_ex, open_removed_suite_rejected)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        TestRootPin root(part_handle);
+        tsra_session_psk psk{ 1, nullptr };
+        tsra_handle session = 0;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &psk,
+                static_cast<tsra_session_suite>(0x02),
+                &session
+            ),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        ASSERT_EQ(session, 0);
     });
 }
 
@@ -229,8 +319,10 @@ TEST_F(tsra_sess_ex, open_wrong_length_psk)
         std::vector<uint8_t> short_psk(16, 0);
         tsra_buffer psk_buf{ short_psk.data(), static_cast<uint32_t>(short_psk.size()) };
         tsra_session_psk psk{ 0, &psk_buf };
+        uint8_t hash[48]{};
+        tsra_buffer root{ hash, sizeof(hash) };
         auto err =
-            tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess_handle);
+            tsra_sess_ex_open(part_handle, &root, &psk, TSRA_SESSION_SUITE_ECDH_P384, &sess_handle);
 
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
@@ -571,13 +663,15 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
         }
 
         // Reopening with the rotated secret must now succeed.
+        TestRootPin root(part_handle);
         {
             tsra_handle sess_handle = 0;
             tsra_session_psk psk{ 0, &new_psk_buf };
             auto err = tsra_sess_ex_open(
                 part_handle,
+                &root.buffer,
                 &psk,
-                TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+                TSRA_SESSION_SUITE_ECDH_P384,
                 &sess_handle
             );
             ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
@@ -591,8 +685,9 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
             tsra_session_psk psk{ 0, nullptr };
             auto err = tsra_sess_ex_open(
                 part_handle,
+                &root.buffer,
                 &psk,
-                TSRA_SESSION_EX_TYPE_AUTHENTICATED,
+                TSRA_SESSION_SUITE_ECDH_P384,
                 &sess_handle
             );
             ASSERT_NE(err, TSRA_STATUS_SUCCESS);
@@ -603,6 +698,108 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
                 tsra_sess_close(sess_handle);
             }
         }
+    });
+}
+
+TEST_F(tsra_sess_ex, cu_rotation_rebinds_calling_session)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        TestRootPin root(part_handle);
+        tsra_session_psk credential{ 1, nullptr };
+        tsra_handle session = 0;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &credential,
+                TSRA_SESSION_SUITE_ECDH_P384,
+                &session
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        auto session_guard = scope_guard::make_scope_exit([&session] {
+            if (session != 0)
+            {
+                tsra_sess_close(session);
+            }
+        });
+        std::vector<uint8_t> psk(32, 0xA5);
+        tsra_buffer psk_buffer{ psk.data(), static_cast<uint32_t>(psk.size()) };
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(
+            tsra_sess_ex_psk_change(session, &psk_buffer),
+            TSRA_STATUS_PSK_CHANGE_ALREADY_USED
+        );
+        ASSERT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+        session = 0;
+        credential.psk = &psk_buffer;
+        ASSERT_EQ(
+            tsra_sess_ex_open(
+                part_handle,
+                &root.buffer,
+                &credential,
+                TSRA_SESSION_SUITE_ECDH_P384,
+                &session
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_sess_ex, migration_reopen_uses_default_psk_and_restores_psk_change)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part = open_reset_partition(path);
+        ASSERT_NE(part, 0);
+        auto part_guard = scope_guard::make_scope_exit([&part] { tsra_part_close(part); });
+        tsra_handle session = open_sd_session(part);
+        ASSERT_NE(session, 0);
+        auto session_guard = scope_guard::make_scope_exit([&session] {
+            EXPECT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+        });
+        TestRootPin root(part);
+        std::vector<uint8_t> psk(32, 0xB4);
+        tsra_buffer credential{ psk.data(), static_cast<uint32_t>(psk.size()) };
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &credential), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_part_reset(part), TSRA_STATUS_SUCCESS);
+        EXPECT_EQ(
+            tsra_sess_ex_psk_change(session, &credential),
+            TSRA_STATUS_SESSION_NEEDS_RENEGOTIATION
+        );
+        EXPECT_EQ(tsra_sess_ex_reopen(session, nullptr, &credential), TSRA_STATUS_INVALID_ARGUMENT);
+        tsra_buffer short_psk{ psk.data(), 31 };
+        EXPECT_EQ(
+            tsra_sess_ex_reopen(session, &root.buffer, &short_psk),
+            TSRA_STATUS_INVALID_ARGUMENT
+        );
+        std::vector<uint8_t> wrong_psk(32, 0xD6);
+        tsra_buffer wrong{ wrong_psk.data(), static_cast<uint32_t>(wrong_psk.size()) };
+        EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &wrong), TSRA_STATUS_SUCCESS);
+        // The migration returned the PSKs to their defaults.
+        EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, nullptr), TSRA_STATUS_SUCCESS);
+        // It also restored the change allowance, so the role rotates again.
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &credential), TSRA_STATUS_SUCCESS);
+        EXPECT_EQ(
+            tsra_sess_ex_psk_change(session, &credential),
+            TSRA_STATUS_PSK_CHANGE_ALREADY_USED
+        );
     });
 }
 
@@ -730,7 +927,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
 
         std::vector<uint8_t> policy(512, 0);
         std::vector<uint8_t> key(kMaskedSealingKeyLen, 0);
-        std::vector<uint8_t> backup(kPokLocalBackupLen, 0);
+        std::vector<uint8_t> backup(kPokRemoteBackupLen, 0);
         uint8_t cert = 0;
         uint8_t report = 0;
         tsra_buffer policy_buf{ policy.data(), 0 };
@@ -739,33 +936,32 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         tsra_buffer report_buf{ &report, 1 };
         tsra_sd_cert_chain chain{ &cert_buf, 1 };
         tsra_sd_evidence evidence{ chain, chain, chain, &report_buf };
-        tsra_buffer remote_backup{ backup.data(), 161 };
+        tsra_sd_identity_evidence identity{ chain, chain, chain };
+        tsra_buffer remote_backup{ backup.data(), kPokRemoteBackupLen };
         tsra_buffer local_backup{ backup.data(), kPokLocalBackupLen };
         tsra_buffer mk_backup{ backup.data(), kSdMkBackupLen };
 
         tsra_sd_create_remote_backup_params create{
             &policy_buf,
-            &key_buf,
             chain,
             &evidence,
         };
         tsra_sd_reseal_remote_backup_params reseal{
-            &policy_buf, &key_buf, &evidence, &evidence, &remote_backup,
+            &policy_buf, &key_buf, &identity, &evidence, &remote_backup,
         };
         tsra_sd_restore_remote_backup_params restore{
-            &policy_buf, &key_buf, chain, &evidence, &remote_backup, &mk_backup,
+            &policy_buf, &key_buf, &key_buf, &identity, &remote_backup, &mk_backup,
         };
         tsra_sd_create_peer_backup_params create_peer{
             &policy_buf,
-            &key_buf,
             &evidence,
             &local_backup,
         };
         tsra_sd_restore_peer_backup_params restore_peer{
-            &policy_buf, &key_buf, &evidence, &remote_backup, &mk_backup,
+            &policy_buf, &key_buf, &identity, &remote_backup, &mk_backup,
         };
 
-        std::vector<uint8_t> remote(161, 0);
+        std::vector<uint8_t> remote(kPokRemoteBackupLen, 0);
         std::vector<uint8_t> local(kPokLocalBackupLen, 0);
         std::vector<uint8_t> mk(kSdMkBackupLen, 0);
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };

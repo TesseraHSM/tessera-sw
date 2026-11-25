@@ -4,10 +4,9 @@
 //! `SdRestorePeerBackup` (opcode `0x0F`) over the TBOR transport at the DDI
 //! layer.
 //!
-//! Restores a security domain from a **peer** backup: HPKE-Auth-opens the
-//! caller-supplied `pok_peer_backup` (an HPKE seal of BKS3) with the
-//! receiver's masked sealing key — authenticated by the source peer's
-//! attested key — recovers `SDMK` from `prev_sd_mk_backup`, and returns the
+//! Restores a security domain from a **peer** backup: verifies the source PID's
+//! POTA-authorized SdBackup report and policy before Base-opening with the
+//! actual recipient key, recovers `SDMK` from `prev_sd_mk_backup`, and returns the
 //! device-local backups. Peer cloning is gated by the security domain's
 //! `allow_peer_cloning` policy flag. Runs **inside an already-open
 //! session**; the request carries the active session id, which the firmware
@@ -39,6 +38,7 @@ impl From<TborSdRestorePeerBackupResp> for HsmSdRestoreResult {
 /// # Arguments
 ///
 /// * `partition` - The HSM partition handle.
+/// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
 ///   `SdSealingKeyGen`) that unseals the backup, exactly
@@ -60,9 +60,10 @@ impl From<TborSdRestorePeerBackupResp> for HsmSdRestoreResult {
 /// `allow_peer_cloning`).
 pub(crate) fn sd_restore_peer_backup_ex(
     partition: &HsmPartition,
+    api_rev: HsmApiRev,
     session_id: u16,
     masked_sealing_key: &[u8],
-    src_evidence: &HsmSdEvidence<'_>,
+    src_evidence: &HsmSdIdentityEvidence<'_>,
     policy: &[u8],
     pok_peer_backup: &[u8],
     prev_sd_mk_backup: &[u8],
@@ -81,7 +82,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
 
     // Flatten the source evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
-    let src = push_evidence(src_evidence, &mut oob)?;
+    let src = super::sd_evidence::push_identity_evidence(src_evidence, &mut oob)?;
 
     let req = TborSdRestorePeerBackupReq {
         session_id,
@@ -90,7 +91,6 @@ pub(crate) fn sd_restore_peer_backup_ex(
         src_mfgr_cert_chain: src.mfgr,
         src_owner_cert_chain: src.owner,
         src_part_owner_cert_chain: src.part_owner,
-        src_report: src.report,
         pok_peer_backup,
         prev_sd_mk_backup,
     };
@@ -102,7 +102,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(&req, oob_items, cookie)
+        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
             .map(HsmSdRestoreResult::from)
             .map_err(HsmError::from)
     })

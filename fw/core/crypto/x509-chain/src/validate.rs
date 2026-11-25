@@ -527,14 +527,15 @@ impl ChainValidator {
     /// for P-521), and asks the PAL to verify.
     ///
     /// `curr.tbs_raw` and `verify_key.point` are already in DMA
-    /// memory; only the digest, raw signature, and reformatted
-    /// public key need temporary DMA allocations from `alloc`.
+    /// memory; only the packed signature-and-digest input and the
+    /// reformatted public key need temporary DMA allocations from
+    /// `alloc`.
     ///
     /// # Parameters
     /// * `pal` — PAL providing both [`HsmHash`] and [`HsmEcc`].
     /// * `io` — I/O context for the in-flight HSM operation.
-    /// * `alloc` — scoped DMA allocator for the digest, raw
-    ///   signature, and public-key buffers.
+    /// * `alloc` — scoped DMA allocator for the packed
+    ///   signature-and-digest and public-key buffers.
     /// * `verify_key` — the issuer's EC public key (its `curve`
     ///   field selects the hardware sizes used below).
     /// * `curr` — the certificate whose signature is being
@@ -563,49 +564,37 @@ impl ChainValidator {
             .sig_algo
             .hash_algo()
             .ok_or(HsmError::X509UnsupportedAlgorithm)?;
-        let digest_len = hash_algo.digest_len();
         let curve = verify_key.curve;
         let coord_len = curve.priv_key_len();
-
-        let operand_len = curve.ecdsa_digest_len();
-        let digest_dma = alloc.dma_alloc(digest_len.max(operand_len))?;
-        pal.hash(
-            io,
-            hash_algo,
-            curr.tbs_raw,
-            HsmDigestForm::Standard,
-            Some(&mut digest_dma[..digest_len]),
-        )
-        .await?;
-        // Truncate the big-endian hash or left-pad it to the PAL's fixed
-        // digest field before converting to operand order.
-        if digest_len < operand_len {
-            let padding = operand_len - digest_len;
-            digest_dma.copy_within(..digest_len, padding);
-            digest_dma[..padding].fill(0);
-        }
-        let digest_dma = &mut digest_dma[..operand_len];
-        byte_order::int_from_be(P::BYTE_ORDER, digest_dma);
 
         // X.509 carries the public key and signature as big-endian
         // `x ‖ y` / `r ‖ s`; convert each pair in place to the operand
         // layout `ecc_verify` expects.
-        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len(P::BYTE_ORDER))?;
+        let pk_dma = alloc.dma_alloc(curve.wire_pub_key_len(P::ECC_COORD_PAD))?;
         let point = verify_key
             .point
             .get(..2 * coord_len)
             .ok_or(HsmError::X509ParseError)?;
         pk_dma[..2 * coord_len].copy_from_slice(point);
-        byte_order::pair_from_be(P::BYTE_ORDER, curve, pk_dma)?;
+        byte_order::pair_from_be::<P>(curve, pk_dma)?;
 
-        let sig_dma = alloc.dma_alloc(curve.wire_sig_len(P::BYTE_ORDER))?;
-        ecdsa::decode_ecdsa_sig(curr.signature, curve, sig_dma)?;
-        byte_order::pair_from_be(P::BYTE_ORDER, curve, sig_dma)?;
+        // `r ‖ s ‖ digest`, with the operand-order digest at the start of
+        // its zeroed lane; the PAL truncates an over-long digest.
+        let input = alloc.dma_alloc(curve.ecdsa_verify_input_len(hash_algo, P::ECC_COORD_PAD))?;
+        input.fill(0);
+        let (sig, digest) = input.split_at_mut(curve.wire_sig_len(P::ECC_COORD_PAD));
+        ecdsa::decode_ecdsa_sig(curr.signature, curve, sig)?;
+        byte_order::pair_from_be::<P>(curve, sig)?;
+        pal.hash(
+            io,
+            hash_algo,
+            curr.tbs_raw,
+            HsmDigestForm::Operand,
+            Some(&mut digest[..hash_algo.digest_len()]),
+        )
+        .await?;
 
-        if pal
-            .ecc_verify(io, curve, pk_dma, digest_dma, sig_dma)
-            .await?
-        {
+        if pal.ecc_verify(io, curve, hash_algo, pk_dma, input).await? {
             Ok(())
         } else {
             Err(HsmError::X509SignatureInvalid)

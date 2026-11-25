@@ -7,9 +7,8 @@
 //! imports a DARC Transfer Masking Key (TMK) sealed off-device to a DARC
 //! key-exchange key (see `DarcKexKeyGen`) and re-masks it locally under
 //! the partition security-domain masking key (SDMK).  The 32-byte TMK is
-//! recovered by HPKE-Auth-opening `sealed_tmk` with the receiver's masked
-//! DARC key-exchange private key, authenticated by the sender public key
-//! recovered from a POTA-anchored certificate chain.
+//! recovered by HPKE Base after checking its operation report against the
+//! POTA-endorsed source PID and its binding to the actual recipient key.
 //!
 //! The wire schema is shared with the firmware handler via
 //! `tsra_fw_ddi_tbor_types::darc_tmk_import`; this module adds the
@@ -29,9 +28,11 @@ pub const TBOR_OP_DARC_TMK_IMPORT: u8 = 0x21;
 /// Plaintext length of a DARC Transfer Masking Key (256-bit key).
 pub const TMK_LEN: usize = 32;
 
-/// On-the-wire length of `sealed_tmk`: `enc(97) ‖ ct(TMK 32 + tag 16)`
+/// On-the-wire length of ES384 COSE_Sign1 containing the complete DARC envelope
 /// (matches the firmware schema's `SEALED_TMK_LEN`).
-pub const SEALED_TMK_LEN: usize = 145;
+pub const SEALED_TMK_LEN: usize = 367;
+/// Maximum source-chain depth, including POTA -> PTA -> PID.
+pub const DARC_SOURCE_CERT_CHAIN_MAX_CERTS: usize = 3;
 
 /// On-the-wire length of the `masked_tmk` output envelope (matches the
 /// firmware schema's `MASKED_TMK_LEN`).
@@ -56,20 +57,19 @@ pub struct TborDarcTmkImportReq {
     #[tbor(align = 4)]
     pub masked_kex_key: [u8; MASKED_KEX_KEY_LEN],
 
-    /// Unified partition policy whose `POTAPubKey` anchors
-    /// `remote_cert_chain`.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    /// Unified partition policy whose `pota_spki_thumbprint` anchors
+    /// `remote_cert_chain`. Encoded as deterministic CBOR, at most 384 bytes.
     #[tbor(max_len = 384)]
     pub policy: Vec<u8>,
 
-    /// HPKE-Auth seal of the 32-byte TMK, exactly [`SEALED_TMK_LEN`]
-    /// (145 B): `enc(97) ‖ ct(48)`.
+    /// PID-signed HPKE Base envelope of the 32-byte TMK, exactly 367 bytes.
     pub sealed_tmk: [u8; SEALED_TMK_LEN],
 
     /// Sender certificate-chain descriptors `(index, length)` referencing
-    /// the out-of-band SGL Data Blocks; carries 1..=2 entries.  The chain
-    /// must be POTA-anchored; its terminal certificate carries the sender
-    /// public key that sealed `sealed_tmk`.
-    #[tbor(min_len = 3, max_len = 6)]
+    /// the out-of-band SGL Data Blocks; carries 1..=3 entries. The chain
+    /// must be POTA-anchored and its leaf must carry the reporting PID key,
+    /// not the former sender KEX key.
+    #[tbor(min_len = 3, max_len = 9)]
     pub remote_cert_chain: Vec<CertDescriptor>,
 }
 
@@ -98,7 +98,7 @@ mod tests {
         let req = TborDarcTmkImportReq {
             session_id: 9,
             masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
-            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
+            policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             sealed_tmk: [0xABu8; SEALED_TMK_LEN],
             remote_cert_chain: alloc::vec![
                 CertDescriptor {
@@ -113,9 +113,9 @@ mod tests {
         };
 
         let mut buf = [0u8; 2048];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The maximum-length policy plus the masked key and sealed TMK must be
+        // The policy plus the masked key and sealed TMK must be
         // carried in the data section.
         assert!(
             frame.len() > crate::policy::PART_POLICY_MAX_LEN + MASKED_KEX_KEY_LEN + SEALED_TMK_LEN,

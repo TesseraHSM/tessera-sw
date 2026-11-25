@@ -3,7 +3,7 @@
 
 //! Host-side wrapper for the TBOR `MlDsaSign` command.
 //!
-//! `MlDsaSign` is (temporarily) an **out-of-session** command that signs a host-supplied
+//! `MlDsaSign` is an in-session command that signs a host-supplied
 //! 64-byte message representative `μ` using a caller-held **masked** ML-DSA
 //! secret key; this crate only defines wire types and performs no
 //! cryptography.
@@ -18,18 +18,7 @@
 //! and the result is a pure ML-DSA signature over `M` under `ctx`.  See
 //! [`MLDSA_MU_LEN`](crate::MLDSA_MU_LEN).
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use alloc::vec::Vec;
 
@@ -57,8 +46,8 @@ pub struct TborMlDsaSignReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The masked ML-DSA secret key (from `MlDsaGenerateKey`).  164 B:
-    /// the wire ships seed-only keys.  See
+    /// The masked ML-DSA seed and expanded secret key (from
+    /// `MlDsaGenerateKey`), up to 5160 B. See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`](crate::MASKED_MLDSA_KEY_MAX_LEN).
     #[tbor(align = 4, max_len = 5160)]
     pub masked_key: Vec<u8>,
@@ -103,14 +92,14 @@ mod tests {
             hedge: MLDSA_HEDGE_DETERMINISTIC,
         };
         let mut buf = [0u8; 8192];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame
                 .windows(MLDSA_MU_LEN)
                 .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
             "encoded frame must carry mu",
         );
-        // header(8) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
-        assert_eq!(frame.len(), 5252);
+        // header(12) + 5 TOC entries * 4 + padding(0) + data(5160 + 64).
+        assert_eq!(frame.len(), 5256);
     }
 }

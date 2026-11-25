@@ -19,3 +19,21 @@ MEMORY
 /* Include before link.x consumes the .text/.rodata self-test inputs. */
 INCLUDE gsram.x
 ASSERT(__gsram_rodata_end <= ORIGIN(GSRAM_CODE) + LENGTH(GSRAM_CODE), "Self-tests exceed GSRAM_CODE");
+
+/* .data has no load copy: the previous boot stage writes .data straight to
+   its run address, and the reset handler doesn't copy it (cortex-m-rt's
+   skip-data-copy feature, turned on in app/Cargo.toml). This block is the
+   .data rule of cortex-m-rt 0.7.7's link.x without AT>FLASH, and LLD's
+   OVERWRITE_SECTIONS puts it in place of that one. link.x still sets
+   __edata and __sidata after it, so __sidata equals __sdata. */
+OVERWRITE_SECTIONS
+{
+    .data : ALIGN(4)
+    {
+        . = ALIGN(4);
+        __sdata = .;
+        *(.data .data.*);
+        . = ALIGN(4);
+    } > RAM
+}
+ASSERT(LOADADDR(.data) == ADDR(.data), ".data must load at its run address: the previous boot stage writes it there, and the reset handler doesn't copy it");

@@ -25,10 +25,10 @@
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::SessionSuite;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
-use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborHmacGenerateKeyReq;
 use tsra_ddi_tbor_types::TborHmacReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -348,7 +348,7 @@ fn hmac_generate_key_accepts_non_empty_key_label() {
 fn hmac_generate_key_rejects_default_psk() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open session");
     let req = TborHmacGenerateKeyReq {
         session_id: session.session_id(),

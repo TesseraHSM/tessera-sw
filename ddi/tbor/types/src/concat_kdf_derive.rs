@@ -100,7 +100,7 @@ mod tests {
             info: alloc::vec![0x22u8; 16],
         };
         let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&CONCAT_KDF_ALG_SP800_56A),
             "encoded frame must carry the kdf-alg discriminant",

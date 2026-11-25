@@ -7,7 +7,8 @@
 //! `DarcKexKeyGen` generates a new DARC key-exchange key (ECC-P384) and
 //! returns the **masked** (AEAD-GCM-256) private key plus its raw public
 //! key. Run on the target it yields the HPKE receiver identity; run on
-//! the source it yields the HPKE sender-auth identity. The private key is
+//! the source it may be used as a recipient key for incoming transfers;
+//! outgoing transfers authenticate with the source PID. The private key is
 //! not stored on the device; the caller retains the masked blob and
 //! unmasks it on-use in [`darc_tmk_export`](super::darc_tmk_export) /
 //! [`darc_tmk_import`](super::darc_tmk_import).
@@ -63,8 +64,9 @@ pub(crate) fn darc_kex_key_gen(
     };
 
     let mut cookie = None;
+    let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(&req, None, &mut cookie)
+        dev.exec_op_tbor(rev, &req, None, &mut cookie)
             .map_err(HsmError::from)
     })?;
 

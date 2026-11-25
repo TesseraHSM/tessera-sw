@@ -8,9 +8,9 @@
 //! keys, wire form for public keys) and the
 //! [`StdRsa`](crate::drivers::rsa::StdRsa) driver (OpenSSL key handles).
 //!
-//! Raw key generation, modular exponentiation, signature verification and
-//! OAEP decryption are implemented. Output-producing padding operations without
-//! a software implementation return `UnsupportedCmd` in both query and use modes.
+//! Raw key generation, modular exponentiation, PKCS#1 v1.5 and PSS
+//! sign/verify, and PKCS#1 v1.5 and OAEP encrypt/decrypt are implemented
+//! with tsra_crypto (OpenSSL). Signing and OAEP accept SHA-1/SHA-2 only.
 
 use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::ExportableHsmRsaKey;
@@ -31,7 +31,45 @@ fn key_size_bits(key_size: HsmRsaKey) -> usize {
     key_size.modulus_len() * 8
 }
 
+/// Parse a vault (HSM byte format) private key and check its modulus
+/// matches `key_size`.
+fn vault_priv_key(key_size: HsmRsaKey, priv_key: &[u8]) -> HsmResult<RsaPrivateKey> {
+    let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
+    if pk.n(None).map_err(|_| HsmError::InvalidArg)? != key_size.modulus_len() {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(pk)
+}
+
 impl StdHsmPal {
+    /// PKCS#1 v1.5 (`salt_len == None`) or PSS sign of a pre-computed
+    /// digest; `out == None` queries the signature length.
+    async fn rsa_sign(
+        &self,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        priv_key: &[u8],
+        message_hash: &[u8],
+        salt_len: Option<usize>,
+        out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let hash = crate::hash::to_hash_algo(algo)?;
+        if message_hash.len() != algo.digest_len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let pk = vault_priv_key(key_size, priv_key)?;
+        self.rsa
+            .sign(
+                key_size,
+                hash,
+                &pk,
+                message_hash,
+                salt_len,
+                out.map(|buf| &mut **buf),
+            )
+            .await
+    }
+
     pub(crate) async fn rsa_pair_pct(
         &self,
         private: &RsaPrivateKey,
@@ -187,7 +225,9 @@ impl HsmRsa for StdHsmPal {
         out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let k = key_size.modulus_len();
-        let pub_key = RsaPublicKey::from_bytes(key).map_err(|_| HsmError::InvalidArg)?;
+        let public_be = crate::drivers::rsa::pub_key_be(key, StdHsmPal::BYTE_ORDER, k)?;
+        let pub_key = <RsaPublicKey as tsra_crypto::ImportableHsmKey>::from_hsm_bytes(&public_be)
+            .map_err(|_| HsmError::InvalidArg)?;
         if pub_key.n(None).map_err(|_| HsmError::InvalidArg)? != k || x.len() != k {
             return Err(HsmError::InvalidArg);
         }
@@ -208,8 +248,8 @@ impl HsmRsa for StdHsmPal {
         pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The std PAL's vault representation is HSM byte format (raw
-        // components): parse it, derive the public key, and emit the raw
-        // wire form `n_le || e_le`.  The BE->LE flip lives in the driver.
+        // components): parse it, derive the public key, and emit raw
+        // `n || e` in operand order.
         // In query mode (`pub_out == None`) only the wire length is returned.
         let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
         let pubk = pk.public_key().map_err(|_| HsmError::RsaGenerateError)?;
@@ -275,35 +315,56 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_pkcs1_encrypt(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _pub_key: &HsmDmaBuf,
-        _message: &HsmDmaBuf,
-        _out: Option<&mut HsmDmaBuf>,
+        key_size: HsmRsaKey,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        let k = key_size.modulus_len();
+        if message.len() > key_size.max_pkcs1_message() || pub_key.len() != k + 4 {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(output) = out else {
+            return Ok(k);
+        };
+        let output = output.get_mut(..k).ok_or(HsmError::InvalidArg)?;
+        self.rsa
+            .encrypt(key_size, pub_key, message, None, output)
+            .await?;
+        Ok(k)
     }
 
     async fn rsa_pkcs1_decrypt(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _priv_key: &HsmDmaBuf,
-        _ciphertext: &HsmDmaBuf,
-        _out: Option<&mut HsmDmaBuf>,
+        key_size: HsmRsaKey,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        if ciphertext.len() != key_size.modulus_len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let pk = vault_priv_key(key_size, priv_key)?;
+        let Some(output) = out else {
+            return Ok(key_size.max_pkcs1_message());
+        };
+        self.rsa
+            .pkcs1_decrypt(key_size, &pk, ciphertext, output)
+            .await
     }
 
     async fn rsa_pkcs1_sign(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _algo: HsmHashAlgo,
-        _priv_key: &HsmDmaBuf,
-        _message_hash: &HsmDmaBuf,
-        _out: Option<&mut HsmDmaBuf>,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        self.rsa_sign(key_size, algo, priv_key, message_hash, None, out)
+            .await
     }
 
     async fn rsa_pkcs1_verify(
@@ -330,14 +391,31 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_oaep_encrypt(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _algo: HsmHashAlgo,
-        _pub_key: &HsmDmaBuf,
-        _message: &HsmDmaBuf,
-        _label: &HsmDmaBuf,
-        _out: Option<&mut HsmDmaBuf>,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        let hash = crate::hash::to_hash_algo(algo)?;
+        let k = key_size.modulus_len();
+        if message.len() > key_size.max_oaep_message(algo) || pub_key.len() != k + 4 {
+            return Err(HsmError::InvalidArg);
+        }
+        let Some(output) = out else {
+            return Ok(k);
+        };
+        let output = output.get_mut(..k).ok_or(HsmError::InvalidArg)?;
+        let label = if label.is_empty() {
+            None
+        } else {
+            Some(label.to_vec())
+        };
+        self.rsa
+            .encrypt(key_size, pub_key, message, Some((hash, label)), output)
+            .await?;
+        Ok(k)
     }
 
     async fn rsa_oaep_decrypt(
@@ -382,14 +460,22 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_pss_sign(
         &self,
         _io: &StdHsmIo,
-        _key_size: HsmRsaKey,
-        _algo: HsmHashAlgo,
-        _priv_key: &HsmDmaBuf,
-        _message_hash: &HsmDmaBuf,
-        _salt_len: usize,
-        _out: Option<&mut HsmDmaBuf>,
+        key_size: HsmRsaKey,
+        algo: HsmHashAlgo,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        salt_len: usize,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        let max_salt = key_size
+            .modulus_len()
+            .checked_sub(algo.digest_len() + 2)
+            .ok_or(HsmError::InvalidArg)?;
+        if salt_len > max_salt {
+            return Err(HsmError::InvalidArg);
+        }
+        self.rsa_sign(key_size, algo, priv_key, message_hash, Some(salt_len), out)
+            .await
     }
 
     async fn rsa_pss_verify(
@@ -418,6 +504,7 @@ impl HsmRsa for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
+    use tsra_crypto::DecryptOp;
     use tsra_crypto::EncryptOp;
     use tsra_crypto::HashAlgo;
     use tsra_crypto::KeyGenerationOp;
@@ -432,6 +519,12 @@ mod tests {
         let (reply_tx, _) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
         (pal, io)
+    }
+
+    fn convert_to_or_from_device_order(bytes: &mut [u8]) {
+        if StdHsmPal::BYTE_ORDER == HsmByteOrder::Le {
+            bytes.reverse();
+        }
     }
 
     #[tokio::test]
@@ -508,8 +601,13 @@ mod tests {
                 assert!(private[written.0..].iter().all(|&b| b == 0xCC));
                 assert!(public[written.1..].iter().all(|&b| b == 0xCC));
                 let private = &private[..written.0];
-                let public = &public[..written.1];
+                let _public_der = &public[..written.1];
                 let k = key_size.modulus_len();
+                let public_wire = alloc.dma_alloc(k + 4)?;
+                assert_eq!(
+                    pal.rsa_priv_pub_key(&io, private, Some(public_wire))?,
+                    k + 4
+                );
                 let input = alloc.dma_alloc_zeroed(k)?;
                 let low = if StdHsmPal::BYTE_ORDER == HsmByteOrder::Le {
                     0
@@ -537,7 +635,7 @@ mod tests {
                         k
                     );
                     assert_eq!(
-                        pal.mod_exp_pub(&io, key_size.pub_variant(), public, input, None)
+                        pal.mod_exp_pub(&io, key_size.pub_variant(), public_wire, input, None)
                             .await?,
                         k
                     );
@@ -553,7 +651,7 @@ mod tests {
                         pal.mod_exp_pub(
                             &io,
                             key_size.pub_variant(),
-                            public,
+                            public_wire,
                             input,
                             Some(&mut encrypted[..k - 1]),
                         )
@@ -580,8 +678,14 @@ mod tests {
                 assert!(encrypted.iter().all(|&b| b == 0xCC));
                 assert!(decrypted.iter().all(|&b| b == 0xCC));
                 assert_eq!(
-                    pal.mod_exp_pub(&io, key_size.pub_variant(), public, input, Some(encrypted))
-                        .await?,
+                    pal.mod_exp_pub(
+                        &io,
+                        key_size.pub_variant(),
+                        public_wire,
+                        input,
+                        Some(encrypted),
+                    )
+                    .await?,
                     k
                 );
                 assert_eq!(
@@ -664,6 +768,176 @@ mod tests {
                 .expect("OAEP private-key width validation");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn padded_encrypt_decrypt_interoperates_with_standard_rsa_encoding() {
+        let (pal, io) = pal_and_io();
+        let private = RsaPrivateKey::generate(256).expect("RSA key");
+        let public = private.public_key().expect("public key");
+        let message = [0x00, 0x31, 0x00, 0x82, 0xFE, 0x00];
+        let label_bytes = b"raw-byte-label\0value";
+        let mut public_wire = vec![0u8; 260];
+        crate::drivers::rsa::rsa_pub_wire(&public, StdHsmPal::BYTE_ORDER, Some(&mut public_wire))
+            .expect("public wire");
+
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let private_wire = alloc.dma_alloc(private.hsm_bytes_len())?;
+            private
+                .to_hsm_bytes(private_wire)
+                .map_err(|_| HsmError::RsaToDerError)?;
+            let public_wire_buf = alloc.dma_alloc(public_wire.len())?;
+            public_wire_buf.copy_from_slice(&public_wire);
+            let message_buf = alloc.dma_alloc(message.len())?;
+            message_buf.copy_from_slice(&message);
+            let label = alloc.dma_alloc(label_bytes.len())?;
+            label.copy_from_slice(label_bytes);
+            let ciphertext = alloc.dma_alloc(256)?;
+            let output = alloc.dma_alloc(512)?;
+
+            assert_eq!(
+                pal.rsa_pkcs1_encrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Pub,
+                    public_wire_buf,
+                    message_buf,
+                    None
+                )
+                .await?,
+                256
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(&io, HsmRsaKey::Rsa2048Priv, private_wire, ciphertext, None,)
+                    .await?,
+                245
+            );
+            let (short_output, _) = output.split_at_mut(255);
+            assert_eq!(
+                pal.rsa_pkcs1_encrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Pub,
+                    public_wire_buf,
+                    message_buf,
+                    Some(short_output),
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+
+            pal.rsa_pkcs1_encrypt(
+                &io,
+                HsmRsaKey::Rsa2048Pub,
+                public_wire_buf,
+                message_buf,
+                Some(ciphertext),
+            )
+            .await?;
+            let mut ciphertext_be = ciphertext.to_vec();
+            convert_to_or_from_device_order(&mut ciphertext_be);
+            let mut host_plaintext = vec![0u8; 256];
+            let mut host_decrypt = RsaEncryptAlgo::with_pkcs1_padding();
+            let written = host_decrypt
+                .decrypt(&private, &ciphertext_be, Some(&mut host_plaintext))
+                .map_err(|_| HsmError::RsaDecryptFailed)?;
+            assert_eq!(&host_plaintext[..written], &message);
+
+            let mut host_ciphertext = vec![0u8; 256];
+            let mut host_encrypt = RsaEncryptAlgo::with_pkcs1_padding();
+            host_encrypt
+                .encrypt(&public, &message, Some(&mut host_ciphertext))
+                .map_err(|_| HsmError::RsaEncryptFailed)?;
+            convert_to_or_from_device_order(&mut host_ciphertext);
+            ciphertext.copy_from_slice(&host_ciphertext);
+            let written = pal
+                .rsa_pkcs1_decrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Priv,
+                    private_wire,
+                    ciphertext,
+                    Some(output),
+                )
+                .await?;
+            assert_eq!(&output[..written], &message);
+
+            let invalid_encoded = vec![0x41; 256];
+            let mut invalid_ciphertext = vec![0u8; 256];
+            let mut raw = RsaEncryptAlgo::with_no_padding();
+            raw.encrypt(&public, &invalid_encoded, Some(&mut invalid_ciphertext))
+                .map_err(|_| HsmError::RsaEncryptFailed)?;
+            convert_to_or_from_device_order(&mut invalid_ciphertext);
+            ciphertext.copy_from_slice(&invalid_ciphertext);
+            output.fill(0xCC);
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Priv,
+                    private_wire,
+                    ciphertext,
+                    Some(output),
+                )
+                .await,
+                Err(HsmError::RsaDecryptFailed)
+            );
+            assert!(output.iter().all(|byte| *byte == 0xCC));
+
+            let oaep_ciphertext = alloc.dma_alloc(256)?;
+            assert_eq!(
+                pal.rsa_oaep_encrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Pub,
+                    HsmHashAlgo::Sha256,
+                    public_wire_buf,
+                    message_buf,
+                    label,
+                    None,
+                )
+                .await?,
+                256
+            );
+            pal.rsa_oaep_encrypt(
+                &io,
+                HsmRsaKey::Rsa2048Pub,
+                HsmHashAlgo::Sha256,
+                public_wire_buf,
+                message_buf,
+                label,
+                Some(oaep_ciphertext),
+            )
+            .await?;
+            let mut oaep_be = oaep_ciphertext.to_vec();
+            convert_to_or_from_device_order(&mut oaep_be);
+            let mut host_oaep_plaintext = vec![0u8; 256];
+            let mut host_oaep_decrypt =
+                RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), Some(label_bytes));
+            let written = host_oaep_decrypt
+                .decrypt(&private, &oaep_be, Some(&mut host_oaep_plaintext))
+                .map_err(|_| HsmError::RsaDecryptFailed)?;
+            assert_eq!(&host_oaep_plaintext[..written], &message);
+
+            let mut host_oaep_ciphertext = vec![0u8; 256];
+            let mut host_oaep_encrypt =
+                RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), Some(label_bytes));
+            host_oaep_encrypt
+                .encrypt(&public, &message, Some(&mut host_oaep_ciphertext))
+                .map_err(|_| HsmError::RsaEncryptFailed)?;
+            convert_to_or_from_device_order(&mut host_oaep_ciphertext);
+            oaep_ciphertext.copy_from_slice(&host_oaep_ciphertext);
+            let written = pal
+                .rsa_oaep_decrypt(
+                    &io,
+                    HsmRsaKey::Rsa2048Priv,
+                    HsmHashAlgo::Sha256,
+                    private_wire,
+                    oaep_ciphertext,
+                    label,
+                    Some(output),
+                )
+                .await?;
+            assert_eq!(&output[..written], &message);
+            Ok(())
+        })
+        .await
+        .expect("padded RSA interop");
     }
 
     #[tokio::test]
@@ -783,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_padding_operations_reject_queries_and_execution() {
+    async fn invalid_rsa_inputs_are_rejected_without_writing_output() {
         let (pal, io) = pal_and_io();
         pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
             let input = alloc.dma_alloc(0)?;
@@ -798,20 +1072,20 @@ mod tests {
                         .await,
                     pal.rsa_pkcs1_decrypt(&io, key, input, input, execute.then_some(&mut *output))
                         .await,
-                    pal.rsa_pkcs1_sign(
-                        &io,
-                        key,
-                        hash,
-                        input,
-                        input,
-                        execute.then_some(&mut *output),
-                    )
-                    .await,
                     pal.rsa_oaep_encrypt(
                         &io,
                         key,
                         hash,
                         input,
+                        input,
+                        input,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    pal.rsa_pkcs1_sign(
+                        &io,
+                        key,
+                        hash,
                         input,
                         input,
                         execute.then_some(&mut *output),
@@ -828,7 +1102,7 @@ mod tests {
                     )
                     .await,
                 ] {
-                    assert_eq!(outcome, Err(HsmError::UnsupportedCmd));
+                    assert_eq!(outcome, Err(HsmError::InvalidArg));
                 }
                 assert!(output.iter().all(|&b| b == 0xCC));
                 assert_eq!(pal.iic.pool().dma_mark(io.slot).get(), mark);
@@ -836,6 +1110,311 @@ mod tests {
             Ok(())
         })
         .await
-        .expect("unsupported operations");
+        .expect("invalid RSA inputs");
+    }
+
+    #[tokio::test]
+    async fn sign_round_trips_through_verify() {
+        let (pal, io) = pal_and_io();
+        let key_size = HsmRsaKey::Rsa2048Priv;
+        let k = key_size.modulus_len();
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let (priv_len, pub_len) = pal
+                .rsa_gen_keypair(&io, key_size, HsmRsaPct::None, None)
+                .await?;
+            let private = alloc.dma_alloc(priv_len)?;
+            let public = alloc.dma_alloc(pub_len)?;
+            let (priv_len, _) = pal
+                .rsa_gen_keypair(&io, key_size, HsmRsaPct::None, Some((private, public)))
+                .await?;
+            let private = &private[..priv_len];
+            let public = alloc.dma_alloc(pal.rsa_priv_pub_key(&io, private, None)?)?;
+            pal.rsa_priv_pub_key(&io, private, Some(&mut *public))?;
+            let public = &*public;
+            let digest = alloc.dma_alloc(32)?;
+            digest.fill(0x5A);
+            let signature = alloc.dma_alloc(k + 4)?;
+            for salt in [None, Some(0), Some(32), Some(k - 34)] {
+                let sign = async |out: Option<&mut HsmDmaBuf>| match salt {
+                    None => {
+                        pal.rsa_pkcs1_sign(&io, key_size, HsmHashAlgo::Sha256, private, digest, out)
+                            .await
+                    }
+                    Some(len) => {
+                        pal.rsa_pss_sign(
+                            &io,
+                            key_size,
+                            HsmHashAlgo::Sha256,
+                            private,
+                            digest,
+                            len,
+                            out,
+                        )
+                        .await
+                    }
+                };
+                let verify = async |digest: &HsmDmaBuf, signature: &HsmDmaBuf| match salt {
+                    None => {
+                        pal.rsa_pkcs1_verify(
+                            &io,
+                            key_size.pub_variant(),
+                            HsmHashAlgo::Sha256,
+                            public,
+                            digest,
+                            signature,
+                        )
+                        .await
+                    }
+                    Some(len) => {
+                        pal.rsa_pss_verify(
+                            &io,
+                            key_size.pub_variant(),
+                            HsmHashAlgo::Sha256,
+                            public,
+                            digest,
+                            len,
+                            signature,
+                        )
+                        .await
+                    }
+                };
+                signature.fill(0xCC);
+                assert_eq!(sign(None).await, Ok(k));
+                assert_eq!(
+                    sign(Some(&mut signature[..k - 1])).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert_eq!(sign(Some(&mut *signature)).await, Ok(k));
+                assert_eq!(&signature[k..], &[0xCC; 4]);
+                assert_eq!(verify(digest, &signature[..k]).await, Ok(true));
+                digest[0] ^= 1;
+                assert_ne!(verify(digest, &signature[..k]).await, Ok(true));
+                digest[0] ^= 1;
+            }
+            assert_eq!(
+                pal.rsa_pss_sign(
+                    &io,
+                    key_size,
+                    HsmHashAlgo::Sha256,
+                    private,
+                    digest,
+                    k - 33,
+                    None
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_sign(&io, key_size, HsmHashAlgo::Sha384, private, digest, None)
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_sign(&io, key_size, HsmHashAlgo::Sha3_256, private, digest, None)
+                    .await,
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            );
+            Ok(())
+        })
+        .await
+        .expect("RSA sign/verify");
+    }
+
+    #[tokio::test]
+    async fn encrypt_round_trips_through_decrypt() {
+        let (pal, io) = pal_and_io();
+        let key_size = HsmRsaKey::Rsa2048Priv;
+        let k = key_size.modulus_len();
+        let hash = HsmHashAlgo::Sha256;
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let (priv_len, pub_len) = pal
+                .rsa_gen_keypair(&io, key_size, HsmRsaPct::None, None)
+                .await?;
+            let private = alloc.dma_alloc(priv_len)?;
+            let public = alloc.dma_alloc(pub_len)?;
+            let (priv_len, _) = pal
+                .rsa_gen_keypair(&io, key_size, HsmRsaPct::None, Some((private, public)))
+                .await?;
+            let private = &private[..priv_len];
+            let public = alloc.dma_alloc(pal.rsa_priv_pub_key(&io, private, None)?)?;
+            pal.rsa_priv_pub_key(&io, private, Some(&mut *public))?;
+            let public = &*public;
+            let pub_size = key_size.pub_variant();
+            let message = alloc.dma_alloc(key_size.max_pkcs1_message() + 1)?;
+            message.fill(0xA5);
+            let label = alloc.dma_alloc(5)?;
+            label.copy_from_slice(b"label");
+            let ciphertext = alloc.dma_alloc(k)?;
+            let plaintext = alloc.dma_alloc(k)?;
+
+            // PKCS#1 v1.5
+            let max = key_size.max_pkcs1_message();
+            assert_eq!(
+                pal.rsa_pkcs1_encrypt(&io, pub_size, public, message, None)
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+            let message = &message[..max];
+            assert_eq!(
+                pal.rsa_pkcs1_encrypt(&io, pub_size, public, message, None)
+                    .await,
+                Ok(k)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_encrypt(&io, pub_size, public, message, Some(&mut *ciphertext))
+                    .await,
+                Ok(k)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(&io, key_size, private, ciphertext, None)
+                    .await,
+                Ok(max)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(
+                    &io,
+                    key_size,
+                    private,
+                    ciphertext,
+                    Some(&mut plaintext[..max - 1])
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(&io, key_size, private, ciphertext, Some(&mut *plaintext))
+                    .await,
+                Ok(max)
+            );
+            assert_eq!(&plaintext[..max], message);
+
+            // A block that is not EME-PKCS1-v1_5 encoded (EM = 2) fails the
+            // padding check rather than yielding an implicit-rejection value.
+            let block = alloc.dma_alloc_zeroed(k)?;
+            let low = if StdHsmPal::BYTE_ORDER == HsmByteOrder::Le {
+                0
+            } else {
+                k - 1
+            };
+            block[low] = 2;
+            pal.mod_exp_pub(&io, pub_size, public, block, Some(&mut *ciphertext))
+                .await?;
+            assert_eq!(
+                pal.rsa_pkcs1_decrypt(&io, key_size, private, ciphertext, Some(&mut *plaintext))
+                    .await,
+                Err(HsmError::RsaDecryptFailed)
+            );
+
+            // OAEP
+            let max = key_size.max_oaep_message(hash);
+            let message = &message[..max];
+            assert_eq!(
+                pal.rsa_oaep_encrypt(
+                    &io,
+                    pub_size,
+                    hash,
+                    public,
+                    &plaintext[..max + 1],
+                    label,
+                    None
+                )
+                .await,
+                Err(HsmError::InvalidArg)
+            );
+            assert_eq!(
+                pal.rsa_oaep_encrypt(&io, pub_size, hash, public, message, label, None)
+                    .await,
+                Ok(k)
+            );
+            assert_eq!(
+                pal.rsa_oaep_encrypt(
+                    &io,
+                    pub_size,
+                    hash,
+                    public,
+                    message,
+                    label,
+                    Some(&mut *ciphertext)
+                )
+                .await,
+                Ok(k)
+            );
+            assert_eq!(
+                pal.rsa_oaep_decrypt(
+                    &io,
+                    key_size,
+                    hash,
+                    private,
+                    ciphertext,
+                    label,
+                    Some(&mut *plaintext)
+                )
+                .await,
+                Ok(max)
+            );
+            assert_eq!(&plaintext[..max], message);
+            assert_eq!(
+                pal.rsa_oaep_encrypt(
+                    &io,
+                    pub_size,
+                    HsmHashAlgo::Sha3_256,
+                    public,
+                    message,
+                    label,
+                    None
+                )
+                .await,
+                Err(HsmError::UnsupportedDigestHashAlgorithm)
+            );
+            Ok(())
+        })
+        .await
+        .expect("RSA encrypt/decrypt");
+    }
+
+    #[tokio::test]
+    async fn rsa_sign_queries_validate_hash_and_pss_salt() {
+        let (pal, io) = pal_and_io();
+        let key = RsaPrivateKey::generate(256).expect("RSA key");
+        let mut key_bytes = vec![0; key.hsm_bytes_len()];
+        key.to_hsm_bytes(&mut key_bytes).expect("serialize RSA key");
+
+        pal.alloc_scoped_async(&io, async |alloc| -> HsmResult<()> {
+            let private = alloc.dma_alloc(key_bytes.len())?;
+            private.copy_from_slice(&key_bytes);
+            let digest = alloc.dma_alloc_zeroed(64)?;
+            let output = alloc.dma_alloc(256)?;
+
+            for execute in [false, true] {
+                assert_eq!(
+                    pal.rsa_pkcs1_sign(
+                        &io,
+                        HsmRsaKey::Rsa2048Priv,
+                        HsmHashAlgo::Sha3_256,
+                        private,
+                        &digest[..32],
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    Err(HsmError::UnsupportedDigestHashAlgorithm),
+                );
+                assert_eq!(
+                    pal.rsa_pss_sign(
+                        &io,
+                        HsmRsaKey::Rsa2048Priv,
+                        HsmHashAlgo::Sha256,
+                        private,
+                        &digest[..32],
+                        223,
+                        execute.then_some(&mut *output),
+                    )
+                    .await,
+                    Err(HsmError::InvalidArg),
+                );
+            }
+            Ok(())
+        })
+        .await
+        .expect("RSA signing query validation");
     }
 }

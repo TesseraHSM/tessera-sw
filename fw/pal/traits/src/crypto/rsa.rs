@@ -16,6 +16,15 @@
 //! key material. Each PAL implementation is responsible for parsing
 //! them into whatever internal representation it needs.
 //!
+//! ## Key buffer alignment
+//!
+//! Hardware engines require RSA key material to start
+//! at a **4-byte aligned** address, with **`roundup8(len)`** bytes of
+//! readable memory behind it. Callers must uphold this; implementations
+//! may rely on it. PAL allocations are 4-byte aligned, and keys unmasked
+//! in place from a masked-key blob meet both requirements (see the
+//! masked-key format in `tsra_fw_core_crypto_key_masking`).
+//!
 //! ## Modular exponentiation
 //!
 //! RSA signing and decryption are expressed as private-key modular
@@ -260,10 +269,13 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key_size` — modulus size selector.
-    /// - `key` — RSA public key.
+    /// - `key` — RSA public key as `n || e`, where the modulus is exactly
+    ///   `key_size.modulus_len()` bytes and the exponent is exactly four
+    ///   bytes. Each integer is encoded independently in operand order
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]); this is not DER.
     /// - `x` — input integer; must be exactly
     ///   `key_size.modulus_len()` bytes, in operand order
-    ///   ([`HsmCryptoOrder::BYTE_ORDER`]).
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]) and satisfy `0 <= x < n`.
     /// - `out` — `None` to query the modulus length without exponentiation
     ///   or DMA scratch allocation; `Some(y)` to write the operand-order result.
     ///   The buffer must fit the modulus; any tail is left untouched.

@@ -4,13 +4,10 @@
 //! Host-side wrapper for the TBOR `RsaModExp` command.
 //!
 //! `RsaModExp` is an **in-session** command (Crypto-Officer or
-//! Crypto-User) that performs the RSA private-key primitive
-//! `x = y^d mod n` using a caller-held **masked** RSA private key
-//! (imported via [`UnwrapKey`](crate::unwrap_key) with the RSA / RSA-CRT
-//! key class).  It is the raw modular exponentiation underlying RSA
-//! decrypt / sign — the host applies and removes any padding.  There is no
-//! TBOR RSA key generation; RSA keys enter the device only through
-//! `UnwrapKey`.
+//! Crypto-User) that performs a raw RSA exponentiation using a caller-held
+//! **masked** RSA private key (imported via [`UnwrapKey`](crate::unwrap_key)
+//! with the RSA / RSA-CRT key class). The host applies encryption padding
+//! and validates recovered signature blocks.
 //!
 //! `op_type` is a raw 1-byte discriminant (the firmware types it as the
 //! `RsaOp` open-enum; this host crate is firewalled from the firmware PAL
@@ -34,6 +31,12 @@ pub const RSA_OP_DECRYPT: u8 = 1;
 /// `RsaOp` discriminant for the RSA sign primitive (requires the masked
 /// key's `sign` usage attribute).
 pub const RSA_OP_SIGN: u8 = 2;
+/// `RsaOp` discriminant for the RSA public encrypt primitive (requires the
+/// masked key's `encrypt` usage attribute).
+pub const RSA_OP_ENCRYPT: u8 = 3;
+/// `RsaOp` discriminant for the RSA public verify primitive (requires the
+/// masked key's `verify` usage attribute).
+pub const RSA_OP_VERIFY: u8 = 4;
 
 /// Host-facing TBOR `RsaModExp` request.
 #[tbor(opcode = TBOR_OP_RSA_MOD_EXP, session_ctrl = in_session)]
@@ -53,8 +56,8 @@ pub struct TborRsaModExpReq {
     #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
-    /// The private-key operation, 1-byte `RsaOp` (see `RSA_OP_*`): gates on
-    /// the masked key's `decrypt` / `sign` usage.
+    /// The operation, 1-byte `RsaOp` (see `RSA_OP_*`): gates on the
+    /// corresponding `decrypt`, `sign`, `encrypt`, or `verify` usage.
     pub op_type: u8,
 }
 
@@ -62,8 +65,9 @@ pub struct TborRsaModExpReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborRsaModExpResp {
-    /// The result `x = y^d mod n` in device byte order, exactly the
-    /// key's modulus length (256 / 384 / 512 B).
+    /// The result in device byte order, exactly the key's modulus length
+    /// (256 / 384 / 512 B): `y^d mod n` for Decrypt/Sign and `y^e mod n`
+    /// for Encrypt/Verify.
     #[tbor(max_len = 512)]
     pub x: Vec<u8>,
 }
@@ -83,10 +87,18 @@ mod tests {
             y: alloc::vec![0x22u8; 256],
         };
         let mut buf = [0u8; 4096];
-        let frame = req.encode_request(&mut buf).expect("encode");
+        let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
         assert!(
             frame.contains(&RSA_OP_SIGN),
             "encoded frame must carry the op-type discriminant",
         );
+    }
+
+    #[test]
+    fn operation_discriminants_are_stable() {
+        assert_eq!(RSA_OP_DECRYPT, 1);
+        assert_eq!(RSA_OP_SIGN, 2);
+        assert_eq!(RSA_OP_ENCRYPT, 3);
+        assert_eq!(RSA_OP_VERIFY, 4);
     }
 }

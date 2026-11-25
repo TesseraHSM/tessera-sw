@@ -134,4 +134,5 @@ impl HsmPalFeatures for StdHsmPal {
 /// Crypto operands are little-endian (word-padded P-521 slots).
 impl HsmCryptoOrder for StdHsmPal {
     const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+    const ECC_COORD_PAD: usize = 4;
 }

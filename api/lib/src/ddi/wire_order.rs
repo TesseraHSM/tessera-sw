@@ -36,38 +36,45 @@ impl WireOrder {
         Self::for_rev(session.api_rev())
     }
 
-    /// Returns the wire length of one ECC coordinate whose big-endian
+    /// Returns the wire lane length of one ECC coordinate whose big-endian
     /// length is `coord`.
     ///
-    /// On [`Le`](Self::Le) each coordinate is zero-extended to a 4-byte
-    /// multiple (P-521: 66 bytes become 68); on [`Be`](Self::Be) it is
-    /// exactly `coord` bytes. Only ECC coordinate pairs are padded; other
-    /// operands are byte-reversed at their natural width.
+    /// Each coordinate sits at the head of a lane padded to 4 bytes on
+    /// [`Le`](Self::Le) and 8 bytes on [`Be`](Self::Be) (P-521: 66 bytes in
+    /// a 68- or 72-byte lane), followed by zero bytes. Only ECC components
+    /// are padded; other operands are byte-reversed at their natural width.
     pub(crate) fn coord_len(self, coord: usize) -> usize {
         match self {
             Self::Le => coord.next_multiple_of(4),
-            Self::Be => coord,
+            Self::Be => coord.next_multiple_of(8),
         }
     }
 
-    /// Converts a wire integer to big-endian, trimming it to `len` bytes.
+    /// Converts a wire ECC coordinate lane to its `coord`-byte big-endian
+    /// value.
     ///
-    /// Fails if the wire value is shorter than `len` or carries non-zero
-    /// bytes above the low `len` bytes.
-    pub(crate) fn int_to_be(self, wire: &[u8], len: usize) -> HsmResult<Vec<u8>> {
-        let pad = wire.len().checked_sub(len).ok_or(HsmError::InternalError)?;
-        let (high, low) = match self {
-            Self::Le => (&wire[len..], &wire[..len]),
-            Self::Be => (&wire[..pad], &wire[pad..]),
-        };
-        if high.iter().any(|&byte| byte != 0) {
+    /// Fails if the lane is not [`coord_len`](Self::coord_len) bytes or its
+    /// zero tail is not zero.
+    pub(crate) fn coord_to_be(self, lane: &[u8], coord: usize) -> HsmResult<Vec<u8>> {
+        if lane.len() != self.coord_len(coord) {
             return Err(HsmError::InternalError);
         }
-        let mut be = low.to_vec();
-        if self == Self::Le {
-            be.reverse();
+        let (value, tail) = lane.split_at(coord);
+        if tail.iter().any(|&byte| byte != 0) {
+            return Err(HsmError::InternalError);
         }
+        let mut be = value.to_vec();
+        self.convert_in_place(&mut be);
         Ok(be)
+    }
+
+    /// Converts the big-endian ECC coordinate `be` (at most `coord` bytes,
+    /// zero-extended to `coord`) to a wire lane of
+    /// [`coord_len`](Self::coord_len) bytes, value first, zero tail.
+    pub(crate) fn coord_from_be(self, be: &[u8], coord: usize) -> HsmResult<Vec<u8>> {
+        let mut lane = self.int_from_be(be, coord)?;
+        lane.resize(self.coord_len(coord), 0);
+        Ok(lane)
     }
 
     /// Converts a big-endian integer to the wire, zero-extending it to
@@ -96,14 +103,14 @@ impl WireOrder {
             return Err(HsmError::InternalError);
         }
         let (a, b) = wire.split_at(half);
-        Ok((self.int_to_be(a, coord)?, self.int_to_be(b, coord)?))
+        Ok((self.coord_to_be(a, coord)?, self.coord_to_be(b, coord)?))
     }
 
-    /// Joins big-endian `a` and `b` into a wire `a ‖ b` coordinate pair.
+    /// Joins big-endian `a` and `b` (each at most `coord` bytes) into a
+    /// wire `a ‖ b` coordinate pair.
     pub(crate) fn pair_from_be(self, a: &[u8], b: &[u8], coord: usize) -> HsmResult<Vec<u8>> {
-        let half = self.coord_len(coord);
-        let mut wire = self.int_from_be(a, half)?;
-        wire.extend_from_slice(&self.int_from_be(b, half)?);
+        let mut wire = self.coord_from_be(a, coord)?;
+        wire.extend_from_slice(&self.coord_from_be(b, coord)?);
         Ok(wire)
     }
 }
@@ -128,7 +135,7 @@ mod tests {
     fn pair_round_trips_p521_both_orders() {
         let x: Vec<u8> = (1..=66).collect();
         let y: Vec<u8> = (101..=166).collect();
-        for (order, half) in [(WireOrder::Le, 68), (WireOrder::Be, 66)] {
+        for (order, half) in [(WireOrder::Le, 68), (WireOrder::Be, 72)] {
             let wire = order.pair_from_be(&x, &y, 66).expect("encode");
             assert_eq!(wire.len(), half * 2);
             let (rx, ry) = order.pair_to_be(&wire, 66).expect("decode");
@@ -137,16 +144,19 @@ mod tests {
         let le = WireOrder::Le.pair_from_be(&x, &y, 66).expect("encode");
         assert_eq!(le[0], 66);
         assert_eq!(&le[66..68], &[0, 0]);
+        let be = WireOrder::Be.pair_from_be(&x, &y, 66).expect("encode");
+        assert_eq!(&be[..66], &x[..]);
+        assert_eq!(&be[66..72], &[0; 6]);
+        assert_eq!(&be[72..138], &y[..]);
     }
 
     #[test]
-    fn int_to_be_rejects_nonzero_pad() {
-        assert!(WireOrder::Le.int_to_be(&[1, 2, 0, 9], 3).is_err());
-        assert!(WireOrder::Be.int_to_be(&[9, 1, 2, 3], 3).is_err());
-        assert_eq!(
-            WireOrder::Be.int_to_be(&[0, 1, 2, 3], 3).expect("trim"),
-            [1, 2, 3]
-        );
-        assert!(WireOrder::Be.int_to_be(&[1, 2], 3).is_err());
+    fn coord_to_be_rejects_bad_lane() {
+        let mut lane = vec![0u8; 72];
+        lane[0] = 1;
+        assert_eq!(WireOrder::Be.coord_to_be(&lane, 66).expect("lane")[0], 1);
+        lane[66] = 1;
+        assert!(WireOrder::Be.coord_to_be(&lane, 66).is_err());
+        assert!(WireOrder::Be.coord_to_be(&lane[..68], 66).is_err());
     }
 }
