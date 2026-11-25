@@ -61,11 +61,6 @@ impl EngineExecutor {
         arg2: u32,
         arg3: u32,
     ) {
-        // Read STATUS, waiting out BUSY, before ringing the doorbell, as the
-        // reference driver does before every COMMAND write. After a non-POR
-        // reset (e.g. the SP's FIPS error-state reset) a COMMAND write to an
-        // engine whose STATUS has not been read since the reset faults the bus.
-        Self::spin_until_idle(engine_id);
         Self::write_descriptor(engine_id, opcode, result, arg1, arg2, arg3);
         // Hardware barrier (not just a compiler fence): ensure the descriptor
         // stores are globally visible before the command-register write triggers
@@ -172,7 +167,15 @@ impl EngineExecutor {
     }
 
     /// Submit an arbitrary descriptor address to an engine's command register.
+    ///
+    /// Every COMMAND write (engine-local, staged-ticket and wipe submissions)
+    /// goes through here.
     fn submit_cmd_at(engine_id: u8, descriptor_addr: u32) {
+        // Read STATUS, waiting out BUSY, before ringing the doorbell, as the
+        // reference driver does before every COMMAND write. After a non-POR
+        // reset (e.g. the SP's FIPS error-state reset) a COMMAND write to an
+        // engine whose STATUS has not been read since the reset faults the bus.
+        Self::spin_until_idle(engine_id);
         Self::engine_regs(engine_id).command.set(descriptor_addr);
     }
 

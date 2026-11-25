@@ -128,8 +128,18 @@ impl UnoHsmPal {
         let slot = part.unwrapping_key_slot();
         let pct_due =
             slot == Some(UnwrappingKeySlot::PendingPct) && part.unwrapping_key_id().is_none();
-        // Negative-PCT test builds can also ask for a staged key to be tested
-        // again, even one that already passed or was imported.
+        // Negative-PCT test builds can also ask for the unwrapping key to be
+        // tested again. An imported key is tested from the vault, because the
+        // `RawKeyImport` hook can install one that the slot doesn't hold.
+        #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+        if !pct_due
+            && self.neg_pct_retest(pid)
+            && let Some(key_id) = part.unwrapping_key_id()
+        {
+            self.retest_imported_unwrapping_key(io, key_id).await;
+            return;
+        }
+        // Otherwise a staged key is tested again, even one that already passed.
         #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
         let pct_due = pct_due
             || (self.neg_pct_retest(pid)
@@ -166,7 +176,7 @@ impl UnoHsmPal {
                         part.mark_unwrapping_key_pct_passed();
                     }
                     #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
-                    self.set_neg_pct_retest(pid, false);
+                    self.neg_pct_retest_passed(pid);
                 }
                 Ok(false) => {
                     // Discard the failed key before entering the error
@@ -181,6 +191,58 @@ impl UnoHsmPal {
                 }
                 // The test didn't finish, or it passed bytes that the slot no
                 // longer holds. Leave the slot for a later IO to test.
+                _ => {}
+            }
+        })
+        .await;
+    }
+
+    /// Runs the negative-PCT retest of `io`'s partition's imported
+    /// unwrapping key `key_id`, testing a copy of the vault key.
+    ///
+    /// Covers every way the key reached the vault, including a key the
+    /// `RawKeyImport` hook installed while the slot is empty or holds a
+    /// different staged key. A pass applies only if the partition still has
+    /// the same key; a failed PCT always enters the FIPS error state.
+    #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+    async fn retest_imported_unwrapping_key(
+        &self,
+        io: &UnoHsmIo,
+        key_id: tsra_fw_hsm_pal_traits::HsmKeyId,
+    ) {
+        use tsra_fw_hsm_pal_traits::HsmVault;
+
+        let pid = io.pid();
+        let Ok(part) = PartStore::partition(pid) else {
+            return;
+        };
+        let Some(_reservation) = PctReservation::acquire(self, pid) else {
+            return;
+        };
+        self.alloc_scoped_async(io, async |alloc| {
+            let Ok(active) = self.vault_key(io, key_id) else {
+                return;
+            };
+            let Ok(key) = scratch(alloc, active.len()) else {
+                return;
+            };
+            key.copy_from_slice(active);
+            let result = self.neg_pct_unwrapping_key_pct(io, key).await;
+
+            // Nothing below awaits, so the partition can't change before the
+            // result is applied.
+            let same = part.unwrapping_key_id() == Some(key_id)
+                && self
+                    .vault_key(io, key_id)
+                    .is_ok_and(|active| ct_eq(active, key));
+            wipe(key);
+            match result {
+                Ok(true) if same => self.neg_pct_retest_passed(pid),
+                Ok(false) => {
+                    tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed)
+                }
+                // The test didn't finish, or the partition's key changed during
+                // it. Leave the retest for a later IO.
                 _ => {}
             }
         })

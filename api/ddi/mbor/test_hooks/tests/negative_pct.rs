@@ -255,6 +255,10 @@ fn ecc_keygen_pct_failure(
 /// on the driver (typically `ETIMEDOUT`), and the driver stays detached once
 /// the device has reset. Recovery therefore isn't checked here; the debug log
 /// confirms which PCT failed.
+///
+/// The setup session is closed before the NSSR. An NSSR keeps established
+/// sessions for renegotiation and the halted device then warm-resets, which
+/// preserves them, so an open session would keep its slot until power-on.
 fn nssr_pct_failure(
     dev: &mut <DdiTest as Ddi>::Dev,
     ddi: &DdiTest,
@@ -266,6 +270,10 @@ fn nssr_pct_failure(
         return;
     }
 
+    // The arm is per partition, so it survives closing the session.
+    let resp = helper_close_session(dev, Some(session_id), Some(REV));
+    assert!(resp.is_ok(), "resp {:?}", resp);
+
     match ddi.open_dev(path).unwrap().erase() {
         Err(err) => println!("erase (NSSR) failed as expected: {err:?}"),
         Ok(()) => panic!("erase (NSSR) unexpectedly succeeded"),
@@ -276,8 +284,8 @@ fn nssr_pct_failure(
     );
 }
 
-/// Cleanup for the NSSR tests: the driver is detached after the halt, so
-/// there is no session to close and no device to erase.
+/// Cleanup for the NSSR tests: the test already closed its session, and the
+/// driver is detached after the halt, so there is no device to erase.
 fn nssr_cleanup(
     _dev: &mut <DdiTest as Ddi>::Dev,
     _ddi: &DdiTest,

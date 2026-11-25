@@ -62,7 +62,9 @@ struct DdiTestActionNegativePctFailureReqInfo {
 /// The kind of PCT that `TriggerNegativePctFailure` targets.
 ///
 /// Mirrors the host test-hooks `DdiTestActionNegativePctKind`. Each kind is
-/// one injection site and one PCT failure code.
+/// one injection site and one PCT failure code. The host's ML-DSA (6) and
+/// ML-KEM (7) kinds have no injection site yet, so they are not listed here
+/// and arming them fails with [`HsmError::InvalidArg`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u32)]
 pub(crate) enum NegPctKind {
@@ -76,10 +78,6 @@ pub(crate) enum NegPctKind {
     SessionEncKey = 4,
     /// RSA unwrapping key: `PctValidationUnwrappingKeyFailed`.
     UnwrappingKey = 5,
-    /// ML-DSA key generation: `PctValidationMlDsaGenKeyFailed`.
-    MlDsaKeyGen = 6,
-    /// ML-KEM key generation: `PctValidationMlKemGenKeyFailed`.
-    MlKemKeyGen = 7,
 }
 
 impl TryFrom<u32> for NegPctKind {
@@ -92,8 +90,6 @@ impl TryFrom<u32> for NegPctKind {
             Self::EstablishCredKey,
             Self::SessionEncKey,
             Self::UnwrappingKey,
-            Self::MlDsaKeyGen,
-            Self::MlKemKeyGen,
         ]
         .into_iter()
         .find(|kind| *kind as u32 == value)
@@ -330,6 +326,21 @@ impl UnoHsmPal {
         if let Some(flag) = self.neg_pct_retest.get(usize::from(u8::from(pid))) {
             flag.set(retest);
         }
+    }
+
+    /// Records that partition `pid`'s unwrapping-key retest passed.
+    ///
+    /// The retest stays requested while the partition is still armed for
+    /// [`NegPctKind::UnwrappingKey`]: a nonzero skip count lets this PCT pass,
+    /// and a later IO must run it again until the arm fires. Call this after
+    /// the PCT's last await, so an arm installed while the PCT ran is kept.
+    pub(crate) fn neg_pct_retest_passed(&self, pid: HsmPartId) {
+        let armed = self
+            .neg_pct_skip
+            .get(usize::from(u8::from(pid)))
+            .and_then(Cell::get)
+            .is_some_and(|arm| arm.kind == NegPctKind::UnwrappingKey);
+        self.set_neg_pct_retest(pid, armed);
     }
 
     /// Runs the unwrapping key's PCT with negative-PCT injection.

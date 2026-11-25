@@ -284,9 +284,13 @@ pub enum DdiTestActionNegativePctKind {
     SessionEncKey = 4,
     /// RSA unwrapping key (`PctValidationUnwrappingKeyFailed`).
     UnwrappingKey = 5,
-    /// ML-DSA key generation (`PctValidationMlDsaGenKeyFailed`).
+    /// ML-DSA key generation (`PctValidationMlDsaGenKeyFailed`). Reserved:
+    /// firmware does not inject this kind yet and rejects it with
+    /// `InvalidArg`.
     MlDsaKeyGen = 6,
-    /// ML-KEM key generation (`PctValidationMlKemGenKeyFailed`).
+    /// ML-KEM key generation (`PctValidationMlKemGenKeyFailed`). Reserved:
+    /// firmware does not inject this kind yet and rejects it with
+    /// `InvalidArg`.
     MlKemKeyGen = 7,
 }
 
