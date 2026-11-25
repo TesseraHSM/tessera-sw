@@ -69,6 +69,7 @@ include = [
   "TsraSdCreatePeerBackupParams",
   "TsraSdCreateRemoteBackupParams",
   "TsraSdEvidence",
+  "TsraSdIdentityEvidence",
   "TsraSdResealRemoteBackupParams",
   "TsraSdRestoreLocalBackupParams",
   "TsraSdRestorePeerBackupParams",
@@ -152,6 +153,7 @@ item_types = [
 "TsraSdCreatePeerBackupParams" = "tsra_sd_create_peer_backup_params"
 "TsraSdCreateRemoteBackupParams" = "tsra_sd_create_remote_backup_params"
 "TsraSdEvidence" = "tsra_sd_evidence"
+"TsraSdIdentityEvidence" = "tsra_sd_identity_evidence"
 "TsraSdResealRemoteBackupParams" = "tsra_sd_reseal_remote_backup_params"
 "TsraSdRestoreLocalBackupParams" = "tsra_sd_restore_local_backup_params"
 "TsraSdRestorePeerBackupParams" = "tsra_sd_restore_peer_backup_params"

@@ -56,6 +56,7 @@ mod types;
 mod validate;
 
 pub use parse::parse_cert;
+pub use spki::p384_point_from_spki;
 pub use spki::p384_spki_thumbprint;
 pub use spki::P384_POINT_LEN;
 pub use spki::P384_SPKI_LEN;

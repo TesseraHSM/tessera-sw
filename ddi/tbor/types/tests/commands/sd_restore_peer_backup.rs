@@ -4,7 +4,7 @@
 //! Integration tests for the TBOR `SdRestorePeerBackup` command.
 //!
 //! `SdRestorePeerBackup` restores a security domain from a **peer** backup:
-//! it HPKE-Auth-opens the caller-supplied `pok_peer_backup` (an HPKE seal
+//! it HPKE Base-opens the caller-supplied `pok_peer_backup` (an HPKE seal
 //! of BKS3) with the receiver's masked SD-sealing key — authenticated by
 //! the sender peer's attested key — recovers `SDMK` from `prev_sd_mk_backup`,
 //! and returns the device-local backups.  It is `SdRestoreRemoteBackup`
@@ -87,7 +87,7 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, sata, pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
@@ -95,7 +95,6 @@ fn create_peer_backup(seed: &[u8], sata: &CaKey, pota: &CaKey) -> PeerBackup {
         .tbor_oob(
             &create_peer_req(
                 session_id,
-                &masked,
                 &evidence,
                 &part.policy,
                 &created.pok_local_backup,
@@ -138,7 +137,6 @@ fn restore_peer_req_with(
         src_mfgr_cert_chain: evidence.mfgr.clone(),
         src_owner_cert_chain: evidence.owner.clone(),
         src_part_owner_cert_chain: evidence.part_owner.clone(),
-        src_report: evidence.report,
         pok_peer_backup: backup.pok_peer_backup,
         prev_sd_mk_backup: backup.prev_sd_mk_backup,
     }
@@ -215,7 +213,7 @@ fn sd_restore_peer_backup_is_one_shot() {
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
         .tbor_oob(
-            &backup_request(session_id, masked.clone(), &evidence, &part.policy),
+            &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
         .expect("SdCreateRemoteBackup");
@@ -223,7 +221,6 @@ fn sd_restore_peer_backup_is_one_shot() {
         .tbor_oob(
             &create_peer_req(
                 session_id,
-                &masked,
                 &evidence,
                 &part.policy,
                 &created.pok_local_backup,
@@ -294,7 +291,6 @@ fn sd_restore_peer_backup_rejects_before_finalize() {
         src_mfgr_cert_chain: Vec::new(),
         src_owner_cert_chain: Vec::new(),
         src_part_owner_cert_chain: Vec::new(),
-        src_report: Default::default(),
         pok_peer_backup: [0u8; POK_REMOTE_BACKUP_LEN],
         prev_sd_mk_backup: [0u8; SD_MK_BACKUP_LEN],
     };

@@ -30,7 +30,7 @@ enum Mutation {
     WrongBackingPartition,
     PolicyHashMismatch,
     TamperReceiverCertificate { offset: u16, mask: u8 },
-    CorruptMaskedSealingKey { offset: u16, mask: u8 },
+    CorruptReceiverSignature { offset: u16, mask: u8 },
     TamperTrustedReport { mask: u8 },
     TrustedReceiverKeyMismatch,
     TrustedEvidenceLeafMismatch,
@@ -216,10 +216,6 @@ fn build_fixture(
 
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: masked_sealing_key
-            .as_slice()
-            .try_into()
-            .expect("SdSealingKeyGen returns a fixed-length key"),
         receiver_cert_chain: receiver_desc,
         receiver_mfgr_cert_chain: mfgr_desc,
         receiver_owner_cert_chain: owner_desc,
@@ -345,9 +341,10 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
                 assert_success(ctx, &fixture);
             }
         }
-        Mutation::CorruptMaskedSealingKey { offset, mask } => {
-            let byte = &mut fixture.request.masked_sealing_key
-                [usize::from(offset) % MASKED_SEALING_KEY_LEN];
+        Mutation::CorruptReceiverSignature { offset, mask } => {
+            let certificate = &mut fixture.oob_items[fixture.receiver_leaf_index];
+            let index = certificate.len() - 1 - usize::from(offset) % 96;
+            let byte = &mut certificate[index];
             *byte ^= mask;
             if mask == 0 {
                 assert_success(ctx, &fixture);
@@ -356,7 +353,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
                 let result = ctx.tbor_oob(&fixture.request, &oob);
                 assert!(
                     matches!(&result, Err(tsra_ddi_interface::DdiError::TborStatus(_))),
-                    "corrupted masked sealing key must be rejected by firmware",
+                    "corrupted receiver signature must be rejected by firmware",
                 );
             }
         }

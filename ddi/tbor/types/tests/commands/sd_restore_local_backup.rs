@@ -95,9 +95,9 @@ fn create_sd_on_first_device(seed: &[u8], sata: &CaKey, pota: &CaKey) -> Created
         .expect("PartFinal")
         .local_mk_backup;
 
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, sata, &report);
-    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
@@ -137,9 +137,9 @@ fn create_sd_on_resettable_partition(
         .expect("PartFinal")
         .local_mk_backup;
 
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(ctx, session.session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, sata, &report);
-    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");
@@ -358,9 +358,9 @@ fn sd_restore_local_backup_is_one_shot() {
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
 
-    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
+    let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
-    let req = backup_request(session.session_id, masked, &evidence, &policy);
+    let req = backup_request(session.session_id, &evidence, &policy);
     let created = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup");

@@ -438,11 +438,11 @@ fn sealing_key_gen_sd_scope() {
         res.err(),
     );
 
-    let (masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
+    let (_masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
     let evidence = sd_provision::build_receiver_evidence(&pid_pub, &receiver_pub, &sata, &report);
     evidence
         .with_create_backup(|receiver_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, receiver_chain, receiver)
+            session.sd_create_remote_backup(&policy, receiver_chain, receiver)
         })
         .expect("provision security domain with a Local-scoped sealing key");
 
@@ -483,11 +483,11 @@ fn sealing_key_gen_sd_scope_reopen() {
     let pota = sd_provision::CaKey::generate();
     let (session, policy, pid_pub, _local_mk) =
         sd_provision::provision_backing(&sata, &pota, None, None);
-    let (local_masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
+    let (_local_masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
     let evidence = sd_provision::build_evidence(&pid_pub, &receiver_pub, &sata, &pota, &report);
     let created = evidence
         .with_create_backup(|receiver_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &local_masked, receiver_chain, receiver)
+            session.sd_create_remote_backup(&policy, receiver_chain, receiver)
         })
         .expect("provision security domain");
 
@@ -523,14 +523,18 @@ fn sealing_key_gen_sd_scope_reopen() {
         )
         .expect("reopen CO session");
 
+    let reconstructed =
+        HsmKeyManager::unmask_key(&reopened, &mut HsmSealingKeyUnmaskAlgo::default(), &masked)
+            .expect("reuse original SD-scoped sealing key on reopened session");
+    assert_eq!(reconstructed.kind(), HsmKeyKind::Sealing);
     let peer = evidence
         .with_hsm_evidence(|destination| {
-            reopened.sd_create_peer_backup(&policy, &masked, destination, &created.pok_local_backup)
+            reopened.sd_create_peer_backup(&policy, destination, &created.pok_local_backup)
         })
         .expect("reuse original SD-scoped sealing key on reopened session");
-    assert_eq!(peer.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(peer.backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        peer.iter().any(|&byte| byte != 0),
+        peer.backup.iter().any(|&byte| byte != 0),
         "peer backup must not be all-zero",
     );
 }

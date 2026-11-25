@@ -9,21 +9,23 @@ session is rejected with `TSRA_STATUS_INVALID_SESSION`.
 
 A transfer proceeds in two phases:
 
-- **Key exchange.** Both endpoints call
+- **TMK transfer.** The target calls
   [`tsra_darc_kex_key_gen`](#tsra_darc_kex_key_gen) to mint an ephemeral
   DARC KEX key. The source mints a Transfer Masking Key (TMK) with
   [`tsra_darc_tmk_gen`](#tsra_darc_tmk_gen), seals it to the target's KEX
   key with [`tsra_darc_tmk_export`](#tsra_darc_tmk_export), and the target
   opens it with [`tsra_darc_tmk_import`](#tsra_darc_tmk_import). The sealed
-  TMK is bound to both endpoints' identities via HPKE-Auth and validated
-  against the certificate chains anchored in the partition policy.
+  TMK uses P-384 HPKE Base (HKDF-SHA384, AES-256-GCM). A separate
+  PID-signed `Darc` report binds the source PID, recipient key, and exact
+  encrypted envelope. DATA authorizes the recipient KEX; POTA authorizes
+  the source PID report signer. No source KEX key is required.
 - **Key wrap.** The source wraps the designated key under the TMK with
   [`tsra_darc_key_wrap`](#tsra_darc_key_wrap); the target unwraps and
   installs it with [`tsra_darc_key_unwrap`](#tsra_darc_key_unwrap).
 
 None of these commands persist state on the device: the KEX keys and TMK are
-returned masked under the partition SDMK and exist only for the duration of
-the transfer.
+returned as masked blobs, not stored on the device. The caller retains them
+for subsequent transfer commands.
 
 ## tsra_darc_kex_key_gen
 
@@ -32,9 +34,9 @@ Generate a DARC key-exchange (KEX) key.
 Mints a new ephemeral ECC-P384 KEX key on the calling session's partition and
 returns the masked private key together with its raw P-384 public key
 (`x ‖ y`, 96 bytes, big-endian per coordinate — the certificate-leaf form). Run on the **target** it yields the HPKE receiver
-identity; run on the **source** it yields the HPKE sender-auth identity. The
+identity. Outgoing transfers use the source PID for report signing. The
 key is not stored on the device — the caller must retain the returned masked
-key for the subsequent export/import call.
+key for the subsequent import call.
 
 ```cpp
 tsra_status tsra_darc_kex_key_gen(
@@ -51,7 +53,7 @@ tsra_status tsra_darc_kex_key_gen(
  | ------------------ | ------------------------------- | -------------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle) | security-domain session handle                           |
  | [in] scope         | uint8_t                         | requested key scope (`KeyScope` discriminant)            |
- | [in,out] masked_key| [tsra_buffer*](#tsra_buffer)| out: masked KEX private key (`MASKED_KEX_KEY_LEN`, 276 B)|
+ | [in,out] masked_key| [tsra_buffer*](#tsra_buffer)| out: masked KEX private key (`MASKED_KEX_KEY_LEN`, 280 B)|
  | [in,out] pub_key   | [tsra_buffer*](#tsra_buffer)| out: raw P-384 public key (`KEX_PUB_KEY_LEN`, 96 B) &nbsp;|
 
 **Returns**
@@ -77,7 +79,7 @@ tsra_status tsra_darc_tmk_gen(
  | Parameter          | Name                            | Description                                     |
  | ------------------ | ------------------------------- | ----------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle) | security-domain session handle                  |
- | [in,out] masked_tmk| [tsra_buffer*](#tsra_buffer)| out: masked TMK (`MASKED_TMK_LEN`, 260 B) &nbsp;|
+ | [in,out] masked_tmk| [tsra_buffer*](#tsra_buffer)| out: masked TMK (`MASKED_TMK_LEN`, 264 B) &nbsp;|
 
 **Returns**
 
@@ -87,10 +89,17 @@ tsra_status tsra_darc_tmk_gen(
 
 Seal a DARC TMK to an authenticated target.
 
-Validates `target_cert_chain` against the `DATAPubKey` anchored in the
-supplied partition policy, then HPKE-Auth seals the TMK to the
-target's KEX key using the source's KEX key as the sender-auth identity,
-returning the sealed TMK.
+Validates `target_cert_chain` against the `data_spki_thumbprint` anchored in the
+supplied unified partition policy, then HPKE Base seals the TMK to the
+target's KEX key and directly signs the complete binary `Darc` envelope
+with the source PID. The canonical 113-byte header binds source and
+recipient SHA-384 canonical-DER-SPKI thumbprints and is used as HPKE
+`info`, with empty AEAD AAD. One 367-byte COSE_Sign1 carries the 258-byte
+envelope and signature. Its protected header is `{1: -35}`; the
+unprotected map is empty. COSE external AAD is ASCII `TSRA-Darc-v1`
+followed by 20 zero bytes (32 bytes total), reconstructed by the signer
+and verifier rather than transmitted. Empty or wrong-domain transfer
+signatures are rejected; the 367-byte artifact size is unchanged.
 
 ```cpp
 tsra_status tsra_darc_tmk_export(
@@ -106,7 +115,11 @@ tsra_status tsra_darc_tmk_export(
  | ------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle)                              | security-domain session handle                       |
  | [in] params        | const [tsra_darc_tmk_export_params*](#tsra_darc_tmk_export_params) | export input buffers                        |
- | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer)                            | out: sealed TMK (`SEALED_TMK_LEN`, 145 B)     &nbsp; |
+ | [in,out] sealed_tmk| [tsra_buffer*](#tsra_buffer) | out: signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
+
+The output follows probe/fill: provide a zero-length buffer to obtain the
+required capacity of 367 bytes with `TSRA_STATUS_BUFFER_TOO_SMALL`, then
+retry. Persist and transport this single artifact; there is no detached report.
 
 **Returns**
 
@@ -118,7 +131,6 @@ Input buffers for [`tsra_darc_tmk_export`](#tsra_darc_tmk_export).
 
 ```cpp
 struct tsra_darc_tmk_export_params {
-    const tsra_buffer *masked_sender_key;
     const tsra_buffer *masked_tmk;
     const tsra_buffer *policy;
     tsra_darc_cert_chain target_cert_chain;
@@ -127,19 +139,25 @@ struct tsra_darc_tmk_export_params {
 
  | Field             | Name                                                      | Description                                                  |
  | ----------------- | -------------------------------------------------------- | ------------------------------------------------------------ |
- | masked_sender_key | const [tsra_buffer*](#tsra_buffer)                   | source masked KEX key (`MASKED_KEX_KEY_LEN`, 276 B)          |
- | masked_tmk        | const [tsra_buffer*](#tsra_buffer)                   | masked TMK to export (`MASKED_TMK_LEN`, 260 B)              |
- | policy            | const [tsra_buffer*](#tsra_buffer)                   | partition policy anchoring the DATA key thumbprint           |
+ | masked_tmk        | const [tsra_buffer*](#tsra_buffer)                   | masked TMK to export (`MASKED_TMK_LEN`, 264 B)              |
+ | policy            | const [tsra_buffer*](#tsra_buffer)                   | unified partition policy image anchoring `data_spki_thumbprint`        |
  | target_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)        | DATA-anchored target certificate chain (1–2 certs)   &nbsp; |
 
 ## tsra_darc_tmk_import
 
 Import (open) a sealed DARC TMK on the target.
 
-Validates `remote_cert_chain` against the `POTAPubKey` anchored in the
-supplied partition policy, HPKE-Auth opens the sealed TMK against the
-target's KEX key, and re-masks the recovered TMK under the target partition
-SDMK, returning the masked TMK.
+Validates `remote_cert_chain` against the `pota_spki_thumbprint` anchored in the
+supplied unified partition policy, authorizing the terminal source PID
+public key. It verifies the direct `Darc` signature, kind, source, and
+actual recipient in the signed header before HPKE Base opening.
+It then re-masks the recovered TMK under the target partition SDMK.
+
+The normal source chain has three certificates: POTA root, PTA
+intermediate, PID leaf. The source partition's certificate slot 2
+provides the PTA-signed PID leaf; append it to the endorsed PTA chain.
+A generic public-key report cannot authorize a transfer. Reports do not
+themselves provide replay protection or certificate freshness.
 
 ```cpp
 tsra_status tsra_darc_tmk_import(
@@ -155,7 +173,7 @@ tsra_status tsra_darc_tmk_import(
  | ------------------ | ------------------------------------------------------------ | ------------------------------------------------- |
  | [in] sess_handle   | [tsra_handle](#tsra_handle)                              | security-domain session handle                    |
  | [in] params        | const [tsra_darc_tmk_import_params*](#tsra_darc_tmk_import_params) | import input buffers                     |
- | [in,out] masked_tmk| [tsra_buffer*](#tsra_buffer)                            | out: imported masked TMK (`MASKED_TMK_LEN`, 260 B)|
+ | [in,out] masked_tmk| [tsra_buffer*](#tsra_buffer)                            | out: imported masked TMK (`MASKED_TMK_LEN`, 264 B)|
 
 **Returns**
 
@@ -176,10 +194,10 @@ struct tsra_darc_tmk_import_params {
 
  | Field             | Name                                                | Description                                                  |
  | ----------------- | --------------------------------------------------- | ------------------------------------------------------------ |
- | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (`MASKED_KEX_KEY_LEN`, 276 B)         |
- | policy            | const [tsra_buffer*](#tsra_buffer)              | partition policy anchoring the POTA key thumbprint           |
- | sealed_tmk        | const [tsra_buffer*](#tsra_buffer)              | sealed TMK to open (`SEALED_TMK_LEN`, 145 B)               |
- | remote_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)   | POTA-anchored source certificate chain (1–2 certs)   &nbsp; |
+ | masked_kex_key    | const [tsra_buffer*](#tsra_buffer)              | target masked KEX key (`MASKED_KEX_KEY_LEN`, 280 B)         |
+ | policy            | const [tsra_buffer*](#tsra_buffer)              | unified partition policy image anchoring `pota_spki_thumbprint`        |
+ | sealed_tmk        | const [tsra_buffer*](#tsra_buffer) | signed encrypted TMK (`SEALED_TMK_LEN`, 367 B) |
+ | remote_cert_chain | [tsra_darc_cert_chain](#tsra_darc_cert_chain)   | POTA-anchored source PID certificate chain (1..=3 certs) |
 
 ## tsra_darc_key_wrap
 
@@ -228,7 +246,7 @@ struct tsra_darc_key_wrap_params {
  | Field      | Name                                    | Description                                                          |
  | ---------- | --------------------------------------- | ------------------------------------------------------------------- |
  | source_key | [tsra_handle](#tsra_handle)         | handle to the source EC private key to export (the transferred key) |
- | masked_tmk | const [tsra_buffer*](#tsra_buffer)  | masked TMK (`MASKED_TMK_LEN`, 260 B) &nbsp;                         |
+ | masked_tmk | const [tsra_buffer*](#tsra_buffer)  | masked TMK (`MASKED_TMK_LEN`, 264 B) &nbsp;                         |
 
 ## tsra_darc_key_unwrap
 
@@ -276,7 +294,7 @@ struct tsra_darc_key_unwrap_params {
 
  | Field          | Name                                          | Description                                                       |
  | -------------- | --------------------------------------------- | ---------------------------------------------------------------- |
- | masked_tmk     | const [tsra_buffer*](#tsra_buffer)        | masked TMK (`MASKED_TMK_LEN`, 260 B)                             |
+ | masked_tmk     | const [tsra_buffer*](#tsra_buffer)        | masked TMK (`MASKED_TMK_LEN`, 264 B)                             |
  | wrapped_key    | const [tsra_buffer*](#tsra_buffer)        | wrapped key to unwrap (`DARC_UNWRAP_WRAPPED_KEY_MAX_LEN`, ≤512 B)|
  | priv_key_props | const [tsra_key_prop_list*](#tsra_key_prop_list) | requested properties for the recovered private key        |
  | pub_key_props  | const [tsra_key_prop_list*](#tsra_key_prop_list) | requested properties for the recovered public key &nbsp;  |
@@ -286,7 +304,8 @@ struct tsra_darc_key_unwrap_params {
 A DARC certificate chain: an array of `len` [`tsra_buffer`](#tsra_buffer)s,
 each a DER-encoded certificate ordered root to leaf. The DER bytes are
 borrowed for the duration of the call, not copied. A chain must contain
-between 1 and 2 certificates.
+between 1 and 2 certificates for export (DATA-authorized recipient),
+or 1 and 3 for import (POTA-authorized source PID).
 
 ```cpp
 struct tsra_darc_cert_chain {
@@ -298,4 +317,4 @@ struct tsra_darc_cert_chain {
  | Field | Name                                   | Description                                          |
  | ----- | -------------------------------------- | ---------------------------------------------------- |
  | certs | const [tsra_buffer*](#tsra_buffer) | array of `len` DER certificate buffers               |
- | len   | uint32_t                               | number of certificates in `certs` (1–2)      &nbsp;  |
+ | len   | uint32_t                               | certificate count (1..=2 for export; 1..=3 for import) |

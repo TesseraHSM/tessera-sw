@@ -11,8 +11,8 @@
 //! deterministic machine seed — restores `PartLocalMK` via `part_final` (so
 //! the captured sealing key unmasks) and restores the security domain from
 //! the remote backup. A successful restore is itself the correctness check:
-//! the HPKE open only succeeds if the receiver key and attested sender key
-//! match those that sealed the backup.
+//! the HPKE open only succeeds after the PID-signed operation report binds
+//! the complete envelope, recipient, and transferred policy.
 
 use tsra_api::*;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
@@ -23,6 +23,7 @@ use crate::utils::sd_provision::CaKey;
 use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
+use crate::utils::sd_provision::spki_pub;
 
 /// Happy path: create a remote backup on one incarnation, then restore it
 /// on a rebooted (factory-reset, same-seed) incarnation; the restore
@@ -41,29 +42,75 @@ fn sd_restore_remote_backup_roundtrip() {
     let (session1, policy, pid_pub, local_mk) = provision_backing(&sata, &pota, None, None);
     let (masked, rcvr_pub, report) = masked_key_and_report(&session1);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
+    let sender_pid = spki_pub(&pid_pub);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session1.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session1.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
     drop(session1);
-
     // Device 2 (reboot, same seed): restore PartLocalMK from device 1's
     // backup, then restore the security domain from the remote backup.
     let (session2, _policy2, _pid_pub2, _lmk2) =
         provision_backing(&sata, &pota, Some(&policy), Some(&local_mk));
-    let restored = evidence
-        .with_create_backup(|sender_chain, ev| {
-            session2.sd_restore_remote_backup(
-                &policy,
-                &masked,
-                sender_chain,
-                ev,
-                &created.pok_remote_backup,
-                &created.sd_mk_backup,
-            )
-        })
-        .expect("restore remote backup");
+    let restore = |receiver: &[u8], signer: &[u8], backup: &[u8]| {
+        session2.sd_restore_remote_backup(
+            &policy,
+            receiver,
+            signer,
+            &HsmSdIdentityEvidence::default(),
+            backup,
+            &created.sd_mk_backup,
+        )
+    };
+    for backup in [&[][..], evidence.report()] {
+        assert!(
+            restore(&masked, &sender_pid, backup).is_err(),
+            "empty and generic PublicKey reports cannot replace a signed backup",
+        );
+    }
+    // The ciphertext ends before the two-byte bstr header and 96-byte signature.
+    for offset in [
+        created.pok_remote_backup.len() - 1,
+        created.pok_remote_backup.len() - 99,
+    ] {
+        let mut tampered = created.pok_remote_backup.clone();
+        tampered[offset] ^= 1;
+        assert!(
+            restore(&masked, &sender_pid, &tampered).is_err(),
+            "signature-only restore must verify the complete signed backup",
+        );
+    }
+    let (wrong_receiver, _, _) = masked_key_and_report(&session2);
+    assert!(
+        restore(&wrong_receiver, &sender_pid, &created.pok_remote_backup).is_err(),
+        "a valid report cannot authorize a different recipient",
+    );
+    let wrong_pid = spki_pub(&CaKey::generate().raw_pub());
+    assert!(
+        restore(&masked, &wrong_pid, &created.pok_remote_backup).is_err(),
+        "the supplied PID must verify the operation signature",
+    );
+    for len in [0, 96, 97, 119, 121] {
+        let malformed_pid = vec![0; len];
+        assert!(
+            matches!(
+                restore(&masked, &malformed_pid, &created.pok_remote_backup),
+                Err(HsmError::InvalidArgument)
+            ),
+            "the signer PID must be canonical P-384 DER SPKI",
+        );
+    }
+    for offset in [0, 1, 8, 17, 22, 23] {
+        let mut malformed_pid = sender_pid.clone();
+        malformed_pid[offset] ^= 1;
+        assert!(matches!(
+            restore(&masked, &malformed_pid, &created.pok_remote_backup),
+            Err(HsmError::InvalidArgument)
+        ));
+    }
+    let restored =
+        restore(&masked, &sender_pid, &created.pok_remote_backup).expect("restore remote backup");
 
     // Local backup (BKS3 re-masked under PartLocalMK), 276 B, non-zero.
     assert_eq!(restored.pok_local_backup.len(), MASKED_SD_LEN);
@@ -96,15 +143,15 @@ fn sd_restore_remote_backup_is_one_shot() {
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     let created = evidence
         .with_create_backup(|rcvr_chain, ev| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, ev)
+            session.sd_create_remote_backup(&policy, rcvr_chain, ev)
         })
         .expect("create remote backup");
 
-    let restored = evidence.with_create_backup(|sender_chain, ev| {
+    let restored = evidence.with_hsm_identity(|ev| {
         session.sd_restore_remote_backup(
             &policy,
             &masked,
-            sender_chain,
+            &spki_pub(&pid_pub),
             ev,
             &created.pok_remote_backup,
             &created.sd_mk_backup,

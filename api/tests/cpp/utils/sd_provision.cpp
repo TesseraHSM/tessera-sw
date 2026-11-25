@@ -1534,6 +1534,7 @@ void SdEvidenceHolder::wire()
     ev_.owner_cert_chain = { owner_bufs_, 2 };
     ev_.part_owner_cert_chain = { po_bufs_, 2 };
     ev_.report = &report_buf_;
+    identity_ = { ev_.mfgr_cert_chain, ev_.owner_cert_chain, ev_.part_owner_cert_chain };
     rcvr_chain_ = { rcvr_bufs_, 2 };
 }
 
@@ -1758,10 +1759,8 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     bctx.pota_key = pota_ca;
     SdEvidenceHolder evidence = build_receiver_evidence(bctx, sealing.pub, sealing.report);
 
-    tsra_buffer masked_buf{ sealing.masked.data(), static_cast<uint32_t>(sealing.masked.size()) };
     tsra_sd_create_remote_backup_params create_params{
         &policy_buf,
-        &masked_buf,
         evidence.receiver_chain(),
         &evidence.get(),
     };
@@ -1806,6 +1805,7 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     ctx.policy = std::move(policy);
     ctx.data_key = std::move(data_ca);
     ctx.pota_key = std::move(pota_ca);
+    ctx.pid_pub = std::move(pid_pub);
     return ctx;
 }
 

@@ -3,11 +3,11 @@ Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 -->
 
-# MlKemEncapsulate (Opcode 0x2A) — schema-only
+# MlKemEncapsulate (Opcode 0x2A)
 
 The parameter set is **not** carried on the wire.  It is recovered from the length of `pub_key`, which is unique per parameter set (ML-KEM-512 = 800 B, ML-KEM-768 = 1184 B, ML-KEM-1024 = 1568 B).  Carrying it explicitly would create a second source of truth that firmware must cross-check against the key, and would let a caller pair a parameter set with a mismatched key.
 
-**Handler:** _Not implemented yet (wire schema only)_
+**Handler:** `fw/core/lib/src/ddi/tbor/mlkem_encapsulate.rs`
 **Session:** InSession
 
 ## Description
@@ -18,8 +18,8 @@ requested scope's masking key.  The shared secret plaintext is 32 bytes
 for all ML-KEM parameter sets; the TBOR response carries only the masked
 envelope.
 
-This snapshot defines only the wire schema; no firmware handler or PQC
-implementation is registered.
+An active session is required. The requested scope determines the masking
+key for the returned shared secret.
 
 ## Request
 
@@ -43,19 +43,24 @@ Carries the public key.
 |---|---|---|---|
 | 12 | `ciphertext` | `buffer` (up to 1568 B) | ML-KEM ciphertext bytes. |
 | 16 | (padding) | `padding` (0..=3 B) | Places `masked_shared_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 20 | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
+| 20 | `masked_shared_secret` | `buffer` (264 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
 
 ### Data section
 
 Carries the ciphertext followed by the masked shared secret.  The masked
-shared-secret length is `32 + 132 = 164` bytes.
+shared-secret length is `32 + 232 = 264` bytes.
 
 ## Errors
 
-Handler errors are not defined yet because this command is schema-only.
-Expected future errors include a public key whose length matches no
-supported parameter set, malformed public
-keys, unsupported key scope, and malformed request bodies.
+| Error | Cause |
+|---|---|
+| `SessionNotFound` | `session_id` does not refer to an active session |
+| `InvalidArg` | The public-key length matches no supported parameter set |
+| `UnsupportedKeyScope` | The requested scope has no available masking key |
+| `TborNonCanonicalLayout` | `pub_key` is not the first data field immediately after the request TOC |
+
+Malformed keys, request bodies, and backend encapsulation or masking
+failures are reported through their corresponding error statuses.
 
 ## See also
 

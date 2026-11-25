@@ -23,6 +23,9 @@ use crate::codec::SigStructure;
 use crate::codec::SIG_STRUCTURE_CONTEXT;
 use crate::consts::*;
 use crate::sig::sig_halves_swap;
+use crate::ReportKind;
+use crate::ReportView;
+use crate::TransferReportView;
 
 /// Zero-copy view over a decoded COSE_Sign1 key-attestation report.
 ///
@@ -44,8 +47,8 @@ pub struct KeyReportView<'a> {
     pub report_data: &'a HsmDmaBuf,
     /// VM launch ID.
     pub vm_launch_id: &'a HsmDmaBuf,
-    /// Optional SHA-384 PartPolicy digest. `Some` iff the report is v2
-    /// (carries map key 7); `None` for a v1 report.
+    /// Optional SHA-384 PartPolicy digest. Required for v2 public-key
+    /// reports without a signed kind discriminator.
     pub policy_hash: Option<&'a HsmDmaBuf>,
     /// COSE_Sign1 protected header (signed input).
     pub protected_header: &'a HsmDmaBuf,
@@ -69,6 +72,12 @@ pub(crate) fn bytes_span(d: &mut Decoder<'_>) -> HsmResult<(usize, usize)> {
     Ok((start, end))
 }
 
+pub(crate) struct CoseReportView<'a> {
+    pub(crate) protected_header: &'a HsmDmaBuf,
+    pub(crate) payload: &'a HsmDmaBuf,
+    pub(crate) signature: &'a HsmDmaBuf,
+}
+
 /// Parse a tagged COSE_Sign1 key-attestation report, returning a
 /// zero-copy [`KeyReportView`] borrowing from `report`.
 ///
@@ -76,6 +85,13 @@ pub(crate) fn bytes_span(d: &mut Decoder<'_>) -> HsmResult<(usize, usize)> {
 /// * [`HsmError::InvalidArg`] — malformed report (bad tag, structure, or
 ///   CBOR).
 pub fn parse_key_report(report: &HsmDmaBuf) -> HsmResult<KeyReportView<'_>> {
+    match parse_payload(parse_cose_report(report)?)? {
+        ReportView::PublicKey(view) => Ok(view),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+fn parse_cose_report(report: &HsmDmaBuf) -> HsmResult<CoseReportView<'_>> {
     if report.len() <= COSE_SIGN1_TAG_SIZE || report[0] != COSE_SIGN1_TAG {
         return Err(HsmError::InvalidArg);
     }
@@ -102,88 +118,105 @@ pub fn parse_key_report(report: &HsmDmaBuf) -> HsmResult<KeyReportView<'_>> {
     };
 
     // Enforce the fixed COSE-envelope field lengths.
-    if prot.1 - prot.0 != PROTECTED_HEADER.len() || sig.1 - sig.0 != SIGNATURE_LEN {
+    if sig.1 - sig.0 != SIGNATURE_LEN {
         return Err(HsmError::InvalidArg);
     }
     let protected_header = &rest[prot.0..prot.1];
     let payload = &rest[payload_span.0..payload_span.1];
     let signature = &rest[sig.0..sig.1];
 
-    // Payload = integer-keyed map. v1 has 7 entries (keys 0..=6); v2 adds
-    // an 8th (key 7 = policy_hash). All of keys 0..=6 are mandatory; key 7
-    // is optional and, when present, marks the report as v2.
+    Ok(CoseReportView {
+        protected_header,
+        payload,
+        signature,
+    })
+}
+
+/// Parse a directly signed transfer envelope or a public-key attestation.
+///
+/// Binary transfer headers and public-key CBOR maps are disjoint payloads.
+/// Parsing does not verify signatures or authorize an operation.
+pub fn parse_report(report: &HsmDmaBuf) -> HsmResult<ReportView<'_>> {
+    if report.len() > KEY_REPORT_MAX_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    parse_payload(parse_cose_report(report)?)
+}
+
+fn parse_payload(view: CoseReportView<'_>) -> HsmResult<ReportView<'_>> {
+    let payload = view.payload;
+    let transfer_payload = payload.first().is_none_or(|byte| byte >> 5 != 5);
+    let expected_header: &[u8] = if transfer_payload {
+        &TRANSFER_PROTECTED_HEADER
+    } else {
+        &PROTECTED_HEADER
+    };
+    if &**view.protected_header != expected_header {
+        return Err(HsmError::InvalidArg);
+    }
+    if transfer_payload {
+        let envelope = crate::transfer::parse_transfer_envelope(payload)?;
+        return Ok(ReportView::Transfer(TransferReportView {
+            header: envelope.header,
+            envelope: payload,
+            protected_header: view.protected_header,
+            signature: view.signature,
+        }));
+    }
     let mut version = 0u16;
     let mut public_key_size = 0u16;
     let mut flags = 0u32;
-    let mut pk = (0usize, 0usize);
-    let mut uuid = (0usize, 0usize);
-    let mut rd = (0usize, 0usize);
-    let mut vm = (0usize, 0usize);
-    let mut ph = (0usize, 0usize);
-    let mut have_policy_hash = false;
-    {
-        let mut d = Decoder::new(payload);
-        let entries = map_decode_err(d.map())?.ok_or(HsmError::InvalidArg)?;
-        if entries != 7 && entries != 8 {
+    let mut report_kind = None;
+    let mut fields = [(0usize, 0usize); 9];
+    let mut seen = 0u16;
+    let mut d = Decoder::new(payload);
+    let entries = map_decode_err(d.map())?.ok_or(HsmError::InvalidArg)?;
+    if !(7..=9).contains(&entries) {
+        return Err(HsmError::InvalidArg);
+    }
+    for _ in 0..entries {
+        let key = map_decode_err(d.u8())?;
+        if key > 8 || seen & (1 << key) != 0 {
             return Err(HsmError::InvalidArg);
         }
-        let mut seen = 0u8;
-        for _ in 0..entries {
-            let key = map_decode_err(d.u8())?;
-            if key > 7 || seen & (1 << key) != 0 {
-                // Unknown or duplicate key.
-                return Err(HsmError::InvalidArg);
-            }
-            seen |= 1 << key;
-            match key {
-                0 => version = map_decode_err(d.u16())?,
-                1 => pk = bytes_span(&mut d)?,
-                2 => public_key_size = map_decode_err(d.u16())?,
-                3 => flags = map_decode_err(d.u32())?,
-                4 => uuid = bytes_span(&mut d)?,
-                5 => rd = bytes_span(&mut d)?,
-                6 => vm = bytes_span(&mut d)?,
-                _ => {
-                    // key == 7: policy_hash (v2 only).
-                    ph = bytes_span(&mut d)?;
-                    have_policy_hash = true;
-                }
-            }
-        }
-        // Keys 0..=6 must each appear exactly once.
-        if seen & 0x7f != 0x7f {
-            return Err(HsmError::InvalidArg);
-        }
-        // Reject trailing bytes inside the payload.
-        if d.position() != payload.len() {
-            return Err(HsmError::InvalidArg);
+        seen |= 1 << key;
+        match key {
+            0 => version = map_decode_err(d.u16())?,
+            2 => public_key_size = map_decode_err(d.u16())?,
+            3 => flags = map_decode_err(d.u32())?,
+            8 => report_kind = Some(map_decode_err(d.u8())?),
+            _ => fields[key as usize] = bytes_span(&mut d)?,
         }
     }
-
-    // Enforce fixed payload field lengths and value bounds so callers can
-    // slice the returned views (e.g. `public_key[..public_key_size]`)
-    // without any risk of out-of-bounds panics on untrusted input. The
-    // expected version is fixed by whether `policy_hash` is present, so a
-    // v1 report claiming v2 (or vice versa) is rejected.
-    let expected_version = if have_policy_hash {
+    if d.position() != payload.len() {
+        return Err(HsmError::InvalidArg);
+    }
+    let policy = fields[7];
+    let have_policy_hash = seen & (1 << 7) != 0;
+    if have_policy_hash && policy.1 - policy.0 != POLICY_HASH_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+    let expected_version = if report_kind.is_some() || have_policy_hash {
         REPORT_VERSION_V2
     } else {
         REPORT_VERSION
     };
-    if pk.1 - pk.0 != PUBLIC_KEY_MAX_SIZE
+    let pk = fields[1];
+    let uuid = fields[4];
+    let rd = fields[5];
+    let vm = fields[6];
+    if report_kind.is_some_and(|kind| kind != ReportKind::PublicKey as u8)
+        || seen & 0x7f != 0x7f
+        || version != expected_version
+        || pk.1 - pk.0 != PUBLIC_KEY_MAX_SIZE
         || uuid.1 - uuid.0 != APP_UUID_LEN
         || rd.1 - rd.0 != REPORT_DATA_LEN
         || vm.1 - vm.0 != VM_LAUNCH_ID_LEN
-        || version != expected_version
         || public_key_size as usize > PUBLIC_KEY_MAX_SIZE
-        || (have_policy_hash && ph.1 - ph.0 != POLICY_HASH_LEN)
     {
         return Err(HsmError::InvalidArg);
     }
-
-    let policy_hash = have_policy_hash.then(|| &payload[ph.0..ph.1]);
-
-    Ok(KeyReportView {
+    Ok(ReportView::PublicKey(KeyReportView {
         version,
         public_key_size,
         flags,
@@ -191,11 +224,11 @@ pub fn parse_key_report(report: &HsmDmaBuf) -> HsmResult<KeyReportView<'_>> {
         app_uuid: &payload[uuid.0..uuid.1],
         report_data: &payload[rd.0..rd.1],
         vm_launch_id: &payload[vm.0..vm.1],
-        policy_hash,
-        protected_header,
+        policy_hash: have_policy_hash.then(|| &payload[policy.0..policy.1]),
+        protected_header: view.protected_header,
         payload,
-        signature,
-    })
+        signature: view.signature,
+    }))
 }
 
 /// Verify the ES384 signature of a COSE_Sign1 key-attestation report.
@@ -226,22 +259,77 @@ where
 {
     let view = parse_key_report(report)?;
 
-    // The protected header is signed input. Our fixed wire format mandates
-    // the canonical ES384 header, and the Sig_structure below is rebuilt
-    // from that constant — so bind it by rejecting any report whose
-    // protected header differs (otherwise a tampered header would not be
-    // covered by the signature check below).
+    verify_signature(
+        pal,
+        io,
+        alloc,
+        CoseReportView {
+            protected_header: view.protected_header,
+            payload: view.payload,
+            signature: view.signature,
+        },
+        signer_pub,
+        ReportKind::PublicKey,
+    )
+    .await
+}
+
+/// Verify an ES384 report signature and require the expected signed kind.
+///
+/// This does not authorize the signer or check recipient identity or policy.
+/// The receiving command must do so.
+pub async fn verify_report<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    report: &HsmDmaBuf,
+    signer_pub: &HsmDmaBuf,
+    expected_kind: ReportKind,
+) -> HsmResult<bool>
+where
+    P: HsmCrypto + 'a,
+{
+    let view = parse_report(report)?;
+    if view.kind() != expected_kind {
+        return Err(HsmError::InvalidArg);
+    }
+    let cose = match view {
+        ReportView::PublicKey(view) => CoseReportView {
+            protected_header: view.protected_header,
+            payload: view.payload,
+            signature: view.signature,
+        },
+        ReportView::Transfer(transfer) => CoseReportView {
+            protected_header: transfer.protected_header,
+            payload: transfer.envelope,
+            signature: transfer.signature,
+        },
+    };
+    verify_signature(pal, io, alloc, cose, signer_pub, expected_kind).await
+}
+
+pub(crate) async fn verify_signature<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    view: CoseReportView<'_>,
+    signer_pub: &HsmDmaBuf,
+    kind: ReportKind,
+) -> HsmResult<bool>
+where
+    P: HsmCrypto + 'a,
+{
     let protected: &[u8] = view.protected_header;
-    if protected != &PROTECTED_HEADER[..] {
+    if protected != kind.protected_header() {
         return Err(HsmError::InvalidArg);
     }
 
-    // Rebuild the Sig_structure over (protected_header, payload) and
+    // Rebuild the Sig_structure with the required signature domain and
     // measure/encode it with `minicbor::len` — no hand byte-counting.
     let sig_struct_val = SigStructure {
         context: SIG_STRUCTURE_CONTEXT,
-        body_protected: &PROTECTED_HEADER,
-        external_aad: &[],
+        body_protected: protected,
+        external_aad: kind.external_aad(),
         payload: view.payload,
     };
     // Zeroed so any `len`/`encode` divergence can't feed stale DMA bytes

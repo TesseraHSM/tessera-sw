@@ -67,6 +67,50 @@ pub(crate) const CO: u8 = 0;
 /// `SessionType` role identifier for Crypto-User sessions.
 pub(crate) const CU: u8 = 1;
 
+/// Independent COSE_Sign1 fixture for a complete binary transfer envelope.
+pub(crate) fn sign_transfer_envelope(
+    payload: &[u8],
+    signer: &tsra_crypto::EccPrivateKey,
+) -> Vec<u8> {
+    use tsra_crypto::SignOp;
+
+    let external_aad: &[u8; 32] = match payload.get(10) {
+        Some(1) => b"TSRA-Darc-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        Some(2) => b"TSRA-SdBackup-v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        _ => panic!("invalid transfer fixture kind"),
+    };
+    let protected = b"\xa1\x01\x38\x22";
+    let mut structure = minicbor::Encoder::new(Vec::new());
+    structure
+        .array(4)
+        .expect("Sig_structure")
+        .str("Signature1")
+        .expect("context")
+        .bytes(protected)
+        .expect("protected")
+        .bytes(external_aad)
+        .expect("external AAD")
+        .bytes(payload)
+        .expect("payload");
+    let mut signature = [0; 96];
+    tsra_crypto::EcdsaAlgo::new(HashAlgo::sha384())
+        .sign(signer, &structure.into_writer(), Some(&mut signature))
+        .expect("sign transfer envelope");
+    let mut signed = minicbor::Encoder::new(vec![0xD2]);
+    signed
+        .array(4)
+        .expect("COSE_Sign1")
+        .bytes(protected)
+        .expect("protected")
+        .map(0)
+        .expect("unprotected")
+        .bytes(payload)
+        .expect("payload")
+        .bytes(&signature)
+        .expect("signature");
+    signed.into_writer()
+}
+
 /// AEAD envelope component lengths.
 pub(crate) const ENVELOPE_HEADER_LEN: usize = tsra_crypto::aead_envelope::HEADER_LEN;
 

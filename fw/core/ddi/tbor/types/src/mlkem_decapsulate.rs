@@ -3,7 +3,7 @@
 
 //! TBOR `MlKemDecapsulate` wire schema.
 //!
-//! `MlKemDecapsulate` is (temporarily) an out-of-session command that decapsulates an
+//! `MlKemDecapsulate` is an in-session command that decapsulates an
 //! ML-KEM ciphertext using a caller-held **masked** decapsulation key
 //! (from [`MlKemGenerateKey`](crate::mlkem_generate_key)) and returns the
 //! shared secret as a **masked** blob under the requested scope's masking
@@ -12,18 +12,7 @@
 //! self-describing.  Its authenticated key kind already tells the firmware
 //! which parameter set the seed belongs to.
 //!
-//! # TEMPORARY: out-of-session bring-up
-//!
-//! **This command is wired as `no_session` purely to unblock hardware
-//! bring-up and MUST be reverted to `in_session` before any PR.**  TBOR
-//! session establishment currently fails on real silicon
-//! (`SessionOpenInit` -> `TborDecodeError`), which blocks every
-//! in-session command, while the `no_session` path is proven working
-//! there by `ApiRev`.  Running out of session means the request carries
-//! no `session_id` and the private key is masked under a hardcoded
-//! development key rather than a partition masking key, so there is
-//! **no authentication, no authorization and no key protection**.
-//! Not fit to ship.
+//! Requests are bound to an active session.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -49,8 +38,8 @@ pub struct TborMlKemDecapsulateReq<'a> {
     #[tbor(U8)]
     pub scope: KeyScope,
 
-    /// The masked ML-KEM decapsulation key, an AEAD-GCM-256 envelope of
-    /// 196 B: the wire ships seed-only keys.  See
+    /// The masked seed pair and expanded ML-KEM decapsulation key, in an
+    /// AEAD-GCM-256 envelope of up to 3464 B. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
     #[tbor(align = 4, buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
@@ -67,7 +56,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
 #[tbor(response, pair = TborMlKemDecapsulateReq)]
 pub struct TborMlKemDecapsulateResp<'a> {
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
-    /// requested scope's masking key.  The envelope is always 164 B.
+    /// requested scope's masking key. The envelope is always 264 B.
     #[tbor(align = 4, buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }

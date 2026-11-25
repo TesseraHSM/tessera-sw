@@ -182,10 +182,10 @@ fn create(args: &CreateArgs) -> Result<()> {
     );
     let (_, state) = load_local_recovery(&env.store)?;
     let outbox = jzon::object! {
-        version: 1, policy: hex::encode(env.policy.as_bytes()),
+        version: 2, policy: hex::encode(env.policy.as_bytes()),
         pok_remote_backup: hex::encode(backup.pok_remote_backup),
         sd_mk_backup: hex::encode(state.sd_mk_backup),
-        sender: wire::encode_evidence(&backup.evidence),
+        sender: wire::encode_identity(&backup.evidence),
         receiver: receiver,
     };
     env.store
@@ -303,8 +303,8 @@ fn join(args: &JoinArgs) -> Result<()> {
         wire::blob(&response, "policy")? == env.policy.as_bytes(),
         "resealed policy mismatch"
     );
-    env.validate_receiver(&response["sender"])?;
     let backup = wire::resealed_backup(&response)?;
+    env.validate_resealed(&backup, &prepared.evidence)?;
     progress(
         &args.state,
         "resealed",
@@ -421,8 +421,8 @@ fn restore_remote(args: &RestoreArgs) -> Result<()> {
         "resealed policy mismatch"
     );
     let backup = wire::resealed_backup(&response)?;
-    env.validate_receiver(&response["sender"])
-        .context("verify reseal sender against saved root policy and leaf SATA/SAPOTA")?;
+    env.validate_resealed(&backup, &prepared.evidence)
+        .context("verify reseal operation report and source PID against leaf SAPOTA")?;
     progress(
         &args.state,
         "resealed",

@@ -69,6 +69,7 @@ pub(crate) mod sd_restore_local_backup;
 pub(crate) mod sd_restore_peer_backup;
 pub(crate) mod sd_restore_remote_backup;
 pub(crate) mod sd_sealing_key_gen;
+pub(crate) mod sd_transfer;
 pub(crate) mod session_close;
 pub(crate) mod session_open_finish;
 pub(crate) mod session_open_init;
@@ -358,42 +359,35 @@ pub(crate) mod opcode {
     /// `MlDsaGenerateKey` — generate an ML-DSA (FIPS 204) keypair and
     /// return the private half **masked**, plus the public key.
     ///
-    /// TEMPORARY: currently dispatched out of session for hardware
-    /// bring-up, and served by a stub that decodes and rejects rather
-    /// than generating a key.  See [`super::mldsa_generate_key`].
+    /// In-session; see [`super::mldsa_generate_key`].
     pub(crate) const MLDSA_GENERATE_KEY: u8 = 0x26;
 
     /// `MlDsaSign` — sign a message with a caller-held masked ML-DSA key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like
-    /// `MLDSA_GENERATE_KEY`.  See [`super::mldsa_sign`].
+    /// In-session; see [`super::mldsa_sign`].
     pub(crate) const MLDSA_SIGN: u8 = 0x27;
 
     /// `MlDsaVerify` — verify a signature under a supplied public key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mldsa_verify`].
+    /// In-session; see [`super::mldsa_verify`].
     pub(crate) const MLDSA_VERIFY: u8 = 0x28;
 
     /// `MlKemGenerateKey` — generate an ML-KEM key pair and return the
     /// decapsulation key **masked**, plus the encapsulation key.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_generate_key`].
+    /// In-session; see [`super::mlkem_generate_key`].
     pub(crate) const MLKEM_GENERATE_KEY: u8 = 0x29;
 
     /// `MlKemEncapsulate` — encapsulate to an ML-KEM public key, returning
     /// the ciphertext and the shared secret **masked**.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_encapsulate`].
+    /// In-session; see [`super::mlkem_encapsulate`].
     pub(crate) const MLKEM_ENCAPSULATE: u8 = 0x2A;
 
     /// `MlKemDecapsulate` — decapsulate a ciphertext with a caller-held
     /// masked ML-KEM key, returning the shared secret **masked**.
     ///
-    /// TEMPORARY: dispatched out of session for hardware bring-up, like the
-    /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
+    /// In-session; see [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
 
     /// `AesGcmEncryptDecrypt` — AES-256-GCM over OOB in / out SGL blocks
