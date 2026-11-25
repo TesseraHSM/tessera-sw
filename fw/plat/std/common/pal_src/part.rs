@@ -532,12 +532,16 @@ impl StdHsmPal {
     #[allow(clippy::mut_from_ref)]
     #[inline]
     fn table_mut(&self) -> &mut PartitionTable {
+        // SAFETY: callers follow the module's single-threaded Embassy borrowing
+        // model, excluding overlapping table borrows during mutation.
         unsafe { &mut *self.part_table.get() }
     }
 
     #[allow(unsafe_code)]
     #[inline]
     fn table(&self) -> &PartitionTable {
+        // SAFETY: callers follow the module's single-threaded Embassy borrowing
+        // model, excluding table mutation while the shared borrow is live.
         unsafe { &*self.part_table.get() }
     }
 

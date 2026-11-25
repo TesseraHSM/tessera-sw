@@ -112,6 +112,8 @@ fn bump<'a>(
     // reuses the slot after the IO completes (which freezes any prior
     // borrows). The returned `&mut [u8]` therefore aliases nothing.
     let ptr = unsafe { ptr_for(pool, slot, heap).add(start) };
+    // SAFETY: ptr is non-null and points to size initialized bytes within the
+    // pool allocation. The range is disjoint and remains valid as described above.
     Ok(unsafe { core::slice::from_raw_parts_mut(ptr, size) })
 }
 

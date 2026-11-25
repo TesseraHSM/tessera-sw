@@ -428,6 +428,7 @@ impl StdHsmPal {
     #[allow(unsafe_code)]
     async fn ensure_leaf_cert(&self, pid: u8) -> HsmResult<()> {
         {
+            // SAFETY: single-threaded Embassy access; this borrow ends before any await.
             let table = unsafe { &*self.part_table.get() };
             let idx = pid as usize;
             if idx >= NUM_PARTITIONS {
@@ -444,6 +445,8 @@ impl StdHsmPal {
         }
 
         let public_key = {
+            // SAFETY: single-threaded Embassy access; the key is owned and this
+            // table borrow ends before any await.
             let table = unsafe { &*self.part_table.get() };
             let entry = &table.entries[pid as usize];
             let key_id = entry.id_key_id.ok_or(HsmError::PartPropNotFound)?;
@@ -498,6 +501,8 @@ impl StdHsmPal {
             .await?;
 
         // Build final cert and cache.
+        // SAFETY: earlier table borrows have ended, and this single-threaded
+        // cache update does not await or otherwise interleave with table access.
         let table = unsafe { &mut *self.part_table.get() };
         let entry = &mut table.entries[pid as usize];
         let len = cert_builder::build_leaf_cert(&params, &r, &s, &mut entry.leaf_cert)
@@ -541,6 +546,8 @@ impl HsmCertStore for StdHsmPal {
 
         self.ensure_leaf_cert(pid).await?;
 
+        // SAFETY: partition-table access follows the single-threaded Embassy
+        // borrowing model documented in crate::part.
         let table = unsafe { &*self.part_table.get() };
         let entry = &table.entries[pid as usize];
 
@@ -617,6 +624,8 @@ impl HsmCertStore for StdHsmPal {
 
         self.ensure_leaf_cert(pid).await?;
 
+        // SAFETY: single-threaded Embassy access; copying the certificate does
+        // not await or interleave with partition-table mutation.
         let table = unsafe { &*self.part_table.get() };
         let entry = &table.entries[pid as usize];
         let len = entry.leaf_cert_len;
