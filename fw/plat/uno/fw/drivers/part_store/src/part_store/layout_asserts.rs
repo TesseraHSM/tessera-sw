@@ -40,3 +40,21 @@ const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) + 2 <= SHADOW
 const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) < SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(SHADOW_HEAD + SHADOW_RUN <= SHADOW_TAIL);
 const _: () = assert!(SHADOW_TAIL + SHADOW_RUN <= STORE_SIZE);
+
+// When an update arrives from another firmware family, the SP rebuilds this
+// store before the cores start. It writes a reset slot (`version`, every key
+// handle absent) and, for each function the host gave resources, `state`,
+// `res_mask`, the identity, and the VM launch GUID, at these offsets. Moving
+// any of them breaks that contract.
+const _: () = assert!(STORE_VERSION == 1);
+const _: () = assert!(PART_STORE_T_BASE == 0x000B_B000);
+const _: () = assert!(core::mem::offset_of!(Storage, version) == 0);
+const _: () = assert!(core::mem::offset_of!(Storage, vm_launch_guid) == 554);
+const _: () = assert!(core::mem::offset_of!(Storage, partition_id_valid) == 570);
+const _: () = assert!(core::mem::offset_of!(Storage, partition_identifier) == 572);
+const _: () = assert!(core::mem::offset_of!(PartitionIdentifier, priv_key) == ID_LEN);
+const _: () = assert!(core::mem::offset_of!(Storage, state) == 2444);
+const _: () = assert!(core::mem::offset_of!(Storage, res_mask) == 2452);
+const _: () = assert!(core::mem::offset_of!(Storage, id_key_id) == 2900);
+const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) == 2900 + 9 * 2);
+const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) == 2900 + 10 * 2);

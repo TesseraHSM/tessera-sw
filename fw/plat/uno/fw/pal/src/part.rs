@@ -241,7 +241,8 @@ impl UnoHsmPal {
         part.set_state(HsmPartState::Unallocated);
     }
 
-    /// Creates the partition's `Masked_BK_BOOT` once at allocation.
+    /// Creates the partition's `Masked_BK_BOOT` once at allocation, or at
+    /// enable for a partition the SP rebuilt after a cross-family update.
     ///
     /// Generates a fresh random `BK_BOOT`, envelopes it under the
     /// partition's `BKx`, and persists only the masked form.  The raw
@@ -628,9 +629,12 @@ impl UnoHsmPal {
     ///   recorded and key provisioning is *deferred* to [`part_alloc`], which
     ///   runs when `SetResource` arrives.
     ///
+    /// An `Allocated` partition without a `Masked_BK_BOOT` (one the SP
+    /// rebuilt after a cross-family update) gets one first, as at allocation.
+    ///
     /// Re-enabling an already-`Enabled` partition preserves its keys, PSKs,
     /// and nonce.
-    /// Certificates and BK_BOOT are out of scope.
+    /// Certificates are out of scope.
     ///
     /// A PF left `Faulted` by a failed PCIe-reset free is freed again first,
     /// because its enable arrives before the `SetResource` whose
@@ -649,6 +653,12 @@ impl UnoHsmPal {
         match part.state()? {
             HsmPartState::Allocated | HsmPartState::Disabled => {
                 self.restore_identity(pid).await?;
+                // A store the SP rebuilt after an update from another firmware
+                // family carries the resources and identity but none of the
+                // HSM-derived key material.
+                if part.masked_bk_boot().is_empty() {
+                    self.provision_masked_bk_boot(pid).await?;
+                }
                 self.provision_enabled_keys(pid).await?;
                 part.bake_default_psks();
                 part.set_state(HsmPartState::Enabled);
