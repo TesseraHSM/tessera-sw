@@ -14,7 +14,6 @@ use std::path::Path;
 
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
-use tsra_api::HsmGenericSecretKeyUnmaskAlgo;
 use tsra_api::HsmHashAlgo;
 use tsra_api::HsmHkdfAlgo;
 use tsra_api::HsmKeyClass;
@@ -22,6 +21,7 @@ use tsra_api::HsmKeyCommonProps;
 use tsra_api::HsmKeyKind;
 use tsra_api::HsmKeyManager;
 use tsra_api::HsmKeyPropsBuilder;
+use tsra_api::HsmSharedSecretKeyUnmaskAlgo;
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
@@ -140,7 +140,7 @@ impl HkdfHandler for TsraHkdf {
         // Unmask the IKM, derive, mask the result; both handles are ephemeral
         // — the blobs are the persistent forms.
         let masked = data.with_session(|session| {
-            let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+            let mut unmask = HsmSharedSecretKeyUnmaskAlgo::default();
             let ikm_key = HsmKeyManager::unmask_key(session, &mut unmask, &ikm_blob)
                 .map_err(|e| EngineError::wrap("unmask HKDF IKM", e))?;
 

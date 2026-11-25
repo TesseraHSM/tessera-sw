@@ -368,8 +368,8 @@ pub unsafe extern "C" fn tsra_key_get_prop(
                 let key = HsmRsaPrivateKey::try_from(key_handle)?;
                 get_key_prop(key, prop)
             }
-            HandleType::GenericSecretKey => {
-                let key = HsmGenericSecretKey::try_from(key_handle)?;
+            HandleType::SharedSecretKey => {
+                let key = HsmSharedSecretKey::try_from(key_handle)?;
                 get_key_prop(key, prop)
             }
             HandleType::HmacKey => {

@@ -99,7 +99,7 @@ fn expected_op_calls(error: &FaultError, injected_faults: u32) -> u32 {
 /// Derive an HMAC key from a shared secret via HKDF.
 fn hkdf_derive_hmac_key(
     session: &HsmSession,
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     key_kind: HsmKeyKind,
     bits: u32,
 ) -> HsmHmacKey {
@@ -287,7 +287,7 @@ fn hmac_verify(key: &HsmHmacKey, data: &[u8], signature: &[u8]) -> HsmResult<boo
 /// Derive an AES-256 key from a shared secret via HKDF.
 fn hkdf_derive_aes_key(
     session: &HsmSession,
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
 ) -> HsmResult<HsmAesKey> {
     let aes_props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -307,7 +307,7 @@ fn hkdf_derive_aes_key(
 }
 
 /// Set up a shared secret for HKDF tests (ECDH without faults).
-fn setup_shared_secret(session: &HsmSession) -> HsmGenericSecretKey {
+fn setup_shared_secret(session: &HsmSession) -> HsmSharedSecretKey {
     let (priv_a, _pub_a) = generate_ecc_derive_key_pair(session, HsmEccCurve::P256);
     let (_priv_b, pub_b) = generate_ecc_derive_key_pair(session, HsmEccCurve::P256);
     ecdh_derive(session, &priv_a, &pub_b).expect("ECDH derivation failed")

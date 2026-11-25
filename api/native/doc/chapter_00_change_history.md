@@ -71,4 +71,11 @@
 |            | using implicit 32-byte AAD; SDK and firmware must be updated   |
 |            | together. Out-of-order completions remain supported.           |
 
+| 11/16/2026 | Renamed Rust `HsmGenericSecretKey` to `HsmSharedSecretKey` and |
+|            | `HsmGenericSecretKeyUnmaskAlgo` to `HsmSharedSecretKeyUnmaskAlgo` |
+|            | (source-breaking; update callers, no old-name aliases). C ABI, |
+|            | `TSRA_KEY_KIND_SHARED_SECRET = 5`, DDI formats, and key behavior |
+|            | are unchanged. The wrapper still carries AES/HMAC KDF outputs. |
+|            | A future HSM generic-secret type is not introduced here.       |
+
 \pagebreak

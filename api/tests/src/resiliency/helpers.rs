@@ -116,7 +116,7 @@ pub(crate) fn ecdh_derive(
     session: &HsmSession,
     priv_key: &HsmEccPrivateKey,
     peer_pub_key: &HsmEccPublicKey,
-) -> HsmResult<HsmGenericSecretKey> {
+) -> HsmResult<HsmSharedSecretKey> {
     let pub_key_der = peer_pub_key
         .pub_key_der_vec()
         .expect("Failed to get peer public key DER");

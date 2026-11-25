@@ -111,8 +111,8 @@ pub(crate) fn ecdh_derive_key(
     let derived_key =
         HsmKeyManager::derive_key(session, &mut ecdh_algo, ecc_priv_key, derived_key_props)?;
 
-    // Allocate handle for the derived generic secret key
-    let handle = HANDLE_TABLE.alloc_handle(HandleType::GenericSecretKey, Box::new(derived_key));
+    // Allocate handle for the derived shared secret key
+    let handle = HANDLE_TABLE.alloc_handle(HandleType::SharedSecretKey, Box::new(derived_key));
 
     Ok(handle)
 }
@@ -166,8 +166,8 @@ pub(crate) fn hkdf_derive_key(
     };
 
     // Get the base secret key
-    let base_secret: &HsmGenericSecretKey =
-        HANDLE_TABLE.as_ref(base_key_handle, HandleType::GenericSecretKey)?;
+    let base_secret: &HsmSharedSecretKey =
+        HANDLE_TABLE.as_ref(base_key_handle, HandleType::SharedSecretKey)?;
 
     // Create HKDF algorithm
     let mut hkdf_algo = HsmHkdfAlgo::new(hash_algo, salt, info)?;
@@ -251,8 +251,8 @@ pub(crate) fn kbkdf_counter_derive_key(
     };
 
     // Get the base secret key
-    let base_secret: &HsmGenericSecretKey =
-        HANDLE_TABLE.as_ref(base_key_handle, HandleType::GenericSecretKey)?;
+    let base_secret: &HsmSharedSecretKey =
+        HANDLE_TABLE.as_ref(base_key_handle, HandleType::SharedSecretKey)?;
 
     // Create KBKDF algorithm
     let mut kbkdf_algo = HsmKbkdfAlgo::new(hash_algo, label, context)?;
@@ -266,9 +266,8 @@ pub(crate) fn kbkdf_counter_derive_key(
     )?;
 
     // Determine the handle type based on the derived key kind.
-    // KBKDF derives generic-secret keys; `api/lib` validation
-    // (HsmGenericSecretKey::validate_props) only admits AES and HMAC kinds, so no
-    // AES-GCM arm is needed here.
+    // KBKDF returns AES or HMAC material in a shared-secret wrapper.
+    // AES-GCM is not a supported output kind.
     let handle = match derived_key_props.kind() {
         HsmKeyKind::Aes => {
             let aes_key: HsmAesKey = derived_key.try_into()?;

@@ -916,7 +916,7 @@ fn exec_ecdh_derive(
     Ok(())
 }
 
-fn exec_hkdf_derive(session: &HsmSession, shared_secret: &HsmGenericSecretKey) -> HsmResult<()> {
+fn exec_hkdf_derive(session: &HsmSession, shared_secret: &HsmSharedSecretKey) -> HsmResult<()> {
     let hmac_props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::HmacSha256)

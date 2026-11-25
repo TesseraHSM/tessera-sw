@@ -57,7 +57,7 @@ fn test_message_bytes(seed: u8, len: usize) -> Vec<u8> {
 pub(crate) fn derive_ecdh_shared_secrets(
     session: &HsmSession,
     curve: HsmEccCurve,
-) -> (HsmGenericSecretKey, HsmGenericSecretKey) {
+) -> (HsmSharedSecretKey, HsmSharedSecretKey) {
     let (priv_key_a, pub_key_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true)
         .expect("Failed to generate key pair for party A");
 
@@ -76,7 +76,7 @@ pub(crate) fn derive_ecdh_shared_secrets(
 fn derive_hmac_key_from_shared_secret(
     session: &HsmSession,
     hkdf_algo: &mut HsmHkdfAlgo,
-    shared_secret: &HsmGenericSecretKey,
+    shared_secret: &HsmSharedSecretKey,
     key_kind: HsmKeyKind,
 ) -> HsmHmacKey {
     let bits = hmac_key_kind_to_bits(key_kind);

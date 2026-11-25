@@ -42,7 +42,7 @@ pub(crate) enum HandleType {
     HmacKey,
     HmacSignCtx,
     HmacVerifyCtx,
-    GenericSecretKey,
+    SharedSecretKey,
     RsaSignCtx,
     RsaVerifyCtx,
     SealingKey,

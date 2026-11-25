@@ -14,7 +14,7 @@ use crate::algo::ecc::*;
 fn derive_shared_secret_for_unmask_test(
     session: &HsmSession,
     curve: HsmEccCurve,
-) -> HsmGenericSecretKey {
+) -> HsmSharedSecretKey {
     let (_priv_key_a, pub_key_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true)
         .expect("Failed to generate key pair for party A");
 
@@ -43,10 +43,7 @@ fn derive_shared_secret_for_unmask_test(
 }
 
 /// Compares key properties between original and unmasked keys.
-fn compare_shared_secret_properties(
-    original: &HsmGenericSecretKey,
-    unmasked: &HsmGenericSecretKey,
-) {
+fn compare_shared_secret_properties(original: &HsmSharedSecretKey, unmasked: &HsmSharedSecretKey) {
     assert_eq!(original.class(), unmasked.class());
     assert_eq!(original.kind(), unmasked.kind());
     assert_eq!(original.bits(), unmasked.bits());
@@ -56,8 +53,8 @@ fn compare_shared_secret_properties(
 /// Verifies original and unmasked keys behave identically.
 fn compare_shared_secret_functionality(
     _session: &HsmSession,
-    original: &HsmGenericSecretKey,
-    unmasked: &HsmGenericSecretKey,
+    original: &HsmSharedSecretKey,
+    unmasked: &HsmSharedSecretKey,
 ) {
     // Use both keys in a simple operation (derive or usage)
     let bits_original = original.bits();
@@ -71,7 +68,7 @@ fn compare_shared_secret_functionality(
 /// This test:
 /// 1. Derives a shared secret key using ECDH
 /// 2. Gets the masked key blob
-/// 3. Unmasks it using HsmGenericSecretKeyUnmaskAlgo
+/// 3. Unmasks it using HsmSharedSecretKeyUnmaskAlgo
 /// 4. Verifies the properties match
 fn test_shared_secret_unmask_common(session: &HsmSession, curve: HsmEccCurve) {
     // Derive a shared secret key
@@ -83,7 +80,7 @@ fn test_shared_secret_unmask_common(session: &HsmSession, curve: HsmEccCurve) {
         .expect("Failed to get masked key");
 
     // Unmask the key
-    let mut unmask_algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut unmask_algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let unmasked_key = HsmKeyManager::unmask_key(session, &mut unmask_algo, &masked_key)
         .expect("Failed to unmask shared secret key");
 
@@ -103,7 +100,7 @@ fn run_unmask_corrupted_blob_test(session: &HsmSession, curve: HsmEccCurve) {
     let mut blob = key.masked_key_vec().unwrap();
     blob[0] ^= 0xFF; // corrupt first byte
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(session, &mut algo, &blob);
 
     assert!(result.is_err(), "Corrupted blob should fail");
@@ -113,7 +110,7 @@ fn run_unmask_corrupted_blob_test(session: &HsmSession, curve: HsmEccCurve) {
 
 /// Verifies unmask fails for empty blob.
 fn run_unmask_empty_blob_test(session: &HsmSession) {
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(session, &mut algo, &[]);
 
     assert!(result.is_err(), "Empty blob should fail");
@@ -123,7 +120,7 @@ fn run_unmask_empty_blob_test(session: &HsmSession) {
 fn run_unmask_random_blob_test(session: &HsmSession) {
     let random_blob = vec![1, 2, 3, 4, 5];
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(session, &mut algo, &random_blob);
 
     assert!(result.is_err(), "Random blob should fail");
@@ -135,7 +132,7 @@ fn run_unmasked_key_functional_test(session: &HsmSession, curve: HsmEccCurve) {
 
     let blob = original.masked_key_vec().unwrap();
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let unmasked = HsmKeyManager::unmask_key(session, &mut algo, &blob).unwrap();
 
     // Try deriving again using unmasked key (if allowed)
@@ -152,7 +149,7 @@ fn run_unmask_twice_test(session: &HsmSession, curve: HsmEccCurve) {
     let key = derive_shared_secret_for_unmask_test(session, curve);
     let blob = key.masked_key_vec().unwrap();
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
 
     let k1 = HsmKeyManager::unmask_key(session, &mut algo, &blob).expect("First unmask failed");
 
@@ -177,12 +174,12 @@ fn run_unmask_wrong_context_blob_test(session: &HsmSession) {
     let blob = key.masked_key_vec().unwrap();
 
     // Try to unmask in a context expecting P-256 behavior (implicitly different)
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(session, &mut algo, &blob);
 
     assert!(
         result.is_ok(),
-        "Generic-secret unmasking should succeed for valid masked blob: {:?}",
+        "Shared-secret unmasking should succeed for valid masked blob: {:?}",
         result.as_ref().err()
     );
 
@@ -241,7 +238,7 @@ fn run_unmask_truncated_blob_test(session: &HsmSession, curve: HsmEccCurve) {
     let mut blob = key.masked_key_vec().unwrap();
     blob.truncate(blob.len() / 2); // cut in half
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(session, &mut algo, &blob);
 
     assert!(result.is_err(), "Truncated blob should fail");
@@ -274,7 +271,7 @@ fn test_shared_secret_unmask_p521(session: HsmSession) {
 /// Verifies unmask fails for malformed blob
 #[session_test]
 fn test_unmask_malformed_blob(session: HsmSession) {
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
 
     let malformed = vec![0xAA; 10]; // invalid format
     let result = HsmKeyManager::unmask_key(&session, &mut algo, &malformed);
@@ -463,7 +460,7 @@ fn test_unmask_after_original_deleted(session: HsmSession) {
     // delete original BEFORE unmask
     HsmKeyManager::delete_key(key).unwrap();
 
-    let mut algo = HsmGenericSecretKeyUnmaskAlgo::default();
+    let mut algo = HsmSharedSecretKeyUnmaskAlgo::default();
     let result = HsmKeyManager::unmask_key(&session, &mut algo, &blob);
 
     assert!(
