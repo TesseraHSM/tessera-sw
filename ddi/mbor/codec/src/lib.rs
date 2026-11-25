@@ -3,7 +3,6 @@
 
 #![cfg_attr(not(feature = "fuzzing"), no_std)]
 
-
 mod decode;
 mod encode;
 mod len;
