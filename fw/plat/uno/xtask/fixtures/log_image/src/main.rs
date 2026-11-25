@@ -22,8 +22,7 @@ use cortex_m_rt::entry;
 use tsra_fw_hsm_core_tracing::error;
 use tsra_fw_hsm_core_tracing::info;
 use tsra_fw_hsm_core_tracing::warn;
-use tsra_fw_uno_trace::error_text;
-use tsra_fw_uno_trace::warn_text;
+use tsra_fw_uno_trace::error_uart;
 
 /// A value that the optimizer can't predict, for the calls to log.
 static mut INPUT: u32 = 0;
@@ -83,18 +82,11 @@ fn input() -> u32 {
     unsafe { (&raw const INPUT).read_volatile() }
 }
 
-/// The value of the `error_text!` call. The image keeps this function only
+/// The value of the `error_uart!` call. The image keeps this function only
 /// when the call evaluates its value.
 #[inline(never)]
 fn text_only_value() -> u32 {
     input() ^ 0x5c
-}
-
-/// The value of the `warn_text!` call. The image keeps this function only
-/// when the call evaluates its value.
-#[inline(never)]
-fn warn_text_value() -> u32 {
-    input() ^ 0x5d
 }
 
 #[entry]
@@ -123,16 +115,12 @@ fn main() -> ! {
     core::hint::black_box(__hsm_trace_emit as fn(u8, &str, core::fmt::Arguments<'_>));
     // Text output prints this line; debug-log output compiles it to nothing,
     // and doesn't evaluate its value (TEXT_ONLY in xtask/src/log_fixture.rs).
-    error_text!(
+    error_uart!(
         "fixture",
         Code(0x5c),
         "a text-only line: {:?}",
         text_only_value()
     );
-    // Text output prints this line when its level prints warnings;
-    // debug-log output compiles it to nothing, and doesn't evaluate its value
-    // (WARN_TEXT in xtask/src/log_fixture.rs).
-    warn_text!("fixture", "a text-only warning: {:?}", warn_text_value());
     tsra_log_fixture_dep::report(depth);
     variant(depth);
     fail_case(depth);

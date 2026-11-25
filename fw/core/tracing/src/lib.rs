@@ -69,7 +69,7 @@ macro_rules! __on {
 
 /// Prints a call through the text hook, and never records. For `error!`, the
 /// message ends with ` [err:<code>]`, with the code as eight hex digits. The
-/// Uno trace crate's `error_text!` uses it too.
+/// Uno trace crate's `error_uart!` uses it too.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __text {

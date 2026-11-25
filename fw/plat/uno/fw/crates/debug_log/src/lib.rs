@@ -75,7 +75,7 @@
 //! fails to compile, so a line with more values than a record holds keeps
 //! only the values that fit. A line that no record may hold, such as the
 //! fault crate's development stack dump, prints with the Uno trace crate's
-//! `error_text!`, which never records. Each call in Uno code also leaves a
+//! `error_uart!`, which never records. Each call in Uno code also leaves a
 //! marker in the `.tsra_log_sites` section, which isn't loaded: the call's
 //! crate, target, message, file, and line. The Uno xtask reads the markers,
 //! and fails when one target and message comes from more than one line.

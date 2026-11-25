@@ -14,10 +14,12 @@
 //! With `backend-uart`, each line holds the UART lock that CP1 shares with
 //! CP0.
 //!
-//! `error_text!` takes the same arguments as `error!`, and `warn_text!` the
-//! same as `warn!`. Each prints with text output when one of this crate's
-//! `level-*` features prints its level, and compiles to nothing otherwise.
-//! Neither records, so they suit lines that no debug-log record holds.
+//! `error_uart!` takes the same arguments as `error!`. It prints with text
+//! output when one of this crate's `level-*` features is on, to the UART
+//! with `backend-uart` or through semihosting with `backend-semihosting`,
+//! and compiles to nothing otherwise. It never records, so it suits only
+//! lines that no debug-log record may hold, such as the fault crate's
+//! development stack dump.
 //!
 //! # Usage
 //!
@@ -51,7 +53,7 @@ pub extern crate tsra_fw_hsm_core_tracing as tracing;
     feature = "level-warn",
     feature = "level-error"
 ))]
-macro_rules! error_text {
+macro_rules! error_uart {
     ($($t:tt)*) => { $crate::tracing::__text!(error, b'E', $($t)*) };
 }
 /// Prints like `error!` with text output, and compiles to nothing otherwise.
@@ -64,31 +66,6 @@ macro_rules! error_text {
     feature = "level-warn",
     feature = "level-error"
 )))]
-macro_rules! error_text {
-    ($($t:tt)*) => {};
-}
-
-/// Prints like `warn!` with text output, and compiles to nothing otherwise.
-/// It never records.
-#[macro_export]
-#[cfg(any(
-    feature = "level-trace",
-    feature = "level-debug",
-    feature = "level-info",
-    feature = "level-warn"
-))]
-macro_rules! warn_text {
-    ($($t:tt)*) => { $crate::tracing::__text!(warn, b'W', $($t)*) };
-}
-/// Prints like `warn!` with text output, and compiles to nothing otherwise.
-/// It never records.
-#[macro_export]
-#[cfg(not(any(
-    feature = "level-trace",
-    feature = "level-debug",
-    feature = "level-info",
-    feature = "level-warn"
-)))]
-macro_rules! warn_text {
+macro_rules! error_uart {
     ($($t:tt)*) => {};
 }

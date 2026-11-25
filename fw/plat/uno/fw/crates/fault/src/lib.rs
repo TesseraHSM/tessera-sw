@@ -28,7 +28,7 @@
 //! registers it captures, and `CFSR`, `MMFAR`, and `BFAR`. A HardFault logs
 //! the same marker after a stack overflow; the dump's `CFSR` shows the
 //! cause. Only the development stack dump (`fault-stackdump`) prints with
-//! `error_text!`, which never records, because no record may hold stack
+//! `error_uart!`, which never records, because no record may hold stack
 //! contents.
 //!
 //! The panic, HardFault, and explicit-crash handlers log after they save the
@@ -57,7 +57,7 @@
 //! [`HsmError::UnexpectedException`], or [`HsmError::ExplicitCrash`] — so
 //! fault output is greppable by code and exception type. The `trace-uart` /
 //! `trace-semihosting` features select `level-info`, which compiles `error!`
-//! and `error_text!` in.
+//! and `error_uart!` in.
 //!
 //! # FIPS error state
 //!
@@ -123,7 +123,7 @@ use tsra_fw_uno_reg_soc::sys_mbx::S2H_MBX_INSTS;
 #[cfg(not(feature = "semihosting"))]
 use tsra_fw_uno_reg_soc::sys_mbx::SYS_MBX_BASE;
 #[cfg(feature = "fault-stackdump")]
-use tsra_fw_uno_trace::error_text;
+use tsra_fw_uno_trace::error_uart;
 
 /// Mailbox0, which the SP watches for this core's error interrupt.
 #[cfg(not(feature = "semihosting"))]
@@ -543,7 +543,7 @@ unsafe fn DefaultHandler(irqn: i16) -> ! {
 /// Performs volatile reads of arbitrary stack addresses; the range may run
 /// past valid RAM. Intended for debug builds on hardware only.
 //
-// Reads are consumed only by `error_text!`, which compiles out unless a trace
+// Reads are consumed only by `error_uart!`, which compiles out unless a trace
 // level is enabled; allow keeps a `fault-stackdump`-without-trace build clean.
 #[cfg(feature = "fault-stackdump")]
 #[allow(unused_variables)]
@@ -553,7 +553,7 @@ unsafe fn stack_dump(sp: u32) {
     // corrupted or misaligned at the fault, so align the base down first to
     // avoid undefined behaviour while keeping the dump word-oriented.
     let base = sp & !0b11;
-    error_text!("fault", HsmError::HardFault, "stack dump @ {:#010x}:", base);
+    error_uart!("fault", HsmError::HardFault, "stack dump @ {:#010x}:", base);
     for row in 0..ROWS {
         let addr = base.wrapping_add(row * 16);
         let p = addr as *const u32;
@@ -566,7 +566,7 @@ unsafe fn stack_dump(sp: u32) {
                 core::ptr::read_volatile(p.add(3)),
             )
         };
-        error_text!(
+        error_uart!(
             "fault",
             HsmError::HardFault,
             "  {:#010x}: {:08x} {:08x} {:08x} {:08x}",
