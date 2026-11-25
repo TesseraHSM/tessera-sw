@@ -679,7 +679,8 @@ mod session_gate_tests {
     fn flush_success_and_absent_session_report_closed_completion() {
         for sess_id in [0, 7, u16::MAX] {
             for result in [Ok(()), Err(HsmError::SessionNotFound)] {
-                let reply = flush_session_completion(sess_id, result).unwrap();
+                let reply = flush_session_completion(sess_id, result)
+                    .expect("session completion flush should succeed");
                 assert!(reply.resp.is_none());
                 assert!(!reply.ddi_failed);
                 assert_eq!(

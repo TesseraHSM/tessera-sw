@@ -40,7 +40,7 @@ fn helper_get_certificate_chain(dev: &mut <DdiTest as Ddi>::Dev) -> (u8, [u8; 32
         let result = helper_get_certificate(dev, cert_id);
         assert!(result.is_ok(), "result {:?}", result);
 
-        let resp = result.unwrap();
+        let resp = result.expect("helper get certificate chain result should succeed");
         assert!(
             !resp.data.certificate.as_slice().is_empty(),
             "certificate {} must not be empty",
@@ -93,7 +93,9 @@ fn test_get_cert_chain_length_multiple_times() {
             for i in 0..loop_count {
                 let result = helper_get_cert_chain_info(dev);
                 assert!(result.is_ok(), "result {:?}", result);
-                let resp = result.unwrap();
+                let resp = result.expect(
+                    "test get certificate chain length multiple times result should succeed",
+                );
                 let num_certs = resp.data.num_certs;
                 let thumbprint = resp.data.thumbprint.data_take();
 
@@ -138,7 +140,9 @@ fn test_get_cert_chain_multithread() {
 
                 let thread = thread::spawn(move || {
                     let ddi = DdiTest::default();
-                    let mut dev = ddi.open_dev(device_path.as_str()).unwrap();
+                    let mut dev = ddi
+                        .open_dev(device_path.as_str())
+                        .expect("device opening should succeed");
 
                     thread::sleep(std::time::Duration::from_secs(2));
 
@@ -157,7 +161,8 @@ fn test_get_cert_chain_multithread() {
             for thread in threads {
                 let result = thread.join();
                 assert!(result.is_ok(), "result {:?}", result);
-                let (num_cert, thumbprint) = result.unwrap();
+                let (num_cert, thumbprint) =
+                    result.expect("test get certificate chain multithread result should succeed");
 
                 match prev_num_cert {
                     Some(prev) => {
@@ -198,11 +203,15 @@ fn test_get_cert_chain_info_multithread() {
                     thread::sleep(std::time::Duration::from_secs(2));
 
                     let ddi = DdiTest::default();
-                    let dev = ddi.open_dev(device_path.as_str()).unwrap();
+                    let dev = ddi
+                        .open_dev(device_path.as_str())
+                        .expect("device opening should succeed");
 
                     let result = helper_get_cert_chain_info(&dev);
                     assert!(result.is_ok(), "result {:?}", result);
-                    let resp = result.unwrap();
+                    let resp = result.expect(
+                        "test get certificate chain info multithread result should succeed",
+                    );
                     let num_certs = resp.data.num_certs;
                     let thumbprint = resp.data.thumbprint.data_take();
 
@@ -219,7 +228,8 @@ fn test_get_cert_chain_info_multithread() {
             for thread in threads {
                 let result = thread.join();
                 assert!(result.is_ok(), "result {:?}", result);
-                let (num_cert, thumbprint) = result.unwrap();
+                let (num_cert, thumbprint) = result
+                    .expect("test get certificate chain info multithread result should succeed");
 
                 match prev_num_cert {
                     Some(prev) => {

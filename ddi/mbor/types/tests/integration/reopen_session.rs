@@ -109,7 +109,7 @@ fn test_reopen_session_without_revision() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
             ));
         },
@@ -159,7 +159,7 @@ fn test_reopen_session() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
             assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
@@ -303,7 +303,7 @@ fn test_reopen_session_mismatch_sessions() {
                     .expect("Failed to create empty masked unwrapping key"),
             );
 
-            let file_handle = ddi.open_dev(path).unwrap();
+            let file_handle = ddi.open_dev(path).expect("device opening should succeed");
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                 &file_handle,
                 TEST_CRED_ID,
@@ -321,7 +321,7 @@ fn test_reopen_session_mismatch_sessions() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -682,7 +682,7 @@ fn test_reopen_session_multiple() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
                 assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
@@ -752,7 +752,7 @@ fn test_reopen_session_tamper_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -805,7 +805,7 @@ fn test_reopen_session_tamper_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -1139,7 +1139,7 @@ fn test_reopen_session_verify_nonce_change() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
             assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
@@ -1204,7 +1204,7 @@ fn test_reopen_session_verify_public_key_not_change() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
             assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
@@ -1282,7 +1282,7 @@ fn test_reopen_session_null_id_then_proper_id() {
                 );
 
                 assert_ne!(
-                    old_nonce.unwrap(),
+                    old_nonce.expect("old nonce should be available"),
                     encrypted_credential.nonce,
                     "Nonce is expected to be different now since crypto portion was successful previously"
                 );
@@ -1298,7 +1298,7 @@ fn test_reopen_session_null_id_then_proper_id() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert_eq!(resp.hdr.sess_id, Some(setup_res.session_id));
                 assert_eq!(resp.hdr.op, DdiOp::ReopenSession);
@@ -1422,7 +1422,7 @@ fn test_reopen_session_dest_smaller_svn() {
 
             let current_svn = extract_svn_from_bmk(setup_res.partition_bmk.as_slice());
             assert!(current_svn.is_some(), "Failed to extract SVN from BMK");
-            let current_svn = current_svn.unwrap();
+            let current_svn = current_svn.expect("current svn should be available");
             let updated_svn = current_svn + 1;
             let mut partition_bmk_copy = setup_res.partition_bmk;
             update_svn_in_bmk(partition_bmk_copy.as_mut_slice(), updated_svn);
@@ -1433,16 +1433,17 @@ fn test_reopen_session_dest_smaller_svn() {
                 None,
                 Some(DdiApiRev { major: 1, minor: 0 }),
             )
-            .unwrap();
+            .expect("DDI get establish credential encryption key should succeed");
             // Establish credential
             let nonce = resp.data.nonce;
-            let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+            let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+                .expect("device credential key construction should succeed");
             let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
                 .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-                .unwrap();
+                .expect("credential key derivation from DER should succeed");
             let ddi_encrypted_credential = establish_cred_encryption_key
                 .encrypt_establish_credential(TEST_CRED_ID, TEST_CRED_PIN, nonce)
-                .unwrap();
+                .expect("credential establishment encryption should succeed");
             let (signature, pota_pub_key) = helper_get_pota_endorsement(dev);
 
             let resp = helper_establish_credential(
@@ -1554,7 +1555,7 @@ fn test_reopen_session_after_lm_with_max() {
             //
             // Keep the file handles alive in a Vec so the driver does not flush sessions
             let try_open_new_session = || {
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &new_dev,
                     TEST_CRED_ID,
@@ -1584,7 +1585,7 @@ fn test_reopen_session_after_lm_with_max() {
                         last_idx,
                         resp
                     );
-                    let resp = resp.unwrap();
+                    let resp = resp.expect("DDI response should succeed");
                     assert!(resp.hdr.sess_id.is_some());
                     assert_eq!(resp.hdr.op, DdiOp::OpenSession);
                     assert_eq!(resp.hdr.status, DdiStatus::Success);
@@ -1598,7 +1599,7 @@ fn test_reopen_session_after_lm_with_max() {
                         resp
                     );
 
-                    let err = resp.unwrap_err();
+                    let err = resp.expect_err("DDI response should fail");
                     assert!(
                         matches!(
                             err,
@@ -1640,7 +1641,7 @@ fn test_reopen_session_after_lm_with_max() {
                 reopen_resp
             );
 
-            let reopen_resp = reopen_resp.unwrap();
+            let reopen_resp = reopen_resp.expect("DDI reopen response should succeed");
             assert_eq!(reopen_resp.hdr.op, DdiOp::ReopenSession);
             assert_eq!(reopen_resp.hdr.status, DdiStatus::Success);
             assert_eq!(
@@ -1667,7 +1668,7 @@ fn test_reopen_session_after_lm_with_max() {
             // then sanity-check the device returned to baseline by opening a fresh session
             drop(file_handles);
 
-            let sanity_dev = ddi.open_dev(path).unwrap();
+            let sanity_dev = ddi.open_dev(path).expect("device opening should succeed");
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                 &sanity_dev,
                 TEST_CRED_ID,
@@ -1743,7 +1744,7 @@ fn test_reopen_session_with_invalid_session_id() {
 
             {
                 // Session id exists but doesn't need to be reopened
-                let new_dev = ddi.open_dev(path).unwrap();
+                let new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &new_dev,
@@ -1762,12 +1763,12 @@ fn test_reopen_session_with_invalid_session_id() {
 
                 assert!(resp.is_ok(), "OpenSession should succeed: {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);
 
-                let active_session_id = resp.hdr.sess_id.unwrap();
+                let active_session_id = resp.hdr.sess_id.expect("session ID should be available");
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &new_dev,
                     TEST_CRED_ID,
@@ -1907,14 +1908,22 @@ fn extract_svn_from_bmk(bmk: &[u8]) -> Option<u64> {
         return None;
     }
 
-    let iv_len: usize =
-        u16::from_le_bytes(bmk[ALGORITHM_OFFSET..IV_LEN_OFFSET].try_into().unwrap()).into();
-    let iv_padding_len: usize =
-        u16::from_le_bytes(bmk[IV_LEN_OFFSET..IV_PADDING_OFFSET].try_into().unwrap()).into();
+    let iv_len: usize = u16::from_le_bytes(
+        bmk[ALGORITHM_OFFSET..IV_LEN_OFFSET]
+            .try_into()
+            .expect("conversion to the required type should succeed"),
+    )
+    .into();
+    let iv_padding_len: usize = u16::from_le_bytes(
+        bmk[IV_LEN_OFFSET..IV_PADDING_OFFSET]
+            .try_into()
+            .expect("conversion to the required type should succeed"),
+    )
+    .into();
     let metadata_len: usize = u16::from_le_bytes(
         bmk[IV_PADDING_OFFSET..METADATA_LEN_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
 
@@ -1934,7 +1943,7 @@ fn extract_svn_from_bmk(bmk: &[u8]) -> Option<u64> {
         return None;
     }
 
-    metadata.unwrap().svn
+    metadata.expect("metadata should be available").svn
 }
 
 // Update the SVN in the BMK metadata section
@@ -1955,14 +1964,22 @@ fn update_svn_in_bmk(bmk: &mut [u8], svn: u64) {
         return;
     }
 
-    let iv_len: usize =
-        u16::from_le_bytes(bmk[ALGORITHM_OFFSET..IV_LEN_OFFSET].try_into().unwrap()).into();
-    let iv_padding_len: usize =
-        u16::from_le_bytes(bmk[IV_LEN_OFFSET..IV_PADDING_OFFSET].try_into().unwrap()).into();
+    let iv_len: usize = u16::from_le_bytes(
+        bmk[ALGORITHM_OFFSET..IV_LEN_OFFSET]
+            .try_into()
+            .expect("conversion to the required type should succeed"),
+    )
+    .into();
+    let iv_padding_len: usize = u16::from_le_bytes(
+        bmk[IV_LEN_OFFSET..IV_PADDING_OFFSET]
+            .try_into()
+            .expect("conversion to the required type should succeed"),
+    )
+    .into();
     let metadata_len: usize = u16::from_le_bytes(
         bmk[IV_PADDING_OFFSET..METADATA_LEN_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
 
@@ -1981,7 +1998,7 @@ fn update_svn_in_bmk(bmk: &mut [u8], svn: u64) {
         tracing::error!("mbor_decode error {:?}", e);
         return;
     }
-    let mut metadata = metadata.unwrap();
+    let mut metadata = metadata.expect("metadata should be available");
     metadata.svn = Some(svn);
 
     let metadata_slot = &mut bmk[metadata_offset..metadata_offset + metadata_len];

@@ -1397,19 +1397,31 @@ mod csr_tests {
 
     /// Build a self-signed ECDSA-P384 CSR for testing.
     fn build_p384_csr() -> Vec<u8> {
-        let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
-        let ec_key = EcKey::generate(&group).unwrap();
-        let pkey = PKey::from_ec_key(ec_key).unwrap();
+        let group = EcGroup::from_curve_name(Nid::SECP384R1)
+            .expect("EC group construction from curve name should succeed");
+        let ec_key = EcKey::generate(&group).expect("key generation should succeed");
+        let pkey =
+            PKey::from_ec_key(ec_key).expect("p key construction from EC key should succeed");
 
-        let mut name = X509Name::builder().unwrap();
-        name.append_entry_by_text("CN", "test-csr").unwrap();
+        let mut name = X509Name::builder().expect("X509 name construction should succeed");
+        name.append_entry_by_text("CN", "test-csr")
+            .expect("append entry by text operation should succeed");
         let name = name.build();
 
-        let mut builder = X509ReqBuilder::new().unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_pubkey(&pkey).unwrap();
-        builder.sign(&pkey, MessageDigest::sha384()).unwrap();
-        builder.build().to_der().unwrap()
+        let mut builder = X509ReqBuilder::new().expect("X509 request construction should succeed");
+        builder
+            .set_subject_name(&name)
+            .expect("set subject name operation should succeed");
+        builder
+            .set_pubkey(&pkey)
+            .expect("set pubkey operation should succeed");
+        builder
+            .sign(&pkey, MessageDigest::sha384())
+            .expect("signature generation should succeed");
+        builder
+            .build()
+            .to_der()
+            .expect("DER encoding should succeed")
     }
 
     #[test]

@@ -329,7 +329,7 @@ fn test_secret_kbkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let derived_key_id1 = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -348,7 +348,7 @@ fn test_secret_kbkdf_helper(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_derived_key_id1, _, _) = resp.unwrap();
+    let (new_derived_key_id1, _, _) = resp.expect("DDI response should succeed");
 
     // Derive from second secret key
     // Derive first key
@@ -366,7 +366,7 @@ fn test_secret_kbkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let derived_key_id2 = resp.data.key_id;
 
     // Encrypt message with secret key 1
@@ -386,7 +386,7 @@ fn test_secret_kbkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     // Decrypt with key 2 and confirm message is same
     let resp = helper_aes_encrypt_decrypt(
@@ -400,7 +400,7 @@ fn test_secret_kbkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     assert_eq!(resp.data.msg.data_take(), msg);
     assert_eq!(resp.data.msg.len(), msg_len);
@@ -450,7 +450,7 @@ fn test_secret_kbkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let derived_key_id1 = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -469,9 +469,9 @@ fn test_secret_kbkdf_aes_gcm_helper(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (_, new_derived_key_id1, _) = resp.unwrap();
+    let (_, new_derived_key_id1, _) = resp.expect("DDI response should succeed");
     assert!(new_derived_key_id1.is_some());
-    let new_derived_key_id1 = new_derived_key_id1.unwrap();
+    let new_derived_key_id1 = new_derived_key_id1.expect("new derived key id1 should be available");
 
     // Derive from second secret key
     let resp = helper_kbkdf_derive(
@@ -488,7 +488,11 @@ fn test_secret_kbkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let derived_key_id2 = resp.unwrap().data.bulk_key_id.unwrap();
+    let derived_key_id2 = resp
+        .expect("DDI response should succeed")
+        .data
+        .bulk_key_id
+        .expect("bulk key ID should be available");
 
     // set up requests for the gcm encrypt operations
     let aad = [0x4; 32usize];
@@ -510,7 +514,7 @@ fn test_secret_kbkdf_aes_gcm_helper(
     let resp = dev.exec_op_fp_gcm(DdiAesOp::Encrypt, tsra_fp_gcm_params.clone(), data.clone());
 
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let encrypted_resp = resp.unwrap();
+    let encrypted_resp = resp.expect("DDI response should succeed");
 
     // ensure encrypted data length is the same as the original data
     // ensure encrypted data is different from original data
@@ -531,7 +535,7 @@ fn test_secret_kbkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let decrypted_resp = resp.unwrap();
+    let decrypted_resp = resp.expect("DDI response should succeed");
 
     assert_eq!(decrypted_resp.data.len(), data.len());
     assert_eq!(decrypted_resp.data, data);

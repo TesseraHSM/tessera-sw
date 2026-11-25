@@ -14,27 +14,27 @@ fn main() {
     let mut buf = [0u8; 64];
 
     // Set all fields.
-    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
-        .required(1).unwrap()
-        .opt_a(Some(2)).unwrap()
-        .opt_b(Some(3)).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).expect("optional request encoding should succeed")
+        .required(1).expect("required value lookup should succeed")
+        .opt_a(Some(2)).expect("optional a field should be available")
+        .opt_b(Some(3)).expect("optional b field should be available")
         .finish();
 
     // Early finish — skip trailing optionals.
-    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
-        .required(1).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).expect("optional request encoding should succeed")
+        .required(1).expect("required value lookup should succeed")
         .finish();
 
     // Skip intermediate optional, jump to opt_b.
-    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
-        .required(1).unwrap()
-        .opt_b(Some(3)).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).expect("optional request encoding should succeed")
+        .required(1).expect("required value lookup should succeed")
+        .opt_b(Some(3)).expect("optional b field should be available")
         .finish();
 
     // Set opt_a with None explicitly.
-    let _ = OptReq::encode(&mut buf, (1, 1)).unwrap()
-        .required(1).unwrap()
-        .opt_a(None).unwrap()
-        .opt_b(Some(3)).unwrap()
+    let _ = OptReq::encode(&mut buf, (1, 1)).expect("optional request encoding should succeed")
+        .required(1).expect("required value lookup should succeed")
+        .opt_a(None).expect("optional a field should be available")
+        .opt_b(Some(3)).expect("optional b field should be available")
         .finish();
 }

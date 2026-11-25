@@ -13,8 +13,8 @@ pub struct SkipReq {
 fn main() {
     let mut buf = [0u8; 64];
     // Try to skip required_b by jumping to required_c.
-    let _ = SkipReq::encode(&mut buf, (1, 1)).unwrap()
-        .required_a(1).unwrap()
-        .required_c(3).unwrap() // ERROR: cannot skip required field required_b
+    let _ = SkipReq::encode(&mut buf, (1, 1)).expect("skip request encoding should succeed")
+        .required_a(1).expect("required a field should be available")
+        .required_c(3).expect("required C field should be available") // ERROR: cannot skip required field required_b
         .finish();
 }

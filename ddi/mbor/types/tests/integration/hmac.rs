@@ -30,7 +30,7 @@ fn test_hmac_invalid_key_type() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let ecc_key_id = resp.data.private_key_id;
 
             // Hmac operation
@@ -44,7 +44,7 @@ fn test_hmac_invalid_key_type() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidKeyType)
             ));
         },
@@ -70,7 +70,7 @@ fn test_hmac_invalid_key() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -98,7 +98,7 @@ fn test_hmac_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -126,7 +126,7 @@ fn test_hmac_invalid_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -152,7 +152,7 @@ fn test_hmac_sha256() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 32)
         },
@@ -178,7 +178,7 @@ fn test_hmac_sha384() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 48)
         },
@@ -204,7 +204,7 @@ fn test_hmac_sha512() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 64)
         },
@@ -233,7 +233,7 @@ fn test_var_hmac_sha256() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 32)
         },
@@ -262,7 +262,7 @@ fn test_var_hmac_sha384() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 48)
         },
@@ -291,7 +291,7 @@ fn test_var_hmac_sha512() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 64)
         },
@@ -317,7 +317,7 @@ fn test_hmac_sha256_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 32)
         },
@@ -343,7 +343,7 @@ fn test_hmac_sha384_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 48)
         },
@@ -369,7 +369,7 @@ fn test_hmac_sha512_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 64)
         },
@@ -398,7 +398,7 @@ fn test_var_hmac_sha256_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 32)
         },
@@ -427,7 +427,7 @@ fn test_var_hmac_sha384_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 48)
         },
@@ -456,7 +456,7 @@ fn test_var_hmac_sha512_kbkdf() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 64)
         },

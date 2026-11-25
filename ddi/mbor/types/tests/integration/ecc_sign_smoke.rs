@@ -35,7 +35,7 @@ fn test_ecc_sign_smoke() {
                 DdiEccCurve::P256,
                 key_props,
             )
-            .unwrap();
+            .expect("DDI ECC generate key pair should succeed");
 
             // Sign a 32-byte digest with the generated key.
             let digest = [0xaau8; 32];
@@ -44,10 +44,10 @@ fn test_ecc_sign_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 gen_resp.data.private_key_id,
-                MborByteArray::from_slice(&digest).unwrap(),
+                MborByteArray::from_slice(&digest).expect("byte slice conversion should succeed"),
                 DdiHashAlgorithm::Sha256,
             )
-            .unwrap();
+            .expect("DDI ECC sign should succeed");
 
             assert_eq!(sign_resp.hdr.op, DdiOp::EccSign);
             assert_eq!(sign_resp.hdr.status, DdiStatus::Success);
@@ -91,7 +91,7 @@ fn test_ecc_sign_unknown_key_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 0xFFFF, /* unknown key id */
-                MborByteArray::from_slice(&digest).unwrap(),
+                MborByteArray::from_slice(&digest).expect("byte slice conversion should succeed"),
                 DdiHashAlgorithm::Sha256,
             )
             .expect_err("EccSign must reject an unknown key id");

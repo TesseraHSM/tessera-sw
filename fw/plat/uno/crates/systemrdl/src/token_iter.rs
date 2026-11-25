@@ -157,7 +157,9 @@ impl<'a> TokenIter<'a> {
         let (next, span) = if self.fifo.is_empty() {
             self.next_token_raw()
         } else {
-            self.fifo.pop_front().unwrap()
+            self.fifo
+                .pop_front()
+                .expect("first queued value should be present")
         };
         self.last_span = span;
         next

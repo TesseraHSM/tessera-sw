@@ -11,9 +11,9 @@ pub struct DupReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = DupReq::encode(&mut buf, (1, 1)).unwrap()
-        .a(1).unwrap()
-        .a(2).unwrap() // ERROR: `a` not available on State1
-        .b(3).unwrap()
+    let _ = DupReq::encode(&mut buf, (1, 1)).expect("dup request encoding should succeed")
+        .a(1).expect("a field should be available")
+        .a(2).expect("a field should be available") // ERROR: `a` not available on State1
+        .b(3).expect("b field should be available")
         .finish();
 }

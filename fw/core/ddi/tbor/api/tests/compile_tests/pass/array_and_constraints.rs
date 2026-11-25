@@ -22,15 +22,15 @@ fn main() {
     let nonce = [0u8; 16];
     let mut buf = [0u8; 256];
     let frame = ArrayReq::encode(&mut buf, (1, 1))
-        .unwrap()
+        .expect("array request encoding should succeed")
         .nonce(&nonce)
-        .unwrap()
+        .expect("nonce field should be available")
         .tag(b"hello")
-        .unwrap()
+        .expect("tag field should be available")
         .payload(b"data")
-        .unwrap()
+        .expect("payload field should be available")
         .finish();
 
-    let view = ArrayReq::decode(brand(frame.as_bytes())).unwrap();
+    let view = ArrayReq::decode(brand(frame.as_bytes())).expect("array request decoding should succeed");
     let _n: &HsmDmaBuf = view.nonce(); // accessor returns &HsmDmaBuf uniformly
 }

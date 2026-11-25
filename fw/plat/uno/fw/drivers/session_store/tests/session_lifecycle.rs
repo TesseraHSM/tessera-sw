@@ -78,13 +78,15 @@ fn tbor_recovery_retains_identity_and_cannot_be_evicted() {
 #[test]
 fn migrate_retains_established_ids_and_releases_pending_handshakes() {
     let pid = HsmPartId::from(50u8);
-    let part = PartStore::partition(pid).unwrap();
+    let part = PartStore::partition(pid).expect("partition lookup should succeed");
     part.reset();
-    let mut table = SessionStore::partition(pid).unwrap();
-    let active = table.create(HsmKeyId::from(0u16)).unwrap();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
+    let active = table
+        .create(HsmKeyId::from(0u16))
+        .expect("object creation should succeed");
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(1u16))
-        .unwrap();
+        .expect("pending object creation should succeed");
 
     table.mark_all_needs_renego();
     part.clear_state(PartResetKind::Migrate);
@@ -110,22 +112,39 @@ fn migrate_retains_established_ids_and_releases_pending_handshakes() {
 
     let new_key = HsmKeyId::from(2u16);
     assert_eq!(table.validate_recreation(active), Ok(()));
-    assert_eq!(table.recreate(active, new_key).unwrap(), active);
+    assert_eq!(
+        table
+            .recreate(active, new_key)
+            .expect("object recreation should succeed"),
+        active
+    );
     assert!(matches!(table.state(active), HsmSessionState::Active));
-    assert_eq!(table.physical_id(active).unwrap(), new_key);
-    assert_eq!(table.create(HsmKeyId::from(3u16)).unwrap(), pending);
+    assert_eq!(
+        table
+            .physical_id(active)
+            .expect("physical ID lookup should succeed"),
+        new_key
+    );
+    assert_eq!(
+        table
+            .create(HsmKeyId::from(3u16))
+            .expect("object creation should succeed"),
+        pending
+    );
 }
 
 #[test]
 fn recreate_rejects_non_renegotiating_slots_without_changing_the_table() {
     let pid = HsmPartId::from(51u8);
-    let part = PartStore::partition(pid).unwrap();
+    let part = PartStore::partition(pid).expect("partition lookup should succeed");
     part.reset();
-    let mut table = SessionStore::partition(pid).unwrap();
-    let active = table.create(HsmKeyId::from(0u16)).unwrap();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
+    let active = table
+        .create(HsmKeyId::from(0u16))
+        .expect("object creation should succeed");
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(1u16))
-        .unwrap();
+        .expect("pending object creation should succeed");
     let before = *part.session_table();
     let meta_before = *part.session_meta();
     let replacement = HsmKeyId::from(2u16);
@@ -172,12 +191,14 @@ fn recreate_rejects_non_renegotiating_slots_without_changing_the_table() {
 #[test]
 fn recreate_retained_sessions_when_the_table_is_full() {
     let pid = HsmPartId::from(55u8);
-    let part = PartStore::partition(pid).unwrap();
+    let part = PartStore::partition(pid).expect("partition lookup should succeed");
     part.reset();
-    let mut table = SessionStore::partition(pid).unwrap();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
     for raw_id in 0..8u16 {
         assert_eq!(
-            table.create(HsmKeyId::from(raw_id)).unwrap(),
+            table
+                .create(HsmKeyId::from(raw_id))
+                .expect("object creation should succeed"),
             HsmSessId::from(raw_id)
         );
     }
@@ -192,7 +213,12 @@ fn recreate_retained_sessions_when_the_table_is_full() {
         assert_eq!(part.session_table(), &before);
         assert_eq!(table.recreate(id, replacement), Ok(id));
         assert!(matches!(table.state(id), HsmSessionState::Active));
-        assert_eq!(table.physical_id(id).unwrap(), replacement);
+        assert_eq!(
+            table
+                .physical_id(id)
+                .expect("physical ID lookup should succeed"),
+            replacement
+        );
     }
     assert!(table.limit_reached());
 }
@@ -200,36 +226,55 @@ fn recreate_retained_sessions_when_the_table_is_full() {
 #[test]
 fn reopen_rollback_preserves_the_reserved_id_for_retry() {
     let pid = HsmPartId::from(52u8);
-    PartStore::partition(pid).unwrap().reset();
-    let mut table = SessionStore::partition(pid).unwrap();
-    let id = table.create(HsmKeyId::from(0u16)).unwrap();
+    PartStore::partition(pid)
+        .expect("partition lookup should succeed")
+        .reset();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
+    let id = table
+        .create(HsmKeyId::from(0u16))
+        .expect("object creation should succeed");
     table.mark_all_needs_renego();
-    let migrated = *PartStore::partition(pid).unwrap().session_table();
+    let migrated = *PartStore::partition(pid)
+        .expect("partition lookup should succeed")
+        .session_table();
 
-    table.recreate(id, HsmKeyId::from(1u16)).unwrap();
-    table.rollback_recreation(id).unwrap();
+    table
+        .recreate(id, HsmKeyId::from(1u16))
+        .expect("object recreation should succeed");
+    table
+        .rollback_recreation(id)
+        .expect("key recreation rollback should succeed");
     assert!(matches!(
         table.state(id),
         HsmSessionState::NeedsRenegotiation
     ));
     assert_eq!(
-        PartStore::partition(pid).unwrap().session_table(),
+        PartStore::partition(pid)
+            .expect("partition lookup should succeed")
+            .session_table(),
         &migrated
     );
     assert!(table.occupied_physical_ids().iter().all(Option::is_none));
-    assert_eq!(table.recreate(id, HsmKeyId::from(2u16)).unwrap(), id);
+    assert_eq!(
+        table
+            .recreate(id, HsmKeyId::from(2u16))
+            .expect("object recreation should succeed"),
+        id
+    );
 }
 
 #[test]
 fn disable_retains_ids_but_free_releases_them() {
     let pid = HsmPartId::from(53u8);
-    let part = PartStore::partition(pid).unwrap();
+    let part = PartStore::partition(pid).expect("partition lookup should succeed");
     part.reset();
-    let mut table = SessionStore::partition(pid).unwrap();
-    let id = table.create(HsmKeyId::from(0u16)).unwrap();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
+    let id = table
+        .create(HsmKeyId::from(0u16))
+        .expect("object creation should succeed");
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(1u16))
-        .unwrap();
+        .expect("pending object creation should succeed");
 
     table.mark_all_needs_renego();
     part.clear_state(PartResetKind::Disable);
@@ -245,21 +290,30 @@ fn disable_retains_ids_but_free_releases_them() {
     table.clear_all();
     assert!(matches!(table.state(id), HsmSessionState::Invalid));
     assert_eq!(part.session_table(), &[0u8; 18]);
-    assert_eq!(table.create(HsmKeyId::from(2u16)).unwrap(), id);
+    assert_eq!(
+        table
+            .create(HsmKeyId::from(2u16))
+            .expect("object creation should succeed"),
+        id
+    );
 }
 
 #[test]
 fn clear_all_releases_active_pending_and_renegotiating_slots() {
     let pid = HsmPartId::from(54u8);
-    let part = PartStore::partition(pid).unwrap();
+    let part = PartStore::partition(pid).expect("partition lookup should succeed");
     part.reset();
-    let mut table = SessionStore::partition(pid).unwrap();
-    let renegotiating = table.create(HsmKeyId::from(0u16)).unwrap();
+    let mut table = SessionStore::partition(pid).expect("partition lookup should succeed");
+    let renegotiating = table
+        .create(HsmKeyId::from(0u16))
+        .expect("object creation should succeed");
     table.mark_all_needs_renego();
-    let active = table.create(HsmKeyId::from(1u16)).unwrap();
+    let active = table
+        .create(HsmKeyId::from(1u16))
+        .expect("object creation should succeed");
     let (pending, _) = table
         .create_pending(HsmSessionRole::CryptoUser, HsmKeyId::from(2u16))
-        .unwrap();
+        .expect("pending object creation should succeed");
 
     // Full teardown must clear the masks, even if some slots already
     // needed renegotiation before resources were removed.
@@ -275,5 +329,10 @@ fn clear_all_releases_active_pending_and_renegotiating_slots() {
         );
     }
     assert!(table.occupied_physical_ids().iter().all(Option::is_none));
-    assert_eq!(table.create(HsmKeyId::from(4u16)).unwrap(), renegotiating);
+    assert_eq!(
+        table
+            .create(HsmKeyId::from(4u16))
+            .expect("object creation should succeed"),
+        renegotiating
+    );
 }

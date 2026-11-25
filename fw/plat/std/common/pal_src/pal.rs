@@ -236,7 +236,7 @@ impl Default for StdHsmPal {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
-            .unwrap();
+            .expect("builder construction should succeed");
         let handle = rt.handle().clone();
         Self {
             iic: StdIic::new(rx),

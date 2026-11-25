@@ -27,7 +27,7 @@ fn test_ecc_generate_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -45,7 +45,7 @@ fn test_ecc_generate_malformed_ddi() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
                 ));
             }
@@ -72,7 +72,7 @@ fn test_ecc_generate_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -98,7 +98,7 @@ fn test_ecc_generate_invalid_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -124,7 +124,7 @@ fn test_ecc_generate_invalid_key_usage() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
             ));
         },
@@ -137,7 +137,7 @@ fn test_ecc_generate_session_only_key() {
         common_setup,
         common_cleanup,
         |_dev, ddi, path, _session_id| {
-            let session_only_key_dev = ddi.open_dev(path).unwrap();
+            let session_only_key_dev = ddi.open_dev(path).expect("device opening should succeed");
 
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                 &session_only_key_dev,
@@ -155,7 +155,7 @@ fn test_ecc_generate_session_only_key() {
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let session_only_key_session = resp.hdr.sess_id;
 
@@ -254,7 +254,7 @@ fn test_ecc_generate_and_unmask() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
 
             let pub_key = data.pub_key;
 
@@ -278,7 +278,7 @@ fn test_ecc_generate_and_unmask() {
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let data = resp.unwrap().data;
+            let data = resp.expect("DDI response should succeed").data;
             let unmasked_key_id = data.key_id;
             assert_ne!(unmasked_key_id, original_key_id);
 
@@ -296,7 +296,7 @@ fn test_ecc_generate_and_unmask() {
                     DdiHashAlgorithm::Sha256,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 let signature_len = resp.data.signature.len();
                 &resp.data.signature.data()[..signature_len].to_vec()
             };
@@ -312,7 +312,7 @@ fn test_ecc_generate_and_unmask() {
                 );
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 let signature_len = resp.data.signature.len();
                 &resp.data.signature.data()[..signature_len].to_vec()
             };

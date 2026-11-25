@@ -59,9 +59,9 @@ pub(crate) fn run_rustfmt(code: &str) -> String {
     child
         .stdin
         .as_mut()
-        .unwrap()
+        .expect("mutable value should be present")
         .write_all(code.as_bytes())
-        .unwrap();
+        .expect("complete buffer write should succeed");
 
     match child.wait_with_output() {
         Ok(output) if output.status.success() => {

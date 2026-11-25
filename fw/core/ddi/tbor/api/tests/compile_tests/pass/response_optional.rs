@@ -15,13 +15,13 @@ fn main() {
     let mut buf = [0u8; 256];
 
     // With tag.
-    let _ = MyResp::encode(&mut buf, (1, 1), 0, true).unwrap()
-        .data(b"ciphertext").unwrap()
-        .opt_tag(Some(b"tag")).unwrap()
+    let _ = MyResp::encode(&mut buf, (1, 1), 0, true).expect("my response encoding should succeed")
+        .data(b"ciphertext").expect("data field should be available")
+        .opt_tag(Some(b"tag")).expect("optional tag field should be available")
         .finish();
 
     // Without tag — early finish.
-    let _ = MyResp::encode(&mut buf, (1, 1), 0, false).unwrap()
-        .data(b"ciphertext").unwrap()
+    let _ = MyResp::encode(&mut buf, (1, 1), 0, false).expect("my response encoding should succeed")
+        .data(b"ciphertext").expect("data field should be available")
         .finish();
 }

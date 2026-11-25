@@ -36,7 +36,7 @@ fn test_aes_cbc_encrypt_decrypt_smoke() {
                 DdiAesKeySize::Aes128,
                 key_props,
             )
-            .unwrap()
+            .expect("DDI AES generate should succeed")
             .data
             .key_id;
 
@@ -49,10 +49,11 @@ fn test_aes_cbc_encrypt_decrypt_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 key_id,
                 DdiAesOp::Encrypt,
-                MborByteArray::from_slice(&plaintext).unwrap(),
-                MborByteArray::from_slice(&iv).unwrap(),
+                MborByteArray::from_slice(&plaintext)
+                    .expect("byte slice conversion should succeed"),
+                MborByteArray::from_slice(&iv).expect("byte slice conversion should succeed"),
             )
-            .unwrap();
+            .expect("DDI AES encrypt decrypt should succeed");
 
             assert_eq!(enc_resp.hdr.op, DdiOp::AesEncryptDecrypt);
             assert_eq!(enc_resp.hdr.status, DdiStatus::Success);
@@ -70,10 +71,11 @@ fn test_aes_cbc_encrypt_decrypt_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 key_id,
                 DdiAesOp::Decrypt,
-                MborByteArray::from_slice(&ciphertext).unwrap(),
-                MborByteArray::from_slice(&iv).unwrap(),
+                MborByteArray::from_slice(&ciphertext)
+                    .expect("byte slice conversion should succeed"),
+                MborByteArray::from_slice(&iv).expect("byte slice conversion should succeed"),
             )
-            .unwrap();
+            .expect("DDI AES encrypt decrypt should succeed");
 
             assert_eq!(dec_resp.hdr.status, DdiStatus::Success);
             assert_eq!(
@@ -99,8 +101,9 @@ fn test_aes_cbc_no_session_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 1, /* any key id — the request never reaches firmware */
                 DdiAesOp::Encrypt,
-                MborByteArray::from_slice(&plaintext).unwrap(),
-                MborByteArray::from_slice(&iv).unwrap(),
+                MborByteArray::from_slice(&plaintext)
+                    .expect("byte slice conversion should succeed"),
+                MborByteArray::from_slice(&iv).expect("byte slice conversion should succeed"),
             )
             .expect_err("AesEncryptDecrypt must be rejected without a session");
 
@@ -132,8 +135,9 @@ fn test_aes_cbc_unknown_key_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 0xFFFF, /* unknown key id */
                 DdiAesOp::Encrypt,
-                MborByteArray::from_slice(&plaintext).unwrap(),
-                MborByteArray::from_slice(&iv).unwrap(),
+                MborByteArray::from_slice(&plaintext)
+                    .expect("byte slice conversion should succeed"),
+                MborByteArray::from_slice(&iv).expect("byte slice conversion should succeed"),
             )
             .expect_err("AesEncryptDecrypt must reject an unknown key id");
 

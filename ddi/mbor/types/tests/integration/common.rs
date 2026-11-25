@@ -111,7 +111,7 @@ pub(crate) const HARD_CODED_BK3: [u8; 48] = [
 pub fn common_setup(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
     common_cleanup(dev, ddi, path, None);
 
-    let mut setup_dev = ddi.open_dev(path).unwrap();
+    let mut setup_dev = ddi.open_dev(path).expect("device opening should succeed");
 
     // Set Device Kind
 
@@ -134,11 +134,11 @@ pub fn common_setup(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) 
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     assert!(resp.hdr.sess_id.is_some());
 
-    resp.hdr.sess_id.unwrap()
+    resp.hdr.sess_id.expect("session ID should be available")
 }
 
 #[allow(dead_code)]
@@ -157,7 +157,7 @@ pub fn common_cleanup(
         );
     }
 
-    let cleanup_dev = ddi.open_dev(path).unwrap();
+    let cleanup_dev = ddi.open_dev(path).expect("device opening should succeed");
     let resp = cleanup_dev.erase();
 
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -192,14 +192,14 @@ pub fn helper_verify_cert_chain(collaterals: &[Vec<u8>]) -> Result<bool, X509Cer
 pub fn helper_get_partition_id_pub_key(dev: &mut <DdiTest as Ddi>::Dev) -> Vec<u8> {
     let result = helper_get_cert_chain_info(dev);
     assert!(result.is_ok(), "result {:?}", result);
-    let resp = result.unwrap();
+    let resp = result.expect("helper get partition ID public key result should succeed");
 
     let num_certs = resp.data.num_certs;
 
     // The leaf certificate is the partition ID cert
     let result = helper_get_certificate(dev, num_certs - 1);
     assert!(result.is_ok(), "result {:?}", result);
-    let resp = result.unwrap();
+    let resp = result.expect("helper get partition ID public key result should succeed");
 
     let cert_der = resp.data.certificate.as_slice();
 
@@ -210,8 +210,10 @@ pub fn helper_get_partition_id_pub_key(dev: &mut <DdiTest as Ddi>::Dev) -> Vec<u
     );
 
     // Parse the DER certificate
-    let x509 = X509Certificate::from_der(cert_der).unwrap();
-    x509.get_public_key_der().unwrap()
+    let x509 = X509Certificate::from_der(cert_der)
+        .expect("X509 certificate construction from DER should succeed");
+    x509.get_public_key_der()
+        .expect("public key DER extraction should succeed")
 }
 
 #[allow(dead_code)]
@@ -223,11 +225,12 @@ pub fn helper_key_signature_verification(
 ) -> bool {
     let result = EccPublicKey::from_bytes(pub_key_der);
     assert!(result.is_ok(), "result {:?}", result);
-    let ecc_pub = result.unwrap();
+    let ecc_pub = result.expect("helper key signature verification result should succeed");
 
     let result = ecc_pub.coord_vec();
     assert!(result.is_ok(), "result {:?}", result);
-    let (expected_x, expected_y) = result.unwrap();
+    let (expected_x, expected_y) =
+        result.expect("helper key signature verification result should succeed");
 
     // OpenSSL strips leading zeros from X and Y coordinates, so we have to pad them back
     let mut x_array = [0u8; 48];
@@ -250,7 +253,8 @@ pub fn helper_key_signature_verification(
     let part_id_pub_key = helper_get_partition_id_pub_key(dev);
 
     // verify the signature using the partition ID public key
-    let pkey = EccPublicKey::from_bytes(part_id_pub_key.as_slice()).unwrap();
+    let pkey = EccPublicKey::from_bytes(part_id_pub_key.as_slice())
+        .expect("ECC public key construction from bytes should succeed");
     Verifier::verify(
         &mut EccAlgo::default(),
         &pkey,
@@ -264,7 +268,7 @@ pub fn helper_key_signature_verification(
 pub fn helper_get_cert_chain_info_data(dev: &mut <DdiTest as Ddi>::Dev) -> (u8, [u8; 32]) {
     let result = helper_get_cert_chain_info(dev);
     assert!(result.is_ok(), "result {:?}", result);
-    let resp = result.unwrap();
+    let resp = result.expect("helper get certificate chain info data result should succeed");
     let num_certs = resp.data.num_certs;
     let thumbprint = resp.data.thumbprint.data_take();
 
@@ -286,7 +290,7 @@ pub fn helper_verify_leaf_cert(
     let result = helper_get_cert_chain_info(dev);
     assert!(result.is_ok(), "result {:?}", result);
 
-    let resp = result.unwrap();
+    let resp = result.expect("helper verify leaf certificate result should succeed");
     let num_certs = resp.data.num_certs;
 
     let mut cert_chain: Vec<Vec<u8>> = Vec::with_capacity(num_certs as usize);
@@ -294,7 +298,7 @@ pub fn helper_verify_leaf_cert(
         let result = helper_get_certificate(dev, i);
         assert!(result.is_ok(), "result {:?}", result);
 
-        let resp = result.unwrap();
+        let resp = result.expect("helper verify leaf certificate result should succeed");
         let der = &resp.data.certificate.as_slice();
         print!("cert DER {:?}", der);
 
@@ -309,20 +313,28 @@ pub fn helper_verify_leaf_cert(
 }
 
 pub fn helper_get_pota_endorsement(dev: &<DdiTest as Ddi>::Dev) -> (Vec<u8>, Vec<u8>) {
-    let get_cert_chain_info = helper_get_cert_chain_info(dev).unwrap();
+    let get_cert_chain_info =
+        helper_get_cert_chain_info(dev).expect("DDI get certificate chain info should succeed");
     // Get last cert
-    let cert_resp = helper_get_certificate(dev, get_cert_chain_info.data.num_certs - 1).unwrap();
+    let cert_resp = helper_get_certificate(dev, get_cert_chain_info.data.num_certs - 1)
+        .expect("DDI get certificate should succeed");
     let cert = cert_resp.data.certificate.as_slice();
-    let cert = X509Certificate::from_der(cert).unwrap();
-    let cert_pub_key_der = cert.get_public_key_der().unwrap();
-    let cert_pub_key_obj = tsra_crypto::DerEccPublicKey::from_der(&cert_pub_key_der).unwrap();
+    let cert = X509Certificate::from_der(cert)
+        .expect("X509 certificate construction from DER should succeed");
+    let cert_pub_key_der = cert
+        .get_public_key_der()
+        .expect("public key DER extraction should succeed");
+    let cert_pub_key_obj = tsra_crypto::DerEccPublicKey::from_der(&cert_pub_key_der)
+        .expect("DER ECC public key construction from DER should succeed");
     let mut cert_pub_uncomp = vec![0x04u8];
     cert_pub_uncomp.extend_from_slice(cert_pub_key_obj.x());
     cert_pub_uncomp.extend_from_slice(cert_pub_key_obj.y());
     let hash_algo = HashAlgo::sha384();
     let mut ecdsa_algo = EcdsaAlgo::new(hash_algo);
-    let pota_priv_key = tsra_crypto::EccPrivateKey::from_bytes(&TEST_POTA_ECC_PRIVATE_KEY).unwrap();
-    let sig_len = Signer::sign(&mut ecdsa_algo, &pota_priv_key, &cert_pub_uncomp, None).unwrap();
+    let pota_priv_key = tsra_crypto::EccPrivateKey::from_bytes(&TEST_POTA_ECC_PRIVATE_KEY)
+        .expect("ECC private key construction from bytes should succeed");
+    let sig_len = Signer::sign(&mut ecdsa_algo, &pota_priv_key, &cert_pub_uncomp, None)
+        .expect("signature generation should succeed");
     let mut signature = vec![0u8; sig_len];
     let _ = Signer::sign(
         &mut ecdsa_algo,
@@ -330,7 +342,7 @@ pub fn helper_get_pota_endorsement(dev: &<DdiTest as Ddi>::Dev) -> (Vec<u8>, Vec
         &cert_pub_uncomp,
         Some(&mut signature),
     )
-    .unwrap();
+    .expect("signature generation should succeed");
 
     (signature, TEST_POTA_ECC_PUB_KEY.to_vec())
 }
@@ -350,16 +362,17 @@ pub fn helper_common_establish_credential_no_unwrap(
 
     // Establish credential
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     let mut bk3 = vec![0u8; 48];
-    Rng::rand_bytes(&mut bk3).unwrap();
+    Rng::rand_bytes(&mut bk3).expect("random byte generation should succeed");
     let masked_bk3 = helper_get_or_init_bk3(dev);
 
     let (signature, pota_pub_key) = helper_get_pota_endorsement(dev);
@@ -396,17 +409,18 @@ pub fn helper_common_establish_credential_with_bmk(
     // Get establish credential encryption key
     let resp =
         helper_get_establish_cred_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-            .unwrap();
+            .expect("DDI get establish credential encryption key should succeed");
 
     // Establish credential
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     let (signature, pota_pub_key) = helper_get_pota_endorsement(dev);
 
@@ -427,7 +441,7 @@ pub fn helper_common_establish_credential_with_bmk(
         },
     );
 
-    resp.unwrap().data.bmk
+    resp.expect("DDI response should succeed").data.bmk
 }
 
 #[allow(dead_code)]
@@ -442,17 +456,18 @@ pub fn helper_common_establish_credential_with_bmk_no_unwrap(
     // Get establish credential encryption key
     let resp =
         helper_get_establish_cred_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-            .unwrap();
+            .expect("DDI get establish credential encryption key should succeed");
 
     // Establish credential
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     let (signature, pota_pub_key) = helper_get_pota_endorsement(dev);
 
@@ -493,14 +508,14 @@ pub fn common_setup_for_lm(
 ) -> LMSetupResult {
     common_cleanup(dev, ddi, path, None);
 
-    let mut setup_dev = ddi.open_dev(path).unwrap();
+    let mut setup_dev = ddi.open_dev(path).expect("device opening should succeed");
 
     // Set Device Kind
 
     let masked_bk3 = helper_get_or_init_bk3(&setup_dev);
 
     let mut random_seed = vec![0u8; 48];
-    Rng::rand_bytes(&mut random_seed).unwrap();
+    Rng::rand_bytes(&mut random_seed).expect("random byte generation should succeed");
 
     // This is used for initial setup from fresh so all the option fields are empty
     let bmk = helper_common_establish_credential_with_bmk(
@@ -516,7 +531,10 @@ pub fn common_setup_for_lm(
         &setup_dev,
         TEST_CRED_ID,
         TEST_CRED_PIN,
-        random_seed.as_slice().try_into().unwrap(),
+        random_seed
+            .as_slice()
+            .try_into()
+            .expect("conversion to the required type should succeed"),
     );
 
     let resp = helper_open_session(
@@ -528,15 +546,18 @@ pub fn common_setup_for_lm(
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     assert!(resp.hdr.sess_id.is_some());
 
     LMSetupResult {
-        session_id: resp.hdr.sess_id.unwrap(),
+        session_id: resp.hdr.sess_id.expect("session ID should be available"),
         masked_bk3,
         partition_bmk: bmk,
         session_bmk: resp.data.bmk_session,
-        random_seed: random_seed.as_slice().try_into().unwrap(),
+        random_seed: random_seed
+            .as_slice()
+            .try_into()
+            .expect("conversion to the required type should succeed"),
     }
 }
 
@@ -552,17 +573,18 @@ pub fn helper_common_establish_credential(
         helper_get_establish_cred_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }));
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     // Establish credential
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     let masked_bk3 = helper_get_or_init_bk3(dev);
 
@@ -585,24 +607,25 @@ pub fn helper_common_establish_credential(
         },
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    resp.unwrap();
+    resp.expect("DDI response should succeed");
 }
 
 #[allow(unused)]
 pub fn get_device_info(ddi: &DdiTest, path: &str) -> DdiGetDeviceInfoResp {
-    let dev = ddi.open_dev(path).unwrap();
+    let dev = ddi.open_dev(path).expect("device opening should succeed");
     let resp = helper_get_device_info(&dev, None, Some(DdiApiRev { major: 1, minor: 0 }));
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     resp.data
 }
 
 #[allow(unused)]
 pub fn get_device_kind(dev: &mut <DdiTest as Ddi>::Dev) -> DdiDeviceKind {
-    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 })).unwrap();
+    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
+        .expect("DDI get device info should succeed");
 
     resp.data.kind
 }
@@ -615,15 +638,16 @@ pub fn encrypt_userid_pin_for_establish_cred(
 ) -> (DdiEncryptedEstablishCredential, DdiDerPublicKey) {
     let resp =
         helper_get_establish_cred_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-            .unwrap();
+            .expect("DDI get establish credential encryption key should succeed");
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_establish_credential(id, pin, nonce)
-        .unwrap();
+        .expect("credential establishment encryption should succeed");
 
     (ddi_encrypted_credential, ddi_public_key)
 }
@@ -636,15 +660,16 @@ pub fn encrypt_userid_pin_for_open_session(
     seed: [u8; 48],
 ) -> (DdiEncryptedSessionCredential, DdiDerPublicKey) {
     let resp = helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-        .unwrap();
+        .expect("DDI get session encryption key should succeed");
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_session_credential(id, pin, seed, nonce)
-        .unwrap();
+        .expect("session credential encryption should succeed");
 
     (ddi_encrypted_credential, ddi_public_key)
 }
@@ -674,15 +699,16 @@ pub fn encrypt_pin_for_change_pin(
     pin: [u8; 16],
 ) -> (DdiEncryptedPin, DdiDerPublicKey) {
     let resp = helper_get_session_encryption_key(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
-        .unwrap();
+        .expect("DDI get session encryption key should succeed");
     let nonce = resp.data.nonce;
-    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce).unwrap();
+    let param_encryption_key = DeviceCredKey::new(&resp.data.pub_key, nonce)
+        .expect("device credential key construction should succeed");
     let (establish_cred_encryption_key, ddi_public_key) = param_encryption_key
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY)
-        .unwrap();
+        .expect("credential key derivation from DER should succeed");
     let ddi_encrypted_credential = establish_cred_encryption_key
         .encrypt_pin(pin, nonce)
-        .unwrap();
+        .expect("PIN encryption should succeed");
 
     (ddi_encrypted_credential, ddi_public_key)
 }
@@ -715,10 +741,10 @@ pub fn store_rsa_keys_no_crt(
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_rsa_priv = resp.data.key_id;
-    let key_rsa_pub = resp.data.pub_key.unwrap();
+    let key_rsa_pub = resp.data.pub_key.expect("public key should be available");
 
     (key_rsa_pub, key_id_rsa_priv, resp.data.masked_key)
 }
@@ -751,10 +777,10 @@ pub fn store_rsa_keys_crt(
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let key_id_rsa_priv_crt = resp.data.key_id;
-    let key_rsa_pub = resp.data.pub_key.unwrap();
+    let key_rsa_pub = resp.data.pub_key.expect("public key should be available");
 
     (key_rsa_pub, key_id_rsa_priv_crt, resp.data.masked_key)
 }
@@ -770,7 +796,7 @@ pub fn store_aes_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
         DdiKeyUsage::EncryptDecrypt,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     resp.data.key_id
 }
@@ -794,7 +820,7 @@ pub fn ecc_gen_key_tsra(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     (
         resp.data.private_key_id,
@@ -834,7 +860,7 @@ pub fn get_unwrapping_key(
             continue;
         }
         assert!(resp.is_ok(), "resp {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
         // Firmware (including emu) returns a populated masked-key envelope
         // for the unwrapping key.
         assert!(!resp.data.masked_key.is_empty());
@@ -854,14 +880,15 @@ pub fn wrap_data_with_aes_key(
     data: &[u8],
     aes_key: &[u8],
 ) -> Vec<u8> {
-    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der).unwrap();
+    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der)
+        .expect("RSA public key construction from bytes should succeed");
 
     let mut encrypted_aes_key = Encrypter::encrypt_vec(
         &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
         &wrapping_pub_key,
         aes_key,
     )
-    .unwrap();
+    .expect("encryption should succeed");
 
     let aes_key = AesKey::from_bytes(aes_key).expect("Failed to create AES key");
 
@@ -881,13 +908,14 @@ pub fn wrap_data_with_aes_key(
 #[allow(unused)]
 pub fn wrap_data(wrapping_pub_key_der: Vec<u8>, data: &[u8]) -> Vec<u8> {
     let aes_key = TEST_EPHEMERAL_AES.as_slice();
-    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der).unwrap();
+    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der)
+        .expect("RSA public key construction from bytes should succeed");
     let mut encrypted_aes_key = Encrypter::encrypt_vec(
         &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
         &wrapping_pub_key,
         aes_key,
     )
-    .unwrap();
+    .expect("encryption should succeed");
 
     let aes_key = AesKey::from_bytes(aes_key).expect("Failed to create AES key");
 
@@ -909,13 +937,14 @@ pub fn wrap_data(wrapping_pub_key_der: Vec<u8>, data: &[u8]) -> Vec<u8> {
 /// before the AES-KWP step is reached.
 pub fn wrap_data_with_oversized_kek(wrapping_pub_key_der: Vec<u8>) -> Vec<u8> {
     let oversized_kek = [0xA5u8; 48];
-    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der).unwrap();
+    let wrapping_pub_key = RsaPublicKey::from_bytes(&wrapping_pub_key_der)
+        .expect("RSA public key construction from bytes should succeed");
     let mut encrypted_kek = Encrypter::encrypt_vec(
         &mut RsaEncryptAlgo::with_oaep_padding(HashAlgo::sha256(), None),
         &wrapping_pub_key,
         &oversized_kek,
     )
-    .unwrap();
+    .expect("encryption should succeed");
 
     // Arbitrary trailer so the blob exceeds the modulus length (a blob no
     // longer than the modulus is rejected as "too short" first).
@@ -936,9 +965,11 @@ pub fn ecc_sign_local(
     digest_len: usize,
 ) -> Vec<u8> {
     let der = DerEccPrivateKey::new(curve, &priv_key);
-    let vec = der.to_der_vec().unwrap();
-    let pkey = EccPrivateKey::from_bytes(&vec).unwrap();
-    Signer::sign_vec(&mut EccAlgo::default(), &pkey, &digest[..digest_len]).unwrap()
+    let vec = der.to_der_vec().expect("DER encoding should succeed");
+    let pkey = EccPrivateKey::from_bytes(&vec)
+        .expect("ECC private key construction from bytes should succeed");
+    Signer::sign_vec(&mut EccAlgo::default(), &pkey, &digest[..digest_len])
+        .expect("signature generation should succeed")
 }
 
 /// Helper to perform ECC verify operation using OpenSSL.
@@ -949,14 +980,15 @@ pub fn ecc_verify_local_openssl(
     digest: [u8; 96],
     digest_len: usize,
 ) -> bool {
-    let pkey = EccPublicKey::from_bytes(&pub_key.der.data()[..pub_key.der.len()]).unwrap();
+    let pkey = EccPublicKey::from_bytes(&pub_key.der.data()[..pub_key.der.len()])
+        .expect("ECC public key construction from bytes should succeed");
     Verifier::verify(
         &mut EccAlgo::default(),
         &pkey,
         &digest[..digest_len],
         signature,
     )
-    .unwrap()
+    .expect("signature verification should succeed")
 }
 
 // Helper to perform RSA encrypt operation using OpenSSL.
@@ -982,13 +1014,14 @@ pub fn rsa_encrypt_local_openssl(
         })
         .unwrap_or(HashAlgo::sha1());
 
-    let pkey = RsaPublicKey::from_bytes(pub_key).unwrap();
+    let pkey = RsaPublicKey::from_bytes(pub_key)
+        .expect("RSA public key construction from bytes should succeed");
     Encrypter::encrypt_vec(
         &mut RsaEncryptAlgo::with_oaep_padding(hash, None),
         &pkey,
         &x[..x_len],
     )
-    .unwrap()
+    .expect("encryption should succeed")
 }
 
 #[allow(dead_code)]
@@ -1010,7 +1043,8 @@ pub fn rsa_verify_local_openssl(
         })
         .unwrap_or(HashAlgo::sha1());
 
-    let pkey = RsaPublicKey::from_bytes(pub_key).unwrap();
+    let pkey = RsaPublicKey::from_bytes(pub_key)
+        .expect("RSA public key construction from bytes should succeed");
 
     let mut algo = if pkcs1 {
         RsaSignAlgo::with_pkcs1_padding(hash)
@@ -1049,7 +1083,7 @@ pub fn create_ecdh_secrets(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let private_key_id1 = resp.data.private_key_id;
 
     let pub_key1 = resp.data.pub_key;
@@ -1069,7 +1103,7 @@ pub fn create_ecdh_secrets(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let private_key_id2 = resp.data.private_key_id;
 
@@ -1090,7 +1124,7 @@ pub fn create_ecdh_secrets(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let secret_key_id1 = resp.unwrap().data.key_id;
+    let secret_key_id1 = resp.expect("DDI response should succeed").data.key_id;
 
     let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
     let resp = helper_ecdh_key_exchange(
@@ -1104,7 +1138,7 @@ pub fn create_ecdh_secrets(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let secret_key_id2 = resp.unwrap().data.key_id;
+    let secret_key_id2 = resp.expect("DDI response should succeed").data.key_id;
 
     (secret_key_id1, secret_key_id2)
 }
@@ -1130,7 +1164,7 @@ pub fn create_hmac_key_ex(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let private_key_id1 = resp.data.private_key_id;
 
     // Generate ECC Key Pair 2
@@ -1146,7 +1180,7 @@ pub fn create_hmac_key_ex(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let pub_key2 = resp.data.pub_key;
     let mut der2 = [0u8; 192];
@@ -1166,7 +1200,7 @@ pub fn create_hmac_key_ex(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let secret_key_id1 = resp.unwrap().data.key_id;
+    let secret_key_id1 = resp.expect("DDI response should succeed").data.key_id;
 
     // Use HKDF to derive HMAC key
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session);
@@ -1196,7 +1230,7 @@ pub fn create_hmac_key(
     let resp = create_hmac_key_ex(sess_id, target_key_type, dev, target_key_len);
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    resp.unwrap().data.key_id
+    resp.expect("DDI response should succeed").data.key_id
 }
 
 // Uses Ecc generate, ECDH, KDF to create an HMAC key
@@ -1220,7 +1254,7 @@ pub fn create_hmac_key_kbkdf(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let private_key_id1 = resp.data.private_key_id;
 
     // Generate ECC Key Pair 2
@@ -1236,7 +1270,7 @@ pub fn create_hmac_key_kbkdf(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let pub_key2 = resp.data.pub_key;
     let mut der2 = [0u8; 192];
@@ -1256,7 +1290,7 @@ pub fn create_hmac_key_kbkdf(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let secret_key_id1 = resp.unwrap().data.key_id;
+    let secret_key_id1 = resp.expect("DDI response should succeed").data.key_id;
 
     // Use KBKDF to derive HMAC key
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session);
@@ -1275,7 +1309,7 @@ pub fn create_hmac_key_kbkdf(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    resp.unwrap().data.key_id
+    resp.expect("DDI response should succeed").data.key_id
 }
 
 #[allow(unused)]
@@ -1336,7 +1370,7 @@ pub fn reopen_session_with_short_app_id(
         pub_key,
     );
     assert!(resp.is_ok(), "Failed to reopen session: {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     (resp.data.sess_id, resp.data.short_app_id)
 }
@@ -1523,20 +1557,20 @@ pub fn set_init_bk3_pin(
     let dev_key = DeviceCredKey::new(&resp.data.pub_key, nonce);
     assert!(dev_key.is_ok(), "DeviceCredKey::new failed: {dev_key:?}");
     let cred = dev_key
-        .unwrap()
+        .expect("device key should be available")
         .create_credential_key_from_der(&TEST_ECC_384_PRIVATE_KEY);
     assert!(
         cred.is_ok(),
         "create_credential_key_from_der failed: {:?}",
         cred.as_ref().err()
     );
-    let (cred_key, pub_key) = cred.unwrap();
+    let (cred_key, pub_key) = cred.expect("credential should be available");
     let ecred = cred_key.encrypt_establish_credential(id, pin, nonce);
     assert!(
         ecred.is_ok(),
         "encrypt_establish_credential failed: {ecred:?}"
     );
-    helper_set_init_bk3_pin(dev, ecred.unwrap(), pub_key)?;
+    helper_set_init_bk3_pin(dev, ecred.expect("ecred should be available"), pub_key)?;
     Ok(())
 }
 
@@ -1558,20 +1592,24 @@ pub fn build_secure_init_bk3_payload(
     let dev_key = DeviceCredKey::new(&resp.data.pub_key, nonce);
     assert!(dev_key.is_ok(), "DeviceCredKey::new failed: {dev_key:?}");
     let bk3_res = dev_key
-        .unwrap()
+        .expect("device key should be available")
         .create_bk3_key_from_der(&TEST_ECC_384_PRIVATE_KEY);
     assert!(
         bk3_res.is_ok(),
         "create_bk3_key_from_der failed: {:?}",
         bk3_res.as_ref().err()
     );
-    let (bk3_key, pub_key): (Bk3EncryptionKey, DdiDerPublicKey) = bk3_res.unwrap();
+    let (bk3_key, pub_key): (Bk3EncryptionKey, DdiDerPublicKey) =
+        bk3_res.expect("BK3 res should be available");
     let encrypted_bk3 = bk3_key.encrypt_bk3(bk3, id, pin, nonce);
     assert!(
         encrypted_bk3.is_ok(),
         "encrypt_bk3 failed: {encrypted_bk3:?}"
     );
-    Ok((encrypted_bk3.unwrap(), pub_key))
+    Ok((
+        encrypted_bk3.expect("encrypted BK3 should be available"),
+        pub_key,
+    ))
 }
 
 /// Full secure provisioning: set the PIN, then inject BK3 (each over its own
@@ -2429,7 +2467,9 @@ pub fn ddi_dev_test(
     }
 
     for dev_info in dev_infos.iter() {
-        let mut dev = ddi.open_dev(&dev_info.path).unwrap();
+        let mut dev = ddi
+            .open_dev(&dev_info.path)
+            .expect("device opening should succeed");
 
         let setup_session_id = setup(&mut dev, &ddi, &dev_info.path);
         // Migration preserves session IDs, so erase cannot replace cleanup
@@ -2447,7 +2487,8 @@ pub fn ddi_dev_test(
 #[cfg(test)]
 #[allow(dead_code)]
 pub fn is_fips_approved_module(dev: &mut <DdiTest as Ddi>::Dev) -> bool {
-    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 })).unwrap();
+    let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
+        .expect("DDI get device info should succeed");
     assert_eq!(resp.hdr.op, DdiOp::GetDeviceInfo);
     assert!(resp.hdr.rev.is_some());
     assert!(resp.hdr.sess_id.is_none());

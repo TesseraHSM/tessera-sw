@@ -1146,7 +1146,9 @@ mod tests {
     #[tokio::test]
     async fn wrong_root_length_rejected_in_use_mode() {
         for bad in [ROOT_LEN - 1, ROOT_LEN + 1, 0] {
-            let err = derive(&vec![0x5Au8; bad]).await.unwrap_err();
+            let err = derive(&vec![0x5Au8; bad])
+                .await
+                .expect_err("derive operation should fail");
             assert_eq!(err, HsmError::InvalidArg, "root len {bad} must be rejected");
         }
     }
@@ -1155,14 +1157,24 @@ mod tests {
     /// depend on whether `out` is `Some`, so query and use mode agree.
     #[tokio::test]
     async fn wrong_root_length_rejected_in_query_mode() {
-        assert_eq!(query(ROOT_LEN - 1).await.unwrap_err(), HsmError::InvalidArg);
-        assert_eq!(query(ROOT_LEN + 1).await.unwrap_err(), HsmError::InvalidArg);
+        assert_eq!(
+            query(ROOT_LEN - 1)
+                .await
+                .expect_err("size query should fail"),
+            HsmError::InvalidArg
+        );
+        assert_eq!(
+            query(ROOT_LEN + 1)
+                .await
+                .expect_err("size query should fail"),
+            HsmError::InvalidArg
+        );
     }
 
     /// Query mode reports the P-384 sizes a caller must allocate.
     #[tokio::test]
     async fn query_mode_reports_p384_sizes() {
-        let (priv_len, pub_len) = query(ROOT_LEN).await.unwrap();
+        let (priv_len, pub_len) = query(ROOT_LEN).await.expect("size query should succeed");
         assert_eq!(priv_len, ROOT_LEN);
         assert_eq!(pub_len, ROOT_LEN * 2);
     }
@@ -1174,8 +1186,12 @@ mod tests {
     #[tokio::test]
     async fn same_root_regenerates_same_keypair() {
         let root = [0xA5u8; ROOT_LEN];
-        let (priv_a, pub_a) = derive(&root).await.unwrap();
-        let (priv_b, pub_b) = derive(&root).await.unwrap();
+        let (priv_a, pub_a) = derive(&root)
+            .await
+            .expect("derive operation should succeed");
+        let (priv_b, pub_b) = derive(&root)
+            .await
+            .expect("derive operation should succeed");
 
         assert_eq!(priv_a, priv_b);
         assert_eq!(pub_a, pub_b);
@@ -1189,8 +1205,12 @@ mod tests {
     /// fanning per-partition keys out of `PartRoot`.
     #[tokio::test]
     async fn different_roots_give_different_keypairs() {
-        let (priv_a, pub_a) = derive(&[0xA5u8; ROOT_LEN]).await.unwrap();
-        let (priv_b, pub_b) = derive(&[0x5Au8; ROOT_LEN]).await.unwrap();
+        let (priv_a, pub_a) = derive(&[0xA5u8; ROOT_LEN])
+            .await
+            .expect("derive operation should succeed");
+        let (priv_b, pub_b) = derive(&[0x5Au8; ROOT_LEN])
+            .await
+            .expect("derive operation should succeed");
 
         assert_ne!(priv_a, priv_b);
         assert_ne!(pub_a, pub_b);
@@ -1200,19 +1220,30 @@ mod tests {
     async fn pairwise_tests_reject_mismatched_keys() {
         let (pal, _) = pal_and_io();
         for curve in [EccCurve::P256, EccCurve::P384, EccCurve::P521] {
-            let (private, public) = pal.ecc.gen_keypair(curve).await.unwrap();
-            let (_, other_public) = pal.ecc.gen_keypair(curve).await.unwrap();
+            let (private, public) = pal
+                .ecc
+                .gen_keypair(curve)
+                .await
+                .expect("key pair generation should succeed");
+            let (_, other_public) = pal
+                .ecc
+                .gen_keypair(curve)
+                .await
+                .expect("key pair generation should succeed");
             for pct in [HsmEccPct::SignVerify, HsmEccPct::KeyAgreement] {
                 let good_pct = match pct {
                     HsmEccPct::SignVerify => HsmEccPct::SignVerify,
                     HsmEccPct::KeyAgreement => HsmEccPct::KeyAgreement,
                     HsmEccPct::None => unreachable!(),
                 };
-                assert!(pal.ecc_pair_pct(&private, &public, good_pct).await.unwrap());
+                assert!(pal
+                    .ecc_pair_pct(&private, &public, good_pct)
+                    .await
+                    .expect("ECC pairwise consistency test should succeed"));
                 assert!(!pal
                     .ecc_pair_pct(&private, &other_public, pct)
                     .await
-                    .unwrap());
+                    .expect("ECC pairwise consistency test should succeed"));
             }
         }
     }
@@ -1223,23 +1254,29 @@ mod tests {
         let curve = EccCurve::P256;
         let mut scalar = [0u8; 32];
         scalar[31] = 1;
-        let private = EccPrivateKey::from_scalar(curve, &scalar).unwrap();
-        let public = private.public_key().unwrap();
-        let (x, y) = public.coord_vec().unwrap();
+        let private = EccPrivateKey::from_scalar(curve, &scalar)
+            .expect("ECC private key construction from scalar should succeed");
+        let public = private
+            .public_key()
+            .expect("public key extraction should succeed");
+        let (x, y) = public
+            .coord_vec()
+            .expect("coord vec operation should succeed");
         let mut negative_y =
             hex::decode("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
-                .unwrap();
+                .expect("hex decoding should succeed");
         let mut borrow = 0i16;
         for (out, &value) in negative_y.iter_mut().zip(y.iter()).rev() {
             let difference = i16::from(*out) - i16::from(value) - borrow;
             *out = difference as u8;
             borrow = i16::from(difference < 0);
         }
-        let negative = EccPublicKey::from_coordinates(curve, &x, &negative_y).unwrap();
+        let negative = EccPublicKey::from_coordinates(curve, &x, &negative_y)
+            .expect("ECC public key construction from coordinates should succeed");
         assert!(!pal
             .ecc_pair_pct(&private, &negative, HsmEccPct::KeyAgreement)
             .await
-            .unwrap());
+            .expect("ECC pairwise consistency test should succeed"));
     }
 
     #[tokio::test]
@@ -1250,20 +1287,22 @@ mod tests {
             let curve = HsmEccCurve::P384;
             let private = alloc
                 .dma_alloc(curve.wire_coord_len(StdHsmPal::ECC_COORD_PAD))
-                .unwrap();
+                .expect("DMA buffer allocation should succeed");
             let public = alloc
                 .dma_alloc(curve.wire_pub_key_len(StdHsmPal::ECC_COORD_PAD))
-                .unwrap();
+                .expect("DMA buffer allocation should succeed");
             private.fill(0xa5);
             public.fill(0xa5);
             let err = pal
                 .ecc_gen_keypair(&io, curve, HsmEccPct::SignVerify, Some((private, public)))
                 .await
-                .unwrap_err();
+                .expect_err("ECC key pair generation should fail");
             assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
             assert!(private.iter().all(|&b| b == 0xa5));
             assert!(public.iter().all(|&b| b == 0xa5));
-            let root = alloc.dma_alloc(ROOT_LEN).unwrap();
+            let root = alloc
+                .dma_alloc(ROOT_LEN)
+                .expect("DMA buffer allocation should succeed");
             root.fill(0x5a);
             let err = pal
                 .ecc_gen_keypair_from_root(
@@ -1274,7 +1313,7 @@ mod tests {
                     Some((private, public)),
                 )
                 .await
-                .unwrap_err();
+                .expect_err("root-derived ECC key pair generation should fail");
             assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
             assert!(private.iter().all(|&b| b == 0xa5));
             assert!(public.iter().all(|&b| b == 0xa5));

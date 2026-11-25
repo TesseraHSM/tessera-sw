@@ -50,7 +50,7 @@ fn test_ecdh_key_exchange_smoke() {
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
-            .unwrap();
+            .expect("DDI ECDH key exchange should succeed");
             assert_eq!(resp1.hdr.op, DdiOp::EcdhKeyExchange);
             assert_eq!(resp1.hdr.status, DdiStatus::Success);
             assert_ne!(resp1.data.key_id, 0);
@@ -88,7 +88,7 @@ fn test_ecdh_key_exchange_smoke() {
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
-            .unwrap();
+            .expect("DDI ECDH key exchange should succeed");
             assert_eq!(resp2.hdr.status, DdiStatus::Success);
             assert_ne!(resp2.data.key_id, 0);
             assert_ne!(resp1.data.key_id, resp2.data.key_id);

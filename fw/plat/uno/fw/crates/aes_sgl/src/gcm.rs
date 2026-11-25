@@ -384,10 +384,12 @@ mod tests {
         let states = [[1u8; GCM_TAG_LEN], [2u8; GCM_TAG_LEN], [3u8; GCM_TAG_LEN]];
         let mut k = 0;
         for st in &states {
-            sgl_checkpoint(Pass::Verify, &mut cps, &mut k, st).unwrap();
+            sgl_checkpoint(Pass::Verify, &mut cps, &mut k, st)
+                .expect("scatter-gather checkpoint should succeed");
         }
         let mut k = 0;
-        sgl_checkpoint(Pass::Decrypt, &mut cps, &mut k, &states[0]).unwrap();
+        sgl_checkpoint(Pass::Decrypt, &mut cps, &mut k, &states[0])
+            .expect("scatter-gather checkpoint should succeed");
         assert_eq!(
             sgl_checkpoint(Pass::Decrypt, &mut cps, &mut k, &[9u8; GCM_TAG_LEN]),
             Err(HsmError::AesGcmDecryptTagDoesNotMatch)

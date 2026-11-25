@@ -31,7 +31,7 @@ fn try_open_session_with_pin(
     id: [u8; 16],
     pin: [u8; 16],
 ) -> Result<DdiOpenSessionCmdResp, DdiError> {
-    let login_dev = ddi.open_dev(path).unwrap();
+    let login_dev = ddi.open_dev(path).expect("device opening should succeed");
     let (encrypted_credential, pub_key) =
         encrypt_userid_pin_for_open_session(&login_dev, id, pin, TEST_SESSION_SEED);
     helper_open_session(

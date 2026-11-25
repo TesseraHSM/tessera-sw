@@ -71,7 +71,7 @@ fn test_ecdh_key_exchange(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, key_
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let key_id = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -97,7 +97,7 @@ fn test_ecdh_key_exchange(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, key_
         masked_key,
     );
     assert!(resp.is_ok(), "unmask {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     assert_eq!(
         resp.data.kind, key_type,
         "unmasked kind must match the derived secret",

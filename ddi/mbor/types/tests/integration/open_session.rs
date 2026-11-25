@@ -48,7 +48,7 @@ fn test_open_session_with_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -75,7 +75,7 @@ fn test_open_session_without_revision() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
             ));
         },
@@ -107,7 +107,7 @@ fn test_open_session() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -373,7 +373,7 @@ fn test_open_session_multiple() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -427,7 +427,7 @@ fn test_open_session_multiple_get_key() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -454,7 +454,7 @@ fn test_open_session_multiple_get_key() {
                 assert!(resp.is_err(), "resp {:?}", resp);
 
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::FileHandleSessionLimitReached)
                 ));
             }
@@ -490,7 +490,7 @@ fn test_open_session_tamper_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -525,7 +525,7 @@ fn test_open_session_tamper_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -560,7 +560,7 @@ fn test_open_session_tamper_iv() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -595,7 +595,7 @@ fn test_open_session_tamper_nonce() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ));
         },
@@ -630,7 +630,7 @@ fn test_open_session_tamper_tag() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::PinDecryptionFailed)
             ));
         },
@@ -689,7 +689,7 @@ fn test_open_session_null_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -718,7 +718,7 @@ fn test_open_session_null_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -750,7 +750,7 @@ fn test_open_session_verify_nonce_change() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -798,7 +798,7 @@ fn test_open_session_verify_public_key_not_change() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -837,7 +837,9 @@ fn test_open_session_multi_threaded_all_should_open() {
             let mut thread_list = Vec::new();
             for i in 0..thread_count {
                 let thread_id = i as u8;
-                let thread_file_handle = Arc::new(RwLock::new(ddi.open_dev(path).unwrap()));
+                let thread_file_handle = Arc::new(RwLock::new(
+                    ddi.open_dev(path).expect("device opening should succeed"),
+                ));
                 file_handles.push(thread_file_handle.clone());
 
                 let thread = thread::spawn(move || {
@@ -935,7 +937,7 @@ fn test_open_session_null_id_then_proper_id() {
                 assert!(resp.is_err(), "resp {:?}", resp);
 
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
                 ));
             }
@@ -949,7 +951,7 @@ fn test_open_session_null_id_then_proper_id() {
                 );
 
                 assert_ne!(
-                    old_nonce.unwrap(),
+                    old_nonce.expect("old nonce should be available"),
                     encrypted_credential.nonce,
                     "Nonce is expected to be different now since crypto portion was successful previously"
                 );
@@ -964,7 +966,7 @@ fn test_open_session_null_id_then_proper_id() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -1003,7 +1005,7 @@ fn test_open_session_with_reset_in_middle() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -1036,7 +1038,7 @@ fn test_open_session_with_reset_in_middle() {
 
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
 
                 assert!(resp.hdr.sess_id.is_some());
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -1070,7 +1072,7 @@ fn test_open_session_incorrect_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -1099,7 +1101,7 @@ fn test_open_session_incorrect_pin() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidAppCredentials)
             ));
         },
@@ -1124,7 +1126,7 @@ fn test_open_session_max_sessions() {
             helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
 
             for element in file_handles.iter_mut() {
-                *element = Some(ddi.open_dev(path).unwrap());
+                *element = Some(ddi.open_dev(path).expect("device opening should succeed"));
 
                 if let Some(file_handle) = element {
                     let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
@@ -1144,7 +1146,7 @@ fn test_open_session_max_sessions() {
 
                     assert!(resp.is_ok(), "resp {:?}", resp);
 
-                    let resp = resp.unwrap();
+                    let resp = resp.expect("DDI response should succeed");
 
                     assert!(resp.hdr.sess_id.is_some());
                     assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -1155,7 +1157,7 @@ fn test_open_session_max_sessions() {
             }
 
             // Now we should not be able to open any more sessions
-            let file_handle = ddi.open_dev(path).unwrap();
+            let file_handle = ddi.open_dev(path).expect("device opening should succeed");
 
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                 &file_handle,
@@ -1240,7 +1242,9 @@ fn test_thread_fn_open_session_single_winner(
     pub_key: DdiDerPublicKey,
 ) -> DdiResult<()> {
     let ddi = DdiTest::default();
-    let dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
 
     helper_open_session(
         &dev,

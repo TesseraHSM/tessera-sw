@@ -44,7 +44,7 @@ fn test_ecc_sign_multi_threaded_stress() {
             }
 
             for thread in threads {
-                thread.join().unwrap();
+                thread.join().expect("worker join should succeed");
             }
         },
     );
@@ -52,7 +52,9 @@ fn test_ecc_sign_multi_threaded_stress() {
 
 fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
     let ddi = DdiTest::default();
-    let dev = ddi.open_dev(device_path.as_str()).unwrap();
+    let dev = ddi
+        .open_dev(device_path.as_str())
+        .expect("device opening should succeed");
 
     let mut app_sess_id = None;
 
@@ -74,7 +76,8 @@ fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
 
         if resp.as_ref().is_err() {
             if matches!(
-                resp.as_ref().unwrap_err(),
+                resp.as_ref()
+                    .expect_err("referenced value lookup should fail"),
                 DdiError::DdiStatus(DdiStatus::NonceMismatch)
             ) {
                 continue;
@@ -83,7 +86,7 @@ fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
 
         assert!(resp.is_ok(), "resp {:?}", resp);
 
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
 
         assert!(resp.hdr.sess_id.is_some());
         assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -94,7 +97,7 @@ fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
         break;
     }
 
-    let app_sess_id = app_sess_id.unwrap();
+    let app_sess_id = app_sess_id.expect("app session ID should be available");
 
     let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App);
 
@@ -107,7 +110,7 @@ fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     thread::sleep(std::time::Duration::from_secs(1));
 

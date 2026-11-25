@@ -77,7 +77,7 @@ fn test_masked_key_ecc_521() {
 }
 
 fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) {
-    let session_only_key_dev = ddi.open_dev(path).unwrap();
+    let session_only_key_dev = ddi.open_dev(path).expect("device opening should succeed");
 
     let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
         &session_only_key_dev,
@@ -95,7 +95,7 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let session_only_key_session = resp.hdr.sess_id;
 
@@ -108,7 +108,7 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let private_key_id = resp.data.private_key_id;
     let pub_key = resp.data.pub_key;
     let masked_key = resp.data.masked_key;
@@ -131,9 +131,9 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_key_id, _, new_pub_key) = resp.unwrap();
+    let (new_key_id, _, new_pub_key) = resp.expect("DDI response should succeed");
     assert!(new_pub_key.is_some());
-    let new_pub_key = new_pub_key.unwrap();
+    let new_pub_key = new_pub_key.expect("new public key should be available");
     assert_eq!(new_pub_key.key_kind, pub_key.key_kind);
     assert_eq!(new_pub_key.der.as_slice(), pub_key.der.as_slice());
 
@@ -150,7 +150,7 @@ fn test_ecc_session_only_key_gen(ddi: &DdiTest, path: &str, curve: DdiEccCurve) 
         DdiHashAlgorithm::Sha256,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let signature_len = resp.data.signature.len();
 
@@ -193,9 +193,9 @@ fn test_ecc_key_gen(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, curve: Ddi
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_key_id, _, new_pub_key) = resp.unwrap();
+    let (new_key_id, _, new_pub_key) = resp.expect("DDI response should succeed");
     assert!(new_pub_key.is_some());
-    let new_pub_key = new_pub_key.unwrap();
+    let new_pub_key = new_pub_key.expect("new public key should be available");
     assert_eq!(new_pub_key.key_kind, pub_key.key_kind);
     assert_eq!(new_pub_key.der.as_slice(), pub_key.der.as_slice());
 
@@ -213,7 +213,7 @@ fn test_ecc_key_gen(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, curve: Ddi
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     let signature_len = resp.data.signature.len();
 

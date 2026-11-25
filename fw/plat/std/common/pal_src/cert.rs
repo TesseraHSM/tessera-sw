@@ -549,7 +549,9 @@ impl HsmCertStore for StdHsmPal {
         self.hash
             .hash(
                 HashAlgo::sha256(),
-                self.cert_store().shared_cert(2).unwrap(),
+                self.cert_store()
+                    .shared_cert(2)
+                    .expect("shared certificate lookup should succeed"),
                 &mut alias_hash,
             )
             .await?;

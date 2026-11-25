@@ -522,7 +522,7 @@ mod tests {
 
             let result = tpm.create_primary(Hierarchy::Null, primary_pub, &pcrs);
             assert!(result.is_ok());
-            let created_primary = result.unwrap();
+            let created_primary = result.expect("vtpm seal unseal basic result should succeed");
 
             // Test data to seal
             let test_data = b"This is secret data that should be sealed";
@@ -555,7 +555,7 @@ mod tests {
                 &[],
             );
             assert!(result.is_ok());
-            let sealed_object = result.unwrap();
+            let sealed_object = result.expect("vtpm seal unseal basic result should succeed");
 
             assert!(
                 !sealed_object.private.is_empty(),
@@ -588,12 +588,12 @@ mod tests {
                 &sealed_object.public,
             );
             assert!(result.is_ok());
-            let loaded_object = result.unwrap();
+            let loaded_object = result.expect("vtpm seal unseal basic result should succeed");
 
             // Now try to unseal the data
             let result = tpm.unseal(loaded_object.handle, &[]);
             assert!(result.is_ok());
-            let unsealed_data = result.unwrap();
+            let unsealed_data = result.expect("vtpm seal unseal basic result should succeed");
 
             assert_eq!(
                 unsealed_data, test_data,

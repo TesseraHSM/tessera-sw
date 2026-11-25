@@ -39,7 +39,7 @@ fn hmac_msg(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         key_id,
-        MborByteArray::from_slice(&[0xA5u8; 64]).unwrap(),
+        MborByteArray::from_slice(&[0xA5u8; 64]).expect("byte slice conversion should succeed"),
     )
 }
 

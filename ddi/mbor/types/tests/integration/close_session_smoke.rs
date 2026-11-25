@@ -49,12 +49,12 @@ fn test_close_session_smoke() {
             encrypted_credential,
             pub_key,
         )
-        .unwrap()
+        .expect("DDI open session should succeed")
         .data
         .sess_id;
 
         let resp = helper_close_session(dev, Some(sess_id), Some(DdiApiRev { major: 1, minor: 0 }))
-            .unwrap();
+            .expect("DDI close session should succeed");
 
         assert_eq!(resp.hdr.op, DdiOp::CloseSession);
         assert_eq!(resp.hdr.status, DdiStatus::Success);
@@ -85,7 +85,7 @@ fn test_close_session_twice_smoke() {
             encrypted_credential,
             pub_key,
         )
-        .unwrap()
+        .expect("DDI open session should succeed")
         .data
         .sess_id;
 

@@ -70,11 +70,14 @@ fn test_attest_ecc_key_smoke() {
                 &report_payload.public_key[..report_payload.public_key_size.into()],
             );
             let ecc_pub =
-                EccPublicKey::from_bytes(&pub_key_der.der.data()[..pub_key_der.der.len()]).unwrap();
+                EccPublicKey::from_bytes(&pub_key_der.der.data()[..pub_key_der.der.len()])
+                    .expect("ECC public key construction from bytes should succeed");
             let CoseKey::EccPublic { crv, x, y } = attested_key else {
                 panic!("Should be CoseKey::EccPublic")
             };
-            let (expected_x, expected_y) = ecc_pub.coord_vec().unwrap();
+            let (expected_x, expected_y) = ecc_pub
+                .coord_vec()
+                .expect("coord vec operation should succeed");
             assert_eq!(normalized_key(&x), normalized_key(&expected_x));
             assert_eq!(normalized_key(&y), normalized_key(&expected_y));
             assert_eq!(crv, 1 /* P-256 */);

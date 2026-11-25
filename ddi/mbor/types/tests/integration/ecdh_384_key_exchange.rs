@@ -39,7 +39,7 @@ fn test_ecdh_384_key_exchange_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -76,7 +76,7 @@ fn test_ecdh_384_key_exchange_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -111,7 +111,7 @@ fn test_ecdh_384_key_exchange_incorrect_private_key_num() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -239,7 +239,7 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_usage() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
             ));
         },
@@ -273,7 +273,7 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let private_key_id3 = resp.data.private_key_id;
 
@@ -296,7 +296,7 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
             ));
 
@@ -343,7 +343,7 @@ fn test_ecdh_384_key_exchange_521_mismatch_input_size() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let private_key_id3 = resp.data.private_key_id;
             let pub_key3 = resp.data.pub_key;
@@ -409,7 +409,7 @@ fn test_ecdh_384_key_exchange_256_mismatch_input_size() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let private_key_id3 = resp.data.private_key_id;
             let pub_key3 = resp.data.pub_key;

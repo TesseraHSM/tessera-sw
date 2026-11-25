@@ -332,7 +332,11 @@ pub fn common_fuzz_test(test: &dyn Fn(&TestCtx, &str)) {
 
     let path = match std::env::var("FUZZ_DEVICE") {
         Ok(path) => path,
-        Err(_) => dev_infos.first().unwrap().path.clone(),
+        Err(_) => dev_infos
+            .first()
+            .expect("first entry should be present")
+            .path
+            .clone(),
     };
 
     // Display all device paths and the selected device path if it hasn't been

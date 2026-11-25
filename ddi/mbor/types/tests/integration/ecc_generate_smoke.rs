@@ -37,7 +37,7 @@ fn test_ecc_generate_smoke() {
                     curve,
                     key_props,
                 )
-                .unwrap();
+                .expect("DDI ECC generate key pair should succeed");
 
                 assert_eq!(resp.hdr.op, DdiOp::EccGenerateKeyPair);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);

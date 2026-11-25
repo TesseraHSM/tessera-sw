@@ -24,7 +24,8 @@ unsafe impl Send for AlignedBuf {}
 impl AlignedBuf {
     #[allow(unsafe_code)]
     fn new(len: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
+        let layout = std::alloc::Layout::from_size_align(len, 4096)
+            .expect("from size align operation should succeed");
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null());
         Self { ptr, len }
@@ -49,7 +50,8 @@ impl AlignedBuf {
 impl Drop for AlignedBuf {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
-        let layout = std::alloc::Layout::from_size_align(self.len, 4096).unwrap();
+        let layout = std::alloc::Layout::from_size_align(self.len, 4096)
+            .expect("from size align operation should succeed");
         unsafe { std::alloc::dealloc(self.ptr, layout) };
     }
 }
@@ -155,7 +157,7 @@ async fn concurrent_ios() {
         }));
     }
     for h in handles {
-        h.await.unwrap();
+        h.await.expect("h should be available");
     }
 }
 
@@ -171,7 +173,7 @@ async fn fifty_concurrent_ios() {
         }));
     }
     for h in handles {
-        h.await.unwrap();
+        h.await.expect("h should be available");
     }
 }
 
@@ -1167,7 +1169,12 @@ async fn get_establish_cred_encryption_key_verify_signature() {
         "signature verification failed: {:?}",
         result
     );
-    assert!(result.unwrap(), "signature over public key is invalid");
+    assert!(
+        result.expect(
+            "get establish credential encryption key verify signature result should succeed"
+        ),
+        "signature over public key is invalid"
+    );
 }
 
 #[tokio::test]

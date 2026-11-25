@@ -65,7 +65,7 @@ fn ecc_sign_verify_fips_aware(
     }
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let resp_sign = resp.data.signature;
 
     signature[..resp_sign.len()].clone_from_slice(&resp_sign.data()[..resp_sign.len()]);

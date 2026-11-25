@@ -24,7 +24,7 @@ fn test_masked_key_malformed_ddi() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::DdiDecodeFailed)
             ));
         },
@@ -50,7 +50,7 @@ fn test_masked_key_no_session() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let masked_key = resp.data.masked_key;
 
             assert!(verify_iv_not_default_from_masked_key(masked_key.as_slice()).unwrap_or(false));
@@ -71,7 +71,7 @@ fn test_masked_key_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -108,7 +108,7 @@ fn test_masked_key_malformed_mask_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let masked_key = resp.data.masked_key;
 
             assert!(verify_iv_not_default_from_masked_key(masked_key.as_slice()).unwrap_or(false));
@@ -123,43 +123,43 @@ fn test_masked_key_malformed_mask_key() {
             let iv_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[ALGORITHM_OFFSET..IV_LEN_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let iv_padding_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[IV_LEN_OFFSET..IV_PADDING_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let metadata_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[IV_PADDING_OFFSET..METADATA_LEN_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let metadata_padding_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[METADATA_LEN_OFFSET..METADATA_PADDING_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let encrypted_key_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[METADATA_PADDING_OFFSET..ENCRYPTED_KEY_LEN_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let encrypted_key_padding_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[ENCRYPTED_KEY_LEN_OFFSET..ENCRYPTED_KEY_PADDING_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
             let tag_len: usize = u16::from_le_bytes(
                 masked_key.as_slice()[ENCRYPTED_KEY_PADDING_OFFSET..TAG_LEN_OFFSET]
                     .try_into()
-                    .unwrap(),
+                    .expect("conversion to the required type should succeed"),
             )
             .into();
 
@@ -176,7 +176,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -194,7 +194,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -213,7 +213,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -234,7 +234,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -256,7 +256,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }
@@ -281,7 +281,7 @@ fn test_masked_key_malformed_mask_key() {
 
                 assert!(resp.is_err(), "resp {:?}", resp);
                 assert!(matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
                 ));
             }

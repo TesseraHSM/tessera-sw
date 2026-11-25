@@ -31,7 +31,7 @@ fn test_rsa_4k_decrypt_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -60,7 +60,7 @@ fn test_rsa_4k_decrypt_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -104,7 +104,7 @@ fn test_rsa_4k_decrypt_incorrect_key_num_entry() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -131,7 +131,7 @@ fn test_rsa_4k_decrypt_incorrect_key_type() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidKeyType)
             ));
         },
@@ -173,7 +173,7 @@ fn test_rsa_4k_decrypt_message_data_below_lower_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -211,7 +211,7 @@ fn test_rsa_4k_decrypt_message_data_above_upper_limit() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -275,7 +275,7 @@ fn test_rsa_4k_encrypt_and_decrypt() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let mut padded_data = [0u8; 512];
             padded_data[..resp.data.x.len()]
@@ -289,7 +289,8 @@ fn test_rsa_4k_encrypt_and_decrypt() {
                 crypto_sha256,
             );
             assert!(unpadded_data_result.is_ok());
-            let unpadded_data = unpadded_data_result.unwrap();
+            let unpadded_data =
+                unpadded_data_result.expect("unpadded data result should be available");
 
             assert_eq!(orig_x[..data_len_to_test], unpadded_data);
         },

@@ -31,12 +31,12 @@ fn test_part_prov_test_provisioning() {
             return;
         }
 
-        let mut dev = ddi.open_dev(path).unwrap();
+        let mut dev = ddi.open_dev(path).expect("device opening should succeed");
 
         // Set Device Kind
 
         let mut bk3 = vec![0u8; 48];
-        Rng::rand_bytes(&mut bk3).unwrap();
+        Rng::rand_bytes(&mut bk3).expect("random byte generation should succeed");
         let masked_bk3 = helper_get_or_init_bk3(&dev);
 
         assert!(verify_iv_not_default_from_masked_key(masked_bk3.as_slice()).unwrap_or(false));
@@ -66,7 +66,7 @@ fn test_part_prov_test_provisioning() {
             pub_key,
         );
         assert!(resp.is_ok(), "resp {:?}", resp);
-        let resp = resp.unwrap();
+        let resp = resp.expect("DDI response should succeed");
         assert!(resp.hdr.sess_id.is_some());
     });
 }
@@ -92,7 +92,7 @@ fn test_part_prov_test_lm() {
                 result
             );
 
-            let mut setup_dev = ddi.open_dev(path).unwrap();
+            let mut setup_dev = ddi.open_dev(path).expect("device opening should succeed");
             // Set Device Kind
 
             let _ = helper_common_establish_credential_with_bmk(
@@ -120,7 +120,7 @@ fn test_part_prov_test_lm() {
                 pub_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.hdr.sess_id.is_some());
         },
     );
@@ -152,7 +152,7 @@ fn test_part_prov_fail_then_succeed() {
                 result
             );
 
-            let mut setup_dev = ddi.open_dev(path).unwrap();
+            let mut setup_dev = ddi.open_dev(path).expect("device opening should succeed");
             // Set Device Kind
 
             // Try establish credential with invalid partition_bmk
@@ -172,7 +172,7 @@ fn test_part_prov_fail_then_succeed() {
             assert!(resp.is_err(), "resp {:?}", resp);
             println!("{:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed)
             ));
 
@@ -202,7 +202,7 @@ fn test_part_prov_fail_then_succeed() {
                 pub_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             assert!(resp.hdr.sess_id.is_some());
         },
     );

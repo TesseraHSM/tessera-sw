@@ -5,13 +5,16 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out =
+        PathBuf::from(env::var("OUT_DIR").expect("environment variable lookup should succeed"));
+    let manifest = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("environment variable lookup should succeed"),
+    );
 
     // Copy memory.x to OUT_DIR so the linker can find it.
     // memory.x lives at the FP workspace root (one level up from app/).
     let memory_x = manifest.join("../memory.x");
-    fs::copy(&memory_x, out.join("memory.x")).unwrap();
+    fs::copy(&memory_x, out.join("memory.x")).expect("file copy should succeed");
     // cortex-m-rt's `device` feature makes its link.x `INCLUDE device.x`,
     // which a PAC would supply. This app takes no interrupts, so there are
     // no handlers to name.
@@ -19,7 +22,7 @@ fn main() {
         out.join("device.x"),
         "/* No device interrupts on the FP cores. */\n",
     )
-    .unwrap();
+    .expect("data write should succeed");
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed={}", memory_x.display());
 }

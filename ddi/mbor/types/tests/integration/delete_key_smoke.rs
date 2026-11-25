@@ -74,8 +74,10 @@ fn test_delete_key_then_reuse_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 key_id,
                 DdiAesOp::Encrypt,
-                MborByteArray::from_slice(&[0u8; 16]).unwrap(),
-                MborByteArray::new([0u8; 16], 16).unwrap(),
+                MborByteArray::from_slice(&[0u8; 16])
+                    .expect("byte slice conversion should succeed"),
+                MborByteArray::new([0u8; 16], 16)
+                    .expect("MBOR byte array construction should succeed"),
             )
             .expect_err("using a deleted key must fail");
             assert!(

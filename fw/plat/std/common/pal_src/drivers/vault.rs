@@ -494,8 +494,11 @@ mod tests {
         let key_data = [0xAA; 32];
         let kid = vault
             .create(&key_data, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
-        assert_eq!(vault.key(kid).unwrap(), &key_data);
+            .expect("object creation should succeed");
+        assert_eq!(
+            vault.key(kid).expect("key lookup should succeed"),
+            &key_data
+        );
     }
 
     #[test]
@@ -504,10 +507,10 @@ mod tests {
         let key = [0u8; 32];
         let k0 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         let k1 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         // Both in table 0, entries 0 and 1.
         assert_eq!(u16::from(k0), 0x0000);
         assert_eq!(u16::from(k1), 0x0001);
@@ -519,14 +522,20 @@ mod tests {
         let key_data = [0xCD; 32];
         let kid = vault
             .create(&key_data, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         assert!(vault.key(kid).is_ok());
         // Disable hides it from lookups without freeing.
-        vault.disable(kid).unwrap();
-        assert_eq!(vault.key(kid).unwrap_err(), HsmError::KeyNotFound);
+        vault.disable(kid).expect("object disabling should succeed");
+        assert_eq!(
+            vault.key(kid).expect_err("key lookup should fail"),
+            HsmError::KeyNotFound
+        );
         // Enable (the undo side) restores it with material intact.
-        vault.enable(kid).unwrap();
-        assert_eq!(vault.key(kid).unwrap(), &key_data);
+        vault.enable(kid).expect("object enabling should succeed");
+        assert_eq!(
+            vault.key(kid).expect("key lookup should succeed"),
+            &key_data
+        );
     }
 
     #[test]
@@ -534,14 +543,17 @@ mod tests {
         let mut vault = KeyVault::new(1);
         let kid = vault
             .create(&[0x11; 32], HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
-        vault.disable(kid).unwrap();
+            .expect("object creation should succeed");
+        vault.disable(kid).expect("object disabling should succeed");
         // The commit side: delete frees even a disabled key; slot reusable.
-        vault.delete(kid).unwrap();
-        assert_eq!(vault.key(kid).unwrap_err(), HsmError::KeyNotFound);
+        vault.delete(kid).expect("object deletion should succeed");
+        assert_eq!(
+            vault.key(kid).expect_err("key lookup should fail"),
+            HsmError::KeyNotFound
+        );
         let kid2 = vault
             .create(&[0x22; 32], HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         assert_eq!(u16::from(kid2), u16::from(kid));
     }
 
@@ -550,21 +562,30 @@ mod tests {
         let mut vault = KeyVault::new(1);
         // A free slot can be neither disabled nor enabled.
         assert_eq!(
-            vault.disable(HsmKeyId::from(0u16)).unwrap_err(),
+            vault
+                .disable(HsmKeyId::from(0u16))
+                .expect_err("object disabling should fail"),
             HsmError::KeyNotFound
         );
         assert_eq!(
-            vault.enable(HsmKeyId::from(0u16)).unwrap_err(),
+            vault
+                .enable(HsmKeyId::from(0u16))
+                .expect_err("object enabling should fail"),
             HsmError::KeyNotFound
         );
         let kid = vault
             .create(&[0x33; 32], HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
-        vault.disable(kid).unwrap();
+            .expect("object creation should succeed");
+        vault.disable(kid).expect("object disabling should succeed");
         // Disable is once-only — an already-disabled key is not "live".
-        assert_eq!(vault.disable(kid).unwrap_err(), HsmError::KeyNotFound);
+        assert_eq!(
+            vault
+                .disable(kid)
+                .expect_err("object disabling should fail"),
+            HsmError::KeyNotFound
+        );
         // Enable is disabled-aware and still finds it.
-        vault.enable(kid).unwrap();
+        vault.enable(kid).expect("object enabling should succeed");
         assert!(vault.key(kid).is_ok());
     }
 
@@ -574,19 +595,21 @@ mod tests {
         let key = [0u8; 32];
         let kid = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
-        vault.delete(kid).unwrap();
+            .expect("object creation should succeed");
+        vault.delete(kid).expect("object deletion should succeed");
         // Slot 0 is free again.
         let kid2 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         assert_eq!(u16::from(kid2), 0x0000);
     }
 
     #[test]
     fn delete_nonexistent_fails() {
         let mut vault = KeyVault::new(1);
-        let err = vault.delete(HsmKeyId::from(0u16)).unwrap_err();
+        let err = vault
+            .delete(HsmKeyId::from(0u16))
+            .expect_err("object deletion should fail");
         assert_eq!(err, HsmError::KeyNotFound);
     }
 
@@ -599,23 +622,25 @@ mod tests {
         // 3 session-scoped keys.
         let s0 = vault
             .create(&key, HsmVaultKeyKind::Aes256, sess_key, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         let s1 = vault
             .create(&key, HsmVaultKeyKind::Aes256, sess_key, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         let s2 = vault
             .create(&key, HsmVaultKeyKind::Aes256, sess_key, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
 
         // 2 app-scoped keys.
         let a0 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         let a1 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
 
-        vault.delete_by_session_key(HsmKeyId::from(5u16)).unwrap();
+        vault
+            .delete_by_session_key(HsmKeyId::from(5u16))
+            .expect("session key deletion should succeed");
 
         // Session keys gone.
         assert!(vault.key(s0).is_err());
@@ -630,7 +655,9 @@ mod tests {
     fn delete_by_session_key_no_match() {
         let mut vault = KeyVault::new(1);
         // No keys at all — should succeed silently.
-        vault.delete_by_session_key(HsmKeyId::from(99u16)).unwrap();
+        vault
+            .delete_by_session_key(HsmKeyId::from(99u16))
+            .expect("session key deletion should succeed");
     }
 
     #[test]
@@ -639,7 +666,9 @@ mod tests {
         let key = [0u8; 32];
         // AES-256 storage cost = 32 (attrs) + 32 (aligned key) = 64 bytes.
         // Budget = 15104 / 64 = 236 keys.
-        let expected = BLOB_MEMORY_SIZE / fw_storage_cost(HsmVaultKeyKind::Aes256, 32).unwrap();
+        let expected = BLOB_MEMORY_SIZE
+            / fw_storage_cost(HsmVaultKeyKind::Aes256, 32)
+                .expect("firmware storage cost calculation should succeed");
         let mut count = 0;
         loop {
             match vault.create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs()) {
@@ -654,7 +683,9 @@ mod tests {
     #[test]
     fn multi_table_capacity() {
         let key = [0u8; 32];
-        let per_table = BLOB_MEMORY_SIZE / fw_storage_cost(HsmVaultKeyKind::Aes256, 32).unwrap();
+        let per_table = BLOB_MEMORY_SIZE
+            / fw_storage_cost(HsmVaultKeyKind::Aes256, 32)
+                .expect("firmware storage cost calculation should succeed");
 
         let mut vault3 = KeyVault::new(3);
         let mut count = 0;
@@ -671,7 +702,8 @@ mod tests {
     fn large_key_byte_budget() {
         let mut vault = KeyVault::new(1);
         // RSA 4K CRT: raw = 2564, aligned = 2568, cost = 2600.
-        let cost = fw_storage_cost(HsmVaultKeyKind::Rsa4kPrivateCrt, 2564).unwrap();
+        let cost = fw_storage_cost(HsmVaultKeyKind::Rsa4kPrivateCrt, 2564)
+            .expect("firmware storage cost calculation should succeed");
         let expected = BLOB_MEMORY_SIZE / cost;
         let key = vec![0u8; 2564];
         let mut count = 0;
@@ -715,7 +747,7 @@ mod tests {
                 None,
                 HsmVaultKeyAttrs::new(),
             )
-            .unwrap_err();
+            .expect_err("object creation should fail");
         assert_eq!(err, HsmError::InvalidKeyType);
     }
 
@@ -729,8 +761,11 @@ mod tests {
                 None,
                 HsmVaultKeyAttrs::new().with_sign(true),
             )
-            .unwrap();
-        assert_eq!(vault.key_kind(kid).unwrap(), HsmVaultKeyKind::Ecc384Private);
+            .expect("object creation should succeed");
+        assert_eq!(
+            vault.key_kind(kid).expect("key kind lookup should succeed"),
+            HsmVaultKeyKind::Ecc384Private
+        );
     }
 
     #[test]
@@ -742,8 +777,13 @@ mod tests {
             .with_never_extractable(true);
         let kid = vault
             .create(&[0; 48], HsmVaultKeyKind::Ecc384Private, None, attrs)
-            .unwrap();
-        assert_eq!(vault.key_attrs(kid).unwrap(), attrs);
+            .expect("object creation should succeed");
+        assert_eq!(
+            vault
+                .key_attrs(kid)
+                .expect("key attribute lookup should succeed"),
+            attrs
+        );
     }
 
     #[test]
@@ -809,7 +849,7 @@ mod tests {
         ];
         for &(kind, expected) in cases {
             assert_eq!(
-                KeyVault::key_len(kind).unwrap(),
+                KeyVault::key_len(kind).expect("key length lookup should succeed"),
                 expected,
                 "mismatch for {kind:?}"
             );
@@ -819,7 +859,7 @@ mod tests {
     #[test]
     fn key_len_free_fails() {
         assert_eq!(
-            KeyVault::key_len(HsmVaultKeyKind::Free).unwrap_err(),
+            KeyVault::key_len(HsmVaultKeyKind::Free).expect_err("key length lookup should fail"),
             HsmError::InvalidKeyType
         );
     }
@@ -830,10 +870,10 @@ mod tests {
         let key = [0u8; 32];
         let k0 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         let k1 = vault
             .create(&key, HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap();
+            .expect("object creation should succeed");
         vault.clear();
         assert!(vault.key(k0).is_err());
         assert!(vault.key(k1).is_err());
@@ -844,7 +884,7 @@ mod tests {
         let mut vault = KeyVault::new(0);
         let err = vault
             .create(&[0; 32], HsmVaultKeyKind::Aes256, None, aes256_attrs())
-            .unwrap_err();
+            .expect_err("object creation should fail");
         assert_eq!(err, HsmError::NotEnoughSpace);
     }
 }

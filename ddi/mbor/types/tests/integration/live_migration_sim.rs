@@ -39,7 +39,9 @@ impl ThreadSessionInfo {
         credential_lock: &Arc<RwLock<()>>,
         thread_id: usize,
     ) -> Result<Self, DdiError> {
-        let dev = ddi.open_dev(dev_path).unwrap();
+        let dev = ddi
+            .open_dev(dev_path)
+            .expect("device opening should succeed");
 
         let _lock = credential_lock.write();
         info!(
@@ -67,7 +69,7 @@ impl ThreadSessionInfo {
             pub_key,
         )?;
 
-        let session_id = resp.hdr.sess_id.unwrap();
+        let session_id = resp.hdr.sess_id.expect("session ID should be available");
         let session_bmk = resp.data.bmk_session.as_slice().to_vec();
         info!(
             "Thread {}: Successfully opened session with ID {}",
@@ -179,9 +181,11 @@ fn test_live_migration_sim_minimum() {
     }
 
     for dev_info in dev_infos.iter() {
-        let dev = ddi.open_dev(&dev_info.path).unwrap();
+        let dev = ddi
+            .open_dev(&dev_info.path)
+            .expect("device opening should succeed");
 
-        dev.erase().unwrap()
+        dev.erase().expect("erase operation should succeed")
     }
 }
 
@@ -226,7 +230,7 @@ fn test_live_migration_sim_basic() {
             assert!(resp.is_err(), "Should fail after migration");
             assert!(
                 matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
                 ),
                 "Should get SessionNeedsRenegotiation error."
@@ -263,7 +267,7 @@ fn test_live_migration_sim_basic() {
                 "Reopen session should succeed: {:?}",
                 reopen_resp
             );
-            let reopened_session = reopen_resp.unwrap();
+            let reopened_session = reopen_resp.expect("DDI reopen response should succeed");
             assert_eq!(
                 reopened_session.data.sess_id, session_id,
                 "Reopened session should have same ID"
@@ -333,7 +337,8 @@ fn test_live_migration_sealed_bk3() {
                 "Failed to get sealed BK3 after setting: {:?}",
                 sealed_bk3_after
             );
-            let sealed_bk3_after_data = sealed_bk3_after.unwrap();
+            let sealed_bk3_after_data =
+                sealed_bk3_after.expect("sealed BK3 after should be available");
 
             assert_eq!(
                 sealed_bk3, sealed_bk3_after_data.data.sealed_bk3,
@@ -358,7 +363,7 @@ fn test_live_migration_two_sessions() {
             let session_seed1 = setup_res.random_seed;
 
             // Create a new device handle for session 2
-            let dev2 = ddi.open_dev(path).unwrap();
+            let dev2 = ddi.open_dev(path).expect("device opening should succeed");
 
             let (encrypted_credential2, pub_key2) = encrypt_userid_pin_for_open_session(
                 &dev2,
@@ -375,8 +380,8 @@ fn test_live_migration_two_sessions() {
                 pub_key2,
             );
             assert!(resp2.is_ok(), "Failed to open second session: {:?}", resp2);
-            let resp2 = resp2.unwrap();
-            let session_id2 = resp2.hdr.sess_id.unwrap();
+            let resp2 = resp2.expect("resp2 should be available");
+            let session_id2 = resp2.hdr.sess_id.expect("session ID should be available");
             let session_bmk2 = resp2.data.bmk_session.as_slice().to_vec();
             let session_seed2 = TEST_SESSION_SEED;
 
@@ -447,12 +452,18 @@ fn test_live_migration_two_sessions() {
 
             // Verify both sessions have the same IDs
             assert_eq!(
-                reopen_resp1.unwrap().data.sess_id,
+                reopen_resp1
+                    .expect("reopen resp1 should be available")
+                    .data
+                    .sess_id,
                 session_id1,
                 "Reopened session 1 should have same ID"
             );
             assert_eq!(
-                reopen_resp2.unwrap().data.sess_id,
+                reopen_resp2
+                    .expect("reopen resp2 should be available")
+                    .data
+                    .sess_id,
                 session_id2,
                 "Reopened session 2 should have same ID"
             );
@@ -471,7 +482,9 @@ fn test_live_migration_zero_sessions() {
     }
 
     for dev_info in dev_infos.iter() {
-        let mut dev = ddi.open_dev(&dev_info.path).unwrap();
+        let mut dev = ddi
+            .open_dev(&dev_info.path)
+            .expect("device opening should succeed");
 
         // Don't open any sessions, just establish credentials
         let _ = helper_common_establish_credential_no_unwrap(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
@@ -585,7 +598,7 @@ fn test_close_session_after_live_migration_sim() {
             // Otherwise, verify it fails with SessionNeedsRenegotiation and perform reopen
             assert!(
                 matches!(
-                    resp.unwrap_err(),
+                    resp.expect_err("DDI response should fail"),
                     DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
                 ),
                 "Expected SessionNeedsRenegotiation error after LM"
@@ -651,7 +664,7 @@ fn test_live_migration_reopen_new_device_handle() {
             );
 
             // Create a new device handle
-            let mut new_dev = ddi.open_dev(path).unwrap();
+            let mut new_dev = ddi.open_dev(path).expect("device opening should succeed");
 
             let _ = helper_common_establish_credential_no_unwrap(
                 &mut new_dev,
@@ -746,7 +759,7 @@ fn test_live_migration_repeated_cycles() {
                     reopen_resp
                 );
 
-                let reopened_session = reopen_resp.unwrap();
+                let reopened_session = reopen_resp.expect("DDI reopen response should succeed");
                 assert_eq!(
                     reopened_session.data.sess_id, session_id,
                     "Reopened session should have same ID on cycle {}",
@@ -789,7 +802,9 @@ fn test_live_migration_concurrent_shared_session() {
     let dev_info = &dev_infos[0];
 
     // Setup: Create device and establish initial session
-    let mut dev = ddi.open_dev(&dev_info.path).unwrap();
+    let mut dev = ddi
+        .open_dev(&dev_info.path)
+        .expect("device opening should succeed");
 
     // Initialize and open session
     let setup_res = common_setup_for_lm(&mut dev, &ddi, &dev_info.path);
@@ -949,12 +964,12 @@ fn test_live_migration_concurrent_shared_session() {
     }
 
     // Wait for migration thread to complete
-    let migration_result = migration_thread.join().unwrap();
+    let migration_result = migration_thread.join().expect("worker join should succeed");
 
     // Wait for all key threads to complete
     let mut key_results = Vec::new();
     for (i, key_thread) in key_threads.into_iter().enumerate() {
-        let result = key_thread.join().unwrap();
+        let result = key_thread.join().expect("worker join should succeed");
         key_results.push((i + 1, result));
     }
 
@@ -990,7 +1005,9 @@ fn test_live_migration_concurrent_separate_sessions() {
     let dev_info = &dev_infos[0];
 
     // Create a main device handle for credential establishment
-    let mut main_dev = ddi.open_dev(&dev_info.path).unwrap();
+    let mut main_dev = ddi
+        .open_dev(&dev_info.path)
+        .expect("device opening should succeed");
 
     // Setup for live migration
     let setup_res = common_setup_for_lm(&mut main_dev, &ddi, &dev_info.path);
@@ -1115,7 +1132,9 @@ fn test_live_migration_concurrent_separate_sessions() {
     }
 
     // Create a single migration device for triggering migrations
-    let mut migration_dev = ddi.open_dev(&dev_info.path).unwrap();
+    let mut migration_dev = ddi
+        .open_dev(&dev_info.path)
+        .expect("device opening should succeed");
 
     let barrier = Arc::new(Barrier::new(1 + NUM_SESSION_THREADS)); // 1 migration thread + session threads
 
@@ -1198,12 +1217,12 @@ fn test_live_migration_concurrent_separate_sessions() {
         }
 
         // Wait for migration thread to complete
-        let migration_result = migration_thread.join().unwrap();
+        let migration_result = migration_thread.join().expect("worker join should succeed");
 
         // Wait for all session threads to complete
         let mut all_session_results = Vec::new();
         for (i, session_thread) in session_threads.into_iter().enumerate() {
-            let result = session_thread.join().unwrap();
+            let result = session_thread.join().expect("worker join should succeed");
             all_session_results.push((i + 2, result)); // Thread IDs start from 2
         }
 

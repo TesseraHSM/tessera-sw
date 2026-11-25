@@ -43,7 +43,7 @@ fn test_attest_ecc_signing_key() {
             );
             assert!(result.is_ok(), "result {:?}", result);
 
-            let resp = result.unwrap();
+            let resp = result.expect("test attest ECC signing key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -74,7 +74,7 @@ fn test_attest_ecc_signing_key() {
 
             let result = EccPublicKey::from_bytes(&pub_key_der.der.data()[..pub_key_der.der.len()]);
             assert!(result.is_ok(), "result {:?}", result);
-            let ecc_pub = result.unwrap();
+            let ecc_pub = result.expect("test attest ECC signing key result should succeed");
 
             let CoseKey::EccPublic { crv, x, y } = attested_key else {
                 panic!("Should be CoseKey::EccPublic")
@@ -82,7 +82,8 @@ fn test_attest_ecc_signing_key() {
 
             let result = ecc_pub.coord_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let (expected_x, expected_y) = result.unwrap();
+            let (expected_x, expected_y) =
+                result.expect("test attest ECC signing key result should succeed");
 
             // In the rare case where generate ECC key returns a point with leading zeros,
             // With openssl, expected_x (or y) would NOT have leading zeros as OpenSSL strips them.
@@ -133,7 +134,7 @@ fn test_attest_ecc_seed_key() {
             );
             assert!(result.is_ok(), "result {:?}", result);
 
-            let resp = result.unwrap();
+            let resp = result.expect("test attest ECC seed key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -164,7 +165,7 @@ fn test_attest_ecc_seed_key() {
 
             let result = EccPublicKey::from_bytes(&pub_key_der.der.data()[..pub_key_der.der.len()]);
             assert!(result.is_ok(), "result {:?}", result);
-            let ecc_pub = result.unwrap();
+            let ecc_pub = result.expect("test attest ECC seed key result should succeed");
 
             let CoseKey::EccPublic { crv, x, y } = attested_key else {
                 panic!("Should be CoseKey::EccPublic")
@@ -172,7 +173,8 @@ fn test_attest_ecc_seed_key() {
 
             let result = ecc_pub.coord_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let (expected_x, expected_y) = result.unwrap();
+            let (expected_x, expected_y) =
+                result.expect("test attest ECC seed key result should succeed");
 
             // In the rare case where generate ECC key returns a point with leading zeros,
             // With openssl, expected_x (or y) would NOT have leading zeros as OpenSSL strips them.
@@ -218,7 +220,7 @@ fn test_attest_rsa_unwrapping_key() {
             );
             assert!(result.is_ok(), "result {:?}", result);
 
-            let resp = result.unwrap();
+            let resp = result.expect("test attest RSA unwrapping key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -249,7 +251,7 @@ fn test_attest_rsa_unwrapping_key() {
 
             let result = RsaPublicKey::from_bytes(&pub_key_der);
             assert!(result.is_ok(), "result {:?}", result);
-            let rsa_pub = result.unwrap();
+            let rsa_pub = result.expect("test attest RSA unwrapping key result should succeed");
 
             let CoseKey::RsaPublic { n, e } = attested_key else {
                 panic!()
@@ -257,11 +259,11 @@ fn test_attest_rsa_unwrapping_key() {
 
             let result = rsa_pub.e_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let expected_e = result.unwrap();
+            let expected_e = result.expect("test attest RSA unwrapping key result should succeed");
 
             let result = rsa_pub.n_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let expected_n = result.unwrap();
+            let expected_n = result.expect("test attest RSA unwrapping key result should succeed");
 
             // Hardware device returns big-endian slices.
             // Crypto library returns little-endian, so convert expected_e to big-endian.
@@ -299,7 +301,7 @@ fn test_attest_rsa_decryption_key() {
             );
             assert!(result.is_ok(), "result {:?}", result);
 
-            let resp = result.unwrap();
+            let resp = result.expect("test attest RSA decryption key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -330,7 +332,7 @@ fn test_attest_rsa_decryption_key() {
 
             let result = RsaPublicKey::from_bytes(&pub_key_der);
             assert!(result.is_ok(), "result {:?}", result);
-            let rsa_pub = result.unwrap();
+            let rsa_pub = result.expect("test attest RSA decryption key result should succeed");
 
             let CoseKey::RsaPublic { n, e } = attested_key else {
                 panic!()
@@ -338,11 +340,11 @@ fn test_attest_rsa_decryption_key() {
 
             let result = rsa_pub.e_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let expected_e = result.unwrap();
+            let expected_e = result.expect("test attest RSA decryption key result should succeed");
 
             let result = rsa_pub.n_vec();
             assert!(result.is_ok(), "result {:?}", result);
-            let expected_n = result.unwrap();
+            let expected_n = result.expect("test attest RSA decryption key result should succeed");
 
             // Hardware device returns big-endian slices.
             // Crypto library returns little-endian, so convert expected_e to big-endian.
@@ -444,7 +446,7 @@ fn test_attest_aes_key() {
                 key_props,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let key_id = resp.unwrap().data.key_id;
+            let key_id = resp.expect("DDI response should succeed").data.key_id;
 
             let report_data = [2u8; REPORT_DATA_SIZE];
             let result = helper_attest_key_cmd(
@@ -455,7 +457,7 @@ fn test_attest_aes_key() {
                 key_id,
             );
             assert!(result.is_ok(), "result {:?}", result);
-            let resp = result.unwrap();
+            let resp = result.expect("test attest AES key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -511,7 +513,7 @@ fn test_attest_aes_xts_bulk_key() {
                 key_props,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let key_id = resp.unwrap().data.key_id;
+            let key_id = resp.expect("DDI response should succeed").data.key_id;
 
             let report_data = [2u8; REPORT_DATA_SIZE];
             let result = helper_attest_key_cmd(
@@ -522,7 +524,7 @@ fn test_attest_aes_xts_bulk_key() {
                 key_id,
             );
             assert!(result.is_ok(), "result {:?}", result);
-            let resp = result.unwrap();
+            let resp = result.expect("test attest AES XTS bulk key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -579,7 +581,7 @@ fn test_attest_hmac_key() {
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert_eq!(resp.data.tag.len(), 48);
 
@@ -592,7 +594,7 @@ fn test_attest_hmac_key() {
                 hmac_key_id,
             );
             assert!(result.is_ok(), "result {:?}", result);
-            let resp = result.unwrap();
+            let resp = result.expect("test attest HMAC key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -658,7 +660,7 @@ fn test_attest_secret_key() {
 
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
             let resp = resp.data;
             assert_ne!(resp.key_id, 0);
             let secret_key_id = resp.key_id;
@@ -672,7 +674,7 @@ fn test_attest_secret_key() {
                 secret_key_id,
             );
             assert!(result.is_ok(), "result {:?}", result);
-            let resp = result.unwrap();
+            let resp = result.expect("test attest secret key result should succeed");
             let report = resp.data.report.data_take();
             let report_len = resp.data.report.len();
             assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -725,7 +727,7 @@ fn assert_derived_aes_attestation(
         aes_key_id,
     );
     assert!(result.is_ok(), "result {:?}", result);
-    let resp = result.unwrap();
+    let resp = result.expect("assert derived AES attestation result should succeed");
     let report = resp.data.report.data_take();
     let report_len = resp.data.report.len();
     assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -787,7 +789,7 @@ fn test_attest_hkdf_derived_aes_key() {
                 Default::default(),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let aes_key_id = resp.unwrap().data.key_id;
+            let aes_key_id = resp.expect("DDI response should succeed").data.key_id;
 
             assert_derived_aes_attestation(dev, session_id, aes_key_id);
         },
@@ -824,7 +826,7 @@ fn test_attest_kbkdf_derived_aes_key() {
                 Default::default(),
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let aes_key_id = resp.unwrap().data.key_id;
+            let aes_key_id = resp.expect("DDI response should succeed").data.key_id;
 
             assert_derived_aes_attestation(dev, session_id, aes_key_id);
         },
@@ -843,7 +845,7 @@ pub(crate) fn helper_get_cert_chain(dev: &mut <DdiTest as Ddi>::Dev) -> Vec<Vec<
     let result = helper_get_cert_chain_info(dev);
     assert!(result.is_ok(), "result {:?}", result);
 
-    let resp = result.unwrap();
+    let resp = result.expect("helper get certificate chain result should succeed");
     let num_certs = resp.data.num_certs;
 
     let mut cert_chain: Vec<Vec<u8>> = Vec::with_capacity(num_certs as usize);
@@ -851,7 +853,7 @@ pub(crate) fn helper_get_cert_chain(dev: &mut <DdiTest as Ddi>::Dev) -> Vec<Vec<
         let result = helper_get_certificate(dev, i);
         assert!(result.is_ok(), "result {:?}", result);
 
-        let resp = result.unwrap();
+        let resp = result.expect("helper get certificate chain result should succeed");
         let der = &resp.data.certificate.as_slice();
         print!("cert DER {:?}", der);
 
@@ -886,13 +888,13 @@ fn import_rsa_key(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16) -> (u16, Vec
     );
 
     assert!(result.is_ok(), "result {:?}", result);
-    let resp = result.unwrap();
+    let resp = result.expect("import RSA key result should succeed");
 
     let key_id = resp.data.key_id;
 
     let pub_key = resp.data.pub_key;
     assert!(pub_key.is_some());
-    let pub_key = pub_key.unwrap();
+    let pub_key = pub_key.expect("public key should be available");
 
     (key_id, pub_key.der.data()[..pub_key.der.len()].to_vec())
 }
@@ -904,18 +906,22 @@ pub(crate) fn verify_report(report: &[u8], cert_chain: &[Vec<u8>]) -> KeyAttesta
 
     let (protected_header, report_payload, signature) = parse_report(report);
 
-    let part_cert = x509::X509Certificate::from_der(cert_chain.last().unwrap()).unwrap();
-    let public_key_der = part_cert.get_public_key_der().unwrap();
+    let part_cert =
+        x509::X509Certificate::from_der(cert_chain.last().expect("last entry should be present"))
+            .expect("X509 certificate construction from DER should succeed");
+    let public_key_der = part_cert
+        .get_public_key_der()
+        .expect("public key DER extraction should succeed");
 
     let result = EccPublicKey::from_bytes(&public_key_der);
     assert!(result.is_ok(), "result {:?}", result);
-    let ecc_public = result.unwrap();
+    let ecc_public = result.expect("verify report result should succeed");
 
     let tbs = create_tbs(&protected_header, &report_payload);
 
     let result = Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs);
     assert!(result.is_ok(), "result {:?}", result);
-    let digest = result.unwrap();
+    let digest = result.expect("verify report result should succeed");
 
     let result = Verifier::verify(&mut EccAlgo::default(), &ecc_public, &digest, &signature);
     assert!(result.is_ok(), "result {:?}", result);
@@ -928,7 +934,7 @@ fn create_tbs(body_protected: &[u8], payload: &[u8]) -> Vec<u8> {
 
     let result = encode_sig_struct(body_protected, payload, &mut sig_struct_buffer);
     assert!(result.is_ok(), "result {:?}", result);
-    let sig_struct_size = result.unwrap();
+    let sig_struct_size = result.expect("create tbs result should succeed");
 
     sig_struct_buffer[..sig_struct_size].to_vec()
 }
@@ -938,7 +944,7 @@ fn parse_report(data: &[u8]) -> ([u8; PROTECTED_HEADER_SIZE], Vec<u8>, [u8; SIGN
 
     let result = decoder.tag();
     assert!(result.is_ok(), "result {:?}", result);
-    let tag = result.unwrap();
+    let tag = result.expect("parse report result should succeed");
     // Tag 18 for COSE_Sign1
     assert_eq!(tag, minicbor::data::Tag::Unassigned(18));
 
@@ -948,7 +954,7 @@ fn parse_report(data: &[u8]) -> ([u8; PROTECTED_HEADER_SIZE], Vec<u8>, [u8; SIGN
 
     let result = decoder.bytes();
     assert!(result.is_ok(), "result {:?}", result);
-    let protected_header = result.unwrap();
+    let protected_header = result.expect("parse report result should succeed");
     assert_eq!(protected_header.len(), PROTECTED_HEADER_SIZE);
 
     let protected_header = {
@@ -963,11 +969,11 @@ fn parse_report(data: &[u8]) -> ([u8; PROTECTED_HEADER_SIZE], Vec<u8>, [u8; SIGN
 
     let result = decoder.bytes();
     assert!(result.is_ok(), "result {:?}", result);
-    let payload = result.unwrap();
+    let payload = result.expect("parse report result should succeed");
 
     let result = decoder.bytes();
     assert!(result.is_ok(), "result {:?}", result);
-    let signature = result.unwrap();
+    let signature = result.expect("parse report result should succeed");
     assert_eq!(signature.len(), SIGNATURE_SIZE);
 
     let signature = {
@@ -983,7 +989,7 @@ fn decode_report_payload(payload: &[u8]) -> KeyAttestationReport {
     let result = minicbor::decode(payload);
     assert!(result.is_ok(), "result {:?}", result);
 
-    result.unwrap()
+    result.expect("decode report payload result should succeed")
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -997,39 +1003,39 @@ pub(crate) fn decode_cose_key(data: &[u8]) -> CoseKey {
 
     let result = decoder.map();
     assert!(result.is_ok(), "result {:?}", result);
-    let map = result.unwrap();
+    let map = result.expect("decode cose key result should succeed");
     assert!(map.is_some());
-    let map_len = map.unwrap();
+    let map_len = map.expect("map should be available");
     assert!(matches!(map_len, 3 | 4));
 
     let result = decoder.u8();
     assert!(result.is_ok(), "result {:?}", result);
-    let key_type_key = result.unwrap();
+    let key_type_key = result.expect("decode cose key result should succeed");
     assert_eq!(key_type_key, COSE_KEY_COMMON_PARAMETERS_KTY);
 
     let result = decoder.u8();
     assert!(result.is_ok(), "result {:?}", result);
-    let key_type_val = result.unwrap();
+    let key_type_val = result.expect("decode cose key result should succeed");
 
     let cose_key = match key_type_val {
         COSE_KEY_TYPES_RSA => {
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let n_key = result.unwrap();
+            let n_key = result.expect("decode cose key result should succeed");
             assert_eq!(n_key, COSE_KEY_TYPE_PARAMETERS_RSA_N);
 
             let result = decoder.bytes();
             assert!(result.is_ok(), "result {:?}", result);
-            let n_val = result.unwrap();
+            let n_val = result.expect("decode cose key result should succeed");
 
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let e_key = result.unwrap();
+            let e_key = result.expect("decode cose key result should succeed");
             assert_eq!(e_key, COSE_KEY_TYPE_PARAMETERS_RSA_E);
 
             let result = decoder.bytes();
             assert!(result.is_ok(), "result {:?}", result);
-            let e_val = result.unwrap();
+            let e_val = result.expect("decode cose key result should succeed");
 
             CoseKey::RsaPublic {
                 n: n_val.to_vec(),
@@ -1039,30 +1045,30 @@ pub(crate) fn decode_cose_key(data: &[u8]) -> CoseKey {
         COSE_KEY_TYPES_EC2 => {
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let crv_key = result.unwrap();
+            let crv_key = result.expect("decode cose key result should succeed");
             assert_eq!(crv_key, COSE_KEY_TYPE_PARAMETERS_EC2_CRV);
 
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let crv_val = result.unwrap();
+            let crv_val = result.expect("decode cose key result should succeed");
 
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let x_key = result.unwrap();
+            let x_key = result.expect("decode cose key result should succeed");
             assert_eq!(x_key, COSE_KEY_TYPE_PARAMETERS_EC2_X);
 
             let result = decoder.bytes();
             assert!(result.is_ok(), "result {:?}", result);
-            let x_val = result.unwrap();
+            let x_val = result.expect("decode cose key result should succeed");
 
             let result = decoder.i8();
             assert!(result.is_ok(), "result {:?}", result);
-            let y_key = result.unwrap();
+            let y_key = result.expect("decode cose key result should succeed");
             assert_eq!(y_key, COSE_KEY_TYPE_PARAMETERS_EC2_Y);
 
             let result = decoder.bytes();
             assert!(result.is_ok(), "result {:?}", result);
-            let y_val = result.unwrap();
+            let y_val = result.expect("decode cose key result should succeed");
 
             CoseKey::EccPublic {
                 crv: crv_val,
@@ -1121,7 +1127,7 @@ fn test_attest_rsa_der_import(
     );
     assert!(result.is_ok(), "result {:?}", result);
 
-    let resp = result.unwrap();
+    let resp = result.expect("test attest RSA DER import result should succeed");
     let report = resp.data.report.data_take();
     let report_len = resp.data.report.len();
     assert!(report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);
@@ -1140,7 +1146,7 @@ fn test_attest_rsa_der_import(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_key_id, _, _) = resp.unwrap();
+    let (new_key_id, _, _) = resp.expect("DDI response should succeed");
 
     let new_report_data = [2u8; REPORT_DATA_SIZE];
     let result = helper_attest_key_cmd(
@@ -1152,7 +1158,7 @@ fn test_attest_rsa_der_import(
     );
     assert!(result.is_ok(), "result {:?}", result);
 
-    let resp = result.unwrap();
+    let resp = result.expect("test attest RSA DER import result should succeed");
     let new_report = resp.data.report.data_take();
     let new_report_len = resp.data.report.len();
     assert!(new_report_len <= TAGGED_COSE_SIGN1_OBJECT_MAX_SIZE);

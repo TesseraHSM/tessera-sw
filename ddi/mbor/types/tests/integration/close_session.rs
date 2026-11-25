@@ -40,7 +40,7 @@ fn test_open_session_simple() {
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -79,7 +79,7 @@ fn test_open_session_simple_repeat() {
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
@@ -106,7 +106,7 @@ fn test_close_session_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -129,7 +129,7 @@ fn test_close_session_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -178,7 +178,7 @@ fn test_close_session_multiple() {
                 DdiStatus::FileHandleNoExistingSession
             };
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(status) if status == expected
             ));
         },
@@ -203,7 +203,7 @@ fn test_close_session_middle_session() {
             let mut opened_sessions = Vec::<u16>::new();
 
             for element in file_handles.iter_mut() {
-                *element = Some(ddi.open_dev(path).unwrap());
+                *element = Some(ddi.open_dev(path).expect("device opening should succeed"));
 
                 if let Some(file_handle) = element {
                     let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
@@ -222,7 +222,7 @@ fn test_close_session_middle_session() {
                     );
                     assert!(resp.is_ok(), "resp {:?}", resp);
 
-                    let resp = resp.unwrap();
+                    let resp = resp.expect("DDI response should succeed");
 
                     opened_sessions.push(resp.data.sess_id);
                 }

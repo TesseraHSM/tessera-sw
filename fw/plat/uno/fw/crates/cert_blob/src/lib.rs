@@ -407,10 +407,11 @@ mod tests {
         let certs: [&[u8]; 3] = [&root, &inter, &devid];
         let thumb = sample_thumb();
 
-        let total = CertBlob::build(&mut buf, &certs, &thumb).unwrap();
+        let total = CertBlob::build(&mut buf, &certs, &thumb)
+            .expect("certificate blob construction should succeed");
         assert!(total <= DEV_ID_CERT_BLOB_REGION_SIZE);
 
-        let blob = CertBlob::parse(&buf).unwrap();
+        let blob = CertBlob::parse(&buf).expect("certificate blob parsing should succeed");
         assert_eq!(blob.cert_count(), 3);
         assert_eq!(blob.dev_id_chain_hash(), &thumb);
         assert_eq!(blob.cert_len(0), Some(40));
@@ -429,11 +430,14 @@ mod tests {
         let a = [1u8; 37];
         let b = [2u8; 41];
         let certs: [&[u8]; 2] = [&a, &b];
-        CertBlob::build(&mut buf, &certs, &sample_thumb()).unwrap();
-        let blob = CertBlob::parse(&buf).unwrap();
+        CertBlob::build(&mut buf, &certs, &sample_thumb())
+            .expect("certificate blob construction should succeed");
+        let blob = CertBlob::parse(&buf).expect("certificate blob parsing should succeed");
         // Offsets are recovered via cert_der; verify each starts 4-byte aligned in the container.
         for i in 0..blob.cert_count() {
-            let der = blob.cert_der(i).unwrap();
+            let der = blob
+                .cert_der(i)
+                .expect("certificate DER operation should succeed");
             let off = der.as_ptr() as usize - buf.as_ptr() as usize;
             assert_eq!(off % CBLOB_ALIGN, 0);
         }
@@ -443,7 +447,8 @@ mod tests {
     fn rejects_bad_magic() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0] = b'X';
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -452,7 +457,8 @@ mod tests {
     fn rejects_bad_version() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[4] = CBLOB_VERSION + 1; // container version
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -461,7 +467,8 @@ mod tests {
     fn rejects_short_region() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        let total = CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        let total = CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         assert!(CertBlob::parse(&buf[..total - 1]).is_none());
         assert!(CertBlob::parse(&buf[..CBLOB_HDR_SIZE - 1]).is_none());
     }
@@ -476,7 +483,8 @@ mod tests {
     fn rejects_absent_slot() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // Only slot 0 exists; asking for slot 1 must fail.
         assert!(CertBlob::parse_slot(&buf, 1).is_none());
     }
@@ -485,7 +493,8 @@ mod tests {
     fn rejects_nonzero_reserved() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0x0A] = 1; // header reserved
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -494,7 +503,8 @@ mod tests {
     fn rejects_bad_desc_size() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // Corrupt desc_size (offset 0x02 within the descriptor at body_off).
         let body_off = CBLOB_HDR_SIZE + CBLOB_INTEGRITY_LEN;
         buf[body_off + 0x02] = 0xFF;
@@ -574,7 +584,7 @@ mod tests {
         buf[0..CBLOB_HDR_SIZE].copy_from_slice(hdr.as_bytes());
 
         // slot 0 is served despite the unknown-version slot 1 preceding it.
-        let blob = CertBlob::parse(&buf).unwrap();
+        let blob = CertBlob::parse(&buf).expect("certificate blob parsing should succeed");
         assert_eq!(blob.cert_count(), 1);
         assert_eq!(blob.dev_id_chain_hash(), &thumb);
         assert_eq!(blob.cert_der(0), Some(&cert[..]));
@@ -591,7 +601,8 @@ mod tests {
     fn rejects_dirty_magic() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0..4].copy_from_slice(b"INVL");
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -601,7 +612,8 @@ mod tests {
     fn rejects_bad_digest_algo() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0x06] = CBLOB_DIGEST_SHA256 + 1;
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -647,7 +659,7 @@ mod tests {
         };
         buf[0..CBLOB_HDR_SIZE].copy_from_slice(hdr.as_bytes());
 
-        let blob = CertBlob::parse(&buf).unwrap();
+        let blob = CertBlob::parse(&buf).expect("certificate blob parsing should succeed");
         assert_eq!(blob.cert_count(), 1);
         assert_eq!(blob.dev_id_chain_hash(), &thumb);
         assert_eq!(blob.cert_der(0), Some(&cert[..]));
@@ -658,7 +670,8 @@ mod tests {
     fn rejects_unaligned_hdr_size() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0x05] = (CBLOB_HDR_SIZE + 1) as u8; // 17, not a multiple of 4
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -668,7 +681,8 @@ mod tests {
     fn rejects_oversize_total_size() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // 4-byte aligned but larger than CBLOB_MAX_SIZE (and the region).
         buf[0x08..0x0A]
             .copy_from_slice(&((CBLOB_MAX_SIZE as u16) + CBLOB_ALIGN as u16).to_le_bytes());
@@ -680,7 +694,8 @@ mod tests {
     fn rejects_unaligned_total_size() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        let total = CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        let total = CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0x08..0x0A].copy_from_slice(&((total as u16) + 1).to_le_bytes());
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -690,7 +705,8 @@ mod tests {
     fn rejects_zero_num_slots() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[0x07] = 0;
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -700,7 +716,8 @@ mod tests {
     fn rejects_cert_offset_inside_descriptor() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // Point cert 0 at the descriptor head (well before desc_end).
         let body_off = CBLOB_HDR_SIZE + CBLOB_INTEGRITY_LEN;
         buf[META0_OFF..META0_OFF + 4].copy_from_slice(&(body_off as u32).to_le_bytes());
@@ -713,9 +730,14 @@ mod tests {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c0 = [1u8; 64];
         let c1 = [2u8; 64];
-        CertBlob::build(&mut buf, &[&c0, &c1], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c0, &c1], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // meta[1].offset lives one CBLOB_META_SIZE past meta[0]; rewrite it to alias meta[0].offset.
-        let meta0_offset = u32::from_le_bytes(buf[META0_OFF..META0_OFF + 4].try_into().unwrap());
+        let meta0_offset = u32::from_le_bytes(
+            buf[META0_OFF..META0_OFF + 4]
+                .try_into()
+                .expect("conversion to the required type should succeed"),
+        );
         let meta1_off_field = META0_OFF + CBLOB_META_SIZE;
         buf[meta1_off_field..meta1_off_field + 4].copy_from_slice(&meta0_offset.to_le_bytes());
         assert!(CertBlob::parse(&buf).is_none());
@@ -727,7 +749,8 @@ mod tests {
     fn rejects_zero_length_cert() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         buf[META0_OFF + 4..META0_OFF + 8].copy_from_slice(&0u32.to_le_bytes());
         assert!(CertBlob::parse(&buf).is_none());
     }
@@ -737,7 +760,8 @@ mod tests {
     fn rejects_cert_length_past_total_size() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         // Inflate cert 0's length to overrun the container (but stay under MAX_DEVID_CERT_LEN so the
         // total_size bound is what trips, not the per-cert cap).
         buf[META0_OFF + 4..META0_OFF + 8].copy_from_slice(&512u32.to_le_bytes());
@@ -750,7 +774,8 @@ mod tests {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [7u8; MAX_DEVID_CERT_LEN + 1];
         // Fits the 16 KB region, so `build` succeeds; the per-cert cap must reject it on parse.
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
         assert!(CertBlob::parse(&buf).is_none());
     }
 
@@ -759,8 +784,13 @@ mod tests {
     fn rejects_unaligned_cert_offset() {
         let mut buf = [0u8; DEV_ID_CERT_BLOB_REGION_SIZE];
         let c = [9u8; 20];
-        CertBlob::build(&mut buf, &[&c], &sample_thumb()).unwrap();
-        let meta0_offset = u32::from_le_bytes(buf[META0_OFF..META0_OFF + 4].try_into().unwrap());
+        CertBlob::build(&mut buf, &[&c], &sample_thumb())
+            .expect("certificate blob construction should succeed");
+        let meta0_offset = u32::from_le_bytes(
+            buf[META0_OFF..META0_OFF + 4]
+                .try_into()
+                .expect("conversion to the required type should succeed"),
+        );
         buf[META0_OFF..META0_OFF + 4].copy_from_slice(&(meta0_offset + 1).to_le_bytes());
         assert!(CertBlob::parse(&buf).is_none());
     }

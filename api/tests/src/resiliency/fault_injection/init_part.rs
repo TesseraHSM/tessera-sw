@@ -729,7 +729,7 @@ fn test_init_no_retry_without_resiliency() {
     clear_faults();
 
     assert_eq!(
-        result.unwrap_err(),
+        result.expect_err("test init no retry without resiliency result should fail"),
         HsmError::IoAborted,
         "init without resiliency should propagate IoAborted immediately"
     );

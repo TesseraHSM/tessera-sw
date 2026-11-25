@@ -243,7 +243,7 @@ fn test_aes_generate_key_no_retry_without_resiliency() {
     clear_faults();
 
     assert_eq!(
-        result.map(|_| ()).unwrap_err(),
+        result.map(|_| ()).expect_err("mapped result should fail"),
         HsmError::IoAborted,
         "AES generate_key without resiliency should propagate IoAborted immediately"
     );
@@ -274,7 +274,7 @@ fn test_ecc_generate_key_pair_no_retry_without_resiliency() {
     clear_faults();
 
     assert_eq!(
-        result.map(|_| ()).unwrap_err(),
+        result.map(|_| ()).expect_err("mapped result should fail"),
         HsmError::IoAborted,
         "ECC generate_key_pair without resiliency should propagate IoAborted immediately"
     );
@@ -305,7 +305,7 @@ fn test_aes_generate_key_fails_after_all_retries_exhausted() {
     clear_faults();
 
     assert_eq!(
-        result.map(|_| ()).unwrap_err(),
+        result.map(|_| ()).expect_err("mapped result should fail"),
         HsmError::IoAborted,
         "AES generate_key should return IoAborted after exhausting all retries"
     );

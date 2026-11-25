@@ -281,7 +281,7 @@ fn test_masked_key_hmac_sha256() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::HmacSha256, dev, None);
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key HMAC sha256 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -327,7 +327,7 @@ fn test_masked_key_hmac_sha384() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::HmacSha384, dev, None);
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key HMAC sha384 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -372,7 +372,7 @@ fn test_masked_key_hmac_sha512() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::HmacSha512, dev, None);
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key HMAC sha512 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -421,7 +421,7 @@ fn test_masked_key_var_hmac_sha256() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::VarHmac256, dev, Some(key_len));
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key var HMAC sha256 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -474,7 +474,7 @@ fn test_masked_key_var_hmac_sha384() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::VarHmac384, dev, Some(key_len));
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key var HMAC sha384 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -527,7 +527,7 @@ fn test_masked_key_var_hmac_sha512() {
             let res = create_hmac_key_ex(session_id, DdiKeyType::VarHmac512, dev, Some(key_len));
             assert!(res.is_ok(), "create_hmac_key_ex failed: {:?}", res);
 
-            let res = res.unwrap();
+            let res = res.expect("test masked key var HMAC sha512 result should succeed");
             let key_id = res.data.key_id;
             let masked_key = res.data.masked_key;
 
@@ -626,7 +626,7 @@ fn test_secret_hkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let derived_key_id1 = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -645,7 +645,7 @@ fn test_secret_hkdf_helper(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (new_derived_key_id1, _, _) = resp.unwrap();
+    let (new_derived_key_id1, _, _) = resp.expect("DDI response should succeed");
 
     // Derive from second secret key
 
@@ -663,7 +663,7 @@ fn test_secret_hkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let derived_key_id2 = resp.unwrap().data.key_id;
+    let derived_key_id2 = resp.expect("DDI response should succeed").data.key_id;
 
     // Encrypt message with secret key 1
     let raw_msg = [1u8; 512];
@@ -682,7 +682,7 @@ fn test_secret_hkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     // Decrypt with key 2 and confirm message is same
 
@@ -697,7 +697,7 @@ fn test_secret_hkdf_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     assert_eq!(resp.data.msg.data_take(), msg);
     assert_eq!(resp.data.msg.len(), msg_len);
@@ -743,7 +743,7 @@ fn test_secret_hkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
     let derived_key_id1 = resp.data.key_id;
     let masked_key = resp.data.masked_key;
 
@@ -762,9 +762,9 @@ fn test_secret_hkdf_aes_gcm_helper(
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let (_, new_derived_key_id1, _) = resp.unwrap();
+    let (_, new_derived_key_id1, _) = resp.expect("DDI response should succeed");
     assert!(new_derived_key_id1.is_some());
-    let new_derived_key_id1 = new_derived_key_id1.unwrap();
+    let new_derived_key_id1 = new_derived_key_id1.expect("new derived key id1 should be available");
 
     // Derive from second secret key
     let resp = helper_hkdf_derive(
@@ -781,7 +781,11 @@ fn test_secret_hkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
-    let derived_key_id2 = resp.unwrap().data.bulk_key_id.unwrap();
+    let derived_key_id2 = resp
+        .expect("DDI response should succeed")
+        .data
+        .bulk_key_id
+        .expect("bulk key ID should be available");
 
     // set up requests for the gcm encrypt operations
     let aad = [0x4; 32usize];
@@ -803,7 +807,7 @@ fn test_secret_hkdf_aes_gcm_helper(
     let resp = dev.exec_op_fp_gcm(DdiAesOp::Encrypt, tsra_fp_gcm_params.clone(), data.clone());
 
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let encrypted_resp = resp.unwrap();
+    let encrypted_resp = resp.expect("DDI response should succeed");
 
     // ensure encrypted data length is the same as the original data
     // ensure encrypted data is different from original data
@@ -824,7 +828,7 @@ fn test_secret_hkdf_aes_gcm_helper(
     );
 
     assert!(resp.is_ok(), "resp: {:?}", resp);
-    let decrypted_resp = resp.unwrap();
+    let decrypted_resp = resp.expect("DDI response should succeed");
 
     assert_eq!(decrypted_resp.data.len(), data.len());
     assert_eq!(decrypted_resp.data, data);

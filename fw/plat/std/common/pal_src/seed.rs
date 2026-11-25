@@ -123,8 +123,16 @@ mod tests {
     #[test]
     fn provisioned_selectors_resolve() {
         let pal = StdHsmPal::default();
-        assert_eq!(pal.mfgr_seed(0).unwrap(), &STD_MFGR_SEED_ROW0[..]);
-        assert_eq!(pal.dev_owner_seed(0).unwrap(), &STD_DEV_OWNER_SEED_ROW0[..]);
+        assert_eq!(
+            pal.mfgr_seed(0)
+                .expect("manufacturer seed row should be available"),
+            &STD_MFGR_SEED_ROW0[..]
+        );
+        assert_eq!(
+            pal.dev_owner_seed(0)
+                .expect("device owner seed row should be available"),
+            &STD_DEV_OWNER_SEED_ROW0[..]
+        );
     }
 
     #[test]

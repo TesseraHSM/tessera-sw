@@ -933,12 +933,16 @@ mod tests {
         let (reply_tx, _) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
         pal.alloc_scoped_async(&io, async |alloc| {
-            let private = alloc.dma_alloc(516).unwrap();
-            let public = alloc.dma_alloc(512).unwrap();
+            let private = alloc
+                .dma_alloc(516)
+                .expect("DMA buffer allocation should succeed");
+            let public = alloc
+                .dma_alloc(512)
+                .expect("DMA buffer allocation should succeed");
             for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
                 pal.rsa_gen_keypair(&io, HsmRsaKey::Rsa2048Priv, pct, Some((private, public)))
                     .await
-                    .unwrap();
+                    .expect("RSA key pair generation should succeed");
             }
             private.fill(0xa5);
             public.fill(0xa5);
@@ -947,7 +951,7 @@ mod tests {
                 assert_eq!(
                     pal.rsa_gen_keypair(&io, HsmRsaKey::Rsa2048Priv, pct, Some((private, public)))
                         .await
-                        .unwrap_err(),
+                        .expect_err("RSA key pair generation should fail"),
                     HsmError::RsaGenerateError
                 );
                 assert!(private.iter().all(|&b| b == 0xa5));
@@ -960,7 +964,7 @@ mod tests {
                 Some((private, public)),
             )
             .await
-            .unwrap();
+            .expect("RSA key pair generation should succeed");
         })
         .await;
     }

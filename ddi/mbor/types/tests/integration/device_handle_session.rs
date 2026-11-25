@@ -29,7 +29,7 @@ fn test_device_handle_session_no_session() {
 
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
 
@@ -69,13 +69,13 @@ fn test_device_handle_session_open_session_twice() {
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             assert!(resp.hdr.sess_id.is_some());
             assert_eq!(resp.hdr.op, DdiOp::OpenSession);
             assert_eq!(resp.hdr.status, DdiStatus::Success);
-            assert_eq!(resp.hdr.rev.unwrap().major, 1);
-            assert_eq!(resp.hdr.rev.unwrap().minor, 0);
+            assert_eq!(resp.hdr.rev.expect("revision should be available").major, 1);
+            assert_eq!(resp.hdr.rev.expect("revision should be available").minor, 0);
 
             // now try to open another session on the same device handle
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
@@ -94,7 +94,7 @@ fn test_device_handle_session_open_session_twice() {
             );
             assert!(resp.is_err(), "resp {:?}", resp);
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionLimitReached)
             ));
         },

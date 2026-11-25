@@ -87,7 +87,7 @@ pub fn verify_iv_not_default_from_masked_key(masked_key: &[u8]) -> Option<bool> 
     let iv_len: usize = u16::from_le_bytes(
         masked_key[ALGORITHM_OFFSET..IV_LEN_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
 
@@ -115,19 +115,19 @@ pub fn extract_metadata_from_masked_key(masked_key: &[u8]) -> Option<DdiMaskedKe
     let iv_len: usize = u16::from_le_bytes(
         masked_key[ALGORITHM_OFFSET..IV_LEN_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
     let iv_padding_len: usize = u16::from_le_bytes(
         masked_key[IV_LEN_OFFSET..IV_PADDING_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
     let metadata_len: usize = u16::from_le_bytes(
         masked_key[IV_PADDING_OFFSET..METADATA_LEN_OFFSET]
             .try_into()
-            .unwrap(),
+            .expect("conversion to the required type should succeed"),
     )
     .into();
 

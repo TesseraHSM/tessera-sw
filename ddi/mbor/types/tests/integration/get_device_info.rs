@@ -22,8 +22,8 @@ fn test_get_device_info() {
         setup,
         common_cleanup,
         |dev, _ddi, _path, _incorrect_session_id| {
-            let resp =
-                helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 })).unwrap();
+            let resp = helper_get_device_info(dev, None, Some(DdiApiRev { major: 1, minor: 0 }))
+                .expect("DDI get device info should succeed");
             assert_eq!(resp.hdr.op, DdiOp::GetDeviceInfo);
             assert!(resp.hdr.rev.is_some());
             assert!(resp.hdr.sess_id.is_none());
@@ -47,7 +47,7 @@ fn test_get_device_info_with_session() {
                 TEST_SESSION_SEED,
             );
 
-            let app_dev = ddi.open_dev(path).unwrap();
+            let app_dev = ddi.open_dev(path).expect("device opening should succeed");
 
             let resp = helper_open_session(
                 &app_dev,
@@ -58,7 +58,7 @@ fn test_get_device_info_with_session() {
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
 
-            let resp = resp.unwrap();
+            let resp = resp.expect("DDI response should succeed");
 
             let resp = helper_get_device_info(
                 dev,
@@ -68,7 +68,7 @@ fn test_get_device_info_with_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -85,7 +85,7 @@ fn test_get_device_info_with_invalid_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
@@ -109,7 +109,7 @@ fn test_get_device_info_with_invalid_rev() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::UnsupportedRevision)
             ));
         },

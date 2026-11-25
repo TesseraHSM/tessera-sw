@@ -18,11 +18,11 @@ pub struct BasicReq {
 fn main() {
     let mut buf = [0u8; 64];
     let frame = BasicReq::encode(&mut buf, (1, 1))
-        .unwrap()
+        .expect("basic request encoding should succeed")
         .a(1)
-        .unwrap()
+        .expect("a field should be available")
         .b(2)
-        .unwrap()
+        .expect("b field should be available")
         .finish();
-    let _ = BasicReq::decode(brand(frame.as_bytes())).unwrap();
+    let _ = BasicReq::decode(brand(frame.as_bytes())).expect("basic request decoding should succeed");
 }

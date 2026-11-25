@@ -32,7 +32,7 @@ const REV: Option<DdiApiRev> = Some(DdiApiRev { major: 1, minor: 0 });
 /// Open a second, independent session (fresh device handle) on the
 /// already-provisioned partition and return its handle + session id.
 fn open_second_session(ddi: &DdiTest, path: &str) -> (<DdiTest as Ddi>::Dev, u16) {
-    let handle = ddi.open_dev(path).unwrap();
+    let handle = ddi.open_dev(path).expect("device opening should succeed");
     let (cred, pub_key) = encrypt_userid_pin_for_open_session(
         &handle,
         TEST_CRED_ID,
@@ -225,7 +225,7 @@ fn open_session_with_seed(
     path: &str,
     seed: [u8; 48],
 ) -> (<DdiTest as Ddi>::Dev, u16) {
-    let handle = ddi.open_dev(path).unwrap();
+    let handle = ddi.open_dev(path).expect("device opening should succeed");
     let (cred, pub_key) =
         encrypt_userid_pin_for_open_session(&handle, TEST_CRED_ID, TEST_CRED_PIN, seed);
     let resp =

@@ -40,7 +40,7 @@ fn test_aes_generate_smoke() {
                     key_size,
                     key_props,
                 )
-                .unwrap();
+                .expect("DDI AES generate should succeed");
 
                 assert_eq!(resp.hdr.op, DdiOp::AesGenerateKey);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);

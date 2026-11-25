@@ -23,7 +23,7 @@ pub fn create_key(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
 
     assert!(resp.is_ok(), "resp {:?}", resp);
 
-    let resp = resp.unwrap();
+    let resp = resp.expect("DDI response should succeed");
 
     resp.data.key_id
 }
@@ -45,7 +45,7 @@ fn test_delete_key_no_session() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -71,7 +71,7 @@ fn test_delete_key_incorrect_session_id() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
             ));
         },
@@ -110,7 +110,7 @@ fn test_delete_key_incorrect_key_num_entry() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -134,7 +134,7 @@ fn test_delete_key_unwrapping_key() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::CannotDeleteInternalKeys)
             ));
         },
@@ -172,7 +172,7 @@ fn test_delete_key() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -204,7 +204,7 @@ fn test_delete_key_multiple() {
             assert!(resp.is_err(), "resp {:?}", resp);
 
             assert!(matches!(
-                resp.unwrap_err(),
+                resp.expect_err("DDI response should fail"),
                 DdiError::DdiStatus(DdiStatus::KeyNotFound)
             ));
         },
@@ -229,7 +229,7 @@ fn test_import_delete_aesbulk256_key() {
                     DdiKeyUsage::EncryptDecrypt,
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
-                key_ids.push(resp.unwrap().data.key_id);
+                key_ids.push(resp.expect("DDI response should succeed").data.key_id);
             }
             for key_id in key_ids {
                 let resp = helper_delete_key(

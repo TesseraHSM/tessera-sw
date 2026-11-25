@@ -350,7 +350,7 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
                 );
                 let resp = helper_unmask_key(dev, Some(session_id), rev, current_env);
                 assert!(resp.is_ok(), "unmask (round {round}): {resp:?}");
-                let resp = resp.unwrap();
+                let resp = resp.expect("DDI response should succeed");
                 assert_eq!(
                     resp.data.kind,
                     DdiKeyType::Rsa4kPrivateCrt,

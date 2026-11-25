@@ -587,7 +587,10 @@ mod tests {
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .map(|i| {
+                u8::from_str_radix(&s[i..i + 2], 16)
+                    .expect("radix-based integer parsing should succeed")
+            })
             .collect()
     }
 
@@ -599,7 +602,9 @@ mod tests {
         let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
-        let key = pal.dma_alloc(&io, 16).unwrap();
+        let key = pal
+            .dma_alloc(&io, 16)
+            .expect("DMA buffer allocation should succeed");
         key.copy_from_slice(&hex("2b7e151628aed2a6abf7158809cf4f3c"));
         let pt = hex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51");
         let iv = hex("000102030405060708090a0b0c0d0e0f");
@@ -642,18 +647,24 @@ mod tests {
             let len = iv.len() + pt.len();
 
             // In place: [IV | pt] -> [ct | IV out].
-            let buf = pal.dma_alloc(&io, len).unwrap();
+            let buf = pal
+                .dma_alloc(&io, len)
+                .expect("DMA buffer allocation should succeed");
             buf[..iv.len()].copy_from_slice(iv);
             buf[iv.len()..].copy_from_slice(&pt);
             pal.aes_enc_dec_in_place(&io, HsmAesOp::Encrypt, mode, key, buf)
                 .await
-                .unwrap();
+                .expect("in-place AES operation should succeed");
             assert_eq!(&buf[..pt.len()], &ct[..], "{mode:?} encrypt");
             assert_eq!(&buf[pt.len()..], &iv_out[..], "{mode:?} iv out");
 
             // Out of place: [IV | ct] -> [pt | IV out].
-            let input = pal.dma_alloc(&io, len).unwrap();
-            let output = pal.dma_alloc(&io, len).unwrap();
+            let input = pal
+                .dma_alloc(&io, len)
+                .expect("DMA buffer allocation should succeed");
+            let output = pal
+                .dma_alloc(&io, len)
+                .expect("DMA buffer allocation should succeed");
             input[..iv.len()].copy_from_slice(iv);
             input[iv.len()..].copy_from_slice(&ct);
             output.fill(0x5a);
@@ -680,10 +691,18 @@ mod tests {
         let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
-        let key = pal.dma_alloc(&io, 32).unwrap();
-        let bad_key = pal.dma_alloc(&io, 20).unwrap();
-        let buf = pal.dma_alloc(&io, 64).unwrap();
-        let out = pal.dma_alloc(&io, 64).unwrap();
+        let key = pal
+            .dma_alloc(&io, 32)
+            .expect("DMA buffer allocation should succeed");
+        let bad_key = pal
+            .dma_alloc(&io, 20)
+            .expect("DMA buffer allocation should succeed");
+        let buf = pal
+            .dma_alloc(&io, 64)
+            .expect("DMA buffer allocation should succeed");
+        let out = pal
+            .dma_alloc(&io, 64)
+            .expect("DMA buffer allocation should succeed");
         let cases: [(HsmAesMode, &HsmDmaBuf, usize); 6] = [
             (HsmAesMode::Cbc, key, 31),
             (HsmAesMode::Ecb, key, 17),
@@ -740,14 +759,20 @@ mod tests {
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
 
         // RFC 3394 §4.1: 128 bits of key data with a 128-bit KEK.
-        let key = pal.dma_alloc(&io, 16).unwrap();
+        let key = pal
+            .dma_alloc(&io, 16)
+            .expect("DMA buffer allocation should succeed");
         key.copy_from_slice(&hex("000102030405060708090a0b0c0d0e0f"));
         let pt = hex("00112233445566778899aabbccddeeff");
         let ct = hex("1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5");
 
-        let input = pal.dma_alloc(&io, pt.len()).unwrap();
+        let input = pal
+            .dma_alloc(&io, pt.len())
+            .expect("DMA buffer allocation should succeed");
         input.copy_from_slice(&pt);
-        let output = pal.dma_alloc(&io, ct.len()).unwrap();
+        let output = pal
+            .dma_alloc(&io, ct.len())
+            .expect("DMA buffer allocation should succeed");
         assert_eq!(pal.aes_kw_wrap(&io, key, input, None).await, Ok(ct.len()));
         assert_eq!(
             pal.aes_kw_wrap(&io, key, input, Some(&mut *output)).await,
@@ -756,12 +781,16 @@ mod tests {
         assert_eq!(&output[..], &ct[..]);
 
         // In place: [reserved | pt] -> ct.
-        let buf = pal.dma_alloc(&io, ct.len()).unwrap();
+        let buf = pal
+            .dma_alloc(&io, ct.len())
+            .expect("DMA buffer allocation should succeed");
         buf[8..].copy_from_slice(&pt);
         assert_eq!(pal.aes_kw_wrap_in_place(&io, key, buf).await, Ok(ct.len()));
         assert_eq!(&buf[..], &ct[..]);
 
-        let plain = pal.dma_alloc(&io, pt.len()).unwrap();
+        let plain = pal
+            .dma_alloc(&io, pt.len())
+            .expect("DMA buffer allocation should succeed");
         assert_eq!(
             pal.aes_kw_unwrap(&io, key, output, None).await,
             Ok(pt.len())
@@ -798,7 +827,9 @@ mod tests {
 
         // RFC 5649 §6 vectors plus an 8-byte boundary case checked with
         // OpenSSL AES-192-ECB over [AIV | plaintext].
-        let key = pal.dma_alloc(&io, 24).unwrap();
+        let key = pal
+            .dma_alloc(&io, 24)
+            .expect("DMA buffer allocation should succeed");
         key.copy_from_slice(&hex("5840df6e29b02af1ab493b705bf16ea1ae8338f4dcc176a8"));
         let cases = [
             (
@@ -811,9 +842,13 @@ mod tests {
         for (pt, ct) in cases {
             let (pt, ct) = (hex(pt), hex(ct));
 
-            let input = pal.dma_alloc(&io, pt.len()).unwrap();
+            let input = pal
+                .dma_alloc(&io, pt.len())
+                .expect("DMA buffer allocation should succeed");
             input.copy_from_slice(&pt);
-            let output = pal.dma_alloc(&io, ct.len()).unwrap();
+            let output = pal
+                .dma_alloc(&io, ct.len())
+                .expect("DMA buffer allocation should succeed");
             assert_eq!(pal.aes_kwp_wrap(&io, key, input, None).await, Ok(ct.len()));
             assert_eq!(
                 pal.aes_kwp_wrap(&io, key, input, Some(&mut *output)).await,
@@ -822,7 +857,9 @@ mod tests {
             assert_eq!(&output[..], &ct[..]);
 
             // In place: [reserved | pt | pad room] -> ct, with spare tail.
-            let buf = pal.dma_alloc(&io, ct.len() + 8).unwrap();
+            let buf = pal
+                .dma_alloc(&io, ct.len() + 8)
+                .expect("DMA buffer allocation should succeed");
             buf.fill(0xee);
             buf[8..8 + pt.len()].copy_from_slice(&pt);
             assert_eq!(
@@ -831,7 +868,9 @@ mod tests {
             );
             assert_eq!(&buf[..ct.len()], &ct[..]);
 
-            let plain = pal.dma_alloc(&io, ct.len() - 8).unwrap();
+            let plain = pal
+                .dma_alloc(&io, ct.len() - 8)
+                .expect("DMA buffer allocation should succeed");
             assert_eq!(
                 pal.aes_kwp_unwrap(&io, key, output, None).await,
                 Ok(ct.len() - 8)
@@ -999,7 +1038,9 @@ mod tests {
     }
 
     fn dma<'a>(pal: &'a StdHsmPal, io: &'a StdHsmIo, bytes: &[u8]) -> &'a mut HsmDmaBuf {
-        let buf = pal.dma_alloc(io, bytes.len()).unwrap();
+        let buf = pal
+            .dma_alloc(io, bytes.len())
+            .expect("DMA buffer allocation should succeed");
         buf.copy_from_slice(bytes);
         buf
     }
@@ -1038,7 +1079,9 @@ mod tests {
         let len = input.len();
         let output = vec![0u8; len];
 
-        let tag = pal.dma_alloc(&io, 16).unwrap();
+        let tag = pal
+            .dma_alloc(&io, 16)
+            .expect("DMA buffer allocation should succeed");
         pal.gcm_encrypt_sgl(
             &io,
             key,
@@ -1050,7 +1093,7 @@ mod tests {
             tag,
         )
         .await
-        .unwrap();
+        .expect("AES-GCM scatter-gather encryption should succeed");
         assert_eq!(&output[32..], &ct[..]);
         assert_eq!(&tag[..], &hex("76fc6ece0f4e1768cddf8853bb2d551b")[..]);
 
@@ -1066,7 +1109,7 @@ mod tests {
             &sgl(&plain),
         )
         .await
-        .unwrap();
+        .expect("AES-GCM scatter-gather decryption should succeed");
         assert_eq!(&plain[32..], &pt[..]);
 
         // Tampered AAD fails authentication.
@@ -1097,8 +1140,12 @@ mod tests {
     #[tokio::test]
     async fn xts_sgl_round_trips_and_uses_tweak() {
         let (pal, io) = test_pal();
-        let key = pal.dma_alloc(&io, HSM_AES_XTS_KEY_LEN).unwrap();
-        pal.aes_xts_gen_key(&io, Some(key)).await.unwrap();
+        let key = pal
+            .dma_alloc(&io, HSM_AES_XTS_KEY_LEN)
+            .expect("DMA buffer allocation should succeed");
+        pal.aes_xts_gen_key(&io, Some(key))
+            .await
+            .expect("AES-XTS key generation should succeed");
         assert_ne!(&key[..32], &key[32..]);
         let tweak = dma(&pal, &io, &7u64.to_le_bytes());
         let pt: Vec<u8> = (0..64u8).collect();
@@ -1107,29 +1154,33 @@ mod tests {
         let ct = vec![0u8; pt.len()];
         pal.aes_xts_enc_dec_sgl(&io, enc, key, tweak, pt.len(), 64, &sgl(&pt), &sgl(&ct))
             .await
-            .unwrap();
+            .expect("AES-XTS scatter-gather operation should succeed");
         assert_ne!(ct, pt);
 
         let other = vec![0u8; pt.len()];
         let tweak2 = dma(&pal, &io, &8u64.to_le_bytes());
         pal.aes_xts_enc_dec_sgl(&io, enc, key, tweak2, pt.len(), 64, &sgl(&pt), &sgl(&other))
             .await
-            .unwrap();
+            .expect("AES-XTS scatter-gather operation should succeed");
         assert_ne!(other, ct);
 
         let back = vec![0u8; pt.len()];
         let dec = HsmAesOp::Decrypt;
         pal.aes_xts_enc_dec_sgl(&io, dec, key, tweak, pt.len(), 64, &sgl(&ct), &sgl(&back))
             .await
-            .unwrap();
+            .expect("AES-XTS scatter-gather operation should succeed");
         assert_eq!(back, pt);
     }
 
     #[tokio::test]
     async fn xts_sgl_multi_unit_matches_per_unit() {
         let (pal, io) = test_pal();
-        let key = pal.dma_alloc(&io, HSM_AES_XTS_KEY_LEN).unwrap();
-        pal.aes_xts_gen_key(&io, Some(key)).await.unwrap();
+        let key = pal
+            .dma_alloc(&io, HSM_AES_XTS_KEY_LEN)
+            .expect("DMA buffer allocation should succeed");
+        pal.aes_xts_gen_key(&io, Some(key))
+            .await
+            .expect("AES-XTS key generation should succeed");
         let pt: Vec<u8> = (0..128u8).collect();
         let enc = HsmAesOp::Encrypt;
 
@@ -1137,14 +1188,14 @@ mod tests {
         let all = vec![0u8; pt.len()];
         pal.aes_xts_enc_dec_sgl(&io, enc, key, tweak, pt.len(), 32, &sgl(&pt), &sgl(&all))
             .await
-            .unwrap();
+            .expect("AES-XTS scatter-gather operation should succeed");
 
         for (i, unit) in pt.chunks(32).enumerate() {
             let tw = dma(&pal, &io, &(5 + i as u64).to_le_bytes());
             let one = vec![0u8; 32];
             pal.aes_xts_enc_dec_sgl(&io, enc, key, tw, 32, 32, &sgl(unit), &sgl(&one))
                 .await
-                .unwrap();
+                .expect("AES-XTS scatter-gather operation should succeed");
             assert_eq!(&all[i * 32..(i + 1) * 32], &one[..]);
         }
     }
