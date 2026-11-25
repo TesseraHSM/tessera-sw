@@ -4,9 +4,12 @@
 #include <gtest/gtest.h>
 #include <tsra_api.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <utility>
 #include <vector>
 
 #include "algo/ecc/helpers.hpp"
@@ -98,6 +101,407 @@ struct RsaUnwrapProperties
         return { public_props.data(), static_cast<uint32_t>(public_props.size()) };
     }
 };
+
+struct RsaImportContext
+{
+    RsaImportContext(uint32_t bits, tsra_key_kind kind, bool sign, bool session_key)
+        : properties(bits, kind), signing(sign)
+    {
+        properties.private_session = session_key;
+        properties.public_session = session_key;
+        properties.private_decrypt = !sign;
+        properties.public_encrypt = !sign;
+        private_sign = sign;
+        public_verify = sign;
+        properties.private_props.push_back(
+            { TSRA_KEY_PROP_ID_SIGN, &private_sign, sizeof(private_sign) }
+        );
+        properties.public_props.push_back(
+            { TSRA_KEY_PROP_ID_VERIFY, &public_verify, sizeof(public_verify) }
+        );
+    }
+    RsaImportContext(const RsaImportContext &) = delete;
+    RsaImportContext &operator=(const RsaImportContext &) = delete;
+
+    RsaUnwrapProperties properties;
+    bool signing;
+    uint8_t private_sign = 0;
+    uint8_t public_verify = 0;
+    std::array<uint32_t, 2> storage{};
+    auto_key unwrapping_private;
+    auto_key unwrapping_public;
+    std::vector<uint8_t> wrapped_blob;
+    RsaAesUnwrapAlgo algorithm;
+
+    void init(tsra_handle session)
+    {
+        ASSERT_EQ(
+            generate_rsa_unwrapping_keypair(
+                session,
+                unwrapping_private.get_ptr(),
+                unwrapping_public.get_ptr()
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        ASSERT_NE(unwrapping_private.get(), 0u);
+        ASSERT_NE(unwrapping_public.get(), 0u);
+        ASSERT_EQ(
+            make_wrapped_rsa_pkcs8_blob(
+                unwrapping_public.get(),
+                properties.private_bit_len,
+                RsaAesWrapConfig{},
+                wrapped_blob
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+        ASSERT_FALSE(wrapped_blob.empty());
+    }
+
+    UnwrapPairResult import()
+    {
+        tsra_buffer blob{ wrapped_blob.data(), static_cast<uint32_t>(wrapped_blob.size()) };
+        auto private_props = properties.private_prop_list();
+        auto public_props = properties.public_prop_list();
+        return try_unwrap_pair(
+            &algorithm.algo,
+            unwrapping_private.get(),
+            &blob,
+            &private_props,
+            &public_props
+        );
+    }
+};
+
+template <typename Check>
+static void for_each_rsa_import(PartitionListHandle &part_list, Check check)
+{
+    for (uint32_t bits : { 2048u, 3072u, 4096u })
+    {
+        SCOPED_TRACE(bits);
+        for (auto kind : { TSRA_KEY_KIND_RSA, TSRA_KEY_KIND_RSA_CRT })
+        {
+            SCOPED_TRACE(kind);
+            for (bool signing : { true, false })
+            {
+                SCOPED_TRACE(signing);
+                for (bool session_key : { true, false })
+                {
+                    SCOPED_TRACE(session_key);
+                    part_list.for_each_session([&](tsra_handle session) {
+                        RsaImportContext ctx(bits, kind, signing, session_key);
+                        ASSERT_NO_FATAL_FAILURE(ctx.init(session));
+                        check(ctx);
+                    });
+                }
+            }
+        }
+    }
+}
+
+static void expect_rsa_import_properties(
+    tsra_handle key,
+    const RsaImportContext &ctx,
+    bool private_half
+)
+{
+    ASSERT_NE(key, 0u);
+    tsra_key_class key_class = TSRA_KEY_CLASS_SECRET;
+    tsra_key_kind kind = TSRA_KEY_KIND_AES;
+    uint32_t bits = 0;
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_CLASS, key_class), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_KIND, kind), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(get_key_prop(key, TSRA_KEY_PROP_ID_BIT_LEN, bits), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(key_class, private_half ? TSRA_KEY_CLASS_PRIVATE : TSRA_KEY_CLASS_PUBLIC);
+    ASSERT_EQ(kind, private_half ? ctx.properties.private_kind : TSRA_KEY_KIND_RSA);
+    ASSERT_EQ(bits, ctx.properties.private_bit_len);
+    for (const auto &[id, expected] : {
+             std::pair{ TSRA_KEY_PROP_ID_SESSION, ctx.properties.private_session != 0 },
+             std::pair{ TSRA_KEY_PROP_ID_LOCAL, false },
+             std::pair{ TSRA_KEY_PROP_ID_SENSITIVE, private_half },
+             std::pair{ TSRA_KEY_PROP_ID_EXTRACTABLE, true },
+             std::pair{ TSRA_KEY_PROP_ID_SIGN, private_half && ctx.signing },
+             std::pair{ TSRA_KEY_PROP_ID_VERIFY, !private_half && ctx.signing },
+             std::pair{ TSRA_KEY_PROP_ID_DECRYPT, private_half && !ctx.signing },
+             std::pair{ TSRA_KEY_PROP_ID_ENCRYPT, !private_half && !ctx.signing },
+             std::pair{ TSRA_KEY_PROP_ID_DERIVE, false },
+             std::pair{ TSRA_KEY_PROP_ID_WRAP, false },
+             std::pair{ TSRA_KEY_PROP_ID_UNWRAP, false },
+         })
+    {
+        SCOPED_TRACE(id);
+        uint8_t actual = 0;
+        ASSERT_EQ(get_key_prop(key, id, actual), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(actual, static_cast<uint8_t>(expected));
+    }
+    tsra_ecc_curve curve = TSRA_ECC_CURVE_P256;
+    ASSERT_EQ(
+        get_key_prop(key, TSRA_KEY_PROP_ID_EC_CURVE, curve),
+        TSRA_STATUS_PROPERTY_NOT_PRESENT
+    );
+}
+
+static void expect_rsa_import_success(RsaImportContext &ctx)
+{
+    const auto result = ctx.import();
+    auto_key private_key;
+    auto_key public_key;
+    private_key.handle = result.private_key;
+    public_key.handle = result.public_key;
+    ASSERT_EQ(result.status, TSRA_STATUS_SUCCESS);
+    ASSERT_NO_FATAL_FAILURE(expect_rsa_import_properties(private_key.get(), ctx, true));
+    ASSERT_NO_FATAL_FAILURE(expect_rsa_import_properties(public_key.get(), ctx, false));
+}
+
+TEST_F(tsra_rsa_unwrap, imported_properties_all_sizes)
+{
+    for_each_rsa_import(part_list_, [](RsaImportContext &ctx) { expect_rsa_import_success(ctx); });
+}
+
+TEST_F(tsra_rsa_unwrap, imported_labels_preserved)
+{
+    constexpr size_t documented_label_capacity = 128;
+    for (auto label : { std::vector<uint8_t>{},
+                        std::vector<uint8_t>{ 'r', 's', 'a' },
+                        std::vector<uint8_t>(documented_label_capacity - 1, 'x') })
+    {
+        SCOPED_TRACE(label.size());
+        for_each_rsa_import(part_list_, [&](RsaImportContext &ctx) {
+            void *label_data =
+                label.empty() ? ctx.storage.data() : static_cast<void *>(label.data());
+            ctx.properties.private_props.push_back(
+                { TSRA_KEY_PROP_ID_LABEL, label_data, static_cast<uint32_t>(label.size()) }
+            );
+            ctx.properties.public_props.push_back(
+                { TSRA_KEY_PROP_ID_LABEL, label_data, static_cast<uint32_t>(label.size()) }
+            );
+            auto result = ctx.import();
+            auto_key private_key;
+            auto_key public_key;
+            private_key.handle = result.private_key;
+            public_key.handle = result.public_key;
+            ASSERT_EQ(result.status, TSRA_STATUS_SUCCESS);
+            ASSERT_NO_FATAL_FAILURE(expect_rsa_import_properties(private_key.get(), ctx, true));
+            ASSERT_NO_FATAL_FAILURE(expect_rsa_import_properties(public_key.get(), ctx, false));
+            for (auto key : { private_key.get(), public_key.get() })
+            {
+                std::vector<uint8_t> actual(label.size() + sizeof(uint8_t));
+                tsra_key_prop property{ TSRA_KEY_PROP_ID_LABEL,
+                                        actual.data(),
+                                        static_cast<uint32_t>(actual.size()) };
+                ASSERT_EQ(tsra_key_get_prop(key, &property), TSRA_STATUS_SUCCESS);
+                ASSERT_EQ(property.len, label.size());
+                actual.resize(property.len);
+                ASSERT_EQ(actual, label);
+            }
+        });
+    }
+}
+
+static void expect_rsa_import_failure(RsaImportContext &ctx)
+{
+    const auto result = ctx.import();
+    auto_key private_key;
+    auto_key public_key;
+    private_key.handle = result.private_key;
+    public_key.handle = result.public_key;
+    ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
+    ASSERT_EQ(private_key.get(), 0u);
+    ASSERT_EQ(public_key.get(), 0u);
+}
+
+static void expect_rsa_import_flag(
+    PartitionListHandle &part_list,
+    bool private_half,
+    tsra_key_prop_id flag
+)
+{
+    for_each_rsa_import(part_list, [&](RsaImportContext &ctx) {
+        uint8_t enabled = 0;
+        auto &target = private_half ? ctx.properties.private_props : ctx.properties.public_props;
+        target.push_back({ flag, &enabled, sizeof(enabled) });
+        ASSERT_NO_FATAL_FAILURE(expect_rsa_import_success(ctx));
+        enabled = 1;
+        expect_rsa_import_failure(ctx);
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_encrypt_rejected)
+{
+    expect_rsa_import_flag(part_list_, true, TSRA_KEY_PROP_ID_ENCRYPT);
+}
+
+TEST_F(tsra_rsa_unwrap, private_verify_rejected)
+{
+    expect_rsa_import_flag(part_list_, true, TSRA_KEY_PROP_ID_VERIFY);
+}
+
+TEST_F(tsra_rsa_unwrap, private_derive_rejected)
+{
+    expect_rsa_import_flag(part_list_, true, TSRA_KEY_PROP_ID_DERIVE);
+}
+
+TEST_F(tsra_rsa_unwrap, private_wrap_rejected)
+{
+    expect_rsa_import_flag(part_list_, true, TSRA_KEY_PROP_ID_WRAP);
+}
+
+TEST_F(tsra_rsa_unwrap, private_unwrap_extra_rejected)
+{
+    expect_rsa_import_flag(part_list_, true, TSRA_KEY_PROP_ID_UNWRAP);
+}
+
+TEST_F(tsra_rsa_unwrap, public_sign_rejected)
+{
+    expect_rsa_import_flag(part_list_, false, TSRA_KEY_PROP_ID_SIGN);
+}
+
+TEST_F(tsra_rsa_unwrap, public_decrypt_rejected)
+{
+    expect_rsa_import_flag(part_list_, false, TSRA_KEY_PROP_ID_DECRYPT);
+}
+
+TEST_F(tsra_rsa_unwrap, public_derive_rejected)
+{
+    expect_rsa_import_flag(part_list_, false, TSRA_KEY_PROP_ID_DERIVE);
+}
+
+TEST_F(tsra_rsa_unwrap, public_unwrap_rejected)
+{
+    expect_rsa_import_flag(part_list_, false, TSRA_KEY_PROP_ID_UNWRAP);
+}
+
+TEST_F(tsra_rsa_unwrap, public_wrap_extra_rejected)
+{
+    expect_rsa_import_flag(part_list_, false, TSRA_KEY_PROP_ID_WRAP);
+}
+
+template <typename Change>
+static void expect_rsa_pair_problem(PartitionListHandle &part_list, Change change)
+{
+    for_each_rsa_import(part_list, [&](RsaImportContext &ctx) {
+        ASSERT_NO_FATAL_FAILURE(expect_rsa_import_success(ctx));
+        ASSERT_NO_FATAL_FAILURE(change(ctx));
+        expect_rsa_import_failure(ctx);
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_usage_missing)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.private_sign = 0;
+        ctx.properties.private_decrypt = 0;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_usage_missing)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.public_verify = 0;
+        ctx.properties.public_encrypt = 0;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_usage_omitted)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        remove_prop_by_id(ctx.properties.private_props, TSRA_KEY_PROP_ID_SIGN);
+        remove_prop_by_id(ctx.properties.private_props, TSRA_KEY_PROP_ID_DECRYPT);
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_usage_omitted)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        remove_prop_by_id(ctx.properties.public_props, TSRA_KEY_PROP_ID_VERIFY);
+        remove_prop_by_id(ctx.properties.public_props, TSRA_KEY_PROP_ID_ENCRYPT);
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_usage_conflict)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.private_sign = 1;
+        ctx.properties.private_decrypt = 1;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_usage_conflict)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.public_verify = 1;
+        ctx.properties.public_encrypt = 1;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, usage_pair_mismatch)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.public_verify = !ctx.signing;
+        ctx.properties.public_encrypt = ctx.signing;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, session_pair_mismatch)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.public_session = !ctx.properties.private_session;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_class_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.private_class = TSRA_KEY_CLASS_PUBLIC;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_class_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.public_class = TSRA_KEY_CLASS_PRIVATE;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_kind_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.private_kind = TSRA_KEY_KIND_ECC;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_kind_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.public_kind = TSRA_KEY_KIND_RSA_CRT;
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, private_curve_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.storage[0] = TSRA_ECC_CURVE_P256;
+        ctx.properties.private_props.push_back(
+            { TSRA_KEY_PROP_ID_EC_CURVE, ctx.storage.data(), sizeof(uint32_t) }
+        );
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, public_curve_rejected)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.storage[0] = TSRA_ECC_CURVE_P256;
+        ctx.properties.public_props.push_back(
+            { TSRA_KEY_PROP_ID_EC_CURVE, ctx.storage.data(), sizeof(uint32_t) }
+        );
+    });
+}
+
+TEST_F(tsra_rsa_unwrap, bit_length_pair_mismatch)
+{
+    expect_rsa_pair_problem(part_list_, [](RsaImportContext &ctx) {
+        ctx.properties.public_bit_len = ctx.properties.private_bit_len == 2048 ? 3072 : 2048;
+    });
+}
 
 // Unwraps an external RSA PKCS#8 key using caller-selected identity properties.
 static UnwrapPairResult unwrap_external_rsa_pair_with_identity_properties(
@@ -373,6 +777,25 @@ static void verify_requested_bit_length_mismatch_rejected(
                                      .len = static_cast<uint32_t>(wrapped_blob.size()) };
 
         RsaAesUnwrapAlgo unwrap_algo{};
+        {
+            RsaUnwrapProperties control_properties(wrapped_bit_len);
+            auto control_private_props = control_properties.private_prop_list();
+            auto control_public_props = control_properties.public_prop_list();
+            const auto control = try_unwrap_pair(
+                &unwrap_algo.algo,
+                wrapping_private_key.get(),
+                &wrapped_key_buf,
+                &control_private_props,
+                &control_public_props
+            );
+            auto_key private_key;
+            auto_key public_key;
+            private_key.handle = control.private_key;
+            public_key.handle = control.public_key;
+            ASSERT_EQ(control.status, TSRA_STATUS_SUCCESS);
+            ASSERT_NE(private_key.get(), 0u);
+            ASSERT_NE(public_key.get(), 0u);
+        }
         RsaUnwrapProperties properties(requested_bit_len);
         auto private_prop_list = properties.private_prop_list();
         auto public_prop_list = properties.public_prop_list();
@@ -385,7 +808,7 @@ static void verify_requested_bit_length_mismatch_rejected(
             &public_prop_list
         );
 
-        ASSERT_NE(result.status, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -401,18 +824,16 @@ static void verify_identity_properties_rejected(
 )
 {
     part_list.for_each_session([=](tsra_handle session) {
-        auto result = unwrap_external_rsa_pair_with_identity_properties(
-            session,
-            bit_len,
-            private_kind,
-            private_class,
-            public_kind,
-            public_class
-        );
-
-        ASSERT_NE(result.status, TSRA_STATUS_SUCCESS);
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
+        RsaImportContext ctx(bit_len, TSRA_KEY_KIND_RSA, false, true);
+        ASSERT_NO_FATAL_FAILURE(ctx.init(session));
+        remove_prop_by_id(ctx.properties.private_props, TSRA_KEY_PROP_ID_SIGN);
+        remove_prop_by_id(ctx.properties.public_props, TSRA_KEY_PROP_ID_VERIFY);
+        ASSERT_NO_FATAL_FAILURE(expect_rsa_import_success(ctx));
+        ctx.properties.private_kind = private_kind;
+        ctx.properties.private_class = private_class;
+        ctx.properties.public_kind = public_kind;
+        ctx.properties.public_class = public_class;
+        expect_rsa_import_failure(ctx);
     });
 }
 
