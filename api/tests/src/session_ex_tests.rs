@@ -10,6 +10,9 @@
 //! the native FFI) would.
 
 use tsra_api::*;
+use tsra_crypto::x509_builder::der_helpers::MLDSA87_SPKI_HEADER;
+use x509::X509Certificate;
+use x509::X509CertificateOp;
 
 use crate::utils::partition_ex_helpers::*;
 
@@ -196,12 +199,35 @@ fn open_session_ex_mlkem1024_authenticates_rotates_and_recovers_both_roles() {
         let (part, rev) = new_partition();
         let root =
             crate::utils::partition_ex_helpers::test_root_spki_sha384_for_suite(&part, suite);
+        let pem = part.cert_chain_mldsa(0).expect("ML-DSA certificate bank");
+        let certificates =
+            X509Certificate::from_pem_stack(pem.as_bytes()).expect("ML-DSA bank certificates");
+        let leaf = certificates.first().expect("PID leaf");
+        let path = leaf
+            .verified_chain(&certificates[1..])
+            .expect("verify certificate path")
+            .expect("valid certificate path");
+        assert!(path.len() > 1, "PID path must include its issuer");
+        let all_mldsa = path.iter().all(|certificate| {
+            certificate
+                .subject_public_key_info_der()
+                .expect("certificate SPKI")
+                .starts_with(&MLDSA87_SPKI_HEADER)
+        });
         let mut wrong_root = root;
         wrong_root[0] ^= 1;
         assert!(matches!(
             part.open_session_ex(rev, &wrong_root, HsmSessionPsk::new(role), suite,),
             Err(HsmError::InvalidSignature)
         ));
+        // Uno may serve an ML-DSA leaf under its P-384 alias chain.
+        if !all_mldsa {
+            assert!(matches!(
+                part.open_session_ex(rev, &root, HsmSessionPsk::new(role), suite),
+                Err(HsmError::InvalidSignature)
+            ));
+            continue;
+        }
         let psk = [0xB5; PSK_LEN];
         let session = part
             .open_session_ex(rev, &root, HsmSessionPsk::new(role), suite)

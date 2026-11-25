@@ -89,7 +89,9 @@
 //! `subjectPublicKeyInfo` (issuer and subject algorithms are independent).
 //! ML-DSA-87 signs the complete TBS through a
 //! [`cert_builder::MlDsaTbsSigner`]; [`cert_builder::MlDsa87Signer`] signs
-//! deterministically with the PAL. Builders:
+//! with required hedging through the PAL. Signing requires entropy, so
+//! repeated builds can produce different certificate bytes and thumbprints.
+//! Builders:
 //!
 //! - [`cert_builder::build_mldsa_leaf_cert`] — ML-DSA-87 issuer and subject.
 //! - [`cert_builder::build_mldsa_leaf_cert_ecc_issuer`] — ECDSA-P384 issuer,
