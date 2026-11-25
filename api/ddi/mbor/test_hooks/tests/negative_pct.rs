@@ -267,6 +267,8 @@ fn nssr_pct_failure(
     kind: DdiTestActionNegativePctKind,
 ) {
     if !is_physical(dev) || !arm(dev, session_id, kind) {
+        // Skipped before any NSSR: undo `common_setup` as a normal test would.
+        common_cleanup(dev, ddi, path, Some(session_id));
         return;
     }
 
@@ -281,8 +283,9 @@ fn nssr_pct_failure(
     println!("Check debuglogread for a single soft reset, then reload the driver.");
 }
 
-/// Cleanup for the NSSR tests: the test already closed its session, and the
-/// driver is detached after the halt, so there is no device to erase.
+/// Cleanup for the NSSR tests. A skipped test runs `common_cleanup` itself;
+/// otherwise the test already closed its session and the driver is detached
+/// after the halt, so there is no device to erase.
 fn nssr_cleanup(
     _dev: &mut <DdiTest as Ddi>::Dev,
     _ddi: &DdiTest,
