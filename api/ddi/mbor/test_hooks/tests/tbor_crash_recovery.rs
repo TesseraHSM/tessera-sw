@@ -45,6 +45,7 @@ use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborPartInfoResp;
+use tsra_ddi_tbor_types::TborSessionClosePlainReq;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 
@@ -146,10 +147,13 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
 
     thread::sleep(Duration::from_secs(RECOVERY_WAIT_SECS));
 
-    // The crashed session is gone or needs renegotiation; closing it is
-    // best-effort and its result is reported rather than asserted.
-    let close = ctx.session_close(cu.session_id);
-    println!("Close of pre-crash CU session after recovery: {close:?}");
+    // Recovery's Disable leaves the crashed CU slot renegotiating, which
+    // keeps it reserved across NSSR; release it with the plaintext close
+    // (a protected close is rejected for a renegotiating slot).
+    ctx.tbor(&TborSessionClosePlainReq {
+        session_id: cu.session_id,
+    })
+    .unwrap_or_else(|e| panic!("after recovery: crashed CU session close failed: {e:?}"));
 
     // After the host's recovery (Disable then Enable) the partition must be
     // back to Enabled, ready to be provisioned again, with its identity kept.
