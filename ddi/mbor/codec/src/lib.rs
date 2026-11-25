@@ -3,6 +3,9 @@
 
 #![cfg_attr(not(feature = "fuzzing"), no_std)]
 
+#[cfg(not(feature = "array"))]
+extern crate alloc;
+
 mod decode;
 mod encode;
 mod len;

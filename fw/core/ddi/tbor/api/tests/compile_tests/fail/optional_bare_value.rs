@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 // Fail: passing bare value to optional field should not compile.
 // Optional fields require Option<T>.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x05)]
@@ -12,8 +15,8 @@ pub struct OptTypeReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = OptTypeReq::encode(&mut buf, (1, 1)).expect("optional type request encoding should succeed")
-        .required(1).expect("required value lookup should succeed")
-        .opt(42u16).expect("optional field should be available") // ERROR: expected Option<u16>, got u16
+    let _ = OptTypeReq::encode(&mut buf, (1, 1)).unwrap()
+        .required(1).unwrap()
+        .opt(42u16).unwrap() // ERROR: expected Option<u16>, got u16
         .finish();
 }

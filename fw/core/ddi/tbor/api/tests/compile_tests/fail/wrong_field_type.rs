@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 // Fail: wrong type for a field should not compile.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x04)]
@@ -10,7 +13,7 @@ pub struct TypeReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = TypeReq::encode(&mut buf, (1, 1)).expect("type request encoding should succeed")
-        .value("not a u8").expect("buf should be available") // ERROR: expected u8
+    let _ = TypeReq::encode(&mut buf, (1, 1)).unwrap()
+        .value("not a u8").unwrap() // ERROR: expected u8
         .finish();
 }

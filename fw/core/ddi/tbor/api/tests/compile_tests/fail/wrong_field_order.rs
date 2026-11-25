@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 // Fail: calling fields out of order should not compile.
 // Field `b` must come after `a` in the typestate chain.
+
+#![allow(clippy::unwrap_used)]
+
 use tsra_fw_ddi_tbor_api::tbor;
 
 #[tbor(opcode = 0x01)]
@@ -12,8 +15,8 @@ pub struct OrderReq {
 
 fn main() {
     let mut buf = [0u8; 64];
-    let _ = OrderReq::encode(&mut buf, (1, 1)).expect("order request encoding should succeed")
-        .b(2).expect("b field should be available")  // ERROR: b is not available on State0
-        .a(1).expect("a field should be available")
+    let _ = OrderReq::encode(&mut buf, (1, 1)).unwrap()
+        .b(2).unwrap()  // ERROR: b is not available on State0
+        .a(1).unwrap()
         .finish();
 }
