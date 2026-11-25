@@ -159,6 +159,7 @@ impl HsmVault for StdHsmPal {
     }
 
     /// Retrieve key material by ID.
+    #[allow(unsafe_code)]
     fn vault_key(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;

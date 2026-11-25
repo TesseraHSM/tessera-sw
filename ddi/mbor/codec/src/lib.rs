@@ -179,10 +179,12 @@ impl<const N: usize> MborByteArray<N> {
         self.data.borrow_mut().1 = len
     }
 
+    #[allow(unsafe_code)]
     pub fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.data.borrow().0, self.data.borrow().1) }
     }
 
+    #[allow(unsafe_code)]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe {
             core::slice::from_raw_parts_mut(self.data.borrow().0 as *mut u8, self.data.borrow().1)
@@ -192,6 +194,7 @@ impl<const N: usize> MborByteArray<N> {
 
 #[cfg(not(feature = "array"))]
 impl<const N: usize> PartialEq for MborByteArray<N> {
+    #[allow(unsafe_code)]
     fn eq(&self, other: &Self) -> bool {
         let this =
             unsafe { core::slice::from_raw_parts(self.data.borrow().0, self.data.borrow().1) };

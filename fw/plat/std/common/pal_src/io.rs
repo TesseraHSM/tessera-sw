@@ -134,6 +134,7 @@ pub struct StdHsmIo {
 }
 
 // SAFETY: StdHsmIo is only used on the single-threaded Embassy executor.
+#[allow(unsafe_code)]
 unsafe impl Send for StdHsmIo {}
 
 impl StdHsmIo {
@@ -316,6 +317,7 @@ impl StdHsmPal {
     }
 
     /// Writes `buf` to the host buffer described by OOB descriptor `index`.
+    #[allow(unsafe_code)]
     pub(crate) async fn oob_write(&self, io: &StdHsmIo, index: usize, buf: &[u8]) -> HsmResult<()> {
         let desc = self.oob_desc(io, index).await?;
         crate::drivers::gdma::validate_raw_src(&desc, buf.len())?;

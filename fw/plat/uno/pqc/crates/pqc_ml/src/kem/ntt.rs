@@ -48,6 +48,7 @@ const Q_NEG: i32 = -(Q as i32);
 /// # Safety
 /// `xp` and `yp` must each be valid for `pairs * 2` `i16` writes and word
 /// aligned, and must not overlap.
+#[allow(unsafe_code)]
 #[cfg(target_arch = "arm")]
 #[inline(always)]
 unsafe fn ct_butterfly_pairs(xp: *mut i16, yp: *mut i16, zeta: i16, pairs: usize) {
@@ -88,6 +89,7 @@ unsafe fn ct_butterfly_pairs(xp: *mut i16, yp: *mut i16, zeta: i16, pairs: usize
 /// Forward NTT (in-place). Kyber's 128-point NTT.
 /// After NTT, pairs (a[2i], a[2i+1]) represent coefficients in
 /// Z_q[x]/(x^2 - zeta^{2*brv(i)+1}).
+#[allow(unsafe_code)]
 pub fn ntt(a: &mut [i16; N]) {
     #[cfg(target_arch = "arm")]
     {

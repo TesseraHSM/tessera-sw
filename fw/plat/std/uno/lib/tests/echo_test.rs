@@ -18,9 +18,11 @@ struct AlignedBuf {
 }
 
 // SAFETY: AlignedBuf owns its allocation exclusively.
+#[allow(unsafe_code)]
 unsafe impl Send for AlignedBuf {}
 
 impl AlignedBuf {
+    #[allow(unsafe_code)]
     fn new(len: usize) -> Self {
         let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -28,10 +30,12 @@ impl AlignedBuf {
         Self { ptr, len }
     }
 
+    #[allow(unsafe_code)]
     fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
+    #[allow(unsafe_code)]
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
@@ -43,6 +47,7 @@ impl AlignedBuf {
 }
 
 impl Drop for AlignedBuf {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         let layout = std::alloc::Layout::from_size_align(self.len, 4096).unwrap();
         unsafe { std::alloc::dealloc(self.ptr, layout) };

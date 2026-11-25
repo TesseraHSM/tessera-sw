@@ -524,6 +524,7 @@ fn frame_encode_field(f: &DdiStructField) -> proc_macro2::TokenStream {
                 let #name = encoder.encode_reserve(#len_name, pad)?;
                 // SAFETY: `encoder` was constructed from a `&mut HsmDmaBuf`, so
                 // the slice it returned is itself DMA-accessible.
+                #[allow(unsafe_code)]
                 let #name = unsafe { tsra_fw_ddi_mbor::HsmDmaBuf::from_raw_mut(#name) };
             }
         }

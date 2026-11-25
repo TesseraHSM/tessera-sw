@@ -64,6 +64,7 @@ fn slot(core_id: u8) -> *mut u32 {
 ///
 /// Allocation-free and shallow on purpose: it runs on a stack that may
 /// itself be the reason we are here.
+#[allow(unsafe_code)]
 pub fn record(kind: u32, pc: u32, lr: u32, sp: u32) {
     let core_id = crate::core_id();
     if core_id >= crate::FP_CORES {
@@ -94,6 +95,7 @@ pub fn record(kind: u32, pc: u32, lr: u32, sp: u32) {
 
 /// Current stack pointer, for the paths that are not handed an exception
 /// frame.
+#[allow(unsafe_code)]
 pub fn sp() -> u32 {
     let sp: u32;
     // SAFETY: reads a core register into a local; no memory is touched.
@@ -108,6 +110,7 @@ pub fn sp() -> u32 {
 /// Invoked only by the CPU's exception mechanism with a valid exception
 /// frame; it is never called directly. The handler diverges, so it never
 /// returns to the faulting context.
+#[allow(unsafe_code)]
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     record(

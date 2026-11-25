@@ -382,6 +382,7 @@ const _: () = assert!(IO_FENCE_START <= IO_DMA_BASE && IO_DMA_BASE + IO_DMA_SIZE
 /// `len` bytes at `addr` in the IO DMA heap as a shared slice, if the whole
 /// range lies in one slot of it. The HSM keeps the buffer in place until
 /// this core answers.
+#[allow(unsafe_code)]
 pub fn io_dma_range(addr: usize, len: usize) -> Option<&'static [u8]> {
     let end = addr.checked_add(len)?;
     let first = addr.checked_sub(IO_DMA_BASE)?;
@@ -406,6 +407,7 @@ fn slot(lane: u8) -> *mut u8 {
 ///
 /// Used to hand the crypto its input and output regions in place; see the
 /// `SLOT_*_OFFSET` constants for the sign layout.
+#[allow(unsafe_code)]
 pub fn slot_range_mut(lane: u8, offset: usize, len: usize) -> Option<&'static mut [u8]> {
     if offset.checked_add(len)? > SLOT_SIZE {
         return None;
@@ -424,6 +426,7 @@ pub fn slot_range_mut(lane: u8, offset: usize, len: usize) -> Option<&'static mu
 /// through dTCM and copying it back.
 ///
 /// Returns `None` if either range leaves the slot, or if the two overlap.
+#[allow(unsafe_code)]
 pub fn slot_pair_mut(
     lane: u8,
     a_offset: usize,
@@ -460,6 +463,7 @@ pub fn slot_pair_mut(
 ///
 /// Verify takes four inputs and produces no output, so it can borrow every
 /// operand at once without any of them aliasing.
+#[allow(unsafe_code)]
 pub fn slot_range(lane: u8, offset: usize, len: usize) -> Option<&'static [u8]> {
     if offset.checked_add(len)? > SLOT_SIZE {
         return None;
@@ -484,6 +488,7 @@ pub fn slot_range(lane: u8, offset: usize, len: usize) -> Option<&'static [u8]> 
 ///
 /// # Panics
 /// Debug-asserts that the two slices are the same length.
+#[allow(unsafe_code)]
 pub fn stage(dst: &mut [u8], src: &[u8]) {
     debug_assert_eq!(dst.len(), src.len());
 
@@ -527,6 +532,7 @@ fn mailbox(lane: u8) -> *mut u32 {
 ///
 /// Returns `None` when both mailboxes have been answered, so a duplicate or
 /// spurious doorbell cannot cause the same request to run twice.
+#[allow(unsafe_code)]
 pub fn take_request(core_id: u8) -> Option<(u8, Request)> {
     // SAFETY: this core's own mailboxes, fixed 256-byte slots that lie
     // outside every region described to the linker. Volatile because the
@@ -592,6 +598,7 @@ pub fn take_request(core_id: u8) -> Option<(u8, Request)> {
 /// `response_seq` is written last, so the HSM cannot observe a matching
 /// sequence number alongside a half-written payload.
 ///
+#[allow(unsafe_code)]
 pub fn respond(lane: u8, req: &Request, status: u32, out_len: u32) {
     let mb = mailbox(lane);
 
@@ -610,6 +617,7 @@ pub fn respond(lane: u8, req: &Request, status: u32, out_len: u32) {
 // ===========================================================================
 
 /// Enable the DWT cycle counter (off out of reset).
+#[allow(unsafe_code)]
 pub fn cyc_init() {
     // SAFETY: DEMCR and DWT_CTRL are core peripheral registers.
     unsafe {

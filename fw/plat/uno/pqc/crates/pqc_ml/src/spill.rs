@@ -59,6 +59,7 @@ static mut KEY_CAP: usize = 0;
 /// # Safety
 /// `base` must be valid for `words` `i32` writes, word aligned, and
 /// reserved for this core alone for the lifetime of the program.
+#[allow(unsafe_code)]
 pub unsafe fn init(base: *mut i32, words: usize) {
     if words >= MATRIX_REGION_WORDS {
         BASE = base;
@@ -70,6 +71,7 @@ pub unsafe fn init(base: *mut i32, words: usize) {
 }
 
 /// Address of matrix slot `i`, if it exists.
+#[allow(unsafe_code)]
 #[inline(always)]
 pub(crate) fn matrix_slot(i: usize) -> Option<*mut i32> {
     // SAFETY: written once at boot before any signing request is serviced,
@@ -88,6 +90,7 @@ pub(crate) fn matrix_slot(i: usize) -> Option<*mut i32> {
 /// The key region starts above the whole matrix region rather than after
 /// however much this parameter set happened to spill, so its base is the
 /// same for every variant and the caller does not have to track one.
+#[allow(unsafe_code)]
 #[inline(always)]
 pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
     // SAFETY: as `matrix_slot`.
@@ -104,6 +107,7 @@ pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
 ///
 /// # Safety
 /// `dst` must come from [`slot`].
+#[allow(unsafe_code)]
 pub(crate) unsafe fn store(dst: *mut i32, src: &[i32; DSA_N]) {
     burst(dst, src.as_ptr(), DSA_N);
 }
@@ -112,6 +116,7 @@ pub(crate) unsafe fn store(dst: *mut i32, src: &[i32; DSA_N]) {
 ///
 /// # Safety
 /// `src` must come from [`slot`].
+#[allow(unsafe_code)]
 pub(crate) unsafe fn load(dst: &mut [i32; DSA_N], src: *const i32) {
     burst(dst.as_mut_ptr(), src, DSA_N);
 }
@@ -137,6 +142,7 @@ pub(crate) const PACKED_WORDS: usize = DSA_N * 3 / 4;
 /// # Safety
 /// `dst` must come from [`slot`], and every element of `src` must be in
 /// `[0, 2^24)`.
+#[allow(unsafe_code)]
 pub(crate) unsafe fn store_packed(dst: *mut i32, src: &[i32; DSA_N]) {
     const COEFFS: usize = 32;
     const WORDS: usize = COEFFS * 3 / 4;
@@ -186,6 +192,7 @@ pub(crate) fn pack(dst: &mut [i32], src: &[i32; DSA_N]) {
 /// # Safety
 /// `src` must come from [`slot`] and must have been written by
 /// [`store_packed`]; `dst` must hold at least [`PACKED_WORDS`] words.
+#[allow(unsafe_code)]
 pub(crate) unsafe fn load_packed_words(dst: &mut [i32], src: *const i32) {
     burst(dst[..PACKED_WORDS].as_mut_ptr(), src, PACKED_WORDS);
 }
@@ -195,6 +202,7 @@ pub(crate) unsafe fn load_packed_words(dst: &mut [i32], src: *const i32) {
 /// # Safety
 /// Both pointers must be valid for `words` words and word aligned, and
 /// `words` must be a multiple of eight.
+#[allow(unsafe_code)]
 #[inline(always)]
 pub(crate) unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
     // Eight words per transaction rather than four. GSRAM costs 121.6

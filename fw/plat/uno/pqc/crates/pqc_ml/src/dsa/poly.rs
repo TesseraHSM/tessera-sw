@@ -117,6 +117,7 @@ pub fn poly_reduce_chknorm(a: &mut Poly, bound: u32) -> bool {
     fused_reduce_chknorm(a, None, bound)
 }
 
+#[allow(unsafe_code)]
 fn fused_reduce_chknorm(a: &mut Poly, b: Option<(&Poly, bool)>, bound: u32) -> bool {
     // Two coefficients a pass, `reduce32` as one `mls`, and the bound as a
     // single unsigned compare: |v| < bound exactly when v + bound - 1, taken

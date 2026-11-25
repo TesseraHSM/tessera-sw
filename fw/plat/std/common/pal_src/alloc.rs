@@ -77,6 +77,7 @@ fn mark_for(pool: &BufferPool, slot: u16, heap: Heap) -> &Cell<usize> {
 /// Bump-allocate `size` bytes with the given alignment from `(slot,
 /// heap)`. Returns the new `&mut [u8]` view over the freshly
 /// allocated region (disjoint from any prior allocation).
+#[allow(unsafe_code)]
 #[allow(clippy::needless_lifetimes, clippy::mut_from_ref)]
 fn bump<'a>(
     pool: &'a BufferPool,
@@ -141,6 +142,7 @@ impl HsmScopedAlloc for StdScopedAlloc<'_> {
         Ok(s)
     }
 
+    #[allow(unsafe_code)]
     #[inline(always)]
     fn alloc_val<T: Sized>(&self, value: T) -> HsmResult<&mut T> {
         let s = bump(
@@ -159,6 +161,7 @@ impl HsmScopedAlloc for StdScopedAlloc<'_> {
         }
     }
 
+    #[allow(unsafe_code)]
     #[inline(always)]
     fn dma_alloc(&self, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = bump(self.pool, self.slot, Heap::Dma, size, 4)?;
@@ -198,6 +201,7 @@ impl HsmAlloc for StdHsmPal {
         Ok(s)
     }
 
+    #[allow(unsafe_code)]
     #[inline(always)]
     fn alloc_val<T: Sized>(&self, io: &StdHsmIo, value: T) -> HsmResult<&mut T> {
         let s = bump(
@@ -215,6 +219,7 @@ impl HsmAlloc for StdHsmPal {
         }
     }
 
+    #[allow(unsafe_code)]
     #[inline(always)]
     fn dma_alloc(&self, io: &StdHsmIo, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = bump(self.iic.pool(), io.slot, Heap::Dma, size, 4)?;
@@ -222,6 +227,7 @@ impl HsmAlloc for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
     }
 
+    #[allow(unsafe_code)]
     fn dma_alloc_exchange(&self, io: &StdHsmIo, size: usize) -> HsmResult<HsmDmaAllocation<'_>> {
         let pool = self.iic.pool();
         bump(pool, io.slot, Heap::Dma, size, 4)?;
@@ -231,6 +237,7 @@ impl HsmAlloc for StdHsmPal {
         Ok(unsafe { HsmDmaAllocation::from_raw_parts(pool.dma_ptr(io.slot).add(start), size) })
     }
 
+    #[allow(unsafe_code)]
     fn dma_grow(
         &self,
         io: &StdHsmIo,
@@ -269,6 +276,7 @@ impl HsmAlloc for StdHsmPal {
         Ok(s)
     }
 
+    #[allow(unsafe_code)]
     fn dma_alloc_var<F>(&self, io: &StdHsmIo, f: F) -> HsmResult<&mut HsmDmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
@@ -307,6 +315,7 @@ impl HsmAlloc for StdHsmPal {
         }
     }
 
+    #[allow(unsafe_code)]
     fn dma_alloc_var_with<F, T>(&self, io: &StdHsmIo, f: F) -> HsmResult<(&mut HsmDmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,

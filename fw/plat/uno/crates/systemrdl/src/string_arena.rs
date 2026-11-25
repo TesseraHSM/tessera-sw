@@ -14,6 +14,7 @@ impl StringArena {
     pub fn new() -> Self {
         Default::default()
     }
+    #[allow(unsafe_code)]
     pub fn add<'a>(&'a self, s: String) -> &'a str {
         let mut map = self.strings.borrow_mut();
         if let Some(existing) = map.get(&s) {

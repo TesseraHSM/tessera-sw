@@ -66,6 +66,7 @@ fn gcm_split_padded(buf: &[u8], aad_len: usize) -> HsmResult<(Option<&[u8]>, usi
 }
 
 /// Reads `len` host bytes described by the raw SGL descriptor `src`.
+#[allow(unsafe_code)]
 fn sgl_read(pal: &StdHsmPal, src: &[u8; 16], len: usize) -> HsmResult<Vec<u8>> {
     crate::drivers::gdma::validate_raw_src(src, len)?;
     let mut buf = vec![0u8; len];
@@ -77,6 +78,7 @@ fn sgl_read(pal: &StdHsmPal, src: &[u8; 16], len: usize) -> HsmResult<Vec<u8>> {
 
 /// Writes `buf` to the host buffer described by the raw SGL descriptor
 /// `dst`.
+#[allow(unsafe_code)]
 fn sgl_write(pal: &StdHsmPal, dst: &[u8; 16], buf: &[u8]) -> HsmResult<()> {
     crate::drivers::gdma::validate_raw_src(dst, buf.len())?;
     // SAFETY: as for `sgl_read`.

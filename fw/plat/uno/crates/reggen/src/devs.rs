@@ -228,12 +228,14 @@ pub fn generate_block(block: &RegisterBlock, regs_crate: &str, bus_crate: &str) 
                 read_arms.push(quote! {
                     o @ #start_lit..#end_lit if o % 4 == 0 => {
                         let ptr = self.periph.reg() as *const #regs_struct_name as *const u8;
+                        #[allow(unsafe_code)]
                         unsafe { core::ptr::read(ptr.add(o as usize) as *const u32) }
                     }
                 });
                 write_arms.push(quote! {
                     o @ #start_lit..#end_lit if o % 4 == 0 => {
                         let ptr = self.periph.reg() as *const #regs_struct_name as *mut u8;
+                        #[allow(unsafe_code)]
                         unsafe { core::ptr::write(ptr.add(o as usize) as *mut u32, val) }
                     }
                 });
@@ -249,12 +251,14 @@ pub fn generate_block(block: &RegisterBlock, regs_crate: &str, bus_crate: &str) 
                 read_arms.push(quote! {
                     o @ #start_lit..#end_lit if o % 4 == 0 => {
                         let ptr = self.periph.reg() as *const #regs_struct_name as *const u8;
+                        #[allow(unsafe_code)]
                         unsafe { core::ptr::read(ptr.add(o as usize) as *const u32) }
                     }
                 });
                 write_arms.push(quote! {
                     o @ #start_lit..#end_lit if o % 4 == 0 => {
                         let ptr = self.periph.reg() as *const #regs_struct_name as *mut u8;
+                        #[allow(unsafe_code)]
                         unsafe { core::ptr::write(ptr.add(o as usize) as *mut u32, val) }
                     }
                 });

@@ -31,7 +31,10 @@ extern "Rust" {
 #[macro_export]
 #[cfg(feature = "level-trace")]
 macro_rules! trace {
-    ($tgt:expr, $($t:tt)*) => { unsafe { $crate::__hsm_trace_emit(b'T', $tgt, format_args!($($t)*)) } };
+    ($tgt:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
+        unsafe { $crate::__hsm_trace_emit(b'T', $tgt, format_args!($($t)*)) }
+    }};
 }
 #[macro_export]
 #[cfg(not(feature = "level-trace"))]
@@ -44,7 +47,10 @@ macro_rules! trace {
 #[macro_export]
 #[cfg(any(feature = "level-trace", feature = "level-debug"))]
 macro_rules! debug {
-    ($tgt:expr, $($t:tt)*) => { unsafe { $crate::__hsm_trace_emit(b'D', $tgt, format_args!($($t)*)) } };
+    ($tgt:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
+        unsafe { $crate::__hsm_trace_emit(b'D', $tgt, format_args!($($t)*)) }
+    }};
 }
 #[macro_export]
 #[cfg(not(any(feature = "level-trace", feature = "level-debug")))]
@@ -61,7 +67,10 @@ macro_rules! debug {
     feature = "level-info"
 ))]
 macro_rules! info {
-    ($tgt:expr, $($t:tt)*) => { unsafe { $crate::__hsm_trace_emit(b'I', $tgt, format_args!($($t)*)) } };
+    ($tgt:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
+        unsafe { $crate::__hsm_trace_emit(b'I', $tgt, format_args!($($t)*)) }
+    }};
 }
 #[macro_export]
 #[cfg(not(any(
@@ -83,7 +92,10 @@ macro_rules! info {
     feature = "level-warn"
 ))]
 macro_rules! warn {
-    ($tgt:expr, $($t:tt)*) => { unsafe { $crate::__hsm_trace_emit(b'W', $tgt, format_args!($($t)*)) } };
+    ($tgt:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
+        unsafe { $crate::__hsm_trace_emit(b'W', $tgt, format_args!($($t)*)) }
+    }};
 }
 #[macro_export]
 #[cfg(not(any(
@@ -107,15 +119,19 @@ macro_rules! warn {
     feature = "level-error"
 ))]
 macro_rules! error {
-    ($tgt:expr, $err:expr, $($t:tt)*) => {
+    ($tgt:expr, $err:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
         unsafe {
             $crate::__hsm_trace_emit(
                 b'E', $tgt,
                 format_args!("{} [err:{:08x}]", format_args!($($t)*), $err.0),
             )
         }
-    };
-    ($tgt:expr, $($t:tt)*) => { unsafe { $crate::__hsm_trace_emit(b'E', $tgt, format_args!($($t)*)) } };
+    }};
+    ($tgt:expr, $($t:tt)*) => {{
+        #[allow(unsafe_code)]
+        unsafe { $crate::__hsm_trace_emit(b'E', $tgt, format_args!($($t)*)) }
+    }};
 }
 #[macro_export]
 #[cfg(not(any(

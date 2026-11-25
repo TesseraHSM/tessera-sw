@@ -244,6 +244,7 @@ impl<'a> MborDecoder<'a> {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
     #[cfg(not(feature = "array"))]
     fn addr(&self) -> *const u8 {
         unsafe { self.buffer.as_ptr().add(self.pos) }

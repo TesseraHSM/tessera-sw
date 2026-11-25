@@ -20,6 +20,7 @@ use crate::keccak::shake256_init;
 use crate::spill::PACKED_WORDS;
 use crate::DsaWorkBuf;
 
+#[allow(unsafe_code)]
 pub fn sign_internal(
     params: &MlDsaParams,
     sig: &mut [u8],
@@ -340,6 +341,7 @@ pub fn sign_internal(
 /// it there -- `*done` counts how many of this polynomial's family have
 /// been -- and otherwise unpacked and transformed, and kept in `slot` for
 /// the next attempt if there is one.
+#[allow(unsafe_code)]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn c_times_key(

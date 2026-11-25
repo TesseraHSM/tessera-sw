@@ -528,12 +528,14 @@ impl StdHsmPal {
     /// Borrow the `PartitionTable` through the `UnsafeCell`.  Safe
     /// because the std PAL runs on a single-threaded Embassy executor
     /// (see the module-level architecture note).
+    #[allow(unsafe_code)]
     #[allow(clippy::mut_from_ref)]
     #[inline]
     fn table_mut(&self) -> &mut PartitionTable {
         unsafe { &mut *self.part_table.get() }
     }
 
+    #[allow(unsafe_code)]
     #[inline]
     fn table(&self) -> &PartitionTable {
         unsafe { &*self.part_table.get() }
@@ -1242,6 +1244,7 @@ impl ExpectedKind {
 /// Brand a borrowed byte slice from the partition table as a
 /// `&HsmDmaBuf`.  Safe on the std PAL because the partition table is
 /// host-heap-resident; no real DMA constraints apply.
+#[allow(unsafe_code)]
 #[inline(always)]
 fn dma(buf: &[u8]) -> &HsmDmaBuf {
     // SAFETY: std PAL has no DMA-region constraint.

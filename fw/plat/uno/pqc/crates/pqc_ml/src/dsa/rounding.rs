@@ -151,6 +151,7 @@ pub fn poly_decompose_reduced(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u3
     }
 }
 
+#[allow(unsafe_code)]
 fn decompose_pass<const G: u32>(w1: &mut Poly, w0: &mut Poly, w: &Poly) {
     // Two coefficients a pass; the per-coefficient arithmetic is the same
     // as the scalar loop below, `a1 * 2 * G` folded into an `mls`.

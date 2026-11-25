@@ -425,6 +425,7 @@ impl StdHsmPal {
     }
 
     /// Ensure the partition's leaf cert is cached.
+    #[allow(unsafe_code)]
     async fn ensure_leaf_cert(&self, pid: u8) -> HsmResult<()> {
         {
             let table = unsafe { &*self.part_table.get() };
@@ -506,6 +507,7 @@ impl StdHsmPal {
     }
 
     /// Get mutable reference to cert store (for init).
+    #[allow(unsafe_code)]
     #[allow(clippy::mut_from_ref)]
     fn cert_store_mut(&self) -> &mut SharedCertStore {
         // SAFETY: only called during init, single-threaded.
@@ -513,6 +515,7 @@ impl StdHsmPal {
     }
 
     /// Get immutable reference to cert store.
+    #[allow(unsafe_code)]
     fn cert_store(&self) -> &SharedCertStore {
         // SAFETY: single-threaded Embassy executor.
         unsafe { &*self.cert_store.get() }
@@ -524,6 +527,7 @@ impl StdHsmPal {
 // ---------------------------------------------------------------------------
 
 impl HsmCertStore for StdHsmPal {
+    #[allow(unsafe_code)]
     async fn get_cert_chain_info(
         &self,
         io: &StdHsmIo,
@@ -575,6 +579,7 @@ impl HsmCertStore for StdHsmPal {
         })
     }
 
+    #[allow(unsafe_code)]
     async fn get_cert(
         &self,
         io: &StdHsmIo,

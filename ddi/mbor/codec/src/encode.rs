@@ -124,6 +124,7 @@ impl<const N: usize> MborEncode for MborPaddedByteArray<'_, N> {
 
 #[cfg(not(feature = "array"))]
 impl<const N: usize> MborEncode for MborPaddedByteArray<'_, N> {
+    #[allow(unsafe_code)]
     fn mbor_encode(&self, encoder: &mut MborEncoder<'_>) -> Result<(), MborEncodeError> {
         if self.0.len() > N {
             Err(MborEncodeError::BufferOverflow)?
@@ -190,6 +191,7 @@ impl MborEncoder<'_> {
         self.pre_encode
     }
 
+    #[allow(unsafe_code)]
     #[cfg(not(feature = "array"))]
     fn addr(&self) -> *const u8 {
         unsafe { self.buffer.as_ptr().add(self.pos) }

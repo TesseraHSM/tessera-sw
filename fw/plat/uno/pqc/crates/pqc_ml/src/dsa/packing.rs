@@ -74,6 +74,7 @@ pub fn pack_t0(buf: &mut [u8], a: &Poly) {
 /// byte or a word. Taking the stream a word at a time is a quarter of the
 /// accesses the byte-wise unpackers made, and one routine for all three
 /// shapes is smaller than any one of them was.
+#[allow(unsafe_code)]
 #[inline(never)]
 pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
     // The stream is 8d words. It is first copied into the top of `a` --

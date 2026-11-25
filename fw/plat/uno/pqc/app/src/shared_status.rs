@@ -93,6 +93,7 @@ pub const FP_STATUS_MAGIC: u32 = 0x464F_4B50;
 /// * `core_id` — this core's stamped identity.
 /// * `counter` — increments every call, so a reader can distinguish a live
 ///   core from a stale block.
+#[allow(unsafe_code)]
 pub fn publish(core_id: u8, counter: u32) {
     let block = (BLOCK_BASE + CORE_BLOCK_OFFSET + (core_id as usize) * CORE_BLOCK_SIZE) as *mut u32;
 
@@ -116,6 +117,7 @@ pub fn publish(core_id: u8, counter: u32) {
 /// Written straight into the status block rather than waiting for the next
 /// status refresh, so a doorbell is visible immediately after it is
 /// answered.
+#[allow(unsafe_code)]
 pub fn note_doorbell(core_id: u8, pending: u32) {
     let block = (BLOCK_BASE + CORE_BLOCK_OFFSET + (core_id as usize) * CORE_BLOCK_SIZE) as *mut u32;
     let count = DOORBELL_COUNT.fetch_add(1, Ordering::Relaxed);

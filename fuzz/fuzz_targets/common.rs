@@ -322,6 +322,7 @@ pub const FUZZ_RESP_BUF_SIZE: usize =
 
 static mut DEVICE_DISPLAY: bool = false;
 
+#[allow(unsafe_code)]
 pub fn common_fuzz_test(test: &dyn Fn(&TestCtx, &str)) {
     let ddi = DdiTest::default();
     let dev_infos = ddi.dev_info_list();

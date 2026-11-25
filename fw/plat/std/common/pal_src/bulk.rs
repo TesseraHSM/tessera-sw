@@ -119,6 +119,7 @@ impl StdHsmPal {
     }
 
     /// Reads `len` bytes of host memory at `addr`.
+    #[allow(unsafe_code)]
     fn bulk_read(&self, addr: u64, len: usize) -> HsmResult<Zeroizing<Vec<u8>>> {
         let mut buf = Zeroizing::new(vec![0u8; len]);
         if len > 0 {
@@ -130,6 +131,7 @@ impl StdHsmPal {
     }
 
     /// Writes `data` to host memory at `addr`.
+    #[allow(unsafe_code)]
     fn bulk_write(&self, data: &[u8], addr: u64) -> HsmResult<()> {
         if !data.is_empty() {
             // SAFETY: as in `bulk_read`.

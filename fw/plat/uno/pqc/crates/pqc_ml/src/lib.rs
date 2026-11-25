@@ -16,6 +16,7 @@ pub mod spill;
 ///
 /// # Safety
 /// `p` must be valid for `n` writes and word aligned.
+#[allow(unsafe_code)]
 pub(crate) unsafe fn fast_zero(p: *mut u8, n: usize) {
     let mut q = p;
     let mut left = n;
