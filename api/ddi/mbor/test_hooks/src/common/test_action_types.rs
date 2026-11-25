@@ -264,14 +264,47 @@ pub struct DdiTestActionForcePkaInstanceReqInfo {
     pub force_pka_instance: u8,
 }
 
+/// Pairwise consistency test (PCT) kind targeted by
+/// [`DdiTestAction::TriggerNegativePctFailure`].
+///
+/// Each kind is one firmware PCT and one failure code in the firmware log.
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[open_enum]
+#[derive(Debug, Ddi, Copy, Clone, PartialEq, Eq)]
+#[repr(u32)]
+#[ddi(enumeration)]
+pub enum DdiTestActionNegativePctKind {
+    /// ECC key generation (`PctValidationEccGenKeyFailed`).
+    EccKeyGen = 1,
+    /// Partition identity key (`PartitionIdKeyGenerationPctFailed`).
+    PartitionIdKey = 2,
+    /// Establish-credential key (`PctValidationEstablishCredEncKeyFailed`).
+    EstablishCredKey = 3,
+    /// Session-encryption key (`PctValidationSessionEncKeyFailed`).
+    SessionEncKey = 4,
+    /// RSA unwrapping key (`PctValidationUnwrappingKeyFailed`).
+    UnwrappingKey = 5,
+    /// ML-DSA key generation (`PctValidationMlDsaGenKeyFailed`). Reserved:
+    /// firmware does not inject this kind yet and rejects it with
+    /// `InvalidArg`.
+    MlDsaKeyGen = 6,
+    /// ML-KEM key generation (`PctValidationMlKemGenKeyFailed`). Reserved:
+    /// firmware does not inject this kind yet and rejects it with
+    /// `InvalidArg`.
+    MlKemKeyGen = 7,
+}
+
 /// Payload for [`DdiTestAction::TriggerNegativePctFailure`].
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Ddi)]
 #[ddi(map)]
 pub struct DdiTestActionNegativePctFailureReqInfo {
-    /// Number of pairwise consistency tests to skip.
+    /// Number of PCTs of `pct_kind` to let pass before the one that fails.
     #[ddi(id = 1)]
     pub neg_pct_skip_cnt: u8,
+    /// PCT kind to make fail.
+    #[ddi(id = 2)]
+    pub pct_kind: DdiTestActionNegativePctKind,
 }
 
 /// Payload for [`DdiTestAction::TriggerEccError`].
