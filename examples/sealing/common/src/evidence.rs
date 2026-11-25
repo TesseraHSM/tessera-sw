@@ -19,11 +19,10 @@ use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::Thumbprint;
 use tsra_sealing_api::RAW_PUB_LEN;
-use tsra_sealing_report::parse_ec2_cose_key_bytes;
+use tsra_sealing_report::attested_recipient;
 use tsra_sealing_report::verify_certificate_chain;
 use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::verify_sd_transfer_report;
-use tsra_sealing_report::Curve;
 use tsra_sealing_report::KeyFlags;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
@@ -36,7 +35,8 @@ pub fn cert_public(cert: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Verify the PID-signed report and full policy binding. Returns the PID and
-/// attested public key separately so CSR ownership can be checked.
+/// attested public key separately so CSR ownership can be checked. The key is
+/// raw P-384 `X || Y` or an ML-KEM-1024 / MLKEM1024-P384 public key.
 pub fn verify_report(
     chain: &[Vec<u8>],
     report: &[u8],
@@ -51,16 +51,11 @@ pub fn verify_report(
         report.policy_hash == Some(digest.as_slice()),
         "peer policy binding mismatch"
     );
-    let public = report
-        .public_key
-        .get(..usize::from(report.public_key_size))
-        .context("invalid attested public key size")?;
-    let public = parse_ec2_cose_key_bytes(public)?;
-    anyhow::ensure!(public.curve == Curve::P384, "peer key must be P-384");
+    let public = attested_recipient(&report)?;
     let pid = cert_public(leaf)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("PID must be P-384"))?;
-    Ok((pid, [public.x, public.y].concat()))
+    Ok((pid, public))
 }
 
 /// Check peer evidence whose partition-owner chain is anchored to the policy

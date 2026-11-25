@@ -5,23 +5,25 @@
 //! (opcode `0x24`) at the DDI layer.
 //!
 //! `DarcTmkExport` seals the source's TMK to an authenticated target. The
-//! handler re-hashes the supplied `policy`, validates the **target**
-//! certificate chain against the policy `data_spki_thumbprint` to recover the
-//! target's KEX public key, unmasks the TMK, HPKE Base seals it, and returns
-//! the canonical envelope together with an operation-bound PID report.
+//! handler re-hashes the supplied `policy`, validates the **target** PID
+//! certificate chain against the policy `data_spki_thumbprint`, verifies the
+//! target's PID-signed key report over its DARC KEX key to recover the
+//! recipient public key (P-384, ML-KEM-1024 or MLKEM1024-P384), unmasks the
+//! TMK, HPKE Base seals it, and returns the canonical envelope together with
+//! an operation-bound PID report.
 //!
-//! The target certificate-chain DER travels **out of band**; the request
-//! carries only `(index, length)` descriptors, built here via
-//! [`push_cert_chain`]. Runs **inside an already-open** security-domain
-//! (V2) session.
+//! The target certificate-chain DER and key report travel **out of band**;
+//! the request carries only `(index, length)` descriptors. The firmware
+//! writes the PID report to OOB item [`DARC_REPORT_OOB_INDEX`]. Runs
+//! **inside an already-open** security-domain (V2) session.
 
 use tsra_ddi_tbor_types::*;
 
 use super::*;
 
-/// Maximum certificates in a DARC target/source certificate chain
-/// (`CertDescriptor[1..=2]`).
-pub(crate) const DARC_CERT_CHAIN_MAX_CERTS: usize = 2;
+/// Maximum certificates in a DARC target certificate chain
+/// (`CertDescriptor[1..=3]`, normally DATA -> PTA -> PID).
+const DARC_TARGET_CERT_CHAIN_MAX_CERTS: usize = 3;
 
 /// Issue `DarcTmkExport` (opcode `0x24`) on the active session.
 ///
@@ -33,45 +35,59 @@ pub(crate) const DARC_CERT_CHAIN_MAX_CERTS: usize = 2;
 ///   bytes.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes)
 ///   whose DATA key thumbprint anchors `target_cert_chain`.
-/// * `target_cert_chain` - DATA-anchored target certificate chain
-///   (1..=2 certs); DER carried out of band.
+/// * `target_cert_chain` - DATA-anchored target PID certificate chain
+///   (1..=3 certs); DER carried out of band.
+/// * `target_key_report` - The target PID's key report over its DARC KEX
+///   key (from `key_report` on the masked KEX key); carried out of band.
 ///
 /// # Errors
 ///
 /// Returns [`HsmError::InvalidArgument`] for a wrong-length
-/// `masked_tmk`, malformed `policy`, or an
-/// empty/oversized chain, and surfaces DDI/device failures.
+/// `masked_tmk`, malformed `policy`, an empty/oversized chain or an
+/// empty/oversized key report, and surfaces DDI/device failures.
 pub(crate) fn darc_tmk_export(
     session: &HsmSession,
     masked_tmk: &[u8],
     policy: &[u8],
     target_cert_chain: &[HsmCert<'_>],
+    target_key_report: &[u8],
 ) -> HsmResult<HsmDarcTmkExportResult> {
     let masked_tmk: [u8; MASKED_TMK_LEN] = masked_tmk
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
     let policy = policy_wire(policy)?;
 
-    let mut oob: Vec<&[u8]> = Vec::new();
-    let target_cert_chain =
-        push_cert_chain(target_cert_chain, &mut oob, DARC_CERT_CHAIN_MAX_CERTS)?;
+    if target_key_report.len() > KEY_REPORT_MAX_LEN {
+        return Err(HsmError::InvalidArgument);
+    }
+
+    let mut report = vec![0u8; DARC_REPORT_MAX_LEN];
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
+    push_report_out(&mut report, &mut oob)?;
+    let target_cert_chain = push_cert_chain(
+        target_cert_chain,
+        &mut oob,
+        DARC_TARGET_CERT_CHAIN_MAX_CERTS,
+    )?;
+    let target_key_report = push_report(target_key_report, &mut oob)?;
 
     let req = TborDarcTmkExportReq {
         session_id: session.ex_session_id()?,
         masked_tmk,
         policy,
         target_cert_chain,
+        target_key_report,
     };
 
     let mut cookie = None;
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
     let rev = session.api_rev();
     let resp = session.with_dev(|dev| {
-        dev.exec_op_tbor(rev, &req, oob_items, &mut cookie)
+        dev.exec_op_tbor_oob(rev, &req, &mut oob, &mut cookie)
             .map_err(HsmError::from)
     })?;
+    drop(oob);
 
-    Ok(HsmDarcTmkExportResult {
-        sealed_tmk: resp.sealed_tmk.to_vec(),
-    })
+    let sealed_tmk = take_report(report, resp.report_len)?;
+    super::darc_tmk_import::validate_sealed_tmk(&sealed_tmk)?;
+    Ok(HsmDarcTmkExportResult { sealed_tmk })
 }

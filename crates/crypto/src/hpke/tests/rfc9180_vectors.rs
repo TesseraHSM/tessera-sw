@@ -20,7 +20,7 @@ use crate::hpke::kdf::labeled_extract;
 #[test]
 fn rfc9180_a3_secret_extract_under_aes256_suite_id() {
     let suite = HpkeSuite::DHKemP256Sha256AesGcm256;
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().expect("two-stage");
     let suite_id = suite.hpke_suite_id();
 
     // RFC 9180 §A.3.1: `shared_secret` from the published Base-mode

@@ -1018,9 +1018,12 @@ tsra_handle open_rotated_co_session(tsra_handle part_handle)
 }
 } // namespace
 
-TestRootPin::TestRootPin(tsra_handle partition)
+TestRootPin::TestRootPin(tsra_handle partition, tsra_session_suite suite)
 {
-    tsra_part_prop prop{ TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, nullptr, 0 };
+    const auto property = suite == TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87
+                              ? TSRA_PART_PROP_ID_MANUFACTURER_ML_DSA_CERT_CHAIN
+                              : TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN;
+    tsra_part_prop prop{ property, nullptr, 0 };
     if (tsra_part_get_prop(partition, &prop) != TSRA_STATUS_BUFFER_TOO_SMALL)
     {
         throw std::runtime_error("test root certificate chain size query failed");

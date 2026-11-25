@@ -41,13 +41,13 @@ impl From<TborSdRestorePeerBackupResp> for HsmSdRestoreResult {
 /// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
-///   `SdSealingKeyGen`) that unseals the backup, exactly
-///   [`MASKED_SEALING_KEY_LEN`] bytes.
+///   `SdSealingKeyGen`) that unseals the backup:
+///   a P-384, ML-KEM-1024 or MLKEM1024-P384 masked sealing key.
 /// * `src_evidence` - Source (peer) attestation evidence (cert chains and
 ///   report), transmitted out of band.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
-/// * `pok_peer_backup` - The peer backup to restore, exactly
-///   [`POK_REMOTE_BACKUP_LEN`] bytes.
+/// * `pok_peer_backup` - The peer backup to restore:
+///   one complete PID-signed SD envelope.
 /// * `prev_sd_mk_backup` - The previous security-domain masking-key backup,
 ///   exactly [`SD_MK_BACKUP_LEN`] bytes.
 ///
@@ -69,12 +69,8 @@ pub(crate) fn sd_restore_peer_backup_ex(
     prev_sd_mk_backup: &[u8],
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmSdRestoreResult> {
-    let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    let pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN] = pok_peer_backup
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
+    let masked_sealing_key = masked_sealing_key_wire(masked_sealing_key)?;
+    let pok_peer_backup = remote_backup_wire(pok_peer_backup)?;
     let prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN] = prev_sd_mk_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
@@ -83,6 +79,7 @@ pub(crate) fn sd_restore_peer_backup_ex(
     // Flatten the source evidence into descriptors + shared OOB items.
     let mut oob: Vec<&[u8]> = Vec::new();
     let src = super::sd_evidence::push_identity_evidence(src_evidence, &mut oob)?;
+    let pok_peer_backup = push_report(&pok_peer_backup, &mut oob)?;
 
     let req = TborSdRestorePeerBackupReq {
         session_id,

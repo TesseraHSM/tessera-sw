@@ -24,3 +24,17 @@ tsra_fw_core_crypto_aes_cbc_pad = { optional = true, path = "../aes-cbc-pad" }
 tsra_fw_core_crypto_gcm_buf = { path = "../gcm-buf" }
 tsra_fw_hsm_byte_order = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
+
+[dev-dependencies]
+async-channel.workspace = true
+hex.workspace = true
+hpke = { features = [
+  "aes",
+  "alloc",
+  "getrandom",
+  "mlkem",
+  "nistp",
+  "shake",
+], workspace = true }
+tokio = { features = ["macros", "rt"], workspace = true }
+tsra_fw_hsm_pal_std_uno.workspace = true

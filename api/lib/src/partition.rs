@@ -865,6 +865,15 @@ impl HsmPartition {
         ddi::get_cert_chain(self, slot)
     }
 
+    /// Retrieve the ML-DSA-87 manufacturer certificate bank as leaf-to-root PEM.
+    ///
+    /// Requires a TBOR-capable revision. Retrieving this chain does not establish
+    /// trust: independently provision its root SPKI SHA-384 pin before using
+    /// [`HsmSessionSuite::MlKem1024MlDsa87`].
+    pub fn cert_chain_mldsa(&self, slot: u8) -> HsmResult<String> {
+        ddi::get_cert_chain_mldsa(self, slot)
+    }
+
     /// Queries whether the partition's security domain is initialized.
     ///
     /// Performs an out-of-session device query on every call. Returns

@@ -11,9 +11,10 @@ use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EccPublicKey;
+use tsra_crypto::HpkeKeyPair;
 use tsra_crypto::HpkeOpenConfig;
+use tsra_crypto::HpkePrivateKey;
 use tsra_crypto::HpkeSealConfig;
-use tsra_crypto::HpkeSuite;
 use tsra_crypto::ImportableKey;
 use tsra_sealing_api::mint_sealing_key;
 use tsra_sealing_api::spki_thumbprint;
@@ -26,16 +27,20 @@ use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_api::SecurityDomainStore;
+use tsra_sealing_api::TransferKem;
 use tsra_sealing_api::RAW_PUB_LEN;
 use tsra_sealing_common::evidence;
-use tsra_sealing_report::parse_ec2_cose_key_bytes;
+use tsra_sealing_common::pki::GeneratedChain;
+use tsra_sealing_report::attested_recipient;
 use tsra_sealing_report::parse_key_report_bytes;
 use tsra_sealing_report::parse_sd_transfer_report;
 use tsra_sealing_report::sd_header;
+use tsra_sealing_report::sign_software_key_report;
 use tsra_sealing_report::sign_software_sd_transfer;
+use tsra_sealing_report::validate_sd_envelope;
 use tsra_sealing_report::verify_certificate_chain;
+use tsra_sealing_report::verify_key_report_bytes;
 use tsra_sealing_report::verify_sd_transfer_report;
-use tsra_sealing_report::Curve;
 use tsra_sealing_report::SD_HEADER_LEN;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
@@ -43,28 +48,131 @@ use zeroize::Zeroizing;
 
 use crate::env::SelfContainedEnv;
 
+/// External software HPKE receiver certified under SATA. Its P-384 leaf key
+/// is the P-384 KEM key, or signs a key report delegating to a post-quantum
+/// key pair. The leaf also signs the authority's software operation reports.
+pub(crate) struct SoftwareReceiver {
+    leaf: EccPrivateKey,
+    leaf_raw: [u8; RAW_PUB_LEN],
+    pq: Option<HpkeKeyPair>,
+    /// Transfer recipient key: raw P-384 `X || Y` or the PQ public key.
+    pub recipient: Vec<u8>,
+    pub chain: GeneratedChain,
+    pub key_report: Option<Vec<u8>>,
+}
+
+impl SoftwareReceiver {
+    pub fn generate(env: &SelfContainedEnv, kem: TransferKem) -> Result<Self> {
+        let leaf = EccPrivateKey::from_curve(EccCurve::P384)?;
+        let leaf_raw = raw_public(&leaf)?;
+        let pq = (kem != TransferKem::P384)
+            .then(|| kem.suite().generate_keypair())
+            .transpose()?;
+        let recipient = match &pq {
+            Some(pair) => pair.public_key().to_vec()?,
+            None => leaf_raw.to_vec(),
+        };
+        let (chain, key_report) = endorse(env, &leaf, &recipient)?;
+        Ok(Self {
+            leaf,
+            leaf_raw,
+            pq,
+            recipient,
+            chain,
+            key_report,
+        })
+    }
+
+    pub fn chain_der(&self) -> Vec<Vec<u8>> {
+        vec![self.chain.root_der.clone(), self.chain.leaf_der.clone()]
+    }
+
+    /// HPKE-open a signed backup after the caller authenticates its source.
+    pub fn open(&self, signed_backup: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let envelope = parse_sd_transfer_report(signed_backup)?.envelope;
+        let kem = validate_sd_envelope(envelope)?;
+        anyhow::ensure!(
+            kem == TransferKem::from_recipient(&self.recipient)?,
+            "SD envelope is not addressed to this receiver's KEM"
+        );
+        let header = &envelope[..SD_HEADER_LEN];
+        let (enc, ct) = envelope[SD_HEADER_LEN..].split_at(kem.enc_len());
+        let mut plaintext = Zeroizing::new(vec![0u8; ct.len()]);
+        let length = TransferKem::with_hpke_public(&self.recipient, |_, public| {
+            let private = match &self.pq {
+                Some(pair) => pair.private_key(),
+                None => HpkePrivateKey::Ecc(&self.leaf),
+            };
+            let open = HpkeOpenConfig::base(kem.suite(), private, public, header, &[]);
+            Ok(hpke::open(&open, enc, ct, Some(&mut plaintext[..]))?)
+        })?;
+        anyhow::ensure!(length == 48, "SD envelope did not contain a 48-byte BKS3");
+        plaintext.truncate(length);
+        Ok(plaintext)
+    }
+}
+
+fn raw_public(key: &EccPrivateKey) -> Result<[u8; RAW_PUB_LEN]> {
+    let (x, y) = key.coord_vec()?;
+    [x, y]
+        .concat()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid P-384 public coordinates"))
+}
+
+/// Certify `leaf` under SATA. A P-384 `recipient` must be the leaf key
+/// itself; any other recipient gets a leaf-signed key report.
+fn endorse(
+    env: &SelfContainedEnv,
+    leaf: &EccPrivateKey,
+    recipient: &[u8],
+) -> Result<(GeneratedChain, Option<Vec<u8>>)> {
+    let leaf_raw = raw_public(leaf)?;
+    let chain = env.receiver_chain(&leaf_raw)?;
+    if TransferKem::from_recipient(recipient)? == TransferKem::P384 {
+        anyhow::ensure!(
+            recipient == leaf_raw,
+            "P-384 recipient must be the leaf key"
+        );
+        return Ok((chain, None));
+    }
+    Ok((chain, Some(sign_software_key_report(leaf, recipient)?)))
+}
+
+/// Certify an HSM receiver under SATA: directly for P-384, otherwise through
+/// a fresh demo leaf that signs a key report attesting it.
+fn endorse_hsm_receiver(
+    env: &SelfContainedEnv,
+    recipient: &[u8],
+) -> Result<(GeneratedChain, Vec<u8>)> {
+    if TransferKem::from_recipient(recipient)? == TransferKem::P384 {
+        let raw = recipient
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid HSM receiver coordinates"))?;
+        return Ok((env.receiver_chain(&raw)?, Vec::new()));
+    }
+    let leaf = EccPrivateKey::from_curve(EccCurve::P384)?;
+    let (chain, report) = endorse(env, &leaf, recipient)?;
+    Ok((chain, report.context("missing receiver key report")?))
+}
+
 /// Prepare a restore-ready backup through an external software SA.
 ///
 /// The SA private key is needed only while opening/resealing here. The saved
 /// package is already addressed to the HSM, so that key need not be exported.
+/// Both the SA and the HSM receiver use `kem`.
 pub fn create(
     domain: &SecurityDomain<SelfContainedEnv>,
     session: &SealingSession,
     seed: &[u8],
+    kem: TransferKem,
 ) -> Result<RemoteRecovery> {
     let env = domain.env();
     anyhow::ensure!(
         !env.policy().flags.require_trusted_sa_key(),
         "software SA cannot satisfy trusted-SA attestation"
     );
-    let sa_key = EccPrivateKey::from_curve(EccCurve::P384)?;
-    let (x, y) = sa_key.coord_vec()?;
-    let sa_public = EccPublicKey::from_coordinates(EccCurve::P384, &x, &y)?;
-    let raw: [u8; RAW_PUB_LEN] = [x, y]
-        .concat()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid SA public coordinates"))?;
-    let chain = env.receiver_chain(&raw)?;
+    let sa = SoftwareReceiver::generate(env, kem)?;
     let no_attestation = Evidence {
         mfgr_cert_chain: Vec::new(),
         owner_cert_chain: Vec::new(),
@@ -74,7 +182,8 @@ pub fn create(
     let created = domain.create(
         session,
         seed,
-        &chain.certs(),
+        &sa.chain.certs(),
+        sa.key_report.as_deref(),
         &no_attestation,
         |csr, report| env.sign_pta(csr, report),
     )?;
@@ -83,7 +192,7 @@ pub fn create(
         env.policy(),
         &env.policy().pota_spki_thumbprint,
         &created.pok_remote_backup,
-        Some(&raw),
+        Some(&sa.recipient),
     )?;
     anyhow::ensure!(
         spki_thumbprint(&source_pid)?
@@ -94,7 +203,7 @@ pub fn create(
                 .1,
         "creation source PID mismatch"
     );
-    let receiver = mint_sealing_key(&session.session)
+    let receiver = mint_sealing_key(&session.session, kem)
         .context("local recovery saved, but HSM remote receiver generation failed")?;
     let receiver_evidence = Evidence {
         mfgr_cert_chain: created.evidence.mfgr_cert_chain.clone(),
@@ -103,31 +212,22 @@ pub fn create(
         report: receiver.report.clone(),
     };
     evidence::verify_peer(&receiver_evidence, env.policy())?;
-    let receiver_public = reported_public_key(&receiver.report)?;
-    let (x, y) = receiver_public.coord_vec()?;
-    let receiver_raw: [u8; RAW_PUB_LEN] = [x, y]
-        .concat()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid HSM receiver coordinates"))?;
-    let receiver_chain = env.receiver_chain(&receiver_raw)?;
-    let header = sd_header(&raw, &receiver_raw, env.policy().as_bytes())?;
+    let receiver_recipient = attested_recipient(&parse_key_report_bytes(&receiver.report)?)?;
+    let (receiver_chain, receiver_key_report) = endorse_hsm_receiver(env, &receiver_recipient)?;
+    let header = sd_header(&sa.leaf_raw, &receiver_recipient, env.policy().as_bytes())?;
 
-    let remote_backup = reseal(
-        &created.pok_remote_backup,
-        &sa_key,
-        &sa_public,
-        &receiver_public,
-        &header,
-    )
-    .context("local recovery saved, but external-SA HPKE open/reseal failed")?;
+    let remote_backup = sa
+        .open(&created.pok_remote_backup)
+        .and_then(|bks3| seal(&header, &receiver_recipient, &bks3))
+        .context("local recovery saved, but external-SA HPKE open/reseal failed")?;
     let state = env
         .store()
         .load_security_domain()?
         .context("saved local SD recovery state is missing after creation")?;
     let signed_backup = sign_software_sd_transfer(
-        &sa_key,
-        &raw,
-        &receiver_raw,
+        &sa.leaf,
+        &sa.leaf_raw,
+        &receiver_recipient,
         env.policy().as_bytes(),
         &remote_backup,
     )?;
@@ -138,54 +238,23 @@ pub fn create(
         },
         masked_receiver_key: receiver.masked,
         sd_mk_backup: state.sd_mk_backup,
-        sender_pid_pub_key: tsra_sealing_report::p384_spki_from_raw(&raw)?,
+        sender_pid_pub_key: tsra_sealing_report::p384_spki_from_raw(&sa.leaf_raw)?,
         receiver_cert_chain: vec![receiver_chain.root_der, receiver_chain.leaf_der],
+        receiver_key_report,
     };
     validate(&remote, env.policy())?;
     Ok(remote)
 }
 
-fn reported_public_key(bytes: &[u8]) -> Result<EccPublicKey> {
-    let report = parse_key_report_bytes(bytes)?;
-    let public = parse_ec2_cose_key_bytes(
-        report
-            .public_key
-            .get(..usize::from(report.public_key_size))
-            .context("invalid sealing public key length")?,
-    )?;
-    anyhow::ensure!(public.curve == Curve::P384, "remote HPKE key must be P-384");
-    Ok(EccPublicKey::from_coordinates(
-        EccCurve::P384,
-        public.x,
-        public.y,
-    )?)
-}
-
-fn reseal(
-    original: &[u8],
-    sa_private: &EccPrivateKey,
-    sa_public: &EccPublicKey,
-    receiver: &EccPublicKey,
-    header: &[u8],
-) -> Result<Vec<u8>> {
-    let original = parse_sd_transfer_report(original)?.envelope;
-    let enc =
-        EccPublicKey::from_coordinates(EccCurve::P384, &original[162..210], &original[210..258])?;
-    let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
-    let open = HpkeOpenConfig::base(
-        suite,
-        sa_private,
-        sa_public,
-        &original[..SD_HEADER_LEN],
-        &[],
-    );
-    let mut plaintext = Zeroizing::new([0u8; 64]);
-    let length = hpke::open(&open, &enc, &original[258..], Some(&mut plaintext[..]))?;
-    anyhow::ensure!(length == 48, "remote backup did not contain a 48-byte BKS3");
-    let seal = HpkeSealConfig::base(suite, receiver, header, &[]);
-    let sealed = hpke::seal_vec(&seal, &plaintext[..length])?;
-    let (x, y) = sealed.enc.coord_vec()?;
-    Ok([header, &[4], &x, &y, &sealed.ct].concat())
+/// HPKE Base seal using `header` as info and empty AEAD AAD.
+fn seal(header: &[u8], recipient: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    TransferKem::with_hpke_public(recipient, |kem, public| {
+        let sealed = hpke::seal_vec(
+            &HpkeSealConfig::base(kem.suite(), public, header, &[]),
+            plaintext,
+        )?;
+        Ok([header, &sealed.enc, &sealed.ct].concat())
+    })
 }
 
 pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
@@ -193,8 +262,9 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
     let signer = tsra_sealing_report::p384_raw_from_spki(&remote.sender_pid_pub_key)?;
     let envelope = aead_envelope::inspect(&remote.masked_receiver_key)
         .context("decode remote receiver envelope")?;
+    let kem = TransferKem::from_masked_key_len(remote.masked_receiver_key.len())?;
     anyhow::ensure!(
-        envelope.aad.len() == 192 && envelope.payload.len() == 48,
+        envelope.aad.len() == 192 && envelope.payload.len() == kem.seed_len(),
         "invalid remote receiver envelope shape"
     );
     let external = remote.backup.evidence.mfgr_cert_chain.is_empty();
@@ -205,12 +275,18 @@ pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
         );
         validate_hpke_chain(&remote.receiver_cert_chain, policy)
             .context("verify HSM receiver HPKE chain")?;
-        let recipient = public_key(
-            remote
-                .receiver_cert_chain
-                .last()
-                .context("missing receiver certificate")?,
-        )?;
+        let leaf = remote
+            .receiver_cert_chain
+            .last()
+            .context("missing receiver certificate")?;
+        let recipient = if remote.receiver_key_report.is_empty() {
+            public_key(leaf)?
+        } else {
+            attested_recipient(
+                &verify_key_report_bytes(&remote.receiver_key_report, leaf)
+                    .context("verify receiver key report against the SATA leaf")?,
+            )?
+        };
         verify_sd_transfer_report(
             &remote.backup.pok_remote_backup,
             &signer,

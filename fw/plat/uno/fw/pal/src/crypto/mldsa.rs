@@ -10,8 +10,15 @@
 //! Signing and verification take the message itself or an external `μ`;
 //! the pre-hash message types are not supported on Uno and are refused with
 //! [`HsmError::UnsupportedCmd`].
-//! Verification passes a pure message to the FP core by its IO DMA address,
+//! A pure message in the IO DMA heap is passed to the FP core by address,
 //! so it is neither copied nor limited to the mailbox message size.
+//!
+//! Keys may be given in seed form: the FP core derives the expanded secret
+//! key or public key from the seed itself, and wipes what it derived before
+//! answering.
+//!
+//! Key and seed generation run the sign/verify pairwise consistency test
+//! when asked; a key pair that fails it enters the FIPS error state.
 //!
 //! Signing is hedged, with randomness from the TRNG, unless the caller
 //! requires deterministic signing, which uses FIPS 204's all-zero `rnd` and
@@ -29,6 +36,7 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
 use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
 use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
@@ -92,9 +100,66 @@ fn hedged(hedge: HsmMlDsaHedge) -> bool {
 /// parameter set — which is why `param_set` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
 
+/// Message the ML-DSA sign/verify pairwise consistency test signs.
+const MLDSA_PCT_MSG: [u8; 32] = [0x64; 32];
+
+impl UnoHsmPal {
+    /// Run the pairwise consistency test `pct` selects on a key pair this
+    /// PAL just generated: a deterministic signature that must verify.
+    ///
+    /// A key pair that fails it enters the FIPS error state. An operation
+    /// that fails returns its error, and the caller discards the key.
+    async fn mldsa_pct(
+        &self,
+        io: &UnoHsmIo,
+        param_set: HsmMlDsaParamSet,
+        pct: HsmMlDsaPct,
+        pk: HsmMlDsaPubKey<'_>,
+        sk: HsmMlDsaPrivKey<'_>,
+    ) -> HsmResult<()> {
+        if pct == HsmMlDsaPct::None {
+            return Ok(());
+        }
+        // Scratch released on return, for the operation that follows.
+        let mark = self.dma_mark(io.index());
+        // Polled through a trait object so the test is emitted once rather
+        // than inlined into every key-generation path (Uno ITCM budget).
+        let verified: core::pin::Pin<&mut dyn core::future::Future<Output = HsmResult<bool>>> =
+            core::pin::pin!(async {
+                let kind = mldsa_kind(param_set);
+                let msg = self.dma_alloc(io, MLDSA_PCT_MSG.len())?;
+                msg.copy_from_slice(&MLDSA_PCT_MSG);
+                let sig = self.dma_alloc(io, param_set.sig_len())?;
+                self.pqc
+                    .mldsa_sign(
+                        kind,
+                        sk,
+                        &[0u8; MLDSA_SEED_LEN],
+                        HsmMlDsaMsgType::Pure,
+                        msg,
+                        &[],
+                        sig,
+                    )
+                    .await?;
+                self.pqc
+                    .mldsa_verify(kind, pk, HsmMlDsaMsgType::Pure, msg, &[], sig)
+                    .await
+            });
+        let verified = verified.await;
+        self.dma_restore(io.index(), mark);
+        if !verified? {
+            tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationMlDsaGenKeyFailed);
+        }
+        Ok(())
+    }
+}
+
 // With `bulk_crypto` each method returns before reaching the PQC driver; see
 // the module docs.
-#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
+#[cfg_attr(
+    feature = "bulk_crypto",
+    allow(unreachable_code, unused_assignments, unused_variables)
+)]
 impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_gen_keypair(
         &self,
@@ -178,15 +243,34 @@ impl HsmMlDsa for UnoHsmPal {
         outcome
     }
 
-    /// Not supported: Uno always derives the key pair with the seed.
     async fn mldsa_gen_seed(
         &self,
-        _io: &UnoHsmIo,
-        _param_set: HsmMlDsaParamSet,
-        _pct: HsmMlDsaPct,
-        _seed: Option<&mut HsmDmaBuf>,
+        io: &UnoHsmIo,
+        param_set: HsmMlDsaParamSet,
+        pct: HsmMlDsaPct,
+        seed: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        Err(HsmError::UnsupportedCmd)
+        #[cfg(feature = "bulk_crypto")]
+        return Err(HsmError::UnsupportedCmd);
+        let Some(seed) = seed else {
+            return Ok(MLDSA_SEED_LEN);
+        };
+        if seed.len() < MLDSA_SEED_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let seed = &mut seed[..MLDSA_SEED_LEN];
+        // Drawn here: the seed is the private key, and an FP core has no
+        // entropy source. The test then runs on FP from the seed.
+        self.rng_fill_bytes(io, seed)?;
+        self.mldsa_pct(
+            io,
+            param_set,
+            pct,
+            HsmMlDsaPubKey::Seed(seed),
+            HsmMlDsaPrivKey::Seed(seed),
+        )
+        .await?;
+        Ok(MLDSA_SEED_LEN)
     }
 
     async fn mldsa_sign(
@@ -202,13 +286,13 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<usize> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            // The FP engine signs only with an expanded key.
-            let HsmMlDsaPrivKey::Expanded(sk) = sk else {
-                return Err(HsmError::UnsupportedCmd);
-            };
             check_msg(&msg)?;
             let sig_len = param_set.sig_len();
-            if sk.len() != param_set.sk_len() {
+            let key_ok = match sk {
+                HsmMlDsaPrivKey::Seed(seed) => seed.len() == MLDSA_SEED_LEN,
+                HsmMlDsaPrivKey::Expanded(sk) => sk.len() == param_set.sk_len(),
+            };
+            if !key_ok {
                 return Err(HsmError::InvalidArg);
             }
             let Some(sig) = sig else {
@@ -263,10 +347,6 @@ impl HsmMlDsa for UnoHsmPal {
         let result = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            // The FP engine signs only with an expanded key.
-            let HsmMlDsaPrivKeyMut::Expanded(sk_sig) = sk_sig else {
-                return Err(HsmError::UnsupportedCmd);
-            };
             check_msg(&msg)?;
             if hedged(hedge) {
                 self.rng_fill_bytes(io, &mut rnd)?;
@@ -305,10 +385,7 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<bool> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            // The FP engine verifies only with an encoded public key.
-            let HsmMlDsaPubKey::Encoded(pk) = pk else {
-                return Err(HsmError::UnsupportedCmd);
-            };
+            check_msg(&msg)?;
             self.pqc
                 .mldsa_verify(
                     mldsa_kind(param_set),

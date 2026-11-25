@@ -267,7 +267,7 @@ TEST_F(tsra_sess_ex, open_invalid_psk_id)
     });
 }
 
-TEST_F(tsra_sess_ex, open_removed_suite_rejected)
+TEST_F(tsra_sess_ex, open_unknown_suite_rejected)
 {
     if (!api_rev_at_least(1, 1))
     {
@@ -289,12 +289,66 @@ TEST_F(tsra_sess_ex, open_removed_suite_rejected)
                 part_handle,
                 &root.buffer,
                 &psk,
-                static_cast<tsra_session_suite>(0x02),
+                static_cast<tsra_session_suite>(0x03),
                 &session
             ),
             TSRA_STATUS_INVALID_ARGUMENT
         );
         ASSERT_EQ(session, 0);
+    });
+}
+
+TEST_F(tsra_sess_ex, open_mlkem1024_and_rotate_both_roles)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        constexpr auto suite = TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87;
+        TestRootPin root(part_handle, suite);
+        for (uint8_t role : { uint8_t{ 0 }, uint8_t{ 1 } })
+        {
+            tsra_session_psk credential{ role, nullptr };
+            tsra_handle session = 0;
+            root.hash[0] ^= 1;
+            ASSERT_EQ(
+                tsra_sess_ex_open(part_handle, &root.buffer, &credential, suite, &session),
+                TSRA_STATUS_INVALID_SIGNATURE
+            );
+            ASSERT_EQ(session, 0);
+            root.hash[0] ^= 1;
+            std::vector<uint8_t> psk(TSRA_PSK_LEN, 0xb5);
+            tsra_buffer psk_buffer{ psk.data(), static_cast<uint32_t>(psk.size()) };
+            {
+                ASSERT_EQ(
+                    tsra_sess_ex_open(part_handle, &root.buffer, &credential, suite, &session),
+                    TSRA_STATUS_SUCCESS
+                );
+                ASSERT_NE(session, 0);
+                auto session_guard = scope_guard::make_scope_exit([&session] {
+                    EXPECT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+                });
+                ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_SUCCESS);
+            }
+            credential.psk = &psk_buffer;
+            ASSERT_EQ(
+                tsra_sess_ex_open(part_handle, &root.buffer, &credential, suite, &session),
+                TSRA_STATUS_SUCCESS
+            );
+            ASSERT_NE(session, 0);
+            ASSERT_EQ(tsra_part_reset(part_handle), TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, nullptr), TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(tsra_sess_ex_psk_change(session, &psk_buffer), TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(tsra_sess_close(session), TSRA_STATUS_SUCCESS);
+        }
     });
 }
 
@@ -552,8 +606,8 @@ TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
         // `PartInitInputs` carries a deliberately oversized (385-byte)
         // policy; `PART_POLICY_MAX_LEN` is 384.
         PartInitInputs in;
-        std::vector<uint8_t> csr(512, 0);
-        std::vector<uint8_t> report(1024, 0);
+        std::vector<uint8_t> csr(8192, 0);
+        std::vector<uint8_t> report(8192, 0);
         tsra_buffer pta_csr{ csr.data(), static_cast<uint32_t>(csr.size()) };
         tsra_buffer pta_report{ report.data(), static_cast<uint32_t>(report.size()) };
 
@@ -961,7 +1015,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
             &policy_buf, &key_buf, &identity, &remote_backup, &mk_backup,
         };
 
-        std::vector<uint8_t> remote(kPokRemoteBackupLen, 0);
+        std::vector<uint8_t> remote(kPokRemoteBackupMaxLen, 0);
         std::vector<uint8_t> local(kPokLocalBackupLen, 0);
         std::vector<uint8_t> mk(kSdMkBackupLen, 0);
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };
@@ -1150,11 +1204,11 @@ TEST(tsra_part_policy_builder, build_round_trips_via_size_probe)
     tsra_buffer probe{ nullptr, 0 };
     ASSERT_EQ(tsra_part_policy_build(b, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
 
-    std::vector<uint8_t> expected{ 0xA4, 0x01, 0x01, 0x02, 0x58, 0x30 };
+    std::vector<uint8_t> expected{ 0xA5, 0x01, 0x02, 0x02, 0x58, 0x30 };
     expected.insert(expected.end(), 48, 0x11);
     expected.insert(expected.end(), { 0x03, 0x58, 0x30 });
     expected.insert(expected.end(), 48, 0x22);
-    expected.insert(expected.end(), { 0x07, 0x00 });
+    expected.insert(expected.end(), { 0x07, 0x00, 0x0A, 0x38, 0x22 });
     ASSERT_EQ(probe.len, expected.size());
 
     std::vector<uint8_t> image(probe.len, 0);

@@ -6,7 +6,7 @@
 //! `SdCreatePeerBackup` recovers BKS3 from the caller's device-local
 //! backup (`pok_local_backup`) and HPKE Base-seals it to a destination
 //! peer named by `dst_evidence`, returning a PID-signed operation report and
-//! peer backup (`pok_peer_backup`, a 322-byte
+//! peer backup (a 431-byte signed
 //! HPKE seal).  It is **stateless** and gated by the security domain's
 //! `allow_peer_cloning` policy flag.
 //!
@@ -16,7 +16,7 @@
 //! attested public key.
 //!
 //! Coverage:
-//! * Round-trip — non-zero 322-byte `pok_peer_backup`.
+//! * Round-trip — non-zero 431-byte signed artifact in OOB output index 0.
 //! * Policy without `allow_peer_cloning` → `SdPeerCloningNotAllowed`.
 //! * Not finalized → `InvalidArg`.
 
@@ -44,6 +44,7 @@ use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 use crate::commands::sd_create_remote_backup::ReceiverEvidence;
+use crate::commands::sd_create_remote_backup::SdOob;
 
 /// A finalized backing partition ready for the peer-backup commands: the
 /// live CO session, its exact policy image, its PID public key (every
@@ -135,7 +136,7 @@ fn sd_create_peer_backup_roundtrip() {
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
-        .tbor_oob(
+        .sd_oob(
             &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
@@ -148,12 +149,12 @@ fn sd_create_peer_backup_roundtrip() {
         &created.pok_local_backup,
     );
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdCreatePeerBackup roundtrip");
 
-    assert_eq!(resp.pok_peer_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        resp.pok_peer_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "pok_peer_backup must not be all-zero",
     );
 }
@@ -171,7 +172,7 @@ fn sd_create_peer_backup_rejects_sata_anchored_evidence() {
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
-        .tbor_oob(
+        .sd_oob(
             &backup_request(session_id, &genuine, &part.policy),
             &genuine.oob(),
         )
@@ -184,7 +185,7 @@ fn sd_create_peer_backup_rejects_sata_anchored_evidence() {
         &part.policy,
         &created.pok_local_backup,
     );
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
@@ -209,7 +210,7 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
     let genuine = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let created = ctx
-        .tbor_oob(&backup_request(sid, &genuine, &part.policy), &genuine.oob())
+        .sd_oob(&backup_request(sid, &genuine, &part.policy), &genuine.oob())
         .expect("create a genuine local backup");
 
     let cu_ctx = TestCtx::new_with_path(ctx.path());
@@ -230,23 +231,18 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     request.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &request)
         .expect("authenticate CU attestation");
     let report = cu_ctx
-        .tbor(&request)
+        .key_report(&request)
         .expect("ordinary imported key remains attestable");
-    let decoded = verify_key_report(
-        &ctx,
-        &report.report,
-        &imported.pub_key,
-        &request.report_data,
-    );
+    let decoded = verify_key_report(&ctx, &report, &imported.pub_key, &request.report_data);
     assert_eq!(decoded.flags & (1 << 10), 0);
 
     let mut imported_pub = [0u8; RAW_PUB_LEN];
     imported_pub.copy_from_slice(&imported.pub_key);
     dev_rev_in_place(&mut imported_pub[..48]);
     dev_rev_in_place(&mut imported_pub[48..]);
-    let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
+    let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report);
     let req = create_peer_req(sid, &evidence, &part.policy, &created.pok_local_backup);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
     cu_ctx.session_close(cu.session_id).expect("close CU");
     ctx.session_close(sid).expect("close CO");
 }
@@ -267,7 +263,7 @@ fn sd_create_peer_backup_rejects_without_peer_cloning() {
     let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session_id);
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
     let req = create_peer_req(session_id, &evidence, &part.policy, &[0u8; MASKED_SD_LEN]);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::SdPeerCloningNotAllowed);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::SdPeerCloningNotAllowed);
 }
 
 #[test]
@@ -302,7 +298,7 @@ fn valid_peer_backup_fixture() -> (TestCtx, TborSdCreatePeerBackupReq, ReceiverE
     let evidence = build_evidence(&part.pid_pub, &rcvr_pub, &sata, &pota, &report);
 
     let created = ctx
-        .tbor_oob(
+        .sd_oob(
             &backup_request(session_id, &evidence, &part.policy),
             &evidence.oob(),
         )
@@ -330,7 +326,7 @@ fn sd_create_peer_backup_rejects_invalid_session_id() {
     };
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject an invalid session ID",
     );
 }
@@ -343,7 +339,7 @@ fn sd_create_peer_backup_rejects_corrupted_local_backup() {
     req.pok_local_backup[0] ^= 0x01;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject a corrupted local backup",
     );
 }
@@ -356,7 +352,7 @@ fn sd_create_peer_backup_rejects_zero_local_backup() {
     req.pok_local_backup = [0u8; MASKED_SD_LEN];
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject an all-zero local backup",
     );
 }
@@ -378,7 +374,7 @@ fn sd_create_peer_backup_rejects_modified_policy() {
     req.policy[info_pos - 1] &= !PolicyFlags::ALLOW_PEER_CLONING;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject a modified policy",
     );
 }
@@ -391,7 +387,7 @@ fn sd_create_peer_backup_rejects_empty_destination_report() {
     req.dst_report.length = Default::default();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject an empty destination report",
     );
 }
@@ -404,7 +400,7 @@ fn sd_create_peer_backup_rejects_empty_mfgr_cert_chain() {
     req.dst_mfgr_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject missing manufacturer certificates",
     );
 }
@@ -418,7 +414,7 @@ fn sd_create_peer_backup_rejects_empty_owner_cert_chain() {
     req.dst_owner_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject missing owner certificates",
     );
 }*/
@@ -431,7 +427,7 @@ fn sd_create_peer_backup_rejects_empty_part_owner_cert_chain() {
     req.dst_part_owner_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject missing partition-owner certificates",
     );
 }
@@ -444,7 +440,7 @@ fn sd_create_peer_backup_rejects_invalid_destination_report() {
     req.dst_report = Default::default();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject invalid destination attestation",
     );
 }
@@ -456,17 +452,17 @@ fn sd_create_peer_backup_allows_repeated_calls() {
 
     for attempt in 0..3 {
         let resp = ctx
-            .tbor_oob(&req, &evidence.oob())
+            .sd_oob(&req, &evidence.oob())
             .expect("repeated SdCreatePeerBackup");
 
         assert_eq!(
-            resp.pok_peer_backup.len(),
+            resp.report.len(),
             POK_REMOTE_BACKUP_LEN,
             "unexpected backup length on attempt {attempt}",
         );
 
         assert!(
-            resp.pok_peer_backup.iter().any(|&b| b != 0),
+            resp.report.iter().any(|&b| b != 0),
             "empty backup on attempt {attempt}",
         );
     }
@@ -480,7 +476,7 @@ fn sd_create_peer_backup_rejects_corrupted_local_backup_tail() {
     req.pok_local_backup[MASKED_SD_LEN - 1] ^= 0x01;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject corrupted backup tail",
     );
 }
@@ -496,7 +492,7 @@ fn sd_create_peer_backup_rejects_local_backup_corruption_at_offsets() {
         req.pok_local_backup[offset] ^= 0x01;
 
         assert!(
-            ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+            ctx.sd_oob(&req, &evidence.oob()).is_err(),
             "SdCreatePeerBackup accepted corrupted backup at offset {offset}",
         );
     }
@@ -510,7 +506,7 @@ fn sd_create_peer_backup_rejects_corrupted_destination_report_header() {
     req.dst_report.length = tsra_ddi_tbor_types::tbor_int::U16::new(1);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject a truncated destination report",
     );
 }
@@ -523,7 +519,7 @@ fn sd_create_peer_backup_rejects_oversized_destination_report() {
     req.dst_report.length = tsra_ddi_tbor_types::tbor_int::U16::new(u16::MAX);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject an oversized destination report",
     );
 }
@@ -538,7 +534,7 @@ fn sd_create_peer_backup_rejects_all_empty_cert_chains() {
     req.dst_part_owner_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject missing certificate chains",
     );
 }
@@ -552,18 +548,18 @@ fn sd_create_peer_backup_valid_after_rejected_request() {
     invalid_req.pok_local_backup = [0u8; MASKED_SD_LEN];
 
     assert!(
-        ctx.tbor_oob(&invalid_req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&invalid_req, &evidence.oob()).is_err(),
         "Invalid peer-backup request must be rejected",
     );
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("Valid peer backup must succeed after rejected request");
 
-    assert_eq!(resp.pok_peer_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
 
     assert!(
-        resp.pok_peer_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "Valid peer backup must not be all-zero",
     );
 }
@@ -577,7 +573,7 @@ fn sd_create_peer_backup_rejects_repeated_invalid_backups() {
         req.pok_local_backup = [0u8; MASKED_SD_LEN];
 
         assert!(
-            ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+            ctx.sd_oob(&req, &evidence.oob()).is_err(),
             "Invalid backup accepted on attempt {attempt}",
         );
     }
@@ -597,17 +593,17 @@ fn sd_create_peer_backup_valid_after_invalid_session_id() {
     };
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "Invalid session ID must be rejected",
     );
 
     req.session_id = valid_session_id;
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("Valid session must remain usable");
 
-    assert_eq!(resp.pok_peer_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
 }
 
 /// Preserve a valid session after several different malformed requests.
@@ -621,7 +617,7 @@ fn sd_create_peer_backup_recovers_after_multiple_failures() {
     req.pok_local_backup = [0u8; MASKED_SD_LEN];
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "Zero local backup must be rejected",
     );
 
@@ -629,20 +625,20 @@ fn sd_create_peer_backup_recovers_after_multiple_failures() {
     req.dst_report.length = Default::default();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "Empty destination report must be rejected",
     );
 
     req.dst_report = original_report;
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("Valid request must succeed after failures");
 
-    assert_eq!(resp.pok_peer_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
 
     assert!(
-        resp.pok_peer_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "Valid peer backup must not be all-zero",
     );
 }
@@ -654,17 +650,17 @@ fn sd_create_peer_backup_remains_usable_after_successes() {
 
     for attempt in 0..5 {
         let resp = ctx
-            .tbor_oob(&req, &evidence.oob())
+            .sd_oob(&req, &evidence.oob())
             .expect("Repeated peer backup must succeed");
 
         assert_eq!(
-            resp.pok_peer_backup.len(),
+            resp.report.len(),
             POK_REMOTE_BACKUP_LEN,
             "Unexpected backup length on attempt {attempt}",
         );
 
         assert!(
-            resp.pok_peer_backup.iter().any(|&b| b != 0),
+            resp.report.iter().any(|&b| b != 0),
             "All-zero backup on attempt {attempt}",
         );
     }
@@ -684,7 +680,7 @@ fn sd_create_peer_backup_rejects_max_session_id() {
     };
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "SdCreatePeerBackup must reject an inactive session ID",
     );
 }
@@ -698,15 +694,15 @@ fn sd_create_peer_backup_zero_session_id_boundary() {
 
     if active_session_id == 0 {
         let resp = ctx
-            .tbor_oob(&req, &evidence.oob())
+            .sd_oob(&req, &evidence.oob())
             .expect("Active session ID zero must be accepted");
 
-        assert_eq!(resp.pok_peer_backup.len(), POK_REMOTE_BACKUP_LEN);
+        assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
     } else {
         req.session_id = 0;
 
         assert!(
-            ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+            ctx.sd_oob(&req, &evidence.oob()).is_err(),
             "Inactive session ID zero must be rejected",
         );
     }

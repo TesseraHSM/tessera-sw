@@ -35,6 +35,7 @@ use tsra_crypto::ExportableKey;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
@@ -48,9 +49,12 @@ use tsra_ddi_tbor_test_harness::CU_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
+use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_BANK_ECC;
+use tsra_ddi_tbor_types::CERT_BANK_MLDSA;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
@@ -65,6 +69,9 @@ use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::ENVELOPE_AAD_LEN;
@@ -101,9 +108,9 @@ fn rebound_caller_report(role: u8) {
     request.auth_envelope =
         seal_key_report_auth(&caller.param_key, &request).expect("authenticate report");
     let response = ctx
-        .tbor(&request)
+        .key_report(&request)
         .expect("same-session report after rotation");
-    let decoded = verify_key_report(&ctx, &response.report, &public_key, &request.report_data);
+    let decoded = verify_key_report(&ctx, &response, &public_key, &request.report_data);
     assert_eq!(&decoded.app_uuid[..], &new_psk[..16]);
     ctx.session_close(caller.session_id).expect("close caller");
 }
@@ -139,7 +146,7 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: imported.masked_key,
@@ -154,7 +161,7 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
     let spki = leaf.get_public_key_der().expect("extract PID public key");
 
     // Verify the PID signature and decode the signed attestation payload.
-    let decoded = verify_cose_sign1(&report.report, &spki);
+    let decoded = verify_cose_sign1(&report, &spki);
 
     assert_eq!(decoded.version, 2);
     assert_eq!(&decoded.report_data[..], &report_data[..]);
@@ -226,15 +233,36 @@ fn sample_report_data() -> [u8; KEY_REPORT_DATA_LEN] {
 /// returning `(masked_key, sealing_pub_le)`.  The public key is in the
 /// little-endian DDI wire form (`x_le ‖ y_le`).
 fn masked_sealing_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Vec<u8>) {
+    masked_kem_sealing_key(ctx, session_id, scope, TRANSFER_KEM_P384)
+}
+
+/// [`masked_sealing_key`] for a sealing key of the given `kem`.
+pub(crate) fn masked_kem_sealing_key(
+    ctx: &TestCtx,
+    session_id: u16,
+    scope: u8,
+    kem: u8,
+) -> (Vec<u8>, Vec<u8>) {
     let seal = ctx
-        .tbor(&TborSdSealingKeyGenReq { session_id, scope })
+        .tbor(&TborSdSealingKeyGenReq {
+            session_id,
+            scope,
+            kem,
+        })
         .expect("SdSealingKeyGen");
-    (seal.masked_key.to_vec(), seal.pub_key.to_vec())
+    (seal.masked_key, seal.pub_key)
 }
 
 /// Verifies a COSE_Sign1 report's ES384 signature under the PID public key
 /// (`pid_spki_der`) and returns the decoded attestation payload.
 pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttestationReport {
+    minicbor::decode(verify_cose_sign1_payload(report, pid_spki_der))
+        .expect("report payload decodes as KeyAttestationReport")
+}
+
+/// Verifies a COSE_Sign1 report's ES384 signature under `pid_spki_der` and
+/// returns the raw payload bytes.
+pub(crate) fn verify_cose_sign1_payload<'a>(report: &'a [u8], pid_spki_der: &[u8]) -> &'a [u8] {
     use tsra_crypto::EccAlgo;
     use tsra_crypto::EccPublicKey;
     use tsra_crypto::HashAlgo;
@@ -253,7 +281,169 @@ pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttest
     let ok = Verifier::verify(&mut EccAlgo::default(), &pid_pub, &digest, &cose.signature)
         .expect("ECDSA verify");
     assert!(ok, "COSE_Sign1 must verify under PID pubkey");
-    minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport")
+    cose.payload
+}
+
+/// Private-use COSE algorithm ids of the ML-KEM sealing keys.
+const COSE_ALG_MLKEM1024: i32 = -65537;
+const COSE_ALG_MLKEM1024_P384: i32 = -65538;
+
+/// `KeyFlags::is_generated` and `KeyFlags::is_sd_sealing` bits.
+const KEY_FLAG_GENERATED: u32 = 1 << 2;
+const KEY_FLAG_SD_SEALING: u32 = 1 << 10;
+
+/// Fields of a key-report payload whose COSE_Key is an ML-KEM AKP key
+/// (larger than the fixed [`KeyAttestationReport`] field).
+pub(crate) struct KemReportFields {
+    /// AKP COSE `alg`.
+    pub alg: i32,
+    /// AKP `pub` (the HPKE public key).
+    pub public_key: Vec<u8>,
+    /// Report flags.
+    pub flags: u32,
+    /// Caller report data.
+    pub report_data: Vec<u8>,
+}
+
+/// Decode a report payload carrying an AKP COSE_Key.
+pub(crate) fn decode_kem_report(payload: &[u8]) -> KemReportFields {
+    let mut d = minicbor::Decoder::new(payload);
+    let n = d.map().expect("payload map").expect("definite map");
+    let (mut cose, mut size, mut flags, mut report_data) = (None, None, None, None);
+    for _ in 0..n {
+        match d.u8().expect("payload key") {
+            1 => cose = Some(d.bytes().expect("public_key").to_vec()),
+            2 => size = Some(d.u16().expect("public_key_size")),
+            3 => flags = Some(d.u32().expect("flags")),
+            5 => report_data = Some(d.bytes().expect("report_data").to_vec()),
+            _ => d.skip().expect("skip payload field"),
+        }
+    }
+    let cose = cose.expect("public_key present");
+    assert_eq!(
+        usize::from(size.expect("public_key_size present")),
+        cose.len()
+    );
+    let mut k = minicbor::Decoder::new(&cose);
+    assert_eq!(k.map().expect("COSE_Key map"), Some(3));
+    assert_eq!(k.u8().expect("kty label"), 1);
+    assert_eq!(k.u8().expect("kty"), 7, "AKP key type");
+    assert_eq!(k.u8().expect("alg label"), 3);
+    let alg = k.i32().expect("alg");
+    assert_eq!(k.i8().expect("pub label"), -1);
+    let public_key = k.bytes().expect("pub").to_vec();
+    assert_eq!(k.position(), cose.len(), "no trailing COSE_Key bytes");
+    KemReportFields {
+        alg,
+        public_key,
+        flags: flags.expect("flags present"),
+        report_data: report_data.expect("report_data present"),
+    }
+}
+
+/// Verify an ES384 PID-signed key report attesting an ML-KEM sealing key
+/// and return its fields.
+pub(crate) fn verify_kem_key_report(ctx: &TestCtx, report: &[u8]) -> KemReportFields {
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    assert_eq!(split_cose_sign1(report).0, COSE_ALG_ES384);
+    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("PID leaf parses");
+    let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI");
+    decode_kem_report(verify_cose_sign1_payload(report, &pid_spki))
+}
+
+/// COSE algorithm identifiers carried in the report's protected header.
+const COSE_ALG_ES384: i64 = -35;
+const COSE_ALG_MLDSA87: i64 = -50;
+
+/// ML-DSA-87 encoded public-key length.
+pub(crate) const MLDSA87_PUB_KEY_LEN: usize = 2592;
+
+/// Splits a tagged COSE_Sign1 into `(protected, payload, signature)` and
+/// returns the protected header's `alg`.
+fn split_cose_sign1(report: &[u8]) -> (i64, &[u8], &[u8], &[u8]) {
+    let mut dec = minicbor::Decoder::new(report);
+    assert_eq!(
+        dec.tag().expect("COSE_Sign1 tag"),
+        minicbor::data::Tag::Unassigned(18)
+    );
+    assert_eq!(dec.array().expect("COSE_Sign1 array"), Some(4));
+    let protected = dec.bytes().expect("protected header");
+    dec.skip().expect("unprotected header");
+    let payload = dec.bytes().expect("payload");
+    let signature = dec.bytes().expect("signature");
+    assert_eq!(dec.position(), report.len(), "no trailing bytes");
+
+    let mut hdr = minicbor::Decoder::new(protected);
+    let entries = hdr
+        .map()
+        .expect("protected map")
+        .expect("definite protected map");
+    let mut alg = None;
+    for _ in 0..entries {
+        if hdr.i64().expect("header label") == 1 {
+            alg = Some(hdr.i64().expect("alg"));
+        } else {
+            hdr.skip().expect("skip header value");
+        }
+    }
+    (
+        alg.expect("protected header carries alg"),
+        protected,
+        payload,
+        signature,
+    )
+}
+
+/// Verifies an ML-DSA-87 COSE_Sign1 report under the encoded public key
+/// `pk` and returns the decoded attestation payload.
+pub(crate) fn verify_mldsa_cose_sign1(report: &[u8], pk: &[u8]) -> KeyAttestationReport {
+    minicbor::decode(verify_mldsa_cose_sign1_payload(report, pk))
+        .expect("report payload decodes as KeyAttestationReport")
+}
+
+/// Verifies an ML-DSA-87 COSE_Sign1 report under the encoded public key
+/// `pk` and returns the raw payload bytes.
+pub(crate) fn verify_mldsa_cose_sign1_payload<'a>(report: &'a [u8], pk: &[u8]) -> &'a [u8] {
+    use tsra_crypto::ImportableKey;
+    use tsra_crypto::MlDsaAlgo;
+    use tsra_crypto::MlDsaPublicKey;
+    use tsra_crypto::VerifyOp;
+    use tsra_ddi_mbor_test_helpers::encode_sig_struct;
+
+    let (alg, protected, payload, signature) = split_cose_sign1(report);
+    assert_eq!(alg, COSE_ALG_MLDSA87, "ML-DSA bank reports use ML-DSA-87");
+    let mut tbs = vec![0u8; 64 + protected.len() + payload.len()];
+    let tbs_len =
+        encode_sig_struct(protected, payload, &mut tbs).expect("encode COSE Sig_structure");
+    let pid_pub = MlDsaPublicKey::from_bytes(pk).expect("ML-DSA PID public key");
+    assert!(
+        MlDsaAlgo::new(&[])
+            .expect("ML-DSA engine")
+            .verify(&pid_pub, &tbs[..tbs_len], signature)
+            .expect("ML-DSA verify"),
+        "COSE_Sign1 must verify under the ML-DSA PID public key",
+    );
+    payload
+}
+
+/// The encoded ML-DSA-87 public key of slot 0's ML-DSA bank leaf: the
+/// trailing bytes of its SubjectPublicKeyInfo.
+pub(crate) fn mldsa_pid_pub_key(ctx: &TestCtx) -> Vec<u8> {
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    let info = ctx
+        .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_MLDSA))
+        .expect("ML-DSA chain info");
+    let leaf_der = ctx
+        .get_cert(0, CERT_BANK_MLDSA, info.num_certs - 1)
+        .expect("ML-DSA PID leaf");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("ML-DSA leaf parses");
+    let spki = leaf.get_public_key_der().expect("ML-DSA leaf SPKI");
+    spki[spki.len() - MLDSA87_PUB_KEY_LEN..].to_vec()
 }
 
 /// Verify a `KeyReport` COSE_Sign1: (1) the envelope verifies under the
@@ -265,17 +455,38 @@ pub(crate) fn verify_key_report(
     sealing_pub_le: &[u8],
     expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
 ) -> KeyAttestationReport {
+    verify_key_report_in_bank(
+        ctx,
+        CERT_BANK_ECC,
+        report,
+        sealing_pub_le,
+        expected_report_data,
+    )
+}
+
+/// [`verify_key_report`] for a report signed by `bank`'s PID key.
+fn verify_key_report_in_bank(
+    ctx: &TestCtx,
+    bank: u8,
+    report: &[u8],
+    sealing_pub_le: &[u8],
+    expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
+) -> KeyAttestationReport {
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
-    // 1. PID pubkey from the slot-0 chain leaf.
-    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
-    let leaf = X509Certificate::from_der(&leaf_der).expect("PID leaf parses as X.509 certificate");
-    let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
-
-    // 2. COSE_Sign1 signature verify under PID pubkey, then decode the
-    // payload.
-    let decoded = verify_cose_sign1(report, &pid_spki);
+    // 1-2. Verify the COSE_Sign1 under the bank's PID pubkey, then decode
+    // the payload.
+    let decoded = if bank == CERT_BANK_MLDSA {
+        verify_mldsa_cose_sign1(report, &mldsa_pid_pub_key(ctx))
+    } else {
+        assert_eq!(split_cose_sign1(report).0, COSE_ALG_ES384);
+        let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+        let leaf =
+            X509Certificate::from_der(&leaf_der).expect("PID leaf parses as X.509 certificate");
+        let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
+        verify_cose_sign1(report, &pid_spki)
+    };
 
     // 3. Cross-bind the embedded COSE_Key to the sealed public point.
 
@@ -380,15 +591,48 @@ fn report_roundtrip_for_scope(scope: u8) {
         masked_key,
         report_data,
     };
-    let resp = ctx.tbor(&req).expect("KeyReport roundtrip");
+    let resp = ctx.key_report(&req).expect("KeyReport roundtrip");
 
     // Tagged COSE_Sign1: CBOR tag 18 (0xD2) opening byte.
     assert_eq!(
-        resp.report.first(),
+        resp.first(),
         Some(&0xD2),
         "report must begin with the COSE_Sign1 CBOR tag (0xD2)",
     );
-    verify_key_report(&ctx, &resp.report, &sealing_pub, &report_data);
+    verify_key_report(&ctx, &resp, &sealing_pub, &report_data);
+}
+
+/// ML-KEM-1024 and MLKEM1024-P384 sealing keys are attested as AKP
+/// COSE_Keys carrying the keygen public key, flagged as generated SD
+/// sealing keys.
+#[test]
+fn key_report_attests_pq_sealing_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (kem, alg) in [
+        (TRANSFER_KEM_MLKEM1024, COSE_ALG_MLKEM1024),
+        (TRANSFER_KEM_MLKEM1024_P384, COSE_ALG_MLKEM1024_P384),
+    ] {
+        let (masked_key, public_key) =
+            masked_kem_sealing_key(&ctx, session.session_id, SCOPE_LOCAL, kem);
+        let report_data = sample_report_data();
+        let report = ctx
+            .key_report(&TborKeyReportReq {
+                auth_envelope: Vec::new(),
+                session_id: session.session_id,
+                masked_key,
+                report_data,
+            })
+            .expect("KeyReport");
+        let fields = verify_kem_key_report(&ctx, &report);
+        assert_eq!(fields.alg, alg);
+        assert_eq!(fields.public_key, public_key);
+        assert_eq!(fields.report_data, report_data);
+        assert_eq!(
+            fields.flags & (KEY_FLAG_GENERATED | KEY_FLAG_SD_SEALING),
+            KEY_FLAG_GENERATED | KEY_FLAG_SD_SEALING,
+        );
+    }
 }
 
 /// Verifies a signed key report for an ephemeral sealing key.
@@ -498,7 +742,7 @@ fn key_report_report_data_patterns() {
             [0; KEY_REPORT_DATA_LEN],
         ] {
             let resp = ctx
-                .tbor(&TborKeyReportReq {
+                .key_report(&TborKeyReportReq {
                     auth_envelope: Vec::new(),
                     session_id: session.session_id,
                     masked_key: masked_key.clone(),
@@ -506,7 +750,7 @@ fn key_report_report_data_patterns() {
                 })
                 .expect("KeyReport with report-data pattern");
             // Verify the signed payload, rather than comparing randomized signatures.
-            verify_key_report(&ctx, &resp.report, &public_key, &report_data);
+            verify_key_report(&ctx, &resp, &public_key, &report_data);
         }
     }
 }
@@ -529,14 +773,14 @@ fn key_report_generated_ecc_all_curves() {
                 .expect("generate ECC key");
             let report_data = sample_report_data();
             let report = ctx
-                .tbor(&TborKeyReportReq {
+                .key_report(&TborKeyReportReq {
                     auth_envelope: Vec::new(),
                     session_id: session.session_id,
                     masked_key: key.masked_key,
                     report_data,
                 })
                 .expect("attest ordinary ECC key");
-            let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+            let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
             // Generated (bit 2) + sign (bit 5); no other usages.
             assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
         }
@@ -592,7 +836,7 @@ fn key_report_session_scope_roundtrip() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -600,7 +844,7 @@ fn key_report_session_scope_roundtrip() {
         })
         .expect("KeyReport accepts session-scoped ECC key");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     // Generated + sign.
     // Session + Generated + Sign.
@@ -669,7 +913,7 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
         );
 
         let resp = ctx
-            .tbor(&TborKeyReportReq {
+            .key_report(&TborKeyReportReq {
                 auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
@@ -677,7 +921,7 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
             })
             .expect("original key remains attestable after rejection");
 
-        verify_key_report(&ctx, &resp.report, &public_key, &report_data);
+        verify_key_report(&ctx, &resp, &public_key, &report_data);
     }
 }
 
@@ -728,7 +972,7 @@ fn key_report_imported_ecc_all_curves() {
         let report_data = sample_report_data();
 
         let report = ctx
-            .tbor(&TborKeyReportReq {
+            .key_report(&TborKeyReportReq {
                 auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: imported.masked_key,
@@ -738,7 +982,7 @@ fn key_report_imported_ecc_all_curves() {
 
         // Verify against the host-generated public key,
         // not the firmware's UnwrapKey public key.
-        let decoded = verify_key_report(&ctx, &report.report, &host_pub_key, &report_data);
+        let decoded = verify_key_report(&ctx, &report, &host_pub_key, &report_data);
 
         // Imported + Sign + Verify.
         assert_eq!(
@@ -772,8 +1016,8 @@ fn key_report_cu_attests_valid_key_after_finalize() {
     req.masked_key[last] ^= 1;
     req.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &req)
         .expect("authenticate CU request");
-    let report = ctx.tbor(&req).expect("CU KeyReport");
-    verify_key_report(&ctx, &report.report, &public_key, &report_data);
+    let report = ctx.key_report(&req).expect("CU KeyReport");
+    verify_key_report(&ctx, &report, &public_key, &report_data);
     ctx.session_close(cu.session_id).expect("close CU session");
 }
 
@@ -801,8 +1045,10 @@ fn key_report_cu_session_scope_roundtrip() {
     };
     request.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &request)
         .expect("authenticate CU session-scoped request");
-    let report = ctx.tbor(&request).expect("attest CU session-scoped key");
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let report = ctx
+        .key_report(&request)
+        .expect("attest CU session-scoped key");
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
     assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
     assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
     ctx.session_close(cu.session_id).expect("close CU");
@@ -857,9 +1103,9 @@ fn key_report_cu_authentication_binds_key_data_and_session() {
         caller.expect_fw_reject(&forged, TborStatus::AeadEnvelopeAuthFailed);
     }
     let report = cu_ctx
-        .tbor(&request)
+        .key_report(&request)
         .expect("original request remains valid");
-    let decoded = verify_key_report(&ctx, &report.report, &public_key, &request.report_data);
+    let decoded = verify_key_report(&ctx, &report, &public_key, &request.report_data);
     assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
     assert_ne!(decoded.flags & (1 << 10), 0, "sealing provenance is signed");
     other_ctx
@@ -905,9 +1151,9 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     request.auth_envelope =
         seal_key_report_auth(&cu.param_key, &request).expect("authenticate fresh CU");
     let report = cu_ctx
-        .tbor(&request)
+        .key_report(&request)
         .expect("freshly authenticated CU report");
-    let decoded = verify_key_report(&ctx, &report.report, &public_key, &request.report_data);
+    let decoded = verify_key_report(&ctx, &report, &public_key, &request.report_data);
     assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
     old.close().expect("close stale CU");
     cu_ctx.session_close(cu.session_id).expect("close fresh CU");
@@ -993,7 +1239,7 @@ fn key_report_generated_ecc_non_empty_label() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1001,7 +1247,7 @@ fn key_report_generated_ecc_non_empty_label() {
         })
         .expect("KeyReport accepts labeled ECC key");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     // Generated + sign.
     assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
@@ -1031,7 +1277,7 @@ fn key_report_generated_ecc_max_label() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1039,7 +1285,7 @@ fn key_report_generated_ecc_max_label() {
         })
         .expect("KeyReport accepts max-label ECC key");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
 }
@@ -1067,7 +1313,7 @@ fn key_report_generated_ecc_derive_usage() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1075,7 +1321,7 @@ fn key_report_generated_ecc_derive_usage() {
         })
         .expect("attest derive-only ECC key");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     // Generated + derive.
     assert_eq!(decoded.flags, (1 << 2) | (1 << 9));
@@ -1104,7 +1350,7 @@ fn key_report_generated_ecc_derive_with_label() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1112,7 +1358,7 @@ fn key_report_generated_ecc_derive_with_label() {
         })
         .expect("attest labeled DERIVE ECC key");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     // Generated + derive.
     assert_eq!(decoded.flags, (1 << 2) | (1 << 9));
@@ -1141,7 +1387,7 @@ fn key_report_generated_ecc_binary_label() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1149,7 +1395,7 @@ fn key_report_generated_ecc_binary_label() {
         })
         .expect("attest ECC key with binary label");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
 }
@@ -1178,7 +1424,7 @@ fn key_report_p521_with_max_label() {
     let report_data = sample_report_data();
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
@@ -1186,7 +1432,7 @@ fn key_report_p521_with_max_label() {
         })
         .expect("attest P-521 ECC key with maximum label");
 
-    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    let decoded = verify_key_report(&ctx, &report, &key.pub_key, &report_data);
 
     assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
 }
@@ -1263,7 +1509,7 @@ fn imported_rsa_tampering_rejected(class: u8) {
 
         // The original key must remain usable after rejection.
         let resp = ctx
-            .tbor(&TborKeyReportReq {
+            .key_report(&TborKeyReportReq {
                 auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
@@ -1272,7 +1518,7 @@ fn imported_rsa_tampering_rejected(class: u8) {
             .expect("original RSA key remains attestable");
 
         assert_eq!(
-            resp.report.first(),
+            resp.first(),
             Some(&0xD2),
             "expected tagged COSE_Sign1 report",
         );
@@ -1326,7 +1572,7 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
 
     // The original key remains valid after the rejected request.
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key,
@@ -1334,7 +1580,7 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
         })
         .expect("original RSA key remains attestable");
 
-    assert_eq!(report.report.first(), Some(&0xD2));
+    assert_eq!(report.first(), Some(&0xD2));
 }
 
 /// Rejects authenticated metadata tampering on an imported RSA key.
@@ -1375,7 +1621,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
 
     // An invalid-session request must not affect the valid session.
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key,
@@ -1383,7 +1629,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
         })
         .expect("valid session remains usable after rejection");
 
-    assert_eq!(report.report.first(), Some(&0xD2));
+    assert_eq!(report.first(), Some(&0xD2));
 }
 
 /// Rejects an imported RSA KeyReport request with an invalid session.
@@ -1413,4 +1659,62 @@ fn key_report_rejects_bad_masked_key_layout() {
             report_data: sample_report_data(),
         },
     );
+}
+
+/// On an ML-DSA-87 PTA partition the report is signed by the ML-DSA-87
+/// PID key, verifying under the ML-DSA bank leaf: the signer follows the
+/// policy `pta_alg`.
+#[test]
+fn key_report_mldsa_pta_signs_with_mldsa_pid() {
+    use tsra_ddi_tbor_test_harness::x509_fixture::csr_public_key;
+    use tsra_ddi_tbor_test_harness::x509_fixture::AnchorKey;
+    use tsra_ddi_tbor_test_harness::x509_fixture::AnyPotaFixture;
+
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+    let pota = AnyPotaFixture::new(AnchorKey::mldsa87(&[7; 32]));
+    let mut policy = crate::commands::part_init::known_good_test_policy()
+        .with_pta_alg(tsra_ddi_tbor_types::POLICY_PTA_ALG_MLDSA87);
+    policy.pota_spki_thumbprint = pota.spki_thumbprint();
+    let policy = policy.encode();
+    let init = ctx
+        .part_init(&session, &crate::commands::part_init::mach_seed(), &policy)
+        .expect("PartInit");
+    let chain = pota.chain_for(csr_public_key(&init.pta_csr));
+    ctx.part_final(&session, &policy, &[], &chain.der_items())
+        .expect("PartFinal");
+
+    let (masked_key, sealing_pub) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
+    let report_data = sample_report_data();
+    let report = ctx
+        .key_report(&TborKeyReportReq {
+            session_id: session.session_id,
+            masked_key,
+            report_data,
+            auth_envelope: Vec::new(),
+        })
+        .expect("KeyReport");
+    verify_key_report_in_bank(&ctx, CERT_BANK_MLDSA, &report, &sealing_pub, &report_data);
+
+    ctx.session_close(session.session_id).expect("close CO");
+}
+
+/// An out-of-band buffer smaller than the report is rejected.
+#[test]
+fn key_report_rejects_undersized_oob() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
+    let mut small = [0u8; 64];
+    ctx.expect_fw_reject_oob_io(
+        &TborKeyReportReq {
+            session_id: session.session_id,
+            masked_key,
+            report_data: sample_report_data(),
+            auth_envelope: Vec::new(),
+        },
+        &mut [TborOobItem::Out(&mut small)],
+        TborStatus::InsufficientBuffer,
+    );
+    ctx.session_close(session.session_id).expect("close CO");
 }

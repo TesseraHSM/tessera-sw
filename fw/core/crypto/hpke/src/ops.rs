@@ -197,9 +197,12 @@ impl<'a> HpkeSealConfig<'a> {
 pub struct HpkeOpenConfig<'a> {
     /// HPKE ciphersuite.
     pub suite: HpkeSuite,
-    /// Recipient private key.
+    /// Recipient private key (`Nsk` bytes): the raw scalar for DHKEM,
+    /// the 64-byte `d ‖ z` seed for ML-KEM-1024, the 32-byte seed for
+    /// MLKEM1024-P384.
     pub sk_r: &'a [u8],
-    /// Recipient public key.
+    /// Recipient public key. Bound into the DHKEM `kem_context`;
+    /// ignored by the post-quantum KEMs.
     pub pk_r: &'a [u8],
     /// Application-supplied info — must equal sender's value.
     pub info: &'a [u8],
@@ -397,9 +400,12 @@ impl<'a> HpkeSendExportConfig<'a> {
 pub struct HpkeReceiveExportConfig<'a> {
     /// HPKE ciphersuite.
     pub suite: HpkeSuite,
-    /// Recipient private key.
+    /// Recipient private key (`Nsk` bytes): the raw scalar for DHKEM,
+    /// the 64-byte `d ‖ z` seed for ML-KEM-1024, the 32-byte seed for
+    /// MLKEM1024-P384.
     pub sk_r: &'a [u8],
-    /// Recipient public key.
+    /// Recipient public key. Bound into the DHKEM `kem_context`;
+    /// ignored by the post-quantum KEMs.
     pub pk_r: &'a [u8],
     /// Application-supplied info — must equal sender's value.
     pub info: &'a [u8],
@@ -508,6 +514,15 @@ fn psk_bytes<'a>(psk: &Option<PskParams<'a>>) -> (&'a [u8], &'a [u8]) {
     }
 }
 
+/// Rejects the Auth / AuthPSK modes for KEMs without AuthEncap /
+/// AuthDecap (the post-quantum KEMs).
+fn check_mode(suite: HpkeSuite, mode: Mode) -> HsmResult<()> {
+    match mode {
+        Mode::Auth | Mode::AuthPsk if !suite.supports_auth() => Err(HsmError::InvalidArg),
+        _ => Ok(()),
+    }
+}
+
 fn aead_ct_len(suite: HpkeSuite, pt_len: usize) -> usize {
     if suite.is_cbc() {
         let padded = pt_len + 16 - (pt_len % 16);
@@ -575,16 +590,22 @@ where
     P: HsmCrypto + HsmAlloc + 'a,
 {
     let suite = cfg.suite;
+    check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, &cfg.auth) {
+    // Encapsulation scratch is released before the key schedule.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, &cfg.auth) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, alloc).await?
+            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, scratch).await
         }
         (Mode::Auth, Some(a)) | (Mode::AuthPsk, Some(a)) => {
-            kem::auth_encap(pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, alloc).await?
+            kem::auth_encap(
+                pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, scratch,
+            )
+            .await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     // AEAD `key ‖ base_nonce` share one allocation; the two LabeledExpand
     // outputs write into the split halves.
@@ -641,16 +662,20 @@ where
     };
 
     let suite = cfg.suite;
+    check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, cfg.auth_pk_s) {
+    // Decapsulation scratch (KB-sized for ML-KEM) is released before the
+    // key schedule; only the shared secret outlives it.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, cfg.auth_pk_s) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, alloc).await?
+            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, scratch).await
         }
         (Mode::Auth, Some(pk_s)) | (Mode::AuthPsk, Some(pk_s)) => {
-            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, alloc).await?
+            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, scratch).await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     let key = alloc_bytes(suite.nk(), alloc)?;
     let nonce = alloc_bytes(suite.nn(), alloc)?;
@@ -725,16 +750,22 @@ where
     P: HsmCrypto + HsmAlloc + 'a,
 {
     let suite = cfg.suite;
+    check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, &cfg.auth) {
+    // Encapsulation scratch is released before the key schedule.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, &cfg.auth) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, alloc).await?
+            kem::encap(pal, io, suite, cfg.pk_r, enc_out, ss, scratch).await
         }
         (Mode::Auth, Some(a)) | (Mode::AuthPsk, Some(a)) => {
-            kem::auth_encap(pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, alloc).await?
+            kem::auth_encap(
+                pal, io, suite, cfg.pk_r, a.sk_s, a.pk_s, enc_out, ss, scratch,
+            )
+            .await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     derive_exported(
         pal,
@@ -776,16 +807,20 @@ where
     };
 
     let suite = cfg.suite;
+    check_mode(suite, cfg.mode)?;
     let ss = alloc_bytes(suite.nsecret(), alloc)?;
-    match (cfg.mode, cfg.auth_pk_s) {
+    // Decapsulation scratch (KB-sized for ML-KEM) is released before the
+    // key schedule; only the shared secret outlives it.
+    pal.alloc_scoped_async(io, async |scratch| match (cfg.mode, cfg.auth_pk_s) {
         (Mode::Base, None) | (Mode::Psk, None) => {
-            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, alloc).await?
+            kem::decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, ss, scratch).await
         }
         (Mode::Auth, Some(pk_s)) | (Mode::AuthPsk, Some(pk_s)) => {
-            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, alloc).await?
+            kem::auth_decap(pal, io, suite, enc, cfg.sk_r, cfg.pk_r, pk_s, ss, scratch).await
         }
-        _ => return Err(HsmError::InvalidArg),
-    }
+        _ => Err(HsmError::InvalidArg),
+    })
+    .await?;
 
     derive_exported(
         pal,
@@ -803,7 +838,9 @@ where
     Ok(exported.len())
 }
 
-/// Run `key_schedule_export` + a final `LabeledExpand("sec", ctx, L)`.
+/// Run `key_schedule_export` + a final `LabeledExpand("sec", ctx, L)`
+/// (two-stage) or `LabeledDerive("sec", ctx, L)` (one-stage, where
+/// `1 <= L <= 65535`).
 #[allow(clippy::too_many_arguments)]
 async fn derive_exported<'a, P>(
     pal: &P,
@@ -840,18 +877,38 @@ where
     // final LabeledExpand writes into a DMA scratch that is copied out —
     // one boundary copy for the exported secret.
     let out_scratch = alloc_bytes(out.len(), alloc)?;
-    kdf::labeled_expand(
-        pal,
-        io,
-        suite.kdf_hash(),
-        &suite.hpke_suite_id(),
-        exp_secret,
-        b"sec",
-        exporter_context,
-        out_scratch,
-        alloc,
-    )
-    .await?;
+    let suite_id = suite.hpke_suite_id();
+    match suite.kdf_hash() {
+        // Export_TwoStage: LabeledExpand(exporter_secret, "sec", ctx, L).
+        Some(algo) => {
+            kdf::labeled_expand(
+                pal,
+                io,
+                algo,
+                &suite_id,
+                exp_secret,
+                b"sec",
+                exporter_context,
+                out_scratch,
+                alloc,
+            )
+            .await?
+        }
+        // Export_OneStage: LabeledDerive(exporter_secret, "sec", ctx, L).
+        None => {
+            kdf::labeled_derive(
+                pal,
+                io,
+                &suite_id,
+                &[&**exp_secret],
+                b"sec",
+                &[exporter_context],
+                out_scratch,
+                alloc,
+            )
+            .await?
+        }
+    }
     out.copy_from_slice(out_scratch);
     Ok(())
 }

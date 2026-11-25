@@ -3,13 +3,16 @@
 
 //! Runtime builder for COSE_Sign1 key-attestation reports.
 //!
-//! The report is signed with ES384 (ECDSA-P384) using the supplied
-//! attestation private key. The attested public key may be ECC, RSA, or
-//! symmetric (see [`AttestedPubKey`]).
+//! The report is signed with ES384 (ECDSA-P384) or ML-DSA-87, as the
+//! supplied [`ReportSigner`] selects. The attested public key may be ECC,
+//! RSA, ML-DSA-87, or symmetric (see [`AttestedPubKey`]).
 //!
-//! All working buffers are [`HsmDmaBuf`] allocations. Every encoded length
-//! is computed by `minicbor::len` on the [`codec`](crate::codec) structs
-//! — there is no hand-maintained byte-counting. The inner COSE_Key uses
+//! All working buffers are [`HsmDmaBuf`] allocations. Payload and
+//! `Sig_structure` lengths are computed by `minicbor::len` on the
+//! [`codec`](crate::codec) structs. The fixed COSE_Sign1 envelope is laid
+//! out by hand so the payload and signature land at their final offsets
+//! in the caller's buffer, keeping ML-DSA-87 reports within the per-IO DMA
+//! budget. The inner COSE_Key uses
 //! negative integer map keys (which minicbor's derive cannot express), so
 //! it alone is written with an imperative `Encoder` (see
 //! [`to_cose_key`](crate::cose_key)).
@@ -22,21 +25,26 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEcdsaNonce;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
 use crate::codec::as_mut_slice;
-use crate::codec::CoseSign1;
 use crate::codec::KeyReportPayload;
 use crate::codec::SigStructure;
-use crate::codec::UnprotectedHeader;
 use crate::codec::SIG_STRUCTURE_CONTEXT;
 use crate::consts::*;
 use crate::cose_key::to_cose_key;
 use crate::cose_key::AttestedPubKey;
 use crate::sig::sig_halves_swap;
+use crate::ReportAlg;
 use crate::ReportKind;
 use crate::ReportParams;
+use crate::ReportSigner;
 
 /// Caller-supplied inputs for the attestation report.
 pub struct KeyReportParams<'a> {
@@ -76,7 +84,7 @@ impl KeyReportParams<'_> {
 }
 
 /// Build a COSE_Sign1 key-attestation report, signed ES384 with
-/// `priv_key`.
+/// `priv_key` (see [`key_report_with`] for other signers).
 ///
 /// Follows the codebase's query/copy convention:
 ///
@@ -89,7 +97,6 @@ impl KeyReportParams<'_> {
 /// # Parameters
 /// * `pal` — [`HsmCrypto`] (SHA-384 + ECDSA-P384) and [`HsmAlloc`].
 /// * `io` — caller's IO scope.
-/// * `alloc` — scoped allocator for internal `HsmDmaBuf` scratch.
 /// * `params` — attested key material, flags, UUIDs, report data.
 /// * `priv_key` — P-384 attestation private key (raw scalar, exactly
 ///   [`PRIV_KEY_LEN`] bytes).
@@ -99,18 +106,32 @@ impl KeyReportParams<'_> {
 /// * [`HsmError::InvalidArg`] — a `params` field or `priv_key` has the
 ///   wrong length, or `out` is shorter than the required size.
 /// * Other [`HsmError`] values propagated from the PAL.
-pub async fn key_report<'a, P>(
+pub async fn key_report<P>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
     priv_key: &HsmDmaBuf,
-    out: Option<&mut [u8]>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize>
 where
-    P: HsmCrypto + HsmAlloc + 'a,
+    P: HsmCrypto + HsmAlloc,
 {
-    build_key_report(pal, io, alloc, (params, None), priv_key, out).await
+    key_report_with(pal, io, params, ReportSigner::Es384(priv_key), out).await
+}
+
+/// [`key_report`] signed by `signer`, whose algorithm the report's
+/// protected header names.
+pub async fn key_report_with<P>(
+    pal: &P,
+    io: &P::Io,
+    params: &KeyReportParams<'_>,
+    signer: ReportSigner<'_>,
+    out: Option<&mut HsmDmaBuf>,
+) -> HsmResult<usize>
+where
+    P: HsmCrypto + HsmAlloc,
+{
+    build_key_report(pal, io, (params, None), signer, out).await
 }
 
 /// Sign a public-key attestation or a complete canonical transfer envelope.
@@ -118,69 +139,74 @@ where
 /// Query mode (`out = None`) validates inputs and returns the encoded size
 /// without signing. Only exporting command handlers may supply operation
 /// envelopes; this function does not perform command authorization.
-pub async fn report<'a, P>(
+pub async fn report<P>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     params: &ReportParams<'_>,
     priv_key: &HsmDmaBuf,
-    out: Option<&mut [u8]>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize>
 where
-    P: HsmCrypto + HsmAlloc + 'a,
+    P: HsmCrypto + HsmAlloc,
 {
-    if priv_key.len() != PRIV_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
+    report_with(pal, io, params, ReportSigner::Es384(priv_key), out).await
+}
+
+/// [`report`] signed by `signer`, whose algorithm the report's protected
+/// header names.
+pub async fn report_with<P>(
+    pal: &P,
+    io: &P::Io,
+    params: &ReportParams<'_>,
+    signer: ReportSigner<'_>,
+    out: Option<&mut HsmDmaBuf>,
+) -> HsmResult<usize>
+where
+    P: HsmCrypto + HsmAlloc,
+{
+    signer.validate()?;
     match params {
         ReportParams::PublicKey(params) => {
-            build_key_report(
-                pal,
-                io,
-                alloc,
-                (params, Some(ReportKind::PublicKey)),
-                priv_key,
-                out,
-            )
-            .await
+            build_key_report(pal, io, (params, Some(ReportKind::PublicKey)), signer, out).await
         }
         ReportParams::Transfer(envelope) => {
             let kind = crate::transfer::parse_transfer_envelope(envelope)?
                 .header
                 .kind();
             match out {
-                Some(out) => sign_payload(pal, io, alloc, kind, envelope, priv_key, out).await,
-                None => pal.alloc_scoped(io, |scoped| {
-                    signed_report_size(scoped, kind.protected_header(), envelope.len())
-                }),
+                Some(out) => {
+                    let encode = |payload: &mut [u8]| {
+                        payload.copy_from_slice(envelope);
+                        Ok(())
+                    };
+                    sign_into(pal, io, kind, signer, envelope.len(), &encode, out).await
+                }
+                None => Ok(Sign1Layout::new(kind, signer.alg(), envelope.len())?.total),
             }
         }
     }
 }
 
-async fn build_key_report<'a, P>(
+async fn build_key_report<P>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     (params, kind): (&KeyReportParams<'_>, Option<ReportKind>),
-    priv_key: &HsmDmaBuf,
-    out: Option<&mut [u8]>,
+    signer: ReportSigner<'_>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize>
 where
-    P: HsmCrypto + HsmAlloc + 'a,
+    P: HsmCrypto + HsmAlloc,
 {
     params.validate()?;
-    if priv_key.len() != PRIV_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
+    signer.validate()?;
 
     let Some(out) = out else {
         // Query pass: measure in a nested scope so the scratch frees
         // before returning (the size query retains nothing).
-        return pal.alloc_scoped(io, |scoped| report_size(scoped, params, kind));
+        return pal.alloc_scoped(io, |scoped| report_size(scoped, params, kind, signer.alg()));
     };
 
-    do_build(pal, io, alloc, (params, kind), priv_key, out).await
+    do_build(pal, io, (params, kind), signer, out).await
 }
 
 /// Encode the inner COSE_Key into `cose_key` scratch and build the
@@ -212,151 +238,275 @@ fn build_payload_struct<'a>(
     }
 }
 
-/// Compute the exact tagged-report size for `params` using
-/// `minicbor::len`, allocating only transient scratch from `scoped`.
+/// Compute the exact tagged-report size for `params`, encoding the
+/// COSE_Key into transient scratch from `scoped` to measure the payload.
 fn report_size(
     scoped: &impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
     kind: Option<ReportKind>,
+    alg: ReportAlg,
 ) -> HsmResult<usize> {
-    let cose_key = scoped.dma_alloc_zeroed(PUBLIC_KEY_MAX_SIZE)?;
-    let cose_len = to_cose_key(&params.key, cose_key)?;
-    let payload = build_payload_struct(params, cose_key, cose_len, kind);
-    let payload_len = minicbor::len(&payload);
-
-    signed_report_size(scoped, &PROTECTED_HEADER, payload_len)
+    let payload_len = key_payload_len(scoped, params, kind)?;
+    Ok(Sign1Layout::new(ReportKind::PublicKey, alg, payload_len)?.total)
 }
 
-fn signed_report_size(
+/// Encoded length of the key-report payload map.
+fn key_payload_len(
     scoped: &impl HsmScopedAlloc,
-    protected_header: &[u8],
-    payload_len: usize,
+    params: &KeyReportParams<'_>,
+    kind: Option<ReportKind>,
 ) -> HsmResult<usize> {
-    // The COSE_Sign1 wrapper length depends only on the payload and
-    // signature lengths, so measure it against length-placeholder scratch.
-    let payload_buf = scoped.dma_alloc(payload_len)?;
-    let sig_buf = scoped.dma_alloc(SIGNATURE_LEN)?;
-    let cose = CoseSign1 {
-        protected_header,
-        unprotected: UnprotectedHeader {},
-        payload: payload_buf,
-        signature: sig_buf,
-    };
-    Ok(COSE_SIGN1_TAG_SIZE + minicbor::len(&cose))
+    let (cose_key, cose_len) = encode_cose_key(scoped, params)?;
+    Ok(minicbor::len(build_payload_struct(
+        params, cose_key, cose_len, kind,
+    )))
 }
 
-async fn do_build<'a, P>(
+/// Encode the attested key's COSE_Key into a zeroed `public_key` field,
+/// returning the field and the COSE_Key's length within it.
+fn encode_cose_key<'a>(
+    alloc: &'a impl HsmScopedAlloc,
+    params: &KeyReportParams<'_>,
+) -> HsmResult<(&'a HsmDmaBuf, usize)> {
+    let field = alloc.dma_alloc_zeroed(params.key.field_len())?;
+    let cose_len = to_cose_key(&params.key, field)?;
+    if field.len() > PUBLIC_KEY_MAX_SIZE && cose_len != field.len() {
+        return Err(HsmError::InternalError);
+    }
+    Ok((field, cose_len))
+}
+
+/// Byte layout of a tagged COSE_Sign1
+/// `18([ bstr(protected), {}, bstr(payload), bstr(signature) ])`.
+///
+/// Lets the payload and signature be written at their final offsets in
+/// the caller's buffer, so building a report needs no payload, signature
+/// or envelope scratch — only the transient `Sig_structure`.
+struct Sign1Layout {
+    protected_header: &'static [u8],
+    sig_len: usize,
+    payload_at: usize,
+    payload_len: usize,
+    sig_at: usize,
+    total: usize,
+}
+
+impl Sign1Layout {
+    fn new(kind: ReportKind, alg: ReportAlg, payload_len: usize) -> HsmResult<Self> {
+        let protected_header = kind.protected_header(alg);
+        let protected = protected_header.len();
+        let payload_at = COSE_SIGN1_TAG_SIZE + 1 + bstr_head_len(protected)? + protected + 1;
+        let payload_at = payload_at + bstr_head_len(payload_len)?;
+        let sig_len = alg.signature_len();
+        let sig_at = payload_at + payload_len + bstr_head_len(sig_len)?;
+        Ok(Self {
+            protected_header,
+            sig_len,
+            payload_at,
+            payload_len,
+            sig_at,
+            total: sig_at + sig_len,
+        })
+    }
+
+    /// Write every envelope byte outside the payload and signature.
+    fn write_envelope(&self, out: &mut [u8]) -> HsmResult<()> {
+        let protected = self.protected_header;
+        out[0] = COSE_SIGN1_TAG;
+        out[1] = CBOR_ARRAY_4;
+        let mut at = 2 + write_bstr_head(&mut out[2..], protected.len())?;
+        out[at..at + protected.len()].copy_from_slice(protected);
+        at += protected.len();
+        out[at] = CBOR_EMPTY_MAP;
+        at += 1;
+        at += write_bstr_head(&mut out[at..], self.payload_len)?;
+        if at != self.payload_at {
+            return Err(HsmError::InternalError);
+        }
+        at += self.payload_len;
+        at += write_bstr_head(&mut out[at..], self.sig_len)?;
+        if at != self.sig_at {
+            return Err(HsmError::InternalError);
+        }
+        Ok(())
+    }
+}
+
+/// CBOR `array(4)` initial byte.
+const CBOR_ARRAY_4: u8 = 0x84;
+/// CBOR empty map `{}`.
+const CBOR_EMPTY_MAP: u8 = 0xA0;
+
+/// Length of a definite CBOR byte-string head for `len` content bytes.
+fn bstr_head_len(len: usize) -> HsmResult<usize> {
+    match len {
+        0..=23 => Ok(1),
+        24..=0xFF => Ok(2),
+        0x100..=0xFFFF => Ok(3),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Write the shortest-form CBOR byte-string head for `len` into `out`.
+fn write_bstr_head(out: &mut [u8], len: usize) -> HsmResult<usize> {
+    const BSTR: u8 = 0x40;
+    let head_len = bstr_head_len(len)?;
+    let head = out.get_mut(..head_len).ok_or(HsmError::InternalError)?;
+    match head {
+        [b] => *b = BSTR | len as u8,
+        [b, l] => {
+            *b = BSTR | 24;
+            *l = len as u8;
+        }
+        [b, rest @ ..] => {
+            *b = BSTR | 25;
+            rest.copy_from_slice(&(len as u16).to_be_bytes());
+        }
+        [] => return Err(HsmError::InternalError),
+    }
+    Ok(head_len)
+}
+
+async fn do_build<P>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     (params, kind): (&KeyReportParams<'_>, Option<ReportKind>),
-    priv_key: &HsmDmaBuf,
-    out: &mut [u8],
+    signer: ReportSigner<'_>,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<usize>
 where
-    P: HsmCrypto + HsmAlloc + 'a,
+    P: HsmCrypto + HsmAlloc,
 {
-    // 1. Encode the inner COSE_Key (zero-padded to the fixed field size).
-    let cose_key = alloc.dma_alloc_zeroed(PUBLIC_KEY_MAX_SIZE)?;
-    let cose_len = to_cose_key(&params.key, cose_key)?;
-
-    // 2. Encode the payload map into DMA scratch. Zeroed so a short
-    //    `minicbor::encode` write can't leave stale DMA bytes in the
-    //    payload that is sent to the host.
-    let payload_struct = build_payload_struct(params, cose_key, cose_len, kind);
-    let payload_len = minicbor::len(&payload_struct);
-    let payload = alloc.dma_alloc_zeroed(payload_len)?;
-    minicbor::encode(&payload_struct, as_mut_slice(payload))
-        .map_err(|_| HsmError::InternalError)?;
-
-    sign_payload(
+    let payload_len = pal.alloc_scoped(io, |scoped| key_payload_len(scoped, params, kind))?;
+    // The COSE_Key scratch lives only while the payload is encoded into
+    // its final position in `out`.
+    let encode = |payload: &mut [u8]| {
+        pal.alloc_scoped(io, |scoped| {
+            let (cose_key, cose_len) = encode_cose_key(scoped, params)?;
+            let payload_struct = build_payload_struct(params, cose_key, cose_len, kind);
+            minicbor::encode(&payload_struct, payload).map_err(|_| HsmError::InternalError)
+        })
+    };
+    sign_into(
         pal,
         io,
-        alloc,
         ReportKind::PublicKey,
-        payload,
-        priv_key,
+        signer,
+        payload_len,
+        &encode,
         out,
     )
     .await
 }
 
-async fn sign_payload<'a, P>(
+/// Exact size of a COSE_Sign1 containing the complete SD encrypted envelope.
+/// Exact size of COSE_Sign1 containing a complete encrypted transfer.
+pub fn transfer_report_len(
+    kind: ReportKind,
+    kem: crate::transfer::TransferKem,
+    alg: ReportAlg,
+) -> HsmResult<usize> {
+    let payload_len = match kind {
+        ReportKind::Darc => crate::transfer::darc_envelope_len(kem),
+        ReportKind::SdBackup => crate::transfer::sd_backup_envelope_len(kem),
+        ReportKind::PublicKey => return Err(HsmError::InvalidArg),
+    };
+    Ok(Sign1Layout::new(kind, alg, payload_len)?.total)
+}
+
+/// Assemble a tagged COSE_Sign1 in `out`: `encode` writes the
+/// `payload_len`-byte payload at its final offset and `signer` signs
+/// straight into the trailing signature field.
+///
+/// `encode` is a trait object so the key and transfer reports share one
+/// copy of this function.
+async fn sign_into<P>(
     pal: &P,
     io: &P::Io,
-    alloc: &'a impl HsmScopedAlloc,
     kind: ReportKind,
-    payload: &HsmDmaBuf,
-    priv_key: &HsmDmaBuf,
-    out: &mut [u8],
+    signer: ReportSigner<'_>,
+    payload_len: usize,
+    encode: &dyn Fn(&mut [u8]) -> HsmResult<()>,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<usize>
 where
-    P: HsmCrypto + HsmAlloc + 'a,
+    P: HsmCrypto + HsmAlloc,
 {
-    let protected_header = kind.protected_header();
-    let total = pal.alloc_scoped(io, |scoped| {
-        signed_report_size(scoped, protected_header, payload.len())
-    })?;
-    if out.len() < total || total > KEY_REPORT_MAX_LEN {
+    let alg = signer.alg();
+    let layout = Sign1Layout::new(kind, alg, payload_len)?;
+    if out.len() < layout.total || layout.total > REPORT_MAX_LEN {
         return Err(HsmError::InvalidArg);
     }
+    let out = &mut out[..layout.total];
+    // `out` may be uninitialised DMA memory; zero it so a short
+    // `minicbor::encode` write can't expose stale bytes to the host.
+    out.fill(0);
+    layout.write_envelope(out)?;
+    let payload_end = layout.payload_at + payload_len;
+    encode(&mut out[layout.payload_at..payload_end])?;
 
-    // 3. Bind the report kind through the COSE external signature domain.
-    let sig_struct_val = SigStructure {
-        context: SIG_STRUCTURE_CONTEXT,
-        body_protected: protected_header,
-        external_aad: kind.external_aad(),
-        payload,
-    };
-    let sig_struct_len = minicbor::len(&sig_struct_val);
-    // Zeroed so any `len`/`encode` divergence can't feed stale DMA bytes
-    // into the signed digest.
-    let sig_struct = alloc.dma_alloc_zeroed(sig_struct_len)?;
-    minicbor::encode(&sig_struct_val, as_mut_slice(sig_struct))
-        .map_err(|_| HsmError::InternalError)?;
+    let (head, sig) = out.split_at_mut(layout.sig_at);
+    let payload = &head[layout.payload_at..payload_end];
+    pal.alloc_scoped_async(io, async |alloc| {
+        // Encode the COSE Sig_structure over (protected_header, payload).
+        // Zeroed so any `len`/`encode` divergence can't feed stale DMA
+        // bytes into the signed message.
+        let sig_struct_val = SigStructure {
+            context: SIG_STRUCTURE_CONTEXT,
+            body_protected: layout.protected_header,
+            external_aad: kind.external_aad(),
+            payload,
+        };
+        let sig_struct = alloc.dma_alloc_zeroed(minicbor::len(&sig_struct_val))?;
+        minicbor::encode(&sig_struct_val, as_mut_slice(sig_struct))
+            .map_err(|_| HsmError::InternalError)?;
 
-    // 4. SHA-384 digest in operand order into the digest lane of
-    //    `k ‖ digest`, as `ecc_sign_in_place` consumes it.
-    let sig = alloc.dma_alloc(SIGNATURE_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        sig_struct,
-        HsmDigestForm::Operand,
-        Some(&mut sig[SIGNATURE_LEN / 2..]),
-    )
+        match signer {
+            ReportSigner::Es384(priv_key) => {
+                // The final COSE signature field need not be word-aligned.
+                let aligned_sig = alloc.dma_alloc(SIGNATURE_LEN)?;
+                pal.hash(
+                    io,
+                    HsmHashAlgo::Sha384,
+                    sig_struct,
+                    HsmDigestForm::Operand,
+                    Some(&mut aligned_sig[SIGNATURE_LEN / 2..]),
+                )
+                .await?;
+                pal.ecc_sign_in_place(
+                    io,
+                    HsmEccCurve::P384,
+                    HsmHashAlgo::Sha384,
+                    priv_key,
+                    HsmEcdsaNonce::Generated,
+                    aligned_sig,
+                )
+                .await?;
+                sig_halves_swap(P::BYTE_ORDER, aligned_sig)?;
+                sig.copy_from_slice(aligned_sig);
+                Ok(())
+            }
+            ReportSigner::MlDsa87Seed(seed) => {
+                // ML-DSA-87 signs the Sig_structure itself (pure mode,
+                // empty context), with required hedging.
+                let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::Pure, 0, sig_struct)?;
+                let len = pal
+                    .mldsa_sign(
+                        io,
+                        HsmMlDsaParamSet::MlDsa87,
+                        HsmMlDsaPrivKey::Seed(seed),
+                        HsmMlDsaHedge::Required,
+                        msg,
+                        Some(&mut *sig),
+                    )
+                    .await?;
+                if len != MLDSA87_SIGNATURE_LEN {
+                    return Err(HsmError::InternalError);
+                }
+                Ok(())
+            }
+        }
+    })
     .await?;
-
-    // 5. ECDSA-P384 sign in place — `r || s` in operand order.
-    pal.ecc_sign_in_place(
-        io,
-        HsmEccCurve::P384,
-        HsmHashAlgo::Sha384,
-        priv_key,
-        HsmEcdsaNonce::Generated,
-        sig,
-    )
-    .await?;
-
-    // 6. Convert the signature in place to big-endian per half for COSE.
-    sig_halves_swap(P::BYTE_ORDER, sig)?;
-
-    // 7. Compose the tagged COSE_Sign1 envelope into `out`.
-    let cose = CoseSign1 {
-        protected_header,
-        unprotected: UnprotectedHeader {},
-        payload,
-        signature: sig,
-    };
-    let total = COSE_SIGN1_TAG_SIZE + minicbor::len(&cose);
-    if out.len() < total {
-        return Err(HsmError::InvalidArg);
-    }
-    // `out` may be uninitialised DMA memory; zero the report region so a
-    // short `minicbor::encode` write can't expose stale bytes to the host.
-    out[..total].fill(0);
-    out[0] = COSE_SIGN1_TAG;
-    minicbor::encode(&cose, &mut out[COSE_SIGN1_TAG_SIZE..total])
-        .map_err(|_| HsmError::InternalError)?;
-    Ok(total)
+    Ok(layout.total)
 }

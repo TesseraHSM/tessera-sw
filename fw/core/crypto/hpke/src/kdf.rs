@@ -1,22 +1,37 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! HPKE LabeledExtract and LabeledExpand (RFC 9180 §4).
+//! HPKE labelled KDF helpers.
 //!
-//! These are thin wrappers that prepend HPKE domain-separation labels
-//! before calling the PAL's HKDF Extract/Expand:
+//! Two-stage (HKDF) suites use LabeledExtract and LabeledExpand
+//! (RFC 9180 §4), thin wrappers that prepend HPKE domain-separation
+//! labels before calling the PAL's HKDF Extract/Expand:
 //!
 //! ```text
 //! labeled_ikm  = "HPKE-v1" || suite_id || label || ikm
 //! labeled_info = I2OSP(L, 2) || "HPKE-v1" || suite_id || label || info
 //! ```
 //!
-//! Both helpers assemble their labelled buffer from the caller's
-//! [`HsmScopedAlloc`], while the PAL allocates any internal HKDF scratch
+//! One-stage (SHAKE256) suites use LabeledDerive
+//! (draft-ietf-hpke-hpke §4.4):
+//!
+//! ```text
+//! labeled_ikm = ikm || "HPKE-v1" || suite_id || lengthPrefixed(label)
+//!               || I2OSP(L, 2) || context
+//! out         = SHAKE256(labeled_ikm, L)
+//! ```
+//!
+//! Every helper assembles its labelled buffer from the caller's
+//! [`HsmScopedAlloc`], while the PAL allocates any internal scratch
 //! per call.
 
+use core::num::NonZeroU16;
+
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -42,14 +57,32 @@ fn concat_alloc<'a>(
     parts: &[&[u8]],
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let total: usize = parts.iter().map(|p| p.len()).sum();
-    let dst = alloc.dma_alloc(total)?;
+    concat3_alloc(&[], parts, &[], alloc)
+}
+
+/// [`concat_alloc`] over three part lists, concatenated in order.
+fn concat3_alloc<'a>(
+    a: &[&[u8]],
+    b: &[&[u8]],
+    c: &[&[u8]],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let parts = || a.iter().chain(b).chain(c);
+    let total = parts().try_fold(0usize, |n, p| n.checked_add(p.len()));
+    let dst = alloc.dma_alloc(total.ok_or(HsmError::InvalidArg)?)?;
     let mut pos = 0;
-    for part in parts {
+    for part in parts() {
         dst[pos..pos + part.len()].copy_from_slice(part);
         pos += part.len();
     }
     Ok(dst)
+}
+
+/// `I2OSP(len, 2)`, or `InvalidArg` when `len` does not fit two bytes.
+pub(crate) fn i2osp2(len: usize) -> HsmResult<[u8; 2]> {
+    u16::try_from(len)
+        .map(u16::to_be_bytes)
+        .map_err(|_| HsmError::InvalidArg)
 }
 
 // =============================================================================
@@ -171,4 +204,72 @@ where
     let labeled_info = concat_alloc(&[&l_bytes, HPKE_V1, suite_id, label, info], alloc)?;
     pal.hkdf_expand(io, algo, prk, Some(labeled_info), out)
         .await
+}
+
+/// HPKE one-stage `LabeledDerive` (draft-ietf-hpke-hpke §4.4) with
+/// SHAKE256 as `Derive`:
+///
+/// ```text
+/// labeled_ikm = ikm || "HPKE-v1" || suite_id || lengthPrefixed(label)
+///               || I2OSP(L, 2) || context
+/// out         = SHAKE256(labeled_ikm, L)
+/// ```
+///
+/// `ikm` and `context` are passed as part lists that are concatenated
+/// in order, so callers can supply length prefixes without a copy.
+/// The labelled input is assembled into one scoped DMA buffer and
+/// hashed in a single call (some PALs only support one-shot SHAKE).
+///
+/// # Parameters
+///
+/// * `pal` — PAL providing SHAKE256.
+/// * `io` — caller's I/O context (per-IO scope).
+/// * `suite_id` — HPKE or KEM suite identifier.
+/// * `ikm` — input keying material parts.
+/// * `label` — context-specific label (e.g. `b"secret"`).
+/// * `context` — context parts (may be empty).
+/// * `out` — destination; `L = out.len()`, `1..=65535` bytes.
+/// * `alloc` — scoped allocator used for the labelled input buffer.
+///
+/// # Returns
+///
+/// * `Ok(())` — `out` filled with the derived bytes.
+/// * `Err(HsmError::InvalidArg)` — `L` or `len(label)` out of range,
+///   or the labelled input exceeds the PAL's SHAKE input limit.
+/// * `Err(HsmError::NotEnoughSpace)` — scoped allocation failed.
+/// * `Err(HsmError)` — propagated from [`HsmHash::hash`].
+pub async fn labeled_derive<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    suite_id: &[u8],
+    ikm: &[&[u8]],
+    label: &[u8],
+    context: &[&[u8]],
+    out: &mut HsmDmaBuf,
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<()>
+where
+    P: HsmHash + HsmAlloc + 'a,
+{
+    let l = u16::try_from(out.len())
+        .ok()
+        .and_then(NonZeroU16::new)
+        .ok_or(HsmError::InvalidArg)?;
+    let label_len = i2osp2(label.len())?;
+    let l_bytes = l.get().to_be_bytes();
+    let labeled_ikm = concat3_alloc(
+        ikm,
+        &[HPKE_V1, suite_id, &label_len, label, &l_bytes],
+        context,
+        alloc,
+    )?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Shake256(l),
+        labeled_ikm,
+        HsmDigestForm::Standard,
+        Some(out),
+    )
+    .await
+    .map(|_| ())
 }

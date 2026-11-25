@@ -29,6 +29,9 @@ use bitfield_struct::bitfield;
 
 use super::der_helpers::ECDSA_SHA384_ALG_ID;
 use super::der_helpers::MAX_ECDSA384_SIG_DER_LEN;
+use super::der_helpers::MLDSA87_ALG_ID;
+use super::der_helpers::MLDSA87_SIG_BIT_STRING_HEADER;
+use super::der_helpers::MLDSA87_SIGNATURE_LEN;
 use super::der_helpers::{self};
 
 /// Length of Common Name field (space-padded ASCII, 32 bytes).
@@ -260,6 +263,21 @@ pub fn build_root_cert(
     sig_s: &[u8; 48],
     out: &mut [u8],
 ) -> Option<usize> {
+    let tbs = root_cert_tbs(params)?;
+    assemble_cert(&tbs, sig_r, sig_s, out)
+}
+
+/// The patched P-384 TBS of the self-signed Root CA certificate
+/// [`build_root_cert`] assembles.
+///
+/// For other algorithms, pass it to
+/// [`retarget_tbs`](super::retarget::retarget_tbs) before signing.
+///
+/// # Returns
+/// `None` if validation fails.
+pub fn root_cert_tbs(
+    params: &RootCertParams<'_>,
+) -> Option<[u8; super::root_cert::TBS_TEMPLATE.len()]> {
     use super::root_cert::*;
 
     validate_serial(params.serial_number)?;
@@ -278,7 +296,7 @@ pub fn build_root_cert(
     patch(&mut tbs, SUBJECT_SN_OFFSET, &subject_sn);
     patch(&mut tbs, SUBJECT_KEY_ID_OFFSET, params.subject_key_id);
 
-    assemble_cert(&tbs, sig_r, sig_s, out)
+    Some(tbs)
 }
 
 /// Build an Intermediate CA certificate from the [`intermediate_cert`](super::intermediate_cert) template.
@@ -299,11 +317,19 @@ pub fn build_intermediate_cert(
     sig_s: &[u8; 48],
     out: &mut [u8],
 ) -> Option<usize> {
-    let tbs = intermediate_tbs(params)?;
+    let tbs = intermediate_cert_tbs(params)?;
     assemble_cert(&tbs, sig_r, sig_s, out)
 }
 
-fn intermediate_tbs(
+/// The patched P-384 TBS of the Intermediate CA certificate
+/// [`build_intermediate_cert`] assembles.
+///
+/// For other algorithms, pass it to
+/// [`retarget_tbs`](super::retarget::retarget_tbs) before signing.
+///
+/// # Returns
+/// `None` if validation fails.
+pub fn intermediate_cert_tbs(
     params: &IntermediateCertParams<'_>,
 ) -> Option<[u8; super::intermediate_cert::TBS_TEMPLATE.len()]> {
     use super::intermediate_cert::*;
@@ -342,7 +368,7 @@ pub fn intermediate_cert_tbs_with_subject_name(
     out: &mut [u8],
 ) -> Option<usize> {
     use super::intermediate_cert::*;
-    let tbs = intermediate_tbs(params)?;
+    let tbs = intermediate_cert_tbs(params)?;
     replace_tbs_name(
         &tbs,
         SUBJECT_CN_OFFSET - 13,
@@ -369,6 +395,21 @@ pub fn build_leaf_cert(
     sig_s: &[u8; 48],
     out: &mut [u8],
 ) -> Option<usize> {
+    let tbs = leaf_cert_tbs(params)?;
+    assemble_cert(&tbs, sig_r, sig_s, out)
+}
+
+/// The patched P-384 TBS of the Leaf certificate [`build_leaf_cert`]
+/// assembles.
+///
+/// For other algorithms, pass it to
+/// [`retarget_tbs`](super::retarget::retarget_tbs) before signing.
+///
+/// # Returns
+/// `None` if validation fails.
+pub fn leaf_cert_tbs(
+    params: &LeafCertParams<'_>,
+) -> Option<[u8; super::leaf_cert::TBS_TEMPLATE.len()]> {
     use super::leaf_cert::*;
 
     validate_serial(params.serial_number)?;
@@ -391,7 +432,7 @@ pub fn build_leaf_cert(
     patch(&mut tbs, AUTHORITY_KEY_ID_OFFSET, params.authority_key_id);
     patch(&mut tbs, KEY_USAGE_OFFSET, &params.key_usage.to_bytes());
 
-    assemble_cert(&tbs, sig_r, sig_s, out)
+    Some(tbs)
 }
 
 fn replace_tbs_name(
@@ -478,6 +519,36 @@ pub fn assemble_cert(
     pos += sig_len;
 
     Some(pos)
+}
+
+/// Size of the certificate [`assemble_cert_mldsa`] builds for a TBS of
+/// `tbs_len` bytes.
+pub fn mldsa_cert_len(tbs_len: usize) -> usize {
+    der_helpers::signed_len(
+        tbs_len,
+        MLDSA87_ALG_ID.len(),
+        MLDSA87_SIG_BIT_STRING_HEADER.len() + MLDSA87_SIGNATURE_LEN,
+    )
+}
+
+/// Assemble a DER certificate from `tbs` and its ML-DSA-87 signature
+/// (pure, empty context). `tbs` must name ML-DSA-87 as its signature
+/// algorithm (see [`retarget_tbs`](super::retarget::retarget_tbs)).
+///
+/// # Returns
+/// `Some(n)` — bytes written, or `None` if `out` is shorter than
+/// [`mldsa_cert_len`].
+pub fn assemble_cert_mldsa(
+    tbs: &[u8],
+    sig: &[u8; MLDSA87_SIGNATURE_LEN],
+    out: &mut [u8],
+) -> Option<usize> {
+    der_helpers::assemble_signed(
+        out,
+        tbs,
+        &MLDSA87_ALG_ID,
+        &[&MLDSA87_SIG_BIT_STRING_HEADER, sig],
+    )
 }
 
 #[cfg(test)]

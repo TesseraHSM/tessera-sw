@@ -147,7 +147,7 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
     env.store.save_peer(&env.record())?;
     let domain = SecurityDomain::new(env);
     let env = domain.env();
-    let prepared = domain.prepare_peer(&session, &seed, |csr, report| {
+    let prepared = domain.prepare_peer(&session, &seed, args.kem, |csr, report| {
         display::write_peer_enrollment(
             &mut std::io::stdout().lock(),
             &env.manufacturer,

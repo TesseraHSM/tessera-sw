@@ -23,9 +23,9 @@ use tsra_ddi_tbor_types::codec::RESP_HEADER_LEN;
 use tsra_ddi_tbor_types::codec::TOC_ENTRY_LEN;
 use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_ddi_tbor_types::TborGetCertChainInfoResp;
-use tsra_ddi_tbor_types::TborGetCertReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_BANK_ECC;
 use tsra_ddi_tbor_types::CERT_THUMBPRINT_LEN;
 
 const VALID_SLOT: u8 = 0;
@@ -35,7 +35,7 @@ const VALID_SLOT: u8 = 0;
 fn round_trip() {
     let ctx = TestCtx::new();
     let resp = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("TBOR GetCertChainInfo round-trip");
 
     assert!(
@@ -59,10 +59,10 @@ fn round_trip() {
 fn repeated_stable() {
     let ctx = TestCtx::new();
     let first = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("first GetCertChainInfo");
     let second = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("second GetCertChainInfo");
     assert_eq!(
         first, second,
@@ -81,7 +81,7 @@ fn matches_mbor_path() {
         return;
     }
     let tbor = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("TBOR GetCertChainInfo");
     let mbor = ctx.cert_chain_info().expect("MBOR GetCertChainInfo");
 
@@ -103,24 +103,26 @@ fn matches_mbor_path() {
 fn reported_count_defines_certificate_bounds() {
     let ctx = TestCtx::new();
     let info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo");
 
     assert!(info.num_certs > 0, "chain must be non-empty");
     for cert_id in 0..info.num_certs {
         let cert = ctx
-            .tbor(&TborGetCertReq::new(VALID_SLOT, cert_id))
+            .get_cert(VALID_SLOT, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|err| {
                 panic!("advertised certificate {cert_id} is unreadable: {err:?}")
             });
         assert!(
-            !cert.certificate.is_empty(),
+            !cert.is_empty(),
             "advertised certificate {cert_id} must contain DER bytes",
         );
     }
 
-    ctx.expect_fw_reject(
-        &TborGetCertReq::new(VALID_SLOT, info.num_certs),
+    ctx.expect_get_cert_reject(
+        VALID_SLOT,
+        CERT_BANK_ECC,
+        info.num_certs,
         TborStatus::InvalidArg,
     );
 }
@@ -132,16 +134,16 @@ fn certificate_reads_do_not_change_chain_info() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before certificate reads");
 
     for cert_id in 0..before.num_certs {
-        ctx.tbor(&TborGetCertReq::new(VALID_SLOT, cert_id))
+        ctx.get_cert(VALID_SLOT, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|err| panic!("failed to read certificate {cert_id}: {err:?}"));
     }
 
     let after = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo after certificate reads");
 
     assert_eq!(
@@ -155,22 +157,22 @@ fn certificate_reads_do_not_change_chain_info() {
 fn certificates_are_stable_across_reads() {
     let ctx = TestCtx::new();
     let info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo");
 
     assert!(info.num_certs > 0, "chain must be non-empty");
 
     for cert_id in 0..info.num_certs {
         let first = ctx
-            .tbor(&TborGetCertReq::new(VALID_SLOT, cert_id))
+            .get_cert(VALID_SLOT, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|err| panic!("first read of certificate {cert_id} failed: {err:?}"));
 
         let second = ctx
-            .tbor(&TborGetCertReq::new(VALID_SLOT, cert_id))
+            .get_cert(VALID_SLOT, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|err| panic!("second read of certificate {cert_id} failed: {err:?}"));
 
         assert_eq!(
-            first.certificate, second.certificate,
+            first, second,
             "certificate {cert_id} must be stable across reads",
         );
     }
@@ -182,7 +184,7 @@ fn certificates_are_stable_across_reads() {
 fn certificate_indices_do_not_alias() {
     let ctx = TestCtx::new();
     let info = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo");
 
     assert!(
@@ -194,17 +196,17 @@ fn certificate_indices_do_not_alias() {
 
     for cert_id in 0..info.num_certs {
         let cert = ctx
-            .tbor(&TborGetCertReq::new(VALID_SLOT, cert_id))
+            .get_cert(VALID_SLOT, CERT_BANK_ECC, cert_id)
             .unwrap_or_else(|err| panic!("failed to read certificate {cert_id}: {err:?}"));
 
         for (previous_id, previous) in certificates.iter().enumerate() {
             assert_ne!(
-                &cert.certificate, previous,
+                &cert, previous,
                 "certificate {cert_id} aliases certificate {previous_id}",
             );
         }
 
-        certificates.push(cert.certificate);
+        certificates.push(cert);
     }
 }
 
@@ -215,16 +217,16 @@ fn invalid_slot_does_not_affect_valid_slot() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before invalid request");
 
     ctx.expect_fw_reject(
-        &TborGetCertChainInfoReq::new(u8::MAX),
+        &TborGetCertChainInfoReq::new(u8::MAX, CERT_BANK_ECC),
         TborStatus::InvalidArg,
     );
 
     let after = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo after invalid request");
 
     assert_eq!(
@@ -240,7 +242,7 @@ fn stable_across_co_session_activity() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before CO session activity");
 
     let session = ctx
@@ -250,7 +252,7 @@ fn stable_across_co_session_activity() {
     session.close().expect("close CO authenticated session");
 
     let after = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo after CO session activity");
 
     assert_eq!(
@@ -266,7 +268,7 @@ fn callable_while_co_session_active() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before opening CO session");
 
     let session = ctx
@@ -274,7 +276,7 @@ fn callable_while_co_session_active() {
         .expect("open CO authenticated session");
 
     let during = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo while CO session is active");
 
     assert_eq!(
@@ -292,7 +294,7 @@ fn unsupported_slot_boundaries_rejected() {
 
     for slot_id in [1, 2, 127, 254, u8::MAX] {
         ctx.expect_fw_reject(
-            &TborGetCertChainInfoReq::new(slot_id),
+            &TborGetCertChainInfoReq::new(slot_id, CERT_BANK_ECC),
             TborStatus::InvalidArg,
         );
     }
@@ -393,7 +395,7 @@ fn stable_across_cu_session_activity() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before CU session activity");
 
     // CU bootstrap sessions use PlainText while the CU PSK is still
@@ -405,7 +407,7 @@ fn stable_across_cu_session_activity() {
     session.close().expect("close CU plaintext session");
 
     let after = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo after CU session activity");
 
     assert_eq!(
@@ -421,7 +423,7 @@ fn callable_while_cu_session_active() {
     let ctx = TestCtx::new();
 
     let before = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before opening CU session");
 
     // CU bootstrap sessions use PlainText while the CU PSK is still
@@ -431,7 +433,7 @@ fn callable_while_cu_session_active() {
         .expect("open CU plaintext session");
 
     let during = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo while CU session is active");
 
     assert_eq!(
@@ -480,7 +482,7 @@ fn trailing_unknown_toc_type_is_ignored() {
 #[test]
 fn request_constructor_preserves_slot_id() {
     for slot_id in [0, 1, 2, 127, 254, u8::MAX] {
-        let req = TborGetCertChainInfoReq::new(slot_id);
+        let req = TborGetCertChainInfoReq::new(slot_id, CERT_BANK_ECC);
 
         assert_eq!(
             req.slot_id, slot_id,
@@ -511,7 +513,7 @@ fn default_request_matches_explicit_slot_zero() {
         .expect("default GetCertChainInfo request");
 
     let explicit_resp = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("explicit slot-0 GetCertChainInfo request");
 
     assert_eq!(
@@ -527,12 +529,12 @@ fn repeated_calls_remain_stable() {
     let ctx = TestCtx::new();
 
     let expected = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("initial GetCertChainInfo");
 
     for iteration in 0..8 {
         let actual = ctx
-            .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+            .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
             .unwrap_or_else(|err| panic!("GetCertChainInfo iteration {iteration} failed: {err:?}"));
 
         assert_eq!(
@@ -549,7 +551,7 @@ fn first_unsupported_slot_rejected() {
     let ctx = TestCtx::new();
 
     ctx.expect_fw_reject(
-        &TborGetCertChainInfoReq::new(VALID_SLOT + 1),
+        &TborGetCertChainInfoReq::new(VALID_SLOT + 1, CERT_BANK_ECC),
         TborStatus::InvalidArg,
     );
 }
@@ -561,7 +563,7 @@ fn maximum_slot_id_rejected() {
     let ctx = TestCtx::new();
 
     ctx.expect_fw_reject(
-        &TborGetCertChainInfoReq::new(u8::MAX),
+        &TborGetCertChainInfoReq::new(u8::MAX, CERT_BANK_ECC),
         TborStatus::InvalidArg,
     );
 }
@@ -573,18 +575,18 @@ fn repeated_invalid_slots_do_not_affect_valid_slot() {
     let ctx = TestCtx::new();
 
     let expected = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo before invalid requests");
 
     for slot_id in [1, 2, 127, 254, u8::MAX] {
         ctx.expect_fw_reject(
-            &TborGetCertChainInfoReq::new(slot_id),
+            &TborGetCertChainInfoReq::new(slot_id, CERT_BANK_ECC),
             TborStatus::InvalidArg,
         );
     }
 
     let actual = ctx
-        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT))
+        .tbor(&TborGetCertChainInfoReq::new(VALID_SLOT, CERT_BANK_ECC))
         .expect("GetCertChainInfo after invalid requests");
 
     assert_eq!(
@@ -599,10 +601,7 @@ fn repeated_invalid_slots_do_not_affect_valid_slot() {
 fn maximum_certificate_index_rejected() {
     let ctx = TestCtx::new();
 
-    ctx.expect_fw_reject(
-        &TborGetCertReq::new(VALID_SLOT, u8::MAX),
-        TborStatus::InvalidArg,
-    );
+    ctx.expect_get_cert_reject(VALID_SLOT, CERT_BANK_ECC, u8::MAX, TborStatus::InvalidArg);
 }
 
 /// A thumbprint buffer shorter than the fixed SHA-256 length is rejected.

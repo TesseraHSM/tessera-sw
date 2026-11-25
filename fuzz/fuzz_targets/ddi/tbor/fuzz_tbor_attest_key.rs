@@ -445,7 +445,7 @@ fuzz_target!(|input: FuzzInput| {
             report_data: input.fuzzed_key_data.report_data,
             auth_envelope: Vec::new(),
         };
-        let result = ctx.tbor(&req);
+        let result = ctx.key_report(&req);
 
         let oversized = req.masked_key.len() > KEY_REPORT_MASKED_KEY_MAX_LEN;
         match (&result, expected) {
@@ -459,10 +459,10 @@ fuzz_target!(|input: FuzzInput| {
                 "oversized masked key must be rejected, got {err}"
             ),
             (Ok(resp), Expected::Report { pub_key, coord_len }) => {
-                verify_key_report(ctx, &resp.report, &req.report_data, &pub_key, coord_len)
+                verify_key_report(ctx, resp, &req.report_data, &pub_key, coord_len)
             }
             (Ok(resp), Expected::RsaReport { n, e }) => {
-                verify_rsa_key_report(ctx, &resp.report, &req.report_data, &n, &e)
+                verify_rsa_key_report(ctx, resp, &req.report_data, &n, &e)
             }
             (Err(err), Expected::Report { .. }) => {
                 panic!("KeyReport of a generated ECC key must succeed, got {err}")

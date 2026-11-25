@@ -49,27 +49,39 @@
 //!    DER-encoded PTACSR and the COSE_Sign1 PTAReport.
 
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
-use tsra_fw_core_crypto_key_report::key_report;
+use tsra_fw_core_crypto_key_report::key_report_with;
 use tsra_fw_core_crypto_key_report::AttestedPubKey;
 use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KeyReportParams;
+use tsra_fw_core_crypto_key_report::ReportSigner;
 use tsra_fw_core_crypto_key_report::APP_UUID_LEN;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
+use tsra_fw_core_crypto_key_report::MLDSA87_PUB_KEY_LEN;
+use tsra_fw_core_crypto_key_report::MLDSA_SEED_LEN;
 use tsra_fw_core_crypto_key_report::REPORT_DATA_LEN;
 use tsra_fw_core_crypto_key_report::VM_LAUNCH_ID_LEN;
+use tsra_fw_core_crypto_x509_builder::cert_builder::MlDsa87Signer;
 use tsra_fw_core_crypto_x509_builder::csr;
 use tsra_fw_core_crypto_x509_builder::csr_builder;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
+use tsra_fw_ddi_tbor_types::PolicyPtaAlg;
 use tsra_fw_ddi_tbor_types::TborPartInitReq;
 use tsra_fw_ddi_tbor_types::TborPartInitResp;
 use tsra_fw_ddi_tbor_types::MACH_SEED_LEN;
+use tsra_fw_ddi_tbor_types::PART_INIT_CSR_OOB_INDEX;
 use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LABEL;
 use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
+use tsra_fw_ddi_tbor_types::PART_INIT_REPORT_OOB_INDEX;
 use tsra_fw_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_fw_ddi_tbor_types::PTA_REPORT_MAX_LEN;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPrivKey;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -79,6 +91,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::pta;
+#[cfg(test)]
 use super::pta::PTAID_LABEL;
 #[cfg(test)]
 use super::pta::PTAID_LEN;
@@ -143,33 +156,32 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| {
         let req = parse_request(cmd_buf.request_mut())?;
 
+        // Fail fast on a re-init before any derivation or out-of-band
+        // output.  The atomic commit guard below still decides races.
+        if crate::part_state::part_pta_provisioned(pal, io)? {
+            return Err(HsmError::PtaKeyAlreadySet);
+        }
+
         // Read-only request fields are codec sub-views of the inbound
         // buffer, so they flow directly into PAL crypto and the
         // write-once setters without copying.  `mach_seed_envelope` is
         // AEAD-opened **in place** on the same inbound buffer.
         let policy_dma = req.policy;
-        let _ = super::policy::from_bytes(policy_dma)?;
+        let pta_alg = super::policy::from_bytes(policy_dma)?.pta_alg;
         let mach_seed_dma =
             open_mach_seed_envelope(pal, io, req.sess_id, req.mach_seed_envelope).await?;
 
         // ── Single-root derivation ────────────────────────────────
-        // PartRoot binds every request input; the PTA keypair fans out
-        // from it.  (The security-domain local masking keys are derived
-        // later in part-final, bound to the POTA-endorsed PTA cert
-        // chain — see the module docs.)
+        // PartRoot binds every request input; the PTA fans out from it.
+        // (The security-domain local masking keys are derived later in
+        // part-final, bound to the POTA-endorsed PTA cert chain — see
+        // the module docs.)
         let root_dma = derive_part_root(pal, io, alloc, mach_seed_dma, policy_dma).await?;
-        let pta = derive_pta_keypair_buf(pal, io, alloc, root_dma).await?;
-
-        // PTACSR + PTAReport: build everything before any partition-
-        // state mutation so failures roll back cleanly.
-        let (csr_dma, csr_len) =
-            build_signed_csr(pal, io, alloc, pta.pub_sec1, pta.priv_scalar).await?;
-        let (report_dma, report_len) =
-            build_pta_report(pal, io, alloc, req.sess_id, pta.pub_sec1, policy_dma).await?;
 
         // Persist only the SHA-384 hash of the policy blob; the full
         // PartPolicy is consumed transiently during PartRoot derivation
-        // (above) and is never stored in the partition.
+        // (above) and is never stored in the partition.  The PTA report
+        // binds the same digest.
         let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
         pal.hash(
             io,
@@ -179,13 +191,28 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             Some(policy_hash_dma),
         )
         .await?;
+        let policy_hash_dma: &HsmDmaBuf = policy_hash_dma;
 
-        // Stage the partition's vault keys (async; independent slots) so the
-        // commit below is a single await-free, atomic block.  Their
-        // delete-inverses are recorded now, so a fail-fast in the commit
-        // guard still reaps the just-created keys.
-        let (root_key_id, pta_key_id) =
-            stage_part_keys(pal, io, root_dma, pta.priv_scalar, undo).await?;
+        // Derive the PTA of the policy's algorithm, send its CSR and
+        // report out of band, then stage its vault key.  Nothing touches
+        // partition state yet, so failures roll back cleanly.
+        let pta = provision_pta(
+            pal,
+            io,
+            alloc,
+            req.sess_id,
+            pta_alg,
+            root_dma,
+            policy_dma,
+            policy_hash_dma,
+            undo,
+        )
+        .await?;
+
+        // Stage PartRoot (async) so the commit below is a single
+        // await-free, atomic block.  Its delete-inverse is recorded now,
+        // so a fail-fast in the commit guard still reaps it.
+        let root_key_id = stage_root_key(pal, io, root_dma, undo).await?;
 
         // Commit partition state (guards-first, atomic), then encode the
         // response.
@@ -196,12 +223,175 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 policy_hash: policy_hash_dma,
             },
             root_key_id,
-            pta_key_id,
+            pta.key,
             undo,
         )?;
-        encode_response(cmd_buf, &csr_dma[..csr_len], &report_dma[..report_len])
+        encode_response(cmd_buf, pta.csr_len, pta.report_len)
     })
     .await
+}
+
+/// A provisioned PTA: its staged vault key and the lengths of the CSR and
+/// report already sent out of band.
+struct ProvisionedPta {
+    key: pta::PtaKey,
+    csr_len: u16,
+    report_len: u16,
+}
+
+/// Send `buf` to out-of-band item `index` and return its length.
+async fn send_out<P: HsmPal>(pal: &P, io: &P::Io, index: usize, buf: &HsmDmaBuf) -> HsmResult<u16> {
+    let len = u16::try_from(buf.len()).map_err(|_| HsmError::InternalError)?;
+    pal.send_oob_bounded(io, index, buf).await?;
+    Ok(len)
+}
+
+/// Derive the PTA of algorithm `alg` from PartRoot, emit its CSR (signed
+/// by the PTA) and a PID-signed report out of band, and stage its vault
+/// key: the P-384 private scalar or the ML-DSA-87 seed.
+#[allow(clippy::too_many_arguments)]
+async fn provision_pta<'p, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    sess_id: HsmSessId,
+    alg: PolicyPtaAlg,
+    root: &HsmDmaBuf,
+    policy: &HsmDmaBuf,
+    policy_hash: &HsmDmaBuf,
+    undo: &mut UndoLog<'p>,
+) -> HsmResult<ProvisionedPta> {
+    // `secret` is the vaulted key; `pub_key` the PTAID-form public key
+    // (SEC1 point for P-384, raw encoding for ML-DSA-87).
+    let (secret, pub_key): (&HsmDmaBuf, &HsmDmaBuf) = match alg {
+        PolicyPtaAlg::Es384 => {
+            let pta = derive_pta_keypair_buf(pal, io, alloc, root).await?;
+            (pta.priv_scalar, pta.pub_sec1)
+        }
+        PolicyPtaAlg::MlDsa87 => derive_mldsa_pta(pal, io, alloc, root).await?,
+    };
+
+    let csr_len = pal
+        .alloc_scoped_async(io, async |scope| {
+            let cn = pta::subject_cn_for_key(pal, io, scope, pub_key).await?;
+            let csr = match alg {
+                PolicyPtaAlg::Es384 => {
+                    build_signed_csr(pal, io, scope, pub_key, secret, &cn).await?
+                }
+                PolicyPtaAlg::MlDsa87 => {
+                    build_mldsa_csr(pal, io, scope, pub_key, secret, &cn).await?
+                }
+            };
+            send_out(pal, io, PART_INIT_CSR_OOB_INDEX, csr).await
+        })
+        .await?;
+
+    let report_len = pal
+        .alloc_scoped_async(io, async |scope| {
+            let (signer, key) = match alg {
+                PolicyPtaAlg::Es384 => {
+                    let pid = pal.vault_key(io, crate::part_state::part_id_key_id(pal, io)?)?;
+                    let pub_xy = &pub_key[1..];
+                    let key = AttestedPubKey::Ecc {
+                        curve: tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
+                        x: &pub_xy[..P384_COORD_LEN],
+                        y: &pub_xy[P384_COORD_LEN..],
+                    };
+                    (ReportSigner::Es384(pid), key)
+                }
+                PolicyPtaAlg::MlDsa87 => {
+                    let pid =
+                        pal.vault_key(io, crate::part_state::part_id_mldsa_seed_key_id(pal, io)?)?;
+                    (
+                        ReportSigner::MlDsa87Seed(pid),
+                        AttestedPubKey::MlDsa87 { pk: pub_key },
+                    )
+                }
+            };
+            let report =
+                build_pta_report(pal, io, scope, sess_id, signer, key, policy, policy_hash).await?;
+            send_out(pal, io, PART_INIT_REPORT_OOB_INDEX, report).await
+        })
+        .await?;
+
+    let kind = match alg {
+        PolicyPtaAlg::Es384 => HsmVaultKeyKind::PartitionTrustAnchor,
+        PolicyPtaAlg::MlDsa87 => HsmVaultKeyKind::MlDsa87Seed,
+    };
+    let key_id = pal
+        .vault_key_create(io, secret, kind, None, PTA_VAULT_ATTRS, HsmVaultPct::None)
+        .await?;
+    undo.push_vault_create(key_id)?;
+    let key = match alg {
+        PolicyPtaAlg::Es384 => pta::PtaKey::Ecc(key_id),
+        PolicyPtaAlg::MlDsa87 => pta::PtaKey::MlDsa87(key_id),
+    };
+    Ok(ProvisionedPta {
+        key,
+        csr_len,
+        report_len,
+    })
+}
+
+/// Derive the ML-DSA-87 PTA seed from PartRoot and its public key,
+/// returned as `(seed, public_key)`.
+async fn derive_mldsa_pta<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    root: &HsmDmaBuf,
+) -> HsmResult<(&'a HsmDmaBuf, &'a HsmDmaBuf)> {
+    let seed = alloc.dma_alloc(MLDSA_SEED_LEN)?;
+    {
+        let info = alloc.dma_alloc(kdf::PTA_MLDSA_SEED_INFO.len())?;
+        info.copy_from_slice(kdf::PTA_MLDSA_SEED_INFO);
+        pal.hkdf_expand(io, HsmHashAlgo::Sha384, root, Some(info), seed)
+            .await?;
+    }
+    let pk = alloc.dma_alloc(HsmMlDsaParamSet::MlDsa87.pk_len())?;
+    pal.alloc_scoped_async(io, async |scope| -> HsmResult<()> {
+        // The expanded key is only needed for the PCT; signing uses the seed.
+        let sk = scope.dma_alloc(HsmMlDsaParamSet::MlDsa87.sk_len())?;
+        let _ = pal
+            .mldsa_gen_keypair(
+                io,
+                HsmMlDsaParamSet::MlDsa87,
+                HsmMlSeedSrc::Caller,
+                HsmMlDsaPct::SignVerify,
+                seed,
+                Some((sk, pk)),
+            )
+            .await?;
+        Ok(())
+    })
+    .await?;
+    Ok((seed, pk))
+}
+
+/// Build the ML-DSA-87 PTA CSR with subject `commonName` `cn`, signed by
+/// the PTA seed.
+async fn build_mldsa_csr<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    pk: &HsmDmaBuf,
+    seed: &HsmDmaBuf,
+    cn: &[u8; csr::SUBJECT_CN_LEN],
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let pk_bytes: &[u8] = pk;
+    let pk_arr =
+        <&[u8; MLDSA87_PUB_KEY_LEN]>::try_from(pk_bytes).map_err(|_| HsmError::InternalError)?;
+    let signer = MlDsa87Signer::new(pal, HsmMlDsaPrivKey::Seed(seed));
+    let len = csr_builder::build_mldsa_csr(io, alloc, pk_arr, cn, &signer, None).await?;
+    if len > PTA_CSR_MAX_LEN {
+        return Err(HsmError::InternalError);
+    }
+    let csr = alloc.dma_alloc(len)?;
+    let written = csr_builder::build_mldsa_csr(io, alloc, pk_arr, cn, &signer, Some(csr)).await?;
+    if written != len {
+        return Err(HsmError::InternalError);
+    }
+    Ok(csr)
 }
 
 /// Parsed-and-validated PartInit request fields, ready to flow into
@@ -352,61 +542,50 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     })
 }
 
-/// Build the CSR subject `commonName` (fixed PTA name plus hex PTAID),
-/// then sign with the PTA private key and emit the full DER-encoded CSR.
-/// The `cn` array is local to this function so it never crosses an await
-/// boundary in `handle`.
+/// Build the P-384 PTA CSR with subject `commonName` `cn`, signed ES384 by
+/// the PTA private key.
 async fn build_signed_csr<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     pub_sec1: &HsmDmaBuf,
     pta_priv: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
-    // PTAID = SHA-384("TSRA-PTAID-v1" || sec1_pub)[..PTAID_LEN].
-    let ptaid_input = alloc.dma_alloc(PTAID_LABEL.len() + P384_PUB_SEC1_LEN)?;
-    ptaid_input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
-    ptaid_input[PTAID_LABEL.len()..].copy_from_slice(pub_sec1);
-    let ptaid_digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        ptaid_input,
-        HsmDigestForm::Standard,
-        Some(ptaid_digest),
-    )
-    .await?;
-
-    let digest_bytes: &[u8] = ptaid_digest;
-    let digest =
-        <&[u8; SHA384_LEN]>::try_from(digest_bytes).map_err(|_| HsmError::InternalError)?;
-    let cn = pta::subject_cn(digest);
-
+    cn: &[u8; csr::SUBJECT_CN_LEN],
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let input = csr_builder::CsrInput {
         tbs_template: &csr::TBS_TEMPLATE,
         public_key_offset: csr::PUBLIC_KEY_OFFSET,
         public_key: pub_sec1,
         subject_cn_offset: csr::SUBJECT_CN_OFFSET,
-        subject_cn: &cn,
+        subject_cn: cn,
     };
 
-    let csr = alloc.dma_alloc(PTA_CSR_MAX_LEN)?;
-    let csr_len = csr_builder::build_csr(pal, io, alloc, &input, pta_priv, Some(csr)).await?;
-    Ok((csr, csr_len))
+    // The size query is an upper bound (the DER ECDSA signature length
+    // varies); only the written prefix is returned.
+    let max_len = csr_builder::build_csr(pal, io, alloc, &input, pta_priv, None).await?;
+    if max_len > PTA_CSR_MAX_LEN {
+        return Err(HsmError::InternalError);
+    }
+    let csr = alloc.dma_alloc(max_len)?;
+    let written = csr_builder::build_csr(pal, io, alloc, &input, pta_priv, Some(csr)).await?;
+    if written == 0 || written > csr.len() {
+        return Err(HsmError::InternalError);
+    }
+    Ok(&mut csr[..written])
 }
 
-/// Build the PID-signed COSE_Sign1 PTAReport binding the PTA pubkey
-/// to the unified partition policy.
+/// Build the PID-signed COSE_Sign1 PTAReport binding the PTA public key
+/// `key` to the unified partition policy.
 async fn build_pta_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
-    pub_sec1: &HsmDmaBuf,
+    signer: ReportSigner<'_>,
+    key: AttestedPubKey<'_>,
     policy: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
-    let pid_priv = pal.vault_key(io, crate::part_state::part_id_key_id(pal, io)?)?;
-
+    policy_hash: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     // Copy the session app id into DMA scratch so every report input is a
     // `HsmDmaBuf` (the report builder takes `&HsmDmaBuf` throughout).
     let app_id = super::super::super::session::session_app_id(pal, io, sess_id)?;
@@ -428,51 +607,32 @@ async fn build_pta_report<'a, P: HsmPal>(
     // is `is_generated`; downstream policy uses the PartPolicy bytes
     // (bound via `report_data`) for finer-grained authorization.
     let flags: u32 = KeyFlags::new().with_is_generated(true).into();
-    let pub_xy = &pub_sec1[1..];
 
     // v2 report: bind the PTA attestation to the PartPolicy digest
     // (SHA-384, big-endian — the same digest persisted at commit and
     // surfaced later by the KeyReport command as the provisioned hash).
-    let policy_hash_dma = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(
-        io,
-        HsmHashAlgo::Sha384,
-        policy,
-        HsmDigestForm::Standard,
-        Some(policy_hash_dma),
-    )
-    .await?;
-
     let params = KeyReportParams {
-        key: AttestedPubKey::Ecc {
-            curve: tsra_fw_hsm_pal_traits::HsmEccCurve::P384,
-            x: &pub_xy[..P384_COORD_LEN],
-            y: &pub_xy[P384_COORD_LEN..],
-        },
+        key,
         flags,
         app_uuid,
         report_data,
         vm_launch_id,
-        policy_hash: Some(&*policy_hash_dma),
+        policy_hash: Some(policy_hash),
     };
 
-    // Two-pass query/copy: the `None` pass computes the exact report size
-    // (via `minicbor::len`, freeing its scratch), so we allocate only what
-    // the report needs. The runtime bound check replaces the former
-    // compile-time assert now that the size is computed dynamically.
-    let report_len = key_report(pal, io, alloc, &params, pid_priv, None).await?;
+    // Two-pass query/copy: allocate exactly the report size, and require
+    // the copy pass to fill it (the DMA buffer is uninitialised, so a
+    // short write would leak stale bytes to the host).
+    let report_len = key_report_with(pal, io, &params, signer, None).await?;
     if report_len > PTA_REPORT_MAX_LEN {
         return Err(HsmError::InternalError);
     }
     let report = alloc.dma_alloc(report_len)?;
-    // Enforce that the copy pass writes exactly the queried size. The
-    // buffer is uninitialised DMA memory, so a shorter write would leak
-    // stale bytes in `report[written..report_len]` to the host.
-    let written = key_report(pal, io, alloc, &params, pid_priv, Some(report)).await?;
+    let written = key_report_with(pal, io, &params, signer, Some(report)).await?;
     if written != report_len {
         return Err(HsmError::InternalError);
     }
-    Ok((report, report_len))
+    Ok(report)
 }
 
 /// Build the 128-byte `report_data` field:
@@ -513,21 +673,19 @@ struct CommitInputs<'a> {
     policy_hash: &'a HsmDmaBuf,
 }
 
-/// Create the partition's two vault keys — the PartRoot UPS secret and the
-/// PTA private key — in independent vault slots, recording each key's
-/// delete-inverse on the undo log.
+/// Create the PartRoot UPS vault key, recording its delete-inverse on the
+/// undo log.
 ///
 /// Done **before** [`commit_partition_state`] so that block can be a single
 /// await-free (atomic) commit.  Concurrent `PartInit`s stage their own keys
 /// independently and only race in the atomic commit, where the loser
 /// fails-fast; its just-staged keys are reaped by the recorded inverses.
-async fn stage_part_keys<'p, P: HsmPal>(
+async fn stage_root_key<'p, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     root: &HsmDmaBuf,
-    pta_priv: &HsmDmaBuf,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<(HsmKeyId, HsmKeyId)> {
+) -> HsmResult<HsmKeyId> {
     let root_key_id = pal
         .vault_key_create(
             io,
@@ -539,29 +697,16 @@ async fn stage_part_keys<'p, P: HsmPal>(
         )
         .await?;
     undo.push_vault_create(root_key_id)?;
-
-    let pta_key_id = pal
-        .vault_key_create(
-            io,
-            pta_priv,
-            HsmVaultKeyKind::PartitionTrustAnchor,
-            None,
-            PTA_VAULT_ATTRS,
-            HsmVaultPct::None,
-        )
-        .await?;
-    undo.push_vault_create(pta_key_id)?;
-
-    Ok((root_key_id, pta_key_id))
+    Ok(root_key_id)
 }
 
 /// Register the partition write-once fields and publish the `Enabled → Initializing` transition, in a
 /// single **await-free** guards-first block.
 ///
-/// The two vault keys are already staged by [`stage_part_keys`]; only their
-/// `key_id`s flow in here.  Setter order is fixed (the write-once fields
-/// must be set before the STATE transition).  Each mutation records its
-/// inverse on the per-command undo log, so a partial failure (or a later
+/// The vault keys are already staged; only their `key_id`s flow in here.
+/// Setter order is fixed (the write-once fields must be set before the
+/// STATE transition).  Each mutation records its inverse on the
+/// per-command undo log, so a partial failure (or a later
 /// response/completion failure) is rolled back by the dispatcher's walk.
 ///
 /// Being await-free, this block is **atomic** on the cooperative executor:
@@ -574,27 +719,33 @@ fn commit_partition_state<P: HsmPal>(
     io: &P::Io,
     inputs: CommitInputs<'_>,
     root_key_id: HsmKeyId,
-    pta_key_id: HsmKeyId,
+    pta: pta::PtaKey,
     undo: &mut UndoLog<'_>,
 ) -> HsmResult<()> {
     // Guards-first: reject a racing PartInit (or a re-init) that already
     // published this partition's write-once provisioning, *before* any field
     // inverse is recorded — otherwise its restore-to-absent undo would clear
-    // the winner's just-set fields.  Mirrors `part_set_pta_key_id`'s one-shot
-    // `PtaKeyAlreadySet` guard, hoisted ahead of the undo bookkeeping so the
-    // whole commit stays atomic (await-free) and the loser mutates nothing.
-    // Only a genuinely absent slot (`PartPropNotFound`) means "not set yet";
-    // any other read error is propagated rather than masked as unset.
-    if crate::part_state::prop_present(crate::part_state::part_pta_key_id(pal, io))? {
+    // the winner's just-set fields.  Either PTA slot counts, so a racing
+    // init of the other algorithm is rejected too.  Only a genuinely absent
+    // slot (`PartPropNotFound`) means "not set yet"; any other read error is
+    // propagated rather than masked as unset.
+    if crate::part_state::part_pta_provisioned(pal, io)? {
         return Err(HsmError::PtaKeyAlreadySet);
     }
 
     // Record the write-once / STATE inverses *before* applying them: the
     // fields are absent now, so "restore to absent" is valid even if a
     // setter below fails partway (the clear is then a benign no-op).
-    record_field_undo(undo)?;
+    let pta_prop = match pta {
+        pta::PtaKey::Ecc(_) => HsmPartPropId::PTA_KEY_ID,
+        pta::PtaKey::MlDsa87(_) => HsmPartPropId::PTA_MLDSA_SEED_KEY_ID,
+    };
+    record_field_undo(undo, pta_prop)?;
 
-    crate::part_state::part_set_pta_key_id(pal, io, pta_key_id)?;
+    match pta {
+        pta::PtaKey::Ecc(id) => crate::part_state::part_set_pta_key_id(pal, io, id)?,
+        pta::PtaKey::MlDsa87(id) => crate::part_state::part_set_pta_mldsa_seed_key_id(pal, io, id)?,
+    }
     crate::part_state::part_set_ups_key_id(pal, io, root_key_id)?;
     crate::part_state::part_set_policy_hash(pal, io, inputs.policy_hash)?;
     crate::part_state::part_set_state(pal, io, HsmPartState::Initializing)?;
@@ -605,27 +756,22 @@ fn commit_partition_state<P: HsmPal>(
 /// in commit order (the dispatcher walks them LIFO).  Each write-once
 /// field restores to **absent** (it was unset before PartInit); STATE
 /// restores to its prior `Enabled`.
-fn record_field_undo(undo: &mut UndoLog<'_>) -> HsmResult<()> {
-    undo.push_prop_restore_absent(HsmPartPropId::PTA_KEY_ID)?;
+fn record_field_undo(undo: &mut UndoLog<'_>, pta_prop: HsmPartPropId) -> HsmResult<()> {
+    undo.push_prop_restore_absent(pta_prop)?;
     undo.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)?;
     undo.push_prop_restore_absent(HsmPartPropId::POLICY_HASH)?;
     undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
 }
 
-/// Encode the `TborPartInitResp` into a fresh IO-scoped HsmDmaBuf.
-fn encode_response(
-    cmd_buf: &mut HsmCmdBuf<'_>,
-    pta_csr_bytes: &[u8],
-    pta_report_bytes: &[u8],
-) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
+/// Encode the `TborPartInitResp` carrying the out-of-band item lengths.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, csr_len: u16, report_len: u16) -> HsmResult<usize> {
+    cmd_buf.encode_response(|buf| {
         let frame = TborPartInitResp::encode_for_request(buf, 0, false)?
-            .pta_csr(pta_csr_bytes)?
-            .pta_report(pta_report_bytes)?
+            .pta_csr_len(U16::new(csr_len))?
+            .pta_report_len(U16::new(report_len))?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }
 
 // ─── Low-level helpers ───────────────────────────────────────────────────────
@@ -754,6 +900,10 @@ pub(crate) mod kdf {
     /// (SP 800-108 KBKDF input).  Version suffix `v1` reserved for
     /// future protocol revisions.
     pub const PART_ROOT_LABEL: &[u8] = b"TSRA-PartInit-PartRoot-v1";
+
+    /// HKDF-Expand-SHA384 `info` deriving the ML-DSA-87 PTA seed from
+    /// `PartRoot`.
+    pub const PTA_MLDSA_SEED_INFO: &[u8] = b"TSRA-PartInit-PTA-MLDSA87-v1";
 
     /// Length of the derived per-partition root secret, in bytes.
     ///

@@ -34,13 +34,21 @@ use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::TborSdResealRemoteBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024;
+use tsra_ddi_tbor_types::TRANSFER_KEM_MLKEM1024_P384;
+use tsra_ddi_tbor_types::TRANSFER_KEM_P384;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
+use crate::commands::sd_create_remote_backup::evidence_from_chains;
 use crate::commands::sd_create_remote_backup::finalized_backing_session_with_pota;
+use crate::commands::sd_create_remote_backup::kem_sealing_key_and_report;
 use crate::commands::sd_create_remote_backup::masked_key_and_report;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
+use crate::commands::sd_create_remote_backup::resign_key_report;
+use crate::commands::sd_create_remote_backup::sd_oob_items;
+use crate::commands::sd_create_remote_backup::SdOob;
 
 /// Both attestation evidences (source sender, destination receiver) laid
 /// out in a single OOB page, with descriptors indexing into it.
@@ -119,7 +127,7 @@ fn build_reseal_evidence(
     dest_anchor: &CaKey,
     dest_report: &[u8],
 ) -> ResealEvidence {
-    let mut items = Vec::new();
+    let mut items = sd_oob_items();
     let (src_mfgr, src_owner, src_part_owner, _) = push_evidence(
         &mut items,
         &make_chain(&CaKey::generate(), pid_pub),
@@ -150,16 +158,14 @@ fn build_reseal_evidence(
 fn reseal_request(
     session_id: u16,
     masked_receiver_key: Vec<u8>,
-    evidence: &ResealEvidence,
+    evidence: &mut ResealEvidence,
     policy: &[u8],
-    src_remote_backup: &[u8; POK_REMOTE_BACKUP_LEN],
+    src_remote_backup: &[u8],
 ) -> TborSdResealRemoteBackupReq {
+    let source = push_item(&mut evidence.oob_items, src_remote_backup);
     TborSdResealRemoteBackupReq {
         session_id,
-        masked_sealing_key: masked_receiver_key
-            .as_slice()
-            .try_into()
-            .expect("masked receiver key is exactly MASKED_SEALING_KEY_LEN bytes"),
+        masked_sealing_key: masked_receiver_key.clone(),
         policy: policy.to_vec(),
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
@@ -168,7 +174,10 @@ fn reseal_request(
         dest_owner_cert_chain: evidence.dest_owner.clone(),
         dest_part_owner_cert_chain: evidence.dest_part_owner.clone(),
         dest_report: evidence.dest_report,
-        src_remote_backup: *src_remote_backup,
+        src_remote_backup: ReportDescriptor {
+            index: source.index,
+            length: source.length,
+        },
     }
 }
 
@@ -183,13 +192,13 @@ fn create_source_backup(
     sata_key: &CaKey,
     receiver_report: &[u8],
     policy: &[u8],
-) -> [u8; POK_REMOTE_BACKUP_LEN] {
+) -> Vec<u8> {
     let rcvr_ev = build_receiver_evidence(pid_pub, receiver_pub, sata_key, receiver_report);
     let req = backup_request(session_id, &rcvr_ev, policy);
     let response = ctx
-        .tbor_oob(&req, &rcvr_ev.oob())
+        .sd_oob(&req, &rcvr_ev.oob())
         .expect("SdCreateRemoteBackup source backup");
-    response.pok_remote_backup
+    response.report
 }
 
 /// Build a valid reseal request with source and destination evidence.
@@ -215,9 +224,9 @@ fn valid_reseal_fixture() -> (TestCtx, TborSdResealRemoteBackupReq, ResealEviden
         &policy,
     );
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
 
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
 
     (ctx, req, evidence)
 }
@@ -250,24 +259,97 @@ fn sd_reseal_remote_backup_roundtrip() {
 
     // Reseal: open with the receiver key (auth = sender), reseal to the
     // destination receiver.
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdResealRemoteBackup roundtrip");
 
     // A successful HPKE open→seal yields a 431-byte, non-zero backup.
-    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        resp.dst_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "dst_remote_backup must not be all-zero",
     );
     // The resealed backup is a fresh HPKE encapsulation, distinct from the
     // source ciphertext.
     assert_ne!(
-        resp.dst_remote_backup, src_backup,
+        resp.report, src_backup,
         "reseal must produce a fresh encapsulation, not echo the source",
     );
+}
+
+/// Create a source backup sealed to a fresh local sealing key of `kem`,
+/// using a SATA-leaf-signed receiver key report for PQ KEMs.  Returns the
+/// masked receiver key and the complete signed source backup.
+fn create_kem_source_backup(
+    ctx: &TestCtx,
+    sid: u16,
+    pid_pub: &[u8; RAW_PUB_LEN],
+    sata_key: &CaKey,
+    policy: &[u8],
+    kem: u8,
+) -> (Vec<u8>, Vec<u8>) {
+    if kem == TRANSFER_KEM_P384 {
+        let (masked, report, rcvr_pub) = masked_key_report_and_pub(ctx, sid);
+        let backup = create_source_backup(ctx, sid, pid_pub, &rcvr_pub, sata_key, &report, policy);
+        return (masked, backup);
+    }
+    let (masked, report) = kem_sealing_key_and_report(ctx, sid, kem);
+    let leaf = CaKey::generate();
+    let other = || make_chain(&CaKey::generate(), pid_pub);
+    let mut rcvr_ev = evidence_from_chains(
+        &make_chain(sata_key, &leaf.raw_pub()),
+        &other(),
+        &other(),
+        &other(),
+        &report,
+    );
+    let desc = rcvr_ev.push_report(&resign_key_report(&report, &leaf));
+    let mut req = backup_request(sid, &rcvr_ev, policy);
+    req.receiver_key_report = vec![desc];
+    let resp = ctx
+        .sd_oob(&req, &rcvr_ev.oob())
+        .expect("SdCreateRemoteBackup PQ source backup");
+    (masked, resp.report)
+}
+
+/// Reseal works for every receiver × destination KEM pairing; PQ
+/// destinations produce larger backups than P-384.
+#[test]
+fn sd_reseal_remote_backup_pq_kems() {
+    let kems = [
+        TRANSFER_KEM_P384,
+        TRANSFER_KEM_MLKEM1024,
+        TRANSFER_KEM_MLKEM1024_P384,
+    ];
+    for rcvr_kem in kems {
+        for dest_kem in kems {
+            let ctx = TestCtx::new();
+            let sata_key = CaKey::generate();
+            let pota_key = CaKey::generate();
+            let (session, policy, pid_pub) =
+                finalized_backing_session_with_pota(&ctx, &sata_key, &pota_key);
+            let sid = session.session_id;
+            let (masked_rcvr, src_backup) =
+                create_kem_source_backup(&ctx, sid, &pid_pub, &sata_key, &policy, rcvr_kem);
+            let (_, report_dst) = kem_sealing_key_and_report(&ctx, sid, dest_kem);
+            let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+            let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
+            let resp = ctx
+                .sd_oob(&req, &evidence.oob())
+                .unwrap_or_else(|e| panic!("reseal {rcvr_kem} -> {dest_kem}: {e:?}"));
+            let len = resp.report.len();
+            if dest_kem == TRANSFER_KEM_P384 {
+                assert_eq!(len, POK_REMOTE_BACKUP_LEN);
+            } else {
+                assert!(
+                    len > POK_REMOTE_BACKUP_LEN,
+                    "{rcvr_kem} -> {dest_kem}: {len}"
+                );
+            }
+        }
+    }
 }
 
 /// Verify that repeated reseals produce different HPKE ciphertexts.
@@ -293,15 +375,15 @@ fn sd_reseal_remote_backup_rerandomizes() {
         &policy,
     );
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
 
-    let first = ctx.tbor_oob(&req, &evidence.oob()).expect("first reseal");
-    let second = ctx.tbor_oob(&req, &evidence.oob()).expect("second reseal");
+    let first = ctx.sd_oob(&req, &evidence.oob()).expect("first reseal");
+    let second = ctx.sd_oob(&req, &evidence.oob()).expect("second reseal");
 
     // Each reseal uses a fresh HPKE ephemeral → distinct ciphertexts.
     assert_ne!(
-        first.dst_remote_backup, second.dst_remote_backup,
+        first.report, second.report,
         "each reseal must re-randomize the HPKE encapsulation",
     );
 }
@@ -331,11 +413,11 @@ fn sd_reseal_remote_backup_rejects_tampered_src() {
     // Flip a byte in the ciphertext region so the HPKE Base open fails.
     src_backup[POK_REMOTE_BACKUP_LEN - 1] ^= 0xFF;
 
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
 
     // The evidence still validates, but the unseal's AEAD tag check fails.
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("tampered source backup must fail the HPKE open");
 }
 
@@ -364,8 +446,8 @@ fn sd_reseal_remote_backup_rejects_missing_oob() {
 
     // The evidence descriptors reference OOB items, but no OOB page is
     // supplied → the handler rejects before any crypto.
-    let evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
+    let mut evidence = build_reseal_evidence(&pid_pub, &pota_key, &pota_key, &report_dst);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
 
@@ -376,7 +458,7 @@ fn sd_reseal_remote_backup_invalid_session_rejected() {
 
     req.session_id = u16::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("unknown session must be rejected");
 }
 
@@ -387,34 +469,39 @@ fn sd_reseal_remote_backup_wrong_receiver_key_rejected() {
 
     let (wrong_masked_key, _) = masked_key_and_report(&ctx, req.session_id);
 
-    req.masked_sealing_key = wrong_masked_key
-        .as_slice()
-        .try_into()
-        .expect("masked key has the required length");
+    req.masked_sealing_key = wrong_masked_key;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("wrong receiver key must be rejected");
 }
 
 /// Reject a source remote backup containing only zeros.
 #[test]
 fn sd_reseal_remote_backup_empty_source_rejected() {
-    let (ctx, mut req, evidence) = valid_reseal_fixture();
+    let (ctx, req, mut evidence) = valid_reseal_fixture();
 
-    req.src_remote_backup = [0u8; POK_REMOTE_BACKUP_LEN];
+    evidence.oob_items[usize::from(req.src_remote_backup.index)].fill(0);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("empty source backup must be rejected");
 }
 
 /// Reject a source backup with a corrupted HPKE encapsulation.
 #[test]
 fn sd_reseal_remote_backup_tampered_encapsulation_rejected() {
-    let (ctx, mut req, evidence) = valid_reseal_fixture();
+    let (ctx, req, mut evidence) = valid_reseal_fixture();
 
-    req.src_remote_backup[0] ^= 0xFF;
+    let artifact = &mut evidence.oob_items[usize::from(req.src_remote_backup.index)];
+    let mut dec = minicbor::Decoder::new(artifact);
+    dec.tag().expect("COSE tag");
+    dec.array().expect("COSE array");
+    dec.bytes().expect("protected");
+    dec.skip().expect("unprotected");
+    let payload = dec.bytes().expect("payload");
+    let offset = payload.as_ptr() as usize - artifact.as_ptr() as usize;
+    artifact[offset + 161] ^= 0xFF;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("tampered encapsulation must be rejected");
 }
 
@@ -425,7 +512,7 @@ fn sd_reseal_remote_backup_missing_src_mfgr_chain_rejected() {
 
     req.src_mfgr_cert_chain.clear();
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("missing source manufacturer chain must be rejected");
 }
 
@@ -436,7 +523,7 @@ fn sd_reseal_remote_backup_missing_dest_mfgr_chain_rejected() {
 
     req.dest_mfgr_cert_chain.clear();
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("missing destination manufacturer chain must be rejected");
 }
 
@@ -447,7 +534,7 @@ fn sd_reseal_remote_backup_invalid_src_certificate_index_rejected() {
 
     req.src_mfgr_cert_chain[0].index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid source certificate index must be rejected");
 }
 
@@ -463,7 +550,7 @@ fn sd_reseal_remote_backup_wrong_sender_evidence_rejected() {
         descriptor.length = U16::new(certificate.len() as u16);
     }
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("wrong source sender evidence must be rejected");
 }
 
@@ -491,10 +578,10 @@ fn expect_reseal_rejects_sata_anchor(src_sata: bool, dest_sata: bool) {
     );
 
     let anchor = |sata: bool| if sata { &sata_key } else { &pota_key };
-    let evidence =
+    let mut evidence =
         build_reseal_evidence(&pid_pub, anchor(src_sata), anchor(dest_sata), &report_dst);
-    let req = reseal_request(sid, masked_rcvr, &evidence, &policy, &src_backup);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    let req = reseal_request(sid, masked_rcvr, &mut evidence, &policy, &src_backup);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 /// Reject source evidence rooted at SATA even when the destination
@@ -516,15 +603,9 @@ fn sd_reseal_remote_backup_rejects_sata_anchored_dest_evidence() {
 fn sd_reseal_remote_backup_tampered_masked_key_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    let mut masked_key = req.masked_sealing_key.to_vec();
-    masked_key[0] ^= 0xFF;
+    req.masked_sealing_key[0] ^= 0xFF;
 
-    req.masked_sealing_key = masked_key
-        .as_slice()
-        .try_into()
-        .expect("masked key has the required length");
-
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("tampered masked receiver key must be rejected");
 }
 
@@ -535,17 +616,20 @@ fn sd_reseal_remote_backup_invalid_dest_report_rejected() {
 
     req.dest_report.index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid destination report must be rejected");
 }
 
 /// Reject a source envelope whose signature bytes have been corrupted.
 #[test]
 fn sd_reseal_remote_backup_corrupted_src_signature_rejected() {
-    let (ctx, mut req, evidence) = valid_reseal_fixture();
-    req.src_remote_backup[POK_REMOTE_BACKUP_LEN - 1] ^= 0xFF;
+    let (ctx, req, mut evidence) = valid_reseal_fixture();
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    let artifact = &mut evidence.oob_items[usize::from(req.src_remote_backup.index)];
+    let last = artifact.len() - 1;
+    artifact[last] ^= 0xFF;
+
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("corrupted source signature must be rejected");
 }
 
@@ -560,7 +644,7 @@ fn sd_reseal_remote_backup_corrupted_dest_report_rejected() {
     let last = report.len() - 1;
     report[last] ^= 0xFF;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("corrupted destination report must be rejected");
 }
 
@@ -571,7 +655,7 @@ fn sd_reseal_remote_backup_missing_src_part_owner_chain_rejected() {
 
     req.src_part_owner_cert_chain.clear();
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("missing source partition-owner chain must be rejected");
 }
 
@@ -582,7 +666,7 @@ fn sd_reseal_remote_backup_missing_dest_part_owner_chain_rejected() {
 
     req.dest_part_owner_cert_chain.clear();
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("missing destination partition-owner chain must be rejected");
 }
 
@@ -593,7 +677,7 @@ fn sd_reseal_remote_backup_invalid_src_certificate_length_rejected() {
 
     req.src_mfgr_cert_chain[0].length = U16::new(0);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid source certificate length must be rejected");
 }
 
@@ -604,7 +688,7 @@ fn sd_reseal_remote_backup_invalid_dest_report_length_rejected() {
 
     req.dest_report.length = U16::new(0);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid destination report length must be rejected");
 }
 
@@ -616,11 +700,11 @@ fn sd_reseal_remote_backup_empty_src_owner_chain_succeeds() {
     req.src_owner_cert_chain.clear();
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("reseal should succeed without source owner chain");
 
-    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
-    assert!(resp.dst_remote_backup.iter().any(|&b| b != 0));
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
+    assert!(resp.report.iter().any(|&b| b != 0));
 }
 
 /// Verify that resealing succeeds without a destination owner certificate chain.
@@ -631,11 +715,11 @@ fn sd_reseal_remote_backup_empty_dest_owner_chain_succeeds() {
     req.dest_owner_cert_chain.clear();
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("reseal should succeed without destination owner chain");
 
-    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
-    assert!(resp.dst_remote_backup.iter().any(|&b| b != 0));
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
+    assert!(resp.report.iter().any(|&b| b != 0));
 }
 
 /// Verify that resealing succeeds with session ID zero.
@@ -646,13 +730,13 @@ fn sd_reseal_remote_backup_zero_session_succeeds() {
     req.session_id = 0;
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("reseal should succeed with session ID zero");
 
-    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
 
     assert!(
-        resp.dst_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "resealed backup must not be all-zero"
     );
 }
@@ -664,7 +748,7 @@ fn sd_reseal_remote_backup_invalid_src_mfgr_cert_index_rejected() {
 
     req.src_mfgr_cert_chain[0].index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid source manufacturer cert index must fail");
 }
 
@@ -675,7 +759,7 @@ fn sd_reseal_remote_backup_invalid_dest_mfgr_cert_index_rejected() {
 
     req.dest_mfgr_cert_chain[0].index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid destination manufacturer cert index must fail");
 }
 
@@ -686,7 +770,7 @@ fn sd_reseal_remote_backup_invalid_src_part_owner_cert_index_rejected() {
 
     req.src_part_owner_cert_chain[0].index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid source partition-owner cert index must fail");
 }
 
@@ -697,7 +781,7 @@ fn sd_reseal_remote_backup_invalid_dest_part_owner_cert_index_rejected() {
 
     req.dest_part_owner_cert_chain[0].index = u8::MAX;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("invalid destination partition-owner cert index must fail");
 }
 
@@ -712,7 +796,7 @@ fn sd_reseal_remote_backup_src_cert_length_mismatch_rejected() {
     assert!(actual_len > 1);
     req.src_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("source certificate length mismatch must fail");
 }
 
@@ -727,7 +811,7 @@ fn sd_reseal_remote_backup_dest_cert_length_mismatch_rejected() {
     assert!(actual_len > 1);
     req.dest_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("destination certificate length mismatch must fail");
 }
 
@@ -738,7 +822,7 @@ fn sd_reseal_remote_backup_zeroed_masked_key_rejected() {
 
     req.masked_sealing_key.fill(0);
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("zeroed masked sealing key must fail");
 }
 
@@ -751,13 +835,13 @@ fn sd_reseal_remote_backup_both_owner_chains_empty_succeeds() {
     req.dest_owner_cert_chain.clear();
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("reseal should succeed without either owner chain");
 
-    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
 
     assert!(
-        resp.dst_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "resealed backup must not be all-zero"
     );
 }
@@ -777,7 +861,7 @@ fn sd_reseal_remote_backup_malformed_src_owner_chain_rejected() {
     );
     leaf[0] = 0x00;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("malformed source owner certificate must be rejected");
 }
 
@@ -796,7 +880,7 @@ fn sd_reseal_remote_backup_malformed_dest_owner_chain_rejected() {
     );
     leaf[0] = 0x00;
 
-    ctx.tbor_oob(&req, &evidence.oob())
+    ctx.sd_oob(&req, &evidence.oob())
         .expect_err("malformed destination owner certificate must be rejected");
 }
 

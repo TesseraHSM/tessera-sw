@@ -54,7 +54,11 @@ All test names below are relative to the
 | Role gate: CU + Authenticated → `InvalidSessionType` | ✅ | `open_session::open_session_cu_authenticated_rejected_emu` |  |
 | `psk_id` not in `{0, 1}` → `InvalidPskId` | ✅ 🔁 | `open_session::open_session_invalid_psk_id_emu` | Loop over `[2, 0x7F, 0xFF]` |
 | `session_type` byte not in `{0, 1}` → `InvalidSessionType` | ✅ | `open_session::open_session_invalid_session_type_byte_emu` | Bypasses typed enum; ships raw byte `42` |
-| `suite_id` not in `{0x01}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id` | Loop over `[0x00, 0x02, 0x03, 0xff]`; includes removed suite `0x02` |
+| `suite_id` not in `{0x01, 0x02}` → `UnsupportedSessionSuite` | ✅ 🔁 | `open_session::open_session_unsupported_suite_id` | Loop over `[0x00, 0x03, 0xff]` |
+| Both roles open with ECDH/ECDSA P-384 and ML-KEM-1024/ML-DSA-87 | ✅ 🔁 | `open_session::open_session_every_role_and_suite_happy` | Encrypted Finish and close prove transport-key agreement |
+| Public-key length does not match selected suite → `InvalidArg` | ✅ 🔁 | `open_session::open_session_pk_init_length_mismatch_rejected` | All suites, truncated keys and cross-suite lengths |
+| Non-canonical ML-KEM encapsulation key → `InvalidArg` | ✅ 🔁 | `open_session::open_session_mlkem_noncanonical_public_key_rejected` | First/last packed coefficient equal q; valid open still succeeds |
+| ML-DSA signature requires exactly 4627 bytes in OOB output zero | ✅ 🔁 | `open_session::open_session_mldsa_signature_requires_an_exact_oob_output_without_consuming_slots` | Missing, short and oversized outputs rejected; valid sessions still open |
 | Default-PSK gate bypass (E3, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_open_init_bypass_emu` |  |
 | Multiple concurrent sessions return distinct session ids | ✅ | `open_session::open_session_multiple_concurrent_emu` |  |
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |

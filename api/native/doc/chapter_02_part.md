@@ -335,8 +335,16 @@ Retrieve partition property
 | min api revision supported by the device           | [struct tsra_api_rev](#tsra_api_rev) | \scriptsize TSRA_PART_PROP_ID_MIN_API_REV       |
 | max api revision supported by the device           | [struct tsra_api_rev](#tsra_api_rev) | \scriptsize TSRA_PART_PROP_ID_MAX_API_REV       |
 | manufacturer cert chain in PEM format              | [tsra_char*](#tsra_char)             | \scriptsize TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN |
+| ML-DSA-87 manufacturer cert chain in PEM (TBOR only) | [tsra_char*](#tsra_char)             | \scriptsize TSRA_PART_PROP_ID_MANUFACTURER_ML_DSA_CERT_CHAIN |
 | partition identity (PID) public key in DER format  | uint8_t*                                 | \scriptsize TSRA_PART_PROP_ID_PART_PUB_KEY    |
 | current security-domain initialization state      | [tsra_bool](#tsra_bool)                   | \scriptsize TSRA_PART_PROP_ID_SD_INITIALIZED |
+
+The ML-DSA property retrieves certificate bank `1`, ordered PID leaf to root.
+Its root SPKI pin must be provisioned independently before using
+`TSRA_SESSION_SUITE_ML_KEM1024_ML_DSA87`; retrieving the chain does not make
+it trusted. Rust callers can retrieve this bank with
+`HsmPartition::cert_chain_mldsa(0)`. Existing manufacturer-chain properties
+and `HsmPartition::cert_chain(0)` continue to retrieve the ECC bank.
 
 `TSRA_PART_PROP_ID_SD_INITIALIZED` performs an out-of-session device query on every
 call; it does not use a partition-list snapshot or cache. It returns `TSRA_BOOL_TRUE` when

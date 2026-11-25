@@ -6,7 +6,7 @@
 //! Out-of-session info command — the TBOR analogue of MBOR
 //! `GetCertChainInfo`.  Returns the number of certificates and the
 //! leaf-certificate SHA-256 thumbprint for the caller's partition at the
-//! requested chain slot.  No session is required; the chain is read for
+//! requested chain slot and bank.  No session is required; the chain is read for
 //! the caller's own bound partition, resolved internally by the PAL,
 //! mirroring the MBOR handler.
 //!
@@ -34,11 +34,12 @@ pub(crate) async fn handle<P: HsmPal>(
 ) -> HsmResult<usize> {
     let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
     let slot = HsmCertSlot(req.slot_id());
+    let bank = HsmCertBank(req.bank());
 
     let info = if slot == HsmCertSlot::PartOwner {
-        super::pta::chain_info(pal, io).await?
+        super::pta::chain_info(pal, io, bank).await?
     } else {
-        pal.get_cert_chain_info(io, slot, HsmCertBank::Ecc).await?
+        pal.get_cert_chain_info(io, slot, bank).await?
     };
 
     let resp = cmd_buf.encode_response(|buf| {

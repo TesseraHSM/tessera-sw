@@ -16,9 +16,9 @@ and **target SD policy hash** are checked before HPKE decapsulation.
 
 **SATA does not authorize the sender.** `sender_pid_pub_key` is the
 DER SubjectPublicKeyInfo of the operation signer. The field is
-length-delimited; the current profile accepts only canonical uncompressed
-P-384 SPKI (120 bytes, `id-ecPublicKey` with the `secp384r1` named curve).
-Bare SEC1 points, unsupported algorithms, noncanonical encodings, and
+length-delimited and accepts canonical uncompressed P-384 SPKI (120 bytes,
+`id-ecPublicKey` with `secp384r1`) or ML-DSA-87 SPKI (2614 bytes).
+Bare public keys, unsupported algorithms, noncanonical encodings, and
 trailing data are rejected. The complete public key is needed for signature
 verification; its SHA-384 SPKI thumbprint must match the signed
 `source_pid_spki_thumbprint`.
@@ -52,11 +52,11 @@ transfer can still be accepted when all restore checks pass.
 | Field | Shape | Meaning |
 |---|---|---|
 | `session_id` | Inline session ID | Active CO session |
-| `masked_sealing_key` | 280 B, aligned to 4 B | Actual recipient key |
+| `masked_sealing_key` | 264 / 280 / 296 B, aligned to 4 B | Actual recipient key |
 | `policy` | 1-384 B | Bound SD policy |
-| `sender_pid_pub_key` | DER SPKI, at most 120 B in the current profile | Report signer; canonical P-384 SPKI required |
+| `sender_pid_pub_key` | DER SPKI, 120 or 2614 B | Signer: canonical P-384 or ML-DSA-87 SPKI |
 | `sender_evidence` | Three chain descriptor lists | Optional/required SAPOTA PID chains as above |
-| `src_remote_backup` | 431 B | Complete PID-signed Base envelope |
+| `src_remote_backup` | 3 B report descriptor | OOB complete signed artifact; 431 / 1902 / 1999 / 4963 / 6434 / 6531 B |
 | `prev_sd_mk_backup` | 264 B | Previous SDMK backup |
 
 The identity group expands to three TOC entries. Certificates are fetched
@@ -69,7 +69,7 @@ out of band; the signature is inside `src_remote_backup`.
 | `pok_local_backup` | 280 B, aligned to 4 B | Refreshed local BKS3 backup |
 | `sd_mk_backup` | 264 B, aligned to 4 B | Refreshed SDMK backup |
 
-See [transfer format](key_report.md#p-384-transfer-envelope-binding).
+See [transfer format](key_report.md#transfer-envelope-binding).
 Local derivation, masking, SVN checks, and provisioning undo behavior are
 unchanged. Restore is one-shot; an initialized SD returns
 `SdAlreadyInitialized`. Validation failures do not provision the SD or

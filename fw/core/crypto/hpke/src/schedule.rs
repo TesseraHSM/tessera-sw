@@ -1,9 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! HPKE key schedule (RFC 9180 §5.1).
+//! HPKE key schedule (RFC 9180 §5.1, draft-ietf-hpke-hpke §5.1).
 //!
-//! Both [`key_schedule`] and [`key_schedule_export`] start by deriving
+//! One-stage (SHAKE256) suites derive `key ‖ base_nonce ‖
+//! exporter_secret` with a single `LabeledDerive` in
+//! [`one_stage_secret`] (`CombineSecrets_OneStage`) and split it.
+//!
+//! For two-stage (HKDF) suites, both [`key_schedule`] and
+//! [`key_schedule_export`] start by deriving
 //! `secret`, the `key_schedule_context` (`KSC`), and the per-suite
 //! `hpke_suite_id` from the shared inputs. They then diverge:
 //!
@@ -19,6 +24,7 @@
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -86,7 +92,7 @@ async fn derive_secret_and_ksc<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
-    let algo = suite.kdf_hash();
+    let algo = suite.kdf_hash().ok_or(HsmError::InvalidArg)?;
     let nh = suite.nh();
     let suite_id = suite.hpke_suite_id();
 
@@ -149,6 +155,59 @@ where
 }
 
 // =============================================================================
+// One-stage key schedule
+// =============================================================================
+
+/// `CombineSecrets_OneStage` (draft-ietf-hpke-hpke §5.1):
+///
+/// ```text
+/// secrets = lengthPrefixed(psk) ‖ lengthPrefixed(shared_secret)
+/// context = mode ‖ lengthPrefixed(psk_id) ‖ lengthPrefixed(info)
+/// secret  = LabeledDerive(secrets, "secret", context, Nk + Nn + Nh)
+/// ```
+///
+/// # Returns
+///
+/// * `Ok(secret)` — `key ‖ base_nonce ‖ exporter_secret`, allocated
+///   from `alloc`.
+/// * `Err(HsmError::InvalidArg)` — `psk`, `psk_id` or `info` longer
+///   than 65535 bytes, or the labelled input exceeds the PAL's SHAKE
+///   input limit.
+/// * `Err(HsmError)` — allocation or PAL failure.
+async fn one_stage_secret<'a, P>(
+    pal: &P,
+    io: &P::Io,
+    suite: HpkeSuite,
+    mode: u8,
+    shared_secret: &HsmDmaBuf,
+    info: &[u8],
+    psk: &[u8],
+    psk_id: &[u8],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<&'a HsmDmaBuf>
+where
+    P: HsmCrypto + HsmAlloc + 'a,
+{
+    let psk_len = kdf::i2osp2(psk.len())?;
+    let ss_len = kdf::i2osp2(shared_secret.len())?;
+    let psk_id_len = kdf::i2osp2(psk_id.len())?;
+    let info_len = kdf::i2osp2(info.len())?;
+    let secret = alloc_bytes(suite.nk() + suite.nn() + suite.nh(), alloc)?;
+    kdf::labeled_derive(
+        pal,
+        io,
+        &suite.hpke_suite_id(),
+        &[&psk_len, psk, &ss_len, shared_secret],
+        b"secret",
+        &[&[mode], &psk_id_len, psk_id, &info_len, info],
+        secret,
+        alloc,
+    )
+    .await?;
+    Ok(secret)
+}
+
+// =============================================================================
 // Public entry points
 // =============================================================================
 
@@ -158,6 +217,8 @@ where
 /// Implements the RFC 9180 §5.1 KeySchedule for all four modes —
 /// the `mode` / `psk` / `psk_id` parameters select Base, PSK, Auth,
 /// or AuthPSK.  For Base / Auth modes pass empty `psk` / `psk_id`.
+/// One-stage suites use `CombineSecrets_OneStage`
+/// (draft-ietf-hpke-hpke §5.1).
 ///
 /// # Type parameters
 ///
@@ -200,6 +261,28 @@ pub async fn key_schedule<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
+    if suite.is_one_stage() {
+        let secret = one_stage_secret(
+            pal,
+            io,
+            suite,
+            mode,
+            shared_secret,
+            info,
+            psk,
+            psk_id,
+            alloc,
+        )
+        .await?;
+        let (nk, nn) = (suite.nk(), suite.nn());
+        if key.len() != nk || base_nonce.len() != nn {
+            return Err(HsmError::InvalidArg);
+        }
+        key.copy_from_slice(&secret[..nk]);
+        base_nonce.copy_from_slice(&secret[nk..nk + nn]);
+        return Ok(());
+    }
+
     let st = derive_secret_and_ksc(
         pal,
         io,
@@ -244,9 +327,10 @@ where
 
 /// Derive an `exporter_secret` from `shared_secret + info`.
 ///
-/// Same algorithm as [`key_schedule`] but stops after the secret /
-/// KSC step and emits a single `LabeledExpand` for the export
-/// secret.
+/// Same algorithm as [`key_schedule`] but keeps only the export
+/// secret: for two-stage suites it stops after the secret / KSC step
+/// and emits a single `LabeledExpand`; for one-stage suites it keeps
+/// the `exporter_secret` slice of the combined secret.
 ///
 /// # Parameters
 ///
@@ -275,6 +359,27 @@ pub async fn key_schedule_export<'a, P>(
 where
     P: HsmCrypto + HsmAlloc + 'a,
 {
+    if suite.is_one_stage() {
+        let secret = one_stage_secret(
+            pal,
+            io,
+            suite,
+            mode,
+            shared_secret,
+            info,
+            psk,
+            psk_id,
+            alloc,
+        )
+        .await?;
+        let off = suite.nk() + suite.nn();
+        if exporter_secret.len() != suite.nh() {
+            return Err(HsmError::InvalidArg);
+        }
+        exporter_secret.copy_from_slice(&secret[off..]);
+        return Ok(());
+    }
+
     let st = derive_secret_and_ksc(
         pal,
         io,

@@ -112,6 +112,16 @@ impl CaKey {
         sha1_ski(&self.pub_sec1)
     }
 
+    /// ECDSA-P384 / SHA-384 sign `msg`, returning the raw `r ‖ s`
+    /// (COSE ES384) signature.
+    pub fn sign_es384(&self, msg: &[u8]) -> [u8; 96] {
+        let (r, s) = self.sign(msg);
+        let mut sig = [0u8; 96];
+        sig[..48].copy_from_slice(&r);
+        sig[48..].copy_from_slice(&s);
+        sig
+    }
+
     /// ECDSA-P384 / SHA-384 sign `tbs`, returning `(r, s)` (48 bytes each).
     fn sign(&self, tbs: &[u8]) -> ([u8; 48], [u8; 48]) {
         let mut algo = EcdsaAlgo::new(HashAlgo::sha384());
@@ -251,9 +261,15 @@ pub fn build_pta_intermediate(pta_pub_sec1: &[u8; SEC1_PUB_LEN], issuer: &CaKey)
 /// space-padded.  This equals the subject a conformant CA preserves from
 /// the `PartInit` CSR, and the issuer the firmware stamps on its PID leaf.
 pub fn pta_subject_der(sec1_pub: &[u8; SEC1_PUB_LEN]) -> [u8; PTA_SUBJECT_DER_LEN] {
-    let mut input = Vec::with_capacity(PTAID_LABEL.len() + SEC1_PUB_LEN);
+    pta_subject_der_for(sec1_pub)
+}
+
+/// [`pta_subject_der`] for a PTAID-form public key of either algorithm:
+/// the SEC1 uncompressed P-384 point or the raw ML-DSA-87 key.
+pub fn pta_subject_der_for(pub_key: &[u8]) -> [u8; PTA_SUBJECT_DER_LEN] {
+    let mut input = Vec::with_capacity(PTAID_LABEL.len() + pub_key.len());
     input.extend_from_slice(PTAID_LABEL);
-    input.extend_from_slice(sec1_pub);
+    input.extend_from_slice(pub_key);
     let mut algo = HashAlgo::sha384();
     let mut digest = [0u8; 48];
     algo.hash(&input, Some(&mut digest)).expect("sha384");
@@ -734,6 +750,16 @@ pub fn make_chain(ca: &CaKey, leaf_pub_raw: &[u8; RAW_PUB_LEN]) -> GeneratedChai
 /// This is the receiver's "convert CSR → certificate" step: read the
 /// requested public key so the POTA CA can issue the PTA cert for it.
 pub fn pta_pub_from_csr(csr: &[u8]) -> [u8; SEC1_PUB_LEN] {
+    let point = csr_public_key(csr);
+    assert_eq!(point.len(), SEC1_PUB_LEN, "P-384 uncompressed point");
+    assert_eq!(point[0], 0x04, "uncompressed point tag");
+    point.try_into().expect("SEC1 point")
+}
+
+/// The `subjectPublicKey` BIT STRING contents of a PKCS#10 CSR, without
+/// the unused-bits octet: the SEC1 point for P-384 or the raw ML-DSA-87
+/// key (the PTAID form of either).
+pub fn csr_public_key(csr: &[u8]) -> &[u8] {
     // CertificationRequest ::= SEQUENCE
     let (_, cr, _) = der_tlv(csr);
     // certificationRequestInfo ::= SEQUENCE (first field of the request)
@@ -749,12 +775,9 @@ pub fn pta_pub_from_csr(csr: &[u8]) -> [u8; SEC1_PUB_LEN] {
     // subjectPublicKey BIT STRING
     let (tag, bit_string, _) = der_tlv(after_algorithm);
     assert_eq!(tag, 0x03, "subjectPublicKey must be a BIT STRING");
-    // BIT STRING content: leading unused-bits octet (0), then the SEC1
-    // uncompressed point (0x04 ‖ X ‖ Y).
-    let point = &bit_string[1..];
-    assert_eq!(point.len(), SEC1_PUB_LEN, "P-384 uncompressed point");
-    assert_eq!(point[0], 0x04, "uncompressed point tag");
-    point.try_into().expect("SEC1 point")
+    // BIT STRING content: leading unused-bits octet (0), then the key.
+    assert_eq!(bit_string[0], 0, "no unused bits");
+    &bit_string[1..]
 }
 
 /// Extract the complete DER subject Name (SEQUENCE TLV) from a PKCS#10
@@ -820,4 +843,259 @@ fn patch_tbs_leaf(tbs: &mut [u8], params: &LeafCertParams<'_>) {
     tbs[AUTHORITY_KEY_ID_OFFSET..AUTHORITY_KEY_ID_OFFSET + 20]
         .copy_from_slice(params.authority_key_id);
     tbs[KEY_USAGE_OFFSET..KEY_USAGE_OFFSET + 2].copy_from_slice(&params.key_usage.to_bytes());
+}
+
+// ---------------------------------------------------------------------------
+// Algorithm-agnostic POTA → PTA chains (P-384 or ML-DSA-87 at either level)
+// ---------------------------------------------------------------------------
+
+/// Raw ML-DSA-87 public-key length (FIPS 204).
+pub const MLDSA87_PUB_LEN: usize = 2592;
+
+/// `id-ml-dsa-87` OBJECT IDENTIFIER TLV.
+const MLDSA87_OID: [u8; 11] = [
+    0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13,
+];
+/// `ecdsa-with-SHA384` OBJECT IDENTIFIER TLV.
+const ECDSA_SHA384_OID: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03];
+
+/// Encode one definite-length DER TLV.
+fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if value.len() < 0x80 {
+        out.push(value.len() as u8);
+    } else if value.len() <= 0xff {
+        out.extend_from_slice(&[0x81, value.len() as u8]);
+    } else {
+        let len = u16::try_from(value.len()).expect("DER length");
+        out.push(0x82);
+        out.extend_from_slice(&len.to_be_bytes());
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+fn der_seq(parts: &[&[u8]]) -> Vec<u8> {
+    tlv(0x30, &parts.concat())
+}
+
+/// Positive DER INTEGER from big-endian `value`.
+fn der_uint(value: &[u8]) -> Vec<u8> {
+    let first = value
+        .iter()
+        .position(|&b| b != 0)
+        .unwrap_or(value.len() - 1);
+    let mut body = Vec::with_capacity(value.len() + 1);
+    if value[first] & 0x80 != 0 {
+        body.push(0);
+    }
+    body.extend_from_slice(&value[first..]);
+    tlv(0x02, &body)
+}
+
+fn der_bits(value: &[u8]) -> Vec<u8> {
+    tlv(0x03, &[&[0u8][..], value].concat())
+}
+
+/// SubjectPublicKeyInfo DER for a PTAID-form public key: the SEC1
+/// uncompressed P-384 point or the raw ML-DSA-87 key.
+pub fn spki_for(pub_key: &[u8]) -> Vec<u8> {
+    if pub_key.len() == SEC1_PUB_LEN {
+        let mut spki = P384_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&pub_key[1..]);
+        spki
+    } else {
+        assert_eq!(pub_key.len(), MLDSA87_PUB_LEN, "ML-DSA-87 public key");
+        der_seq(&[&der_seq(&[&MLDSA87_OID]), &der_bits(pub_key)])
+    }
+}
+
+/// A POTA signing key of either supported algorithm.
+pub enum AnchorKey {
+    /// ECDSA-P384 / SHA-384.
+    P384(CaKey),
+    /// ML-DSA-87 (pure, empty context).
+    MlDsa87 {
+        /// Signing key.
+        key: tsra_crypto::MlDsaPrivateKey,
+        /// Raw public key.
+        pub_key: Vec<u8>,
+    },
+}
+
+impl AnchorKey {
+    /// Generate a fresh P-384 anchor.
+    pub fn p384() -> Self {
+        Self::P384(CaKey::generate())
+    }
+
+    /// Derive an ML-DSA-87 anchor from `seed`.
+    pub fn mldsa87(seed: &[u8; 32]) -> Self {
+        use tsra_crypto::ExportableKey;
+        use tsra_crypto::PrivateKey;
+
+        let key = tsra_crypto::MlDsaPrivateKey::from_seed(tsra_crypto::MlDsaVariant::MlDsa87, seed)
+            .expect("ML-DSA-87 key");
+        let public = key.public_key().expect("ML-DSA-87 public key");
+        let mut pub_key = vec![0u8; MLDSA87_PUB_LEN];
+        let len = public.to_bytes(Some(&mut pub_key)).expect("export");
+        assert_eq!(len, MLDSA87_PUB_LEN);
+        Self::MlDsa87 { key, pub_key }
+    }
+
+    /// PTAID-form public key (SEC1 for P-384, raw for ML-DSA-87).
+    pub fn pub_key(&self) -> Vec<u8> {
+        match self {
+            Self::P384(ca) => ca.sec1_pub().to_vec(),
+            Self::MlDsa87 { pub_key, .. } => pub_key.clone(),
+        }
+    }
+
+    /// Policy `pota_spki_thumbprint`: SHA-384 over the SPKI DER.
+    pub fn spki_thumbprint(&self) -> [u8; POLICY_THUMBPRINT_LEN] {
+        sha384(&spki_for(&self.pub_key()))
+    }
+
+    fn ski(&self) -> [u8; 20] {
+        sha1(&self.pub_key())
+    }
+
+    fn sig_alg(&self) -> Vec<u8> {
+        match self {
+            Self::P384(_) => der_seq(&[&ECDSA_SHA384_OID]),
+            Self::MlDsa87 { .. } => der_seq(&[&MLDSA87_OID]),
+        }
+    }
+
+    /// Signature value (BIT STRING contents after the unused-bits octet).
+    fn sign(&self, tbs: &[u8]) -> Vec<u8> {
+        match self {
+            Self::P384(ca) => {
+                let (r, s) = ca.sign(tbs);
+                der_seq(&[&der_uint(&r), &der_uint(&s)])
+            }
+            Self::MlDsa87 { key, .. } => {
+                let mut algo = tsra_crypto::MlDsaAlgo::new(&[]).expect("ML-DSA engine");
+                let len = algo.sign(key, tbs, None).expect("ML-DSA length");
+                let mut sig = vec![0u8; len];
+                algo.sign(key, tbs, Some(&mut sig)).expect("ML-DSA sign");
+                sig
+            }
+        }
+    }
+}
+
+/// SHA-1 of `input`.
+fn sha1(input: &[u8]) -> [u8; 20] {
+    let mut algo = HashAlgo::sha1();
+    let mut out = [0u8; 20];
+    algo.hash(input, Some(&mut out)).expect("sha1");
+    out
+}
+
+/// Single-`commonName` Name DER.
+fn cn_name(cn: &str) -> Vec<u8> {
+    der_seq(&[&tlv(
+        0x31,
+        &der_seq(&[&[0x06, 0x03, 0x55, 0x04, 0x03], &tlv(0x0c, cn.as_bytes())]),
+    )])
+}
+
+/// Build a v3 CA certificate (`cA=true` critical, `keyCertSign|cRLSign`
+/// critical, SKID, optional AKID) signed by `signer`.
+fn build_ca_cert(
+    subject: &[u8],
+    issuer: &[u8],
+    spki: &[u8],
+    skid: &[u8; 20],
+    akid: Option<&[u8; 20]>,
+    serial_tag: u8,
+    signer: &AnchorKey,
+) -> Vec<u8> {
+    const CRITICAL: [u8; 3] = [0x01, 0x01, 0xff];
+    let basic_constraints = der_seq(&[
+        &[0x06, 0x03, 0x55, 0x1d, 0x13],
+        &CRITICAL,
+        &tlv(0x04, &der_seq(&[&[0x01, 0x01, 0xff]])),
+    ]);
+    // keyCertSign (bit 5) | cRLSign (bit 6): BIT STRING 03 02 01 06.
+    let key_usage = der_seq(&[
+        &[0x06, 0x03, 0x55, 0x1d, 0x0f],
+        &CRITICAL,
+        &tlv(0x04, &[0x03, 0x02, 0x01, 0x06]),
+    ]);
+    let ski = der_seq(&[
+        &[0x06, 0x03, 0x55, 0x1d, 0x0e],
+        &tlv(0x04, &tlv(0x04, skid)),
+    ]);
+    let mut extensions = vec![basic_constraints, key_usage, ski];
+    if let Some(akid) = akid {
+        extensions.push(der_seq(&[
+            &[0x06, 0x03, 0x55, 0x1d, 0x23],
+            &tlv(0x04, &der_seq(&[&tlv(0x80, akid)])),
+        ]));
+    }
+    let sig_alg = signer.sig_alg();
+    let tbs = der_seq(&[
+        &tlv(0xa0, &der_uint(&[2])),
+        &der_uint(&serial(serial_tag)),
+        &sig_alg,
+        issuer,
+        &der_seq(&[&tlv(0x17, b"250101000000Z"), &tlv(0x17, b"350101000000Z")]),
+        subject,
+        spki,
+        &tlv(
+            0xa3,
+            &der_seq(&extensions.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+        ),
+    ]);
+    let signature = signer.sign(&tbs);
+    der_seq(&[&tbs, &sig_alg, &der_bits(&signature)])
+}
+
+/// POTA root fixture of either algorithm, issuing PTA certificates of
+/// either algorithm (the POTA and PTA algorithms are independent).
+pub struct AnyPotaFixture {
+    key: AnchorKey,
+    root_der: Vec<u8>,
+}
+
+impl AnyPotaFixture {
+    /// Self-sign a POTA root for `key`.
+    pub fn new(key: AnchorKey) -> Self {
+        let name = cn_name(ROOT_CN);
+        let ski = key.ski();
+        let root_der = build_ca_cert(&name, &name, &spki_for(&key.pub_key()), &ski, None, 1, &key);
+        Self { key, root_der }
+    }
+
+    /// Policy `pota_spki_thumbprint` of this POTA.
+    pub fn spki_thumbprint(&self) -> [u8; POLICY_THUMBPRINT_LEN] {
+        self.key.spki_thumbprint()
+    }
+
+    /// Issue a conformant root → PTA chain for the PTAID-form PTA key
+    /// `pta_pub` (SEC1 P-384 or raw ML-DSA-87): the deterministic PTA
+    /// subject and SKID = SHA-1(`pta_pub`).
+    pub fn chain_for(&self, pta_pub: &[u8]) -> PtaChain {
+        self.chain_with(pta_pub, &pta_subject_der_for(pta_pub), &sha1(pta_pub))
+    }
+
+    /// Issue a root → PTA chain with a caller-chosen subject Name DER and
+    /// SKID, for profile-rejection tests.
+    pub fn chain_with(&self, pta_pub: &[u8], subject: &[u8], skid: &[u8; 20]) -> PtaChain {
+        let pta_der = build_ca_cert(
+            subject,
+            &cn_name(ROOT_CN),
+            &spki_for(pta_pub),
+            skid,
+            Some(&self.key.ski()),
+            2,
+            &self.key,
+        );
+        PtaChain {
+            root_der: self.root_der.clone(),
+            pta_der,
+        }
+    }
 }

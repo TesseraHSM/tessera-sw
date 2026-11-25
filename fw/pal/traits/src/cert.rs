@@ -56,7 +56,9 @@ pub enum HsmCertSlot {
 pub enum HsmCertBank {
     /// ECC certificate chain.
     Ecc = 0,
-    /// ML-DSA certificate chain.
+    /// ML-DSA certificate chain.  Its leaf certifies the partition's
+    /// ML-DSA-87 identity key; a platform without an ML-DSA device chain
+    /// may sign that leaf with its ECC issuer.
     MlDsa = 1,
 }
 
@@ -98,8 +100,8 @@ pub trait HsmCertStore: HsmIoTypes {
     ///
     /// - `io` — caller's I/O context, bound to the target partition.
     /// - `slot` — certificate-chain owner.
-    /// - `bank` — certificate-chain family. Standard and Uno PALs
-    ///   currently support only [`HsmCertBank::Ecc`].
+    /// - `bank` — certificate-chain family: [`HsmCertBank::Ecc`] or
+    ///   [`HsmCertBank::MlDsa`].
     ///
     /// # Returns
     ///
@@ -122,8 +124,9 @@ pub trait HsmCertStore: HsmIoTypes {
     /// Follows the standard query/copy pattern used elsewhere in the
     /// PAL: pass `cert = None` to obtain the certificate's size
     /// without copying, then call again with `cert = Some(buf)` to
-    /// perform the copy.  Both calls return the same canonical
-    /// length.
+    /// perform the copy.  For [`HsmCertBank::Ecc`] both calls return
+    /// the same canonical length; for other banks the query may return
+    /// an upper bound, and the copy returns the exact length.
     ///
     /// # Parameters
     ///
@@ -140,8 +143,8 @@ pub trait HsmCertStore: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(size)` — number of bytes that were (or would be)
-    ///   written.
+    /// - `Ok(size)` — number of bytes written, or (query) the size
+    ///   `buf` must hold.
     /// - `Err(HsmError::InvalidArg)` — the bound partition, `slot`,
     ///   or `idx` is out of range, the bank is unsupported, or `cert = Some(buf)` and
     ///   `buf.len() < size`.

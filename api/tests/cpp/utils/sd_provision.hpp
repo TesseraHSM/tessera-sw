@@ -15,7 +15,10 @@
 /// independently, not learn it from the connection being authenticated.
 struct TestRootPin
 {
-    explicit TestRootPin(tsra_handle partition);
+    explicit TestRootPin(
+        tsra_handle partition,
+        tsra_session_suite suite = TSRA_SESSION_SUITE_ECDH_P384
+    );
     TestRootPin(const TestRootPin &) = delete;
     TestRootPin &operator=(const TestRootPin &) = delete;
 
@@ -33,6 +36,8 @@ inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 bac
 inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
 /// COSE_Sign1 containing header(161) + enc(97) + ciphertext(48) + tag(16).
 inline constexpr uint32_t kPokRemoteBackupLen = 431;
+/// Maximum complete backup: MLKEM1024-P384 encrypted payload signed by ML-DSA-87.
+inline constexpr uint32_t kPokRemoteBackupMaxLen = 6531;
 
 // Security-domain provisioning helper for the sealing round-trip test.
 //

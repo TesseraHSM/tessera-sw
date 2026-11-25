@@ -15,13 +15,15 @@ deterministic per-partition keypair (the **PTA** — Partition Trust
 Anchor) derived from caller-supplied entropy and a caller-asserted
 [partition policy](../part_policy.md). The policy names the **POTA**
 (Partition Owner Trust Anchor), SATA, and optional SAPOTA keys by
-public-key thumbprint.
+public-key thumbprint, and selects the PTA algorithm with `pta_alg`:
+P-384 (ES384, `-35`) or ML-DSA-87 (`-50`). A partition has exactly one
+PTA.
 
 `PartInit` is **write-once** on a partition: a second invocation on
 an already-initialized or in-flight partition is refused (the
 write-once partition setters reject the duplicate values).  It
 transitions the partition from `Enabled → Initializing`; the
-follow-up `FinalizePart` handler (TBD) drives `Initializing →
+follow-up [`PartFinal`](./part_final.md) drives `Initializing →
 Initialized` after POTA validates the returned PTACSR / PTAReport.
 
 Only **Crypto Officer** sessions may issue `PartInit`; CU callers
@@ -40,15 +42,21 @@ usual way: the caller's CO PSK must already have been rotated by
 3. **KDF cascade:**
    * `PartRoot = derive_part_root(UDS, mach_seed, policy)` — the
      per-partition root secret binding every request input.
-   * `(PTA_priv, PTA_pub) = derive_pta_keypair(PartRoot)` —
-     deterministic P-384 keypair.
+   * `pta_alg` ES384: `(PTA_priv, PTA_pub) = derive_pta_keypair(PartRoot)`
+     — deterministic P-384 keypair.
+   * `pta_alg` ML-DSA-87: `PTA_seed = HKDF-Expand-SHA384(PartRoot,
+     "TSRA-PartInit-PTA-MLDSA87-v1", 32)`, expanded to the ML-DSA-87
+     keypair (FIPS 204 `KeyGen_internal`). Only the seed is vaulted.
 4. **Build PTACSR:** PKCS#10 CertificationRequest for `PTA_pub`. The
    subject is a single `commonName` holding `"Tessera Integrated HSM
    PTA"`, a space, and the hex-encoded **PTAID**
-   (`SHA-384("TSRA-PTAID-v1" ‖ sec1_pub)[..16]`). Signed by `PTA_priv`
-   (`ECDSA-P384`).
+   (`SHA-384("TSRA-PTAID-v1" ‖ pta_pub)[..16]`, where `pta_pub` is the
+   SEC1 uncompressed point for P-384 or the raw 2592-byte ML-DSA-87
+   key). Self-signed by `PTA_priv` (`ECDSA-P384` or `ML-DSA-87`).
 5. **Build PTAReport:** COSE_Sign1 key-attestation report signed by
-   the per-partition identity key (**PID**, owned by `alloc_part`).
+   the per-partition identity key (**PID**, owned by `alloc_part`) of
+   the PTA's algorithm: the P-384 PID (`ES384`) or the ML-DSA-87 PID
+   (COSE `-50`).
    Claims bind `PTA_pub` and the partition policy (and through it the
    trust-anchor thumbprints) via the `report_data` field:
 
@@ -57,7 +65,9 @@ usual way: the caller's CO PSK must already have been rotated by
                         ‖ u16_be(|policy|) ‖ policy )
                ‖ zeros[..80]
    ```
-6. **Commit:** vault-allocate the PartRoot and the PTA private key,
+6. **Return:** write the PTACSR to out-of-band item 0 and the
+   PTAReport to out-of-band item 1.
+7. **Commit:** vault-allocate the PartRoot and the PTA private key (or seed),
    then write the write-once partition fields `(pta_pub, pta_key_id,
    policy_hash)` and mark the partition `Initializing`. Only the
    SHA-384 digest of the policy is persisted. All commits are atomic —
@@ -115,19 +125,24 @@ Built by the host with [`aead_envelope::seal`](
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 12 | `pta_csr` | `varlen` (≤ 512 B) | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
-| 16 | `pta_report` | `varlen` (≤ 1024 B) | COSE_Sign1 PTA key-attestation report signed by the partition identity key (PID). |
+| 12 | `pta_csr_len` | `u16` (inline) | Bytes written to out-of-band item 0. |
+| 16 | `pta_report_len` | `u16` (inline) | Bytes written to out-of-band item 1. |
 
-### Data section
+### Out-of-band items
 
-| Offset | Field | Description |
+The CSR and report do not fit the inline response for ML-DSA-87, so both
+travel out of band (as SGL Data Blocks). The host must supply two output
+buffers of at least `PTA_CSR_MAX_LEN` and `PTA_REPORT_MAX_LEN` (8192 B
+each).
+
+| Index | Item | Description |
 |---|---|---|
-| 36 | `pta_csr` bytes | DER PKCS#10; length stored in the TOC entry above. |
-| 36 + `len(pta_csr)` | `pta_report` bytes | COSE_Sign1; length stored in the TOC entry above. |
+| 0 | `pta_csr` | DER-encoded PKCS#10 CertificationRequest for the PTA public key, signed by `PTA_priv`. |
+| 1 | `pta_report` | COSE_Sign1 PTA key-attestation report signed by the PID of the PTA's algorithm. |
 
 The host is expected to forward both blobs to the partition owner
-for POTA validation; the resulting PTA certificate is then handed
-back to the partition in the upcoming `FinalizePart` opcode.
+for POTA validation; the resulting PTA certificate chain is then handed
+back to the partition in [`PartFinal`](./part_final.md).
 
 ## Errors
 
@@ -136,7 +151,7 @@ back to the partition in the upcoming `FinalizePart` opcode.
 | `InvalidPermissions` | Calling session is not Crypto Officer. |
 | `SessionNotFound` | `session_id` does not refer to an Active CO slot in the calling partition. |
 | `TborInvalidFixedLength` | `mach_seed_envelope` is not exactly 104 B, or `part_policy` is longer than 384 B (rejected at decode before the handler runs). |
-| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32; `part_policy` is not a valid deterministic CBOR policy. |
+| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32; `part_policy` is not a valid deterministic CBOR policy (including a missing or unsupported `pta_alg`); an out-of-band output buffer is missing or too small. |
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout / `session_id`). |
 | `PartStateInvalid` | Partition is not in `Enabled`; e.g. already `Initializing` or `Initialized` (write-once gate via `part_mark_initializing`). |
 | `PtaKeyAlreadySet` / `UmsKeyAlreadySet` | A prior `PartInit` already committed PTA or UMS material; write-once setters reject the duplicate. |
@@ -147,7 +162,8 @@ back to the partition in the upcoming `FinalizePart` opcode.
 For a fixed `(UDS, mach_seed, policy)` tuple the entire
 pipeline is deterministic: the same call inputs always produce
 byte-identical `pta_csr` (modulo the ECDSA signature, which is
-deterministic via RFC 6979 in the PAL) and byte-identical
+deterministic via RFC 6979 in the PAL; ML-DSA signing is hedged) and
+byte-identical
 `report_data` claims.  This is exercised by
 `part_init_determinism_emu` in the integration suite.
 

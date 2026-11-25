@@ -48,6 +48,8 @@ enum TborMaskedKeyKind {
     Secret384,
     Secret521,
     SdSealing,
+    SdSealingMlKem1024,
+    SdSealingMlKem1024P384,
     VarLenHmacSha256,
     VarLenHmacSha384,
     VarLenHmacSha512,
@@ -75,6 +77,8 @@ impl TryFrom<u8> for TborMaskedKeyKind {
             KEY_KIND_SECRET384 => Self::Secret384,
             KEY_KIND_SECRET521 => Self::Secret521,
             KEY_KIND_SD_SEALING => Self::SdSealing,
+            KEY_KIND_SD_SEALING_MLKEM1024 => Self::SdSealingMlKem1024,
+            KEY_KIND_SD_SEALING_MLKEM1024_P384 => Self::SdSealingMlKem1024P384,
             KEY_KIND_VAR_LEN_HMAC_SHA256 => Self::VarLenHmacSha256,
             KEY_KIND_VAR_LEN_HMAC_SHA384 => Self::VarLenHmacSha384,
             KEY_KIND_VAR_LEN_HMAC_SHA512 => Self::VarLenHmacSha512,
@@ -104,6 +108,8 @@ impl TborMaskedKeyKind {
             Self::Secret384 => (HsmKeyKind::SharedSecret, 384, None),
             Self::Secret521 => (HsmKeyKind::SharedSecret, 521, None),
             Self::SdSealing => (HsmKeyKind::Sealing, 384, None),
+            Self::SdSealingMlKem1024 => (HsmKeyKind::Sealing, 1024, None),
+            Self::SdSealingMlKem1024P384 => (HsmKeyKind::Sealing, 1408, None),
             Self::VarLenHmacSha256 => (HsmKeyKind::HmacSha256, 256, None),
             Self::VarLenHmacSha384 => (HsmKeyKind::HmacSha384, 384, None),
             Self::VarLenHmacSha512 => (HsmKeyKind::HmacSha512, 512, None),
@@ -123,6 +129,9 @@ impl TborMaskedKeyKind {
                 return payload_len == key_bytes * 9 / 2 + 4 || payload_len == key_bytes * 5 + 4;
             }
             Self::EccP256 | Self::EccP384 => key_bytes,
+            // PQ sealing keys store their key-generation seed.
+            Self::SdSealingMlKem1024 => 64,
+            Self::SdSealingMlKem1024P384 => 32,
             // Firmware pads the P-521 scalar to its ECC lane: 4 bytes on
             // little-endian devices (66 -> 68), 8 on big-endian ones (66 -> 72).
             Self::EccP521 => {

@@ -19,6 +19,7 @@ use tsra_sealing_api::Evidence;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_api::SecurityDomainEnv;
+use tsra_sealing_api::TransferKem;
 
 use crate::cli::CreateArgs;
 use crate::cli::RestoreArgs;
@@ -27,7 +28,6 @@ use crate::env::SelfContainedEnv;
 use crate::key_check;
 use crate::key_check::SavedKey;
 use crate::peer;
-use crate::pki::CaKey;
 use crate::remote;
 use crate::store::FileStore;
 
@@ -44,9 +44,9 @@ pub(crate) fn create(args: &CreateArgs) -> Result<()> {
 
     println!("Creating security domain...");
     if args.remote_restorable {
-        create_remote_backup(&domain, &session, &args.state_dir)?;
+        create_remote_backup(&domain, &session, &args.state_dir, args.kem)?;
     } else {
-        create_temporary_backup(&domain, &session, &args.state_dir)?;
+        create_temporary_backup(&domain, &session, &args.state_dir, args.kem)?;
     }
 
     let keys = key_check::generate(&session.session)
@@ -64,8 +64,9 @@ fn create_remote_backup(
     domain: &SecurityDomain<SelfContainedEnv>,
     session: &SealingSession,
     state_dir: &Path,
+    kem: TransferKem,
 ) -> Result<()> {
-    let recovery = remote::create(domain, session, domain.env().machine_seed())?;
+    let recovery = remote::create(domain, session, domain.env().machine_seed(), kem)?;
     if let Err(source) = domain.env().store().save_remote(&recovery) {
         return Err(tsra_sealing_api::Error::RemoteBackupPersistence {
             result: recovery,
@@ -83,10 +84,9 @@ fn create_temporary_backup(
     domain: &SecurityDomain<SelfContainedEnv>,
     session: &SealingSession,
     state_dir: &Path,
+    kem: TransferKem,
 ) -> Result<()> {
-    let receiver_key = CaKey::generate();
-    let receiver_pub = receiver_key.raw_pub();
-    let receiver_chain = domain.env().receiver_chain(&receiver_pub)?;
+    let receiver = remote::SoftwareReceiver::generate(domain.env(), kem)?;
     // This demo receiver does not require trusted-SA attestation.
     let receiver_evidence = Evidence {
         mfgr_cert_chain: Vec::new(),
@@ -97,17 +97,23 @@ fn create_temporary_backup(
     let created = domain.create(
         session,
         domain.env().machine_seed(),
-        &receiver_chain.certs(),
+        &receiver.chain.certs(),
+        receiver.key_report.as_deref(),
         &receiver_evidence,
         |csr, report| domain.env().sign_pta(csr, report),
     )?;
     display::write_temporary_creation(
         &mut std::io::stdout().lock(),
         &created,
-        &receiver_pub,
-        &[receiver_chain.root_der, receiver_chain.leaf_der],
+        &receiver.recipient,
+        &receiver.chain_der(),
+        receiver.key_report.as_deref(),
         state_dir,
     )?;
+    receiver
+        .open(&created.pok_remote_backup)
+        .context("host HPKE open of the SD envelope failed")?;
+    println!("  host HPKE open:       ok (software receiver recovered the BKS3)");
     Ok(())
 }
 

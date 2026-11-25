@@ -41,6 +41,78 @@ pub const ECDSA_SHA384_ALG_ID: [u8; 12] = [
     0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03, // 1.2.840.10045.4.3.3
 ];
 
+/// Uncompressed P-384 public key length (`0x04 || x || y`).
+pub const P384_PUBLIC_KEY_LEN: usize = 97;
+
+/// DER prefix of a P-384 `SubjectPublicKeyInfo`, up to and including the
+/// BIT STRING's unused-bits octet; the uncompressed point follows.
+pub const P384_SPKI_HEADER: [u8; 23] = [
+    0x30, 0x76, // SEQUENCE, length 118
+    0x30, 0x10, // SEQUENCE (AlgorithmIdentifier), length 16
+    0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, // id-ecPublicKey
+    0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, // secp384r1
+    0x03, 0x62, 0x00, // BIT STRING, length 98, 0 unused bits
+];
+
+/// ML-DSA-87 public key length (FIPS 204).
+pub const MLDSA87_PUBLIC_KEY_LEN: usize = 2592;
+
+/// ML-DSA-87 signature length (FIPS 204).
+pub const MLDSA87_SIGNATURE_LEN: usize = 4627;
+
+/// DER-encoded AlgorithmIdentifier for ML-DSA-87
+/// (OID 2.16.840.1.101.3.4.3.19, parameters absent — RFC 9881). Used both
+/// as the signature algorithm and inside the `SubjectPublicKeyInfo`.
+pub const MLDSA87_ALG_ID: [u8; 13] = [
+    0x30, 0x0B, // SEQUENCE, length 11
+    0x06, 0x09, // OID, length 9
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13, // 2.16.840.1.101.3.4.3.19
+];
+
+/// DER prefix of an ML-DSA-87 `SubjectPublicKeyInfo`, up to and including
+/// the BIT STRING's unused-bits octet; the raw public key follows.
+pub const MLDSA87_SPKI_HEADER: [u8; 22] = [
+    0x30, 0x82, 0x0A, 0x32, // SEQUENCE, length 2610
+    0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13, // ML-DSA-87
+    0x03, 0x82, 0x0A, 0x21, 0x00, // BIT STRING, length 2593, 0 unused bits
+];
+
+/// DER prefix of an ML-DSA-87 `signatureValue` BIT STRING, up to and
+/// including the unused-bits octet; the raw signature follows.
+pub const MLDSA87_SIG_BIT_STRING_HEADER: [u8; 5] = [0x03, 0x82, 0x12, 0x14, 0x00];
+
+/// Size of `SEQUENCE { tbs, alg_id, sig }` with contents of the given sizes.
+pub fn signed_len(tbs_len: usize, alg_id_len: usize, sig_len: usize) -> usize {
+    let content = tbs_len + alg_id_len + sig_len;
+    1 + der_length_size(content) + content
+}
+
+/// Write `SEQUENCE { tbs, alg_id, sig_parts[0] || sig_parts[1] || .. }`
+/// into `out`, where `sig_parts` is the complete DER signature field.
+///
+/// # Returns
+/// `Some(n)` — bytes written, or `None` if `out` is too small or the
+/// content exceeds the supported DER length.
+pub fn assemble_signed(
+    out: &mut [u8],
+    tbs: &[u8],
+    alg_id: &[u8],
+    sig_parts: &[&[u8]],
+) -> Option<usize> {
+    let sig_len: usize = sig_parts.iter().map(|part| part.len()).sum();
+    let content_len = tbs.len() + alg_id.len() + sig_len;
+    if out.len() < signed_len(tbs.len(), alg_id.len(), sig_len) {
+        return None;
+    }
+    *out.first_mut()? = 0x30;
+    let mut pos = 1 + encode_der_length(&mut out[1..], content_len)?;
+    for part in [tbs, alg_id].into_iter().chain(sig_parts.iter().copied()) {
+        out[pos..pos + part.len()].copy_from_slice(part);
+        pos += part.len();
+    }
+    Some(pos)
+}
+
 /// Encode a DER length field into `buf`.
 ///
 /// Supports lengths up to 65535 (two-byte long form).

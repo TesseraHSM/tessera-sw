@@ -89,7 +89,11 @@ fuzz_target!(|input: FuzzInput| {
             input.close_session_before_request,
             scope,
         );
-        let req = TborSdSealingKeyGenReq { session_id, scope };
+        let req = TborSdSealingKeyGenReq {
+            session_id,
+            scope,
+            kem: TRANSFER_KEM_P384,
+        };
         let result = ctx.tbor(&req);
 
         match result {

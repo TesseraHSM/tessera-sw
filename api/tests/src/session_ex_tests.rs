@@ -170,7 +170,7 @@ fn open_session_ex_cu_ecdh_p384() {
 }
 
 #[test]
-fn open_session_ex_removed_suite_rejected() {
+fn open_session_ex_unknown_suite_rejected() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -180,9 +180,49 @@ fn open_session_ex_removed_suite_rejected() {
         rev,
         &test_root_spki_sha384(&part),
         HsmSessionPsk::new(HsmPskId::CU),
-        HsmSessionSuite(0x02),
+        HsmSessionSuite(0x03),
     );
     assert!(matches!(result, Err(HsmError::InvalidArgument)));
+}
+
+#[test]
+fn open_session_ex_mlkem1024_authenticates_rotates_and_recovers_both_roles() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = PARTITION_LOCK.lock();
+    let suite = HsmSessionSuite::MlKem1024MlDsa87;
+    for role in [HsmPskId::CO, HsmPskId::CU] {
+        let (part, rev) = new_partition();
+        let root =
+            crate::utils::partition_ex_helpers::test_root_spki_sha384_for_suite(&part, suite);
+        let mut wrong_root = root;
+        wrong_root[0] ^= 1;
+        assert!(matches!(
+            part.open_session_ex(rev, &wrong_root, HsmSessionPsk::new(role), suite,),
+            Err(HsmError::InvalidSignature)
+        ));
+        let psk = [0xB5; PSK_LEN];
+        let session = part
+            .open_session_ex(rev, &root, HsmSessionPsk::new(role), suite)
+            .expect("ML-KEM session");
+        assert_eq!(session.api_rev(), rev);
+        session.change_psk(&psk).expect("rotate role PSK");
+        drop(session);
+        let session = part
+            .open_session_ex(rev, &root, HsmSessionPsk::with_psk(role, &psk), suite)
+            .expect("ML-KEM session with rotated PSK");
+        part.reset().expect("migration");
+        session
+            .reopen_ex(&root, None)
+            .expect("ML-KEM recovery with default PSK");
+        session.change_psk(&psk).expect("rotate after migration");
+        drop(session);
+        assert!(
+            part.open_session_ex(rev, &root, HsmSessionPsk::new(role), suite,)
+                .is_err()
+        );
+    }
 }
 
 /// PSK-rotation round trip: after rotating the CO PSK from the default,

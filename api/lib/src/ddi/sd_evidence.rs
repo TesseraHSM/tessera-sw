@@ -66,7 +66,7 @@ impl EvidenceDescriptors {
 /// empty evidence.
 pub(crate) fn push_evidence_if_present<'a>(
     evidence: &HsmSdEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut impl InputOobItems<'a>,
 ) -> HsmResult<EvidenceDescriptors> {
     let is_empty = evidence.mfgr_cert_chain.is_empty()
         && evidence.owner_cert_chain.is_empty()
@@ -85,7 +85,7 @@ pub(crate) fn push_evidence_if_present<'a>(
 /// contiguous.
 pub(crate) fn push_evidence<'a>(
     evidence: &HsmSdEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut impl InputOobItems<'a>,
 ) -> HsmResult<EvidenceDescriptors> {
     Ok(EvidenceDescriptors {
         mfgr: push_cert_chain(evidence.mfgr_cert_chain, oob, EVIDENCE_CHAIN_MAX_CERTS)?,
@@ -113,7 +113,7 @@ pub(crate) struct IdentityDescriptors {
 /// Pack identity chains only. Firmware enforces the command's trust policy.
 pub(crate) fn push_identity_evidence<'a>(
     evidence: &HsmSdIdentityEvidence<'a>,
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut impl InputOobItems<'a>,
 ) -> HsmResult<IdentityDescriptors> {
     let mut result = IdentityDescriptors {
         mfgr: Vec::new(),

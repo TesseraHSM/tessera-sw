@@ -92,7 +92,10 @@ impl StdPqc {
         self.pool
             .submit_with_result(async move {
                 let sk =
-                    MlDsaPrivateKey::from_seed(variant, &seed).map_err(|_| HsmError::InvalidArg)?;
+                    MlDsaPrivateKey::from_seed(variant, &seed).map_err(|error| match error {
+                        CryptoError::PqcUnavailable => HsmError::UnsupportedCmd,
+                        _ => HsmError::InvalidArg,
+                    })?;
                 let pk = sk
                     .public_key()
                     .and_then(|pk| pk.to_vec())

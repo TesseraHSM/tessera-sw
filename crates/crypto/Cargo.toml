@@ -40,4 +40,12 @@ workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+hpke = { features = [
+  "aes",
+  "alloc",
+  "getrandom",
+  "mlkem",
+  "nistp",
+  "shake",
+], workspace = true }
 rand.workspace = true

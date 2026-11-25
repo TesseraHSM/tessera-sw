@@ -62,6 +62,7 @@ impl TryFrom<HsmSessionSuite> for SessionSuite {
     fn try_from(suite: HsmSessionSuite) -> Result<Self, Self::Error> {
         match suite {
             HsmSessionSuite::EcdhP384 => Ok(SessionSuite::EcdhP384),
+            HsmSessionSuite::MlKem1024MlDsa87 => Ok(SessionSuite::MlKem1024MlDsa87),
             _ => Err(HsmError::InvalidArgument),
         }
     }
@@ -103,15 +104,15 @@ pub(crate) struct OpenSessionExResult {
 }
 
 /// Fetch the partition identity public key (`pk_hsm`) from the
-/// production cert chain. Uses [`fetch_cert_chain_checked_tbor`] — the
+/// production cert chain. Uses [`fetch_cert_chain_checked_tbor_bank`] — the
 /// out-of-session TBOR `GetCertChainInfo` / `GetCertificate` commands,
 /// so the whole handshake stays on the TBOR transport — whose leaf cert
-/// is the partition-ID cert; its SubjectPublicKeyInfo carries the P-384
+/// is the partition-ID cert; its SubjectPublicKeyInfo carries the suite's
 /// key the FW signs the handshake transcript with.
 ///
 /// The SD handshake authenticates the entire session against this key,
 /// so the partition cert chain is cryptographically verified (via
-/// [`validate_part_cert_chain`]) before the leaf key is trusted.
+/// [`validate_session_cert_chain`]) before the leaf key is trusted.
 ///
 /// The negotiated API revision is validated before issuing the TBOR cert
 /// commands; revisions below [`TBOR_MIN_API_REV`] are unsupported.
@@ -119,18 +120,20 @@ pub(super) fn fetch_pk_hsm(
     dev: &HsmDev,
     rev: HsmApiRev,
     root_spki_thumbprint: &[u8; 48],
-) -> HsmResult<EccPublicKey> {
+    suite: SessionSuite,
+) -> HsmResult<SessionIdentityKey> {
     require_tbor_rev(rev)?;
-    let (chain_pem, _) = fetch_cert_chain_checked_tbor(dev, rev, 0)?;
-    validate_part_cert_chain(&chain_pem, root_spki_thumbprint)
+    let (chain_pem, _) = fetch_cert_chain_checked_tbor_bank(dev, rev, 0, suite.cert_bank())?;
+    validate_session_cert_chain(&chain_pem, root_spki_thumbprint, suite)
 }
 
 /// Authenticate the PID path against the caller's root SPKI thumbprint and require
 /// DICE layer zero plus the Tessera EKU on the same non-PID certificate.
-fn validate_part_cert_chain(
+fn validate_session_cert_chain(
     chain_pem: &str,
     root_spki_thumbprint: &[u8; 48],
-) -> HsmResult<EccPublicKey> {
+    suite: SessionSuite,
+) -> HsmResult<SessionIdentityKey> {
     let certs = X509Certificate::from_pem_stack(chain_pem.as_bytes())
         .map_err(|_| HsmError::InvalidSignature)?;
     let Some((leaf, rest)) = certs.split_first() else {
@@ -176,10 +179,30 @@ fn validate_part_cert_chain(
     if !tessera_device {
         return Err(HsmError::InvalidSignature);
     }
+    if suite == SessionSuite::MlKem1024MlDsa87 {
+        // A PQ leaf under a classical issuer would still permit forged identities.
+        for certificate in &path {
+            let spki = certificate
+                .subject_public_key_info_der()
+                .map_err(|_| HsmError::InvalidSignature)?;
+            SessionIdentityKey::from_spki(suite, spki).map_err(|_| HsmError::InvalidSignature)?;
+        }
+    }
     let pk_der = leaf
         .subject_public_key_info_der()
         .map_err(|_| HsmError::InvalidSignature)?;
-    EccPublicKey::from_bytes(pk_der).map_err(|_| HsmError::InvalidSignature)
+    SessionIdentityKey::from_spki(suite, pk_der).map_err(|_| HsmError::InvalidSignature)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn validate_part_cert_chain(
+    chain_pem: &str,
+    root_spki_thumbprint: &[u8; 48],
+) -> HsmResult<EccPublicKey> {
+    match validate_session_cert_chain(chain_pem, root_spki_thumbprint, SessionSuite::EcdhP384)? {
+        SessionIdentityKey::EcdsaP384(key) => Ok(key),
+        SessionIdentityKey::MlDsa87(_) => Err(HsmError::InvalidSignature),
+    }
 }
 
 /// Opens a session on an HSM partition over the TBOR transport.
@@ -278,7 +301,7 @@ fn establish_session_ex_init(
     let inner = partition.inner().read();
     let dev = inner.dev();
 
-    let pk_hsm = fetch_pk_hsm(dev, rev, root_spki_thumbprint)?;
+    let pk_hsm = fetch_pk_hsm(dev, rev, root_spki_thumbprint, session_suite)?;
     let initiator = SessionInitiator::generate(session_suite, rev.tbor().map_err(HsmError::from)?)?
         .for_reopen(reopen_id);
     let session_type = SessionType::Encrypted.to_u8();
@@ -289,14 +312,36 @@ fn establish_session_ex_init(
         suite_id: session_suite.id(),
         pk_init: initiator.pk_init().to_vec(),
     };
-    let resp = dev
-        .exec_op_tbor(rev, &req, None, &mut None)
-        .map_err(HsmError::from)?;
+    let mut pq_sig = vec![
+        0;
+        if session_suite == SessionSuite::MlKem1024MlDsa87 {
+            session_suite.sig_len()
+        } else {
+            0
+        }
+    ];
+    let resp = if pq_sig.is_empty() {
+        dev.exec_op_tbor(rev, &req, None, &mut None)
+    } else {
+        dev.exec_op_tbor_oob(rev, &req, &mut [TborOobItem::Out(&mut pq_sig)], &mut None)
+    }
+    .map_err(HsmError::from)?;
     if reopen_id != u16::MAX && resp.session_id != reopen_id {
         return Err(HsmError::InvalidSession);
     }
 
-    match initiator.complete(psk_id, session_type, &pk_hsm, psk, &resp.enc, &resp.sig) {
+    let complete = || {
+        let sig = if pq_sig.is_empty() {
+            resp.sig.as_slice()
+        } else {
+            if !resp.sig.is_empty() {
+                return Err(SessionExCryptoError::InvalidInput);
+            }
+            pq_sig.as_slice()
+        };
+        initiator.complete(psk_id, session_type, &pk_hsm, psk, &resp.enc, sig)
+    };
+    match complete() {
         Ok(handshake) => Ok(PendingHandshake {
             api_rev: rev,
             session_id: resp.session_id,

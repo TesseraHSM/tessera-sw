@@ -50,12 +50,12 @@ pub struct TborSdRestoreLocalBackupReq {
 pub struct TborSdRestoreLocalBackupResp {
     /// Refreshed local partition-owner-key backup (exactly 280 B on the
     /// wire; the firmware schema is the length authority).
-    #[tbor(max_len = 280)]
+    #[tbor(align = 4, max_len = 280)]
     pub pok_local_backup: Vec<u8>,
 
     /// Refreshed security-domain masking-key backup envelope (exactly
     /// 264 B on the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 264)]
+    #[tbor(align = 4, max_len = 264)]
     pub sd_mk_backup: Vec<u8>,
 }
 

@@ -33,11 +33,10 @@ use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_core_crypto_x509_chain::parse_cert;
 use tsra_fw_core_crypto_x509_chain::validate_issuing_chain;
-use tsra_fw_core_crypto_x509_chain::MAX_CERT_DER_LEN;
-use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
 use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
 use tsra_fw_ddi_tbor_types::policy::PartPolicy;
+use tsra_fw_ddi_tbor_types::policy::PolicyPtaAlg;
 use tsra_fw_ddi_tbor_types::TborPartFinalReq;
 use tsra_fw_ddi_tbor_types::TborPartFinalResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
@@ -127,7 +126,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Integrity gate: the re-supplied policy must match the one
         // bound at `PartInit` (`SHA-384(part_policy) == policy_hash`).
-        verify_policy_hash(pal, io, alloc, req.part_policy).await?;
+        verify_policy_hash(pal, io, req.part_policy, alloc.dma_alloc(SHA384_LEN)?).await?;
 
         // Validate the typed policy (rejects malformed input) and recover
         // the POTA trust-anchor thumbprint for cert-chain validation.
@@ -137,7 +136,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // chains to the policy `pota_spki_thumbprint` and that its terminal (PTA)
         // certificate carries this partition's PTA key.
         //
-        // Scope the validation buffers (terminal snapshot, chain-walk
+        // Scope the validation buffers (expected PTA key, chain-walk
         // scratch, and profile parse) to a nested allocator so they are
         // reclaimed before the UPS derivation and backup
         // restoration/masking below allocate. Restoring a backup with two
@@ -293,91 +292,54 @@ async fn validate_pta_chain<P: HsmPal>(
         return Err(HsmError::InvalidArg);
     }
 
-    // Descriptors address out-of-band items by `index`, and the
-    // snapshot-serving fetch closure below selects the terminal
-    // certificate by that index. A certificate chain never legitimately
-    // references the same out-of-band item twice, and duplicate indices
-    // would make that selection ambiguous (e.g. a shorter non-terminal
-    // descriptor sharing the terminal's index). Reject them outright so a
-    // malformed host request cannot drive the fetch closure into a
-    // length-mismatched copy.
+    // A certificate chain never legitimately references the same
+    // out-of-band item twice; reject duplicate indices outright.
     for (i, a) in cert_descriptors.iter().enumerate() {
         if cert_descriptors[i + 1..].iter().any(|b| b.index == a.index) {
             return Err(HsmError::InvalidArg);
         }
     }
 
-    let pta = alloc.dma_alloc(P384_POINT_LEN)?;
-    super::super::part_state::part_pta_pub_key(pal, io, pta).await?;
-
-    let anchor = policy.pota_spki_thumbprint;
-
-    // Snapshot the terminal (PTA) certificate's DER **once**, up front,
-    // into HSM-owned memory. Both the chain walk (which signature-verifies
-    // the terminal) and the profile enforcement below consume this single
-    // snapshot, so they cannot observe different host-controlled bytes
-    // (TOCTOU): a host that swaps the OOB bytes between reads can no longer
-    // pass signature validation with one certificate while the
-    // subject/SKID/CA profile is checked against another.
-    let terminal = cert_descriptors.last().ok_or(HsmError::InvalidArg)?;
-    let terminal_index = usize::from(terminal.index);
-    let terminal_len = usize::from(terminal.length.get());
-    if terminal_len == 0 || terminal_len > MAX_CERT_DER_LEN {
-        return Err(HsmError::InvalidArg);
+    // Compute the expected PTA identity before the walk so the ML-DSA-87
+    // key-expansion scratch is released before the chain buffers are
+    // allocated. The policy hash was verified above, and PartInit
+    // provisioned the PTA from that same policy; re-check the binding.
+    let identity = super::pta::pta_identity(pal, io, alloc).await?;
+    let alg_matches = matches!(
+        (policy.pta_alg, identity.key()),
+        (PolicyPtaAlg::Es384, super::pta::PtaKey::Ecc(_))
+            | (PolicyPtaAlg::MlDsa87, super::pta::PtaKey::MlDsa87(_))
+    );
+    if !alg_matches {
+        return Err(HsmError::PartFinalPtaMismatch);
     }
-    let pta_der = alloc.dma_alloc(terminal_len)?;
-    pal.recv_oob(io, terminal_index, pta_der).await?;
 
     // Walk the chain root → leaf, validating the terminal as an *issuing*
     // CA (it will later sign the on-demand slot-2 PID leaf): this enforces
-    // `cA == true`, `keyCertSign`, and — crucially — the ancestor
-    // `pathLenConstraint` budget on the PTA, so a chain whose ancestors
-    // leave no room for the PID leaf is rejected here. The terminal is
-    // served from `pta_der`; every other certificate still streams from
-    // the out-of-band region.
-    let mut pta_from_chain = [0u8; P384_POINT_LEN];
-    validate_issuing_chain(
+    // `cA == true`, `keyCertSign`, and the ancestor `pathLenConstraint`
+    // budget on the PTA. The POTA anchor may be P-384 or ML-DSA-87
+    // independently of the PTA algorithm. Each certificate is read from the
+    // out-of-band region exactly once into HSM-owned memory, and the
+    // returned terminal DER is the same buffer the walk verified, so the
+    // profile checks below cannot observe different host bytes (no TOCTOU).
+    let pta_der = validate_issuing_chain(
         pal,
         io,
         alloc,
         cert_descriptors,
-        Some(anchor),
-        &mut pta_from_chain,
-        async |index, buf| {
-            if index == terminal_index {
-                // Defensive: duplicate indices are already rejected above,
-                // so `buf` here is the terminal descriptor's buffer and its
-                // length equals the snapshot's. Guard the copy anyway so a
-                // length mismatch can never panic the firmware across the
-                // host trust boundary.
-                let snapshot: &[u8] = pta_der;
-                if buf.len() != snapshot.len() {
-                    return Err(HsmError::InvalidArg);
-                }
-                buf.copy_from_slice(snapshot);
-                Ok(())
-            } else {
-                pal.recv_oob(io, index, buf).await
-            }
-        },
+        Some(policy.pota_spki_thumbprint),
+        async |index, buf| pal.recv_oob(io, index, buf).await,
     )
     .await?;
 
-    // The chain is cryptographically valid and POTA-anchored; its
-    // terminal (PTA) certificate must carry this partition's PTA key.
-    // Compare as byte slices (`pta` is a `HsmDmaBuf` DST over `[u8]`).
-    let expected_pta: &[u8] = pta;
-    if &pta_from_chain[..] != expected_pta {
+    // The chain is valid and POTA-anchored; its terminal (PTA) certificate
+    // must carry this partition's PTA key and the deterministic
+    // subject/SKID/CA profile the on-demand slot-2 PID leaf depends on.
+    let pta_cert = parse_cert(pta_der)?;
+    if !identity.matches(&pta_cert.pub_key) {
         return Err(HsmError::PartFinalPtaMismatch);
     }
-
-    // `validate_issuing_chain` does not pin the terminal certificate's
-    // subject DN or SKID. Parse the **same snapshot** the walk verified
-    // and enforce the deterministic subject/SKID/CA profile the on-demand
-    // slot-2 PID leaf depends on; otherwise finalization could accept a
-    // PTA that no future PID leaf can chain to.
-    let pta_cert = parse_cert(pta_der)?;
-    super::pta::validate_pta_profile(pal, io, alloc, &pta_cert).await?;
+    super::pta::validate_pta_profile(&identity, &pta_cert)?;
 
     Ok(())
 }
@@ -410,14 +372,18 @@ async fn derive_local_bmk<'a, P: HsmPal>(
 }
 
 /// Verify `SHA-384(part_policy)` equals the partition's stored
-/// `policy_hash` (bound at `PartInit`).
+/// `policy_hash` (bound at `PartInit`), leaving the verified digest in
+/// `digest` (exactly [`SHA384_LEN`] bytes) so callers needing the policy
+/// hash do not hash the policy again.
 pub(crate) async fn verify_policy_hash<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
     part_policy: &HsmDmaBuf,
+    digest: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
-    let digest = alloc.dma_alloc(SHA384_LEN)?;
+    if digest.len() != SHA384_LEN {
+        return Err(HsmError::InternalError);
+    }
     pal.hash(
         io,
         HsmHashAlgo::Sha384,

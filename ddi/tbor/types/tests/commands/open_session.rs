@@ -22,12 +22,13 @@ use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MAC_FIN_LEN;
 use tsra_ddi_tbor_types::SEED_ENVELOPE_LEN;
+use tsra_ddi_tbor_types::SESSION_MLKEM1024_PK_LEN;
 use tsra_ddi_tbor_types::SESSION_P384_SEC1_LEN;
 use tsra_ddi_tbor_types::SESSION_SUITE_ECDH_P384_ECDSA_P384;
 use tsra_session_ex_crypto::SessionInitiator;
 
 /// Every key-establishment suite the host supports.
-const SUITES: [SessionSuite; 1] = [SessionSuite::EcdhP384];
+const SUITES: [SessionSuite; 2] = [SessionSuite::EcdhP384, SessionSuite::MlKem1024MlDsa87];
 
 #[test]
 fn session_reopen_rejects_another_slots_valid_recovery_material() {
@@ -125,11 +126,12 @@ fn session_reopen_after_migration_restores_masked_keys_under_default_psk_for_bot
     use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
     use tsra_ddi_tbor_types::*;
 
-    for role in [CO, CU] {
+    for (suite, role) in SUITES
+        .into_iter()
+        .flat_map(|suite| [CO, CU].map(|role| (suite, role)))
+    {
         let ctx = TestCtx::new();
-        let pending = ctx
-            .session_open_init(role, SessionSuite::EcdhP384)
-            .expect("init");
+        let pending = ctx.session_open_init(role, suite).expect("init");
         let original = ctx.session_open_finish(pending).expect("finish");
         let psk = [0xA7; PSK_LEN];
         ctx.psk_change(&original, &psk)
@@ -374,10 +376,8 @@ fn open_session_invalid_session_type_byte() {
 /// Rejects unsupported session-suite identifiers.
 #[test]
 fn open_session_unsupported_suite_id() {
-    // Only 0x01 (ECDH P-384) is supported, including rejection of the
-    // removed 0x02 suite before any key-agreement work happens.
     let ctx = TestCtx::new();
-    for bad in [0x00u8, 0x02, 0x03, 0xff] {
+    for bad in [0x00u8, 0x03, 0xff] {
         let req = raw_init_req(
             SessionType::Encrypted.to_u8(),
             bad,
@@ -391,13 +391,74 @@ fn open_session_unsupported_suite_id() {
 #[test]
 fn open_session_pk_init_length_mismatch_rejected() {
     let ctx = TestCtx::new();
-    let ecdh_pk = SessionInitiator::generate(SessionSuite::EcdhP384, (1, 1))
-        .expect("generate ECDH ephemeral")
+    for suite in SUITES {
+        let pk = SessionInitiator::generate(suite, (1, 1))
+            .expect("generate ephemeral")
+            .pk_init()
+            .to_vec();
+        let other_len = match suite {
+            SessionSuite::EcdhP384 => SESSION_MLKEM1024_PK_LEN,
+            SessionSuite::MlKem1024MlDsa87 => SESSION_P384_SEC1_LEN,
+        };
+        for len in [0, 1, pk.len() - 1, other_len] {
+            let mut malformed = pk.clone();
+            malformed.resize(len, 0);
+            let req = raw_init_req(SessionType::Encrypted.to_u8(), suite.id(), malformed);
+            ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+        }
+    }
+}
+
+#[test]
+fn open_session_mlkem_noncanonical_public_key_rejected() {
+    let ctx = TestCtx::new();
+    let suite = SessionSuite::MlKem1024MlDsa87;
+    let pk = SessionInitiator::generate(suite, (1, 1))
+        .expect("generate ephemeral")
         .pk_init()
         .to_vec();
-    for len in [0, 1, SESSION_P384_SEC1_LEN - 1] {
-        let req = raw_ecdh_init_req(ecdh_pk[..len].to_vec());
+    for offset in [0, SESSION_MLKEM1024_PK_LEN - 32 - 3] {
+        let mut malformed = pk.clone();
+        // Encode q = 3329, which is outside the canonical coefficient range.
+        malformed[offset] = 0x01;
+        malformed[offset + 1] = (malformed[offset + 1] & 0xf0) | 0x0d;
+        let req = raw_init_req(SessionType::Encrypted.to_u8(), suite.id(), malformed);
         ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+    }
+    ctx.open_session(CU, suite)
+        .expect("rejected key did not consume a slot")
+        .close()
+        .expect("close");
+}
+
+#[test]
+fn open_session_mldsa_signature_requires_an_exact_oob_output_without_consuming_slots() {
+    use tsra_ddi_interface::TborOobItem;
+
+    let ctx = TestCtx::new();
+    let suite = SessionSuite::MlKem1024MlDsa87;
+    let init = SessionInitiator::generate(suite, (1, 1)).expect("ephemeral");
+    let req = raw_init_req(
+        SessionType::Encrypted.to_u8(),
+        suite.id(),
+        init.pk_init().to_vec(),
+    );
+    ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+    for len in [suite.sig_len() - 1, suite.sig_len() + 1] {
+        let mut output = vec![0; len];
+        let error = ctx
+            .tbor_oob_io(&req, &mut [TborOobItem::Out(&mut output)])
+            .expect_err("wrong signature output length");
+        assert_fw_rejects(&error, TborStatus::InvalidArg);
+    }
+    let sessions: Vec<_> = (0..7)
+        .map(|_| {
+            ctx.open_session(CU, suite)
+                .expect("failed outputs did not consume slots")
+        })
+        .collect();
+    for session in sessions {
+        session.close().expect("close");
     }
 }
 

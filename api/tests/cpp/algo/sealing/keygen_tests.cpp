@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -488,6 +489,82 @@ TEST_F(tsra_sealing_keygen, key_gen_roundtrip_generates_usable_sealing_key)
         std::vector<uint8_t> pub_der;
         ASSERT_EQ(read_prop(TSRA_KEY_PROP_ID_PUB_KEY_INFO, pub_der), TSRA_STATUS_SUCCESS);
         ASSERT_FALSE(pub_der.empty());
+    });
+}
+
+// The bit length selects the sealing KEM: 1024 = ML-KEM-1024 and
+// 1408 = MLKEM1024-P384. PQ keys mask their seed (64 / 32 B) and carry the
+// public key in their key report rather than a DER SubjectPublicKeyInfo.
+TEST_F(tsra_sealing_keygen, key_gen_pq_kems_follow_bits)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_handle part_handle = open_reset_partition(path);
+        if (part_handle == 0)
+        {
+            return;
+        }
+        auto part_guard =
+            scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+        tsra_handle sess_handle = provision_sd_co_session(part_handle);
+        if (sess_handle == 0)
+        {
+            return;
+        }
+        auto sess_guard =
+            scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
+
+        struct Case
+        {
+            uint32_t bits;
+            uint32_t masked_len;
+        };
+        for (const Case &c : { Case{ 1024, 296 }, Case{ 1408, 264 } })
+        {
+            SCOPED_TRACE(c.bits);
+            SealingProps props;
+            props.bits = c.bits;
+            auto algo = sealing_algo();
+            auto prop_list = props.list();
+            tsra_handle key_handle = 0;
+            ASSERT_EQ(
+                tsra_key_gen(sess_handle, &algo, &prop_list, &key_handle),
+                TSRA_STATUS_SUCCESS
+            );
+            auto key_guard =
+                scope_guard::make_scope_exit([&key_handle] { tsra_key_delete(key_handle); });
+
+            tsra_key_prop masked{ TSRA_KEY_PROP_ID_MASKED_KEY, nullptr, 0 };
+            ASSERT_EQ(tsra_key_get_prop(key_handle, &masked), TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(masked.len, c.masked_len);
+
+            uint32_t bits = 0;
+            tsra_key_prop bits_prop{ TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) };
+            ASSERT_EQ(tsra_key_get_prop(key_handle, &bits_prop), TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(bits, c.bits);
+
+            tsra_key_prop pub{ TSRA_KEY_PROP_ID_PUB_KEY_INFO, nullptr, 0 };
+            ASSERT_NE(tsra_key_get_prop(key_handle, &pub), TSRA_STATUS_BUFFER_TOO_SMALL);
+
+            // The key report carries the ML-KEM (or hybrid) public key.
+            std::array<uint8_t, 128> report_data{};
+            tsra_buffer data_buf{ report_data.data(), static_cast<uint32_t>(report_data.size()) };
+            tsra_buffer report_buf{ nullptr, 0 };
+            ASSERT_EQ(
+                tsra_generate_key_report(key_handle, &data_buf, &report_buf),
+                TSRA_STATUS_BUFFER_TOO_SMALL
+            );
+            std::vector<uint8_t> report(report_buf.len);
+            report_buf = { report.data(), static_cast<uint32_t>(report.size()) };
+            ASSERT_EQ(
+                tsra_generate_key_report(key_handle, &data_buf, &report_buf),
+                TSRA_STATUS_SUCCESS
+            );
+            ASSERT_GT(report_buf.len, 1568u);
+        }
     });
 }
 

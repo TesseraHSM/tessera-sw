@@ -27,14 +27,14 @@ use super::*;
 /// * `api_rev` - The active session's negotiated API revision.
 /// * `session_id` - The active session id this request binds to.
 /// * `masked_sealing_key` - The receiver's masked SD-sealing key (from
-///   `SdSealingKeyGen`) that unseals the source backup, exactly
-///   [`MASKED_SEALING_KEY_LEN`] bytes.
+///   `SdSealingKeyGen`) that unseals the source backup:
+///   a P-384, ML-KEM-1024 or MLKEM1024-P384 masked sealing key.
 /// * `src_evidence` - Source (sender) attestation evidence, transmitted
 ///   out of band.
 /// * `dest_evidence` - Destination (receiver) attestation evidence.
 /// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
-/// * `src_remote_backup` - The source remote backup to reseal, exactly
-///   [`POK_REMOTE_BACKUP_LEN`] bytes.
+/// * `src_remote_backup` - The source remote backup to reseal:
+///   one complete PID-signed SD envelope.
 ///
 /// # Errors
 ///
@@ -52,19 +52,18 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     src_remote_backup: &[u8],
     ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmSdTransferResult> {
-    let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
-    let src_remote_backup: [u8; POK_REMOTE_BACKUP_LEN] = src_remote_backup
-        .try_into()
-        .map_err(|_| HsmError::InvalidArgument)?;
+    let masked_sealing_key = masked_sealing_key_wire(masked_sealing_key)?;
+    let src_remote_backup = remote_backup_wire(src_remote_backup)?;
     let policy = policy_wire(policy)?;
 
     // Both parties' evidence share one OOB list; push the source first,
     // then the destination, so descriptor indices stay contiguous.
-    let mut oob: Vec<&[u8]> = Vec::new();
+    let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
+    push_report_out(&mut report, &mut oob)?;
     let src = super::sd_evidence::push_identity_evidence(src_evidence, &mut oob)?;
     let dest = push_evidence(dest_evidence, &mut oob)?;
+    let src_remote_backup = push_report(&src_remote_backup, &mut oob)?;
 
     let req = TborSdResealRemoteBackupReq {
         session_id,
@@ -85,12 +84,12 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
-            .map(|resp| HsmSdTransferResult {
-                backup: resp.dst_remote_backup.to_vec(),
-            })
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor_oob(api_rev, &req, &mut oob, cookie)
             .map_err(HsmError::from)
+    })?;
+    drop(oob);
+    Ok(HsmSdTransferResult {
+        backup: take_sd_backup(report, resp.report_len)?,
     })
 }

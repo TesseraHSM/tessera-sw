@@ -7,7 +7,11 @@
 //! (e.g. the `masked_key` returned by `SdSealingKeyGen`), unmasks it,
 //! derives the attested key's public component on-device, and returns a
 //! signed COSE_Sign1 key-attestation report over it. The report is signed
-//! by the partition-identity (PID) key.
+//! by the partition-identity (PID) key of the policy `pta_alg`: ES384 for a
+//! P-384 PTA or ML-DSA-87 for an ML-DSA-87 PTA. Verify it with the PID leaf
+//! of the matching `GetCert` bank ([`CERT_BANK_ECC`] or [`CERT_BANK_MLDSA`])
+//! and check the protected-header alg.
+//! The report is returned through out-of-band item [`KEY_REPORT_OOB_INDEX`].
 //!
 //! The request carries the masked-key envelope to attest plus a
 //! caller-supplied 128-byte `report_data` bound into the report payload.
@@ -19,6 +23,11 @@
 use alloc::vec::Vec;
 
 use crate::tbor;
+use crate::tbor_int::U16;
+#[cfg(doc)]
+use crate::CERT_BANK_ECC;
+#[cfg(doc)]
+use crate::CERT_BANK_MLDSA;
 
 /// TBOR opcode for `KeyReport`.
 ///
@@ -40,13 +49,17 @@ pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
 /// Bind request authentication to this command and session.
 pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
     let mut aad = [0u8; 32];
-    aad[..13].copy_from_slice(b"key-report-v1");
+    aad[..13].copy_from_slice(b"key-report-v3");
     aad[13..15].copy_from_slice(&session_id.to_le_bytes());
     aad
 }
 
-/// Maximum wire length of the returned COSE_Sign1 `report`.
-pub const KEY_REPORT_MAX_LEN: usize = 1024;
+/// Maximum length of the returned COSE_Sign1 report; an out-of-band buffer
+/// of this size always holds it.
+pub const KEY_REPORT_MAX_LEN: usize = 8192;
+
+/// Out-of-band item that receives the report.
+pub const KEY_REPORT_OOB_INDEX: usize = 0;
 
 /// Host-facing TBOR `KeyReport` request.
 #[tbor(opcode = TBOR_OP_KEY_REPORT, session_ctrl = in_session)]
@@ -73,12 +86,11 @@ pub struct TborKeyReportReq {
 
 /// Host-facing TBOR `KeyReport` response.
 #[tbor(response)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TborKeyReportResp {
-    /// The tagged COSE_Sign1 key-attestation report, signed by the PID
-    /// key. Variable length up to [`KEY_REPORT_MAX_LEN`].
-    #[tbor(max_len = 1024)]
-    pub report: Vec<u8>,
+    /// Number of report bytes written to out-of-band item
+    /// [`KEY_REPORT_OOB_INDEX`].
+    pub report_len: U16,
 }
 
 #[cfg(test)]

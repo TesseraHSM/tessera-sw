@@ -27,7 +27,7 @@ pub fn all_suites() -> [HpkeSuite; 6] {
 /// top 7 bits of the leading scalar byte — biased toward small values
 /// but acceptable for tests.
 pub fn gen_keypair(suite: HpkeSuite) -> (EccPrivateKey, EccPublicKey) {
-    let curve = suite.kem_curve();
+    let curve = suite.kem_curve().expect("dh suite");
     let nsk = suite.nsk();
     let mut scalar = vec![0u8; nsk];
 

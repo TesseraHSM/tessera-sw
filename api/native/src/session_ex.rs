@@ -32,6 +32,9 @@ pub struct TsraSessionPsk {
 /// session. `psk` selects the role slot and (optionally) the PSK, and
 /// `suite` selects the key-establishment suite. Every session encrypts
 /// its in-session traffic under keys agreed during the handshake.
+/// ECDH P-384 uses ECDSA P-384 authentication;
+/// ML-KEM-1024/ML-DSA-87 uses the ML-DSA-87 PID and certificate bank.
+/// Its root pin must identify that bank's independently trusted root.
 ///
 /// @param[in] dev_handle Handle to the HSM partition
 /// @param[in] root_spki_thumbprint Required 48-byte SHA-384 hash of the

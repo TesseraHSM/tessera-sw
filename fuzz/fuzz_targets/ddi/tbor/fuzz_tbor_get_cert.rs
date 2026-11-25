@@ -90,15 +90,14 @@ fn make_request(input: &FuzzInput, count: u8) -> TborGetCertReq {
             )
         }
     };
-    TborGetCertReq::new(slot_id, cert_id)
+    TborGetCertReq::new(slot_id, CERT_BANK_ECC, cert_id)
 }
 
 /// Read a known-valid request and validate the complete returned certificate.
-fn read_certificate(ctx: &TestCtx, request: &TborGetCertReq, state: Lifecycle) -> TborGetCertResp {
-    let response = ctx
-        .tbor(request)
+fn read_certificate(ctx: &TestCtx, request: &TborGetCertReq, state: Lifecycle) -> Vec<u8> {
+    let der = ctx
+        .get_cert(request.slot_id, request.bank, request.cert_id)
         .unwrap_or_else(|err| panic!("valid TborGetCertReq in {state:?} failed: {err:?}"));
-    let der = &response.certificate;
     assert!(
         !der.is_empty() && der.len() <= CERT_MAX_LEN,
         "TborGetCertReq in {state:?}: invalid certificate length",
@@ -107,9 +106,9 @@ fn read_certificate(ctx: &TestCtx, request: &TborGetCertReq, state: Lifecycle) -
         der[0], 0x30,
         "TborGetCertReq in {state:?}: certificate must be a DER SEQUENCE",
     );
-    X509Certificate::from_der(der)
+    X509Certificate::from_der(&der)
         .unwrap_or_else(|err| panic!("TborGetCertReq in {state:?}: invalid X.509: {err:?}"));
-    response
+    der
 }
 
 /// Assert the independent lookup oracle and slot-specific stability properties.
@@ -127,7 +126,7 @@ fn exercise_request(ctx: &TestCtx, request: &TborGetCertReq, count: u8, state: L
                 .get_certificate(request.cert_id)
                 .unwrap_or_else(|err| panic!("TborGetCertReq in {state:?} failed: {err:?}"));
             assert_eq!(
-                response.certificate.as_slice(),
+                response.as_slice(),
                 mbor.data.certificate.as_slice(),
                 "TborGetCertReq in {state:?}: TBOR and MBOR disagree",
             );
@@ -138,9 +137,9 @@ fn exercise_request(ctx: &TestCtx, request: &TborGetCertReq, count: u8, state: L
             );
         }
     } else {
-        let baseline_request = TborGetCertReq::new(0, 0);
+        let baseline_request = TborGetCertReq::new(0, CERT_BANK_ECC, 0);
         let before = read_certificate(ctx, &baseline_request, state);
-        match ctx.tbor(request) {
+        match ctx.get_cert(request.slot_id, request.bank, request.cert_id) {
             Ok(_response) => {
                 panic!("invalid TborGetCertReq in {state:?} unexpectedly succeeded");
             }
@@ -154,7 +153,7 @@ fn exercise_request(ctx: &TestCtx, request: &TborGetCertReq, count: u8, state: L
             "rejected TborGetCertReq in {state:?} changed the valid slot-0 certificate",
         );
         if request.slot_id == 2 && state == Lifecycle::Finalized {
-            read_certificate(ctx, &TborGetCertReq::new(2, 0), state);
+            read_certificate(ctx, &TborGetCertReq::new(2, CERT_BANK_ECC, 0), state);
         }
     }
 }
@@ -163,7 +162,7 @@ fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx: &TestCtx, _path: &str| {
         let state = prepare_partition(ctx, input.lifecycle);
         let count = ctx
-            .tbor(&TborGetCertChainInfoReq::new(0))
+            .tbor(&TborGetCertChainInfoReq::new(0, CERT_BANK_ECC))
             .expect("slot-0 chain metadata must be available")
             .num_certs;
         assert!(count > 0, "slot-0 certificate chain must be nonempty");

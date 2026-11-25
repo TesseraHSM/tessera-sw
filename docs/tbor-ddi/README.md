@@ -357,7 +357,8 @@ KEM exchange plus the role PSK, followed by encrypted host confirmation.
 
 The SDK first authenticates the PID certificate path against the caller's
 required root SPKI thumbprint and the DICE layer-zero/Tessera-EKU profile. The
-[session design](./session-design.md) specifies that validation, the ECDH P-384 suite,
+[session design](./session-design.md) specifies that validation, the ECDH P-384
+and ML-KEM-1024/ML-DSA-87 suites,
 the exact transcript/key schedule, and the distinction between provenance and
 persistent unit identity.
 

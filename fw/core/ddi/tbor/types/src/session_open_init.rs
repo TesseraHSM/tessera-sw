@@ -83,16 +83,25 @@ pub enum SessionKind {
 pub enum SuiteId {
     /// Ephemeral ECDH P-384, transcript signed with ECDSA P-384.
     EcdhP384EcdsaP384 = 0x01,
+
+    /// ML-KEM-1024, transcript signed with ML-DSA-87.
+    MlKem1024MlDsa87 = 0x02,
 }
 
-/// Largest `pk_init`: a 97 B SEC1 uncompressed P-384 point.
-pub const PK_INIT_MAX_LEN: usize = 97;
+/// Largest `pk_init`: the 1568 B ML-KEM-1024 encapsulation key.
+pub const PK_INIT_MAX_LEN: usize = 1568;
 
-/// Largest `enc`: the HSM's 97 B SEC1 uncompressed P-384 ephemeral point.
-pub const ENC_MAX_LEN: usize = 97;
+/// Largest `enc`: the 1568 B ML-KEM-1024 ciphertext.
+pub const ENC_MAX_LEN: usize = 1568;
 
 /// Length of the transcript signature: raw big-endian ECDSA P-384 `r ‖ s`.
 pub const SIG_LEN: usize = 96;
+
+/// ML-DSA-87 transcript signature length in OOB output item zero.
+pub const SESSION_MLDSA87_SIG_LEN: usize = 4627;
+
+/// OOB output index of the ML-DSA-87 transcript signature.
+pub const SESSION_SIGNATURE_OOB_INDEX: usize = 0;
 
 /// `SessionOpenInit` request schema.
 ///
@@ -124,9 +133,9 @@ pub struct TborSessionOpenInitReq<'a> {
     #[tbor(U8)]
     pub suite_id: SuiteId,
 
-    /// The VM's per-handshake ephemeral ECDH P-384 public key, encoded
-    /// as a 97 B SEC1 uncompressed point.
-    #[tbor(align = 4, buffer, max_len = 97)]
+    /// The VM's per-handshake KEM public key: a 97 B SEC1 P-384 point
+    /// or a 1568 B ML-KEM-1024 encapsulation key.
+    #[tbor(align = 4, buffer, max_len = 1568)]
     pub pk_init: &'a [u8],
 }
 
@@ -142,12 +151,14 @@ pub struct TborSessionOpenInitResp<'a> {
     #[tbor(session_id)]
     pub session_id: SessionId,
 
-    /// The HSM's 97 B SEC1 uncompressed ephemeral P-384 point.
-    #[tbor(align = 4, buffer, max_len = 97)]
+    /// The HSM's 97 B SEC1 ephemeral P-384 point or the 1568 B
+    /// ML-KEM-1024 ciphertext.
+    #[tbor(align = 4, buffer, max_len = 1568)]
     pub enc: &'a [u8],
 
     /// Partition-identity ECDSA P-384 signature over the transcript hash
-    /// `T1`, raw big-endian `r ‖ s`.
-    #[tbor(buffer, len = 96)]
+    /// `T1`, raw big-endian `r ‖ s`. Empty for suite `0x02`, whose
+    /// 4627-byte ML-DSA-87 signature is written to OOB output item zero.
+    #[tbor(buffer, max_len = 96)]
     pub sig: &'a [u8],
 }

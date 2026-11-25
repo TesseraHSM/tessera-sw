@@ -85,6 +85,8 @@ pub enum SessionExCryptoError {
 pub enum SessionSuite {
     /// Ephemeral ECDH P-384 ([`SESSION_SUITE_ECDH_P384_ECDSA_P384`]).
     EcdhP384,
+    /// ML-KEM-1024 with ML-DSA-87 authentication.
+    MlKem1024MlDsa87,
 }
 
 impl SessionSuite {
@@ -92,6 +94,7 @@ impl SessionSuite {
     pub const fn id(self) -> u8 {
         match self {
             Self::EcdhP384 => SESSION_SUITE_ECDH_P384_ECDSA_P384,
+            Self::MlKem1024MlDsa87 => SESSION_SUITE_MLKEM1024_MLDSA87,
         }
     }
 
@@ -99,7 +102,79 @@ impl SessionSuite {
     pub const fn enc_len(self) -> usize {
         match self {
             Self::EcdhP384 => SESSION_P384_SEC1_LEN,
+            Self::MlKem1024MlDsa87 => SESSION_MLKEM1024_CT_LEN,
         }
+    }
+
+    /// Certificate bank whose PID authenticates this suite.
+    pub const fn cert_bank(self) -> u8 {
+        match self {
+            Self::EcdhP384 => CERT_BANK_ECC,
+            Self::MlKem1024MlDsa87 => CERT_BANK_MLDSA,
+        }
+    }
+
+    /// Length of the transcript signature, independent of its transport.
+    pub const fn sig_len(self) -> usize {
+        match self {
+            Self::EcdhP384 => SIG_LEN,
+            Self::MlKem1024MlDsa87 => SESSION_MLDSA87_SIG_LEN,
+        }
+    }
+}
+
+/// Authenticated partition-identity key used to verify a session transcript.
+pub enum SessionIdentityKey {
+    /// P-384 identity used by the ECDSA-authenticated suite.
+    EcdsaP384(EccPublicKey),
+    /// ML-DSA-87 identity used by the post-quantum-authenticated suite.
+    MlDsa87(MlDsaPublicKey),
+}
+
+impl SessionIdentityKey {
+    /// Import a canonical SPKI of the identity algorithm required by `suite`.
+    pub fn from_spki(suite: SessionSuite, spki: &[u8]) -> SessionExCryptoResult<Self> {
+        match suite {
+            SessionSuite::EcdhP384 => {
+                let key = EccPublicKey::from_bytes(spki)
+                    .map_err(|_| SessionExCryptoError::InvalidInput)?;
+                ec_pub_to_sec1(&key)?;
+                Ok(Self::EcdsaP384(key))
+            }
+            SessionSuite::MlKem1024MlDsa87 => {
+                let encoded = spki
+                    .strip_prefix(&x509_builder::der_helpers::MLDSA87_SPKI_HEADER)
+                    .ok_or(SessionExCryptoError::InvalidInput)?;
+                let key = MlDsaPublicKey::from_bytes(encoded)
+                    .map_err(|_| SessionExCryptoError::InvalidInput)?;
+                if key.variant() != MlDsaVariant::MlDsa87 {
+                    return Err(SessionExCryptoError::InvalidInput);
+                }
+                Ok(Self::MlDsa87(key))
+            }
+        }
+    }
+
+    fn transcript_key(&self, suite: SessionSuite) -> SessionExCryptoResult<Vec<u8>> {
+        match (suite, self) {
+            (SessionSuite::EcdhP384, Self::EcdsaP384(key)) => Ok(ec_pub_to_sec1(key)?.to_vec()),
+            (SessionSuite::MlKem1024MlDsa87, Self::MlDsa87(key))
+                if key.variant() == MlDsaVariant::MlDsa87 =>
+            {
+                key.to_vec().map_err(|_| SessionExCryptoError::Crypto)
+            }
+            _ => Err(SessionExCryptoError::InvalidInput),
+        }
+    }
+
+    fn verify(&self, t1: &[u8], sig: &[u8]) -> SessionExCryptoResult<bool> {
+        match self {
+            Self::EcdsaP384(key) => EccAlgo::default().verify(key, t1, sig),
+            Self::MlDsa87(key) => {
+                MlDsaAlgo::new(&[]).and_then(|mut verifier| verifier.verify(key, t1, sig))
+            }
+        }
+        .map_err(|_| SessionExCryptoError::Crypto)
     }
 }
 
@@ -150,7 +225,8 @@ fn len16(len: usize) -> SessionExCryptoResult<[u8; 2]> {
 /// `T1 = SHA-384("TSRA-SESSION-v1" ‖ BE16(api_major) ‖ BE16(api_minor)
 /// ‖ suite_id ‖ psk_id ‖ session_type
 /// ‖ pk_hsm ‖ len16 ‖ pk_init ‖ len16 ‖ enc)`, where `pk_hsm` is the
-/// partition identity key as a SEC1 point and lengths are big-endian.
+/// partition identity key as a SEC1 point for ECDSA or a raw ML-DSA-87
+/// public key for suite `0x02`; lengths are big-endian.
 pub fn transcript_hash(
     api_rev: (u16, u16),
     suite_id: u8,
@@ -299,12 +375,17 @@ impl TransportDir {
     }
 }
 
+enum Ephemeral {
+    Ecdh(EccPrivateKey),
+    MlKem(MlKemPrivateKey),
+}
+
 /// Host side of one handshake, between `SessionOpenInit`'s request and
 /// its response.
 pub struct SessionInitiator {
     api_rev: (u16, u16),
     suite: SessionSuite,
-    eph: EccPrivateKey,
+    eph: Ephemeral,
     pk_init: Vec<u8>,
     reopen_id: u16,
 }
@@ -327,7 +408,27 @@ impl SessionInitiator {
                 Ok(Self {
                     api_rev,
                     suite,
-                    eph: sk,
+                    eph: Ephemeral::Ecdh(sk),
+                    pk_init,
+                    reopen_id: u16::MAX,
+                })
+            }
+            SessionSuite::MlKem1024MlDsa87 => {
+                let mut seed = Zeroizing::new([0u8; MLKEM_SEED_LEN]);
+                Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| SessionExCryptoError::Crypto)?;
+                let sk = MlKemPrivateKey::from_seed(MlKemVariant::MlKem1024, seed.as_slice())
+                    .map_err(|_| SessionExCryptoError::Crypto)?;
+                let pk_init = sk
+                    .public_key()
+                    .and_then(|pk| pk.to_vec())
+                    .map_err(|_| SessionExCryptoError::Crypto)?;
+                if pk_init.len() != SESSION_MLKEM1024_PK_LEN {
+                    return Err(SessionExCryptoError::Crypto);
+                }
+                Ok(Self {
+                    api_rev,
+                    suite,
+                    eph: Ephemeral::MlKem(sk),
                     pk_init,
                     reopen_id: u16::MAX,
                 })
@@ -358,22 +459,23 @@ impl SessionInitiator {
     ///
     /// # Errors
     ///
-    /// [`SessionExCryptoError::InvalidInput`] if `enc` or `sig` is
-    /// malformed, [`SessionExCryptoError::MacMismatch`] if `sig` does not
+    /// [`SessionExCryptoError::InvalidInput`] if the identity algorithm
+    /// does not match the suite, or `enc` or `sig` is malformed;
+    /// [`SessionExCryptoError::MacMismatch`] if `sig` does not
     /// verify, [`SessionExCryptoError::Crypto`] if a primitive fails.
     pub fn complete(
         &self,
         psk_id: u8,
         session_type: u8,
-        pk_hsm: &EccPublicKey,
+        pk_hsm: &SessionIdentityKey,
         psk: &[u8],
         enc: &[u8],
         sig: &[u8],
     ) -> SessionExCryptoResult<SessionHandshake> {
-        if enc.len() != self.suite.enc_len() || sig.len() != SIG_LEN {
+        if enc.len() != self.suite.enc_len() || sig.len() != self.suite.sig_len() {
             return Err(SessionExCryptoError::InvalidInput);
         }
-        let pk_hsm_sec1 = ec_pub_to_sec1(pk_hsm)?;
+        let pk_hsm_sec1 = pk_hsm.transcript_key(self.suite)?;
         let t1 = transcript_hash_for_reopen(
             self.api_rev,
             self.suite.id(),
@@ -384,8 +486,7 @@ impl SessionInitiator {
             enc,
             self.reopen_id,
         )?;
-        let mut verifier = EccAlgo::default();
-        if !verifier.verify(pk_hsm, &t1, sig).unwrap_or(false) {
+        if !pk_hsm.verify(&t1, sig)? {
             return Err(SessionExCryptoError::MacMismatch);
         }
 
@@ -396,12 +497,23 @@ impl SessionInitiator {
 
     /// KEM shared secret `Z` for `enc`.
     fn shared_secret(&self, enc: &[u8]) -> SessionExCryptoResult<Zeroizing<Vec<u8>>> {
-        let peer = ec_pub_from_sec1(enc)?;
-        EcdhAlgo::new(&peer)
-            .derive(&self.eph, P384_COORD_LEN)
-            .and_then(|z| z.to_vec())
-            .map(Zeroizing::new)
-            .map_err(|_| SessionExCryptoError::Crypto)
+        match &self.eph {
+            Ephemeral::Ecdh(sk) => {
+                let peer = ec_pub_from_sec1(enc)?;
+                EcdhAlgo::new(&peer)
+                    .derive(sk, P384_COORD_LEN)
+                    .and_then(|z| z.to_vec())
+                    .map(Zeroizing::new)
+                    .map_err(|_| SessionExCryptoError::Crypto)
+            }
+            Ephemeral::MlKem(sk) => {
+                let mut z = Zeroizing::new(vec![0u8; MLKEM_SHARED_SECRET_LEN]);
+                MlKemAlgo::new()
+                    .decapsulate(sk, enc, Some(z.as_mut_slice()))
+                    .map_err(|_| SessionExCryptoError::Crypto)?;
+                Ok(z)
+            }
+        }
     }
 }
 
@@ -839,6 +951,49 @@ mod tests {
     const HS: [u8; SESSION_HS_LEN] = [0x5a; SESSION_HS_LEN];
     const PSK: [u8; PSK_LEN] = [0x33; PSK_LEN];
 
+    enum DeviceIdentity {
+        Ecc(EccPrivateKey),
+        MlDsa(MlDsaPrivateKey),
+    }
+
+    impl DeviceIdentity {
+        fn for_suite(suite: SessionSuite) -> Self {
+            if suite == SessionSuite::MlKem1024MlDsa87 {
+                Self::MlDsa(
+                    MlDsaPrivateKey::from_seed(MlDsaVariant::MlDsa87, &[0x17; MLDSA_SEED_LEN])
+                        .expect("ML-DSA identity"),
+                )
+            } else {
+                Self::Ecc(
+                    EccPrivateKey::from_scalar(EccCurve::P384, &[0x17; 48]).expect("ECC identity"),
+                )
+            }
+        }
+
+        fn public_key(&self) -> SessionIdentityKey {
+            match self {
+                Self::Ecc(key) => {
+                    SessionIdentityKey::EcdsaP384(key.public_key().expect("identity"))
+                }
+                Self::MlDsa(key) => {
+                    SessionIdentityKey::MlDsa87(key.public_key().expect("identity"))
+                }
+            }
+        }
+
+        fn sign(&self, t1: &[u8], sig: &mut [u8]) {
+            match self {
+                Self::Ecc(key) => EccAlgo::default().sign(key, t1, Some(sig)),
+                Self::MlDsa(key) => {
+                    MlDsaAlgo::new(&[])
+                        .expect("empty context")
+                        .sign(key, t1, Some(sig))
+                }
+            }
+            .expect("sign transcript");
+        }
+    }
+
     /// The device's key for one direction.
     fn device_key(label: &[u8]) -> AesKey {
         let bytes =
@@ -861,7 +1016,7 @@ mod tests {
     /// [`SessionInitiator`]. Returns `(enc, sig, hs)`.
     fn device_open_init(
         suite: SessionSuite,
-        sk_hsm: &EccPrivateKey,
+        sk_hsm: &DeviceIdentity,
         pk_init: &[u8],
         api_rev: (u16, u16),
     ) -> (Vec<u8>, Vec<u8>, Zeroizing<[u8; SESSION_HS_LEN]>) {
@@ -878,22 +1033,31 @@ mod tests {
                     ec_pub_to_sec1(&eph.public_key().expect("test crypto")).expect("test crypto");
                 (enc.to_vec(), z)
             }
+            SessionSuite::MlKem1024MlDsa87 => {
+                let pk = MlKemPublicKey::from_bytes(pk_init).expect("test crypto");
+                let mut enc = vec![0u8; SESSION_MLKEM1024_CT_LEN];
+                let mut z = vec![0u8; MLKEM_SHARED_SECRET_LEN];
+                MlKemAlgo::new()
+                    .encapsulate(&pk, Some(&mut enc), Some(&mut z))
+                    .expect("test crypto");
+                (enc, z)
+            }
         };
-        let pk_hsm =
-            ec_pub_to_sec1(&sk_hsm.public_key().expect("test crypto")).expect("test crypto");
+        let pk_hsm = match sk_hsm.public_key() {
+            SessionIdentityKey::EcdsaP384(key) => ec_pub_to_sec1(&key).expect("SEC1").to_vec(),
+            SessionIdentityKey::MlDsa87(key) => key.to_vec().expect("encoded ML-DSA key"),
+        };
         let t1 = transcript_hash(api_rev, suite.id(), 1, 0, &pk_hsm, pk_init, &enc)
             .expect("test crypto");
-        let mut sig = vec![0u8; SIG_LEN];
-        EccAlgo::default()
-            .sign(sk_hsm, &t1, Some(&mut sig))
-            .expect("test crypto");
+        let mut sig = vec![0u8; suite.sig_len()];
+        sk_hsm.sign(&t1, &mut sig);
         let hs = handshake_secret(&z, &PSK, &t1).expect("test crypto");
         (enc, sig, hs)
     }
 
     fn handshake_agrees(suite: SessionSuite, api_rev: (u16, u16)) {
-        let sk_hsm = EccPrivateKey::from_scalar(EccCurve::P384, &[0x17; 48]).expect("test crypto");
-        let pk_hsm = sk_hsm.public_key().expect("test crypto");
+        let sk_hsm = DeviceIdentity::for_suite(suite);
+        let pk_hsm = sk_hsm.public_key();
         let init = SessionInitiator::generate(suite, api_rev).expect("test crypto");
         let (enc, sig, hs) = device_open_init(suite, &sk_hsm, init.pk_init(), api_rev);
 
@@ -914,12 +1078,22 @@ mod tests {
             init.complete(1, 0, &pk_hsm, &PSK, &enc, &bad_sig),
             Err(SessionExCryptoError::MacMismatch)
         ));
+        let mut bad_enc = enc.clone();
+        bad_enc[0] ^= 1;
+        assert!(matches!(
+            init.complete(1, 0, &pk_hsm, &PSK, &bad_enc, &sig),
+            Err(SessionExCryptoError::MacMismatch)
+        ));
         assert!(matches!(
             init.complete(0, 0, &pk_hsm, &PSK, &enc, &sig),
             Err(SessionExCryptoError::MacMismatch)
         ));
         assert!(matches!(
             init.complete(1, 0, &pk_hsm, &PSK, &enc[1..], &sig),
+            Err(SessionExCryptoError::InvalidInput)
+        ));
+        assert!(matches!(
+            init.complete(1, 0, &pk_hsm, &PSK, &enc, &sig[..sig.len() - 1]),
             Err(SessionExCryptoError::InvalidInput)
         ));
         for changed in [(api_rev.0 ^ 1, api_rev.1), (api_rev.0, api_rev.1 ^ 1)] {
@@ -936,6 +1110,63 @@ mod tests {
         for api_rev in [(1, 1), (2, 0)] {
             handshake_agrees(SessionSuite::EcdhP384, api_rev);
         }
+    }
+
+    #[test]
+    fn mlkem_mldsa_handshake_agrees_with_device() {
+        for api_rev in [(1, 1), (2, 0)] {
+            handshake_agrees(SessionSuite::MlKem1024MlDsa87, api_rev);
+        }
+    }
+
+    #[test]
+    fn mlkem_mldsa_rejects_wrong_identity_algorithm_signature_length_and_context() {
+        let suite = SessionSuite::MlKem1024MlDsa87;
+        let identity = DeviceIdentity::for_suite(suite);
+        let key = identity.public_key();
+        let init = SessionInitiator::generate(suite, (2, 0)).expect("initiator");
+        let (enc, sig, _) = device_open_init(suite, &identity, init.pk_init(), (2, 0));
+        let classical_key = DeviceIdentity::for_suite(SessionSuite::EcdhP384).public_key();
+        let wrong_variant = SessionIdentityKey::MlDsa87(
+            MlDsaPrivateKey::from_seed(MlDsaVariant::MlDsa65, &[0x18; MLDSA_SEED_LEN])
+                .expect("ML-DSA-65")
+                .public_key()
+                .expect("public key"),
+        );
+        for wrong in [&classical_key, &wrong_variant] {
+            assert!(matches!(
+                init.complete(1, 0, wrong, &PSK, &enc, &sig),
+                Err(SessionExCryptoError::InvalidInput)
+            ));
+        }
+        for len in [0, SIG_LEN, sig.len() - 1] {
+            assert!(matches!(
+                init.complete(1, 0, &key, &PSK, &enc, &sig[..len]),
+                Err(SessionExCryptoError::InvalidInput)
+            ));
+        }
+        let t1 = transcript_hash(
+            (2, 0),
+            suite.id(),
+            1,
+            0,
+            &key.transcript_key(suite).expect("PID"),
+            init.pk_init(),
+            &enc,
+        )
+        .expect("transcript");
+        let DeviceIdentity::MlDsa(private_key) = identity else {
+            panic!("ML-DSA identity");
+        };
+        let mut wrong_context_sig = vec![0; suite.sig_len()];
+        MlDsaAlgo::new(b"wrong-context")
+            .expect("context")
+            .sign(&private_key, &t1, Some(&mut wrong_context_sig))
+            .expect("signature");
+        assert!(matches!(
+            init.complete(1, 0, &key, &PSK, &enc, &wrong_context_sig),
+            Err(SessionExCryptoError::MacMismatch)
+        ));
     }
 
     #[test]

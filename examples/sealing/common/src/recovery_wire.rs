@@ -19,6 +19,7 @@ pub fn encode(remote: &RemoteRecovery) -> Result<JsonValue> {
         sd_mk_backup: hex::encode(&remote.sd_mk_backup),
         sender_pid_pub_key: hex::encode(&remote.sender_pid_pub_key),
         receiver_cert_chain: wire::encode_chain(&remote.receiver_cert_chain),
+        receiver_key_report: hex::encode(&remote.receiver_key_report),
         sender: wire::encode_identity(&remote.backup.evidence),
     })
 }
@@ -33,6 +34,11 @@ pub fn decode(record: &JsonValue) -> Result<RemoteRecovery> {
         sd_mk_backup: wire::blob(record, "sd_mk_backup")?,
         sender_pid_pub_key: wire::blob(record, "sender_pid_pub_key")?,
         receiver_cert_chain: wire::chain(record, "receiver_cert_chain")?,
+        receiver_key_report: if record.has_key("receiver_key_report") {
+            wire::blob(record, "receiver_key_report")?
+        } else {
+            Vec::new()
+        },
         backup: RemoteBackup {
             pok_remote_backup: wire::blob(record, "pok_remote_backup")?,
             evidence: wire::identity(&record["sender"])?,

@@ -210,9 +210,12 @@ struct Import {
 fn dummy_request(session_id: u16) -> TborDarcTmkImportReq {
     TborDarcTmkImportReq {
         session_id,
-        masked_kex_key: [0; MASKED_KEX_KEY_LEN],
+        masked_kex_key: vec![0; MASKED_KEX_KEY_LEN],
         policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
-        sealed_tmk: [0; SEALED_TMK_LEN],
+        sealed_tmk: ReportDescriptor {
+            index: 1,
+            length: (SEALED_TMK_LEN as u16).into(),
+        },
         remote_cert_chain: vec![CertDescriptor {
             index: 0,
             length: 1u16.into(),
@@ -241,6 +244,7 @@ fn valid_import(
         .tbor(&TborDarcKexKeyGenReq {
             session_id,
             scope: input.scope,
+            kem: TRANSFER_KEM_P384,
         })
         .expect("receiver key generation");
     let recipient = receiver_public(&kex.pub_key);
@@ -257,12 +261,16 @@ fn valid_import(
         .iter()
         .map(|der| common::add_evidence_item(&mut items, der))
         .collect();
+    let artifact = common::add_evidence_item(&mut items, &sealed_tmk);
     Import {
         req: TborDarcTmkImportReq {
             session_id,
             masked_kex_key: kex.masked_key,
             policy: fixture.policy.clone(),
-            sealed_tmk,
+            sealed_tmk: ReportDescriptor {
+                index: artifact.index,
+                length: artifact.length,
+            },
             remote_cert_chain,
         },
         items,
@@ -331,6 +339,12 @@ fn sealed_outcome(original: &[u8], changed: &[u8]) -> Expected {
 /// Length mismatches fail before DER parsing. Repeating the root can validate
 /// as a chain, but recovers the CA rather than the operation-report signer.
 fn descriptor_outcome(import: &Import, original_items: &[Vec<u8>]) -> Expected {
+    let Some(artifact) = import.items.get(usize::from(import.req.sealed_tmk.index)) else {
+        return Expected::Reject(TborStatus::InvalidArg);
+    };
+    if artifact != &original_items[2] {
+        return Expected::Reject(TborStatus::InvalidArg);
+    }
     let descriptors = &import.req.remote_cert_chain;
     if !(1..=3).contains(&descriptors.len()) {
         return Expected::Reject(TborStatus::TborInvalidFixedLength);
@@ -346,10 +360,9 @@ fn descriptor_outcome(import: &Import, original_items: &[Vec<u8>]) -> Expected {
         if item == &original_items[0] {
             roots.push(true);
         } else {
-            assert!(
-                item == &original_items[1],
-                "descriptor oracle requires authentic DER"
-            );
+            if item != &original_items[1] {
+                return Expected::Reject(TborStatus::InvalidArg);
+            }
             roots.push(false);
         }
     }
@@ -378,15 +391,16 @@ fn mutate(
 ) -> Expected {
     let original = import.req.clone();
     let original_items = import.items.clone();
+    let original_artifact = original_items[usize::from(original.sealed_tmk.index)].clone();
     let req = &mut import.req;
     match input.scenario {
         Scenario::ReportFlip => {
             flip(
-                &mut req.sealed_tmk[SEALED_TMK_LEN - 96..],
+                &mut import.items[usize::from(req.sealed_tmk.index)][SEALED_TMK_LEN - 96..],
                 input.offset,
                 input.mask,
             );
-            return if req.sealed_tmk == original.sealed_tmk {
+            return if import.items[usize::from(req.sealed_tmk.index)] == original_artifact {
                 Expected::Success
             } else {
                 Expected::Reject(TborStatus::InvalidArg)
@@ -397,22 +411,19 @@ fn mutate(
                 .tbor(&TborSdSealingKeyGenReq {
                     session_id: req.session_id,
                     scope: input.scope,
+                    kem: TRANSFER_KEM_P384,
                 })
                 .expect("public-key report fixture");
             let report = ctx
-                .tbor(&TborKeyReportReq {
+                .key_report(&TborKeyReportReq {
                     session_id: req.session_id,
                     masked_key: key.masked_key.to_vec(),
                     report_data: [0; KEY_REPORT_DATA_LEN],
                     auth_envelope: Vec::new(),
                 })
-                .expect("public-key report is not an operation report")
-                .report;
-            req.sealed_tmk.copy_from_slice(
-                report
-                    .get(..SEALED_TMK_LEN)
-                    .expect("PublicKey report exceeds transfer field"),
-            );
+                .expect("public-key report is not an operation report");
+            req.sealed_tmk.length = (report.len() as u16).into();
+            import.items[usize::from(req.sealed_tmk.index)] = report;
             return Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::MaskedKeyFlip | Scenario::IvSuffix => {
@@ -425,7 +436,7 @@ fn mutate(
             return masked_key_outcome(&original.masked_kex_key, &req.masked_kex_key);
         }
         Scenario::RawMaskedKey => {
-            req.masked_kex_key = input.bytes();
+            req.masked_kex_key = input.bytes::<MASKED_KEX_KEY_LEN>().to_vec();
             return masked_key_outcome(&original.masked_kex_key, &req.masked_kex_key);
         }
         Scenario::MaskedKeyScope => {
@@ -443,6 +454,7 @@ fn mutate(
                 .tbor(&TborSdSealingKeyGenReq {
                     session_id: req.session_id,
                     scope: input.scope,
+                    kem: TRANSFER_KEM_P384,
                 })
                 .expect("authentic wrong-kind key")
                 .masked_key;
@@ -453,6 +465,7 @@ fn mutate(
                 .tbor(&TborDarcKexKeyGenReq {
                     session_id: req.session_id,
                     scope: input.scope,
+                    kem: TRANSFER_KEM_P384,
                 })
                 .expect("second receiver key")
                 .masked_key;
@@ -475,26 +488,41 @@ fn mutate(
             }
             req.policy = bytes;
             if input.scenario == Scenario::PolicyAndSealed {
-                flip(&mut req.sealed_tmk, input.offset, input.control);
+                flip(
+                    &mut import.items[usize::from(req.sealed_tmk.index)],
+                    input.offset,
+                    input.control,
+                );
             }
             return if req.policy != original.policy {
                 Expected::Reject(TborStatus::InvalidArg)
             } else {
-                sealed_outcome(&original.sealed_tmk, &req.sealed_tmk)
+                sealed_outcome(
+                    &original_artifact,
+                    &import.items[usize::from(req.sealed_tmk.index)],
+                )
             };
         }
         Scenario::SealedFlip | Scenario::CiphertextFlip | Scenario::RawSealed => {
             if input.scenario == Scenario::RawSealed {
-                req.sealed_tmk = input.bytes();
+                import.items[usize::from(req.sealed_tmk.index)] =
+                    input.bytes::<SEALED_TMK_LEN>().to_vec();
             } else {
                 let offset = if input.scenario == Scenario::CiphertextFlip {
                     210 + usize::from(input.offset) % (SEALED_TMK_LEN - 210)
                 } else {
                     usize::from(input.offset) % SEALED_TMK_LEN
                 };
-                flip(&mut req.sealed_tmk, offset as u16, input.mask);
+                flip(
+                    &mut import.items[usize::from(req.sealed_tmk.index)],
+                    offset as u16,
+                    input.mask,
+                );
             }
-            return sealed_outcome(&original.sealed_tmk, &req.sealed_tmk);
+            return sealed_outcome(
+                &original_artifact,
+                &import.items[usize::from(req.sealed_tmk.index)],
+            );
         }
         Scenario::WrongSender | Scenario::ForeignAnchor => {
             let sender = input.private_key(
@@ -518,6 +546,11 @@ fn mutate(
                 .iter()
                 .map(|der| common::add_evidence_item(&mut import.items, der))
                 .collect();
+            let artifact = common::add_evidence_item(&mut import.items, &original_artifact);
+            req.sealed_tmk = ReportDescriptor {
+                index: artifact.index,
+                length: artifact.length,
+            };
             return Expected::Reject(TborStatus::InvalidArg);
         }
         Scenario::DescriptorCount | Scenario::SingleCertificate => {
@@ -556,11 +589,13 @@ fn mutate(
                 items.push(original_items[0].clone());
                 req.remote_cert_chain[0].index = (padding + 1) as u8;
                 req.remote_cert_chain[1].index = padding as u8;
+                items.push(original_artifact);
             } else {
                 items.extend(original_items.iter().cloned());
                 for desc in &mut req.remote_cert_chain {
                     desc.index += padding as u8;
                 }
+                req.sealed_tmk.index = (padding + 2) as u8;
             }
             items.push(input.bytes::<32>().to_vec());
             import.items = items;

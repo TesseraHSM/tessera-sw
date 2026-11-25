@@ -54,7 +54,9 @@ pub(crate) fn sd_create_peer_backup_ex(
     let policy = policy_wire(policy)?;
 
     // Flatten the destination evidence into descriptors + shared OOB items.
-    let mut oob: Vec<&[u8]> = Vec::new();
+    let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+    let mut oob: Vec<TborOobItem<'_>> = Vec::new();
+    push_report_out(&mut report, &mut oob)?;
     let dst = push_evidence(dst_evidence, &mut oob)?;
 
     let req = TborSdCreatePeerBackupReq {
@@ -72,12 +74,12 @@ pub(crate) fn sd_create_peer_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(api_rev, &req, oob_items, cookie)
-            .map(|resp| HsmSdTransferResult {
-                backup: resp.pok_peer_backup.to_vec(),
-            })
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor_oob(api_rev, &req, &mut oob, cookie)
             .map_err(HsmError::from)
+    })?;
+    drop(oob);
+    Ok(HsmSdTransferResult {
+        backup: take_sd_backup(report, resp.report_len)?,
     })
 }

@@ -6,8 +6,8 @@
 //! `SdCreateRemoteBackup` creates a security domain: it mints a fresh
 //! BKS3 and a random security-domain masking key (`SDMK`), provisions
 //! `SDMK` in the vault as the partition's SecurityDomain-scope masking
-//! key, and returns three backups — the 431-byte HPKE Base
-//! `pok_remote_backup`, the 280-byte `pok_local_backup` (BKS3 masked
+//! key, and writes one complete signed HPKE Base backup to OOB index 0.
+//! The response carries its length, the 280-byte `pok_local_backup` (BKS3 masked
 //! under `PartLocalMK`), and the 264-byte `sd_mk_backup` (`SDMK` masked
 //! under the derived `SDBMK`).
 //!
@@ -19,7 +19,7 @@
 //! device.
 //!
 //! Coverage:
-//! * Happy path — non-zero `pok_remote_backup` (431 B), `pok_local_backup`
+//! * Happy path — non-zero signed remote artifact (431 B), `pok_local_backup`
 //!   (280 B), and `sd_mk_backup` (264 B).
 //! * One-shot: a second create on the now-initialized partition →
 //!   `SdAlreadyInitialized`.
@@ -44,6 +44,9 @@
 //! saw it because the std PAL clears the flag on `part_enable` and
 //! `clear_enabled_state`.
 
+use tsra_ddi::DdiError;
+use tsra_ddi::DdiResult;
+use tsra_ddi::TborOobItem;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
@@ -63,6 +66,7 @@ use tsra_ddi_tbor_types::PolicyFlags;
 use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborKeyReportReq;
+use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
@@ -71,6 +75,8 @@ use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
+use tsra_ddi_tbor_types::SD_BACKUP_REPORT_MAX_LEN;
+use tsra_ddi_tbor_types::SD_BACKUP_REPORT_OOB_INDEX;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 
 use crate::commands::part_info::assert_part_state;
@@ -239,9 +245,10 @@ pub(crate) fn masked_key_report_and_pub(
         .tbor(&TborSdSealingKeyGenReq {
             session_id,
             scope: SCOPE_LOCAL,
+            kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
         })
         .expect("SdSealingKeyGen");
-    let masked = seal.masked_key.to_vec();
+    let masked = seal.masked_key.clone();
 
     const COORD_LEN: usize = RAW_PUB_LEN / 2;
     let mut rcvr_pub = [0u8; RAW_PUB_LEN];
@@ -250,16 +257,210 @@ pub(crate) fn masked_key_report_and_pub(
     dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
-        .tbor(&TborKeyReportReq {
+        .key_report(&TborKeyReportReq {
             session_id,
             auth_envelope: Vec::new(),
             masked_key: masked.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
         })
-        .expect("KeyReport")
-        .report;
+        .expect("KeyReport");
 
     (masked, report, rcvr_pub)
+}
+
+/// Re-sign the payload of the COSE_Sign1 key report `report` under
+/// `signer` (ES384), as a SATA-certified receiver leaf would sign a receiver
+/// key report over its KEM key.
+pub(crate) fn resign_key_report(report: &[u8], signer: &CaKey) -> Vec<u8> {
+    use tsra_ddi_mbor_test_helpers::encode_sig_struct;
+
+    let mut dec = minicbor::Decoder::new(report);
+    dec.tag().expect("COSE_Sign1 tag");
+    dec.array().expect("COSE_Sign1 array");
+    let protected = dec.bytes().expect("protected header");
+    let unprotected_at = dec.position();
+    dec.skip().expect("unprotected header");
+    let unprotected = &report[unprotected_at..dec.position()];
+    let payload = dec.bytes().expect("payload");
+
+    let mut tbs = vec![0u8; 64 + protected.len() + payload.len()];
+    let tbs_len = encode_sig_struct(protected, payload, &mut tbs).expect("Sig_structure");
+    let sig = signer.sign_es384(&tbs[..tbs_len]);
+
+    let mut out = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut out);
+    enc.tag(minicbor::data::Tag::Unassigned(18))
+        .expect("tag")
+        .array(4)
+        .expect("array")
+        .bytes(protected)
+        .expect("protected");
+    out.extend_from_slice(unprotected);
+    let mut enc = minicbor::Encoder::new(&mut out);
+    enc.bytes(payload)
+        .expect("payload")
+        .bytes(&sig)
+        .expect("signature");
+    out
+}
+
+/// Generate a local SD sealing key of `kem` and its PID-signed key report.
+/// Returns `(masked_key, report)`.
+pub(crate) fn kem_sealing_key_and_report(
+    ctx: &TestCtx,
+    session_id: u16,
+    kem: u8,
+) -> (Vec<u8>, Vec<u8>) {
+    let seal = ctx
+        .tbor(&TborSdSealingKeyGenReq {
+            session_id,
+            scope: SCOPE_LOCAL,
+            kem,
+        })
+        .expect("SdSealingKeyGen");
+    let report = ctx
+        .key_report(&TborKeyReportReq {
+            session_id,
+            auth_envelope: Vec::new(),
+            masked_key: seal.masked_key.clone(),
+            report_data: [0u8; KEY_REPORT_DATA_LEN],
+        })
+        .expect("KeyReport");
+    (seal.masked_key, report)
+}
+
+/// Response of an SD backup-family command plus the out-of-band report it
+/// returned at [`SD_BACKUP_REPORT_OOB_INDEX`] (empty for restores).
+/// The report is the complete signed encrypted backup, not detached evidence.
+#[derive(Debug)]
+pub(crate) struct SdOut<T> {
+    pub(crate) resp: T,
+    pub(crate) report: Vec<u8>,
+}
+
+impl<T> core::ops::Deref for SdOut<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.resp
+    }
+}
+
+/// Response types of the SD backup family: how many report bytes the
+/// firmware wrote to the out-of-band report slot.
+pub(crate) trait SdReportLen: core::fmt::Debug {
+    fn sd_report_len(&self) -> usize;
+    fn creates_report() -> bool {
+        true
+    }
+}
+
+macro_rules! sd_report_len {
+    ($($ty:ty => $len:expr),* $(,)?) => {
+        $(impl SdReportLen for $ty {
+            fn sd_report_len(&self) -> usize {
+                #[allow(clippy::redundant_closure_call)]
+                ($len)(self)
+            }
+        })*
+    };
+}
+
+sd_report_len! {
+    tsra_ddi_tbor_types::TborSdCreateRemoteBackupResp => |r: &tsra_ddi_tbor_types::TborSdCreateRemoteBackupResp| usize::from(r.report_len.get()),
+    tsra_ddi_tbor_types::TborSdCreatePeerBackupResp => |r: &tsra_ddi_tbor_types::TborSdCreatePeerBackupResp| usize::from(r.report_len.get()),
+    tsra_ddi_tbor_types::TborSdResealRemoteBackupResp => |r: &tsra_ddi_tbor_types::TborSdResealRemoteBackupResp| usize::from(r.report_len.get()),
+    tsra_ddi_tbor_types::TborDarcTmkExportResp => |r: &tsra_ddi_tbor_types::TborDarcTmkExportResp| usize::from(r.report_len.get()),
+}
+
+macro_rules! sd_restore_report_len {
+    ($($ty:ty),* $(,)?) => {
+        $(impl SdReportLen for $ty {
+            fn sd_report_len(&self) -> usize { 0 }
+            fn creates_report() -> bool { false }
+        })*
+    };
+}
+
+sd_restore_report_len! {
+    tsra_ddi_tbor_types::TborSdRestoreRemoteBackupResp,
+    tsra_ddi_tbor_types::TborSdRestorePeerBackupResp,
+    tsra_ddi_tbor_types::TborSdRestoreLocalBackupResp,
+}
+
+/// Issue SD backup-family commands whose OOB item
+/// [`SD_BACKUP_REPORT_OOB_INDEX`] is the report output slot for creation;
+/// restores keep every input slot available without installing an output.
+pub(crate) trait SdOob {
+    fn sd_oob<R: TborOpReq>(&self, req: &R, items: &[&[u8]]) -> DdiResult<SdOut<R::OpResp>>
+    where
+        R::OpResp: SdReportLen;
+
+    #[track_caller]
+    fn expect_sd_reject<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+        expected: TborStatus,
+    ) -> DdiError
+    where
+        R::OpResp: SdReportLen;
+}
+
+impl SdOob for TestCtx {
+    fn sd_oob<R: TborOpReq>(&self, req: &R, items: &[&[u8]]) -> DdiResult<SdOut<R::OpResp>>
+    where
+        R::OpResp: SdReportLen,
+    {
+        if !R::OpResp::creates_report() {
+            let resp = self.tbor_oob(req, items)?;
+            return Ok(SdOut {
+                resp,
+                report: Vec::new(),
+            });
+        }
+        let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+        let mut oob: Vec<TborOobItem<'_>> = vec![TborOobItem::Out(&mut report)];
+        oob.extend(
+            items
+                .iter()
+                .skip(SD_BACKUP_REPORT_OOB_INDEX + 1)
+                .map(|item| TborOobItem::In(item)),
+        );
+        let resp = self.tbor_oob_io(req, &mut oob)?;
+        drop(oob);
+        report.truncate(resp.sd_report_len());
+        Ok(SdOut { resp, report })
+    }
+
+    #[track_caller]
+    fn expect_sd_reject<R: TborOpReq>(
+        &self,
+        req: &R,
+        items: &[&[u8]],
+        expected: TborStatus,
+    ) -> DdiError
+    where
+        R::OpResp: SdReportLen,
+    {
+        if !R::OpResp::creates_report() {
+            return self.expect_fw_reject_oob(req, items, expected);
+        }
+        let mut report = vec![0u8; SD_BACKUP_REPORT_MAX_LEN];
+        let mut oob: Vec<TborOobItem<'_>> = vec![TborOobItem::Out(&mut report)];
+        oob.extend(
+            items
+                .iter()
+                .skip(SD_BACKUP_REPORT_OOB_INDEX + 1)
+                .map(|item| TborOobItem::In(item)),
+        );
+        self.expect_fw_reject_oob_io(req, &mut oob, expected)
+    }
+}
+
+/// Fresh OOB item list with the report output slot reserved. A nonempty
+/// placeholder also permits borrowing the list as inputs during restore.
+pub(crate) fn sd_oob_items() -> Vec<Vec<u8>> {
+    vec![vec![0]]
 }
 
 /// Receiver attestation evidence: the OOB items (the receiver key chain,
@@ -281,6 +482,21 @@ pub(crate) struct ReceiverEvidence {
 }
 
 impl ReceiverEvidence {
+    /// Append a PublicKey report or signed backup as an extra OOB input.
+    pub(crate) fn push_report(&mut self, report: &[u8]) -> ReportDescriptor {
+        let desc = push_item(&mut self.oob_items, report);
+        ReportDescriptor {
+            index: desc.index,
+            length: desc.length,
+        }
+    }
+
+    pub(crate) fn with_report(mut self, report: &[u8]) -> Self {
+        self.oob_items[self.report.index as usize] = report.to_vec();
+        self.report.length = U16::new(report.len().try_into().expect("report fits descriptor"));
+        self
+    }
+
     /// Borrow the OOB items as the `&[&[u8]]` slice `tbor_oob` expects.
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
@@ -325,7 +541,7 @@ pub(crate) fn evidence_from_chains(
     part_owner: &GeneratedChain,
     report: &[u8],
 ) -> ReceiverEvidence {
-    let mut items = Vec::new();
+    let mut items = sd_oob_items();
     let receiver_desc = vec![
         push_item(&mut items, &receiver.root_der),
         push_item(&mut items, &receiver.leaf_der),
@@ -405,6 +621,7 @@ pub(crate) fn backup_request(
         receiver_owner_cert_chain: evidence.owner.clone(),
         receiver_part_owner_cert_chain: evidence.part_owner.clone(),
         receiver_report: evidence.report,
+        receiver_key_report: Vec::new(),
         policy: policy.to_vec(),
     }
 }
@@ -414,13 +631,13 @@ pub(crate) fn backup_request(
 /// policy whose backing-partition binding is rejected first.
 fn dummy_evidence(report: &[u8]) -> ReceiverEvidence {
     ReceiverEvidence {
-        oob_items: vec![report.to_vec()],
+        oob_items: vec![Vec::new(), report.to_vec()],
         receiver: Vec::new(),
         mfgr: Vec::new(),
         owner: Vec::new(),
         part_owner: Vec::new(),
         report: ReportDescriptor {
-            index: 0,
+            index: 1,
             length: U16::new(report.len() as u16),
         },
     }
@@ -437,20 +654,21 @@ fn sd_create_remote_backup_roundtrip() {
 
     let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup roundtrip");
     assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
     let _ = masked_key_report_and_pub(&ctx, session.session_id);
     ctx.tbor(&TborDarcKexKeyGenReq {
         session_id: session.session_id,
         scope: SCOPE_LOCAL,
+        kem: tsra_ddi_tbor_types::TRANSFER_KEM_P384,
     })
     .expect("DarcKexKeyGen must remain available after SD provisioning");
 
     // Canonical header, encapsulation, BKS3 ciphertext, and tag.
-    assert_eq!(resp.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        resp.pok_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "pok_remote_backup must not be all-zero",
     );
 
@@ -479,15 +697,15 @@ fn sd_create_remote_backup_is_one_shot() {
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    let first = ctx.tbor_oob(&req, &evidence.oob()).expect("first create");
+    let first = ctx.sd_oob(&req, &evidence.oob()).expect("first create");
     assert!(
-        first.pok_remote_backup.iter().any(|&b| b != 0),
+        first.report.iter().any(|&b| b != 0),
         "first backup must be a real seal",
     );
 
     // The security domain is now initialized (SDMK provisioned); a second
     // create on the same partition is rejected by the one-shot gate.
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::SdAlreadyInitialized);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::SdAlreadyInitialized);
     assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }
 
@@ -503,7 +721,7 @@ fn sd_create_remote_backup_state_clears_on_erase() {
         let (_, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
         let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
         let req = backup_request(session.session_id, &evidence, &policy);
-        ctx.tbor_oob(&req, &evidence.oob())
+        ctx.sd_oob(&req, &evidence.oob())
             .expect("SdCreateRemoteBackup after reset");
         assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
         ctx.session_close(session.session_id)
@@ -542,7 +760,7 @@ fn sd_create_remote_backup_rejects_non_backing_policy() {
     let policy = known_good_part_policy();
     let evidence = dummy_evidence(&report);
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 /// Flip the final byte of a DER/COSE blob — corrupts the trailing ECDSA
@@ -571,7 +789,7 @@ fn sd_create_remote_backup_rejects_wrong_sata_anchor() {
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
@@ -591,7 +809,7 @@ fn sd_create_remote_backup_rejects_tampered_cert_sig() {
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::X509SignatureInvalid);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::X509SignatureInvalid);
 }
 
 #[test]
@@ -616,12 +834,12 @@ fn sd_create_remote_backup_trusted_sa_roundtrip() {
 
     let req = backup_request(session.session_id, &evidence, &policy);
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup trusted-SA roundtrip");
 
-    assert_eq!(resp.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        resp.pok_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "pok_remote_backup must not be all-zero",
     );
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
@@ -651,7 +869,7 @@ fn sd_create_remote_backup_trusted_sa_rejects_evidence_leaf_mismatch() {
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
@@ -675,7 +893,7 @@ fn sd_create_remote_backup_trusted_sa_rejects_rcvr_pub_mismatch() {
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 #[test]
@@ -699,7 +917,7 @@ fn sd_create_remote_backup_trusted_sa_rejects_tampered_report() {
     let evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &tampered_report);
 
     let req = backup_request(session.session_id, &evidence, &policy);
-    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    ctx.expect_sd_reject(&req, &evidence.oob(), TborStatus::InvalidArg);
 }
 
 /// Verifies that an unknown session ID cannot create a remote backup.
@@ -715,7 +933,7 @@ fn sd_create_remote_backup_rejects_invalid_session_id() {
     req.session_id = u16::MAX;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "unknown session ID must be rejected",
     );
 }
@@ -733,7 +951,7 @@ fn sd_create_remote_backup_rejects_missing_recipient_authorization() {
     req.receiver_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "missing recipient authorization must be rejected",
     );
 }
@@ -753,7 +971,7 @@ fn sd_create_remote_backup_rejects_tampered_recipient_certificate() {
     leaf[last] ^= 0xFF;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "tampered recipient certificate must be rejected",
     );
 }
@@ -776,7 +994,7 @@ fn sd_create_remote_backup_rejects_policy_hash_mismatch() {
     let req = backup_request(session.session_id, &evidence, &modified_policy);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "policy hash mismatch must be rejected",
     );
 }
@@ -794,7 +1012,7 @@ fn sd_create_remote_backup_rejects_invalid_receiver_cert_index() {
     req.receiver_cert_chain[0].index = u8::MAX;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "out-of-range receiver certificate index must be rejected",
     );
 }
@@ -812,7 +1030,7 @@ fn sd_create_remote_backup_rejects_receiver_cert_length_mismatch() {
     req.receiver_cert_chain[0].length = U16::new(0);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "receiver certificate length mismatch must be rejected",
     );
 }
@@ -841,7 +1059,7 @@ fn sd_create_remote_backup_rejects_invalid_report_index() {
     req.receiver_report.index = u8::MAX;
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "invalid trusted receiver report index must be rejected",
     );
 }
@@ -870,7 +1088,7 @@ fn sd_create_remote_backup_rejects_report_length_mismatch() {
     req.receiver_report.length = U16::new(0);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "trusted receiver report length mismatch must be rejected",
     );
 }
@@ -891,7 +1109,7 @@ fn sd_create_remote_backup_rejects_empty_receiver_cert_chain() {
     req.receiver_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "empty receiver certificate chain must be rejected",
     );
 }
@@ -912,12 +1130,12 @@ fn sd_create_remote_backup_rejects_corrupted_receiver_cert() {
 
     let mut evidence = evidence_from_chains(&receiver, &mfgr, &owner, &part_owner, &report);
 
-    evidence.oob_items[1][0] ^= 0xFF;
+    evidence.oob_items[usize::from(evidence.receiver[0].index)][0] ^= 0xFF;
 
     let req = backup_request(session.session_id, &evidence, &policy);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "corrupted receiver certificate must be rejected",
     );
 }
@@ -946,7 +1164,7 @@ fn sd_create_remote_backup_rejects_missing_report_oob() {
     let req = backup_request(session.session_id, &evidence, &policy);
 
     assert!(
-        ctx.tbor_oob(&req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&req, &evidence.oob()).is_err(),
         "missing trusted receiver report must be rejected",
     );
 }
@@ -969,22 +1187,22 @@ fn sd_create_remote_backup_failed_create_allows_retry() {
     invalid_req.receiver_cert_chain.clear();
 
     assert!(
-        ctx.tbor_oob(&invalid_req, &evidence.oob()).is_err(),
+        ctx.sd_oob(&invalid_req, &evidence.oob()).is_err(),
         "invalid create request must be rejected",
     );
 
     let resp = ctx
-        .tbor_oob(&valid_req, &evidence.oob())
+        .sd_oob(&valid_req, &evidence.oob())
         .expect("valid create must succeed after rejected request");
 
-    assert_eq!(resp.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN,);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN,);
 
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN,);
 
     assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN,);
 
     assert!(
-        resp.pok_remote_backup.iter().any(|&b| b != 0),
+        resp.report.iter().any(|&b| b != 0),
         "remote backup must not be all-zero",
     );
 
@@ -998,7 +1216,7 @@ fn sd_create_remote_backup_failed_create_allows_retry() {
         "SD masking-key backup must not be all-zero",
     );
 
-    ctx.expect_fw_reject_oob(
+    ctx.expect_sd_reject(
         &valid_req,
         &evidence.oob(),
         TborStatus::SdAlreadyInitialized,
@@ -1022,10 +1240,10 @@ fn sd_create_remote_backup_accepts_duplicate_receiver_cert_descriptor() {
     req.receiver_cert_chain[1] = req.receiver_cert_chain[0];
 
     let resp = ctx
-        .tbor_oob(&req, &evidence.oob())
+        .sd_oob(&req, &evidence.oob())
         .expect("current firmware accepts duplicate receiver descriptors");
 
-    assert_eq!(resp.pok_remote_backup.len(), POK_REMOTE_BACKUP_LEN,);
+    assert_eq!(resp.report.len(), POK_REMOTE_BACKUP_LEN,);
 
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN,);
 

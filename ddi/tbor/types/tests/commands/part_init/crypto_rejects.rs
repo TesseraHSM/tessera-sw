@@ -550,7 +550,7 @@ fn part_init_valid_request_succeeds_after_envelope_rejection() {
     // valid request.
     let valid_req = make_part_init_req(session.session_id, valid_envelope);
 
-    ctx.tbor(&valid_req)
+    ctx.part_init_req(&valid_req)
         .expect("valid PartInit must succeed after rejected envelope");
 }
 
@@ -602,7 +602,7 @@ fn part_init_recovers_after_each_envelope_rejection_stage() {
         ctx.expect_fw_reject(&invalid_req, expected_status);
 
         let valid_req = make_part_init_req(session.session_id, valid_envelope);
-        ctx.tbor(&valid_req)
+        ctx.part_init_req(&valid_req)
             .expect("valid PartInit must succeed after rejected request");
     }
 }
@@ -648,7 +648,8 @@ fn part_init_valid_envelope_cannot_be_replayed() {
 
     let req = make_part_init_req(session.session_id, envelope);
 
-    ctx.tbor(&req).expect("first PartInit must succeed");
+    ctx.part_init_req(&req)
+        .expect("first PartInit must succeed");
 
     ctx.expect_fw_reject(&req, TborStatus::PtaKeyAlreadySet);
 }
@@ -702,7 +703,7 @@ fn part_init_all_zero_mach_seed() {
 
     let req = make_part_init_req(session.session_id, envelope);
 
-    ctx.tbor(&req)
+    ctx.part_init_req(&req)
         .expect("correctly authenticated all-zero mach_seed is accepted");
 }
 

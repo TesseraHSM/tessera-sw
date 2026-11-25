@@ -64,6 +64,8 @@ pub use session::build_part_init_mach_seed_aad;
 pub use session::coord_sizes;
 pub use session::encrypt_mach_seed_envelope;
 pub use session::encrypt_psk_envelope;
+pub use session::exec_part_init;
+pub use session::PartInitOut;
 pub use session::SessionHandshake;
 pub use session::SessionOpenInitOptions;
 pub use session_guard::SessionGuard;

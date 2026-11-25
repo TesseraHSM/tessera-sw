@@ -20,9 +20,8 @@
 
 use alloc::vec::Vec;
 
-use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+use crate::evidence::ReportDescriptor;
 use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
-use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 use crate::tbor;
 use crate::CertDescriptor;
 
@@ -38,11 +37,12 @@ pub struct TborSdRestorePeerBackupReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`),
-    /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
-    /// recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(align = 4)]
-    pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
+    /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`):
+    /// 280 B (P-384), 296 B (ML-KEM-1024) or 264 B
+    /// (MLKEM1024-P384).  Unmasked on-device to recover the receiver's
+    /// private HPKE key (`RcvrPriv`).
+    #[tbor(align = 4, min_len = 264, max_len = 296)]
+    pub masked_sealing_key: Vec<u8>,
 
     /// Unified [`PartPolicy`] describing the security domain being
     /// restored.  Encoded as its deterministic CBOR document of at most 384 bytes.
@@ -63,10 +63,8 @@ pub struct TborSdRestorePeerBackupReq {
     #[tbor(max_len = 8)]
     pub src_part_owner_cert_chain: Vec<CertDescriptor>,
 
-    /// Peer backup to restore: an HPKE Base seal of BKS3, exactly
-    /// [`POK_REMOTE_BACKUP_LEN`] (431 B), including its PID signature. The firmware schema is the length
-    /// authority.
-    pub pok_peer_backup: [u8; POK_REMOTE_BACKUP_LEN],
+    /// Out-of-band complete peer PID-signed backup.
+    pub pok_peer_backup: ReportDescriptor,
 
     /// Previous security-domain masking-key backup (SDMK masked under the
     /// derived SDBMK), exactly [`SD_MK_BACKUP_LEN`] (264 B), from which
@@ -95,32 +93,32 @@ mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
+    use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
+    use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 
     #[test]
     fn request_encodes_all_fields() {
         let req = TborSdRestorePeerBackupReq {
             session_id: 9,
-            masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
+            masked_sealing_key: alloc::vec![0u8; MASKED_SEALING_KEY_LEN],
             policy: alloc::vec![0; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
-            pok_peer_backup: [0xABu8; POK_REMOTE_BACKUP_LEN],
+            pok_peer_backup: ReportDescriptor {
+                index: 1,
+                length: crate::tbor_int::U16::new(POK_REMOTE_BACKUP_LEN as u16),
+            },
             prev_sd_mk_backup: [0xCDu8; SD_MK_BACKUP_LEN],
         };
 
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf, (1, 1)).expect("encode");
 
-        // The crate::policy::PART_POLICY_MAX_LEN-byte policy plus the sealing key and the two backups must
-        // be carried in the data section.
         assert!(
             frame.len()
-                > crate::policy::PART_POLICY_MAX_LEN
-                    + MASKED_SEALING_KEY_LEN
-                    + POK_REMOTE_BACKUP_LEN
-                    + SD_MK_BACKUP_LEN,
-            "encoded frame must carry the policy, key, and backups"
+                > crate::policy::PART_POLICY_MAX_LEN + MASKED_SEALING_KEY_LEN + SD_MK_BACKUP_LEN,
+            "encoded frame must carry the policy, key, and local backup"
         );
     }
 }

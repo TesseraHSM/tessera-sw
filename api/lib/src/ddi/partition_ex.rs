@@ -33,19 +33,6 @@ use tsra_ddi_tbor_types::*;
 
 use super::*;
 
-/// Converts the DDI/wire `PartInit` response into the API-layer
-/// [`HsmPartInitExResult`] with owned bytes, so the wire response type
-/// stays confined to the DDI layer and never reaches `HsmSession`
-/// callers.
-impl From<TborPartInitResp> for HsmPartInitExResult {
-    fn from(resp: TborPartInitResp) -> Self {
-        Self {
-            pta_csr: resp.pta_csr,
-            pta_report: resp.pta_report,
-        }
-    }
-}
-
 /// Converts the DDI/wire `PartFinal` response into the API-layer
 /// [`HsmPartFinalExResult`] with owned bytes, so the wire response type
 /// stays confined to the DDI layer and never reaches `HsmSession`
@@ -172,10 +159,28 @@ pub(crate) fn part_init_ex(
     // this session across calls (per the `exec_op_tbor` contract in
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
-    with_explicit_cookie(ddi_cookie, |cookie| {
-        dev.exec_op_tbor(inner.api_rev(), &req, None, cookie)
-            .map(HsmPartInitExResult::from)
+    // The CSR and report return out of band; size each buffer for its
+    // maximum and truncate to the lengths in the response.
+    let mut pta_csr = vec![0u8; PTA_CSR_MAX_LEN];
+    let mut pta_report = vec![0u8; PTA_REPORT_MAX_LEN];
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        let mut oob = [
+            TborOobItem::Out(&mut pta_csr),
+            TborOobItem::Out(&mut pta_report),
+        ];
+        dev.exec_op_tbor_oob(inner.api_rev(), &req, &mut oob, cookie)
             .map_err(HsmError::from)
+    })?;
+    let csr_len = usize::from(resp.pta_csr_len.get());
+    let report_len = usize::from(resp.pta_report_len.get());
+    if csr_len == 0 || csr_len > pta_csr.len() || report_len == 0 || report_len > pta_report.len() {
+        return Err(HsmError::InternalError);
+    }
+    pta_csr.truncate(csr_len);
+    pta_report.truncate(report_len);
+    Ok(HsmPartInitExResult {
+        pta_csr,
+        pta_report,
     })
 }
 
@@ -309,14 +314,15 @@ pub(crate) fn part_info(partition: &HsmPartition) -> HsmResult<HsmPartInfo> {
 /// Returns [`HsmError::InternalError`] if the certificate count is zero,
 /// and [`HsmError::CertChainChanged`] if the count or thumbprint changes
 /// between the pre- and post-fetch `GetCertChainInfo` reads. This helper is
-/// only used for the production slot (slot 0); the regenerated TBOR slot-2
-/// PID certificate is served earlier in [`fetch_cert_chain_checked`].
-pub(super) fn fetch_cert_chain_checked_tbor(
+/// retrieves the explicitly selected certificate bank. The regenerated
+/// ECC slot-2 PID certificate is served earlier in [`fetch_cert_chain_checked`].
+pub(super) fn fetch_cert_chain_checked_tbor_bank(
     dev: &HsmDev,
     rev: HsmApiRev,
     slot_id: u8,
+    bank: u8,
 ) -> HsmResult<(String, Vec<u8>)> {
-    let (count, thumbprint) = get_cert_chain_info_tbor(dev, rev, slot_id)?;
+    let (count, thumbprint) = get_cert_chain_info_tbor_bank(dev, rev, slot_id, bank)?;
     if count == 0 {
         return Err(HsmError::InternalError);
     }
@@ -326,7 +332,7 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 
     // Firmware returns the chain root->leaf; reverse it to leaf->root.
     for cert_id in (0..count).rev() {
-        let der = get_cert_tbor(dev, rev, slot_id, cert_id)?;
+        let der = get_cert_tbor_bank(dev, rev, slot_id, bank, cert_id)?;
         let pem = der_to_pem(&der).map_hsm_err(HsmError::InternalError)?;
         cert_chain.push_str(&pem);
         if cert_id == count - 1 {
@@ -334,7 +340,7 @@ pub(super) fn fetch_cert_chain_checked_tbor(
         }
     }
 
-    let (new_count, new_thumbprint) = get_cert_chain_info_tbor(dev, rev, slot_id)?;
+    let (new_count, new_thumbprint) = get_cert_chain_info_tbor_bank(dev, rev, slot_id, bank)?;
     if new_count != count || new_thumbprint != thumbprint {
         return Err(HsmError::CertChainChanged);
     }
@@ -343,17 +349,26 @@ pub(super) fn fetch_cert_chain_checked_tbor(
 }
 
 /// TBOR `GetCertChainInfo` (opcode `0x1E`, out-of-session): returns the
-/// certificate count and chain thumbprint for `slot_id`.
+/// certificate count and chain thumbprint of the P-384 chain at `slot_id`.
 pub(super) fn get_cert_chain_info_tbor(
     dev: &HsmDev,
     rev: HsmApiRev,
     slot_id: u8,
 ) -> HsmResult<(u8, Vec<u8>)> {
+    get_cert_chain_info_tbor_bank(dev, rev, slot_id, CERT_BANK_ECC)
+}
+
+fn get_cert_chain_info_tbor_bank(
+    dev: &HsmDev,
+    rev: HsmApiRev,
+    slot_id: u8,
+    bank: u8,
+) -> HsmResult<(u8, Vec<u8>)> {
     let mut cookie = None;
     let resp = dev
         .exec_op_tbor(
             rev,
-            &TborGetCertChainInfoReq::new(slot_id),
+            &TborGetCertChainInfoReq::new(slot_id, bank),
             None,
             &mut cookie,
         )
@@ -362,23 +377,40 @@ pub(super) fn get_cert_chain_info_tbor(
 }
 
 /// TBOR `GetCertificate` (opcode `0x1F`, out-of-session): returns the
-/// DER-encoded certificate at `(slot_id, cert_id)`.
+/// DER-encoded certificate at `(slot_id, cert_id)` of the P-384 chain,
+/// received through an out-of-band buffer.
 pub(super) fn get_cert_tbor(
     dev: &HsmDev,
     rev: HsmApiRev,
     slot_id: u8,
     cert_id: u8,
 ) -> HsmResult<Vec<u8>> {
+    get_cert_tbor_bank(dev, rev, slot_id, CERT_BANK_ECC, cert_id)
+}
+
+fn get_cert_tbor_bank(
+    dev: &HsmDev,
+    rev: HsmApiRev,
+    slot_id: u8,
+    bank: u8,
+    cert_id: u8,
+) -> HsmResult<Vec<u8>> {
     let mut cookie = None;
+    let mut cert = vec![0u8; CERT_MAX_LEN];
     let resp = dev
-        .exec_op_tbor(
+        .exec_op_tbor_oob(
             rev,
-            &TborGetCertReq::new(slot_id, cert_id),
-            None,
+            &TborGetCertReq::new(slot_id, bank, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
             &mut cookie,
         )
         .map_err(HsmError::from)?;
-    Ok(resp.certificate)
+    let len = usize::from(resp.cert_len.get());
+    if len > cert.len() {
+        return Err(HsmError::InternalError);
+    }
+    cert.truncate(len);
+    Ok(cert)
 }
 
 #[cfg(test)]

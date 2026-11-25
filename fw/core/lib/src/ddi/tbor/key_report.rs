@@ -7,8 +7,9 @@
 //! [`SdSealingKeyGen`](super::sd_sealing_key_gen)), unmasks it, derives
 //! the attested key's public component on-device, and returns a signed
 //! COSE_Sign1 key-attestation report over it. The report is signed by the
-//! partition-identity (PID) key — the same signer as the `PartInit` PTA
-//! report.
+//! partition-identity (PID) key of the policy `pta_alg`, like the
+//! partition's transfer reports: ES384 by the P-384 PID key for a P-384
+//! PTA, or ML-DSA-87 by the ML-DSA-87 PID seed for an ML-DSA-87 PTA.
 //!
 //! Flow:
 //!
@@ -21,11 +22,14 @@
 //! 4. Dispatch by key kind to build the attested public key. ECC-private
 //!    kinds derive the public key via
 //!    [`HsmEcc::ecc_pub_from_priv`](tsra_fw_hsm_pal_traits::HsmEcc::ecc_pub_from_priv).
-//!    RSA-private kinds, including CRT, use `rsa_priv_pub_key`. Symmetric
+//!    RSA-private kinds, including CRT, use `rsa_priv_pub_key`. SD sealing
+//!    and DARC key-exchange keys (P-384, ML-KEM-1024 or MLKEM1024-P384)
+//!    derive their HPKE public key. Symmetric
 //!    keys (no public component) and other non-attestable kinds are rejected with
 //!    [`HsmError::UnsupportedKeyType`].
 //! 5. Build and PID-sign the COSE_Sign1 report over the derived key,
-//!    caller-supplied `report_data`, session app id, and VM launch id.
+//!    caller-supplied `report_data`, session app id, and VM launch id, and
+//!    return it through out-of-band item `KEY_REPORT_OOB_INDEX`.
 //!
 //! The blob's `svn` / `owner_seed_id` are **not** enforced against the
 //! current partition lineage: the report reflects the key as-masked (the
@@ -34,24 +38,30 @@
 //! This command is available to both Crypto-Officer and Crypto-User sessions.
 //! CU requests authenticate the original key and report data under the
 //! session parameter key. Both roles must use their current TBOR credential.
-//! SD-sealing provenance is signed separately from ordinary key capabilities.
+//! SD-sealing and DARC key-exchange provenance are signed separately from
+//! ordinary key capabilities.
 
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
-use tsra_fw_core_crypto_key_report::key_report;
+use tsra_fw_core_crypto_key_report::key_report_with;
+use tsra_fw_core_crypto_key_report::transfer::TransferKem;
 use tsra_fw_core_crypto_key_report::AttestedPubKey;
 use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KeyReportParams;
+use tsra_fw_core_crypto_key_report::ReportSigner;
 use tsra_fw_ddi_tbor_types::build_key_report_auth_aad;
+use tsra_fw_ddi_tbor_types::tbor_int::U16;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::TborKeyReportResp;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_AUTH_ENVELOPE_LEN;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
+use tsra_fw_ddi_tbor_types::KEY_REPORT_OOB_INDEX;
 use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
@@ -95,7 +105,8 @@ fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs, kind: HsmVaultKeyKind) -> KeyFl
         .with_can_wrap(attrs.wrap())
         .with_can_unwrap(attrs.unwrap())
         .with_can_derive(attrs.derive())
-        .with_is_sd_sealing(kind == HsmVaultKeyKind::SdSealing && attrs.local())
+        .with_is_sd_sealing(super::sd_transfer::sealing_kem(kind).is_ok() && attrs.local())
+        .with_is_darc_kex(super::sd_transfer::darc_kex_kem(kind).is_ok() && attrs.local())
 }
 
 /// Allocate the report's AppId captured by the authenticated handshake.
@@ -139,10 +150,20 @@ async fn attested_pub_key<'a, P: HsmPal>(
         });
     }
 
-    let Some(curve) = super::from_pal::ecc_curve(key_kind) else {
+    let kem = super::sd_transfer::sealing_kem(key_kind)
+        .or_else(|_| super::sd_transfer::darc_kex_kem(key_kind));
+    let curve = match kem {
+        Ok(TransferKem::P384) => HsmEccCurve::P384,
+        Ok(kem) => {
+            let pk = super::sd_transfer::sealing_public(pal, io, alloc, kem, priv_key).await?;
+            return Ok(match kem {
+                TransferKem::MlKem1024 => AttestedPubKey::MlKem1024 { pk },
+                _ => AttestedPubKey::MlKem1024P384 { pk },
+            });
+        }
         // Only ECC/RSA-private kinds are attestable. Symmetric keys have
         // no public component; other kinds are non-attestable or internal.
-        return Err(HsmError::UnsupportedKeyType);
+        Err(_) => super::from_pal::ecc_curve(key_kind).ok_or(HsmError::UnsupportedKeyType)?,
     };
 
     let coord_raw = curve.priv_key_len();
@@ -175,7 +196,6 @@ pub(crate) async fn handle<P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| {
         let req = TborKeyReportReq::decode_mut(cmd_buf.request_mut())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
-
         validate_active_session(pal, io, sess_id)?;
 
         // Reports bind the finalized partition policy, so the partition must
@@ -214,7 +234,7 @@ pub(crate) async fn handle<P: HsmPal>(
             resolve_masking_key(pal, io, scope, sess_id)?
         };
 
-        let (report, report_len) = build_key_report(
+        let report = build_key_report(
             pal,
             io,
             alloc,
@@ -224,7 +244,10 @@ pub(crate) async fn handle<P: HsmPal>(
             report_data,
         )
         .await?;
-        encode_response(cmd_buf, &report[..report_len])
+        let report_len = u16::try_from(report.len()).map_err(|_| HsmError::InternalError)?;
+        pal.send_oob_bounded(io, KEY_REPORT_OOB_INDEX, report)
+            .await?;
+        encode_response(cmd_buf, report_len)
     })
     .await
 }
@@ -269,8 +292,8 @@ async fn authenticate_request<P: HsmPal>(
 /// Unmask the key, derive its public component, and build the PID-signed
 /// COSE_Sign1 report over it.
 ///
-/// Returns the report bytes in `alloc`-scoped scratch (`&mut HsmDmaBuf`) plus
-/// its exact length; the caller copies them into the IO-scoped response.
+/// Returns the exact-length report in `alloc`-scoped scratch.
+#[allow(clippy::too_many_arguments)]
 async fn build_key_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -279,7 +302,7 @@ async fn build_key_report<'a, P: HsmPal>(
     masking_key: &HsmDmaBuf,
     app_uuid: &HsmDmaBuf,
     report_data: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
+) -> HsmResult<&'a HsmDmaBuf> {
     // Derive the public component directly from the IO-scoped request.
     let (key, key_attrs, key_kind) = async {
         let view = unmask(pal, io, masking_key, masked_key).await?;
@@ -292,19 +315,20 @@ async fn build_key_report<'a, P: HsmPal>(
     build_signed_report(pal, io, alloc, app_uuid, key, flags, report_data).await
 }
 
-/// Encode the `KeyReport` response frame around the finished report.
-fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_bytes: &[u8]) -> HsmResult<usize> {
-    let resp = cmd_buf.encode_response(|buf| {
+/// Encode the `KeyReport` response frame carrying the report length.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_len: u16) -> HsmResult<usize> {
+    cmd_buf.encode_response(|buf| {
         let frame = TborKeyReportResp::encode_for_request(buf, 0, false)?
-            .report(report_bytes)?
+            .report_len(U16::new(report_len))?
             .finish();
         Ok(frame.as_bytes().len())
-    })?;
-    Ok(resp)
+    })
 }
 
 /// Assemble the report inputs and build the PID-signed COSE_Sign1 report
-/// via the key-report crate's two-pass builder.
+/// via the key-report crate's two-pass builder, signed by the PID key of
+/// the partition's PTA algorithm.
+#[allow(clippy::too_many_arguments)]
 async fn build_signed_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -313,8 +337,15 @@ async fn build_signed_report<'a, P: HsmPal>(
     key: AttestedPubKey<'_>,
     flags: u32,
     report_data_src: &HsmDmaBuf,
-) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
-    let pid_priv = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
+) -> HsmResult<&'a HsmDmaBuf> {
+    let signer = match super::pta::pta_key(pal, io)? {
+        super::pta::PtaKey::Ecc(_) => {
+            ReportSigner::Es384(pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?)
+        }
+        super::pta::PtaKey::MlDsa87(_) => ReportSigner::MlDsa87Seed(
+            pal.vault_key(io, part_state::part_id_mldsa_seed_key_id(pal, io)?)?,
+        ),
+    };
 
     let vm_launch_id = part_state::part_vm_launch_guid(pal, io)?;
 
@@ -335,11 +366,13 @@ async fn build_signed_report<'a, P: HsmPal>(
     };
 
     // Two-pass: query the exact size, then build into an exact buffer.
-    let report_len = key_report(pal, io, alloc, &params, pid_priv, None).await?;
+    let report_len = key_report_with(pal, io, &params, signer, None).await?;
     if report_len > KEY_REPORT_MAX_LEN {
         return Err(HsmError::InternalError);
     }
     let report = alloc.dma_alloc(report_len)?;
-    key_report(pal, io, alloc, &params, pid_priv, Some(report)).await?;
-    Ok((report, report_len))
+    if key_report_with(pal, io, &params, signer, Some(&mut *report)).await? != report_len {
+        return Err(HsmError::InternalError);
+    }
+    Ok(report)
 }

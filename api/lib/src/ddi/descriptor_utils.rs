@@ -13,13 +13,38 @@ use tsra_ddi_tbor_types::*;
 
 use super::*;
 
+pub(crate) trait InputOobItems<'a> {
+    fn item_count(&self) -> usize;
+    fn push_input(&mut self, input: &'a [u8]);
+}
+
+impl<'a> InputOobItems<'a> for Vec<&'a [u8]> {
+    fn item_count(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn push_input(&mut self, input: &'a [u8]) {
+        self.push(input);
+    }
+}
+
+impl<'a> InputOobItems<'a> for Vec<TborOobItem<'a>> {
+    fn item_count(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn push_input(&mut self, input: &'a [u8]) {
+        self.push(TborOobItem::In(input));
+    }
+}
+
 /// Appends a certificate chain's DER bytes to `oob`, returning the
 /// matching `(index, length)` descriptors. Rejects an empty chain, a
 /// chain longer than `max_certs`, an empty (zero-length) cert, or a cert
 /// whose length overflows the 16-bit descriptor field.
 pub(crate) fn push_cert_chain<'a>(
     chain: &'a [HsmCert<'a>],
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut impl InputOobItems<'a>,
     max_certs: usize,
 ) -> HsmResult<Vec<CertDescriptor>> {
     // Firmware evidence verification rejects an empty chain as InvalidArg;
@@ -34,12 +59,12 @@ pub(crate) fn push_cert_chain<'a>(
             return Err(HsmError::InvalidArgument);
         }
         // Descriptor index = position in the shared OOB list (must fit u8).
-        let index = u8::try_from(oob.len()).map_err(|_| HsmError::InvalidArgument)?;
+        let index = u8::try_from(oob.item_count()).map_err(|_| HsmError::InvalidArgument)?;
         descriptors.push(CertDescriptor {
             index,
             length: tbor_int::U16::new(der.len() as u16),
         });
-        oob.push(der);
+        oob.push_input(der);
     }
     Ok(descriptors)
 }
@@ -49,16 +74,47 @@ pub(crate) fn push_cert_chain<'a>(
 /// 0` as InvalidArg) or one exceeding the 16-bit length.
 pub(crate) fn push_report<'a>(
     report: &'a [u8],
-    oob: &mut Vec<&'a [u8]>,
+    oob: &mut impl InputOobItems<'a>,
 ) -> HsmResult<ReportDescriptor> {
     if report.is_empty() || report.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArgument);
     }
-    let index = u8::try_from(oob.len()).map_err(|_| HsmError::InvalidArgument)?;
+    let index = u8::try_from(oob.item_count()).map_err(|_| HsmError::InvalidArgument)?;
     let descriptor = ReportDescriptor {
         index,
         length: tbor_int::U16::new(report.len() as u16),
     };
-    oob.push(report);
+    oob.push_input(report);
     Ok(descriptor)
+}
+
+/// Truncates the out-of-band report buffer to the firmware-reported length.
+pub(crate) fn take_report(mut report: Vec<u8>, report_len: tbor_int::U16) -> HsmResult<Vec<u8>> {
+    let len = usize::from(report_len.get());
+    if len == 0 || len > report.len() {
+        return Err(HsmError::InternalError);
+    }
+    report.truncate(len);
+    Ok(report)
+}
+
+pub(crate) fn take_sd_backup(report: Vec<u8>, report_len: tbor_int::U16) -> HsmResult<Vec<u8>> {
+    let backup = take_report(report, report_len)?;
+    if !remote_backup_len_valid(backup.len()) {
+        return Err(HsmError::InternalError);
+    }
+    Ok(backup)
+}
+
+/// Pushes the complete signed backup output buffer as out-of-band item
+/// [`SD_BACKUP_REPORT_OOB_INDEX`]; it must precede every input item.
+pub(crate) fn push_report_out<'a>(
+    report: &'a mut [u8],
+    oob: &mut Vec<TborOobItem<'a>>,
+) -> HsmResult<()> {
+    if oob.len() != SD_BACKUP_REPORT_OOB_INDEX {
+        return Err(HsmError::InternalError);
+    }
+    oob.push(TborOobItem::Out(report));
+    Ok(())
 }

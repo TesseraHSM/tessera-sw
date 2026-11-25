@@ -296,7 +296,12 @@ mod tests {
                     .open_dev(&endpoint)
                     .expect("unix socket device");
                 device
-                    .exec_op_tbor((1, 1), &TborGetCertChainInfoReq::new(0), None, &mut None)
+                    .exec_op_tbor(
+                        (1, 1),
+                        &TborGetCertChainInfoReq::new(0, tsra_ddi_tbor_types::CERT_BANK_ECC),
+                        None,
+                        &mut None,
+                    )
                     .expect("cert chain info roundtrip");
             });
             tokio::time::timeout(Duration::from_secs(30), client)

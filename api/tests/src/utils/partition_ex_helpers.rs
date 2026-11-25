@@ -16,12 +16,24 @@ pub(crate) use crate::utils::partition::PARTITION_LOCK;
 /// Controlled test enrollment only: trust the root advertised by the test
 /// backend. Applications must provision this pin independently of the device.
 pub(crate) fn test_root_spki_sha384(part: &HsmPartition) -> [u8; 48] {
+    test_root_spki_sha384_for_suite(part, HsmSessionSuite::EcdhP384)
+}
+
+pub(crate) fn test_root_spki_sha384_for_suite(
+    part: &HsmPartition,
+    suite: HsmSessionSuite,
+) -> [u8; 48] {
     use tsra_crypto::HashAlgo;
     use tsra_crypto::Hasher;
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
-    let pem = part.cert_chain(0).expect("test certificate chain");
+    let pem = if suite == HsmSessionSuite::MlKem1024MlDsa87 {
+        part.cert_chain_mldsa(0)
+    } else {
+        part.cert_chain(0)
+    }
+    .expect("test certificate chain");
     let certificates = X509Certificate::from_pem_stack(pem.as_bytes()).expect("test certificates");
     let spki = certificates
         .last()

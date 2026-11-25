@@ -35,6 +35,8 @@ pub use part_final::part_final;
 pub use part_final::part_final_raw;
 pub use part_init::build_part_init_mach_seed_aad;
 pub use part_init::encrypt_mach_seed_envelope;
+pub use part_init::exec_part_init;
 pub use part_init::part_init;
+pub use part_init::PartInitOut;
 pub use psk_change::encrypt_psk_envelope;
 pub use psk_change::psk_change;

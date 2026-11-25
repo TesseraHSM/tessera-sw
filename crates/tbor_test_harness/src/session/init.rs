@@ -19,6 +19,7 @@
 //! override individual knobs (PSK, wire suite id).
 
 use tsra_ddi_interface::DdiError;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborSessionOpenInitResp;
@@ -124,7 +125,7 @@ pub fn session_open_init_with_options(
     let initiator = SessionInitiator::generate(opts.suite, dev.api_rev())
         .map_err(|_| DdiError::InvalidParameter)?
         .for_reopen(opts.reopen_id);
-    let pk_hsm = crypto::fetch_pk_hsm(dev)?;
+    let pk_hsm = crypto::fetch_session_identity(dev, opts.suite)?;
 
     let session_type = SessionType::Encrypted.to_u8();
     let req = TborSessionOpenInitReq {
@@ -135,19 +136,32 @@ pub fn session_open_init_with_options(
         pk_init: initiator.pk_init().to_vec(),
     };
     let mut cookie = None;
-    let resp: TborSessionOpenInitResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
+    let mut pq_sig = vec![
+        0;
+        if opts.suite == SessionSuite::MlKem1024MlDsa87 {
+            opts.suite.sig_len()
+        } else {
+            0
+        }
+    ];
+    let resp: TborSessionOpenInitResp = if pq_sig.is_empty() {
+        dev.exec_op_tbor(&req, None, &mut cookie)?
+    } else {
+        dev.exec_op_tbor_oob(&req, &mut [TborOobItem::Out(&mut pq_sig)], &mut cookie)?
+    };
+    let sig = if pq_sig.is_empty() {
+        resp.sig.as_slice()
+    } else {
+        if !resp.sig.is_empty() {
+            return Err(DdiError::TborDecodeError);
+        }
+        pq_sig.as_slice()
+    };
 
     let default_psk = default_psk(opts.psk_id).map_err(|_| DdiError::InvalidParameter)?;
     let psk: &[u8] = opts.psk.unwrap_or(default_psk.as_slice());
     let keys = initiator
-        .complete(
-            opts.psk_id,
-            session_type,
-            &pk_hsm,
-            psk,
-            &resp.enc,
-            &resp.sig,
-        )
+        .complete(opts.psk_id, session_type, &pk_hsm, psk, &resp.enc, sig)
         .map_err(|_| DdiError::TborDecodeError)?;
 
     let transport = keys.transport().map_err(|_| DdiError::TborDecodeError)?;

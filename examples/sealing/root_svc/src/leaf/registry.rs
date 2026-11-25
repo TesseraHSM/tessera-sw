@@ -34,6 +34,7 @@ use tsra_sealing_api::PolicyFields;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_api::Thumbprint;
+use tsra_sealing_api::TransferKem;
 use tsra_sealing_common::key_check;
 use tsra_sealing_report::verify_certificate_chain;
 
@@ -398,7 +399,7 @@ fn register(
     }
     let pota = CaKey::generate();
     let sata = CaKey::generate();
-    let key = mint_sealing_key(&session.session)?;
+    let key = mint_sealing_key(&session.session, TransferKem::P384)?;
     let manufacturer = device_cert_chain(&session.partition, 0)?;
     let (_, public) = evidence::verify_report(&manufacturer, &key.report, domain.env().policy())?;
     let public = public

@@ -22,6 +22,9 @@ use tsra_fw_ddi_tbor_types::TborGetCertResp;
 use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoReq;
 use tsra_fw_ddi_tbor_types::TborPartInfoResp;
+use tsra_fw_ddi_tbor_types::CERT_BANK_ECC;
+use tsra_fw_ddi_tbor_types::CERT_BANK_MLDSA;
+use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
 use tsra_fw_ddi_tbor_types::PID_LEN;
 use tsra_fw_ddi_tbor_types::PID_PUB_KEY_LEN;
 use tsra_fw_hsm_io::duo::DuoCmdDword;
@@ -498,13 +501,15 @@ async fn part_resource_accounting_after_free() {
 // Certificate chain tests
 // ---------------------------------------------------------------------------
 
-/// Submit `GetCertChainInfo` for `slot_id` on partition `pid`.
-async fn get_cert_chain_info(pid: u8, slot_id: u8) -> (DuoRawCqe, Vec<u8>) {
+/// Submit `GetCertChainInfo` for `slot_id` and `bank` on partition `pid`.
+async fn get_cert_chain_info_bank(pid: u8, slot_id: u8, bank: u8) -> (DuoRawCqe, Vec<u8>) {
     tbor_io(pid, DuoOp::Tbor, 1108, 0, 0, |buf| {
         TborGetCertChainInfoReq::encode(buf, (2, 0))
             .expect("encode")
             .slot_id(slot_id)
             .expect("slot_id")
+            .bank(bank)
+            .expect("bank")
             .finish()
             .as_bytes()
             .len()
@@ -512,20 +517,49 @@ async fn get_cert_chain_info(pid: u8, slot_id: u8) -> (DuoRawCqe, Vec<u8>) {
     .await
 }
 
-/// Submit `GetCertificate` for slot 0, `cert_id`.
+/// Submit `GetCertChainInfo` for `slot_id` of the ECC bank on partition
+/// `pid`.
+async fn get_cert_chain_info(pid: u8, slot_id: u8) -> (DuoRawCqe, Vec<u8>) {
+    get_cert_chain_info_bank(pid, slot_id, CERT_BANK_ECC).await
+}
+
+/// Submit `GetCertificate` for slot 0, `bank`, `cert_id`, with the
+/// certificate written to `out` (out-of-band item 0).
+async fn get_cert_bank(bank: u8, cert_id: u8, out: &mut [u8]) -> (DuoRawCqe, Vec<u8>) {
+    let mut src = AlignedBuf::new(4096);
+    let mut dst = AlignedBuf::new(4096);
+    let mut oob = AlignedBuf::new(4096);
+    let req_len = TborGetCertReq::encode(src.as_mut_slice(), (2, 0))
+        .expect("encode")
+        .slot_id(0)
+        .expect("slot_id")
+        .bank(bank)
+        .expect("bank")
+        .cert_id(cert_id)
+        .expect("cert_id")
+        .finish()
+        .as_bytes()
+        .len();
+    // One NVMe SGL data-block descriptor: address, then length.
+    let desc = oob.as_mut_slice();
+    desc[..8].copy_from_slice(&(out.as_mut_ptr() as u64).to_le_bytes());
+    desc[8..12].copy_from_slice(&(out.len() as u32).to_le_bytes());
+    let sqe = DuoSqeBuilder::new()
+        .cmd(cmd(DuoOp::Tbor as u8, 1109))
+        .buf_lens(req_len as u32, 4096)
+        .src_prp1(src.as_slice().as_ptr() as u64)
+        .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
+        .oob_prp(oob.as_slice().as_ptr() as u64)
+        .oob_len(16)
+        .build();
+    let c = HSM.io(sqe, IO_PID, 0, 0).await.expect("io");
+    let resp = dst.as_slice()[..cqe_dst_len(&c)].to_vec();
+    (c, resp)
+}
+
+/// Submit `GetCertificate` for slot 0 of the ECC bank, `cert_id`.
 async fn get_cert(cert_id: u8) -> (DuoRawCqe, Vec<u8>) {
-    tbor_io(IO_PID, DuoOp::Tbor, 1109, 0, 0, |buf| {
-        TborGetCertReq::encode(buf, (2, 0))
-            .expect("encode")
-            .slot_id(0)
-            .expect("slot_id")
-            .cert_id(cert_id)
-            .expect("cert_id")
-            .finish()
-            .as_bytes()
-            .len()
-    })
-    .await
+    get_cert_bank(CERT_BANK_ECC, cert_id, &mut vec![0; CERT_MAX_LEN]).await
 }
 
 /// Asserts `resp` is a TBOR error response.
@@ -558,16 +592,23 @@ async fn get_cert_chain_info_invalid_slot() {
     assert_tbor_error(&resp);
 }
 
-/// Helper to retrieve a single certificate by index.
-async fn get_cert_der(idx: u8) -> Vec<u8> {
-    let (c, resp) = get_cert(idx).await;
+/// Helper to retrieve a single certificate of `bank` by index.
+async fn get_cert_der_bank(bank: u8, idx: u8) -> Vec<u8> {
+    let mut out = vec![0; CERT_MAX_LEN];
+    let (c, resp) = get_cert_bank(bank, idx, &mut out).await;
     assert_eq!(
         cqe_status(&c),
         STATUS_SUCCESS,
         "cert idx {idx}: expected Success"
     );
     let data = TborGetCertResp::decode(dma(&resp)).expect("decode");
-    data.certificate().to_vec()
+    out.truncate(usize::from(data.cert_len().get()));
+    out
+}
+
+/// Helper to retrieve a single ECC-bank certificate by index.
+async fn get_cert_der(idx: u8) -> Vec<u8> {
+    get_cert_der_bank(CERT_BANK_ECC, idx).await
 }
 
 #[tokio::test]
@@ -617,6 +658,45 @@ async fn get_certificate_chain_validation() {
             .expect("validate chain"),
         "cert chain validation failed"
     );
+}
+
+#[tokio::test]
+async fn get_certificate_mldsa_chain_validation() {
+    use x509::X509Certificate;
+    use x509::X509CertificateOp;
+
+    ensure_io_part().await;
+    let (c, resp) = get_cert_chain_info_bank(IO_PID, 0, CERT_BANK_MLDSA).await;
+    assert_eq!(cqe_status(&c), STATUS_SUCCESS);
+    let info = TborGetCertChainInfoResp::decode(dma(&resp)).expect("decode");
+    assert_eq!(info.num_certs(), 4);
+    let (c, resp) = get_cert_chain_info(IO_PID, 0).await;
+    assert_eq!(cqe_status(&c), STATUS_SUCCESS);
+    let ecc = TborGetCertChainInfoResp::decode(dma(&resp)).expect("decode");
+    assert_ne!(info.thumbprint(), ecc.thumbprint(), "banks must differ");
+
+    let mut ders = Vec::new();
+    for idx in 0..4 {
+        ders.push(get_cert_der_bank(CERT_BANK_MLDSA, idx).await);
+    }
+    let mut certs: Vec<_> = ders
+        .iter()
+        .map(|der| X509Certificate::from_der(der).expect("parse"))
+        .collect();
+    let leaf = certs.pop().expect("leaf");
+    certs.reverse();
+    assert!(
+        leaf.validate_chain(&certs).expect("validate chain"),
+        "ML-DSA cert chain validation failed"
+    );
+}
+
+#[tokio::test]
+async fn get_certificate_oob_too_small() {
+    ensure_io_part().await;
+    let (c, resp) = get_cert_bank(CERT_BANK_ECC, 0, &mut [0; 16]).await;
+    assert_eq!(cqe_status(&c), STATUS_SUCCESS);
+    assert_tbor_error(&resp);
 }
 
 #[tokio::test]

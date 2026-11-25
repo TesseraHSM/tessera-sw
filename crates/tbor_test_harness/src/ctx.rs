@@ -37,10 +37,14 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::TborApiRevResp;
+use tsra_ddi_tbor_types::TborGetCertReq;
+use tsra_ddi_tbor_types::TborKeyReportReq;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
-use tsra_ddi_tbor_types::TborPartInitResp;
+use tsra_ddi_tbor_types::TborPartInitReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::CERT_MAX_LEN;
+use tsra_ddi_tbor_types::KEY_REPORT_MAX_LEN;
 use tsra_session_ex_crypto::SessionSuite;
 
 use crate::api_rev::helper_api_rev_tbor;
@@ -51,6 +55,7 @@ use crate::fixture::open_dev;
 use crate::fixture::open_dev_secondary;
 use crate::fixture::open_dev_with_path;
 use crate::fixture::TestDev;
+use crate::session::exec_part_init;
 use crate::session::part_final as part_final_helper;
 use crate::session::part_init as part_init_helper;
 use crate::session::psk_change as psk_change_helper;
@@ -60,6 +65,7 @@ use crate::session::session_open_finish as session_open_finish_helper;
 use crate::session::session_open_finish_with_mac as session_open_finish_with_mac_helper;
 use crate::session::session_open_init as session_open_init_helper;
 use crate::session::session_open_init_with_options as session_open_init_with_options_helper;
+use crate::session::PartInitOut;
 use crate::session::PendingHandshake;
 use crate::session::SessionHandshake;
 use crate::session::SessionOpenInitOptions;
@@ -192,6 +198,46 @@ impl TestCtx {
     ) -> DdiResult<R::OpResp> {
         let mut cookie = None;
         self.dev.exec_op_tbor_oob(req, oob_items, &mut cookie)
+    }
+
+    /// Fetch certificate `cert_id` of `bank` in chain `slot_id`. The DER
+    /// rides out-of-band item 0 into a [`CERT_MAX_LEN`] buffer.
+    pub fn get_cert(&self, slot_id: u8, bank: u8, cert_id: u8) -> DdiResult<Vec<u8>> {
+        let mut cert = vec![0u8; CERT_MAX_LEN];
+        let resp = self.tbor_oob_io(
+            &TborGetCertReq::new(slot_id, bank, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
+        )?;
+        cert.truncate(usize::from(resp.cert_len.get()));
+        Ok(cert)
+    }
+
+    /// Issue `KeyReport` and return the COSE_Sign1 report, which rides
+    /// out-of-band item
+    /// [`KEY_REPORT_OOB_INDEX`](tsra_ddi_tbor_types::KEY_REPORT_OOB_INDEX)
+    /// into a [`KEY_REPORT_MAX_LEN`] buffer.
+    pub fn key_report(&self, req: &TborKeyReportReq) -> DdiResult<Vec<u8>> {
+        let mut report = vec![0u8; KEY_REPORT_MAX_LEN];
+        let resp = self.tbor_oob_io(req, &mut [TborOobItem::Out(&mut report)])?;
+        report.truncate(usize::from(resp.report_len.get()));
+        Ok(report)
+    }
+
+    /// [`Self::expect_fw_reject`] for [`Self::get_cert`].
+    #[track_caller]
+    pub fn expect_get_cert_reject(
+        &self,
+        slot_id: u8,
+        bank: u8,
+        cert_id: u8,
+        expected: TborStatus,
+    ) -> DdiError {
+        let mut cert = vec![0u8; CERT_MAX_LEN];
+        self.expect_fw_reject_oob_io(
+            &TborGetCertReq::new(slot_id, bank, cert_id),
+            &mut [TborOobItem::Out(&mut cert)],
+            expected,
+        )
     }
 
     /// The status the device reports for `req` when firmware would
@@ -420,14 +466,20 @@ impl TestCtx {
     }
 
     /// Issue `PartInit` on the CO `session` with the canonical
-    /// envelope construction. Returns the decoded [`TborPartInitResp`].
+    /// envelope construction. Returns the out-of-band CSR and report.
     pub fn part_init(
         &self,
         session: &SessionHandshake,
         mach_seed: &[u8],
         part_policy: &[u8],
-    ) -> DdiResult<TborPartInitResp> {
+    ) -> DdiResult<PartInitOut> {
         part_init_helper(&self.dev, session, mach_seed, part_policy)
+    }
+
+    /// Issue a prebuilt `PartInit` request, receiving the CSR and report
+    /// out of band.
+    pub fn part_init_req(&self, req: &TborPartInitReq) -> DdiResult<PartInitOut> {
+        exec_part_init(|oob| self.tbor_oob_io(req, oob))
     }
 
     /// Issue `PartFinal` re-supplying `part_policy` (must match the one
