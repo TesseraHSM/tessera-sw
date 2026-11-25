@@ -25,6 +25,9 @@
 //! * Crypto-User session → `InvalidPermissions`.
 //! * Before finalize (partition not `Initialized`) → `InvalidArg`.
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
+//! * Extra Ephemeral P-384/P-521 success cases and single-operation rejection cases.
+//! * Mismatched `y` and `d`, wrong wrapping TMK, ciphertext corruption at
+//!   multiple offsets, and two distinct keys sharing one imported TMK.
 
 use tsra_crypto::AesKey;
 use tsra_crypto::AesKeyWrapPadAlgo;
@@ -197,6 +200,7 @@ fn expected_wire_pub(key: &HostEcKey) -> Vec<u8> {
     out
 }
 
+/// Imports a P-256 key into Local scope and verifies its public key and fresh masking.
 #[test]
 fn darc_key_unwrap_roundtrip_local() {
     let ready = sd_initialized_session();
@@ -234,6 +238,7 @@ fn darc_key_unwrap_roundtrip_local() {
     );
 }
 
+/// Imports a P-256 key into Ephemeral scope and verifies the returned key material.
 #[test]
 fn darc_key_unwrap_roundtrip_ephemeral() {
     let ready = sd_initialized_session();
@@ -279,16 +284,19 @@ fn assert_roundtrip_on(curve: EccCurve) {
     assert_eq!(resp.pub_key, expected_wire_pub(&key));
 }
 
+/// Imports a P-384 key and checks its re-derived public coordinates.
 #[test]
 fn darc_key_unwrap_roundtrip_p384() {
     assert_roundtrip_on(EccCurve::P384);
 }
 
+/// Imports a P-521 key and validates padded wire-format public coordinates.
 #[test]
 fn darc_key_unwrap_roundtrip_p521() {
     assert_roundtrip_on(EccCurve::P521);
 }
 
+/// Imports a derive-only P-256 private key with matching COSE permissions.
 #[test]
 fn darc_key_unwrap_roundtrip_derive_usage() {
     let ready = sd_initialized_session();
@@ -312,6 +320,7 @@ fn darc_key_unwrap_roundtrip_derive_usage() {
     assert_eq!(resp.pub_key, expected_wire_pub(&key));
 }
 
+/// Rejects a COSE key whose x coordinate disagrees with its private scalar.
 #[test]
 fn darc_key_unwrap_rejects_mismatched_public_key() {
     let ready = sd_initialized_session();
@@ -331,6 +340,7 @@ fn darc_key_unwrap_rejects_mismatched_public_key() {
     ready.ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
 
+/// Rejects AES-KWP ciphertext corrupted at the final byte.
 #[test]
 fn darc_key_unwrap_rejects_tampered_wrapped_key() {
     let ready = sd_initialized_session();
@@ -351,6 +361,7 @@ fn darc_key_unwrap_rejects_tampered_wrapped_key() {
         .expect_fw_reject(&req, TborStatus::AesUnwrapFailed);
 }
 
+/// Rejects requested derivation when COSE permissions grant signing only.
 #[test]
 fn darc_key_unwrap_rejects_usage_not_granted() {
     let ready = sd_initialized_session();
@@ -369,6 +380,7 @@ fn darc_key_unwrap_rejects_usage_not_granted() {
         .expect_fw_reject(&req, TborStatus::InvalidPermissions);
 }
 
+/// Rejects SecurityDomain as an unsupported destination scope.
 #[test]
 fn darc_key_unwrap_rejects_unsupported_scope() {
     let ready = sd_initialized_session();
@@ -407,6 +419,7 @@ fn alloc_wrapped_stub() -> Vec<u8> {
     vec![0u8; 24]
 }
 
+/// Rejects key unwrapping before partition finalization.
 #[test]
 fn darc_key_unwrap_rejects_before_finalize() {
     // A rotated CO session but no PartInit/PartFinal → the partition is
@@ -417,6 +430,7 @@ fn darc_key_unwrap_rejects_before_finalize() {
     ctx.expect_fw_reject(&dummy_req(session.session_id), TborStatus::InvalidArg);
 }
 
+/// Rejects a Crypto-User session for this Crypto-Officer-only command.
 #[test]
 fn darc_key_unwrap_rejected_on_cu_session() {
     // DarcKeyUnwrap is Crypto-Officer-only: a CU session is rejected at
@@ -429,6 +443,7 @@ fn darc_key_unwrap_rejected_on_cu_session() {
     );
 }
 
+/// Rejects unwrapping while the default CO PSK is still in use.
 #[test]
 fn darc_key_unwrap_rejected_on_default_psk() {
     // A CO session on the still-default PSK is rejected by the
@@ -454,4 +469,262 @@ fn darc_key_unwrap_rejects_bad_masked_key_layout() {
         EccCurve::P256,
     );
     assert_masked_key_layout_rejected(&ready.ctx, &req);
+}
+
+// -----------------------------------------------------------------------------
+// Additional coverage: scope/curve combinations, permission subsets, independent
+// key material, and authenticated-wrapping / EC consistency failures.
+// -----------------------------------------------------------------------------
+
+/// Keep the same response checks across the additional supported combinations.
+fn assert_unwrap_roundtrip_for_scope(curve: EccCurve, scope: u8) {
+    let ready = sd_initialized_session();
+    let (req, key) = build_valid_unwrap(
+        &ready,
+        scope,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        curve,
+    );
+    let resp = ready
+        .ctx
+        .tbor(&req)
+        .expect("DarcKeyUnwrap scope/curve roundtrip");
+    assert_ne!(resp.key_kind, 0);
+    assert!(!resp.masked_key.is_empty());
+    assert!(resp.masked_key.len() <= DARC_UNWRAP_MASKED_KEY_MAX_LEN);
+    assert!(resp.masked_key.iter().any(|&b| b != 0));
+    assert_eq!(resp.pub_key, expected_wire_pub(&key));
+}
+
+/// Imports P-384 into Ephemeral scope and verifies the returned public key.
+#[test]
+fn darc_key_unwrap_roundtrip_ephemeral_p384() {
+    assert_unwrap_roundtrip_for_scope(EccCurve::P384, KEY_SCOPE_EPHEMERAL);
+}
+
+/// Imports P-521 into Ephemeral scope and checks padded public coordinates.
+#[test]
+fn darc_key_unwrap_roundtrip_ephemeral_p521() {
+    // Also checks the 66-byte P-521 coordinates in the 68-byte wire slots.
+    assert_unwrap_roundtrip_for_scope(EccCurve::P521, KEY_SCOPE_EPHEMERAL);
+}
+
+/// Rejects a COSE key whose y coordinate disagrees with its private scalar.
+#[test]
+fn darc_key_unwrap_rejects_mismatched_y_coordinate() {
+    let ready = sd_initialized_session();
+    let mut key = host_ec_key(EccCurve::P256);
+    // A valid-length COSE key still has to agree with d * G in BOTH axes.
+    key.y[0] ^= 0x01;
+    let req = unwrap_req(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &key,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+    );
+    ready.ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+/// Rejects a valid private scalar inconsistent with the supplied public point.
+#[test]
+fn darc_key_unwrap_rejects_mismatched_private_scalar() {
+    let ready = sd_initialized_session();
+    let mut key = host_ec_key(EccCurve::P256);
+    // d=0x1235 is valid, but x/y still describe d=0x1234.
+    // This distinguishes a key-consistency failure from an invalid scalar.
+    let last = key.d.len() - 1;
+    key.d[last] ^= 0x01;
+    let req = unwrap_req(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &key,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+    );
+    ready.ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+/// Rejects a COSE key wrapped under a different TMK.
+#[test]
+fn darc_key_unwrap_rejects_wrong_wrapping_tmk() {
+    let ready = sd_initialized_session();
+    let (mut req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    // The masked TMK is valid, but the COSE key was wrapped under another
+    // same-length AES key; the device must reject AES-KWP authentication.
+    let key = host_ec_key(EccCurve::P256);
+    let wrong_tmk = [0xA5u8; TMK_LEN];
+    req.wrapped_key = kwp_wrap(
+        &wrong_tmk,
+        &encode_cose(&key, &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE]),
+    );
+    ready
+        .ctx
+        .expect_fw_reject(&req, TborStatus::AesUnwrapFailed);
+}
+
+/// Rejects AES-KWP ciphertext corrupted at the first byte.
+#[test]
+fn darc_key_unwrap_rejects_tampered_wrapped_key_first_byte() {
+    let ready = sd_initialized_session();
+    let (mut req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    req.wrapped_key[0] ^= 0x80;
+    ready
+        .ctx
+        .expect_fw_reject(&req, TborStatus::AesUnwrapFailed);
+}
+
+/// Rejects AES-KWP ciphertext corrupted in the middle.
+#[test]
+fn darc_key_unwrap_rejects_tampered_wrapped_key_middle() {
+    let ready = sd_initialized_session();
+    let (mut req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    let middle = req.wrapped_key.len() / 2;
+    req.wrapped_key[middle] ^= 0x40;
+    ready
+        .ctx
+        .expect_fw_reject(&req, TborStatus::AesUnwrapFailed);
+}
+
+/// Imports two distinct EC keys using the same masked TMK envelope.
+#[test]
+fn darc_key_unwrap_two_distinct_keys_same_tmk() {
+    let ready = sd_initialized_session();
+    let (req1, key1) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+
+    // Reuse the same imported TMK envelope, but wrap a second valid key.
+    let mut d2 = key1.d.clone();
+    let last = d2.len() - 1;
+    d2[last] ^= 0x01; // 0x1235, still valid on P-256
+    let sk2 = EccPrivateKey::from_scalar(EccCurve::P256, &d2).expect("second valid scalar");
+    let (x2, y2) = sk2.coord_vec().expect("second public coordinates");
+    let key2 = HostEcKey {
+        curve: EccCurve::P256,
+        d: d2,
+        x: x2,
+        y: y2,
+    };
+    let req2 = TborDarcKeyUnwrapReq {
+        session_id: req1.session_id,
+        scope: req1.scope,
+        key_usage: req1.key_usage,
+        masked_tmk: req1.masked_tmk,
+        wrapped_key: kwp_wrap(
+            &TMK,
+            &encode_cose(&key2, &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE]),
+        ),
+    };
+    let resp1 = ready.ctx.tbor(&req1).expect("first import");
+    let resp2 = ready.ctx.tbor(&req2).expect("second import using same TMK");
+    assert_eq!(resp1.pub_key, expected_wire_pub(&key1));
+    assert_eq!(resp2.pub_key, expected_wire_pub(&key2));
+    assert_ne!(resp1.pub_key, resp2.pub_key);
+    assert_ne!(resp1.masked_key, resp2.masked_key);
+}
+
+// -----------------------------------------------------------------------------
+// Additional coverage: independent operations and TMK reuse across scopes.
+// -----------------------------------------------------------------------------
+
+/// Rejects importing a signing-only P-256 private key under current firmware rules.
+#[test]
+fn darc_key_unwrap_rejects_sign_only() {
+    let ready = sd_initialized_session();
+    let (req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN,
+        &[KEY_OP_CREATE_SIGNATURE],
+        EccCurve::P256,
+    );
+    assert!(
+        ready.ctx.tbor(&req).is_err(),
+        "sign-only import must be rejected"
+    );
+}
+
+/// Rejects importing a verification-only P-256 private key under current firmware rules.
+#[test]
+fn darc_key_unwrap_rejects_verify_only() {
+    let ready = sd_initialized_session();
+    let (req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_VERIFY,
+        &[KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    assert!(
+        ready.ctx.tbor(&req).is_err(),
+        "verify-only import must be rejected"
+    );
+}
+
+/// Rejects signing-only requested usage even when COSE grants signing and verification.
+#[test]
+fn darc_key_unwrap_rejects_requested_usage_subset() {
+    let ready = sd_initialized_session();
+    let (req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    assert!(
+        ready.ctx.tbor(&req).is_err(),
+        "subset-permission import must be rejected"
+    );
+}
+
+/// Reuses one imported TMK to unwrap the same EC key into both permitted scopes.
+#[test]
+fn darc_key_unwrap_same_tmk_local_and_ephemeral() {
+    let ready = sd_initialized_session();
+    let (local_req, key) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    let mut ephemeral_req = local_req.clone();
+    ephemeral_req.scope = KEY_SCOPE_EPHEMERAL;
+
+    let local = ready.ctx.tbor(&local_req).expect("Local key import");
+    let ephemeral = ready
+        .ctx
+        .tbor(&ephemeral_req)
+        .expect("Ephemeral key import");
+    let expected = expected_wire_pub(&key);
+    assert_eq!(local.pub_key, expected);
+    assert_eq!(ephemeral.pub_key, expected);
+    assert!(!local.masked_key.is_empty());
+    assert!(!ephemeral.masked_key.is_empty());
+    assert_ne!(local.masked_key, ephemeral.masked_key);
 }

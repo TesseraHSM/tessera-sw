@@ -53,7 +53,6 @@ use tsra_ddi_tbor_types::TMK_LEN;
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::sign_req;
 use crate::commands::darc_tmk_export::build_valid_export;
-use crate::commands::darc_tmk_export::gen_masked_tmk;
 use crate::commands::darc_tmk_export::mint_kex;
 use crate::commands::darc_tmk_export::reimport;
 use crate::commands::darc_tmk_export::sd_initialized_session_with_data;
@@ -219,21 +218,34 @@ fn assert_roundtrip_on(curve: u8) {
     );
 }
 
+/// Generate a masked TMK using an SD-initialized session.
+fn generate_test_tmk(ctx: &TestCtx, session_id: u16) -> [u8; MASKED_TMK_LEN] {
+    let response = ctx
+        .tbor(&TborDarcTmkGenReq { session_id })
+        .expect("DarcTmkGen");
+
+    tmk_array(&response.masked_tmk)
+}
+
+/// Round-trip a P-256 EC key through DARC wrap, unwrap, and verified signing.
 #[test]
 fn darc_key_wrap_roundtrip_p256() {
     assert_roundtrip_on(ECC_CURVE_P256);
 }
 
+/// Round-trip a P-384 EC key through DARC wrap, unwrap, and verified signing.
 #[test]
 fn darc_key_wrap_roundtrip_p384() {
     assert_roundtrip_on(ECC_CURVE_P384);
 }
 
+/// Round-trip a P-521 EC key through DARC wrap, unwrap, and verified signing.
 #[test]
 fn darc_key_wrap_roundtrip_p521() {
     assert_roundtrip_on(ECC_CURVE_P521);
 }
 
+/// Verify EC-key recovery and signing after a complete TMK export/import hand-off.
 #[test]
 fn darc_key_wrap_e2e_create_export_import_sign() {
     // The full DARC hand-off on a single device: create a TMK, wrap a
@@ -244,7 +256,7 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
     let sid = ready.session.session_id;
 
     // (1) Originate a TMK (masked under the SDMK).
-    let masked_tmk = gen_masked_tmk(&ready);
+    let masked_tmk = generate_test_tmk(&ready.ctx, ready.session.session_id);
 
     // (2) Generate the local EC key to be exported.
     let ec = ready
@@ -319,6 +331,7 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
     );
 }
 
+/// Reject an EC masked key supplied in place of a masked TMK.
 #[test]
 fn darc_key_wrap_rejects_wrong_masked_tmk_kind() {
     // Feed a masked EC key where the masked TMK is expected: it unmasks
@@ -349,6 +362,7 @@ fn darc_key_wrap_rejects_wrong_masked_tmk_kind() {
     );
 }
 
+/// Reject a masked TMK supplied in place of a masked EC private key.
 #[test]
 fn darc_key_wrap_rejects_wrong_masked_key_kind() {
     // Feed a masked TMK where the masked EC key is expected: it unmasks
@@ -384,6 +398,7 @@ fn dummy_req(session_id: u16) -> TborDarcKeyWrapReq {
     }
 }
 
+/// Reject wrapping before the security domain has been initialized.
 #[test]
 fn darc_key_wrap_rejects_before_sd_init() {
     // Finalized but no security domain: the SDMK the TMK is masked under
@@ -393,6 +408,7 @@ fn darc_key_wrap_rejects_before_sd_init() {
     ctx.expect_fw_reject(&dummy_req(session.session_id), TborStatus::InvalidArg);
 }
 
+/// Reject wrapping before partition initialization has been finalized.
 #[test]
 fn darc_key_wrap_rejects_before_finalize() {
     // A rotated CO session but no PartInit/PartFinal → the partition is
@@ -402,6 +418,7 @@ fn darc_key_wrap_rejects_before_finalize() {
     ctx.expect_fw_reject(&dummy_req(session.session_id), TborStatus::InvalidArg);
 }
 
+/// Reject DARC wrapping from a Crypto-User session.
 #[test]
 fn darc_key_wrap_rejected_on_cu_session() {
     // DarcKeyWrap is Crypto-Officer-only: a CU session is rejected at the
@@ -414,6 +431,7 @@ fn darc_key_wrap_rejected_on_cu_session() {
     );
 }
 
+/// Reject DARC wrapping while the default Crypto-Officer PSK is in use.
 #[test]
 fn darc_key_wrap_rejected_on_default_psk() {
     // A CO session on the still-default PSK is rejected by the dispatcher's
@@ -455,4 +473,582 @@ fn darc_key_wrap_rejects_bad_masked_key_layout() {
             masked_key: ec.masked_key,
         },
     );
+}
+
+/// Reject empty, truncated, corrupted, and zeroed masked EC keys without losing a valid key.
+#[test]
+fn darc_key_wrap_rejects_malformed_masked_ec_keys() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+
+    let masked_tmk = generate_test_tmk(&ready.ctx, ready.session.session_id);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("EccGenerateKey");
+
+    let original = ec.masked_key;
+
+    let mut truncated = original.clone();
+    truncated.pop();
+
+    let mut severely_truncated = original.clone();
+    severely_truncated.truncate(original.len() / 2);
+
+    let mut corrupted = original.clone();
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 0x80;
+
+    for (name, masked_key) in [
+        ("empty", Vec::new()),
+        ("one_byte", vec![0xAA]),
+        ("truncated_by_one", truncated),
+        ("truncated_half", severely_truncated),
+        ("zeroed", vec![0u8; original.len()]),
+        ("corrupted_middle", corrupted),
+    ] {
+        let result = ready.ctx.tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key,
+        });
+
+        assert!(
+            result.is_err(),
+            "DarcKeyWrap accepted malformed EC key: {name}"
+        );
+    }
+
+    // Invalid requests must not destroy the original key.
+    let wrapped = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: original,
+        })
+        .expect("valid key should still wrap");
+
+    assert!(!wrapped.wrapped_key.is_empty());
+}
+
+/// Reject malformed masked TMKs while preserving the valid TMK.
+#[test]
+fn darc_key_wrap_rejects_invalid_masked_tmks() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+
+    let valid_tmk = generate_test_tmk(&ready.ctx, sid);
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("EccGenerateKey");
+
+    let mut corrupted_tmk = valid_tmk;
+    corrupted_tmk[MASKED_TMK_LEN / 2] ^= 0x80;
+
+    for (name, masked_tmk) in [
+        ("zeroed", [0u8; MASKED_TMK_LEN]),
+        ("corrupted", corrupted_tmk),
+        ("all_ones", [0xFFu8; MASKED_TMK_LEN]),
+    ] {
+        let result = ready.ctx.tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec.masked_key.clone(),
+        });
+
+        assert!(result.is_err(), "DarcKeyWrap accepted invalid TMK: {name}");
+    }
+
+    // The original TMK must remain usable after failures.
+    let wrapped = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk: valid_tmk,
+            masked_key: ec.masked_key,
+        })
+        .expect("valid TMK should still work");
+
+    assert!(!wrapped.wrapped_key.is_empty());
+}
+
+/// Preserve distinct EC key identities when wrapping two keys under one TMK.
+#[test]
+fn darc_key_wrap_two_keys_same_tmk_preserve_identity() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+
+    let masked_tmk = generate_test_tmk(&ready.ctx, ready.session.session_id);
+
+    let ec1 = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate first EC key");
+
+    let ec2 = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate second EC key");
+
+    assert_ne!(
+        ec1.pub_key, ec2.pub_key,
+        "independently generated keys should differ"
+    );
+
+    let wrap1 = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec1.masked_key,
+        })
+        .expect("wrap first key");
+
+    let wrap2 = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec2.masked_key,
+        })
+        .expect("wrap second key");
+
+    assert_ne!(
+        wrap1.wrapped_key, wrap2.wrapped_key,
+        "different private keys must not produce identical wrapped keys"
+    );
+
+    for (name, wrapped_key, expected_pub) in [
+        ("first", wrap1.wrapped_key, ec1.pub_key),
+        ("second", wrap2.wrapped_key, ec2.pub_key),
+    ] {
+        let unwrapped = ready
+            .ctx
+            .tbor(&TborDarcKeyUnwrapReq {
+                session_id: sid,
+                scope: KEY_SCOPE_LOCAL,
+                key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                masked_tmk,
+                wrapped_key,
+            })
+            .expect("unwrap key");
+
+        assert_eq!(
+            unwrapped.pub_key, expected_pub,
+            "{name} key identity changed during wrap/unwrap"
+        );
+    }
+}
+
+/// Require the matching TMK to recover an EC key wrapped under two different TMKs.
+#[test]
+fn darc_key_wrap_same_key_different_tmks() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+
+    let tmk1 = generate_test_tmk(&ready.ctx, sid);
+    let tmk2 = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("EccGenerateKey");
+
+    let wrap1 = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk: tmk1,
+            masked_key: ec.masked_key.clone(),
+        })
+        .expect("wrap using first TMK");
+
+    let wrap2 = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk: tmk2,
+            masked_key: ec.masked_key,
+        })
+        .expect("wrap using second TMK");
+
+    assert_ne!(
+        wrap1.wrapped_key, wrap2.wrapped_key,
+        "different TMKs should produce different wrapped outputs"
+    );
+
+    // Both correct TMKs must recover the same EC public key.
+    for (wrapped_key, masked_tmk) in [
+        (wrap1.wrapped_key.clone(), tmk1),
+        (wrap2.wrapped_key.clone(), tmk2),
+    ] {
+        let unwrapped = ready
+            .ctx
+            .tbor(&TborDarcKeyUnwrapReq {
+                session_id: sid,
+                scope: KEY_SCOPE_LOCAL,
+                key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                masked_tmk,
+                wrapped_key,
+            })
+            .expect("unwrap with matching TMK");
+
+        assert_eq!(unwrapped.pub_key, ec.pub_key);
+    }
+
+    // Cross-TMK unwrapping must fail.
+    for (wrapped_key, wrong_tmk) in [(wrap1.wrapped_key, tmk2), (wrap2.wrapped_key, tmk1)] {
+        let result = ready.ctx.tbor(&TborDarcKeyUnwrapReq {
+            session_id: sid,
+            scope: KEY_SCOPE_LOCAL,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            masked_tmk: wrong_tmk,
+            wrapped_key,
+        });
+
+        assert!(
+            result.is_err(),
+            "wrapped key must not unwrap under a different TMK"
+        );
+    }
+}
+
+/// Reject invalid session IDs without disrupting the active session.
+#[test]
+fn darc_key_wrap_rejects_invalid_session_ids() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate EC key");
+
+    let result = ready.ctx.tbor(&TborDarcKeyWrapReq {
+        session_id: u16::MAX,
+        masked_tmk,
+        masked_key: ec.masked_key.clone(),
+    });
+
+    assert!(
+        result.is_err(),
+        "DarcKeyWrap accepted an invalid session ID"
+    );
+
+    // Invalid requests must not invalidate the real session.
+    ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec.masked_key,
+        })
+        .expect("valid session must remain usable");
+}
+
+/// Reject bit flips in wrapped key data while still accepting the original envelope.
+#[test]
+fn darc_key_wrap_corrupted_wrapped_key_rejected() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate EC key");
+
+    let wrapped = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec.masked_key,
+        })
+        .expect("wrap EC key");
+
+    let original = wrapped.wrapped_key;
+    assert!(!original.is_empty());
+
+    let positions = [0, original.len() / 2, original.len() - 1];
+
+    for pos in positions {
+        let mut corrupted = original.clone();
+        corrupted[pos] ^= 0x80;
+
+        let result = ready.ctx.tbor(&TborDarcKeyUnwrapReq {
+            session_id: sid,
+            scope: KEY_SCOPE_LOCAL,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            masked_tmk,
+            wrapped_key: corrupted,
+        });
+
+        assert!(
+            result.is_err(),
+            "corrupted wrapped key accepted at byte {pos}"
+        );
+    }
+
+    // The original wrapped key must still unwrap.
+    let recovered = ready
+        .ctx
+        .tbor(&TborDarcKeyUnwrapReq {
+            session_id: sid,
+            scope: KEY_SCOPE_LOCAL,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            masked_tmk,
+            wrapped_key: original,
+        })
+        .expect("original wrapped key must remain valid");
+
+    assert_eq!(recovered.pub_key, ec.pub_key);
+}
+
+/// Reject empty and truncated wrapped-key envelopes at several lengths.
+#[test]
+fn darc_key_wrap_truncated_wrapped_key_rejected() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate EC key");
+
+    let wrapped = ready
+        .ctx
+        .tbor(&TborDarcKeyWrapReq {
+            session_id: sid,
+            masked_tmk,
+            masked_key: ec.masked_key,
+        })
+        .expect("wrap EC key");
+
+    let original = wrapped.wrapped_key;
+
+    assert!(original.len() > 16);
+
+    for (name, length) in [
+        ("empty", 0),
+        ("one_byte", 1),
+        ("short_header", 8),
+        ("half", original.len() / 2),
+        ("minus_one", original.len() - 1),
+    ] {
+        let result = ready.ctx.tbor(&TborDarcKeyUnwrapReq {
+            session_id: sid,
+            scope: KEY_SCOPE_LOCAL,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            masked_tmk,
+            wrapped_key: original[..length].to_vec(),
+        });
+
+        assert!(
+            result.is_err(),
+            "DarcKeyUnwrap accepted truncated input: {name}"
+        );
+    }
+}
+
+/// Preserve the original key across repeated wrap/unwrap operations.
+#[test]
+fn darc_key_wrap_repeated_wrap_preserves_key() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate EC key");
+
+    let original_pub = ec.pub_key;
+
+    // Do not assume the wrapping implementation is deterministic.
+    // Only assert that each result recovers the same private key.
+    for iteration in 0..5 {
+        let wrapped = ready
+            .ctx
+            .tbor(&TborDarcKeyWrapReq {
+                session_id: sid,
+                masked_tmk,
+                masked_key: ec.masked_key.clone(),
+            })
+            .expect("repeated wrap");
+
+        let recovered = ready
+            .ctx
+            .tbor(&TborDarcKeyUnwrapReq {
+                session_id: sid,
+                scope: KEY_SCOPE_LOCAL,
+                key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                masked_tmk,
+                wrapped_key: wrapped.wrapped_key,
+            })
+            .expect("repeated unwrap");
+
+        assert_eq!(
+            recovered.pub_key, original_pub,
+            "iteration {iteration}: key identity changed"
+        );
+    }
+
+    // Confirm the original masked key is still usable.
+    let dgst = digest(32);
+
+    let signature = ready
+        .ctx
+        .tbor(&sign_req(sid, ec.masked_key, original_pub.len() / 2, &dgst))
+        .expect("sign using original key");
+
+    assert!(
+        verify_wire_ecdsa(&original_pub, &signature.signature, &dgst),
+        "original key must remain usable after repeated wrapping"
+    );
+}
+
+/// Wrap and recover P-256, P-384, and P-521 keys using a shared TMK.
+#[test]
+fn darc_key_wrap_multiple_curves_one_tmk() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    for curve in [ECC_CURVE_P256, ECC_CURVE_P384, ECC_CURVE_P521] {
+        let ec = ready
+            .ctx
+            .tbor(&TborEccGenerateKeyReq {
+                session_id: sid,
+                scope: SCOPE_LOCAL,
+                curve,
+                key_usage: KEY_USAGE_SIGN,
+                key_label: Vec::new(),
+            })
+            .expect("generate EC key");
+
+        let original_pub = ec.pub_key;
+
+        let wrapped = ready
+            .ctx
+            .tbor(&TborDarcKeyWrapReq {
+                session_id: sid,
+                masked_tmk,
+                masked_key: ec.masked_key,
+            })
+            .expect("wrap EC key");
+
+        let recovered = ready
+            .ctx
+            .tbor(&TborDarcKeyUnwrapReq {
+                session_id: sid,
+                scope: KEY_SCOPE_LOCAL,
+                key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                masked_tmk,
+                wrapped_key: wrapped.wrapped_key,
+            })
+            .expect("unwrap EC key");
+
+        assert_eq!(
+            recovered.pub_key, original_pub,
+            "curve {curve}: public key mismatch"
+        );
+
+        let dgst = digest(digest_len_for(original_pub.len()));
+
+        let signed = ready
+            .ctx
+            .tbor(&sign_req(
+                sid,
+                recovered.masked_key,
+                original_pub.len() / 2,
+                &dgst,
+            ))
+            .expect("sign using recovered EC key");
+
+        assert!(
+            verify_wire_ecdsa(&original_pub, &signed.signature, &dgst,),
+            "curve {curve}: signature verification failed"
+        );
+    }
+}
+
+/// Round-trip a labeled P-256 key to cover non-empty EC key metadata.
+#[test]
+fn darc_key_wrap_labeled_ec_key_roundtrip() {
+    let ready = sd_initialized_session();
+    let sid = ready.session.session_id;
+    let masked_tmk = generate_test_tmk(&ready.ctx, sid);
+
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: sid,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: b"darc-wrapped-labeled-key".to_vec(),
+        })
+        .expect("generate labeled EC key");
+
+    assert_wrap_unwrap_sign(&ready.ctx, sid, masked_tmk, ec.masked_key, &ec.pub_key);
 }
